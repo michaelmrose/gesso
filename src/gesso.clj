@@ -84,14 +84,6 @@
                attrs
                children)))
 
-(defn label
-  [& args]
-  (let [{:keys [class attrs children]} (unpack args)]
-    (u/element :label
-               {:class (u/class-names "label" class)}
-               attrs
-               children)))
-
 (defn listbox
   [& args]
   (let [{:keys [props class attrs children]} (unpack args)]
@@ -577,6 +569,10 @@
 ;; Dropdown Menu
 ;; ------------------------------------------------------------
 
+(defn dropdown
+  [& args]
+  (apply dropdown-menu args))
+
 (defn dropdown-menu
   [& args]
   (let [{:keys [class attrs children]} (unpack args)]
@@ -584,11 +580,6 @@
                {:class (u/class-names "dropdown-menu" class)}
                attrs
                children)))
-
-(defn dropdown
-  [& args]
-  (apply dropdown-menu args))
-
 
 (defn dropdown-trigger
   [& args]
@@ -691,7 +682,13 @@
                attrs
                children)))
 
-
+(defn label
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :label
+               {:class (u/class-names "label" class)}
+               attrs
+               children)))
 
 ;; ------------------------------------------------------------
 ;; Input / Textarea / Select
@@ -994,6 +991,11 @@
 ;; ------------------------------------------------------------
 ;; Toasts
 ;; ------------------------------------------------------------
+
+(defn toasts
+  [& args]
+  (apply toaster args))
+
 (defn toaster
   [& args]
   (let [{:keys [props class attrs children]} (unpack args)]
@@ -1003,12 +1005,6 @@
                 (data-attrs {:align (when-let [align (:align props)] (name align))}))
                attrs
                children)))
-
-(defn toasts
-  [& args]
-  (apply toaster args))
-
-
 
 (defn toast
   [& args]
