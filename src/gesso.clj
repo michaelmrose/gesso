@@ -568,11 +568,6 @@
 ;; ------------------------------------------------------------
 ;; Dropdown Menu
 ;; ------------------------------------------------------------
-
-(defn dropdown
-  [& args]
-  (apply dropdown-menu args))
-
 (defn dropdown-menu
   [& args]
   (let [{:keys [class attrs children]} (unpack args)]
@@ -580,6 +575,11 @@
                {:class (u/class-names "dropdown-menu" class)}
                attrs
                children)))
+(defn dropdown
+  [& args]
+  (apply dropdown-menu args))
+
+
 
 (defn dropdown-trigger
   [& args]
@@ -661,6 +661,14 @@
                attrs
                children)))
 
+(defn label
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :label
+               {:class (u/class-names "label" class)}
+               attrs
+               children)))
+
 (defn field-label
   [& args]
   (apply label args))
@@ -682,13 +690,7 @@
                attrs
                children)))
 
-(defn label
-  [& args]
-  (let [{:keys [class attrs children]} (unpack args)]
-    (u/element :label
-               {:class (u/class-names "label" class)}
-               attrs
-               children)))
+
 
 ;; ------------------------------------------------------------
 ;; Input / Textarea / Select
@@ -992,10 +994,6 @@
 ;; Toasts
 ;; ------------------------------------------------------------
 
-(defn toasts
-  [& args]
-  (apply toaster args))
-
 (defn toaster
   [& args]
   (let [{:keys [props class attrs children]} (unpack args)]
@@ -1005,6 +1003,12 @@
                 (data-attrs {:align (when-let [align (:align props)] (name align))}))
                attrs
                children)))
+
+(defn toasts
+  [& args]
+  (apply toaster args))
+
+
 
 (defn toast
   [& args]
@@ -1082,5 +1086,487 @@
                 {:data-tooltip text}
                 (data-attrs {:side (when side (name side))
                              :align (when align (name align))}))
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Accordion
+;; ------------------------------------------------------------
+
+(defn accordion
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               (u/merge-attrs
+                {:class (u/class-names "accordion" class)}
+                (data-attrs {:accordion-initialized (when-not (nil? (:initialized props))
+                                                     (bool-str (:initialized props)))})
+                (aria-attrs {:multiselectable (bool-str (:multiselectable props))}))
+               attrs
+               children)))
+
+(defn accordion-item
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        open? (:open props)]
+    (u/element :details
+               {:class (u/class-names "accordion-item" class)
+                :open (when open? true)}
+               attrs
+               children)))
+
+(defn accordion-trigger
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :summary
+               {:class (u/class-names "accordion-trigger" class)}
+               attrs
+               children)))
+
+(defn accordion-content
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :section)
+               {:class (u/class-names "accordion-content" class)}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Alert Dialog
+;; ------------------------------------------------------------
+
+(defn alert-dialog
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :dialog
+               {:class (u/class-names "alert-dialog" class)}
+               attrs
+               children)))
+
+(defn alert-dialog-content
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               {:class (u/class-names "alert-dialog-content" class)}
+               attrs
+               children)))
+
+(defn alert-dialog-header
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :header
+               {:class (u/class-names "alert-dialog-header" class)}
+               attrs
+               children)))
+
+(defn alert-dialog-title
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :h2)
+               {:class (u/class-names "alert-dialog-title" class)}
+               attrs
+               children)))
+
+(defn alert-dialog-description
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :p)
+               {:class (u/class-names "alert-dialog-description" class)}
+               attrs
+               children)))
+
+(defn alert-dialog-body
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :section
+               {:class (u/class-names "alert-dialog-body" class)}
+               attrs
+               children)))
+
+(defn alert-dialog-footer
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :footer
+               {:class (u/class-names "alert-dialog-footer" class)}
+               attrs
+               children)))
+
+(defn alert-dialog-cancel
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :button)]
+    (u/element tag
+               {:class (u/class-names "alert-dialog-cancel" class)
+                :type (when (= tag :button) "button")
+                :data-alert-dialog-cancel true}
+               attrs
+               children)))
+
+(defn alert-dialog-action
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :button)]
+    (u/element tag
+               {:class (u/class-names "alert-dialog-action" class)
+                :type (when (= tag :button) "button")
+                :data-alert-dialog-action true}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Avatar
+;; ------------------------------------------------------------
+
+(defn avatar
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :span)
+               {:class (u/class-names "avatar" class)}
+               attrs
+               children)))
+
+(defn avatar-image
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :img
+               {:class (u/class-names "avatar-image" class)}
+               attrs
+               children)))
+
+(defn avatar-fallback
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :span)
+               {:class (u/class-names "avatar-fallback" class)}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Breadcrumb
+;; ------------------------------------------------------------
+
+(defn breadcrumb
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element :nav
+               {:class (u/class-names "breadcrumb" class)
+                :aria-label (or (:aria-label props) "Breadcrumb")}
+               attrs
+               children)))
+
+(defn breadcrumb-list
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :ol
+               {:class (u/class-names "breadcrumb-list" class)}
+               attrs
+               children)))
+
+(defn breadcrumb-item
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :li
+               {:class (u/class-names "breadcrumb-item" class)}
+               attrs
+               children)))
+
+(defn breadcrumb-link
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :a)]
+    (u/element tag
+               {:class (u/class-names "breadcrumb-link" class)}
+               attrs
+               children)))
+
+(defn breadcrumb-page
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :span)
+               {:class (u/class-names "breadcrumb-page" class)
+                :aria-current "page"}
+               attrs
+               children)))
+
+(defn breadcrumb-separator
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :li)
+               {:class (u/class-names "breadcrumb-separator" class)
+                :role "presentation"
+                :aria-hidden "true"}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Empty
+;; ------------------------------------------------------------
+
+(defn empty
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :section)
+               {:class (u/class-names "empty" class)}
+               attrs
+               children)))
+
+(defn empty-title
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :h2)
+               {:class (u/class-names "empty-title" class)}
+               attrs
+               children)))
+
+(defn empty-description
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :p)
+               {:class (u/class-names "empty-description" class)}
+               attrs
+               children)))
+
+(defn empty-actions
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               {:class (u/class-names "empty-actions" class)}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Input Group
+;; ------------------------------------------------------------
+
+(defn input-group
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               {:class (u/class-names "input-group" class)}
+               attrs
+               children)))
+
+(defn input-addon
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :span)]
+    (u/element tag
+               {:class (u/class-names "input-addon" class)}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Item
+;; ------------------------------------------------------------
+
+(defn item
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :div)]
+    (u/element tag
+               {:class (u/class-names "item" class)}
+               attrs
+               children)))
+
+(defn item-media
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               {:class (u/class-names "item-media" class)}
+               attrs
+               children)))
+
+(defn item-body
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               {:class (u/class-names "item-body" class)}
+               attrs
+               children)))
+
+(defn item-title
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :h3)
+               {:class (u/class-names "item-title" class)}
+               attrs
+               children)))
+
+(defn item-description
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :p)
+               {:class (u/class-names "item-description" class)}
+               attrs
+               children)))
+
+(defn item-actions
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               {:class (u/class-names "item-actions" class)}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Pagination
+;; ------------------------------------------------------------
+
+(defn pagination
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element :nav
+               {:class (u/class-names "pagination" class)
+                :aria-label (or (:aria-label props) "Pagination")}
+               attrs
+               children)))
+
+(defn pagination-content
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :ul
+               {:class (u/class-names "pagination-content" class)}
+               attrs
+               children)))
+
+(defn pagination-item
+  [& args]
+  (let [{:keys [class attrs children]} (unpack args)]
+    (u/element :li
+               {:class (u/class-names "pagination-item" class)}
+               attrs
+               children)))
+
+(defn pagination-link
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :a)]
+    (u/element tag
+               (u/merge-attrs
+                {:class (u/class-names "pagination-link" class)}
+                (aria-attrs {:current (when (:current props) "page")}))
+               attrs
+               children)))
+
+(defn pagination-previous
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :a)]
+    (u/element tag
+               {:class (u/class-names "pagination-previous" class)}
+               attrs
+               children)))
+
+(defn pagination-next
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :a)]
+    (u/element tag
+               {:class (u/class-names "pagination-next" class)}
+               attrs
+               children)))
+
+(defn pagination-ellipsis
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :span)
+               {:class (u/class-names "pagination-ellipsis" class)
+                :aria-hidden "true"}
+               attrs
+               (if (seq children) children ["…"]))))
+
+;; ------------------------------------------------------------
+;; Progress
+;; ------------------------------------------------------------
+
+(defn progress
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :progress)
+        value (:value props)
+        max (or (:max props) 100)]
+    (u/element tag
+               (u/merge-attrs
+                {:class (u/class-names "progress" class)}
+                (when (= tag :progress)
+                  {:value value
+                   :max max})
+                (when (not= tag :progress)
+                  (aria-attrs {:valuenow (when-not (nil? value) (str value))
+                               :valuemin "0"
+                               :valuemax (str max)})))
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Radio Group
+;; ------------------------------------------------------------
+
+(defn radio-group
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element (tag-of props :div)
+               {:class (u/class-names "radio-group" class)
+                :role "radiogroup"}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Skeleton
+;; ------------------------------------------------------------
+
+(defn skeleton
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :div)]
+    (u/element tag
+               (u/merge-attrs
+                {:class (u/class-names "skeleton" class)}
+                (data-attrs {:variant (when-let [v (:variant props)] (name v))}))
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Slider
+;; ------------------------------------------------------------
+
+(defn slider
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)]
+    (u/element :input
+               {:class (u/class-names "slider" "input" class)
+                :type "range"}
+               attrs
+               children)))
+
+;; ------------------------------------------------------------
+;; Spinner
+;; ------------------------------------------------------------
+
+(defn spinner
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :div)]
+    (u/element tag
+               (u/merge-attrs
+                {:class (u/class-names "spinner" class)}
+                (aria-attrs {:label (or (:label props) "Loading")}))
+               attrs
+               (if (seq children) children [[:span {:class "sr-only"} (or (:label props) "Loading")]]))))
+
+;; ------------------------------------------------------------
+;; Theme Switcher
+;; ------------------------------------------------------------
+
+(defn theme-switcher
+  [& args]
+  (let [{:keys [props class attrs children]} (unpack args)
+        tag (tag-of props :button)]
+    (u/element tag
+               (u/merge-attrs
+                {:class (u/class-names "theme-switcher" class)
+                 :type (when (= tag :button) "button")}
+                (data-attrs {:theme-switcher true
+                             :theme (when-let [theme (:theme props)] (name theme))}))
                attrs
                children)))
