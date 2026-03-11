@@ -144,6 +144,7 @@
           attrs
           children))))
 
+
 (defn accordion-trigger
   "Accordion trigger: emits <summary>.
 
@@ -151,7 +152,7 @@
   - decent default spacing/hover
   - a chevron that flips ▾ / ▴ on toggle (via Hyperscript)"
   [& args]
-  (let [base-class "cursor-pointer font-medium p-4 hover:bg-gray-50 list-none flex justify-between items-center gap-3"]
+  (let [base-class "cursor-pointer w-full font-medium p-4 hover:bg-gray-50 list-none flex justify-between items-center gap-3"]
     (if (only-map-arg? args)
       (let [{:keys [props class attrs]} (split-opts (first args))
             text (:text props)
@@ -160,11 +161,10 @@
             {:class (class-names base-class class)}
             attrs
             (if chevron?
-              [[:span {:class "min-w-0"} text]
+              [[:span {:class "flex-1 text-left w-full"} text]
                [:span {:data-accordion-chevron true
                        :aria-hidden "true"
-                       :class "text-xl leading-none"
-                       }
+                       :class "text-xl leading-none"}
                 "▾"]]
               (nodes text))))
       (let [[opts children] (normalize-component-args args)
@@ -174,11 +174,11 @@
             {:class (class-names base-class class)}
             attrs
             (if chevron?
-              [(into [:span {:class "min-w-0"}] (normalize-children children))
+              [(into [:span {:class "flex-1 text-left min-w-0"}]
+                     (normalize-children children))
                [:span {:data-accordion-chevron true
                        :aria-hidden "true"
-                       :class "text-xl leading-none"
-                       }
+                       :class "text-xl leading-none"}
                 "▾"]]
               children))))))
 
@@ -217,7 +217,9 @@
         (el :details
             {}
             details-attrs
-            [(accordion-trigger (merge {:chevron? true} trigger-opts) title)
+            [(accordion-trigger (merge {:chevron? true
+                                        :text title}
+                                       trigger-opts))
              (apply accordion-content content-opts (nodes content))]))
       (let [[opts children] (normalize-component-args args)
             {:keys [props class attrs]} (split-opts opts)
@@ -263,7 +265,7 @@
 
   Notes:
   - We implement :single + :collapsible? using Hyperscript on toggle.
-  - We also flip the chevron ▾/▴ on toggle.
+  - We also flip the chevron ▾ / ▴ on toggle.
   - Value-based defaults take precedence over index-based defaults."
   [& args]
   (let [root-class "border rounded-lg bg-white overflow-hidden shadow-sm"]

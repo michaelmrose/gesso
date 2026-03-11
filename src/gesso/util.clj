@@ -47,27 +47,29 @@
    {}
    maps))
 
-(defn normalize-children
-  "Flatten child sequences one level while preserving hiccup vectors as atomic.
-  - nil children are removed
-  - lists/sequences from (for ...) are spliced
-  - hiccup vectors are kept intact"
-  [children]
-  (->> children
-       (mapcat (fn [c]
-                 (cond
-                   (nil? c) []
-                   (vector? c) [c]
-                   (and (sequential? c) (not (string? c))) c
-                   :else [c])))
-       (remove nil?)))
-
 (defn hiccup-element?
   "True if x looks like a hiccup element vector: [tag ...] where tag is a keyword or symbol."
   [x]
   (and (vector? x)
        (let [t (first x)]
          (or (keyword? t) (symbol? t)))))
+
+(defn normalize-children
+  "Flatten child sequences one level while preserving Hiccup element vectors as atomic."
+  [children]
+  (->> children
+       (mapcat
+        (fn [c]
+          (cond
+            (nil? c) []
+            (hiccup-element? c) [c]
+            (and (vector? c) (not (hiccup-element? c))) c
+            (and (sequential? c) (not (string? c))) c
+            :else [c])))
+       (remove nil?)))
+
+
+
 
 (defn nodes
   "Normalize a content value into a seq of nodes."
