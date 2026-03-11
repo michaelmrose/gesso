@@ -24,21 +24,11 @@
        (remove nil?)
        (str/join "\n")))
 
-;; (defn- accordion-chevron-script []
-;;   (hs-lines
-;;    "set chev to first <span[data-accordion-chevron]/> in me"
-;;    "if chev"
-;;    "  if me.open put '▴' into chev else put '▾' into chev end"
-;;    "end"))
-
 (defn- accordion-chevron-script []
   (hs-lines
-   "set hdr to first <summary/> in me"
-   "if hdr"
-   "  set chev to first <span[data-accordion-chevron]/> in hdr"
-   "  if chev"
-   "    if me.open put '▴' into chev else put '▾' into chev end"
-   "  end"
+   "set chev to first <span[data-accordion-chevron]/> in me"
+   "if chev"
+   "  if me.open put '▴' into chev else put '▾' into chev end"
    "end"))
 
 (defn- accordion-single-script [collapsible?]
