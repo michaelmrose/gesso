@@ -1,13 +1,24 @@
 (ns gesso.components.select
   (:require [gesso.util :refer :all]))
 
+(defn- option-node
+  [{:keys [value label selected disabled]}]
+  [:option
+   (cond-> {:value value}
+     selected (assoc :selected true)
+     disabled (assoc :disabled true))
+   label])
+
 (defn select
   "Native select.
 
   Short form:
-    (select {:options [{:value \"staff\" :label \"Staff\"}
-                       {:value \"manager\" :label \"Manager\"}]
-             :attrs {:name \"role\"}})
+    (select {:id \"role\"
+             :name \"role\"
+             :value \"staff\"
+             :placeholder \"Choose a role\"
+             :options [{:value \"staff\" :label \"Staff\"}
+                       {:value \"manager\" :label \"Manager\"}]})
 
   Long form:
     (select {:attrs {:name \"role\"}}
@@ -15,19 +26,37 @@
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
-          {:keys [options]} props]
+          {:keys [options id name value disabled? required? placeholder]} props
+          options (or options [])
+          options (map (fn [opt]
+                         (if (= (:value opt) value)
+                           (assoc opt :selected true)
+                           opt))
+                       options)]
       (el :select
           {:class (class-names "select" class)}
-          attrs
-          (for [{:keys [value label selected disabled]} options]
-            [:option
-             (cond-> {:value value}
-               selected (assoc :selected true)
-               disabled (assoc :disabled true))
-             label])))
+          (merge-attrs
+           attrs
+           (when id {:id id})
+           (when name {:name name})
+           (when (some? disabled?) {:disabled disabled?})
+           (when (some? required?) {:required required?}))
+          [(when placeholder
+             [:option
+              (cond-> {:value ""}
+                (nil? value) (assoc :selected true)
+                true (assoc :disabled true))
+              placeholder])
+           (map option-node options)]))
     (let [[opts children] (normalize-component-args args)
-          {:keys [class attrs]} (split-opts opts)]
+          {:keys [props class attrs]} (split-opts opts)
+          {:keys [id name disabled? required?]} props]
       (el :select
           {:class (class-names "select" class)}
-          attrs
+          (merge-attrs
+           attrs
+           (when id {:id id})
+           (when name {:name name})
+           (when (some? disabled?) {:disabled disabled?})
+           (when (some? required?) {:required required?}))
           children))))
