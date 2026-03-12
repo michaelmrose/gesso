@@ -7,15 +7,6 @@
 ;; Helpers
 ;; -----------------------------------------------------------------------------
 
-(defn- normalize-component-args
-  "Returns [opts children] for variadic component calls.
-   If the first arg is a map, it is treated as opts; otherwise opts is {} and
-   all args are treated as children."
-  [args]
-  (let [[opts & children] args
-        opts (if (map? opts) opts {})]
-    [opts (if (map? (first args)) children args)]))
-
 (defn- hs-lines
   "Join non-nil lines into a multiline hyperscript string."
   [& lines]
