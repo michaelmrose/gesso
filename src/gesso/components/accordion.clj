@@ -25,28 +25,32 @@
        (str/join "\n")))
 
 (defn- accordion-chevron-script []
-  (hs-lines
-   "set chev to first <span[data-accordion-chevron]/> in me"
-   "if chev"
-   "  if me.open put '▴' into chev else put '▾' into chev end"
-   "end"))
+  "set chev to first <span[data-accordion-chevron]/> in me
+  if chev
+    if me.open put '▴' into chev else put '▾' into chev end
+  end")
 
 (defn- accordion-single-script [collapsible?]
-  (hs-lines
-   "set root to closest <div[data-accordion-root]/>"
-   "if me.open"
-   "  for d in <details/> in root"
-   "    if d != me set d.open to false end"
-   "  end"
-   "else"
-   (when (not collapsible?)
-     (hs-lines
-      "  set anyOpen to false"
-      "  for d in <details/> in root"
-      "    if d.open set anyOpen to true end"
-      "  end"
-      "  if not anyOpen set me.open to true end"))
-   "end"))
+  (if collapsible?
+    "set root to closest <div[data-accordion-root]/>
+    if me.open
+        for d in <details/> in root
+            if d != me set d.open to false end
+        end
+    end"
+    "set root to closest <div[data-accordion-root]/>
+    if me.open
+        for d in <details/> in root
+            if d != me set d.open to false end
+        end
+    else
+        set anyOpen to false
+        for d in <details/> in root
+            if d.open set anyOpen to true end
+        end
+    if not anyOpen set me.open to true end
+    end"))
+
 
 (defn- accordion-script
   [{:keys [type collapsible?]}]
@@ -62,9 +66,7 @@
       :multiple
       (hs-lines
        "on toggle"
-       (accordion-chevron-script))
-
-      nil)))
+       (accordion-chevron-script)))))
 
 (defn- add-accordion-script [attrs script]
   (if script
