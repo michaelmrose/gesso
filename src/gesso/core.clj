@@ -2,7 +2,12 @@
   (:require
    [gesso.components.accordion :as accordion]
    [gesso.components.button :as button]
-   [gesso.components.card :as card]))
+   [gesso.components.card :as card]
+   [gesso.components.field :as field]
+   [gesso.components.input :as input]
+   [gesso.components.label :as label]
+   [gesso.components.select :as select]
+   [gesso.components.textarea :as textarea]))
 
 ;; public api
 
@@ -19,3 +24,11 @@
 (def card-header card/card-header)
 (def card-content card/card-content)
 (def card-footer card/card-footer)
+
+(def label label/label)
+
+(def input input/input)
+(def textarea textarea/textarea)
+(def select select/select)
+
+(def field field/field)
