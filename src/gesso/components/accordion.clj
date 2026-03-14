@@ -1,7 +1,10 @@
 (ns gesso.components.accordion
   (:require
    [clojure.string :as str]
-   [gesso.util :refer :all]))
+   [gesso.util :refer :all]
+   [gesso.hyperscript :refer [hs]]
+   )
+  )
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
