@@ -5,62 +5,43 @@
    [gesso.hyperscript :refer [hs]]
    )
   )
-
-;; -----------------------------------------------------------------------------
-;; Helpers
-;; -----------------------------------------------------------------------------
-
-(defn- hs-lines
-  "Join non-nil lines into a multiline hyperscript string."
-  [& lines]
-  (->> lines
-       flatten
-       (remove nil?)
-       (str/join "\n")))
-
 (defn- accordion-chevron-script []
-  "set chev to first <span[data-accordion-chevron]/> in me
-  if chev
-    if me.open put '▴' into chev else put '▾' into chev end
-  end")
+  [[:let 'chev "first <span[data-accordion-chevron]/> in me"]
+   [:if 'chev
+    [[:if 'me.open
+       [:set 'chev.innerHTML "'▴'"]
+       [:set 'chev.innerHTML "'▾'"]]]]])
 
-(defn- accordion-single-script [collapsible?]
+(defn- accordion-single-script
+  [collapsible?]
   (if collapsible?
-    "set root to closest <div[data-accordion-root]/>
-    if me.open
-        for d in <details/> in root
-            if d != me set d.open to false end
-        end
-    end"
-    "set root to closest <div[data-accordion-root]/>
-    if me.open
-        for d in <details/> in root
-            if d != me set d.open to false end
-        end
-    else
-        set anyOpen to false
-        for d in <details/> in root
-            if d.open set anyOpen to true end
-        end
-    if not anyOpen set me.open to true end
-    end"))
+    [[:let 'root "closest <div[data-accordion-root]/>"]
+     [:if 'me.open
+      [[:for 'd "<details/> in root"
+        [:if "d != me"
+         [:set 'd.open false]]]]]]
 
+    [[:let 'root "closest <div[data-accordion-root]/>"]
+     [:if 'me.open
+      [[:for 'd "<details/> in root"
+        [:if "d != me"
+         [:set 'd.open false]]]]
+      [[:let 'anyOpen false]
+       [:for 'd "<details/> in root"
+        [:if 'd.open
+         [:set 'anyOpen true]]]
+       [:if "not anyOpen"
+        [:set 'me.open true]]]]]))
 
 (defn- accordion-script
   [{:keys [type collapsible?]}]
-  (let [type (or type :multiple)
+  (let [type         (or type :multiple)
         collapsible? (if (nil? collapsible?) true collapsible?)]
-    (case type
-      :single
-      (hs-lines
-       "on toggle"
-       (accordion-single-script collapsible?)
-       (accordion-chevron-script))
-
-      :multiple
-      (hs-lines
-       "on toggle"
-       (accordion-chevron-script)))))
+    (hs
+      [:on :toggle
+       (when (= type :single)
+         (accordion-single-script collapsible?))
+       (accordion-chevron-script)])))
 
 (defn- add-accordion-script [attrs script]
   (if script
@@ -139,7 +120,6 @@
           {:class (class-names "p-4 pt-0 text-gray-600" class)}
           attrs
           children))))
-
 
 (defn accordion-trigger
   "Accordion trigger: emits <summary>.
