@@ -12,9 +12,17 @@
    [gesso.components.radio-group :as radio-group]
    [gesso.components.select :as select]
    [gesso.components.switch :as switch]
-   [gesso.components.textarea :as textarea]))
+   [gesso.components.textarea :as textarea]
+   [gesso.theme :as gtheme]
+   ))
 
 ;; public api
+
+;; theme
+
+(def theme gtheme/theme)
+(def html-theme-attrs gtheme/html-theme-attrs)
+(def theme-head gtheme/theme-head)
 
 (def accordion accordion/accordion)
 (def accordion-item accordion/accordion-item)
