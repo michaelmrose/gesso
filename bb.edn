@@ -1,0 +1,9 @@
+{:paths ["src" "resources"]
+ :tasks
+ {themes
+  (do
+    (println "running themes task")
+    ((requiring-resolve 'gesso.build.themes/build!)
+     {:input-dir "resources/themes"
+      :output-file "resources/public/gesso/themes.css"})
+    (println "done"))}}
