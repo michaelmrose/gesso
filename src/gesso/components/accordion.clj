@@ -3,16 +3,18 @@
    [gesso.util :refer :all]
    [gesso.hyperscript :refer [hs]]))
 
+(declare accordion)
+
 ;; -----------------------------------------------------------------------------
 ;; Hyperscript
 ;; -----------------------------------------------------------------------------
 
 (defn- accordion-chevron-script []
-  [[:let 'chev "first <span[data-accordion-chevron]/> in me"]
+  [[:let 'chev "first <svg[data-accordion-chevron]/> in me"]
    [:if 'chev
     [[:if 'me.open
-       [:set 'chev.innerHTML "'▴'"]
-       [:set 'chev.innerHTML "'▾'"]]]]])
+       [:set 'chev.style.transform "'rotate(180deg)'"]
+       [:set 'chev.style.transform "'rotate(0deg)'"]]]]])
 
 (defn- accordion-single-script
   [collapsible?]
@@ -22,7 +24,6 @@
       [[:for 'd "<details/> in root"
         [:if "d != me"
          [:set 'd.open false]]]]]]
-
     [[:let 'root "closest <div[data-accordion-root]/>"]
      [:if 'me.open
       [[:for 'd "<details/> in root"
@@ -126,56 +127,98 @@
      items*)))
 
 ;; -----------------------------------------------------------------------------
-;; Trigger helpers
+;; Visual helpers
 ;; -----------------------------------------------------------------------------
 
-(defn- accordion-title-node
-  [content class]
-  (into [:h2 {:class (class-names "m-0 flex-1 min-w-0 text-left text-inherit font-inherit" class)}]
-        (normalize-children content)))
+(defn- accordion-root-attrs
+  [class]
+  {:class (class-names "overflow-hidden rounded-lg shadow-sm" class)
+   :data-accordion-root true
+   :style {:border "1px solid var(--border)"
+           :background "var(--card)"}})
+
+(defn- accordion-item-attrs
+  [value open? disabled? class attrs]
+  (merge-attrs
+   {:class (class-names
+            "group overflow-hidden last:border-b-0 focus-within:ring-2 focus-within:ring-inset"
+            (when disabled? "opacity-60 pointer-events-none")
+            class)
+    :open (when open? true)
+    :data-accordion-value (->value value "item")
+    :style {:border-bottom "1px solid var(--border)"
+            :box-shadow (when open? "inset 0 0 0 2px var(--ring)")}}
+   attrs))
+
+(defn- accordion-trigger-attrs
+  [class]
+  {:class (class-names
+           "cursor-pointer w-full list-none px-5 py-4 flex items-center justify-between gap-4 outline-none"
+           class)
+   :style {:background "var(--muted)"
+           :color "var(--primary)"
+           :font-weight 600}})
+
+(defn- accordion-content-attrs
+  [class]
+  {:class (class-names
+           "px-5 py-4"
+           class)
+   :style {:border-top "1px solid var(--border)"
+           :background "var(--background)"
+           :color "var(--muted-foreground)"
+           :font-size "0.95rem"
+           :line-height "1.7"}})
 
 (defn- accordion-chevron-node []
-  [:span {:data-accordion-chevron true
-          :aria-hidden "true"
-          :class "text-xl leading-none shrink-0"}
-   "▾"])
+  [:svg {:data-accordion-chevron true
+         :aria-hidden "true"
+         :viewBox "0 0 20 20"
+         :fill "none"
+         :stroke "currentColor"
+         :stroke-width "2"
+         :stroke-linecap "round"
+         :stroke-linejoin "round"
+         :style {:width "1rem"
+                 :height "1rem"
+                 :display "block"
+                 :flex-shrink 0
+                 :transition "transform 200ms ease"}}
+   [:path {:d "M6 8l4 4 4-4"}]])
+
+(defn- accordion-title-node
+  [content]
+  (into [:h2 {:class "m-0 flex-1 min-w-0 text-left"
+              :style {:margin 0
+                      :font-size "1.1rem"
+                      :font-weight 600
+                      :line-height 1.3
+                      :color "inherit"}}]
+        (normalize-children content)))
 
 (defn- accordion-trigger-body
   [{:keys [content chevron?]}]
   (if chevron?
-    [(accordion-title-node content nil)
+    [(accordion-title-node content)
      (accordion-chevron-node)]
-    [(accordion-title-node content "w-full")]))
-
-(defn- accordion-trigger-opts
-  [class]
-  {:class (class-names
-           "cursor-pointer w-full font-medium p-4 hover:bg-accent/50 list-none flex justify-between items-center gap-3"
-           class)})
+    [(accordion-title-node content)]))
 
 ;; -----------------------------------------------------------------------------
 ;; Components
 ;; -----------------------------------------------------------------------------
-(declare accordion)
-
-(defn- accordion-content-opts
-  [class]
-  {:class (class-names
-           "border-t border-border p-4 text-sm leading-6 text-muted-foreground"
-           class)})
 
 (defn accordion-content
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
       (el :section
-          (accordion-content-opts class)
+          (accordion-content-attrs class)
           attrs
           (nodes (:children props))))
     (let [[opts children] (normalize-component-args args)
           {:keys [class attrs]} (split-opts opts)]
       (el :section
-          (accordion-content-opts class)
+          (accordion-content-attrs class)
           attrs
           children))))
 
@@ -183,10 +226,10 @@
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
-          text      (:text props)
-          chevron?  (not= false (:chevron? props))]
+          text     (:text props)
+          chevron? (not= false (:chevron? props))]
       (el :summary
-          (accordion-trigger-opts class)
+          (accordion-trigger-attrs class)
           attrs
           (accordion-trigger-body {:content [text]
                                    :chevron? chevron?})))
@@ -194,21 +237,10 @@
           {:keys [props class attrs]} (split-opts opts)
           chevron? (not= false (:chevron? props))]
       (el :summary
-          (accordion-trigger-opts class)
+          (accordion-trigger-attrs class)
           attrs
           (accordion-trigger-body {:content children
                                    :chevron? chevron?})))))
-
-(defn- accordion-item-attrs
-  [value open? disabled? class attrs]
-  (merge-attrs
-   {:class (class-names
-            "border-b last:border-b-0 group"
-            (when disabled? "opacity-60 pointer-events-none")
-            class)
-    :open (when open? true)
-    :data-accordion-value (->value value "item")}
-   attrs))
 
 (defn- accordion-item-short-form
   [{:keys [value title content open? disabled? trigger-opts content-opts class attrs]}]
@@ -237,16 +269,16 @@
     (let [[opts children] (normalize-component-args args)]
       (accordion-item-long-form opts children))))
 
-(defn- accordion-root-attrs
-  [class]
-  {:class (class-names "border rounded-lg overflow-hidden shadow-sm" class)
-   :data-accordion-root true})
+;; -----------------------------------------------------------------------------
+;; Root render helpers
+;; -----------------------------------------------------------------------------
 
 (defn- render-prepared-items
   [items* script]
   (for [item items*]
     (let [item-attrs (get-in item [:attrs])]
-      (accordion-item (assoc item :attrs (add-accordion-script item-attrs script))))))
+      (accordion-item
+       (assoc item :attrs (add-accordion-script item-attrs script))))))
 
 (defn- accordion-map-form
   [opts]
@@ -271,7 +303,8 @@
 
 (defn- accordion-fn-items-form
   [item-fn items]
-  (accordion {:item-fn item-fn :items items}))
+  (accordion {:item-fn item-fn
+              :items items}))
 
 (defn- accordion-opts-fn-items-form
   [opts item-fn items]
@@ -306,7 +339,15 @@
      (accordion {:type :single :default-value \"item-2\"} (fn [x] ...) coll)
 
   5) Long form children:
-     (accordion {:type :multiple} (accordion-item ...) ...)"
+     (accordion {:type :multiple} (accordion-item ...) ...)
+
+  Options:
+    :type             :single | :multiple (default :multiple)
+    :default-value    for :single
+    :default-values   for :multiple
+    :default-index    for :single, zero-based
+    :default-indexes  for :multiple, zero-based
+    :collapsible?     for :single (default true)"
   [& args]
   (cond
     (only-map-arg? args)
