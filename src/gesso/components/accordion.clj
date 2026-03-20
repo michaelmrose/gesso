@@ -36,6 +36,12 @@
        [:if "not anyOpen"
         [:set 'me.open true]]]]]))
 
+(defn- accordion-clear-active-script []
+  [[:let 'root "closest <div[data-accordion-root]/>"]
+   [:for 'd "<details/> in root"
+    [:set 'd.dataset.active "'false'"]
+    [:set 'd.style.boxShadow "''"]]])
+
 (defn- accordion-script
   [{:keys [type collapsible?]}]
   (let [type         (or type :multiple)
@@ -137,39 +143,11 @@
    :style {:border "1px solid var(--border)"
            :background "var(--card)"}})
 
-#_(defn- accordion-item-attrs
-  [value open? disabled? class attrs]
-  (merge-attrs
-   {:class (class-names
-            "group overflow-hidden last:border-b-0 focus-within:ring-2 focus-within:ring-inset"
-            (when disabled? "opacity-60 pointer-events-none")
-            class)
-    :open (when open? true)
-    :data-accordion-value (->value value "item")
-    :style {:border-bottom "1px solid var(--border)"
-            :box-shadow (when open? "inset 0 0 0 2px var(--ring)")}}
-   attrs))
-
-;; extra lines
-#_(defn- accordion-item-attrs
-  [value open? disabled? class attrs]
-  (merge-attrs
-   {:class (class-names
-            "group overflow-hidden last:border-b-0 focus-within:ring-2 focus-within:ring-ring"
-            (when disabled? "opacity-60 pointer-events-none")
-            class)
-    :open (when open? true)
-    :data-accordion-value (->value value "item")
-    :style {:border-bottom "1px solid var(--border)"
-            :outline (when open? "2px solid var(--ring)")
-            :outline-offset "-2px"}}
-   attrs))
-
 (defn- accordion-item-attrs
   [value open? disabled? class attrs]
   (merge-attrs
    {:class (class-names
-            "group overflow-hidden last:border-b-0 focus-within:ring-2 focus-within:ring-ring focus-within:ring-inset"
+            "group overflow-hidden last:border-b-0"
             (when disabled? "opacity-60 pointer-events-none")
             class)
     :open (when open? true)
@@ -180,7 +158,7 @@
 (defn- accordion-trigger-attrs
   [class]
   {:class (class-names
-           "cursor-pointer w-full list-none px-6 py-5 flex items-center justify-between gap-4 outline-none"
+           "cursor-pointer w-full list-none px-4 py-6 flex items-center justify-between gap-4 outline-none"
            class)
    :style {:background "var(--muted)"
            :color "var(--primary)"
@@ -189,7 +167,7 @@
 (defn- accordion-content-attrs
   [class]
   {:class (class-names
-           "px-6 py-5"
+           "px-4 py-6"
            class)
    :style {:border-top "1px solid var(--border)"
            :background "var(--background)"
