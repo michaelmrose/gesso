@@ -137,7 +137,7 @@
    :style {:border "1px solid var(--border)"
            :background "var(--card)"}})
 
-(defn- accordion-item-attrs
+#_(defn- accordion-item-attrs
   [value open? disabled? class attrs]
   (merge-attrs
    {:class (class-names
@@ -150,10 +150,37 @@
             :box-shadow (when open? "inset 0 0 0 2px var(--ring)")}}
    attrs))
 
+;; extra lines
+#_(defn- accordion-item-attrs
+  [value open? disabled? class attrs]
+  (merge-attrs
+   {:class (class-names
+            "group overflow-hidden last:border-b-0 focus-within:ring-2 focus-within:ring-ring"
+            (when disabled? "opacity-60 pointer-events-none")
+            class)
+    :open (when open? true)
+    :data-accordion-value (->value value "item")
+    :style {:border-bottom "1px solid var(--border)"
+            :outline (when open? "2px solid var(--ring)")
+            :outline-offset "-2px"}}
+   attrs))
+
+(defn- accordion-item-attrs
+  [value open? disabled? class attrs]
+  (merge-attrs
+   {:class (class-names
+            "group overflow-hidden last:border-b-0 focus-within:ring-2 focus-within:ring-ring focus-within:ring-inset"
+            (when disabled? "opacity-60 pointer-events-none")
+            class)
+    :open (when open? true)
+    :data-accordion-value (->value value "item")
+    :style {:border-bottom "1px solid var(--border)"}}
+   attrs))
+
 (defn- accordion-trigger-attrs
   [class]
   {:class (class-names
-           "cursor-pointer w-full list-none px-5 py-4 flex items-center justify-between gap-4 outline-none"
+           "cursor-pointer w-full list-none px-6 py-5 flex items-center justify-between gap-4 outline-none"
            class)
    :style {:background "var(--muted)"
            :color "var(--primary)"
@@ -162,7 +189,7 @@
 (defn- accordion-content-attrs
   [class]
   {:class (class-names
-           "px-5 py-4"
+           "px-6 py-5"
            class)
    :style {:border-top "1px solid var(--border)"
            :background "var(--background)"
@@ -192,7 +219,7 @@
               :style {:margin 0
                       :font-size "1.1rem"
                       :font-weight 600
-                      :line-height 1.3
+                      :line-height 1.35
                       :color "inherit"}}]
         (normalize-children content)))
 
