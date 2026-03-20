@@ -121,14 +121,52 @@
           attrs
           children))))
 
+
 (defn accordion-trigger
+  "Accordion trigger: emits <summary>.
+
+  Same as the original, but wraps the title text in an h2 for stronger hierarchy
+  without disturbing the chevron layout."
+  [& args]
+  (let [base-class "cursor-pointer w-full font-medium p-4 hover:bg-accent/50 list-none flex justify-between items-center gap-3"]
+    (if (only-map-arg? args)
+      (let [{:keys [props class attrs]} (split-opts (first args))
+            text (:text props)
+            chevron? (not= false (:chevron? props))]
+        (el :summary
+            {:class (class-names base-class class)}
+            attrs
+            (if chevron?
+              [[:h2 {:class "flex-1 text-left w-full m-0 text-inherit font-inherit"}
+                text]
+               [:span {:data-accordion-chevron true
+                       :aria-hidden "true"
+                       :class "text-xl leading-none"}
+                "▾"]]
+              [[:h2 {:class "m-0 text-inherit font-inherit"} text]])))
+      (let [[opts children] (normalize-component-args args)
+            {:keys [props class attrs]} (split-opts opts)
+            chevron? (not= false (:chevron? props))]
+        (el :summary
+            {:class (class-names base-class class)}
+            attrs
+            (if chevron?
+              [(into [:h2 {:class "flex-1 text-left min-w-0 m-0 text-inherit font-inherit"}]
+                     (normalize-children children))
+               [:span {:data-accordion-chevron true
+                       :aria-hidden "true"
+                       :class "text-xl leading-none"}
+                "▾"]]
+              [(into [:h2 {:class "m-0 text-inherit font-inherit"}]
+                     (normalize-children children))]))))))
+#_(defn accordion-trigger
   "Accordion trigger: emits <summary>.
 
   Adds:
   - decent default spacing/hover
   - a chevron that flips ▾ / ▴ on toggle (via Hyperscript)"
   [& args]
-  (let [base-class "cursor-pointer w-full font-medium p-4 hover:bg-gray-50 list-none flex justify-between items-center gap-3"]
+  (let [base-class "cursor-pointer w-full font-medium p-4 hover: list-none flex justify-between items-center gap-3"]
     (if (only-map-arg? args)
       (let [{:keys [props class attrs]} (split-opts (first args))
             text (:text props)
@@ -244,7 +282,7 @@
   - We also flip the chevron ▾ / ▴ on toggle.
   - Value-based defaults take precedence over index-based defaults."
   [& args]
-  (let [root-class "border rounded-lg bg-white overflow-hidden shadow-sm"]
+  (let [root-class "border rounded-lg  overflow-hidden shadow-sm"]
     (cond
       ;; (accordion {:items ...})
       (only-map-arg? args)
