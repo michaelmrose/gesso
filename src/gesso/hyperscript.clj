@@ -1,6 +1,42 @@
 (ns gesso.hyperscript
   (:require [clojure.string :as str]))
 
+
+;; Helpers
+
+#_(defn merge-script-attr
+  [attrs script]
+  (cond
+    (nil? script) attrs
+    (nil? attrs) {:_ script}
+    (contains? attrs :_)
+    (update attrs :_ #(if % (str % "\n" script) script))
+    :else
+    (assoc attrs :_ script)))
+
+(defn merge-script-attr
+  [attrs script]
+  (if script
+    (assoc (or attrs {}) :_ script)
+    attrs))
+
+(defn attach-script-to-node
+  [node pred script]
+  (if (and script (vector? node) (pred node))
+    (let [[tag maybe-attrs & kids] node
+          has-attrs? (map? maybe-attrs)
+          attrs      (if has-attrs? maybe-attrs {})
+          children   (if has-attrs? kids (cons maybe-attrs kids))]
+      (into [tag (merge-script-attr attrs script)] children))
+    node))
+
+(defn attach-script-to-children-by-tag
+  [children tag script]
+  (map #(attach-script-to-node % (fn [node] (= tag (first node))) script)
+       children))
+
+;; hyperscript proper
+
 (def ^:private stmt-ops
   #{:on :if :for :set :let})
 

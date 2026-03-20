@@ -1,7 +1,7 @@
 (ns gesso.components.accordion
   (:require
    [gesso.util :refer :all]
-   [gesso.hyperscript :refer [hs]]))
+   [gesso.hyperscript :refer [hs merge-script-attr attach-script-to-node attach-script-to-children-by-tag]]))
 
 (declare accordion)
 
@@ -51,26 +51,6 @@
       (when (= type :single)
         (accordion-single-script collapsible?))
       (accordion-chevron-script)])))
-
-(defn- add-accordion-script
-  [attrs script]
-  (if script
-    (merge-attrs attrs {:_ script})
-    attrs))
-
-(defn- add-script-to-details-child
-  [child script]
-  (if (and script (vector? child) (= :details (first child)))
-    (let [[tag maybe-attrs & kids] child
-          has-attrs? (map? maybe-attrs)
-          attrs      (if has-attrs? maybe-attrs {})
-          kids       (if has-attrs? kids (cons maybe-attrs kids))]
-      (into [tag (add-accordion-script attrs script)] kids))
-    child))
-
-(defn- add-script-to-details-children
-  [children script]
-  (map #(add-script-to-details-child % script) children))
 
 ;; -----------------------------------------------------------------------------
 ;; Item preparation
@@ -283,7 +263,7 @@
   (for [item items*]
     (let [item-attrs (get-in item [:attrs])]
       (accordion-item
-       (assoc item :attrs (add-accordion-script item-attrs script))))))
+       (assoc item :attrs (merge-script-attr item-attrs script))))))
 
 (defn- accordion-map-form
   [opts]
@@ -320,7 +300,7 @@
   (let [{:keys [props class attrs]} (split-opts opts)
         {:keys [type collapsible?]} props
         script   (accordion-script {:type type :collapsible? collapsible?})
-        children (add-script-to-details-children children script)]
+        children (attach-script-to-children-by-tag children :details script)]
     (el :div
         (accordion-root-attrs class)
         attrs
