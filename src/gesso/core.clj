@@ -1,6 +1,7 @@
 (ns gesso.core
   (:require
    [gesso.components.accordion.core :as accordion]
+   [gesso.components.dropdown-menu.core :as dropdown]
    [gesso.components.alert :as alert]
    [gesso.components.badge :as badge]
    [gesso.components.button :as button]
@@ -24,6 +25,15 @@
 (def theme gtheme/theme)
 (def html-theme-attrs gtheme/html-theme-attrs)
 (def theme-head gtheme/theme-head)
+
+(def dropdown-menu dropdown/dropdown-menu)
+(def dropdown-menu-trigger dropdown/dropdown-menu-trigger)
+(def dropdown-menu-content dropdown/dropdown-menu-content)
+(def dropdown-menu-item dropdown/dropdown-menu-item)
+(def dropdown-menu-label dropdown/dropdown-menu-label)
+(def dropdown-menu-separator dropdown/dropdown-menu-separator)
+(def dropdown-menu-right-slot dropdown/dropdown-menu-right-slot)
+(def dropdown-menu-indicator dropdown/dropdown-menu-indicator)
 
 (def accordion accordion/accordion)
 (def accordion-item accordion/accordion-item)
