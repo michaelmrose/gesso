@@ -1,6 +1,6 @@
 (ns gesso.core
   (:require
-   [gesso.components.accordion :as accordion]
+   [gesso.components.accordion.core :as accordion]
    [gesso.components.alert :as alert]
    [gesso.components.badge :as badge]
    [gesso.components.button :as button]

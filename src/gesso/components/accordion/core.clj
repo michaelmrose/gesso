@@ -1,56 +1,11 @@
-(ns gesso.components.accordion
+(ns gesso.components.accordion.core
   (:require
    [gesso.util :refer :all]
+   [gesso.components.accordion.scripts :refer :all]
+   [gesso.components.accordion.attr :refer :all]
    [gesso.hyperscript :refer [hs merge-script-attr attach-script-to-node attach-script-to-children-by-tag]]))
 
 (declare accordion)
-
-;; -----------------------------------------------------------------------------
-;; Hyperscript
-;; -----------------------------------------------------------------------------
-
-(defn- accordion-chevron-script []
-  [[:let 'chev "first <svg[data-accordion-chevron]/> in me"]
-   [:if 'chev
-    [[:if 'me.open
-       [:set 'chev.style.transform "'rotate(180deg)'"]
-       [:set 'chev.style.transform "'rotate(0deg)'"]]]]])
-
-(defn- accordion-single-script
-  [collapsible?]
-  (if collapsible?
-    [[:let 'root "closest <div[data-accordion-root]/>"]
-     [:if 'me.open
-      [[:for 'd "<details/> in root"
-        [:if "d != me"
-         [:set 'd.open false]]]]]]
-    [[:let 'root "closest <div[data-accordion-root]/>"]
-     [:if 'me.open
-      [[:for 'd "<details/> in root"
-        [:if "d != me"
-         [:set 'd.open false]]]]
-      [[:let 'anyOpen false]
-       [:for 'd "<details/> in root"
-        [:if 'd.open
-         [:set 'anyOpen true]]]
-       [:if "not anyOpen"
-        [:set 'me.open true]]]]]))
-
-(defn- accordion-clear-active-script []
-  [[:let 'root "closest <div[data-accordion-root]/>"]
-   [:for 'd "<details/> in root"
-    [:set 'd.dataset.active "'false'"]
-    [:set 'd.style.boxShadow "''"]]])
-
-(defn- accordion-script
-  [{:keys [type collapsible?]}]
-  (let [type         (or type :multiple)
-        collapsible? (if (nil? collapsible?) true collapsible?)]
-    (hs
-     [:on :toggle
-      (when (= type :single)
-        (accordion-single-script collapsible?))
-      (accordion-chevron-script)])))
 
 ;; -----------------------------------------------------------------------------
 ;; Item preparation
@@ -111,65 +66,6 @@
                 :value value
                 :open? (compute-open? item value type default-one default-many))))
      items*)))
-
-;; -----------------------------------------------------------------------------
-;; Visual helpers
-;; -----------------------------------------------------------------------------
-
-(defn- accordion-root-attrs
-  [class]
-  {:class (class-names "overflow-hidden rounded-lg shadow-sm" class)
-   :data-accordion-root true
-   :style {:border "1px solid var(--border)"
-           :background "var(--card)"}})
-
-(defn- accordion-item-attrs
-  [value open? disabled? class attrs]
-  (merge-attrs
-   {:class (class-names
-            "group overflow-hidden last:border-b-0"
-            (when disabled? "opacity-60 pointer-events-none")
-            class)
-    :open (when open? true)
-    :data-accordion-value (->value value "item")
-    :style {:border-bottom "1px solid var(--border)"}}
-   attrs))
-
-(defn- accordion-trigger-attrs
-  [class]
-  {:class (class-names
-           "cursor-pointer w-full list-none px-4 py-6 flex items-center justify-between gap-4 outline-none"
-           class)
-   :style {:background "var(--muted)"
-           :color "var(--primary)"
-           :font-weight 600}})
-
-(defn- accordion-content-attrs
-  [class]
-  {:class (class-names
-           "px-4 py-6"
-           class)
-   :style {:border-top "1px solid var(--border)"
-           :background "var(--background)"
-           :color "var(--muted-foreground)"
-           :font-size "0.95rem"
-           :line-height "1.7"}})
-
-(defn- accordion-chevron-node []
-  [:svg {:data-accordion-chevron true
-         :aria-hidden "true"
-         :viewBox "0 0 20 20"
-         :fill "none"
-         :stroke "currentColor"
-         :stroke-width "2"
-         :stroke-linecap "round"
-         :stroke-linejoin "round"
-         :style {:width "1rem"
-                 :height "1rem"
-                 :display "block"
-                 :flex-shrink 0
-                 :transition "transform 200ms ease"}}
-   [:path {:d "M6 8l4 4 4-4"}]])
 
 (defn- accordion-title-node
   [content]
