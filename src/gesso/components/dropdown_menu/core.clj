@@ -33,13 +33,19 @@
 (defn dropdown-menu-content
   "Renders the floating dropdown surface.
 
-   The content is intended to be placed inside dropdown-menu."
+   Options:
+   - :open?       whether the menu starts visible
+   - :side        :bottom or :top
+   - :align       :start or :end
+   - :side-offset CSS length string, default \"0.35rem\"
+
+   Positioning is manual for now. The caller chooses the side and alignment."
   [& args]
   (let [[opts children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
-        open? (:open? props)]
+        {:keys [open? side align side-offset]} props]
     (el :div
-        (dropdown-menu-content-attrs class open?)
+        (dropdown-menu-content-attrs class open? side align side-offset)
         attrs
         children)))
 
@@ -130,7 +136,7 @@
           children))))
 
 (defn dropdown-menu
-  "Renders a dropdown menu root.
+   "Renders a dropdown menu root.
 
    Short form:
      (dropdown-menu
@@ -147,8 +153,13 @@
          (dropdown-menu-item {:text \"Profile\"})
          (dropdown-menu-item {:text \"Settings\"})))
 
-   Options:
-     :default-open?  whether the menu starts open"
+   Root options:
+   - :default-open? whether the menu starts open
+
+   Content positioning is configured on dropdown-menu-content with:
+   - :side        :bottom | :top
+   - :align       :start  | :end
+   - :side-offset CSS length string"
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))

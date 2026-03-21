@@ -28,22 +28,43 @@
 (defn dropdown-menu-content-attrs
   "Returns the attribute map for the floating menu surface.
 
-   The content is hidden when closed and positioned below the trigger by
-   default. It uses popover tokens rather than card tokens so the surface reads
-   as a floating layer in both light and dark themes.
+   Supports simple caller-controlled positioning with:
 
-   Positioning is intentionally simple for now: the menu opens below and
-   left-aligned from the root. Near viewport edges this may still need manual
-   adjustment or a later collision-handling pass."
-  [class open?]
-  {:class (class-names
-           "absolute left-0 top-[calc(100%+0.35rem)] z-50 min-w-56 rounded-lg border p-1.5 shadow-sm
-            border-[var(--border)] bg-[var(--popover)] text-[var(--popover-foreground)]
-            shadow-[0_18px_48px_-18px_rgba(0,0,0,0.55),0_10px_24px_-18px_rgba(0,0,0,0.45)]"
-           class)
-   :data-dropdown-content true
-   :role "menu"
-   :hidden (when-not open? true)})
+   - :side  :bottom | :top
+   - :align :start  | :end
+   - :side-offset string CSS length, default \"0.35rem\"
+
+   The current implementation keeps positioning intentionally simple and does
+   not attempt collision detection or viewport-aware flipping.
+
+   Possible later expansions:
+   - automatic vertical flipping when there is not enough room below
+   - automatic horizontal alignment when the menu would overflow right or left
+   - collision padding from viewport edges
+   - recomputing placement on resize or scroll
+   - submenu-aware positioning"
+  [class open? side align side-offset]
+  (let [side (or side :bottom)
+        align (or align :start)
+        side-offset (or side-offset "0.35rem")
+        position-class
+        (case [side align]
+          [:bottom :start] (str "top-[calc(100%+" side-offset ")] left-0")
+          [:bottom :end]   (str "top-[calc(100%+" side-offset ")] right-0")
+          [:top :start]    (str "bottom-[calc(100%+" side-offset ")] left-0")
+          [:top :end]      (str "bottom-[calc(100%+" side-offset ")] right-0")
+          (str "top-[calc(100%+" side-offset ")] left-0"))]
+    {:class (class-names
+             "absolute z-50 min-w-56 rounded-lg border p-1.5 shadow-sm
+              border-[var(--border)] bg-[var(--popover)] text-[var(--popover-foreground)]
+              shadow-[0_18px_48px_-18px_rgba(0,0,0,0.55),0_10px_24px_-18px_rgba(0,0,0,0.45)]"
+             position-class
+             class)
+     :data-dropdown-content true
+     :data-side (name side)
+     :data-align (name align)
+     :role "menu"
+     :hidden (when-not open? true)}))
 
 (defn dropdown-menu-item-attrs
   "Returns the attribute map for a menu item button.
