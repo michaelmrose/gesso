@@ -34,8 +34,11 @@
    - :align :start  | :end
    - :side-offset string CSS length, default \"0.35rem\"
 
-   The current implementation keeps positioning intentionally simple and does
-   not attempt collision detection or viewport-aware flipping.
+   The menu uses popover tokens rather than card tokens so it reads as a
+   floating layer in both light and dark themes.
+
+   Positioning is intentionally simple for now and does not attempt collision
+   detection or automatic flipping.
 
    Possible later expansions:
    - automatic vertical flipping when there is not enough room below
@@ -44,8 +47,8 @@
    - recomputing placement on resize or scroll
    - submenu-aware positioning"
   [class open? side align side-offset]
-  (let [side (or side :bottom)
-        align (or align :start)
+  (let [side        (or side :bottom)
+        align       (or align :start)
         side-offset (or side-offset "0.35rem")
         position-class
         (case [side align]
@@ -55,9 +58,9 @@
           [:top :end]      (str "bottom-[calc(100%+" side-offset ")] right-0")
           (str "top-[calc(100%+" side-offset ")] left-0"))]
     {:class (class-names
-             "absolute z-50 min-w-56 rounded-lg border p-1.5 shadow-sm
+             "absolute z-50 min-w-56 rounded-lg border p-1.5
               border-[var(--border)] bg-[var(--popover)] text-[var(--popover-foreground)]
-              shadow-[0_18px_48px_-18px_rgba(0,0,0,0.55),0_10px_24px_-18px_rgba(0,0,0,0.45)]"
+              shadow-[0_24px_64px_-24px_rgba(0,0,0,0.75),0_16px_32px_-24px_rgba(0,0,0,0.65)]"
              position-class
              class)
      :data-dropdown-content true
@@ -72,14 +75,13 @@
    Items reserve a left gutter for optional indicators and support a highlighted
    hover and focus state through accent tokens.
 
-   Disabled items are marked with both the disabled attribute and a data
-   attribute. The current implementation still uses a small inline style map for
-   disabled and default color handling; that means color behavior is not driven
-   entirely by classes yet."
+   Normal item text uses the standard foreground color so the accent color can
+   be reserved for hover and focus states. Disabled items still rely on a small
+   inline style map for their muted color, cursor, and opacity."
   [class disabled?]
   {:class (class-names
            "relative flex min-h-8 w-full items-center rounded-sm border-none bg-transparent px-2.5 py-2 pl-7 text-left text-[0.8125rem] leading-[1.1] outline-none
-            hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]
+            text-[var(--foreground)] hover:bg-[var(--accent)] hover:text-[var(--accent-foreground)]
             focus:bg-[var(--accent)] focus:text-[var(--accent-foreground)]"
            class)
    :type "button"
@@ -87,9 +89,7 @@
    :data-dropdown-item true
    :data-disabled (when disabled? "true")
    :disabled (when disabled? true)
-   :style {:color (if disabled?
-                    "var(--muted-foreground)"
-                    "var(--primary)")
+   :style {:color (when disabled? "var(--muted-foreground)")
            :cursor (if disabled? "default" "pointer")
            :user-select "none"
            :opacity (when disabled? 0.7)}})
