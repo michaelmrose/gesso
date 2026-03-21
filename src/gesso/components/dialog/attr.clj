@@ -32,19 +32,7 @@
            :background "rgba(0, 0, 0, 0.55)"
            :z-index 40}})
 
-#_(defn dialog-overlay-attrs
-  "Returns the attribute map for the modal overlay.
 
-   The overlay is hidden when the dialog is closed and fills the viewport when
-   open."
-  [class open?]
-  {:class (class-names class)
-   :data-dialog-overlay true
-   :hidden (when-not open? true)
-   :style {:position "fixed"
-           :inset 0
-           :background "color-mix(in srgb, var(--foreground) 45%, transparent)"
-           :z-index 40}})
 
 (defn dialog-content-attrs
   "Returns the attribute map for the dialog content surface.
