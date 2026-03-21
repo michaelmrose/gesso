@@ -2,6 +2,7 @@
   (:require
    [gesso.components.accordion.core :as accordion]
    [gesso.components.dropdown-menu.core :as dropdown]
+   [gesso.components.tabs.core :as tabs]
    [gesso.components.alert :as alert]
    [gesso.components.badge :as badge]
    [gesso.components.button :as button]
@@ -50,6 +51,11 @@
 (def dialog-body dialog/dialog-body)
 (def dialog-footer dialog/dialog-footer)
 (def dialog-close dialog/dialog-close)
+
+(def tabs tabs/tabs)
+(def tabs-list tabs/tabs-list)
+(def tabs-trigger tabs/tabs-trigger)
+(def tabs-content tabs/tabs-content)
 
 (def alert alert/alert)
 (def alert-title alert/alert-title)
