@@ -122,56 +122,79 @@
         orientation (or orientation :horizontal)
         current-value (some-> default-value str)
         rid (root-id attrs)
-        children
-        (map
-         (fn [child]
-           (if (vector? child)
-             (let [[tag maybe-attrs & kids] child
-                   has-attrs? (map? maybe-attrs)
-                   child-attrs (if has-attrs? maybe-attrs {})
-                   child-kids  (if has-attrs? kids (cons maybe-attrs kids))]
-               (cond
-                 (= tag :button)
-                 (let [v (get child-attrs :data-tabs-value)
-                       selected? (= (some-> v str) current-value)]
-                   (into [tag
-                          (assoc child-attrs
-                                 :data-state (if selected? "active" "inactive")
-                                 :aria-selected (if selected? "true" "false")
-                                 :tabindex (if selected? "0" "-1")
-                                 :data-orientation (name orientation)
-                                 :id (or (:id child-attrs)
-                                         (str rid "-tab-" (->tabs-id-part v))))]
-                         child-kids))
 
-                 (= tag :div)
-                 (let [role (:role child-attrs)
-                       v (get child-attrs :data-tabs-value)
-                       selected? (= (some-> v str) current-value)
-                       tab-id (str rid "-tab-" (->tabs-id-part v))]
-                   (if (= role "tabpanel")
-                     (into [tag
-                            (assoc child-attrs
-                                   :data-state (if selected? "active" "inactive")
-                                   :aria-selected (if selected? "true" "false")
-                                   :data-orientation (name orientation)
-                                   :aria-labelledby tab-id
-                                   :id (or (:id child-attrs) (str tab-id "-panel"))
-                                   :hidden (when-not selected? true))]
-                           child-kids)
-                     child))
+        rewrite-trigger
+        (fn [node]
+          (if (vector? node)
+            (let [[tag maybe-attrs & kids] node
+                  has-attrs? (map? maybe-attrs)
+                  child-attrs (if has-attrs? maybe-attrs {})
+                  child-kids  (if has-attrs? kids (cons maybe-attrs kids))]
+              (if (= tag :button)
+                (let [v (get child-attrs :data-tabs-value)
+                      selected? (= (some-> v str) current-value)
+                      tab-id (or (:id child-attrs)
+                                 (str rid "-tab-" (->tabs-id-part v)))
+                      panel-id (or (:aria-controls child-attrs)
+                                   (str tab-id "-panel"))]
+                  (into
+                   [tag
+                    (assoc child-attrs
+                           :id tab-id
+                           :aria-controls panel-id
+                           :aria-selected (if selected? "true" "false")
+                           :tabindex (if selected? "0" "-1")
+                           :data-state (if selected? "active" "inactive")
+                           :data-orientation (name orientation)
+                           :style (merge
+                                   (:style child-attrs)
+                                   {:box-shadow (when selected?
+                                                  (if (= orientation :vertical)
+                                                    "inset -1px 0 0 0 currentColor, -1px 0 0 0 currentColor"
+                                                    "inset 0 -1px 0 0 currentColor, 0 1px 0 0 currentColor"))
+                                    :color (when selected? "var(--primary)")}))]
 
-                 (= tag :nav)
-                 (into [tag
-                        (assoc child-attrs
-                               :data-orientation (name orientation)
-                               :aria-orientation (name orientation))]
-                       child-kids)
+                   child-kids))
+                node))
+            node))
 
-                 :else
-                 child))
-             child))
-         children)]
+        rewrite-root-child
+        (fn [child]
+          (if (vector? child)
+            (let [[tag maybe-attrs & kids] child
+                  has-attrs? (map? maybe-attrs)
+                  child-attrs (if has-attrs? maybe-attrs {})
+                  child-kids  (if has-attrs? kids (cons maybe-attrs kids))]
+              (cond
+                (= tag :nav)
+                (into
+                 [tag
+                  (assoc child-attrs
+                         :data-orientation (name orientation)
+                         :aria-orientation (name orientation))]
+                 (map rewrite-trigger child-kids))
+
+                (and (= tag :div)
+                     (= "tabpanel" (:role child-attrs)))
+                (let [v (get child-attrs :data-tabs-value)
+                      selected? (= (some-> v str) current-value)
+                      tab-id (str rid "-tab-" (->tabs-id-part v))]
+                  (into
+                   [tag
+                    (assoc child-attrs
+                           :data-state (if selected? "active" "inactive")
+                           :aria-selected (if selected? "true" "false")
+                           :data-orientation (name orientation)
+                           :aria-labelledby tab-id
+                           :id (or (:id child-attrs) (str tab-id "-panel"))
+                           :hidden (when-not selected? true))]
+                   child-kids))
+
+                :else
+                child))
+            child))
+
+        children (map rewrite-root-child children)]
     (el :div
         (tabs-root-attrs class current-value orientation)
         (assoc attrs :id rid)
