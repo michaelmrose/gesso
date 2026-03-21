@@ -48,6 +48,21 @@
 (defn dropdown-menu-root-script
   "Builds the script attached to the dropdown root.
 
+   Escape closes the menu whenever it is open. Clicking anywhere outside the
+   current dropdown root closes it as well."
+  []
+  (hs
+   [:on "keyup[key is 'Escape'] from document"
+    [:if "my.dataset.dropdownOpen == 'true'"
+     (dropdown-menu-close-script)]]
+
+   [:on :click "from document"
+    [:if "my.dataset.dropdownOpen == 'true' and not my.contains(event.target)"
+     (dropdown-menu-close-script)]]))
+
+#_(defn dropdown-menu-root-script
+  "Builds the script attached to the dropdown root.
+
    Escape closes the menu whenever it is open."
   []
   (hs
