@@ -14,6 +14,7 @@
    [gesso.components.switch :as switch]
    [gesso.components.textarea :as textarea]
    [gesso.theme :as gtheme]
+   [gesso.components.dialog.core :as dialog]
    ))
 
 ;; public api
@@ -28,6 +29,17 @@
 (def accordion-item accordion/accordion-item)
 (def accordion-trigger accordion/accordion-trigger)
 (def accordion-content accordion/accordion-content)
+
+(def dialog dialog/dialog)
+(def dialog-trigger dialog/dialog-trigger)
+(def dialog-overlay dialog/dialog-overlay)
+(def dialog-content dialog/dialog-content)
+(def dialog-header dialog/dialog-header)
+(def dialog-title dialog/dialog-title)
+(def dialog-description dialog/dialog-description)
+(def dialog-body dialog/dialog-body)
+(def dialog-footer dialog/dialog-footer)
+(def dialog-close dialog/dialog-close)
 
 (def alert alert/alert)
 (def alert-title alert/alert-title)
