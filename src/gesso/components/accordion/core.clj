@@ -12,6 +12,10 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- resolve-default-one
+  "Resolves the initially open item value for a :single accordion.
+
+   Prefers an explicit default-value. If none is supplied, falls back to
+   default-index and derives the value from the indexed item."
   [items* default-value default-index]
   (cond
     (some? default-value)
@@ -24,6 +28,10 @@
     :else nil))
 
 (defn- resolve-default-many
+  "Resolves the set of initially open item values for a :multiple accordion.
+
+   Prefers explicit default-values. If none are supplied, falls back to
+   default-indexes and derives stable values from the indexed items."
   [items* default-values default-indexes]
   (cond
     (seq default-values)
@@ -41,6 +49,10 @@
     :else #{}))
 
 (defn- compute-open?
+  "Determines whether an item should start open.
+
+   An item's explicit :open? value takes precedence. Otherwise the result is
+   derived from the accordion type and the resolved default value or values."
   [item value type default-one default-many]
   (cond
     (contains? item :open?) (:open? item)
@@ -49,6 +61,10 @@
     :else false))
 
 (defn- prepare-accordion-items
+  "Normalizes item input for rendering.
+
+   Applies item-fn when provided, ensures each item has a stable :value, and
+   fills in :open? based on the accordion type and default selection options."
   [{:keys [items item-fn type
            default-value default-values
            default-index default-indexes]}]
@@ -68,6 +84,10 @@
      items*)))
 
 (defn- accordion-title-node
+  "Wraps trigger content in the heading element used for accordion titles.
+
+   The returned node keeps the title visually prominent while allowing the
+   caller to pass plain text or richer Hiccup content."
   [content]
   (into [:h2 {:class "m-0 flex-1 min-w-0 text-left"
               :style {:margin 0
@@ -78,6 +98,10 @@
         (normalize-children content)))
 
 (defn- accordion-trigger-body
+  "Builds the trigger contents for a summary row.
+
+   Renders the title content and, when chevron? is truthy, appends the standard
+   accordion chevron node."
   [{:keys [content chevron?]}]
   (if chevron?
     [(accordion-title-node content)
@@ -89,6 +113,10 @@
 ;; -----------------------------------------------------------------------------
 
 (defn accordion-content
+  "Renders the revealed body region of an accordion item.
+
+   Supports both the map-only short form and the long form with explicit
+   children."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
@@ -104,6 +132,11 @@
           children))))
 
 (defn accordion-trigger
+  "Renders an accordion summary row.
+
+   Supports both the short form with :text and the long form with explicit
+   children. Chevron rendering is enabled by default and can be disabled with
+   :chevron? false."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
@@ -124,6 +157,10 @@
                                    :chevron? chevron?})))))
 
 (defn- accordion-item-short-form
+  "Renders an accordion item from the map-only short form.
+
+   Builds a details element with a generated trigger and content section from
+   the supplied title, content, and item options."
   [{:keys [value title content open? disabled? trigger-opts content-opts class attrs]}]
   (el :details
       {}
@@ -134,6 +171,9 @@
        (apply accordion-content content-opts (nodes content))]))
 
 (defn- accordion-item-long-form
+  "Renders an accordion item from the long form with explicit children.
+
+   The caller supplies the trigger and content nodes directly."
   [opts children]
   (let [{:keys [props class attrs]} (split-opts opts)
         {:keys [value open? disabled?]} props]
@@ -143,6 +183,10 @@
         children)))
 
 (defn accordion-item
+  "Renders a single accordion item.
+
+   Accepts either a short-form map with title and content keys or a long form
+   with explicit child nodes."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
@@ -155,6 +199,10 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- render-prepared-items
+  "Renders a prepared collection of item maps.
+
+   Attaches the computed accordion script to each item's attrs before delegating
+   to accordion-item."
   [items* script]
   (for [item items*]
     (let [item-attrs (get-in item [:attrs])]
@@ -162,6 +210,10 @@
        (assoc item :attrs (merge-script-attr item-attrs script))))))
 
 (defn- accordion-map-form
+  "Renders the accordion from the map-only root form.
+
+   Prepares item state, builds the item script once for the current accordion
+   configuration, and renders the normalized items inside the root container."
   [opts]
   (let [{:keys [props class attrs]} (split-opts opts)
         {:keys [items item-fn type
@@ -183,15 +235,23 @@
         (render-prepared-items items* script))))
 
 (defn- accordion-fn-items-form
+  "Supports the shorthand form where an item-fn and item collection are passed
+   directly to accordion."
   [item-fn items]
   (accordion {:item-fn item-fn
               :items items}))
 
 (defn- accordion-opts-fn-items-form
+  "Supports the shorthand form where root opts, an item-fn, and an item
+   collection are passed directly to accordion."
   [opts item-fn items]
   (accordion (assoc opts :item-fn item-fn :items items)))
 
 (defn- accordion-long-form
+  "Renders the long-form accordion where children are supplied explicitly.
+
+   Attaches the computed script to any details children before rendering the
+   root container."
   [opts children]
   (let [{:keys [props class attrs]} (split-opts opts)
         {:keys [type collapsible?]} props
@@ -203,32 +263,33 @@
         children)))
 
 (defn accordion
-  "Accordion root.
+  "Renders an accordion root.
 
-  Supported call styles:
+   Supported call styles:
 
-  1) Map-only:
-     (accordion {:items [...]})
+   1) Map-only:
+      (accordion {:items [...]})
 
-  2) Map-only with item-fn:
-     (accordion {:items coll :item-fn (fn [x] {:value ... :title ... :content ...})})
+   2) Map-only with item-fn:
+      (accordion {:items coll :item-fn (fn [x] {:value ... :title ... :content ...})})
 
-  3) Function + items:
-     (accordion (fn [x] {:value ... :title ... :content ...}) coll)
+   3) Function + items:
+      (accordion (fn [x] {:value ... :title ... :content ...}) coll)
 
-  4) Options + function + items:
-     (accordion {:type :single :default-value \"item-2\"} (fn [x] ...) coll)
+   4) Options + function + items:
+      (accordion {:type :single :default-value \"item-2\"} (fn [x] ...) coll)
 
-  5) Long form children:
-     (accordion {:type :multiple} (accordion-item ...) ...)
+   5) Long form children:
+      (accordion {:type :multiple} (accordion-item ...) ...)
 
-  Options:
-    :type             :single | :multiple (default :multiple)
-    :default-value    for :single
-    :default-values   for :multiple
-    :default-index    for :single, zero-based
-    :default-indexes  for :multiple, zero-based
-    :collapsible?     for :single (default true)"
+   Options:
+     :type             :single | :multiple (default :multiple)
+     :default-value    initially open value for :single
+     :default-values   initially open values for :multiple
+     :default-index    zero-based initially open index for :single
+     :default-indexes  zero-based initially open indexes for :multiple
+     :collapsible?     whether a :single accordion may close its last open item
+                       (default true)."
   [& args]
   (cond
     (only-map-arg? args)
