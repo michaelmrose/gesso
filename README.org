@@ -1,0 +1,256 @@
+#+TITLE: Gesso + Biff setup
+#+OPTIONS: toc:2 num:nil
+
+* Gesso + Biff setup
+
+This project uses *Gesso* with a downstream *Biff* app. There are two main pieces of setup beyond ordinary Biff:
+
+1. theme CSS generation through =bb.edn=
+2. Tailwind configuration that includes Gesso’s source files
+
+The goal is to let the app define its own themes locally while still using Gesso’s built-in components and styling conventions.
+
+* Overview
+
+Gesso ships its own source and theme tooling. In a downstream Biff app, you generally want to:
+
+- include Gesso on the classpath
+- generate app-local theme CSS from =resources/themes=
+- include that generated CSS in your app
+- configure Tailwind so it scans both your app and Gesso’s files
+
+This lets you keep:
+
+- library styles in Gesso
+- app-specific themes in your downstream project
+
+* =bb.edn=
+
+The downstream project should include Gesso’s source and resources on the classpath, and define a task for generating local theme CSS.
+
+Example:
+
+#+begin_src clojure
+{:paths ["src" "resources" "../gesso/src" "../gesso/resources"]
+
+ :tasks
+ {dev
+  (shell "clj -M:dev dev")
+
+  themes
+  (do
+    ((requiring-resolve 'gesso.build.themes/build!)
+     {:input-dir "resources/themes"
+      :output-file "resources/public/gesso/app-themes.css"}))}}
+#+end_src
+
+** What this does
+
+The important part is the =themes= task:
+
+#+begin_src clojure
+((requiring-resolve 'gesso.build.themes/build!)
+ {:input-dir "resources/themes"
+  :output-file "resources/public/gesso/app-themes.css"})
+#+end_src
+
+This tells Gesso to:
+
+- read raw theme files from =resources/themes=
+- rewrite them into Gesso’s generated theme selectors
+- emit a bundled CSS file at:
+
+#+begin_example
+resources/public/gesso/app-themes.css
+#+end_example
+
+That output file is your app-local theme bundle.
+
+** Theme source directory
+
+Place your app’s raw theme files in:
+
+#+begin_example
+resources/themes
+#+end_example
+
+Each theme file is expected to contain both:
+
+- a =:root= block
+- a =.dark= block
+
+Gesso rewrites those into theme-scoped selectors like:
+
+- =html[data-theme="..."]=
+- =html.dark[data-theme="..."]=
+
+So each file represents one named theme.
+
+* Tailwind config
+
+Tailwind needs to scan:
+
+- your app files
+- your app resources
+- Gesso’s files
+
+Because Gesso may live outside the downstream project, the path is resolved dynamically with Babashka.
+
+Use this =tailwind.config.js=:
+
+#+begin_src js
+const { execFileSync } = require('child_process');
+
+function resolveGessoPath() {
+  try {
+    return execFileSync(
+      'bb',
+      ['-m', 'gesso.build.find-path', 'gesso'],
+      { encoding: 'utf8' }
+    ).trim();
+  } catch (_e) {
+    return null;
+  }
+}
+
+const gessoPath = resolveGessoPath();
+
+module.exports = {
+  corePlugins: {
+    preflight: false,
+    transform: false,
+  },
+  content: [
+    './src/**/*',
+    './resources/**/*',
+    ...(gessoPath ? [`${gessoPath}/**/*`] : []),
+  ],
+  theme: {},
+  plugins: [],
+};
+#+end_src
+
+* Why this Tailwind config is needed
+
+** =resolveGessoPath=
+
+This uses:
+
+#+begin_src js
+execFileSync('bb', ['-m', 'gesso.build.find-path', 'gesso'], ...)
+#+end_src
+
+to locate the Gesso project on disk. That gives Tailwind access to Gesso’s files even when Gesso is not copied directly into the app directory.
+
+** =content=
+
+The =content= list includes:
+
+- =./src/**/*=
+- =./resources/**/*=
+- =gessoPath/**/*= if Gesso is found
+
+That ensures Tailwind sees utility classes used in:
+
+- your downstream app
+- Gesso components
+- Gesso resources
+
+Without this, Tailwind may purge classes that Gesso relies on.
+
+** =corePlugins.preflight = false=
+
+Biff and Gesso should not rely on Tailwind’s global reset here, so preflight is disabled.
+
+** =corePlugins.transform = false=
+
+This is also disabled in this setup to avoid Tailwind’s transform utilities being emitted by default.
+
+* Generated CSS outputs
+
+There are effectively two layers of theme CSS:
+
+** Gesso library CSS
+
+Generated in the Gesso repo itself.
+
+** App-local CSS
+
+Generated in the downstream project:
+
+#+begin_example
+resources/public/gesso/app-themes.css
+#+end_example
+
+Your app should include the generated downstream CSS so local themes are available at runtime.
+
+* Typical workflow
+
+** Start dev server
+
+#+begin_src bash
+bb dev
+#+end_src
+
+** Regenerate local themes
+
+#+begin_src bash
+bb themes
+#+end_src
+
+Whenever you add or change files in:
+
+#+begin_example
+resources/themes
+#+end_example
+
+run the theme build task again so =app-themes.css= is updated.
+
+* Directory summary
+
+Typical downstream layout:
+
+#+begin_example
+src/
+resources/
+  themes/
+    violetbloom.css
+    ember.css
+  public/
+    gesso/
+      app-themes.css
+bb.edn
+tailwind.config.js
+#+end_example
+
+* Minimal integration checklist
+
+1. Add Gesso source and resources to =:paths= in =bb.edn=
+2. Add a =themes= task that calls =gesso.build.themes/build!=
+3. Put raw theme files in =resources/themes=
+4. Output generated local theme CSS to =resources/public/gesso/app-themes.css=
+5. Configure Tailwind to scan app files and Gesso files
+6. Include the generated CSS in your app
+
+* Notes
+
+** Why generate app themes separately?
+
+This keeps the split clean:
+
+- Gesso owns built-in styles and built-in themes
+- the downstream app owns local themes
+
+That means app customization does not require modifying Gesso itself.
+
+** Why not hardcode the Gesso path in Tailwind?
+
+Because the dynamic lookup is more portable. It avoids baking a machine-specific or repo-specific path into =tailwind.config.js=.
+
+** Why not just document manual copying?
+
+Because the theme build task and Tailwind content scanning are both easy to get subtly wrong. Treating them as required setup makes the integration more repeatable.
+
+* Future direction
+
+Eventually this should probably be replaced by a proper *Biff + Gesso project generator/template*, so users can start from a working setup instead of following a manual integration guide. For now, the configuration above is the required wiring.
