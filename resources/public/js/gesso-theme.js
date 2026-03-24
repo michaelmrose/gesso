@@ -1,43 +1,27 @@
 (() => {
   const root = document.documentElement;
-  const THEME_KEY = "themeName";
-  const MODE_KEY = "themeMode";
 
   const metaContent = (name) =>
     document.querySelector(`meta[name="${name}"]`)?.getAttribute("content") || null;
 
-const readDefaultTheme = () =>
-    root.getAttribute("data-theme") || metaContent("gesso-theme-default");
+  const readDefaultColorTheme = () =>
+    root.getAttribute("data-color-theme") ||
+    metaContent("gesso-color-theme-default");
 
   const readDefaultMode = () =>
-    root.getAttribute("data-theme-mode") || metaContent("gesso-theme-mode-default") || "system";
-  const readStorage = (key) => {
-    try {
-      return localStorage.getItem(key);
-    } catch (_e) {
-      return null;
-    }
-  };
-
-  const writeStorage = (key, value) => {
-    try {
-      if (value == null) {
-        localStorage.removeItem(key);
-      } else {
-        localStorage.setItem(key, value);
-      }
-    } catch (_e) {}
-  };
+    root.getAttribute("data-color-theme-mode") ||
+    metaContent("gesso-theme-mode-default") ||
+    "system";
 
   const systemDark = () =>
     window.matchMedia &&
     window.matchMedia("(prefers-color-scheme: dark)").matches;
 
-  const applyTheme = (theme) => {
-    if (theme) {
-      root.setAttribute("data-theme", theme);
+  const applyColorTheme = (colorTheme) => {
+    if (colorTheme) {
+      root.setAttribute("data-color-theme", colorTheme);
     } else {
-      root.removeAttribute("data-theme");
+      root.removeAttribute("data-color-theme");
     }
   };
 
@@ -52,21 +36,25 @@ const readDefaultTheme = () =>
     root.classList.toggle("dark", resolved === "dark");
   };
 
-  const currentTheme = () =>
-    readStorage(THEME_KEY) || readDefaultTheme();
+  const currentColorTheme = () =>
+    readDefaultColorTheme();
 
   const currentMode = () =>
-    readStorage(MODE_KEY) || readDefaultMode();
+    readDefaultMode();
 
   const init = () => {
-    applyTheme(currentTheme());
+    applyColorTheme(currentColorTheme());
     applyMode(currentMode());
   };
 
   document.addEventListener("gesso:theme", (event) => {
     const detail = event?.detail || {};
-    const nextTheme =
-      typeof detail.theme === "string" ? detail.theme : currentTheme();
+    const nextColorTheme =
+      typeof detail.colorTheme === "string"
+        ? detail.colorTheme
+        : typeof detail.theme === "string"
+          ? detail.theme
+          : currentColorTheme();
 
     let nextMode = detail.mode;
     if (!nextMode) {
@@ -75,21 +63,19 @@ const readDefaultTheme = () =>
       nextMode = root.classList.contains("dark") ? "light" : "dark";
     }
 
-    if (typeof nextTheme === "string") {
-      applyTheme(nextTheme);
-      writeStorage(THEME_KEY, nextTheme);
+    if (typeof nextColorTheme === "string") {
+      applyColorTheme(nextColorTheme);
     }
 
     if (typeof nextMode === "string") {
       applyMode(nextMode);
-      writeStorage(MODE_KEY, nextMode);
     }
   });
 
   if (window.matchMedia) {
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     const syncSystemMode = () => {
-      if ((readStorage(MODE_KEY) || readDefaultMode()) === "system") {
+      if (readDefaultMode() === "system") {
         applyMode("system");
       }
     };

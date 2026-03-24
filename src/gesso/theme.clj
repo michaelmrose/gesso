@@ -90,7 +90,7 @@
        (:density config) (assoc :data-density (:density config))
        (:typography config) (assoc :data-typography (:typography config))
        (:shape config) (assoc :data-shape (:shape config))
-       mode (assoc :data-theme-mode mode)
+       mode (assoc :data-color-theme-mode mode)
        (= mode "dark") (assoc :class "dark")))))
 
 (defn theme-head
