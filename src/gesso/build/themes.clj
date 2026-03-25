@@ -1,6 +1,7 @@
 (ns gesso.build.themes
   (:require
    [babashka.fs :as fs]
+   [clojure.java.io :as io]
    [clojure.string :as str]))
 
 (def ^:private axis-specs
@@ -23,6 +24,9 @@
     :dir "shape"
     :attr "data-shape"
     :requires-dark? false}])
+
+(def ^:private utilities-css-resource
+  "gesso/theme-utilities.css")
 
 (defn- preset-name-from-path
   [path]
@@ -106,6 +110,13 @@
             (css-files-in-dir preset-dir))))
    axis-specs))
 
+(defn- utilities-css
+  []
+  (if-let [res (io/resource utilities-css-resource)]
+    (slurp res)
+    (throw (ex-info "Theme utilities CSS resource does not exist"
+                    {:resource utilities-css-resource}))))
+
 (defn build!
   "Reads raw preset CSS files from :input-dir and writes a generated CSS bundle
   to :output-file.
@@ -119,6 +130,9 @@
 
   Color-theme files require both :root and .dark blocks.
   Other preset files require :root and may optionally include .dark.
+
+  The generated bundle also includes a small semantic utility layer for
+  consuming theme variables directly in markup.
 
   Defaults are intended for the gesso repo itself:
     input-dir   => resources/themes
@@ -141,9 +155,11 @@
        (fs/create-dirs (fs/parent output-file))
        (spit output-file
              (str (str/join "\n\n"
-                            (map (fn [{:keys [spec path]}]
-                                   (preset-css spec path))
-                                 presets))
+                            (concat
+                             (map (fn [{:keys [spec path]}]
+                                    (preset-css spec path))
+                                  presets)
+                             [(utilities-css)]))
                   "\n"))
        (println "Wrote" output-file)
        (doseq [{:keys [spec path]} presets]

@@ -1,0 +1,7 @@
+:root {
+  --radius-sm: 0.875rem;
+  --radius-md: 1.25rem;
+  --radius-lg: 1.75rem;
+  --radius-xl: 2.5rem;
+  --border-width: 2px;
+}

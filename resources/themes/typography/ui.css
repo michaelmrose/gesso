@@ -1,0 +1,11 @@
+:root {
+  --font-body: Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-heading: Inter, "Helvetica Neue", Arial, sans-serif;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --leading-body: 1.45;
+  --leading-heading: 1.15;
+  --tracking-body: 0;
+  --tracking-heading: -0.02em;
+}

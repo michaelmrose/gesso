@@ -388,3 +388,102 @@ html.dark[data-color-theme~="violetbloom"] {
   --radius: 0.375rem;
 }
 
+
+/* density: comfortable */
+html[data-density~="comfortable"] {
+  --card-padding: 2rem;
+  --dialog-padding: 2.5rem;
+  --stack-gap: 1.75rem;
+  --control-height: 3.25rem;
+  --section-gap: 3rem;
+}
+
+
+/* density: default */
+html[data-density~="default"] {
+  --card-padding: 1rem;
+  --dialog-padding: 1.5rem;
+  --stack-gap: 1rem;
+  --control-height: 2.5rem;
+  --section-gap: 2rem;
+}
+
+
+/* typography: editorial */
+html[data-typography~="editorial"] {
+  --font-body: Georgia, "Times New Roman", serif;
+  --font-heading: Georgia, "Times New Roman", serif;
+  --text-base: 1.125rem;
+  --text-lg: 1.35rem;
+  --text-xl: 1.8rem;
+  --leading-body: 1.75;
+  --leading-heading: 1.25;
+  --tracking-body: 0;
+  --tracking-heading: -0.01em;
+}
+
+
+/* typography: ui */
+html[data-typography~="ui"] {
+  --font-body: Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-heading: Inter, "Helvetica Neue", Arial, sans-serif;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.375rem;
+  --leading-body: 1.45;
+  --leading-heading: 1.15;
+  --tracking-body: 0;
+  --tracking-heading: -0.02em;
+}
+
+
+/* shape: default */
+html[data-shape~="default"] {
+  --radius-sm: 0.375rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.5rem;
+  --border-width: 1px;
+}
+
+
+/* shape: soft */
+html[data-shape~="soft"] {
+  --radius-sm: 0.875rem;
+  --radius-md: 1.25rem;
+  --radius-lg: 1.75rem;
+  --radius-xl: 2.5rem;
+  --border-width: 2px;
+}
+
+
+/* semantic theme utilities */
+
+.font-body { font-family: var(--font-body); }
+.font-heading { font-family: var(--font-heading); }
+
+.text-base-theme { font-size: var(--text-base); }
+.text-lg-theme { font-size: var(--text-lg); }
+.text-xl-theme { font-size: var(--text-xl); }
+
+.leading-body { line-height: var(--leading-body); }
+.leading-heading { line-height: var(--leading-heading); }
+
+.tracking-body { letter-spacing: var(--tracking-body); }
+.tracking-heading { letter-spacing: var(--tracking-heading); }
+
+.pad-card { padding: var(--card-padding); }
+.pad-dialog { padding: var(--dialog-padding); }
+
+.gap-stack { gap: var(--stack-gap); }
+.gap-section { gap: var(--section-gap); }
+
+.h-control { min-height: var(--control-height); }
+
+.radius-sm { border-radius: var(--radius-sm); }
+.radius-md { border-radius: var(--radius-md); }
+.radius-lg { border-radius: var(--radius-lg); }
+.radius-xl { border-radius: var(--radius-xl); }
+
+.border-theme { border-width: var(--border-width); }
+

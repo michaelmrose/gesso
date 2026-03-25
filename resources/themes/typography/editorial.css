@@ -1,0 +1,11 @@
+:root {
+  --font-body: Georgia, "Times New Roman", serif;
+  --font-heading: Georgia, "Times New Roman", serif;
+  --text-base: 1.125rem;
+  --text-lg: 1.35rem;
+  --text-xl: 1.8rem;
+  --leading-body: 1.75;
+  --leading-heading: 1.25;
+  --tracking-body: 0;
+  --tracking-heading: -0.01em;
+}

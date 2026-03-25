@@ -1,0 +1,29 @@
+/* semantic theme utilities */
+
+.font-body { font-family: var(--font-body); }
+.font-heading { font-family: var(--font-heading); }
+
+.text-base-theme { font-size: var(--text-base); }
+.text-lg-theme { font-size: var(--text-lg); }
+.text-xl-theme { font-size: var(--text-xl); }
+
+.leading-body { line-height: var(--leading-body); }
+.leading-heading { line-height: var(--leading-heading); }
+
+.tracking-body { letter-spacing: var(--tracking-body); }
+.tracking-heading { letter-spacing: var(--tracking-heading); }
+
+.pad-card { padding: var(--card-padding); }
+.pad-dialog { padding: var(--dialog-padding); }
+
+.gap-stack { gap: var(--stack-gap); }
+.gap-section { gap: var(--section-gap); }
+
+.h-control { min-height: var(--control-height); }
+
+.radius-sm { border-radius: var(--radius-sm); }
+.radius-md { border-radius: var(--radius-md); }
+.radius-lg { border-radius: var(--radius-lg); }
+.radius-xl { border-radius: var(--radius-xl); }
+
+.border-theme { border-width: var(--border-width); }
