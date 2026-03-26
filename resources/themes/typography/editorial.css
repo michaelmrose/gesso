@@ -1,11 +1,27 @@
 :root {
   --font-body: Georgia, "Times New Roman", serif;
   --font-heading: Georgia, "Times New Roman", serif;
-  --text-base: 1.125rem;
-  --text-lg: 1.35rem;
-  --text-xl: 1.8rem;
-  --leading-body: 1.75;
-  --leading-heading: 1.25;
-  --tracking-body: 0;
-  --tracking-heading: -0.01em;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1.0625rem;
+  --text-md: 1.1875rem;
+  --text-lg: 1.375rem;
+  --text-xl: 1.625rem;
+  --text-2xl: 2rem;
+  --text-3xl: 2.5rem;
+
+  --leading-tight: 1.25;
+  --leading-snug: 1.4;
+  --leading-body: 1.65;
+  --leading-loose: 1.85;
+
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.03em;
+
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
 }

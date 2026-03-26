@@ -1,7 +1,27 @@
+/* density/comfortable.css */
 :root {
+  --control-height: 3.125rem;
+  --control-px: 1rem;
+  --control-py: 0.75rem;
+
   --card-padding: 2rem;
   --dialog-padding: 2.5rem;
-  --stack-gap: 1.75rem;
-  --control-height: 3.25rem;
-  --section-gap: 3rem;
+
+  --stack-gap: 1.5rem;
+  --section-gap: 4rem;
+
+  --inline-gap: 1rem;
+  --cluster-gap: 1rem;
+
+  --button-px: 1rem;
+  --button-py: 0.75rem;
+
+  --field-gap: 0.75rem;
+  --form-gap: 1.25rem;
+
+  --list-gap: 0.75rem;
+  --panel-gap: 1.25rem;
+
+  --toolbar-gap: 1rem;
+  --container-px: 2rem;
 }
