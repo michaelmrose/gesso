@@ -17,9 +17,19 @@
    [gesso.components.textarea :as textarea]
    [gesso.theme :as gtheme]
    [gesso.components.dialog.core :as dialog]
+   [gesso.components.text :as text ]
    ))
 
 ;; public api
+
+;; text
+
+(def text text/text)
+(def heading text/heading)
+(def page-title text/page-title)
+(def section-title text/section-title)
+(def muted-text text/muted-text)
+(def label-text text/label-text)
 
 ;; theme
 
