@@ -34,7 +34,7 @@
                            opt))
                        options)]
       (el :select
-          {:class (class-names "select" class)}
+          {:class (class-names  "select control-theme rounded-lg border-theme bg-background text-foreground" class)}
           (merge-attrs
            attrs
            (when id {:id id})
@@ -52,7 +52,7 @@
           {:keys [props class attrs]} (split-opts opts)
           {:keys [id name disabled? required?]} props]
       (el :select
-          {:class (class-names "select" class)}
+          {:class (class-names "select control-theme" class)}
           (merge-attrs
            attrs
            (when id {:id id})

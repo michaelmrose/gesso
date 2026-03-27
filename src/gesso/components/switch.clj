@@ -16,7 +16,7 @@
         {:keys [props class attrs]} (split-opts opts)
         {:keys [id name value checked disabled? required?]} props]
     (el :input
-        {:class (class-names "switch input" class)
+        {:class (class-names "switch input control-theme" class)
          :type "checkbox"
          :role "switch"}
         (merge-attrs

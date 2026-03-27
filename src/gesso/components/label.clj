@@ -9,7 +9,10 @@
     (label {:text \"Email\" :required? true})
 
   Long form:
-    (label {:attrs {:for \"email\"}} \"Email\")"
+    (label {:attrs {:for \"email\"}} \"Email\")
+
+  HTMX-related attributes may be passed through :attrs when needed, though most
+  label usage will not require them."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))

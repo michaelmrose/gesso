@@ -12,13 +12,21 @@
                :text \"Initial value\"})
 
   Long form:
-    (textarea {:attrs {...}} \"Initial value\")"
+    (textarea {:attrs {...}} \"Initial value\")
+
+  Uses Basecoat's .textarea class plus the shared control density utility.
+
+  HTMX attributes may be passed through :attrs, for example:
+    (textarea {:name \"notes\"
+               :attrs {:hx-post \"/notes/preview\"
+                       :hx-trigger \"keyup changed delay:300ms\"
+                       :hx-target \"#preview\"}})"
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
           {:keys [id name rows cols placeholder text value disabled? required? readonly?]} props]
       (el :textarea
-          {:class (class-names "textarea" class)}
+          {:class (class-names "textarea control-theme" class)}
           (merge-attrs
            attrs
            (when id {:id id})
@@ -34,7 +42,7 @@
           {:keys [props class attrs]} (split-opts opts)
           {:keys [id name rows cols placeholder disabled? required? readonly?]} props]
       (el :textarea
-          {:class (class-names "textarea" class)}
+          {:class (class-names "textarea control-theme" class)}
           (merge-attrs
            attrs
            (when id {:id id})
