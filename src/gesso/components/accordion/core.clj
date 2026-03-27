@@ -98,10 +98,10 @@
 
    Renders the title content and, when chevron? is truthy, appends the standard
    accordion chevron node."
-  [{:keys [content chevron?]}]
+  [{:keys [content chevron? open?]}]
   (if chevron?
     [(accordion-title-node content)
-     (accordion-chevron-node)]
+     (accordion-chevron-node open?)]
     [(accordion-title-node content)]))
 
 ;; -----------------------------------------------------------------------------
@@ -137,32 +137,33 @@
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
           text     (:text props)
+          open?    (:open? props)
           chevron? (not= false (:chevron? props))]
       (el :summary
           (accordion-trigger-attrs class)
           attrs
           (accordion-trigger-body {:content [text]
+                                   :open? open?
                                    :chevron? chevron?})))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
+          open?    (:open? props)
           chevron? (not= false (:chevron? props))]
       (el :summary
           (accordion-trigger-attrs class)
           attrs
           (accordion-trigger-body {:content children
+                                   :open? open?
                                    :chevron? chevron?})))))
 
 (defn- accordion-item-short-form
-  "Renders an accordion item from the map-only short form.
-
-   Builds a details element with a generated trigger and content section from
-   the supplied title, content, and item options."
   [{:keys [value title content open? disabled? trigger-opts content-opts class attrs]}]
   (el :details
       {}
       (accordion-item-attrs value open? disabled? class attrs)
       [(accordion-trigger (merge {:chevron? true
-                                  :text title}
+                                  :text title
+                                  :open? open?}
                                  trigger-opts))
        (apply accordion-content content-opts (nodes content))]))
 
