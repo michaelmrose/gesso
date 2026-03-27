@@ -86,15 +86,11 @@
 (defn- accordion-title-node
   "Wraps trigger content in the heading element used for accordion titles.
 
-   The returned node keeps the title visually prominent while allowing the
-   caller to pass plain text or richer Hiccup content."
+   Uses shared heading typography classes so the title participates in the
+   theme's typography scale, while inheriting the trigger's explicit primary
+   color."
   [content]
-  (into [:h2 {:class "m-0 flex-1 min-w-0 text-left"
-              :style {:margin 0
-                      :font-size "1.1rem"
-                      :font-weight 600
-                      :line-height 1.35
-                      :color "inherit"}}]
+  (into [:h2 {:class "accordion-title m-0 flex-1 min-w-0 text-left font-heading text-md-theme leading-tight-theme tracking-tight-theme weight-semibold-theme"}]
         (normalize-children content)))
 
 (defn- accordion-trigger-body

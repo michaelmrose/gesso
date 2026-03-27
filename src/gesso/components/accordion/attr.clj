@@ -2,67 +2,61 @@
   (:require [gesso.util :refer :all]))
 
 (defn accordion-root-attrs
-  "Returns the attribute map for the accordion root container.
-
-   Applies the outer shell styling and marks the element so item-level scripts
-   can locate the containing accordion."
+  "Returns the attribute map for the accordion root container."
   [class]
-  {:class (class-names "overflow-hidden rounded-lg shadow-sm" class)
+  {:class (class-names
+           "accordion accordion-root overflow-hidden rounded-lg shadow-sm"
+           class)
    :data-accordion-root true
    :style {:border "1px solid var(--border)"
            :background "var(--card)"}})
 
 (defn accordion-item-attrs
-  "Returns the merged attribute map for a single accordion item.
-
-   Sets the item's stable value, initial open state, disabled treatment, and
-   separator styling, then merges any caller-supplied attrs on top."
+  "Returns the merged attribute map for a single accordion item."
   [value open? disabled? class attrs]
   (merge-attrs
    {:class (class-names
-            "group overflow-hidden last:border-b-0"
-            (when disabled? "opacity-60 pointer-events-none")
+            "accordion-item group overflow-hidden last:border-b-0"
+            (when disabled? "accordion-item-disabled opacity-60 pointer-events-none")
             class)
     :open (when open? true)
     :data-accordion-value (->value value "item")
+    :data-disabled (when disabled? "true")
     :style {:border-bottom "1px solid var(--border)"}}
    attrs))
 
 (defn accordion-trigger-attrs
   "Returns the attribute map for an accordion trigger.
 
-   The trigger is styled as the visible header row for each item, with padding,
-   alignment, and theme-aware colors for the label and chevron."
+   Keeps density-aware spacing utilities, but uses an explicit token split so
+   the header is visibly distinct from the body."
   [class]
   {:class (class-names
-           "cursor-pointer w-full list-none px-4 py-6 flex items-center justify-between gap-4 outline-none"
+           "accordion-trigger cursor-pointer w-full list-none px-control py-control flex items-center justify-between gap-inline outline-none"
            class)
-   :style {:background "var(--muted)"
+   :style {:background "var(--secondary)"
            :color "var(--primary)"
            :font-weight 600}})
 
 (defn accordion-content-attrs
   "Returns the attribute map for the accordion content region.
 
-   Adds inner spacing and a top divider so the revealed body reads as a distinct
-   panel beneath the header."
+   Keeps density-aware spacing and shared body text classes, but uses an
+   explicit body surface so the content reads as a separate panel under the
+   header."
   [class]
   {:class (class-names
-           "px-4 py-6"
+           "accordion-content px-control py-control font-body text-base-theme leading-body"
            class)
    :style {:border-top "1px solid var(--border)"
-           :background "var(--background)"
-           :color "var(--muted-foreground)"
-           :font-size "0.95rem"
-           :line-height "1.7"}})
+           :background "var(--card)"
+           :color "var(--muted-foreground)"}})
 
 (defn accordion-chevron-node
-  "Returns the chevron icon node used by accordion triggers.
-
-   The icon is identified with a data attribute so the attached Hyperscript can
-   rotate it when the corresponding item opens or closes."
+  "Returns the chevron icon node used by accordion triggers."
   []
-  [:svg {:data-accordion-chevron true
+  [:svg {:class "accordion-chevron"
+         :data-accordion-chevron true
          :aria-hidden "true"
          :viewBox "0 0 20 20"
          :fill "none"
