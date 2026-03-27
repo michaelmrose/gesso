@@ -1,17 +1,18 @@
+/* density/comfortable.css */
 :root {
   /* core control sizing */
-  --control-height: 3.125rem;
+  --control-height: 3.25rem;
 
   /* spacing scale */
-  --space-1: 0.625rem;
-  --space-2: 0.75rem;
-  --space-3: 0.875rem;
-  --space-4: 1rem;
-  --space-5: 1.25rem;
-  --space-6: 1.5rem;
-  --space-7: 2rem;
-  --space-8: 2.5rem;
-  --space-9: 4rem;
+  --space-1: 0.6875rem;
+  --space-2: 0.8125rem;
+  --space-3: 0.9375rem;
+  --space-4: 1.0625rem;
+  --space-5: 1.3125rem;
+  --space-6: 1.625rem;
+  --space-7: 2.125rem;
+  --space-8: 2.75rem;
+  --space-9: 4.25rem;
 
   /* common aliases */
   --control-px: var(--space-4);
@@ -19,6 +20,13 @@
 
   --button-px: var(--space-4);
   --button-py: var(--space-2);
+
+  --interactive-row-height: var(--control-height);
+  --interactive-row-px: var(--control-px);
+  --interactive-row-py: var(--control-py);
+
+  --panel-px: var(--space-5);
+  --panel-py: var(--space-5);
 
   --field-gap: var(--space-2);
   --form-gap: var(--space-5);
@@ -32,7 +40,13 @@
   --list-gap: var(--space-2);
   --panel-gap: var(--space-5);
 
+  --title-gap: var(--space-3);
+  --content-gap: var(--space-4);
+
   --card-padding: var(--space-7);
   --dialog-padding: var(--space-8);
   --container-px: var(--space-7);
+
+  --icon-size-sm: 0.9375rem;
+  --icon-size-md: 1.125rem;
 }

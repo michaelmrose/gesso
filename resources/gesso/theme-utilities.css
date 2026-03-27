@@ -32,7 +32,7 @@
 
 /* density */
 
-/* control sizing */
+/* core controls */
 
 .control-height-theme {
   min-height: var(--control-height);
@@ -47,6 +47,31 @@
 .button-density {
   padding-inline: var(--button-px, var(--control-px, 0.875rem));
   padding-block: var(--button-py, var(--control-py, 0.625rem));
+}
+
+/* interactive rows: tabs triggers, accordion headers, dropdown items, etc. */
+
+.interactive-row-height-theme {
+  min-height: var(--interactive-row-height, var(--control-height));
+}
+
+.px-row {
+  padding-inline: var(--interactive-row-px, var(--control-px, 0.875rem));
+}
+
+.py-row {
+  padding-block: var(--interactive-row-py, var(--control-py, 0.625rem));
+}
+
+.pad-row {
+  padding-inline: var(--interactive-row-px, var(--control-px, 0.875rem));
+  padding-block: var(--interactive-row-py, var(--control-py, 0.625rem));
+}
+
+.interactive-row-theme {
+  min-height: var(--interactive-row-height, var(--control-height));
+  padding-inline: var(--interactive-row-px, var(--control-px, 0.875rem));
+  padding-block: var(--interactive-row-py, var(--control-py, 0.625rem));
 }
 
 /* composable padding helpers */
@@ -73,13 +98,12 @@
 .py-dialog { padding-block: var(--dialog-padding); }
 .pad-dialog { padding: var(--dialog-padding); }
 
-/*
-  Useful for bodies inside accordions, tabs, dropdowns, etc.
-  Falls back to card padding if you do not add a dedicated panel token yet.
-*/
-.px-panel { padding-inline: var(--panel-padding, var(--card-padding)); }
-.py-panel { padding-block: var(--panel-padding, var(--card-padding)); }
-.pad-panel { padding: var(--panel-padding, var(--card-padding)); }
+.px-panel { padding-inline: var(--panel-px, var(--card-padding)); }
+.py-panel { padding-block: var(--panel-py, var(--card-padding)); }
+.pad-panel {
+  padding-inline: var(--panel-px, var(--card-padding));
+  padding-block: var(--panel-py, var(--card-padding));
+}
 
 .px-container { padding-inline: var(--container-px, 1.5rem); }
 .pad-container { padding-inline: var(--container-px, 1.5rem); }
@@ -95,6 +119,8 @@
 .gap-list { gap: var(--list-gap, 0.5rem); }
 .gap-panel { gap: var(--panel-gap, var(--stack-gap)); }
 .gap-toolbar { gap: var(--toolbar-gap, var(--cluster-gap, var(--stack-gap))); }
+.gap-title { gap: var(--title-gap, var(--field-gap, 0.5rem)); }
+.gap-content { gap: var(--content-gap, var(--panel-gap, var(--stack-gap))); }
 
 /* layout helpers */
 
@@ -145,6 +171,30 @@
   display: flex;
   flex-direction: column;
   gap: var(--panel-gap, var(--stack-gap));
+}
+
+.title-stack-theme {
+  display: flex;
+  flex-direction: column;
+  gap: var(--title-gap, var(--field-gap, 0.5rem));
+}
+
+.content-stack-theme {
+  display: flex;
+  flex-direction: column;
+  gap: var(--content-gap, var(--panel-gap, var(--stack-gap)));
+}
+
+/* icon sizing */
+
+.icon-sm-theme {
+  width: var(--icon-size-sm, 0.875rem);
+  height: var(--icon-size-sm, 0.875rem);
+}
+
+.icon-md-theme {
+  width: var(--icon-size-md, 1rem);
+  height: var(--icon-size-md, 1rem);
 }
 
 /* shape */

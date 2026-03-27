@@ -1,17 +1,18 @@
+/* density/default.css */
 :root {
   /* core control sizing */
-  --control-height: 2.75rem;
+  --control-height: 2.875rem;
 
   /* spacing scale */
-  --space-1: 0.5rem;
-  --space-2: 0.625rem;
-  --space-3: 0.75rem;
-  --space-4: 0.875rem;
-  --space-5: 1rem;
-  --space-6: 1.25rem;
-  --space-7: 1.5rem;
-  --space-8: 2rem;
-  --space-9: 3rem;
+  --space-1: 0.5625rem;
+  --space-2: 0.6875rem;
+  --space-3: 0.8125rem;
+  --space-4: 0.9375rem;
+  --space-5: 1.125rem;
+  --space-6: 1.375rem;
+  --space-7: 1.75rem;
+  --space-8: 2.25rem;
+  --space-9: 3.25rem;
 
   /* common aliases */
   --control-px: var(--space-4);
@@ -20,7 +21,14 @@
   --button-px: var(--space-4);
   --button-py: var(--space-2);
 
-  --field-gap: var(--space-1);
+  --interactive-row-height: var(--control-height);
+  --interactive-row-px: var(--control-px);
+  --interactive-row-py: var(--control-py);
+
+  --panel-px: var(--space-5);
+  --panel-py: var(--space-5);
+
+  --field-gap: var(--space-2);
   --form-gap: var(--space-5);
 
   --stack-gap: var(--space-6);
@@ -29,10 +37,16 @@
   --inline-gap: var(--space-3);
   --cluster-gap: var(--space-3);
   --toolbar-gap: var(--space-3);
-  --list-gap: var(--space-1);
+  --list-gap: var(--space-2);
   --panel-gap: var(--space-5);
+
+  --title-gap: var(--space-2);
+  --content-gap: var(--space-4);
 
   --card-padding: var(--space-7);
   --dialog-padding: var(--space-8);
   --container-px: var(--space-7);
+
+  --icon-size-sm: 0.875rem;
+  --icon-size-md: 1rem;
 }

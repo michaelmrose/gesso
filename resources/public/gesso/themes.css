@@ -392,18 +392,18 @@ html.dark[data-color-theme~="violetbloom"] {
 /* density: comfortable */
 html[data-density~="comfortable"] {
   /* core control sizing */
-  --control-height: 3.125rem;
+  --control-height: 3.25rem;
 
   /* spacing scale */
-  --space-1: 0.625rem;
-  --space-2: 0.75rem;
-  --space-3: 0.875rem;
-  --space-4: 1rem;
-  --space-5: 1.25rem;
-  --space-6: 1.5rem;
-  --space-7: 2rem;
-  --space-8: 2.5rem;
-  --space-9: 4rem;
+  --space-1: 0.6875rem;
+  --space-2: 0.8125rem;
+  --space-3: 0.9375rem;
+  --space-4: 1.0625rem;
+  --space-5: 1.3125rem;
+  --space-6: 1.625rem;
+  --space-7: 2.125rem;
+  --space-8: 2.75rem;
+  --space-9: 4.25rem;
 
   /* common aliases */
   --control-px: var(--space-4);
@@ -411,6 +411,13 @@ html[data-density~="comfortable"] {
 
   --button-px: var(--space-4);
   --button-py: var(--space-2);
+
+  --interactive-row-height: var(--control-height);
+  --interactive-row-px: var(--control-px);
+  --interactive-row-py: var(--control-py);
+
+  --panel-px: var(--space-5);
+  --panel-py: var(--space-5);
 
   --field-gap: var(--space-2);
   --form-gap: var(--space-5);
@@ -424,27 +431,33 @@ html[data-density~="comfortable"] {
   --list-gap: var(--space-2);
   --panel-gap: var(--space-5);
 
+  --title-gap: var(--space-3);
+  --content-gap: var(--space-4);
+
   --card-padding: var(--space-7);
   --dialog-padding: var(--space-8);
   --container-px: var(--space-7);
+
+  --icon-size-sm: 0.9375rem;
+  --icon-size-md: 1.125rem;
 }
 
 
 /* density: default */
 html[data-density~="default"] {
   /* core control sizing */
-  --control-height: 2.75rem;
+  --control-height: 2.875rem;
 
   /* spacing scale */
-  --space-1: 0.5rem;
-  --space-2: 0.625rem;
-  --space-3: 0.75rem;
-  --space-4: 0.875rem;
-  --space-5: 1rem;
-  --space-6: 1.25rem;
-  --space-7: 1.5rem;
-  --space-8: 2rem;
-  --space-9: 3rem;
+  --space-1: 0.5625rem;
+  --space-2: 0.6875rem;
+  --space-3: 0.8125rem;
+  --space-4: 0.9375rem;
+  --space-5: 1.125rem;
+  --space-6: 1.375rem;
+  --space-7: 1.75rem;
+  --space-8: 2.25rem;
+  --space-9: 3.25rem;
 
   /* common aliases */
   --control-px: var(--space-4);
@@ -453,7 +466,14 @@ html[data-density~="default"] {
   --button-px: var(--space-4);
   --button-py: var(--space-2);
 
-  --field-gap: var(--space-1);
+  --interactive-row-height: var(--control-height);
+  --interactive-row-px: var(--control-px);
+  --interactive-row-py: var(--control-py);
+
+  --panel-px: var(--space-5);
+  --panel-py: var(--space-5);
+
+  --field-gap: var(--space-2);
   --form-gap: var(--space-5);
 
   --stack-gap: var(--space-6);
@@ -462,12 +482,18 @@ html[data-density~="default"] {
   --inline-gap: var(--space-3);
   --cluster-gap: var(--space-3);
   --toolbar-gap: var(--space-3);
-  --list-gap: var(--space-1);
+  --list-gap: var(--space-2);
   --panel-gap: var(--space-5);
+
+  --title-gap: var(--space-2);
+  --content-gap: var(--space-4);
 
   --card-padding: var(--space-7);
   --dialog-padding: var(--space-8);
   --container-px: var(--space-7);
+
+  --icon-size-sm: 0.875rem;
+  --icon-size-md: 1rem;
 }
 
 
@@ -587,7 +613,7 @@ html[data-shape~="soft"] {
 
 /* density */
 
-/* control sizing */
+/* core controls */
 
 .control-height-theme {
   min-height: var(--control-height);
@@ -602,6 +628,31 @@ html[data-shape~="soft"] {
 .button-density {
   padding-inline: var(--button-px, var(--control-px, 0.875rem));
   padding-block: var(--button-py, var(--control-py, 0.625rem));
+}
+
+/* interactive rows: tabs triggers, accordion headers, dropdown items, etc. */
+
+.interactive-row-height-theme {
+  min-height: var(--interactive-row-height, var(--control-height));
+}
+
+.px-row {
+  padding-inline: var(--interactive-row-px, var(--control-px, 0.875rem));
+}
+
+.py-row {
+  padding-block: var(--interactive-row-py, var(--control-py, 0.625rem));
+}
+
+.pad-row {
+  padding-inline: var(--interactive-row-px, var(--control-px, 0.875rem));
+  padding-block: var(--interactive-row-py, var(--control-py, 0.625rem));
+}
+
+.interactive-row-theme {
+  min-height: var(--interactive-row-height, var(--control-height));
+  padding-inline: var(--interactive-row-px, var(--control-px, 0.875rem));
+  padding-block: var(--interactive-row-py, var(--control-py, 0.625rem));
 }
 
 /* composable padding helpers */
@@ -628,13 +679,12 @@ html[data-shape~="soft"] {
 .py-dialog { padding-block: var(--dialog-padding); }
 .pad-dialog { padding: var(--dialog-padding); }
 
-/*
-  Useful for bodies inside accordions, tabs, dropdowns, etc.
-  Falls back to card padding if you do not add a dedicated panel token yet.
-*/
-.px-panel { padding-inline: var(--panel-padding, var(--card-padding)); }
-.py-panel { padding-block: var(--panel-padding, var(--card-padding)); }
-.pad-panel { padding: var(--panel-padding, var(--card-padding)); }
+.px-panel { padding-inline: var(--panel-px, var(--card-padding)); }
+.py-panel { padding-block: var(--panel-py, var(--card-padding)); }
+.pad-panel {
+  padding-inline: var(--panel-px, var(--card-padding));
+  padding-block: var(--panel-py, var(--card-padding));
+}
 
 .px-container { padding-inline: var(--container-px, 1.5rem); }
 .pad-container { padding-inline: var(--container-px, 1.5rem); }
@@ -650,6 +700,8 @@ html[data-shape~="soft"] {
 .gap-list { gap: var(--list-gap, 0.5rem); }
 .gap-panel { gap: var(--panel-gap, var(--stack-gap)); }
 .gap-toolbar { gap: var(--toolbar-gap, var(--cluster-gap, var(--stack-gap))); }
+.gap-title { gap: var(--title-gap, var(--field-gap, 0.5rem)); }
+.gap-content { gap: var(--content-gap, var(--panel-gap, var(--stack-gap))); }
 
 /* layout helpers */
 
@@ -700,6 +752,30 @@ html[data-shape~="soft"] {
   display: flex;
   flex-direction: column;
   gap: var(--panel-gap, var(--stack-gap));
+}
+
+.title-stack-theme {
+  display: flex;
+  flex-direction: column;
+  gap: var(--title-gap, var(--field-gap, 0.5rem));
+}
+
+.content-stack-theme {
+  display: flex;
+  flex-direction: column;
+  gap: var(--content-gap, var(--panel-gap, var(--stack-gap)));
+}
+
+/* icon sizing */
+
+.icon-sm-theme {
+  width: var(--icon-size-sm, 0.875rem);
+  height: var(--icon-size-sm, 0.875rem);
+}
+
+.icon-md-theme {
+  width: var(--icon-size-md, 1rem);
+  height: var(--icon-size-md, 1rem);
 }
 
 /* shape */
