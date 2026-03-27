@@ -1,6 +1,7 @@
 (ns gesso.components.field
   (:require [gesso.util :refer :all]
-            [gesso.components.label :as label]))
+            [gesso.components.label :as label]
+            [gesso.components.text :as text]))
 
 (defn field
   "Field wrapper for label + control + description + error.
@@ -22,7 +23,7 @@
     (let [{:keys [props class attrs]} (split-opts (first args))
           {:keys [label-text for required? control description error orientation invalid?]} props]
       (el :div
-          {:class (class-names "field" class)}
+          {:class (class-names "flex flex-col gap-field" class)}
           (merge-attrs
            attrs
            (when orientation {:data-orientation (name orientation)})
@@ -34,14 +35,21 @@
                :required? required?}))
            control
            (when description
-             [:p {:class "field-description"} description])
+             (text/text
+              {:variant :caption
+               :as :p
+               :text description}))
            (when error
-             [:div {:class "field-error" :role "alert"} error])]))
+             (text/text
+              {:variant :caption
+               :as :div
+               :attrs {:role "alert"}
+               :text error}))]))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
           {:keys [orientation invalid?]} props]
       (el :div
-          {:class (class-names "field" class)}
+          {:class (class-names "flex flex-col gap-field" class)}
           (merge-attrs
            attrs
            (when orientation {:data-orientation (name orientation)})

@@ -15,14 +15,14 @@
   Long form:
     (input {:type \"text\" :attrs {...}})
 
-  Uses Basecoat's .input class."
+  Uses Basecoat's .input class plus the shared control density utility."
   [& args]
   (let [[opts _children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
         {:keys [type id name value placeholder disabled? required? autocomplete readonly? checked min max step]} props
         type (or type "text")]
     (el :input
-        {:class (class-names "input" class)
+        {:class (class-names "input control-theme" class)
          :type type}
         (merge-attrs
          attrs
