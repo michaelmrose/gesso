@@ -4,6 +4,7 @@
 
 .font-body { font-family: var(--font-body); }
 .font-heading { font-family: var(--font-heading); }
+.font-mono { font-family: var(--font-mono); }
 
 .text-xs-theme { font-size: var(--text-xs); }
 .text-sm-theme { font-size: var(--text-sm); }
@@ -13,6 +14,8 @@
 .text-xl-theme { font-size: var(--text-xl); }
 .text-2xl-theme { font-size: var(--text-2xl); }
 .text-3xl-theme { font-size: var(--text-3xl); }
+.text-4xl-theme { font-size: var(--text-4xl); }
+.text-5xl-theme { font-size: var(--text-5xl); }
 
 .leading-tight-theme { line-height: var(--leading-tight); }
 .leading-snug-theme { line-height: var(--leading-snug); }
@@ -25,10 +28,14 @@
 .tracking-heading { letter-spacing: var(--tracking-tight); }
 .tracking-wide-theme { letter-spacing: var(--tracking-wide); }
 
+.weight-light-theme { font-weight: var(--weight-light); }
 .weight-normal-theme { font-weight: var(--weight-normal); }
 .weight-medium-theme { font-weight: var(--weight-medium); }
 .weight-semibold-theme { font-weight: var(--weight-semibold); }
 .weight-bold-theme { font-weight: var(--weight-bold); }
+.weight-extrabold-theme { font-weight: var(--weight-extrabold); }
+
+.italic-theme { font-style: italic; }
 
 /* density */
 
@@ -147,12 +154,6 @@
   flex-wrap: wrap;
   align-items: center;
   gap: var(--toolbar-gap, var(--cluster-gap, var(--stack-gap)));
-}
-
-.field-theme {
-  display: flex;
-  flex-direction: column;
-  gap: var(--field-gap, 0.5rem);
 }
 
 .form-theme {

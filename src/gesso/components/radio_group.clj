@@ -9,7 +9,10 @@
     (radio {:id \"all\"
             :name \"notify\"
             :value \"all\"
-            :checked true})"
+            :checked true})
+
+  HTMX attributes may be passed through :attrs when an individual radio should
+  trigger a request or swap."
   [& args]
   (let [[opts _children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
@@ -28,16 +31,10 @@
         [])))
 
 (defn- option-label-node
-  "Renders the visible label text for a radio option using the shared text
-   system."
   [label]
   (text/label-text {:text label}))
 
 (defn- option-row-classes
-  "Returns the classes for a radio option row.
-
-   Uses the shared interactive row utilities so density changes affect the
-   overall row height and padding, not just the group gap."
   [horizontal? disabled?]
   (class-names
    "interactive-row-theme flex items-center gap-inline rounded-md"
@@ -58,22 +55,32 @@
 
   Long form:
     (radio-group {}
-      ...custom radio rows...)"
+      ...custom radio rows...)
+
+  HTMX notes:
+    - HTMX attributes may be passed through :attrs on the fieldset.
+    - This is useful when changing the selected option should swap another
+      region, reveal a dependent form fragment, or trigger server-side
+      branching UI.
+    - The fieldset includes data-radio-group=\"true\" and option rows include
+      data-radio-option=\"true\" for easier targeting."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
           {:keys [options orientation required? disabled?]} props
-          group-name   (:name props)
-          horizontal?  (= orientation :horizontal)
-          group-class  (class-names
-                        (if horizontal?
-                          "flex flex-wrap items-center gap-inline"
-                          "flex flex-col gap-field")
-                        class)]
+          group-name  (:name props)
+          horizontal? (= orientation :horizontal)
+          group-class (class-names
+                       (if horizontal?
+                         "flex flex-wrap items-center gap-inline"
+                         "flex flex-col gap-field")
+                       class)]
       (el :fieldset
           {:class group-class}
           (merge-attrs
            attrs
+           {:data-radio-group true}
+           (when group-name {:data-name group-name})
            (when orientation {:data-orientation (name orientation)}))
           (map-indexed
            (fn [i {:keys [value label checked disabled]}]
@@ -81,6 +88,8 @@
                    option-disabled? (or disabled disabled?)]
                [:label {:class (option-row-classes horizontal? option-disabled?)
                         :for id
+                        :data-radio-option true
+                        :data-value value
                         :aria-disabled (when option-disabled? "true")}
                 (radio {:id id
                         :name group-name
@@ -92,7 +101,7 @@
            options)))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
-          {:keys [orientation]} props
+          {:keys [orientation name]} props
           group-class (class-names
                        (if (= orientation :horizontal)
                          "flex flex-wrap items-center gap-inline"
@@ -102,5 +111,7 @@
           {:class group-class}
           (merge-attrs
            attrs
+           {:data-radio-group true}
+           (when name {:data-name name})
            (when orientation {:data-orientation (name orientation)}))
           children))))

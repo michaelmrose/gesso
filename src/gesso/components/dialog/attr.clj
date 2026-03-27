@@ -32,79 +32,73 @@
            :background "rgba(0, 0, 0, 0.55)"
            :z-index 40}})
 
-
-
 (defn dialog-content-attrs
   "Returns the attribute map for the dialog content surface.
 
    The content is centered in the viewport and hidden when the dialog is
-   closed."
-  [class open?]
-  {:class (class-names "shadow-sm" class)
-   :data-dialog-content true
-   :hidden (when-not open? true)
-   :role "dialog"
-   :aria-modal "true"
-   :style {:position "fixed"
-           :top "50%"
-           :left "50%"
-           :transform "translate(-50%, -50%)"
-           :width "min(36rem, calc(100vw - 2rem))"
-           :max-height "calc(100vh - 2rem)"
-           :overflow "auto"
-           :z-index 50
-           :border "1px solid var(--border)"
-           :border-radius "0.75rem"
-           :background "var(--card)"
-           :color "var(--card-foreground)"
-           :padding "1.5rem"}})
+   closed. Optional ids and aria references may be supplied for title and
+   description wiring."
+  [class open? content-id title-id description-id]
+  (merge
+   {:class (class-names "shadow-sm pad-dialog" class)
+    :data-dialog-content true
+    :hidden (when-not open? true)
+    :role "dialog"
+    :aria-modal "true"
+    :style {:position "fixed"
+            :top "50%"
+            :left "50%"
+            :transform "translate(-50%, -50%)"
+            :width "min(36rem, calc(100vw - 2rem))"
+            :max-height "calc(100vh - 2rem)"
+            :overflow "auto"
+            :z-index 50
+            :border "1px solid var(--border)"
+            :border-radius "0.75rem"
+            :background "var(--card)"
+            :color "var(--card-foreground)"}}
+   (when content-id {:id content-id})
+   (when title-id {:aria-labelledby title-id})
+   (when description-id {:aria-describedby description-id})))
 
 (defn dialog-header-attrs
   "Returns the attribute map for the dialog header region."
   [class]
-  {:class (class-names class)
-   :style {:display "flex"
-           :flex-direction "column"
-           :gap "0.5rem"
-           :margin-bottom "1rem"}})
+  {:class (class-names "flex flex-col gap-title" class)
+   :data-dialog-header true})
 
 (defn dialog-title-attrs
   "Returns the attribute map for the dialog title."
   [class]
-  {:class (class-names "m-0" class)
-   :style {:margin 0
-           :font-size "1.25rem"
-           :line-height 1.25
-           :font-weight 600
-           :color "var(--foreground)"}})
+  {:class (class-names
+           "m-0 font-heading text-lg-theme leading-tight-theme tracking-tight-theme weight-semibold-theme"
+           class)
+   :data-dialog-title true
+   :style {:color "var(--foreground)"}})
 
 (defn dialog-description-attrs
   "Returns the attribute map for the dialog description."
   [class]
-  {:class (class-names "m-0" class)
-   :style {:margin 0
-           :font-size "0.95rem"
-           :line-height 1.6
-           :color "var(--muted-foreground)"}})
+  {:class (class-names
+           "m-0 font-body text-sm-theme leading-body"
+           class)
+   :data-dialog-description true
+   :style {:color "var(--muted-foreground)"}})
 
 (defn dialog-body-attrs
   "Returns the attribute map for the main dialog body."
   [class]
-  {:class (class-names class)
-   :style {:display "flex"
-           :flex-direction "column"
-           :gap "1rem"}})
+  {:class (class-names "flex flex-col gap-content" class)
+   :data-dialog-body true})
 
 (defn dialog-footer-attrs
   "Returns the attribute map for the dialog footer.
 
    The footer is aligned for actions and spaced away from the body."
   [class]
-  {:class (class-names class)
-   :style {:display "flex"
-           :justify-content "flex-end"
-           :gap "0.5rem"
-           :margin-top "1.25rem"}})
+  {:class (class-names "flex justify-end gap-inline" class)
+   :data-dialog-footer true
+   :style {:margin-top "var(--content-gap, 1rem)"}})
 
 (defn dialog-close-attrs
   "Returns the attribute map for a dialog close button."

@@ -1,13 +1,13 @@
 :root {
-  --font-body: Inter, "Helvetica Neue", Arial, sans-serif;
-  --font-heading: Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-body: Georgia, "Times New Roman", serif;
+  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
   --font-mono: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
-  --text-base: 1rem;
-  --text-md: 1.125rem;
-  --text-lg: 1.25rem;
+  --text-base: 1.0625rem;
+  --text-md: 1.1875rem;
+  --text-lg: 1.3125rem;
   --text-xl: 1.5rem;
   --text-2xl: 1.875rem;
   --text-3xl: 2.25rem;
@@ -16,8 +16,8 @@
 
   --leading-tight: 1.2;
   --leading-snug: 1.35;
-  --leading-body: 1.5;
-  --leading-loose: 1.7;
+  --leading-body: 1.66;
+  --leading-loose: 1.86;
 
   --tracking-tight: -0.02em;
   --tracking-normal: 0;

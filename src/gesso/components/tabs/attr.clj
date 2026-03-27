@@ -7,13 +7,9 @@
    The root stores the selected value on a data attribute and marks the overall
    orientation so triggers and panels can stay in sync.
 
-   The current implementation is uncontrolled: the selected value is initialized
-   from :default-value and then updated locally through scripts.
-
-   Possible later expansions:
-   - controlled tabs with an external :value
-   - explicit activation mode support
-   - more polished vertical styling"
+   The current implementation is uncontrolled in the sense that the selected
+   value is rendered into the DOM and then updated locally through scripts.
+   A server-rendered :value may still be used as the initial selected tab."
   [class value orientation]
   {:class (class-names "flex flex-col" class)
    :data-tabs-root true
@@ -23,8 +19,8 @@
 (defn tabs-list-attrs
   "Returns the attribute map for the tab list.
 
-   The list uses the WAI-ARIA tablist role and defaults to horizontal
-   orientation."
+   The list uses the WAI-ARIA tablist role and marks itself as the stable tabs
+   list region for scripting, styling, and fragment targeting."
   [class orientation]
   {:class (class-names
            "flex shrink-0 border-b border-[var(--border)]"
@@ -33,15 +29,14 @@
            class)
    :role "tablist"
    :aria-orientation (name (or orientation :horizontal))
+   :data-tabs-list true
    :data-orientation (name (or orientation :horizontal))})
 
 (defn tabs-trigger-attrs
   "Returns the attribute map for a tab trigger button.
 
-   The visual model follows the restrained Radix style:
-   neutral by default, clearer on hover, and visibly active with an underline.
-
-   Active styling is applied later by script through data-state."
+   The trigger carries the stable tab value, state, orientation, and disabled
+   markers used by scripts and any future styling hooks."
   [class value tab-id panel-id selected? orientation disabled?]
   {:class (class-names
            "relative flex flex-1 items-center justify-center bg-[var(--card)] px-5 py-3 text-sm leading-none outline-none select-none
@@ -53,6 +48,7 @@
    :aria-controls panel-id
    :aria-selected (if selected? "true" "false")
    :tabindex (if selected? "0" "-1")
+   :data-tabs-trigger true
    :data-tabs-value (some-> value str)
    :data-state (if selected? "active" "inactive")
    :data-orientation (name (or orientation :horizontal))
@@ -71,7 +67,8 @@
   "Returns the attribute map for a tab panel.
 
    Panels are linked to their trigger with aria-labelledby and hidden when
-   inactive."
+   inactive. The data markers make the panel easy to target for scripting,
+   fragment replacement, or future styling hooks."
   [class value tab-id selected? orientation]
   {:class (class-names
            "grow rounded-b-lg bg-[var(--card)] p-5 outline-none"
@@ -83,6 +80,7 @@
    :aria-labelledby tab-id
    :aria-selected (if selected? "true" "false")
    :tabindex "-1"
+   :data-tabs-content true
    :data-tabs-value (some-> value str)
    :data-state (if selected? "active" "inactive")
    :data-orientation (name (or orientation :horizontal))

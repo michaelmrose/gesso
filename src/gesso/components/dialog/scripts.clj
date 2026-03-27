@@ -53,12 +53,13 @@
    [:on :click
     (dialog-close-script)]))
 
+
 (defn dialog-root-script
   "Builds the script attached to the dialog root.
 
    Escape closes the dialog whenever the root is currently open."
   []
   (hs
-   [:on "keyup[key is 'Escape'] from document"
+   [:on "keydown[key is 'Escape'] from document"
     [:if "my.dataset.dialogOpen == 'true'"
      (dialog-close-script)]]))

@@ -10,7 +10,12 @@
                :checked true})
 
   Long form:
-    (checkbox {:attrs {:id \"done\" :name \"done\"}})"
+    (checkbox {:attrs {:id \"done\" :name \"done\"}})
+
+  HTMX notes:
+    - HTMX attributes may be passed through :attrs.
+    - Common uses include immediate toggle updates, preference saving, and
+      revealing or replacing dependent UI regions."
   [& args]
   (let [[opts _children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
@@ -20,6 +25,7 @@
          :type "checkbox"}
         (merge-attrs
          attrs
+         {:data-checkbox true}
          (when id {:id id})
          (when name {:name name})
          (when (some? value) {:value value})

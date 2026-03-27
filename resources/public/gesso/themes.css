@@ -497,10 +497,11 @@ html[data-density~="default"] {
 }
 
 
-/* typography: editorial */
-html[data-typography~="editorial"] {
+/* typography: editorial-serif */
+html[data-typography~="editorial-serif"] {
   --font-body: Georgia, "Times New Roman", serif;
   --font-heading: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
@@ -510,27 +511,32 @@ html[data-typography~="editorial"] {
   --text-xl: 1.625rem;
   --text-2xl: 2rem;
   --text-3xl: 2.5rem;
+  --text-4xl: 3rem;
+  --text-5xl: 3.75rem;
 
   --leading-tight: 1.25;
   --leading-snug: 1.4;
-  --leading-body: 1.65;
-  --leading-loose: 1.85;
+  --leading-body: 1.68;
+  --leading-loose: 1.9;
 
   --tracking-tight: -0.01em;
   --tracking-normal: 0;
   --tracking-wide: 0.03em;
 
+  --weight-light: 300;
   --weight-normal: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
   --weight-bold: 700;
+  --weight-extrabold: 800;
 }
 
 
-/* typography: ui */
-html[data-typography~="ui"] {
-  --font-body: Inter, "Helvetica Neue", Arial, sans-serif;
-  --font-heading: Inter, "Helvetica Neue", Arial, sans-serif;
+/* typography: neutral-sans */
+html[data-typography~="neutral-sans"] {
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
 
   --text-xs: 0.75rem;
   --text-sm: 0.875rem;
@@ -540,6 +546,8 @@ html[data-typography~="ui"] {
   --text-xl: 1.5rem;
   --text-2xl: 1.875rem;
   --text-3xl: 2.25rem;
+  --text-4xl: 2.75rem;
+  --text-5xl: 3.25rem;
 
   --leading-tight: 1.2;
   --leading-snug: 1.35;
@@ -550,10 +558,117 @@ html[data-typography~="ui"] {
   --tracking-normal: 0;
   --tracking-wide: 0.04em;
 
+  --weight-light: 300;
   --weight-normal: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
   --weight-bold: 700;
+  --weight-extrabold: 800;
+}
+
+
+/* typography: sans-headings */
+html[data-typography~="sans-headings"] {
+  --font-body: Georgia, "Times New Roman", serif;
+  --font-heading: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-mono: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1.0625rem;
+  --text-md: 1.1875rem;
+  --text-lg: 1.3125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 1.875rem;
+  --text-3xl: 2.25rem;
+  --text-4xl: 2.75rem;
+  --text-5xl: 3.25rem;
+
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-body: 1.66;
+  --leading-loose: 1.86;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;
+
+  --weight-light: 300;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-extrabold: 800;
+}
+
+
+/* typography: serif-headings */
+html[data-typography~="serif-headings"] {
+  --font-body: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --font-heading: Georgia, "Times New Roman", serif;
+  --font-mono: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-md: 1.125rem;
+  --text-lg: 1.3125rem;
+  --text-xl: 1.625rem;
+  --text-2xl: 2rem;
+  --text-3xl: 2.5rem;
+  --text-4xl: 3rem;
+  --text-5xl: 3.75rem;
+
+  --leading-tight: 1.18;
+  --leading-snug: 1.32;
+  --leading-body: 1.52;
+  --leading-loose: 1.72;
+
+  --tracking-tight: -0.015em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.035em;
+
+  --weight-light: 300;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-extrabold: 800;
+}
+
+
+/* typography: ui */
+html[data-typography~="ui"] {
+  --font-body: Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-heading: Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, Menlo, Consolas, "Liberation Mono", monospace;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-md: 1.125rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 1.875rem;
+  --text-3xl: 2.25rem;
+  --text-4xl: 2.75rem;
+  --text-5xl: 3.25rem;
+
+  --leading-tight: 1.2;
+  --leading-snug: 1.35;
+  --leading-body: 1.5;
+  --leading-loose: 1.7;
+
+  --tracking-tight: -0.02em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.04em;
+
+  --weight-light: 300;
+  --weight-normal: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+  --weight-extrabold: 800;
 }
 
 
@@ -585,6 +700,7 @@ html[data-shape~="soft"] {
 
 .font-body { font-family: var(--font-body); }
 .font-heading { font-family: var(--font-heading); }
+.font-mono { font-family: var(--font-mono); }
 
 .text-xs-theme { font-size: var(--text-xs); }
 .text-sm-theme { font-size: var(--text-sm); }
@@ -594,6 +710,8 @@ html[data-shape~="soft"] {
 .text-xl-theme { font-size: var(--text-xl); }
 .text-2xl-theme { font-size: var(--text-2xl); }
 .text-3xl-theme { font-size: var(--text-3xl); }
+.text-4xl-theme { font-size: var(--text-4xl); }
+.text-5xl-theme { font-size: var(--text-5xl); }
 
 .leading-tight-theme { line-height: var(--leading-tight); }
 .leading-snug-theme { line-height: var(--leading-snug); }
@@ -606,10 +724,14 @@ html[data-shape~="soft"] {
 .tracking-heading { letter-spacing: var(--tracking-tight); }
 .tracking-wide-theme { letter-spacing: var(--tracking-wide); }
 
+.weight-light-theme { font-weight: var(--weight-light); }
 .weight-normal-theme { font-weight: var(--weight-normal); }
 .weight-medium-theme { font-weight: var(--weight-medium); }
 .weight-semibold-theme { font-weight: var(--weight-semibold); }
 .weight-bold-theme { font-weight: var(--weight-bold); }
+.weight-extrabold-theme { font-weight: var(--weight-extrabold); }
+
+.italic-theme { font-style: italic; }
 
 /* density */
 
@@ -728,12 +850,6 @@ html[data-shape~="soft"] {
   flex-wrap: wrap;
   align-items: center;
   gap: var(--toolbar-gap, var(--cluster-gap, var(--stack-gap)));
-}
-
-.field-theme {
-  display: flex;
-  flex-direction: column;
-  gap: var(--field-gap, 0.5rem);
 }
 
 .form-theme {

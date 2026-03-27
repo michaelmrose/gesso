@@ -10,8 +10,8 @@
 (defn alert-title
   "Alert title subcomponent.
 
-   Uses the shared text system for typography without introducing additional
-   component-specific theme classes."
+   Uses the shared text system for alert heading typography without introducing
+   additional component-specific CSS hooks."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
@@ -34,7 +34,7 @@
   "Alert content subcomponent.
 
    Uses the shared body text system without introducing additional
-   component-specific theme classes."
+   component-specific CSS hooks."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
@@ -64,7 +64,13 @@
   Long form:
     (alert {:variant :destructive}
       (alert-title {:text \"Error\"})
-      (alert-content \"Something went wrong.\"))"
+      (alert-content \"Something went wrong.\"))
+
+  HTMX notes:
+    - Alerts make good inline fragments for server-returned status or validation
+      messages.
+    - HTMX attributes may be passed through :attrs on the root element when the
+      alert itself is a swap target or trigger boundary."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
@@ -74,13 +80,13 @@
       (el :div
           {:class (class-names cls class)
            :role "alert"}
-          attrs
+          (merge-attrs attrs {:data-alert true})
           [(when title
              (alert-title {:text title}))
            (when content
              (if (and (sequential? content) (not (hiccup-element? content)))
                (apply alert-content {} content)
-               (alert-content {:text content}))) ]))
+               (alert-content {:text content})))]))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
           variant (or (:variant props) :default)
@@ -88,5 +94,5 @@
       (el :div
           {:class (class-names cls class)
            :role "alert"}
-          attrs
+          (merge-attrs attrs {:data-alert true})
           children))))

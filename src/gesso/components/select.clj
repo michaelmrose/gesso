@@ -22,7 +22,16 @@
 
   Long form:
     (select {:attrs {:name \"role\"}}
-      [:option {:value \"staff\"} \"Staff\"])"
+      [:option {:value \"staff\"} \"Staff\"])
+
+  Uses Basecoat's .select class plus the shared control density utility.
+
+  HTMX notes:
+    - HTMX attributes may be passed through :attrs.
+    - This is useful for dependent selects, server-filtered option lists, or
+      changing another region when the selected value changes.
+    - The rendered <select> includes data-select=\"true\" so it is easy to
+      target as a fragment boundary or behavior hook."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
@@ -34,9 +43,11 @@
                            opt))
                        options)]
       (el :select
-          {:class (class-names  "select control-theme rounded-lg border-theme bg-background text-foreground" class)}
+          {:class (class-names "select control-theme" class)}
           (merge-attrs
            attrs
+           {:data-select true}
+           (when placeholder {:data-placeholder true})
            (when id {:id id})
            (when name {:name name})
            (when (some? disabled?) {:disabled disabled?})
@@ -50,11 +61,13 @@
            (map option-node options)]))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
-          {:keys [id name disabled? required?]} props]
+          {:keys [id name disabled? required? placeholder]} props]
       (el :select
           {:class (class-names "select control-theme" class)}
           (merge-attrs
            attrs
+           {:data-select true}
+           (when placeholder {:data-placeholder true})
            (when id {:id id})
            (when name {:name name})
            (when (some? disabled?) {:disabled disabled?})

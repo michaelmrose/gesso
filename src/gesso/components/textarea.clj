@@ -16,11 +16,10 @@
 
   Uses Basecoat's .textarea class plus the shared control density utility.
 
-  HTMX attributes may be passed through :attrs, for example:
-    (textarea {:name \"notes\"
-               :attrs {:hx-post \"/notes/preview\"
-                       :hx-trigger \"keyup changed delay:300ms\"
-                       :hx-target \"#preview\"}})"
+  HTMX notes:
+    - HTMX attributes may be passed through :attrs.
+    - Common uses include live preview, autosave, inline validation, and
+      server-rendered draft/analysis feedback."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
@@ -29,6 +28,7 @@
           {:class (class-names "textarea control-theme" class)}
           (merge-attrs
            attrs
+           {:data-textarea true}
            (when id {:id id})
            (when name {:name name})
            (when rows {:rows rows})
@@ -45,6 +45,7 @@
           {:class (class-names "textarea control-theme" class)}
           (merge-attrs
            attrs
+           {:data-textarea true}
            (when id {:id id})
            (when name {:name name})
            (when rows {:rows rows})

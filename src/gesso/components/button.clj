@@ -58,7 +58,12 @@
     (button {:class ... :attrs ... :variant ... :size ...} children...)
 
   Short form (map-only):
-    (button {:variant ... :size ... :text <node|scalar>})"
+    (button {:variant ... :size ... :text <node|scalar>})
+
+  HTMX notes:
+    - HTMX attributes may be passed through :attrs.
+    - This is useful for action buttons that post, fetch, swap, or trigger
+      server-rendered updates."
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
