@@ -33,8 +33,10 @@
                :for for
                :required? required?}))
            control
-           (when description [:p description])
-           (when error [:div {:role "alert"} error])]))
+           (when description
+             [:p {:class "field-description"} description])
+           (when error
+             [:div {:class "field-error" :role "alert"} error])]))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
           {:keys [orientation invalid?]} props]

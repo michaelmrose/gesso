@@ -21,7 +21,7 @@
            (when for {:for for}))
           [(when text text)
            (when required?
-             [:span {:aria-hidden "true" :class "text-destructive ml-1"} "*"])]))
+             [:span {:aria-hidden "true"} " *"])]))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
           {:keys [for required?]} props]
@@ -32,4 +32,4 @@
            (when for {:for for}))
           [(normalize-children children)
            (when required?
-             [:span {:aria-hidden "true" :class "text-destructive ml-1"} "*"])]))))
+             [:span {:aria-hidden "true"} " *"])]))))

@@ -16,7 +16,7 @@
         {:keys [props class attrs]} (split-opts opts)
         {:keys [id name value checked disabled? required?]} props]
     (el :input
-        {:class (class-names "input" class)
+        {:class (class-names "checkbox input" class)
          :type "checkbox"}
         (merge-attrs
          attrs

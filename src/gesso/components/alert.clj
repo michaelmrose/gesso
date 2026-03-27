@@ -11,14 +11,14 @@
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
       (el :strong
-          {:class class
+          {:class (class-names "alert-title" class)
            :data-title true}
           attrs
           (nodes (:text props))))
     (let [[opts children] (normalize-component-args args)
           {:keys [class attrs]} (split-opts opts)]
       (el :strong
-          {:class class
+          {:class (class-names "alert-title" class)
            :data-title true}
           attrs
           children))))
@@ -28,7 +28,7 @@
   [& args]
   (let [[opts children] (normalize-component-args args)
         {:keys [class attrs]} (split-opts opts)]
-    (el :section {:class class} attrs children)))
+    (el :section {:class (class-names "alert-content" class)} attrs children)))
 
 (defn alert
   "Alert component.

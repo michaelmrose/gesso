@@ -14,7 +14,7 @@
         {:keys [props class attrs]} (split-opts opts)
         {:keys [id name value checked disabled? required?]} props]
     (el :input
-        {:class (class-names "input" class)
+        {:class (class-names "radio input" class)
          :type "radio"}
         (merge-attrs
          attrs
@@ -46,11 +46,11 @@
           group-name (:name props)
           horizontal? (= orientation :horizontal)
           fieldset-class (class-names
-                          "grid gap-3"
+                          "radio-group grid gap-3"
                           (when horizontal? "grid-flow-col auto-cols-max items-center")
                           class)
           option-label-class (class-names
-                              "label rounded-md px-3 py-2 gap-3"
+                              "radio-option label rounded-md px-3 py-2 gap-3"
                               (when-not disabled? "cursor-pointer hover:bg-accent/50")
                               (when horizontal? "inline-flex"))]
       (el :fieldset
@@ -70,13 +70,13 @@
                         :checked checked
                         :disabled? option-disabled?
                         :required? required?})
-                [:span label]]))
+                [:span {:class "radio-option-label"} label]]))
            options)))
     (let [[opts children] (normalize-component-args args)
           {:keys [props class attrs]} (split-opts opts)
           {:keys [orientation]} props
           fieldset-class (class-names
-                          "grid gap-3"
+                          "radio-group grid gap-3"
                           (when (= orientation :horizontal) "grid-flow-col auto-cols-max items-center")
                           class)]
       (el :fieldset
