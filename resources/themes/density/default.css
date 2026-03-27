@@ -1,27 +1,38 @@
-/* density/default.css */
 :root {
+  /* core control sizing */
   --control-height: 2.75rem;
-  --control-px: 0.875rem;
-  --control-py: 0.625rem;
 
-  --card-padding: 1.5rem;
-  --dialog-padding: 2rem;
+  /* spacing scale */
+  --space-1: 0.5rem;
+  --space-2: 0.625rem;
+  --space-3: 0.75rem;
+  --space-4: 0.875rem;
+  --space-5: 1rem;
+  --space-6: 1.25rem;
+  --space-7: 1.5rem;
+  --space-8: 2rem;
+  --space-9: 3rem;
 
-  --stack-gap: 1.25rem;
-  --section-gap: 3rem;
+  /* common aliases */
+  --control-px: var(--space-4);
+  --control-py: var(--space-2);
 
-  --inline-gap: 0.75rem;
-  --cluster-gap: 0.75rem;
+  --button-px: var(--space-4);
+  --button-py: var(--space-2);
 
-  --button-px: 0.875rem;
-  --button-py: 0.625rem;
+  --field-gap: var(--space-1);
+  --form-gap: var(--space-5);
 
-  --field-gap: 0.5rem;
-  --form-gap: 1rem;
+  --stack-gap: var(--space-6);
+  --section-gap: var(--space-9);
 
-  --list-gap: 0.5rem;
-  --panel-gap: 1rem;
+  --inline-gap: var(--space-3);
+  --cluster-gap: var(--space-3);
+  --toolbar-gap: var(--space-3);
+  --list-gap: var(--space-1);
+  --panel-gap: var(--space-5);
 
-  --toolbar-gap: 0.75rem;
-  --container-px: 1.5rem;
+  --card-padding: var(--space-7);
+  --dialog-padding: var(--space-8);
+  --container-px: var(--space-7);
 }

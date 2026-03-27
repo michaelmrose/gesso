@@ -32,6 +32,12 @@
 
 /* density */
 
+/* control sizing */
+
+.control-height-theme {
+  min-height: var(--control-height);
+}
+
 .control-theme {
   min-height: var(--control-height);
   padding-inline: var(--control-px, 0.875rem);
@@ -43,9 +49,42 @@
   padding-block: var(--button-py, var(--control-py, 0.625rem));
 }
 
+/* composable padding helpers */
+
+.px-control { padding-inline: var(--control-px, 0.875rem); }
+.py-control { padding-block: var(--control-py, 0.625rem); }
+.pad-control {
+  padding-inline: var(--control-px, 0.875rem);
+  padding-block: var(--control-py, 0.625rem);
+}
+
+.px-button { padding-inline: var(--button-px, var(--control-px, 0.875rem)); }
+.py-button { padding-block: var(--button-py, var(--control-py, 0.625rem)); }
+.pad-button {
+  padding-inline: var(--button-px, var(--control-px, 0.875rem));
+  padding-block: var(--button-py, var(--control-py, 0.625rem));
+}
+
+.px-card { padding-inline: var(--card-padding); }
+.py-card { padding-block: var(--card-padding); }
 .pad-card { padding: var(--card-padding); }
+
+.px-dialog { padding-inline: var(--dialog-padding); }
+.py-dialog { padding-block: var(--dialog-padding); }
 .pad-dialog { padding: var(--dialog-padding); }
+
+/*
+  Useful for bodies inside accordions, tabs, dropdowns, etc.
+  Falls back to card padding if you do not add a dedicated panel token yet.
+*/
+.px-panel { padding-inline: var(--panel-padding, var(--card-padding)); }
+.py-panel { padding-block: var(--panel-padding, var(--card-padding)); }
+.pad-panel { padding: var(--panel-padding, var(--card-padding)); }
+
+.px-container { padding-inline: var(--container-px, 1.5rem); }
 .pad-container { padding-inline: var(--container-px, 1.5rem); }
+
+/* gaps */
 
 .gap-stack { gap: var(--stack-gap); }
 .gap-section { gap: var(--section-gap); }
@@ -56,6 +95,8 @@
 .gap-list { gap: var(--list-gap, 0.5rem); }
 .gap-panel { gap: var(--panel-gap, var(--stack-gap)); }
 .gap-toolbar { gap: var(--toolbar-gap, var(--cluster-gap, var(--stack-gap))); }
+
+/* layout helpers */
 
 .stack-theme {
   display: flex;

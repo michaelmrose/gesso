@@ -391,59 +391,83 @@ html.dark[data-color-theme~="violetbloom"] {
 
 /* density: comfortable */
 html[data-density~="comfortable"] {
+  /* core control sizing */
   --control-height: 3.125rem;
-  --control-px: 1rem;
-  --control-py: 0.75rem;
 
-  --card-padding: 2rem;
-  --dialog-padding: 2.5rem;
+  /* spacing scale */
+  --space-1: 0.625rem;
+  --space-2: 0.75rem;
+  --space-3: 0.875rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-7: 2rem;
+  --space-8: 2.5rem;
+  --space-9: 4rem;
 
-  --stack-gap: 1.5rem;
-  --section-gap: 4rem;
+  /* common aliases */
+  --control-px: var(--space-4);
+  --control-py: var(--space-2);
 
-  --inline-gap: 1rem;
-  --cluster-gap: 1rem;
+  --button-px: var(--space-4);
+  --button-py: var(--space-2);
 
-  --button-px: 1rem;
-  --button-py: 0.75rem;
+  --field-gap: var(--space-2);
+  --form-gap: var(--space-5);
 
-  --field-gap: 0.75rem;
-  --form-gap: 1.25rem;
+  --stack-gap: var(--space-6);
+  --section-gap: var(--space-9);
 
-  --list-gap: 0.75rem;
-  --panel-gap: 1.25rem;
+  --inline-gap: var(--space-4);
+  --cluster-gap: var(--space-4);
+  --toolbar-gap: var(--space-4);
+  --list-gap: var(--space-2);
+  --panel-gap: var(--space-5);
 
-  --toolbar-gap: 1rem;
-  --container-px: 2rem;
+  --card-padding: var(--space-7);
+  --dialog-padding: var(--space-8);
+  --container-px: var(--space-7);
 }
 
 
 /* density: default */
 html[data-density~="default"] {
+  /* core control sizing */
   --control-height: 2.75rem;
-  --control-px: 0.875rem;
-  --control-py: 0.625rem;
 
-  --card-padding: 1.5rem;
-  --dialog-padding: 2rem;
+  /* spacing scale */
+  --space-1: 0.5rem;
+  --space-2: 0.625rem;
+  --space-3: 0.75rem;
+  --space-4: 0.875rem;
+  --space-5: 1rem;
+  --space-6: 1.25rem;
+  --space-7: 1.5rem;
+  --space-8: 2rem;
+  --space-9: 3rem;
 
-  --stack-gap: 1.25rem;
-  --section-gap: 3rem;
+  /* common aliases */
+  --control-px: var(--space-4);
+  --control-py: var(--space-2);
 
-  --inline-gap: 0.75rem;
-  --cluster-gap: 0.75rem;
+  --button-px: var(--space-4);
+  --button-py: var(--space-2);
 
-  --button-px: 0.875rem;
-  --button-py: 0.625rem;
+  --field-gap: var(--space-1);
+  --form-gap: var(--space-5);
 
-  --field-gap: 0.5rem;
-  --form-gap: 1rem;
+  --stack-gap: var(--space-6);
+  --section-gap: var(--space-9);
 
-  --list-gap: 0.5rem;
-  --panel-gap: 1rem;
+  --inline-gap: var(--space-3);
+  --cluster-gap: var(--space-3);
+  --toolbar-gap: var(--space-3);
+  --list-gap: var(--space-1);
+  --panel-gap: var(--space-5);
 
-  --toolbar-gap: 0.75rem;
-  --container-px: 1.5rem;
+  --card-padding: var(--space-7);
+  --dialog-padding: var(--space-8);
+  --container-px: var(--space-7);
 }
 
 
@@ -563,6 +587,12 @@ html[data-shape~="soft"] {
 
 /* density */
 
+/* control sizing */
+
+.control-height-theme {
+  min-height: var(--control-height);
+}
+
 .control-theme {
   min-height: var(--control-height);
   padding-inline: var(--control-px, 0.875rem);
@@ -574,9 +604,42 @@ html[data-shape~="soft"] {
   padding-block: var(--button-py, var(--control-py, 0.625rem));
 }
 
+/* composable padding helpers */
+
+.px-control { padding-inline: var(--control-px, 0.875rem); }
+.py-control { padding-block: var(--control-py, 0.625rem); }
+.pad-control {
+  padding-inline: var(--control-px, 0.875rem);
+  padding-block: var(--control-py, 0.625rem);
+}
+
+.px-button { padding-inline: var(--button-px, var(--control-px, 0.875rem)); }
+.py-button { padding-block: var(--button-py, var(--control-py, 0.625rem)); }
+.pad-button {
+  padding-inline: var(--button-px, var(--control-px, 0.875rem));
+  padding-block: var(--button-py, var(--control-py, 0.625rem));
+}
+
+.px-card { padding-inline: var(--card-padding); }
+.py-card { padding-block: var(--card-padding); }
 .pad-card { padding: var(--card-padding); }
+
+.px-dialog { padding-inline: var(--dialog-padding); }
+.py-dialog { padding-block: var(--dialog-padding); }
 .pad-dialog { padding: var(--dialog-padding); }
+
+/*
+  Useful for bodies inside accordions, tabs, dropdowns, etc.
+  Falls back to card padding if you do not add a dedicated panel token yet.
+*/
+.px-panel { padding-inline: var(--panel-padding, var(--card-padding)); }
+.py-panel { padding-block: var(--panel-padding, var(--card-padding)); }
+.pad-panel { padding: var(--panel-padding, var(--card-padding)); }
+
+.px-container { padding-inline: var(--container-px, 1.5rem); }
 .pad-container { padding-inline: var(--container-px, 1.5rem); }
+
+/* gaps */
 
 .gap-stack { gap: var(--stack-gap); }
 .gap-section { gap: var(--section-gap); }
@@ -587,6 +650,8 @@ html[data-shape~="soft"] {
 .gap-list { gap: var(--list-gap, 0.5rem); }
 .gap-panel { gap: var(--panel-gap, var(--stack-gap)); }
 .gap-toolbar { gap: var(--toolbar-gap, var(--cluster-gap, var(--stack-gap))); }
+
+/* layout helpers */
 
 .stack-theme {
   display: flex;
