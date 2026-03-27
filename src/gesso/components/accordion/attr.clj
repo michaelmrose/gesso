@@ -5,16 +5,18 @@
   "Returns the attribute map for the accordion root container."
   [class]
   {:class (class-names
-           "overflow-hidden rounded-lg border border-border bg-card shadow-sm"
+           "overflow-hidden rounded-lg shadow-sm"
            class)
-   :data-accordion-root true})
+   :data-accordion-root true
+   :style {:border "1px solid var(--border)"
+           :background "var(--card)"}})
 
 (defn accordion-item-attrs
   "Returns the merged attribute map for a single accordion item."
   [value open? disabled? class attrs]
   (merge-attrs
    {:class (class-names
-            "group overflow-hidden border-b border-border last:border-b-0"
+            "group overflow-hidden last:border-b-0"
             (when disabled? "opacity-60 pointer-events-none")
             class)
     :open (when open? true)
@@ -25,29 +27,38 @@
 (defn accordion-trigger-attrs
   "Returns the attribute map for an accordion trigger.
 
-   Uses the shared density row utilities while keeping a clear header/body
-   contrast through existing semantic color classes."
+   Uses shared density utilities for spacing, while keeping colors explicit so
+   the header remains visually distinct regardless of Tailwind token utility
+   availability. A hairline inset divider separates closed items."
   [class]
   {:class (class-names
-           "cursor-pointer w-full list-none pad-row flex items-center justify-between gap-inline bg-secondary text-primary outline-none"
+           "cursor-pointer w-full list-none pad-row flex items-center justify-between gap-inline outline-none"
            class)
-   :style {:font-weight 600}})
+   :style {:background "var(--secondary)"
+           :color "var(--primary)"
+           :font-weight 600
+           :box-shadow "inset 0 -1px 0 0 color-mix(in srgb, var(--foreground) 16%, transparent)"}})
+
 
 (defn accordion-content-attrs
   "Returns the attribute map for the accordion content region.
 
-   Uses shared panel spacing and body text utilities while keeping the body on
-   the card surface with a visible divider from the header."
+   Uses shared panel spacing and body text utilities, while keeping body colors
+   and dividers explicit so the content remains visually distinct regardless of
+   Tailwind token utility availability."
   [class]
   {:class (class-names
-           "border-t border-border bg-card pad-panel font-body text-base-theme leading-body text-muted-foreground"
-           class)})
+           "pad-panel font-body text-base-theme leading-body"
+           class)
+   :style {:border-top "1px solid var(--border)"
+           :background "var(--card)"
+           :color "var(--muted-foreground)"}})
 
 (defn accordion-chevron-node
   "Returns the chevron icon node used by accordion triggers.
 
-   Uses shared icon sizing utilities. The initial transform is rendered from
-   open? and the toggle script keeps it in sync afterward."
+   Uses shared icon sizing utilities when available. The initial transform is
+   rendered from open? and the toggle script keeps it in sync afterward."
   [open?]
   [:svg {:data-accordion-chevron true
          :aria-hidden "true"
