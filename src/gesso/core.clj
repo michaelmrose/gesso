@@ -22,9 +22,18 @@
    [gesso.components.icon :as icon]
    [gesso.components.status-pill :as status-pill]
    [gesso.components.group :as group]
+   [gesso.components.section-block :as section-block]
    ))
 
 ;; public api
+
+;; section block
+(def section-block section-block/section-block)
+(def section-block-header section-block/section-block-header)
+(def section-block-title section-block/section-block-title)
+(def section-block-description section-block/section-block-description)
+(def section-block-actions section-block/section-block-actions)
+(def section-block-content section-block/section-block-content)
 
 ;; group
 
