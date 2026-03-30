@@ -27,6 +27,14 @@
    :2xl "text-2xl-theme"
    :3xl "text-3xl-theme"})
 
+(defn- merge-wrapper-opts
+  "Merge wrapper defaults into the first arg when it is an opts map.
+   Otherwise prepend the wrapper defaults as the opts map."
+  [args wrapper-opts]
+  (if (and (seq args) (map? (first args)))
+    (cons (merge wrapper-opts (first args)) (rest args))
+    (cons wrapper-opts args)))
+
 (defn text
   "Semantic text wrapper.
 
@@ -106,24 +114,17 @@
 
 (defn page-title
   [& args]
-  (apply heading (if (only-map-arg? args)
-                   [(update (first args) :props merge {:level 1})]
-                   (cons {:level 1} args))))
+  (apply heading (merge-wrapper-opts args {:level 1})))
 
 (defn section-title
   [& args]
-  (apply heading (if (only-map-arg? args)
-                   [(update (first args) :props merge {:level 2})]
-                   (cons {:level 2} args))))
+  (apply heading (merge-wrapper-opts args {:level 2})))
 
 (defn muted-text
   [& args]
-  (apply text (if (only-map-arg? args)
-                [(update (first args) :props merge {:variant :muted})]
-                (cons {:variant :muted} args))))
+  (apply text (merge-wrapper-opts args {:variant :muted})))
 
 (defn label-text
   [& args]
-  (apply text (if (only-map-arg? args)
-                [(update (first args) :props merge {:variant :label :as :span})]
-                (cons {:variant :label :as :span} args))))
+  (apply text (merge-wrapper-opts args {:variant :label
+                                        :as :span})))
