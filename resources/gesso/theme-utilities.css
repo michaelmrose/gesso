@@ -188,15 +188,12 @@
 
 /* icon sizing */
 
-.icon-sm-theme {
-  width: var(--icon-size-sm, 0.875rem);
-  height: var(--icon-size-sm, 0.875rem);
-}
-
-.icon-md-theme {
-  width: var(--icon-size-md, 1rem);
-  height: var(--icon-size-md, 1rem);
-}
+.icon-xs-theme { width: var(--icon-size-xs, 0.75rem); height: var(--icon-size-xs, 0.75rem); }
+.icon-sm-theme { width: var(--icon-size-sm, 0.875rem); height: var(--icon-size-sm, 0.875rem); }
+.icon-md-theme { width: var(--icon-size-md, 1rem); height: var(--icon-size-md, 1rem); }
+.icon-lg-theme { width: var(--icon-size-lg, 1.25rem); height: var(--icon-size-lg, 1.25rem); }
+.icon-xl-theme { width: var(--icon-size-xl, 1.5rem); height: var(--icon-size-xl, 1.5rem); }
+.icon-2xl-theme { width: var(--icon-size-2xl, 2rem); height: var(--icon-size-2xl, 2rem); }
 
 /* shape */
 

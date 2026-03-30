@@ -27,7 +27,6 @@
 
 ;; Icons
 (def icon icon/icon)
-(def lucide icon/lucide)
 
 ;; empty state
 (def empty-state empty-state/empty-state)

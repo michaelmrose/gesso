@@ -5,165 +5,173 @@
    [clojure.xml :as xml]
    [gesso.util :refer :all]))
 
-(def ^:private icon-size-classes
-  {:sm "icon-sm-theme"
-   :md "icon-md-theme"})
+(def ^:dynamic *icon-search-paths*
+  "Classpath-relative directories searched, in order, when resolving icons by
+   name. Project-local icons should typically live under resources/icons, while
+   Gesso's bundled fallback set can live under resources/icons/lucide."
+  ["icons" "icons/lucide"])
 
-(defonce ^:private lucide-cache
-  (atom {}))
+(defn- normalize-icon-name
+  [name]
+  (-> (str name)
+      str/trim
+      (str/replace #"\.svg$" "")))
 
-(defn- ->resource-name
-  [icon-name]
-  (-> (cond
-        (keyword? icon-name) (name icon-name)
-        (string? icon-name) icon-name
-        :else (str icon-name))
-      str/trim))
+(defn- icon-resource
+  [name]
+  (let [name (normalize-icon-name name)]
+    (some (fn [dir]
+            (io/resource (str dir "/" name ".svg")))
+          *icon-search-paths*)))
 
-(defn- normalize-xml-key
-  [k]
-  (keyword (name k)))
-
-(defn- xml-attrs->hiccup
+(defn- xml-attrs->hiccup-attrs
   [attrs]
   (into {}
         (map (fn [[k v]]
-               [(normalize-xml-key k) (str v)]))
+               [(if (keyword? k) k (keyword (str k))) v]))
         attrs))
 
 (defn- xml-node->hiccup
   [node]
   (cond
     (string? node)
-    (when-not (str/blank? node)
-      node)
+    node
 
     (map? node)
-    (let [tag      (normalize-xml-key (:tag node))
-          attrs    (xml-attrs->hiccup (:attrs node))
-          children (->> (:content node)
-                        (map xml-node->hiccup)
-                        (remove nil?))]
-      (into [tag attrs] children))
+    (let [{:keys [tag attrs content]} node
+          children (->> content
+                        (remove nil?)
+                        (remove #(and (string? %) (str/blank? %)))
+                        (map xml-node->hiccup))]
+      (into [tag (xml-attrs->hiccup-attrs attrs)] children))
 
     :else
     node))
 
-(defn- parse-svg-resource
-  [resource-path]
-  (if-let [res (io/resource resource-path)]
-    (with-open [in (io/input-stream res)]
-      (xml-node->hiccup (xml/parse in)))
-    (throw (ex-info (str "Icon resource not found: " resource-path)
-                    {:resource-path resource-path}))))
+(def ^:private load-icon-template
+  (memoize
+   (fn [name]
+     (let [name (normalize-icon-name name)
+           res  (icon-resource name)]
+       (when-not res
+         (throw (ex-info (str "Icon not found: " name)
+                         {:icon/name name
+                          :icon/search-paths *icon-search-paths*})))
+       (with-open [in (io/input-stream res)]
+         (xml-node->hiccup (xml/parse in)))))))
 
-(defn- lucide-svg
-  [icon-name]
-  (let [icon-name (->resource-name icon-name)]
-    (or (@lucide-cache icon-name)
-        (let [parsed (parse-svg-resource (str "icons/lucide/" icon-name ".svg"))]
-          (swap! lucide-cache assoc icon-name parsed)
-          parsed))))
+(defn- icon-size-class
+  [size]
+  (case size
+    :xs "icon-xs-theme"
+    :sm "icon-sm-theme"
+    :md "icon-md-theme"
+    :lg "icon-lg-theme"
+    :xl "icon-xl-theme"
+    :2xl "icon-2xl-theme"
+    nil))
 
-(defn- normalize-svg-node
-  [svg-node {:keys [class attrs size title]}]
-  (let [[tag maybe-attrs & children] svg-node
-        has-attrs?    (map? maybe-attrs)
-        svg-attrs     (if has-attrs? maybe-attrs {})
-        children      (if has-attrs? children (cons maybe-attrs children))
-        {:keys [class attrs]} (split-opts {:class class :attrs attrs})
-        attrs-class   (:class attrs)
-        attrs         (dissoc attrs :class)
-        size-class    (get icon-size-classes (or size :md))
-        svg-attrs     (-> svg-attrs
-                          (dissoc :width :height)
-                          (merge attrs)
-                          (assoc :class (class-names (:class svg-attrs)
-                                                     attrs-class
-                                                     size-class
-                                                     class)))
-        svg-attrs     (if title
-                        (-> svg-attrs
-                            (assoc :role "img")
-                            (dissoc :aria-hidden))
-                        (-> svg-attrs
-                            (assoc :aria-hidden "true")
-                            (dissoc :role)))
-        children      (if title
-                        (cons [:title title] children)
-                        children)]
-    (into [tag svg-attrs] children)))
+(defn- css-size
+  [v]
+  (cond
+    (nil? v) nil
+    (number? v) (str v "px")
+    :else (str v)))
 
-(defn- wrap-non-svg-node
-  [node {:keys [class attrs size title]}]
-  (let [size-class (get icon-size-classes (or size :md))
-        attrs-class (:class attrs)
-        attrs       (dissoc attrs :class)
-        attrs       (cond-> (merge attrs
-                                   {:class (class-names size-class attrs-class class)})
-                      (not title) (assoc :aria-hidden "true")
-                      title (assoc :role "img" :aria-label title))]
-    (into [:span attrs] (nodes node))))
+(defn- computed-size-style
+  [{:keys [size width height]}]
+  (let [square-size (when (or (string? size) (number? size))
+                      (css-size size))
+        width       (or (css-size width) square-size)
+        height      (or (css-size height) square-size)]
+    (cond-> {}
+      width (assoc :width width)
+      height (assoc :height height))))
+
+(defn- apply-icon-opts
+  [svg {:keys [size width height class attrs title]}]
+  (let [[tag base-attrs & children] svg
+        base-attrs     (apply dissoc base-attrs [:width :height :class :aria-hidden :role :focusable])
+        user-style     (:style attrs)
+        base-style     (:style base-attrs)
+        size-style     (computed-size-style {:size size :width width :height height})
+        merged-style   (merge base-style size-style user-style)
+        attrs-no-style (dissoc attrs :style)
+        default-attrs  (if title
+                         {:role "img"}
+                         {:aria-hidden "true"
+                          :focusable "false"})
+        merged-attrs   (cond-> (merge-attrs
+                                base-attrs
+                                {:class (class-names (icon-size-class size) class)}
+                                default-attrs
+                                attrs-no-style)
+                         (seq merged-style) (assoc :style merged-style))
+        children       (if title
+                         (into [[:title title]] children)
+                         children)]
+    (into [tag merged-attrs] children)))
 
 (defn icon
-  "Normalizes an icon node for consistent sizing and accessibility.
+  "Render an SVG icon by name.
 
   Shorthand:
-    (icon (lucide \"inbox\"))
+    (icon \"search\")
+    (icon \"search\" {:size :xs})
+    (icon \"search\" {:size :lg})
+    (icon \"search\" {:size \"1.5rem\"})
+    (icon \"search\" {:width \"20px\" :height \"20px\"})
+    (icon \"search\" {:title \"Search\"})
 
   Map form:
-    (icon {:node (lucide \"alert-triangle\")
-           :size :sm
-           :title \"Warning\"})
+    (icon {:name \"search\"
+           :size :md
+           :class \"...\"
+           :attrs {...}
+           :title \"Search\"})
 
-  Two-arg form:
-    (icon (lucide \"search\") {:size :sm})
+  Resolution order follows *icon-search-paths*:
+  1. project/local icons (e.g. resources/icons)
+  2. bundled fallback icons (e.g. resources/icons/lucide)
 
-  Options:
-    :node   required in map form
-    :size   :sm | :md (defaults to :md)
-    :class  extra classes
-    :attrs  extra attrs for the rendered root
-    :title  when present, makes the icon non-decorative"
+  Size options:
+    :xs  => icon-xs-theme
+    :sm  => icon-sm-theme
+    :md  => icon-md-theme (default when no explicit size is provided)
+    :lg  => icon-lg-theme
+    :xl  => icon-xl-theme
+    :2xl => icon-2xl-theme
+    \"...\" / number => explicit square size applied to width and height
+
+  Explicit sizing:
+    :width and :height override any square size derived from :size
+
+  Accessibility:
+    - decorative by default (aria-hidden=\"true\")
+    - if :title is provided, the icon is exposed as an image with a <title>"
   [& args]
-  (cond
-    (= 1 (count args))
-    (let [arg (first args)]
-      (if (map? arg)
-        (let [{:keys [node] :as opts} arg]
-          (if (and (vector? node) (= :svg (first node)))
-            (normalize-svg-node node opts)
-            (wrap-non-svg-node node opts)))
-        (normalize-svg-node arg {})))
+  (let [opts (cond
+               (and (= 1 (count args)) (string? (first args)))
+               {:name (first args) :size :md}
 
-    (= 2 (count args))
-    (let [[node opts] args]
-      (if (and (vector? node) (= :svg (first node)))
-        (normalize-svg-node node opts)
-        (wrap-non-svg-node node (assoc opts :node node))))
+               (and (= 1 (count args)) (map? (first args)))
+               (merge {:size :md} (first args))
 
-    :else
-    (throw (ex-info "icon expects either a node, an opts map, or [node opts]"
-                    {:args args}))))
+               (and (= 2 (count args))
+                    (string? (first args))
+                    (map? (second args)))
+               (merge {:name (first args) :size :md} (second args))
 
-(defn lucide
-  "Returns a vendored Lucide SVG as hiccup.
-
-  Looks up SVGs from:
-    resources/icons/lucide/<name>.svg
-
-  Examples:
-    (lucide \"inbox\")
-    (lucide :search)
-    (lucide \"alert-triangle\" {:size :sm})
-    (lucide \"check\" {:class \"text-current\"})
-
-  Options:
-    :size   :sm | :md (defaults to :md)
-    :class  extra classes
-    :attrs  extra attrs for the svg root
-    :title  when present, makes the icon non-decorative"
-  ([icon-name]
-   (lucide icon-name {}))
-  ([icon-name opts]
-   (normalize-svg-node (lucide-svg icon-name) opts)))
+               :else
+               (throw (ex-info "icon expects (icon \"name\"), (icon \"name\" opts), or (icon {:name ...})"
+                               {:args args})))
+        {:keys [props class attrs]} (split-opts opts)
+        {:keys [name size width height title]} props
+        svg (load-icon-template name)]
+    (apply-icon-opts svg
+                     {:size size
+                      :width width
+                      :height height
+                      :title title
+                      :class class
+                      :attrs attrs})))
