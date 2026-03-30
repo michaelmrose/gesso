@@ -21,10 +21,14 @@
    [gesso.components.empty-state :as empty-state]
    [gesso.components.icon :as icon]
    [gesso.components.status-pill :as status-pill]
+   [gesso.components.group :as group]
    ))
 
 ;; public api
 
+;; group
+
+(def group group/group)
 ;; status-pill
 (def status-pill status-pill/status-pill)
 ;; Icons

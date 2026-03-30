@@ -203,3 +203,46 @@
 .radius-xl { border-radius: var(--radius-xl); }
 
 .border-theme { border-width: var(--border-width); }
+
+/* group attachment helpers */
+
+[data-group][data-attached="true"] {
+  gap: 0;
+  flex-wrap: nowrap;
+}
+
+[data-group][data-attached="true"][data-orientation="horizontal"] > * + * {
+  margin-left: calc(-1 * var(--border-width, 1px));
+}
+
+[data-group][data-attached="true"][data-orientation="vertical"] > * + * {
+  margin-top: calc(-1 * var(--border-width, 1px));
+}
+
+[data-group][data-attached="true"][data-orientation="horizontal"] > * {
+  border-radius: 0;
+}
+
+[data-group][data-attached="true"][data-orientation="vertical"] > * {
+  border-radius: 0;
+}
+
+[data-group][data-attached="true"][data-orientation="horizontal"] > :first-child {
+  border-top-left-radius: var(--radius-md);
+  border-bottom-left-radius: var(--radius-md);
+}
+
+[data-group][data-attached="true"][data-orientation="horizontal"] > :last-child {
+  border-top-right-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+}
+
+[data-group][data-attached="true"][data-orientation="vertical"] > :first-child {
+  border-top-left-radius: var(--radius-md);
+  border-top-right-radius: var(--radius-md);
+}
+
+[data-group][data-attached="true"][data-orientation="vertical"] > :last-child {
+  border-bottom-left-radius: var(--radius-md);
+  border-bottom-right-radius: var(--radius-md);
+}
