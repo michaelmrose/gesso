@@ -20,11 +20,13 @@
    [gesso.components.text :as text ]
    [gesso.components.empty-state :as empty-state]
    [gesso.components.icon :as icon]
+   [gesso.components.status-pill :as status-pill]
    ))
 
 ;; public api
 
-
+;; status-pill
+(def status-pill status-pill/status-pill)
 ;; Icons
 (def icon icon/icon)
 
