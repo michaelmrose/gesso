@@ -246,3 +246,91 @@
   border-bottom-left-radius: var(--radius-md);
   border-bottom-right-radius: var(--radius-md);
 }
+
+/* page layouts */
+
+[data-page] {
+  display: grid;
+  align-items: start;
+  gap: var(--section-gap);
+  width: 100%;
+  padding-inline: var(--container-px, 1.5rem);
+}
+
+[data-page-left]  { grid-area: left; min-width: 0; }
+[data-page-main]  { grid-area: main; min-width: 0; }
+[data-page-right] { grid-area: right; min-width: 0; }
+
+[data-page][data-page-variant="focused"] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 72rem) minmax(0, 1fr);
+  grid-template-areas: "left main right";
+}
+
+[data-page][data-page-variant="wide-focused"] {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 88rem) minmax(0, 1fr);
+  grid-template-areas: "left main right";
+}
+
+[data-page][data-page-variant="sidebar-main"] {
+  grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
+  grid-template-areas: "left main";
+}
+
+[data-page][data-page-variant="main-rail"] {
+  grid-template-columns: minmax(0, 1fr) minmax(16rem, 22rem);
+  grid-template-areas: "main right";
+}
+
+[data-page][data-page-variant="three-column"] {
+  grid-template-columns: minmax(14rem, 18rem) minmax(0, 1fr) minmax(16rem, 22rem);
+  grid-template-areas: "left main right";
+}
+
+[data-page][data-page-variant="full"] {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas: "main";
+}
+
+/* medium collapse */
+@media (max-width: 1024px) {
+  [data-page] {
+    display: flex;
+    flex-direction: column;
+  }
+
+  [data-page] > [data-page-left],
+  [data-page] > [data-page-main],
+  [data-page] > [data-page-right] {
+    order: var(--page-md-order, 999);
+  }
+
+  [data-page] > [data-page-left][data-page-md-visible="false"],
+  [data-page] > [data-page-main][data-page-md-visible="false"],
+  [data-page] > [data-page-right][data-page-md-visible="false"] {
+    display: none;
+  }
+}
+
+/* small collapse */
+@media (max-width: 768px) {
+  [data-page] {
+    padding-inline: var(--space-4, 1rem);
+    gap: var(--space-6, 1.5rem);
+  }
+
+  [data-page] > [data-page-left],
+  [data-page] > [data-page-main],
+  [data-page] > [data-page-right] {
+    order: var(--page-sm-order, var(--page-md-order, 999));
+  }
+
+  [data-page] > [data-page-left][data-page-sm-visible="false"],
+  [data-page] > [data-page-main][data-page-sm-visible="false"],
+  [data-page] > [data-page-right][data-page-sm-visible="false"] {
+    display: none;
+  }
+
+  [data-page-surface] {
+    padding: var(--panel-py, var(--card-padding));
+  }
+}
