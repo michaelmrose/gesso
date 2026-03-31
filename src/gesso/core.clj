@@ -23,9 +23,25 @@
    [gesso.components.status-pill :as status-pill]
    [gesso.components.group :as group]
    [gesso.components.section-block :as section-block]
+   [gesso.components.toolbar :as toolbar]
+   [gesso.components.page :as page]
    ))
 
 ;; public api
+
+;; page
+(def page page/page)
+(def page-left page/page-left)
+(def page-main page/page-main)
+(def page-right page/page-right)
+(def page-surface page/page-surface)
+
+;;  toolbar
+(def toolbar toolbar/toolbar)
+(def toolbar-start toolbar/toolbar-start)
+(def toolbar-center toolbar/toolbar-center)
+(def toolbar-end toolbar/toolbar-end)
+(def toolbar-spacer toolbar/toolbar-spacer)
 
 ;; section block
 (def section-block section-block/section-block)
