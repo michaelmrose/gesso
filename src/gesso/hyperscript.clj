@@ -4,16 +4,6 @@
 
 ;; Helpers
 
-#_(defn merge-script-attr
-  [attrs script]
-  (cond
-    (nil? script) attrs
-    (nil? attrs) {:_ script}
-    (contains? attrs :_)
-    (update attrs :_ #(if % (str % "\n" script) script))
-    :else
-    (assoc attrs :_ script)))
-
 (defn merge-script-attr
   [attrs script]
   (if script
