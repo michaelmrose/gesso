@@ -321,3 +321,52 @@
     padding: var(--panel-py, var(--card-padding));
   }
 }
+/* top and side bars */
+/* sidebar */
+
+[data-sidebar] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--panel-gap, var(--stack-gap));
+  min-width: 0;
+}
+
+[data-sidebar-section] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--field-gap, 0.5rem);
+}
+
+[data-sidebar-heading] {
+  font-family: var(--font-heading);
+  font-size: var(--text-sm);
+  line-height: var(--leading-tight);
+  font-weight: var(--weight-semibold);
+  color: var(--muted-foreground);
+}
+
+[data-sidebar-list] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--list-gap, 0.5rem);
+}
+
+[data-sidebar-link] {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+@media (max-width: 1024px) {
+  [data-sidebar][data-collapse-at="md"] {
+    display: none;
+  }
+}
+
+@media (max-width: 768px) {
+  [data-sidebar][data-collapse-at="sm"],
+  [data-sidebar][data-collapse-at="md"] {
+    display: none;
+  }
+}

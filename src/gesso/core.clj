@@ -25,6 +25,8 @@
    [gesso.components.section-block :as section-block]
    [gesso.components.toolbar :as toolbar]
    [gesso.components.page :as page]
+   [gesso.components.topbar :as topbar]
+   [gesso.components.sidebar :as sidebar]
    ))
 
 ;; public api
@@ -42,6 +44,13 @@
 (def toolbar-center toolbar/toolbar-center)
 (def toolbar-end toolbar/toolbar-end)
 (def toolbar-spacer toolbar/toolbar-spacer)
+
+;; top and side bars
+(def topbar topbar/topbar)
+
+(def sidebar sidebar/sidebar)
+(def sidebar-section sidebar/sidebar-section)
+(def sidebar-overflow-items sidebar/sidebar-overflow-items)
 
 ;; section block
 (def section-block section-block/section-block)
