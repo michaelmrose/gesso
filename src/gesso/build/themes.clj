@@ -28,9 +28,21 @@
 (def ^:private utilities-css-resource
   "gesso/theme-utilities.css")
 
+(def ^:private default-component-css-dir
+  "src/gesso/components")
+
 (defn- preset-name-from-path
   [path]
   (-> path fs/file-name str (str/replace #"\.css$" "")))
+
+(defn- component-name-from-path
+  [path]
+  (-> path fs/parent fs/file-name str))
+
+(defn- component-css-path
+  [component-dir]
+  (let [component-name (-> component-dir fs/file-name str)]
+    (fs/path component-dir (str component-name ".css"))))
 
 (defn- find-matching-brace
   [s open-idx]
@@ -117,6 +129,26 @@
     (throw (ex-info "Theme utilities CSS resource does not exist"
                     {:resource utilities-css-resource}))))
 
+(defn- discover-component-css-files
+  [component-css-dir]
+  (let [dir (fs/path component-css-dir)]
+    (if (fs/exists? dir)
+      (->> (fs/list-dir dir)
+           (filter fs/directory?)
+           (map component-css-path)
+           (filter #(and (fs/exists? %)
+                         (fs/regular-file? %)))
+           (sort-by str))
+      [])))
+
+(defn- component-css
+  [path]
+  (let [component-name (component-name-from-path path)]
+    (str "/* component: " component-name " */\n"
+         (slurp (str path))
+         (when-not (str/ends-with? (slurp (str path)) "\n")
+           "\n"))))
+
 (defn build!
   "Reads raw preset CSS files from :input-dir and writes a generated CSS bundle
   to :output-file.
@@ -131,39 +163,53 @@
   Color-theme files require both :root and .dark blocks.
   Other preset files require :root and may optionally include .dark.
 
-  The generated bundle also includes a small semantic utility layer for
-  consuming theme variables directly in markup.
+  The generated bundle includes, in order:
+
+    1. Generated preset CSS
+    2. Shared utility CSS from gesso/theme-utilities.css
+    3. Optional per-component CSS discovered from component-css-dir
+
+  Component CSS discovery is silent:
+    - if component-css-dir does not exist, nothing is added
+    - if a component directory has no matching component_name.css, nothing is added
 
   Defaults are intended for the gesso repo itself:
-    input-dir   => resources/themes
-    output-file => resources/public/gesso/themes.css
+    input-dir         => resources/themes
+    output-file       => resources/public/gesso/themes.css
+    component-css-dir => src/gesso/components
 
-  Downstream apps can call this with a different output file, e.g.
-    resources/public/gesso/app-themes.css"
+  Downstream apps can override any of these."
   ([] (build! {}))
-  ([{:keys [input-dir output-file]
+  ([{:keys [input-dir output-file component-css-dir]
      :or   {input-dir "resources/themes"
-            output-file "resources/public/gesso/themes.css"}}]
+            output-file "resources/public/gesso/themes.css"
+            component-css-dir default-component-css-dir}}]
    (let [input-dir (fs/path input-dir)]
      (when-not (fs/exists? input-dir)
        (throw (ex-info "Theme input directory does not exist"
                        {:input-dir (str input-dir)})))
-     (let [presets (discover-presets input-dir)]
+     (let [presets             (discover-presets input-dir)
+           component-css-files (discover-component-css-files component-css-dir)]
        (when (empty? presets)
          (throw (ex-info "No preset CSS files found"
                          {:input-dir (str input-dir)})))
        (fs/create-dirs (fs/parent output-file))
        (spit output-file
-             (str (str/join "\n\n"
-                            (concat
-                             (map (fn [{:keys [spec path]}]
-                                    (preset-css spec path))
-                                  presets)
-                             [(utilities-css)]))
-                  "\n"))
+             (str
+              (str/join
+               "\n\n"
+               (concat
+                (map (fn [{:keys [spec path]}]
+                       (preset-css spec path))
+                     presets)
+                [(utilities-css)]
+                (map component-css component-css-files)))
+              "\n"))
        (println "Wrote" output-file)
        (doseq [{:keys [spec path]} presets]
-         (println " -" (name (:axis spec)) (preset-name-from-path path)))))))
+         (println " -" (name (:axis spec)) (preset-name-from-path path)))
+       (doseq [path component-css-files]
+         (println " -" "component-css" (component-name-from-path path)))))))
 
 (defn -main
   [& _]
