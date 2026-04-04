@@ -1,0 +1,90 @@
+#+title: bars component
+
+* Purpose
+
+bars is a responsive navigation shell for Gesso.
+
+This first iteration owns:
+
+- topbar
+- optional sidebar
+- hamburger panel
+- wrapped content area
+
+The structural model remains strict:
+
+- menu
+- menu-group
+- menu-item
+
+Authoring convenience is allowed through normalization.
+
+* Current implementation scope
+
+This version implements:
+
+- normalized menu constructors
+- menu metadata for region, category, collapse, overflow, and priority
+- topbar projection
+- sidebar projection
+- hamburger projection
+- sidebar contribution into hamburger when collapsed
+- medium pushdown behavior
+- small replace-below-topbar behavior
+- hamburger click toggle
+- hamburger close-on-resize reset
+
+* Menu metadata
+
+Supported menu keys:
+
+- :label
+- :groups
+- :home-region
+- :category
+- :collapse-at
+- :overflow-target
+- :priority
+
+Supported item keys:
+
+- :text
+- :href
+- :icon
+- :current?
+- :attrs
+
+* Regions
+
+Valid home regions in this iteration:
+
+- :leftmost
+- :center
+- :rightmost
+- :sidebar
+
+* Collapse rules
+
+Supported values for :collapse-at:
+
+- nil
+- :never
+- :small
+- :medium
+- :always
+
+Supported values for :overflow-target:
+
+- :hamburger
+- :disappear
+
+* Deliberately deferred
+
+The following are intentionally deferred to a later iteration:
+
+- width-measured automatic overflow within a region
+- richer topbar dropdown projection for multi-item menus
+- click-away and escape dismissal for that richer topbar dropdown projection
+
+The first iteration keeps topbar rendering simple and real rather than pretending
+to support behavior that has not actually been built.
