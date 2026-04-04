@@ -25,6 +25,7 @@
    [gesso.components.section-block :as section-block]
    [gesso.components.toolbar :as toolbar]
    [gesso.components.page :as page]
+   [gesso.components.bars.core :as bars]
    ))
 
 ;; public api
@@ -140,3 +141,9 @@
 (def radio-group radio-group/radio-group)
 
 (def switch switch/switch)
+
+;; bars
+(def bars bars/bars)
+(def menu bars/menu)
+(def menu-group bars/menu-group)
+(def menu-item bars/menu-item)
