@@ -4,6 +4,7 @@
    [gesso.components.bars.attr :refer :all]
    [gesso.components.bars.scripts :refer :all]
    [gesso.components.dropdown-menu.core :as dropdown]
+   [gesso.components.group :as group]
    [gesso.components.icon :as icon]
    [gesso.hyperscript :refer [merge-script-attr]]
    [gesso.util :refer :all]))
@@ -276,6 +277,16 @@
   [menu]
   (reduce + 0 (map (comp count :items) (:groups menu))))
 
+(defn- show-topbar-menu-label?
+  [menu]
+  (let [groups (:groups menu)
+        group-count (count groups)
+        item-count  (count-menu-items menu)]
+    (and (seq (:label menu))
+         (or (> group-count 1)
+             (> item-count 1)
+             (some :heading groups)))))
+
 (defn- simple-topbar-menu?
   [menu]
   (let [groups (:groups menu)
@@ -321,21 +332,38 @@
 (defn- render-menu-item
   [item mode]
   (let [{:keys [text href icon current? class attrs]} item
-        script   (when (= mode :hamburger)
-                   (bars-close-script))
-        attrs    (merge-script-attr attrs script)
-        content  (concat
-                  (when icon
-                    [[:span {:data-bars-menu-item-icon true}
-                      (item-icon-node icon)]])
-                  (nodes text))
-        defaults (bars-menu-item-attrs mode current? class)
-        attrs    (if href
-                   attrs
-                   (merge {:type "button"} attrs))]
+        script    (when (= mode :hamburger)
+                    (bars-close-script))
+        attrs     (merge-script-attr attrs script)
+        content   (concat
+                   (when icon
+                     [[:span {:data-bars-menu-item-icon true}
+                       (item-icon-node icon)]])
+                   (nodes text))
+        defaults  (bars-menu-item-attrs mode current? class)
+        attrs     (if href
+                    attrs
+                    (merge {:type "button"} attrs))]
     (if href
       (el :a defaults attrs content)
       (el :button defaults attrs content))))
+
+(defn- render-topbar-group
+  [group]
+  (let [{:keys [heading items class attrs]} group]
+    (el :div
+        (bars-menu-group-attrs :topbar class)
+        attrs
+        (concat
+         (when (seq heading)
+           [(el :span
+                (bars-menu-heading-attrs :topbar nil)
+                {}
+                (nodes heading))])
+         [(el :div
+              (bars-menu-items-attrs :topbar nil)
+              {}
+              (map #(render-menu-item % :topbar) items))]))))
 
 (defn- render-topbar-simple-menu
   [menu]
@@ -439,6 +467,22 @@
     (render-topbar-simple-menu menu)
     (render-topbar-dropdown-menu menu)))
 
+(defn- render-topbar-center-cluster
+  [menus]
+  (cond
+    (empty? menus)
+    []
+
+    (= 1 (count menus))
+    (map render-topbar-menu menus)
+
+    :else
+    [(apply group/group
+            {:attached? true
+             :wrap? false
+             :class "items-center"}
+            (map render-topbar-menu menus))]))
+
 (defn- render-vertical-group
   [group mode]
   (let [{:keys [heading items class attrs]} group]
@@ -499,16 +543,53 @@
                    (map normalize-menu)
                    (map #(attach-visibility % sidebar-collapse-at))
                    vec)
-        left-menus        (topbar-home-menus menus :leftmost)
-        center-menus      (topbar-home-menus menus :center)
-        right-menus       (topbar-home-menus menus :rightmost)
-        sidebar-menus     (sidebar-home-menus menus)
-        hamburger-groups  (ordered-hamburger-categories menus)
-        has-sidebar?      (boolean (seq sidebar-menus))
+        left-menus (topbar-home-menus menus :leftmost)
+        center-menus (topbar-home-menus menus :center)
+        right-menus (topbar-home-menus menus :rightmost)
+        sidebar-menus (sidebar-home-menus menus)
+        hamburger-groups (ordered-hamburger-categories menus)
+        has-sidebar? (boolean (seq sidebar-menus))
         has-hamburger-md? (boolean (some #(get-in % [:hamburger-visible :md]) menus))
         has-hamburger-sm? (boolean (some #(get-in % [:hamburger-visible :sm]) menus))
-        root-attrs        (merge-script-attr attrs (bars-root-script))
-        content-nodes     (concat (nodes content) (nodes children))]
+        root-attrs (merge-script-attr attrs (bars-root-script))
+        content-nodes (concat (nodes content) (nodes children))
+        header-children
+        (concat
+         [(el :div
+              (bars-brand-attrs nil)
+              {}
+              (nodes brand))]
+         [(el :nav
+              (bars-segment-attrs :leftmost nil)
+              {}
+              (map render-topbar-menu left-menus))]
+         [(el :nav
+              (bars-segment-attrs :center nil)
+              {}
+              (render-topbar-center-cluster center-menus))]
+         [(el :nav
+              (bars-segment-attrs :rightmost nil)
+              {}
+              (map render-topbar-menu right-menus))]
+         [(el :button
+              (bars-toggle-attrs nil)
+              (merge-script-attr {} (bars-toggle-script))
+              [[:span {:aria-hidden "true"} "☰"]
+               [:span "Menu"]])])
+        hamburger-children
+        [(el :div
+             (bars-hamburger-inner-attrs nil)
+             {}
+             (map render-hamburger-category hamburger-groups))]
+        body-children
+        [(el :aside
+             (bars-sidebar-attrs nil)
+             {}
+             (map #(render-vertical-menu % :sidebar) sidebar-menus))
+         (el :div
+             (bars-content-attrs nil)
+             {}
+             content-nodes)]]
     (el :div
         (bars-root-attrs class
                          {:has-sidebar? has-sidebar?
@@ -519,48 +600,17 @@
         [(el :header
              (bars-topbar-attrs nil)
              {}
-             (concat
-              [(el :div
-                   (bars-brand-attrs nil)
-                   {}
-                   (nodes brand))]
-              [(el :nav
-                   (bars-segment-attrs :leftmost nil)
-                   {}
-                   (map render-topbar-menu left-menus))]
-              [(el :nav
-                   (bars-segment-attrs :center nil)
-                   {}
-                   (map render-topbar-menu center-menus))]
-              [(el :nav
-                   (bars-segment-attrs :rightmost nil)
-                   {}
-                   (map render-topbar-menu right-menus))]
-              [(el :button
-                   (bars-toggle-attrs nil)
-                   (merge-script-attr {} (bars-toggle-script))
-                   [[:span {:aria-hidden "true"} "☰"]
-                    [:span "Menu"]])]))
+             header-children)
 
          (el :section
              (bars-hamburger-panel-attrs nil)
              {}
-             [(el :div
-                  (bars-hamburger-inner-attrs nil)
-                  {}
-                  (map render-hamburger-category hamburger-groups))])
+             hamburger-children)
 
          (el :div
              (bars-body-attrs nil)
              {}
-             [(el :aside
-                  (bars-sidebar-attrs nil)
-                  {}
-                  (map #(render-vertical-menu % :sidebar) sidebar-menus))
-              (el :div
-                  (bars-content-attrs nil)
-                  {}
-                  content-nodes)])])))
+             body-children)])))
 
 (defn bars
   "Responsive navigation shell.
