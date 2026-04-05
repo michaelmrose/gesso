@@ -390,14 +390,15 @@
       (seq attrs) (assoc :attrs attrs)
       disabled? (assoc :disabled? true))))
 
+
 (defn- dropdown-item-children
   [item]
   (let [{:keys [text icon]} item]
-    (concat
-     (when icon
-       [[:span {:data-bars-menu-item-icon true}
-         (item-icon-node icon)]])
-     [[:span text]])))
+    [[:span {:data-bars-menu-item-content true}
+      (when icon
+        [:span {:data-bars-menu-item-icon true}
+         (item-icon-node icon)])
+      [:span text]]]))
 
 (defn- dropdown-group-children
   [group]
