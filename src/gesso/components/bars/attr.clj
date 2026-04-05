@@ -122,3 +122,23 @@
            :data-bars-menu-item true
            :data-bars-mode (name mode)}
     current? (assoc :aria-current "page")))
+
+(defn bars-menu-trigger-attrs
+  [class]
+  {:class (class-names class)
+   :data-bars-menu-trigger true})
+
+(defn bars-menu-trigger-content-attrs
+  [class]
+  {:class (class-names "min-w-0" class)
+   :data-bars-menu-trigger-content true})
+
+(defn bars-menu-trigger-icon-attrs
+  [class]
+  {:class (class-names class)
+   :data-bars-menu-trigger-icon true})
+
+(defn bars-menu-trigger-chevron-attrs
+  [class]
+  {:class (class-names class)
+   :data-bars-menu-trigger-chevron true})
