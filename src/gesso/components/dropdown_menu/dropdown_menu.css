@@ -1,0 +1,3 @@
+[data-dropdown-item] [data-bars-menu-item-icon] {
+  margin-inline-end: var(--inline-gap);
+}

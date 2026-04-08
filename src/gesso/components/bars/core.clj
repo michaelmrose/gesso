@@ -16,30 +16,6 @@
 (def ^:private tiers
   [:default :md :sm])
 
-(defn- slugify
-  [x]
-  (let [s (some-> x str str/lower-case str/trim)]
-    (when (seq s)
-      (-> s
-          (str/replace #"\.svg$" "")
-          (str/replace #"[^a-z0-9]+" "-")
-          (str/replace #"(^-+|-+$)" "")))))
-
-(defn- ensure-vec
-  [x]
-  (cond
-    (nil? x) []
-    (vector? x) x
-    (sequential? x) (vec x)
-    :else [x]))
-
-(defn- normalize-keyword
-  [x]
-  (cond
-    (keyword? x) x
-    (string? x) (keyword x)
-    :else x))
-
 (defn- itemish?
   [x]
   (or (= :menu-item (:kind x))
@@ -60,22 +36,6 @@
            (not (contains? x :groups))
            (or (contains? x :items)
                (contains? x :heading)))))
-
-(defn- menuish?
-  [x]
-  (or (= :menu (:kind x))
-      (and (map? x)
-           (or (contains? x :groups)
-               (contains? x :label)
-               (contains? x :home-region)
-               (contains? x :category)
-               (contains? x :collapse-at)
-               (contains? x :overflow-target)
-               (contains? x :priority)))))
-
-(declare normalize-menu-item)
-(declare normalize-menu-group)
-(declare normalize-menu)
 
 (defn normalize-menu-item
   [x]
@@ -176,12 +136,12 @@
                :id id
                :label label
                :groups groups
-               :home-region (or (normalize-keyword (:home-region menu)) :center)
-               :category (or (normalize-keyword (:category menu))
-                             (normalize-keyword (:home-region menu))
+               :home-region (or (->keyword (:home-region menu)) :center)
+               :category (or (->keyword (:category menu))
+                             (->keyword (:home-region menu))
                              :navigation)
-               :collapse-at (normalize-keyword (:collapse-at menu))
-               :overflow-target (or (normalize-keyword (:overflow-target menu)) :hamburger)
+               :collapse-at (->keyword (:collapse-at menu))
+               :overflow-target (or (->keyword (:overflow-target menu)) :hamburger)
                :priority (or (:priority menu) 0))
         (update :attrs #(or % {})))))
 
@@ -277,20 +237,10 @@
   [menu]
   (reduce + 0 (map (comp count :items) (:groups menu))))
 
-(defn- show-topbar-menu-label?
-  [menu]
-  (let [groups (:groups menu)
-        group-count (count groups)
-        item-count  (count-menu-items menu)]
-    (and (seq (:label menu))
-         (or (> group-count 1)
-             (> item-count 1)
-             (some :heading groups)))))
-
 (defn- simple-topbar-menu?
   [menu]
-  (let [groups (:groups menu)
-        item-count (count-menu-items menu)
+  (let [groups        (:groups menu)
+        item-count    (count-menu-items menu)
         first-heading (get-in menu [:groups 0 :heading])]
     (and (= 1 (count groups))
          (= 1 item-count)
@@ -325,6 +275,14 @@
    (array-map)
    (sort-menus menus)))
 
+(defn- prepare-menus
+  [menus sidebar-collapse-at]
+  (->> menus
+       ensure-vec
+       (map normalize-menu)
+       (map #(attach-visibility % sidebar-collapse-at))
+       vec))
+
 ;; -----------------------------------------------------------------------------
 ;; Rendering helpers
 ;; -----------------------------------------------------------------------------
@@ -332,38 +290,21 @@
 (defn- render-menu-item
   [item mode]
   (let [{:keys [text href icon current? class attrs]} item
-        script    (when (= mode :hamburger)
-                    (bars-close-script))
-        attrs     (merge-script-attr attrs script)
-        content   (concat
-                   (when icon
-                     [[:span {:data-bars-menu-item-icon true}
-                       (item-icon-node icon)]])
-                   (nodes text))
-        defaults  (bars-menu-item-attrs mode current? class)
-        attrs     (if href
-                    attrs
-                    (merge {:type "button"} attrs))]
+        script   (when (= mode :hamburger)
+                   (bars-close-script))
+        attrs    (merge-script-attr attrs script)
+        content  (concat
+                  (when icon
+                    [[:span {:data-bars-menu-item-icon true}
+                      (item-icon-node icon)]])
+                  (nodes text))
+        defaults (bars-menu-item-attrs mode current? class)
+        attrs    (if href
+                   attrs
+                   (merge {:type "button"} attrs))]
     (if href
       (el :a defaults attrs content)
       (el :button defaults attrs content))))
-
-(defn- render-topbar-group
-  [group]
-  (let [{:keys [heading items class attrs]} group]
-    (el :div
-        (bars-menu-group-attrs :topbar class)
-        attrs
-        (concat
-         (when (seq heading)
-           [(el :span
-                (bars-menu-heading-attrs :topbar nil)
-                {}
-                (nodes heading))])
-         [(el :div
-              (bars-menu-items-attrs :topbar nil)
-              {}
-              (map #(render-menu-item % :topbar) items))]))))
 
 (defn- render-topbar-simple-menu
   [menu]
@@ -390,7 +331,6 @@
       (seq attrs) (assoc :attrs attrs)
       disabled? (assoc :disabled? true))))
 
-
 (defn- dropdown-item-children
   [item]
   (let [{:keys [text icon]} item]
@@ -414,7 +354,7 @@
 
 (defn- dropdown-content-children
   [menu]
-  (let [groups (:groups menu)
+  (let [groups   (:groups menu)
         last-idx (dec (count groups))]
     (mapcat
      (fn [idx group]
@@ -427,9 +367,9 @@
 
 (defn- dropdown-trigger-child
   [menu]
-  (let [label (menu-trigger-label menu)
+  (let [label        (menu-trigger-label menu)
         trigger-icon (:icon menu)
-        chevron (icon/icon "chevron-down" {:size :sm})]
+        chevron      (icon/icon "chevron-down" {:size :sm})]
     (el :span
         (bars-menu-trigger-content-attrs nil)
         {}
@@ -534,63 +474,68 @@
               [(category-label category)])]
          (map #(render-vertical-menu % :hamburger) menus)))))
 
+(defn- build-header-children
+  [brand left-menus center-menus right-menus]
+  (concat
+   [(el :div
+        (bars-brand-attrs nil)
+        {}
+        (nodes brand))]
+   [(el :nav
+        (bars-segment-attrs :leftmost nil)
+        {}
+        (map render-topbar-menu left-menus))]
+   [(el :nav
+        (bars-segment-attrs :center nil)
+        {}
+        (render-topbar-center-cluster center-menus))]
+   [(el :nav
+        (bars-segment-attrs :rightmost nil)
+        {}
+        (map render-topbar-menu right-menus))]
+   [(el :button
+        (bars-toggle-attrs nil)
+        (merge-script-attr {} (bars-toggle-script))
+        [[:span {:aria-hidden "true"} "☰"]
+         [:span "Menu"]])]))
+
+(defn- build-hamburger-children
+  [hamburger-groups]
+  [(el :div
+       (bars-hamburger-inner-attrs nil)
+       {}
+       (map render-hamburger-category hamburger-groups))])
+
+(defn- build-body-children
+  [sidebar-menus content-nodes]
+  [(el :aside
+       (bars-sidebar-attrs nil)
+       {}
+       (map #(render-vertical-menu % :sidebar) sidebar-menus))
+   (el :div
+       (bars-content-attrs nil)
+       {}
+       content-nodes)])
+
 (defn- bars-map-form
   [opts]
   (let [{:keys [props class attrs]} (split-opts opts)
         {:keys [brand menus sidebar-collapse-at content children]} props
         sidebar-collapse-at (or sidebar-collapse-at :medium)
-        menus (->> menus
-                   ensure-vec
-                   (map normalize-menu)
-                   (map #(attach-visibility % sidebar-collapse-at))
-                   vec)
-        left-menus (topbar-home-menus menus :leftmost)
-        center-menus (topbar-home-menus menus :center)
-        right-menus (topbar-home-menus menus :rightmost)
-        sidebar-menus (sidebar-home-menus menus)
-        hamburger-groups (ordered-hamburger-categories menus)
-        has-sidebar? (boolean (seq sidebar-menus))
-        has-hamburger-md? (boolean (some #(get-in % [:hamburger-visible :md]) menus))
-        has-hamburger-sm? (boolean (some #(get-in % [:hamburger-visible :sm]) menus))
-        root-attrs (merge-script-attr attrs (bars-root-script))
-        content-nodes (concat (nodes content) (nodes children))
-        header-children
-        (concat
-         [(el :div
-              (bars-brand-attrs nil)
-              {}
-              (nodes brand))]
-         [(el :nav
-              (bars-segment-attrs :leftmost nil)
-              {}
-              (map render-topbar-menu left-menus))]
-         [(el :nav
-              (bars-segment-attrs :center nil)
-              {}
-              (render-topbar-center-cluster center-menus))]
-         [(el :nav
-              (bars-segment-attrs :rightmost nil)
-              {}
-              (map render-topbar-menu right-menus))]
-         [(el :button
-              (bars-toggle-attrs nil)
-              (merge-script-attr {} (bars-toggle-script))
-              [[:span {:aria-hidden "true"} "☰"]
-               [:span "Menu"]])])
-        hamburger-children
-        [(el :div
-             (bars-hamburger-inner-attrs nil)
-             {}
-             (map render-hamburger-category hamburger-groups))]
-        body-children
-        [(el :aside
-             (bars-sidebar-attrs nil)
-             {}
-             (map #(render-vertical-menu % :sidebar) sidebar-menus))
-         (el :div
-             (bars-content-attrs nil)
-             {}
-             content-nodes)]]
+        menus               (prepare-menus menus sidebar-collapse-at)
+        left-menus          (topbar-home-menus menus :leftmost)
+        center-menus        (topbar-home-menus menus :center)
+        right-menus         (topbar-home-menus menus :rightmost)
+        sidebar-menus       (sidebar-home-menus menus)
+        hamburger-groups    (ordered-hamburger-categories menus)
+        has-sidebar?        (boolean (seq sidebar-menus))
+        has-hamburger-md?   (boolean (some #(get-in % [:hamburger-visible :md]) menus))
+        has-hamburger-sm?   (boolean (some #(get-in % [:hamburger-visible :sm]) menus))
+        root-attrs          (merge-script-attr attrs (bars-root-script))
+        content-nodes       (concat (nodes content) (nodes children))
+        header-children     (build-header-children brand left-menus center-menus right-menus)
+        hamburger-children  (build-hamburger-children hamburger-groups)
+        body-children       (build-body-children sidebar-menus content-nodes)]
     (el :div
         (bars-root-attrs class
                          {:has-sidebar? has-sidebar?
@@ -616,7 +561,7 @@
 (defn bars
   "Responsive navigation shell.
 
-  This first iteration owns:
+  This iteration owns:
 
   - topbar
   - optional sidebar

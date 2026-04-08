@@ -3,17 +3,45 @@
    [gesso.hyperscript :refer [hs]]))
 
 (defn bars-root-script
-  "Keeps hamburger state conservative and stable.
+  "Keeps hamburger state stable across true tier changes.
 
-   This first pass closes the hamburger on load and on any window resize. That
-   is stricter than the final breakpoint-only requirement, but it avoids mixed
-   responsive state while the component is still young."
+   Important mobile fix:
+   do not close on every resize. Mobile browsers often fire resize while
+   scrolling because the browser chrome changes height. We only close when the
+   semantic width tier actually changes.
+
+   Tiers are:
+   - default  => width >= 1025
+   - md       => 769..1024
+   - sm       => width <= 768"
   []
   (hs
    [:on :load
-    [[:set 'me.dataset.barsOpen "'false'"]]]
+    "if window.matchMedia('(max-width: 768px)').matches
+       set me.dataset.barsTier to 'sm'
+     else
+       if window.matchMedia('(max-width: 1024px)').matches
+         set me.dataset.barsTier to 'md'
+       else
+         set me.dataset.barsTier to 'default'
+       end
+     end"
+    "set me.dataset.barsOpen to 'false'"]
+
    [:on "resize from window"
-    [[:set 'me.dataset.barsOpen "'false'"]]]))
+    "set prevTier to me.dataset.barsTier"
+    "if window.matchMedia('(max-width: 768px)').matches
+       set me.dataset.barsTier to 'sm'
+     else
+       if window.matchMedia('(max-width: 1024px)').matches
+         set me.dataset.barsTier to 'md'
+       else
+         set me.dataset.barsTier to 'default'
+       end
+     end"
+    "if prevTier != me.dataset.barsTier
+       set me.dataset.barsOpen to 'false'
+     end"]))
 
 (defn bars-toggle-script
   "Toggle the root hamburger state."

@@ -1431,8 +1431,34 @@ html[data-shape~="soft"] {
   }
 }
 
+/* bar state transitions */
+[data-bars-segment="center"],
+[data-bars-segment="rightmost"],
+[data-bars-sidebar],
+[data-bars-hamburger-panel] {
+  transition:
+    opacity 180ms ease,
+    transform 180ms ease;
+}
 
-[data-dropdown-item] > [data-bars-menu-item-icon] {
+@media (max-width: 1024px) and (min-width: 769px) {
+  [data-bars-root][data-bars-has-hamburger-md="true"] [data-bars-segment="rightmost"] {
+    opacity: 0.5;
+    transform: translateX(0.4rem);
+  }
+}
+
+@media (max-width: 768px) {
+  [data-bars-root][data-bars-has-hamburger-sm="true"] [data-bars-segment="center"],
+  [data-bars-root][data-bars-has-hamburger-sm="true"] [data-bars-segment="rightmost"] {
+    opacity: 0.5;
+    transform: translateX(0.4rem);
+  }
+}
+
+
+/* component: dropdown_menu */
+[data-dropdown-item] [data-bars-menu-item-icon] {
   margin-inline-end: var(--inline-gap);
 }
 
