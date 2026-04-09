@@ -26,9 +26,13 @@
    [gesso.components.toolbar :as toolbar]
    [gesso.components.page :as page]
    [gesso.components.bars.core :as bars]
+   [gesso.components.background.core :as background]
    ))
 
 ;; public api
+
+;; background
+(def background background/background)
 
 ;; page
 (def page page/page)

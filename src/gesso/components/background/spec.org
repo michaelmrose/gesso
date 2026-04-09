@@ -1,0 +1,184 @@
+#+title: background specification
+
+* Purpose
+
+The background component provides a simple decorative background layer for a
+region, page section, hero, card wrapper, or other container.
+
+It is intentionally modest in scope.
+
+It does not define layout structure for the content placed above it.
+It only renders one or more absolutely positioned background layers.
+
+The expected usage pattern is:
+
+- parent container is position-relative
+- parent container often uses overflow-hidden
+- background is rendered first
+- foreground content is rendered above it with a higher stacking context
+
+* Core idea
+
+A background is usually easiest to author as a reusable style map.
+
+Example conceptually:
+
+- one named map for a dark orb grid
+- one named map for a light orb grid
+- optional shared base style shared by both
+
+This component exists to present those definitions consistently rather than
+forcing ad hoc wrapper markup each time.
+
+* Structural model
+
+The component renders:
+
+- background root
+  - one or more background layers
+
+The root is:
+
+- absolute
+- inset to all edges
+- non-interactive
+- decorative
+
+A background layer is also absolute and inset.
+
+The component does not wrap content.
+It is a background layer, not a layout container.
+
+* Supported authoring forms
+
+** simple background
+
+A single style map may be supplied.
+
+Example conceptually:
+
+- one map
+  - background
+  - background-image
+  - background-size
+
+This renders a single base layer.
+
+** themed background
+
+A map may be supplied with:
+
+- :light
+- :dark
+
+and optionally:
+
+- :base
+
+The :base map is merged into the light and dark layer styles.
+
+This allows common declarations such as:
+
+- background-size
+- background-position
+- background-repeat
+
+to be shared while the light and dark definitions vary in color or image.
+
+* Theme behavior
+
+For themed backgrounds, the component renders both light and dark layers.
+
+CSS decides which one is visible according to the active theme mode.
+
+This means the component cooperates with theme changes without requiring
+imperative client-side logic.
+
+The intended initial behavior is:
+
+- light layer visible by default
+- dark layer visible when html.dark is present
+
+This matches the existing theme model used elsewhere in Gesso.
+
+* Responsibilities
+
+The component is responsible for:
+
+- rendering decorative background layers
+- supporting simple and themed background definitions
+- staying non-interactive
+- staying independent from the content layout above it
+
+The component is not responsible for:
+
+- making a parent container relative
+- setting foreground text colors
+- choosing padding
+- choosing card surfaces
+- inferring whether a given pattern looks good in all themes
+
+* Accessibility
+
+Background is decorative.
+
+The root should be aria-hidden and should not capture pointer events.
+
+No semantic content should rely on this component for meaning.
+
+* Initial styling contract
+
+The root should:
+
+- fill the parent
+- sit behind content
+- ignore pointer events
+
+Each layer should:
+
+- fill the root
+- be selected by CSS based on theme mode when needed
+
+This keeps the component simple and predictable.
+
+* Usage guidance
+
+This component is best used with a wrapper like:
+
+- relative
+- isolate when helpful
+- overflow-hidden when the pattern should be clipped
+
+Foreground content should be placed in a container above the background, often
+with a higher stacking context.
+
+Typical usage targets include:
+
+- page demo regions
+- hero sections
+- marketing panels
+- decorative shells inside cards or full-width sections
+
+* Out of scope
+
+The following are intentionally out of scope for the first iteration:
+
+- animated backgrounds
+- parallax
+- imperative theme switching logic
+- content layout management
+- automatic generation of light variants from dark variants
+- arbitrary visual inference about which patterns suit which themes
+- a large preset catalog of built-in backgrounds
+
+* Summary
+
+The background component is a small primitive for decorative layer rendering.
+
+It prefers:
+
+- reusable style-map definitions
+- optional light/dark variants
+- CSS-driven theme selection
+- minimal markup
+- no unnecessary behavior or abstraction

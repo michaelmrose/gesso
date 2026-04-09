@@ -1029,6 +1029,32 @@ html[data-shape~="soft"] {
 }
 
 
+/* component: background */
+[data-background-root] {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+[data-background-root] > [data-background-layer] {
+  position: absolute;
+  inset: 0;
+}
+
+[data-background-root] > [data-background-layer="dark"] {
+  display: none;
+}
+
+html.dark [data-background-root] > [data-background-layer="light"] {
+  display: none;
+}
+
+html.dark [data-background-root] > [data-background-layer="dark"] {
+  display: block;
+}
+
+
 /* component: bars */
 /* bars component */
 
