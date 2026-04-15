@@ -1,0 +1,447 @@
+#+title: gesso.live.match
+#+author: OpenAI
+#+startup: overview
+
+* Overview
+
+=gesso.live.match= defines the generic matching contract for the live system.
+
+It owns:
+- the abstraction by which app-defined subscriptions are indexed
+- the abstraction by which app-defined changed values are turned into lookup keys
+- the generic candidate-selection flow
+- the optional exact confirmation step for candidates
+
+It does *not* own:
+- application/domain semantics
+- specific subscription kinds like request, store, org
+- XTDB query mechanics
+- transport framing
+- browser connection lifecycle
+
+This namespace is the boundary between:
+
+- reusable live-routing machinery in =gesso.live=
+and
+- application-specific meaning supplied by the app
+
+* Purpose
+
+The live system needs to answer:
+
+#+begin_quote
+Given a changed thing, which active subscribers should be notified?
+#+end_quote
+
+Gesso should not answer that by knowing the app’s domain.
+
+Instead, the app supplies a *matcher* that tells Gesso:
+
+- how subscriptions are indexed
+- how changed values produce candidate lookup keys
+- optionally how to confirm an exact match
+
+This namespace defines that contract.
+
+* Core Design
+
+The live system is based on:
+
+1. *Changed values*
+   A write publishes an opaque application-defined changed value.
+
+2. *Subscriptions*
+   A subscriber holds an opaque application-defined subscription value.
+
+3. *Matcher*
+   The app provides functions describing how subscriptions and changed values relate.
+
+4. *Indexes*
+   Gesso stores subscribers in indexes using matcher-derived entries.
+
+5. *Candidates and optional confirmation*
+   When a changed value arrives, Gesso uses matcher-derived keys to find candidate
+   subscribers and may optionally confirm them with an exact predicate.
+
+This lets Gesso provide routing machinery without knowing the application model.
+
+* Data Model
+
+** Subscription
+
+A subscription is opaque to Gesso.
+
+Examples of possible subscription values:
+
+#+begin_src clojure
+{:kind :request :id "req-123"}
+{:kind :store-active :id "store-7"}
+{:kind :custom/report :params {...}}
+#+end_src
+
+These are only examples.
+Gesso must not assume any particular shape.
+
+** Changed value
+
+A changed value is also opaque to Gesso.
+
+Examples:
+
+#+begin_src clojure
+{:entity/type :request
+ :entity/id "req-123"
+ :change/kind :updated}
+#+end_src
+
+or any other application-defined structure.
+
+Gesso only passes this value to matcher functions.
+
+** Index entry
+
+An index entry is the generic representation used to place subscribers into indexes.
+
+Required conceptual shape:
+
+#+begin_src clojure
+[index-name index-key]
+#+end_src
+
+Examples:
+
+#+begin_src clojure
+[:request "req-123"]
+[:store-active "store-7"]
+[:org-active "org-9"]
+#+end_src
+
+Gesso does not care what these mean.
+It only uses them to group subscribers.
+
+** Candidate entry
+
+A candidate entry is the same conceptual shape as an index entry:
+
+#+begin_src clojure
+[index-name index-key]
+#+end_src
+
+It represents one lookup Gesso should perform when a changed value arrives.
+
+If a changed value yields multiple entries, Gesso unions the subscriber sets found under them.
+
+** Subscriber
+
+A subscriber is runtime state.
+
+#+begin_src clojure
+{:subscriber/id sub-id
+ :subscription subscription
+ :send! (fn [event] ...)
+ :meta {...}}
+#+end_src
+
+Semantics:
+- =:subscriber/id= is node-local unique identity
+- =:subscription= is opaque app-defined subscription data
+- =:send!= delivers a normalized event
+- =:meta= is optional transport/debug info
+
+** Matcher
+
+A matcher is an app-supplied value providing the matching behavior.
+
+At minimum, it must conceptually supply:
+
+- subscription -> index entries
+- changed value -> candidate entries
+
+Optionally, it may also supply:
+- changed value + subscription -> exact match boolean
+
+A matcher may be implemented as:
+- a map of functions
+- a record
+- a protocol implementation
+- or another equivalent mechanism
+
+This namespace defines the required semantics, not the implementation style.
+
+* Matcher Contract
+
+A matcher must support these three operations conceptually.
+
+** =subscription->entries=
+
+Given one subscription, return the index entries under which a subscriber should be stored.
+
+Signature conceptually:
+
+#+begin_src clojure
+(subscription->entries matcher subscription) => vector-of-index-entries
+#+end_src
+
+Properties:
+- deterministic
+- derived only from the subscription
+- may return one or many entries
+- should be small and index-friendly
+
+Example only:
+
+#+begin_src clojure
+(subscription->entries matcher {:kind :request :id "req-123"})
+=> [[:request "req-123"]]
+#+end_src
+
+** =changed->entries=
+
+Given one changed value, return the candidate index entries Gesso should look up.
+
+Signature conceptually:
+
+#+begin_src clojure
+(changed->entries matcher ctx changed) => vector-of-index-entries
+#+end_src
+
+Properties:
+- deterministic for given ctx + changed
+- may consult current durable model facts through app code
+- may return one or many entries
+- should produce entries aligned with subscription entries
+
+Example only:
+
+#+begin_src clojure
+(changed->entries matcher ctx {:entity/type :request :entity/id "req-123"})
+=> [[:request "req-123"]
+    [:store-active "store-7"]]
+#+end_src
+
+This example is application-specific and shown only to illustrate the contract.
+
+** =matches?= (optional exact confirmation)
+
+Given a changed value and a subscription, decide whether the subscription truly matches.
+
+Signature conceptually:
+
+#+begin_src clojure
+(matches? matcher ctx changed subscription) => boolean
+#+end_src
+
+This is optional.
+
+Use cases:
+- candidate lookup is intentionally coarse
+- extra filtering is required
+- app wants a safety check after index lookup
+
+If omitted, the system may treat candidate lookup as sufficient.
+
+* Responsibilities of Gesso
+
+Given a matcher, Gesso is responsible for:
+
+1. storing subscribers in indexes using =subscription->entries=
+2. deriving candidate lookup entries using =changed->entries=
+3. retrieving candidate subscribers
+4. optionally confirming them via =matches?=
+5. returning or notifying the final matching subscriber set
+
+This is the reusable machinery.
+
+* Responsibilities of the Application
+
+The application is responsible for:
+
+- defining the subscription data shape
+- defining the changed value shape
+- defining subscription semantics
+- defining the matcher behavior
+- deciding which views are actually live
+- querying the durable model if needed to derive candidate entries
+
+This is where domain meaning belongs.
+
+* Recommended Runtime Index Shape
+
+Gesso should maintain indexes roughly like:
+
+#+begin_src clojure
+{index-name
+ {index-key #{subscriber-id ...}}}
+#+end_src
+
+Example shape only:
+
+#+begin_src clojure
+{:request
+ {"req-123" #{sub-1 sub-2}}
+
+ :store-active
+ {"store-7" #{sub-3}}}
+#+end_src
+
+This shape is generic because:
+- =index-name= is matcher-defined
+- =index-key= is matcher-defined
+
+Gesso does not need to know what either means.
+
+* Core Functions
+
+These are the semantic operations this namespace should define.
+
+** =index-entries=
+
+Return the index entries for a subscription.
+
+#+begin_src clojure
+(index-entries matcher subscription) => vector-of-index-entries
+#+end_src
+
+This is the public generic wrapper over the app-supplied matcher behavior.
+
+** =candidate-entries=
+
+Return the candidate lookup entries for a changed value.
+
+#+begin_src clojure
+(candidate-entries matcher ctx changed) => vector-of-index-entries
+#+end_src
+
+This is the public generic wrapper over app-supplied changed routing behavior.
+
+** =confirm-match?=
+
+Return whether a subscription truly matches a changed value.
+
+#+begin_src clojure
+(confirm-match? matcher ctx changed subscription) => boolean
+#+end_src
+
+Rules:
+- if matcher provides exact confirmation, use it
+- otherwise default to true for candidate subscribers
+
+** =candidate-subscriber-ids=
+
+Use candidate entries and indexes to gather candidate subscriber ids.
+
+#+begin_src clojure
+(candidate-subscriber-ids indexes entries) => #{subscriber-id ...}
+#+end_src
+
+Behavior:
+- for each entry = [index-name index-key]
+- look up subscriber ids in the corresponding index
+- union all results
+
+** =matching-subscriber-ids=
+
+Full matching pipeline.
+
+#+begin_src clojure
+(matching-subscriber-ids {:matcher matcher
+                          :indexes indexes
+                          :subscribers subscribers
+                          :ctx ctx
+                          :changed changed})
+=> #{subscriber-id ...}
+#+end_src
+
+Behavior:
+1. derive candidate entries from =changed=
+2. gather candidate subscriber ids from indexes
+3. if exact confirmation exists, filter candidates through it
+4. return final matching subscriber ids
+
+This is the central hot-path semantic function.
+
+** =index-subscription=
+
+Add one subscriber to indexes according to matcher-derived entries.
+
+#+begin_src clojure
+(index-subscription indexes matcher subscriber) => indexes'
+#+end_src
+
+Behavior:
+- derive entries from =subscriber.subscription=
+- assoc subscriber id under each entry
+
+** =unindex-subscription=
+
+Remove one subscriber from indexes according to matcher-derived entries.
+
+#+begin_src clojure
+(unindex-subscription indexes matcher subscriber) => indexes'
+#+end_src
+
+* Extension Model
+
+This design supports extension without rewriting Gesso itself.
+
+** New application semantics
+
+An app can add new subscription kinds simply by changing its matcher.
+
+Gesso does not need to change.
+
+** New transport
+
+SSE or WebSockets do not affect this namespace.
+
+This namespace only outputs matching subscriber ids.
+
+** New consistency backend
+
+XTDB or another backend do not affect this namespace directly.
+Only app matcher code may use current durable facts differently.
+
+* Non-Goals
+
+This namespace should not:
+- define app-specific subscription kinds
+- define app-specific routing hierarchy
+- assume every query is live
+- require writes to enumerate every affected scope
+- become a generic graph query engine
+
+* Design Notes
+
+- This namespace is where Gesso becomes reusable.
+- The matcher contract is the real abstraction boundary.
+- The simpler and more explicit the matcher interface remains, the easier the system will be to test and extend.
+- If there is uncertainty about protocols vs maps-of-fns, the spec should stay semantic and not force the implementation choice too early.
+
+* Example, Purely Illustrative
+
+This example is *illustrative only* and does not belong to Gesso semantics.
+
+A hypothetical matcher might map:
+
+- subscription = {:kind :request :id "req-123"}
+  to entry = [[:request "req-123"]]
+
+and changed value = {:entity/type :request :entity/id "req-123"}
+  to candidate entries = [[:request "req-123"] [:store-active "store-7"]]
+
+Gesso does not care why.
+It only knows:
+- subscriptions are indexed under entries
+- changed values produce candidate entries
+- matching proceeds through those entries
+
+* Summary
+
+=gesso.live.match= should not encode domain meaning.
+
+It should define the reusable contract by which:
+- apps describe how subscriptions are indexed
+- apps describe how changed values produce lookup candidates
+- Gesso uses those descriptions to maintain indexes and find subscribers
+
+That is the right reusable center for =gesso.live=.

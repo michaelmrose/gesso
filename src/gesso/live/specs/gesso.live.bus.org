@@ -1,0 +1,430 @@
+#+title: gesso.live.bus
+#+author: OpenAI
+#+startup: overview
+
+* Overview
+
+=gesso.live.bus= owns the node-local runtime state for active live subscribers.
+
+It is responsible for:
+- holding active subscribers currently connected to this node
+- maintaining indexes derived from subscriptions via the matcher
+- accepting normalized changed-entity events
+- asking the matcher which subscribers are candidates/matches
+- delivering events to the matched local subscribers
+
+It is *not* responsible for:
+- application/domain semantics
+- transport framing
+- XTDB query or transaction logic
+- cross-node distribution
+- browser-side reconnect behavior
+
+This namespace is the local in-memory routing engine.
+
+* Purpose
+
+A changed event arrives on a node.
+
+The bus must answer:
+
+#+begin_quote
+Which subscribers connected to *this node right now* should receive this event?
+#+end_quote
+
+To do that, it combines:
+- subscriber registry
+- matcher-derived indexes
+- matcher-based candidate/match logic
+
+This is ephemeral runtime state, not durable truth.
+
+* Core Design
+
+The bus is built around three structures:
+
+1. *Subscribers*
+   The active subscriber registry.
+
+2. *Indexes*
+   Matcher-derived index structures used for candidate lookup.
+
+3. *Matcher*
+   The app-supplied matching behavior.
+
+The bus does not itself know what subscriptions mean.
+It only knows how to:
+- store them
+- index them
+- route events through the matcher
+
+* Data Model
+
+** Subscriber
+
+A subscriber is runtime state for one active listener.
+
+#+begin_src clojure
+{:subscriber/id sub-id
+ :subscription subscription
+ :send! (fn [event] ...)
+ :meta {:transport :sse
+        :connected-at ...}}
+#+end_src
+
+Semantics:
+- =:subscriber/id= is unique on this node
+- =:subscription= is opaque application-defined subscription data
+- =:send!= is the function that delivers a normalized live event
+- =:meta= is optional runtime metadata
+
+The subscription shape itself is defined by the app, not by Gesso.
+
+** Event
+
+The bus expects normalized changed-entity events.
+
+#+begin_src clojure
+{:event "live-update"
+ :changed changed
+ :consistency-token token
+ :data data}
+#+end_src
+
+Where =changed= is opaque to the bus and interpreted only through the matcher.
+
+** Bus state
+
+A real bus instance should conceptually contain:
+
+#+begin_src clojure
+{:matcher matcher
+ :subscribers (atom {sub-id subscriber})
+ :indexes (atom indexes)}
+#+end_src
+
+Where:
+- =matcher= is the app-supplied matching implementation
+- =subscribers= is the local active subscriber registry
+- =indexes= is the matcher-derived index structure
+
+The exact concrete representation may vary, but these are the semantic pieces.
+
+** Indexes
+
+The bus stores indexes in the generic matcher-driven shape.
+
+Recommended conceptual shape:
+
+#+begin_src clojure
+{index-name
+ {index-key #{subscriber-id ...}}}
+#+end_src
+
+Example shape only:
+
+#+begin_src clojure
+{:request
+ {"req-123" #{sub-1 sub-2}}
+
+ :store-active
+ {"store-7" #{sub-3}}}
+#+end_src
+
+The bus treats these as opaque matcher-compatible buckets.
+
+* Functions
+
+** =bus-from-ctx=
+
+Resolve the live bus from request/app context.
+
+#+begin_src clojure
+(bus-from-ctx ctx) => live-bus
+#+end_src
+
+Initial expectation:
+- bus is stored at =:gesso.live/bus=
+
+This is intentionally small and conventional.
+
+** =empty-state=
+
+Construct an empty bus state map.
+
+#+begin_src clojure
+(empty-state matcher) => bus
+#+end_src
+
+Expected conceptual contents:
+
+#+begin_src clojure
+{:matcher matcher
+ :subscribers (atom {})
+ :indexes (atom {})}
+#+end_src
+
+This is the preferred starting point for a real in-memory bus.
+
+** =memory-bus=
+
+Construct a simple in-memory bus.
+
+#+begin_src clojure
+(memory-bus matcher) => bus
+#+end_src
+
+Behavior:
+- create empty runtime state
+- usable in REPL/tests/dev
+
+This should be the normal first real implementation, not just a fake event log.
+
+** =subscriber=
+
+Build a normalized subscriber map.
+
+#+begin_src clojure
+(subscriber {:subscriber/id ...
+             :subscription ...
+             :send! ...
+             :meta ...})
+=> subscriber-map
+#+end_src
+
+This is optional but useful as a constructor/normalizer.
+
+** =subscribe!=
+
+Register one subscriber with the bus and index it.
+
+#+begin_src clojure
+(subscribe! live-bus subscriber) => subscriber-id-or-subscriber
+#+end_src
+
+Behavior:
+1. validate/normalize subscriber
+2. add subscriber to =:subscribers=
+3. derive index entries via =gesso.live.match/index-entries=
+4. add subscriber id under each derived index entry
+5. return subscriber identity or subscriber
+
+This is the primary subscription entrypoint.
+
+** =unsubscribe!=
+
+Remove one subscriber from the bus and unindex it.
+
+#+begin_src clojure
+(unsubscribe! live-bus subscriber-id) => nil-or-removed-subscriber
+#+end_src
+
+Behavior:
+1. find subscriber in registry
+2. derive index entries via matcher
+3. remove subscriber id from those indexes
+4. remove subscriber from registry
+
+This should be safe to call on disconnect or reconnect cleanup.
+
+** =replace-subscription!=
+
+Replace the subscription for an existing subscriber.
+
+#+begin_src clojure
+(replace-subscription! live-bus subscriber-id new-subscription)
+=> updated-subscriber-or-nil
+#+end_src
+
+Behavior:
+1. unindex old subscription
+2. update subscriber record
+3. reindex new subscription
+
+This is useful if a transport supports subscription changes without reconnect.
+
+If not needed initially, it may be deferred.
+
+** =candidate-subscriber-ids=
+
+Return candidate subscriber ids for a changed event using indexes and matcher.
+
+#+begin_src clojure
+(candidate-subscriber-ids live-bus ctx changed) => #{sub-id ...}
+#+end_src
+
+Behavior:
+1. ask matcher for candidate entries from changed value
+2. look up subscriber ids in indexes for each entry
+3. union results
+
+This is a lower-level helper.
+
+** =matching-subscriber-ids=
+
+Return final matching subscriber ids for a changed event.
+
+#+begin_src clojure
+(matching-subscriber-ids live-bus ctx changed) => #{sub-id ...}
+#+end_src
+
+Behavior:
+1. gather candidate subscriber ids
+2. if matcher has exact confirmation, filter candidates
+3. return final set
+
+This is the central routing function.
+
+** =notify-subscribers!=
+
+Deliver an event to a set of subscriber ids.
+
+#+begin_src clojure
+(notify-subscribers! live-bus subscriber-ids event) => summary
+#+end_src
+
+Behavior:
+- look up subscribers
+- call each =:send!= function once
+- optionally collect delivery summary/errors
+
+The exact summary shape can stay simple initially.
+
+** =publish!=
+
+Publish a normalized event into the bus.
+
+#+begin_src clojure
+(publish! live-bus event) => summary
+#+end_src
+
+Behavior:
+1. extract =changed= from event
+2. compute matching subscriber ids
+3. notify matched subscribers
+4. return summary
+
+This is the primary runtime publication entrypoint used by =gesso.live.core=.
+
+** =subscribers-snapshot=
+
+Return a stable snapshot of current subscribers.
+
+#+begin_src clojure
+(subscribers-snapshot live-bus) => {sub-id subscriber ...}
+#+end_src
+
+Useful for:
+- debugging
+- tests
+- inspection
+
+** =indexes-snapshot=
+
+Return a stable snapshot of current indexes.
+
+#+begin_src clojure
+(indexes-snapshot live-bus) => indexes
+#+end_src
+
+Useful for:
+- debugging
+- tests
+- reasoning about matcher/index behavior
+
+* Suggested Delivery Summary
+
+A useful simple return shape for =publish!= and/or =notify-subscribers!= is:
+
+#+begin_src clojure
+{:matched-subscriber-ids #{...}
+ :delivered-count 3
+ :errors []}
+#+end_src
+
+This keeps operations inspectable without forcing too much ceremony.
+
+* Error Handling
+
+Initial expectations:
+- one subscriber delivery failure should not abort all others
+- errors should be captured in the returned summary where practical
+- badly broken subscribers may later be unsubscribed by transport logic, but that is not required in the first implementation
+
+The bus should stay robust and boring.
+
+* Relationship to the Matcher
+
+The bus depends on =gesso.live.match= for semantics.
+
+The bus should call matcher functions for:
+- deriving index entries from subscriptions
+- deriving candidate entries from changed values
+- optionally confirming exact matches
+
+The bus must *not* embed application-specific routing rules itself.
+
+* Relationship to Transport
+
+The bus only calls =:send!= on subscribers.
+
+It should not know:
+- whether =:send!= ultimately writes SSE
+- whether it writes to a WebSocket
+- whether it stages a reconnect message
+
+That is the transport layer’s concern.
+
+* Relationship to Cross-Node Distribution
+
+This bus is node-local only.
+
+Cross-node distribution should happen outside this namespace, typically by:
+
+1. a write committing durable truth
+2. a shared app-level event bus broadcasting the changed event
+3. each web node receiving that changed event
+4. each node running its *local* bus to notify its own subscribers
+
+This namespace should never pretend subscriber state is globally shared.
+
+* Recommended First Implementation
+
+The first implementation should support only:
+
+- in-memory subscriber registry
+- in-memory matcher-derived indexes
+- subscribe/unsubscribe
+- publish via matcher-based lookup
+- simple delivery summary
+
+That is enough for:
+- REPL development
+- single-node correctness
+- later cross-node layering without redesign
+
+* Non-Goals
+
+This namespace should not:
+- store durable subscriptions in XTDB
+- understand the app’s entity graph directly
+- accept “affected scopes” from writes as its primary semantic input
+- become a shared distributed message broker
+- own browser reconnection policy
+
+* Design Notes
+
+- The bus is where node-local ephemeral state lives.
+- The matcher is where meaning lives.
+- The transport is where bytes go out.
+- Keeping those separate is the main architectural goal.
+
+* Summary
+
+=gesso.live.bus= is the local runtime engine that:
+- stores active subscribers
+- maintains matcher-derived indexes
+- routes normalized changed events to matching local subscribers
+- and does so without knowing the application’s semantics itself
+
+That makes it the right reusable substrate for =gesso.live=.

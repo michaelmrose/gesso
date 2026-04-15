@@ -1,0 +1,445 @@
+#+title: gesso.live.consistency.xtdb
+#+author: OpenAI
+#+startup: overview
+
+* Overview
+
+=gesso.live.consistency.xtdb= adapts XTDB 2 to the generic =gesso.live= system.
+
+It owns:
+- locating the XTDB node/client in application context
+- submitting writes to XTDB 2
+- extracting a generic live =consistency-token= from XTDB 2 results
+- attaching that token to later XTDB 2 reads
+- exposing a small, boring XTDB-2-specific surface for the live stack
+
+It does *not* own:
+- application/domain subscription semantics
+- subscriber matching
+- transport framing
+- browser connection lifecycle
+- application-specific routing logic
+
+This namespace should stay XTDB-2-shaped, explicit, and small.
+
+* Purpose
+
+The generic live system needs two things from a consistency backend:
+
+1. A way to turn a committed write into an opaque =consistency-token=.
+2. A way to use that token so later reads are fresh enough.
+
+For XTDB 2, that means:
+- submit a tx
+- obtain an XTDB 2 token suitable for later read freshness
+- propagate that token with the live event
+- apply that token to later XTDB 2 reads
+
+This namespace translates XTDB 2 behavior into that generic contract.
+
+* Why This Namespace Exists
+
+XTDB 2 provides the important consistency primitive directly:
+- an =await-token= can be supplied on reads so that the query waits until the node has indexed far enough
+
+This matters especially when:
+- a write may happen through one server/client
+- a later read may happen through another server/client
+
+This namespace exists so the rest of =gesso.live= can talk about a generic
+=consistency-token= while XTDB-2-specific token handling remains isolated here.
+
+* Core Design
+
+This namespace should answer only:
+
+#+begin_quote
+How does XTDB 2 produce and consume the token needed for read-after-write correctness in the live system?
+#+end_quote
+
+It should not become:
+- a routing engine
+- an app data access layer
+- a place where application subscription meaning leaks in
+
+* XTDB 2 Orientation
+
+This namespace is specifically oriented toward XTDB 2’s current model:
+
+- query execution is expected to be XTQL or SQL, as supported by XTDB 2
+- read freshness is expressed via =await-token=
+- the generic live system sees only =consistency-token=
+
+The exact query shapes belong to application code and XTDB 2 itself.
+This namespace only concerns itself with the token plumbing around those reads/writes.
+
+* Data Model
+
+** XTDB node/client
+
+The XTDB 2 node/client is resolved from request/app context.
+
+Initial assumption:
+
+#+begin_src clojure
+(:biff/node ctx)
+#+end_src
+
+This should stay isolated in one helper so the rest of the namespace does not care where the XTDB handle comes from.
+
+** Changed event input
+
+The live system publishes normalized changed-entity events of the form:
+
+#+begin_src clojure
+{:event "live-update"
+ :changed changed
+ :consistency-token token
+ :data data}
+#+end_src
+
+This namespace is concerned with producing the =consistency-token= part.
+
+** XTDB 2 tx result
+
+This namespace assumes XTDB 2 transaction submission returns a result map
+from which a token can be extracted.
+
+Current expected shape is conceptually:
+
+#+begin_src clojure
+{:await-token some-token}
+#+end_src
+
+That token is exposed outward as:
+
+#+begin_src clojure
+:consistency-token
+#+end_src
+
+The rest of the live system should not depend on XTDB 2’s field naming.
+
+** Consistency token
+
+At the generic live layer, the token is opaque.
+
+For XTDB 2, the token is whatever value this namespace extracts from tx submission and later attaches to XTDB 2 read opts as =await-token=.
+
+This namespace should be the only place that knows:
+- XTDB 2’s field name
+- XTDB 2’s read option name
+
+** Submit options
+
+Public XTDB 2 submit helper accepts:
+
+#+begin_src clojure
+{:tx tx-ops
+ :changed {:entity/type :request
+           :entity/id "req-123"
+           :change/kind :updated}
+ :event "live-update"
+ :data {:reason :request-updated}}
+#+end_src
+
+Semantics:
+- =:tx= is required
+- =:changed= is required
+- =:event= is optional
+- =:data= is optional metadata attached to the live event
+
+The important point is that this namespace accepts =:changed=, not =:affects=.
+
+** Submit result
+
+The submit helper returns:
+
+#+begin_src clojure
+{:tx-result ...
+ :consistency-token ...
+ :published ...}
+#+end_src
+
+Semantics:
+- =:tx-result= is the raw XTDB 2 submission result
+- =:consistency-token= is the extracted generic live token
+- =:published= is the normalized event returned by =gesso.live.core/publish-change!=
+
+** Read opts
+
+XTDB 2 read opts are treated as normal read opts plus optional propagated token.
+
+Conceptually:
+
+#+begin_src clojure
+{:await-token some-token}
+#+end_src
+
+This namespace is responsible for placing the token in the XTDB-2-expected location.
+
+* Functions
+
+** =node-from-ctx=
+
+Resolve the XTDB 2 node/client from ctx.
+
+#+begin_src clojure
+(node-from-ctx ctx) => xtdb-handle
+#+end_src
+
+Responsibilities:
+- centralize XTDB handle lookup
+- keep Biff/app assumptions out of the rest of the namespace
+
+Initial behavior:
+- return =(:biff/node ctx)=
+
+** =submit-tx-raw!=
+
+Submit raw XTDB 2 tx operations.
+
+#+begin_src clojure
+(submit-tx-raw! node tx) => tx-result
+#+end_src
+
+Responsibilities:
+- be the smallest possible wrapper around XTDB 2 tx submit
+- not know about live publication
+- not know about subscriptions or routing
+
+This function should remain easy to mock.
+
+** =extract-consistency-token=
+
+Extract the generic live token from an XTDB 2 tx result.
+
+#+begin_src clojure
+(extract-consistency-token tx-result) => token-or-nil
+#+end_src
+
+Initial mapping:
+- =(:await-token tx-result)=
+
+This function exists so the rest of the namespace can speak in generic live vocabulary.
+
+** =with-consistency-token=
+
+Attach a generic live token to XTDB 2 read opts.
+
+#+begin_src clojure
+(with-consistency-token opts consistency-token) => opts'
+#+end_src
+
+Behavior:
+- if token is absent, return opts unchanged or normalized
+- if token is present, assoc XTDB 2’s expected read option
+- accept nil opts and treat them as empty opts
+
+Example:
+
+#+begin_src clojure
+(with-consistency-token nil [:tx 1])
+=> {:await-token [:tx 1]}
+#+end_src
+
+** =q-raw=
+
+Execute a raw XTDB 2 read.
+
+#+begin_src clojure
+(q-raw node query opts) => result
+#+end_src
+
+Responsibilities:
+- be the smallest possible XTDB 2 read wrapper
+- not know about ctx
+- not know about live publication
+- not know about subscriber matching
+
+This function is intentionally generic over “query” so application code can pass XTQL/SQL-oriented values as appropriate.
+
+** =q=
+
+Execute a live-consistent XTDB 2 read.
+
+#+begin_src clojure
+(q ctx query) => result
+(q ctx query opts) => result
+#+end_src
+
+Behavior:
+1. resolve XTDB handle from ctx
+2. resolve the propagated token via =gesso.live.core/current-consistency-token=
+3. attach token to read opts via =with-consistency-token=
+4. execute =q-raw=
+
+This is the normal read-side helper for XTDB-2-backed live views.
+
+** =submit-tx!=
+
+Submit a tx and publish the corresponding changed-entity live event.
+
+#+begin_src clojure
+(submit-tx! ctx {:tx tx
+                 :changed {:entity/type :request
+                           :entity/id "req-123"
+                           :change/kind :updated}
+                 :event "live-update"
+                 :data {:reason :request-updated}})
+=> {:tx-result ...
+    :consistency-token ...
+    :published ...}
+#+end_src
+
+Behavior:
+1. resolve XTDB handle from ctx
+2. submit raw tx
+3. extract consistency token from tx result
+4. call =gesso.live.core/publish-change!= with:
+   - =:changed=
+   - =:event=
+   - =:consistency-token=
+   - =:data=
+5. return all three results
+
+This is the primary XTDB 2 write-side entrypoint for the live system.
+
+** =with-consistency=
+
+Provide token access to custom XTDB 2 read logic.
+
+#+begin_src clojure
+(with-consistency ctx f) => result
+#+end_src
+
+Calls =f= with:
+
+#+begin_src clojure
+{:consistency-token token}
+#+end_src
+
+Use when:
+- caller wants multiple XTDB 2 operations under one custom flow
+- caller does not want to use =q= directly
+- caller wants direct token access
+
+* Example Write Flow
+
+1. Application code decides what changed.
+
+#+begin_src clojure
+{:entity/type :request
+ :entity/id "req-123"
+ :change/kind :updated}
+#+end_src
+
+2. Application code calls:
+
+#+begin_src clojure
+(submit-tx! ctx
+  {:tx [[:put-docs :request {:request/id "req-123"
+                             :request/status :open}]]
+   :changed {:entity/type :request
+             :entity/id "req-123"
+             :change/kind :updated}
+   :data {:reason :request-updated}})
+#+end_src
+
+3. XTDB 2 returns a tx result.
+4. This namespace extracts a =consistency-token= from that result.
+5. This namespace publishes the changed-entity event through =gesso.live.core=.
+6. The bus, matcher, and transport layers take over.
+
+* Example Read Flow
+
+1. Browser later refreshes a fragment and includes the propagated token.
+2. Application code calls:
+
+#+begin_src clojure
+(q ctx some-xtdb2-query some-opts)
+#+end_src
+
+3. This namespace extracts the propagated token from request context through core.
+4. This namespace attaches it to XTDB 2 read opts as =await-token=.
+5. The XTDB 2 read executes with the desired freshness constraint.
+
+* Mocking Guidance
+
+This namespace should remain trivial to mock.
+
+A minimal mock XTDB handle may provide functions like:
+
+#+begin_src clojure
+{:submit-tx! (fn [tx] {:tx tx :await-token [:tx 1]})
+ :q (fn [query opts] {:query query :opts opts})}
+#+end_src
+
+That should be enough to exercise:
+- =submit-tx-raw!=
+- =extract-consistency-token=
+- =q-raw=
+- =submit-tx!=
+- =q=
+
+without a real XTDB 2 instance.
+
+* Non-Goals
+
+This namespace should not:
+- define subscription kinds
+- derive application routing hierarchy
+- discover graph relationships
+- decide which subscribers match a changed entity
+- frame SSE or WebSocket messages
+- own cross-node event distribution
+
+It is a consistency adapter, not the whole live system.
+
+* Relationship to the Rest of the System
+
+** To =gesso.live.core=
+
+This namespace depends on core for:
+- reading the currently propagated token
+- publishing normalized changed-entity events
+
+Core remains generic.
+This namespace is the XTDB 2 adapter.
+
+** To =gesso.live.match=
+
+This namespace should not depend directly on match semantics.
+
+It publishes a changed value.
+The matcher later decides who cares.
+
+** To =gesso.live.bus=
+
+This namespace does not talk to the bus directly except through core publication.
+
+That separation is intentional.
+
+* Design Notes
+
+- XTDB-2-specific names like =:await-token= should stay trapped here.
+- The rest of the system should speak in terms of =consistency-token=.
+- If another backend is added later, it should live in a sibling namespace.
+- This namespace should remain boring and explicit.
+- Query shape examples should remain XTDB-2-compatible in spirit, not drift into older query styles.
+
+* Summary
+
+=gesso.live.consistency.xtdb= is the XTDB 2 adapter for the live system.
+
+It:
+- submits writes
+- extracts a generic token from XTDB 2 results
+- applies that token to later XTDB 2 reads
+- publishes changed-entity events with that token attached
+
+It does not:
+- define meaning
+- route subscribers
+- encode app semantics
+
+That is exactly why it belongs here.

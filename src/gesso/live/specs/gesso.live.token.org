@@ -1,0 +1,330 @@
+#+title: gesso.live.token
+#+author: OpenAI
+#+startup: overview
+
+* Overview
+
+=gesso.live.token= owns the request/response-side handling of the live system's
+opaque consistency token.
+
+It is responsible for:
+- defining how the token is read from incoming request context
+- defining small helpers for attaching or clearing the token on request/response-shaped maps
+- remaining completely ignorant of token semantics
+
+It is *not* responsible for:
+- generating the token from a backend write
+- interpreting the token's meaning
+- deciding who should be notified
+- browser-side script behavior
+- HTMX attr generation
+- transport framing
+
+This namespace is deliberately tiny. Its job is to make token plumbing boring.
+
+* Purpose
+
+The live system needs one stable, reusable place that answers:
+
+#+begin_quote
+Where does the current consistency token live in request context, and how do we read or attach it without leaking backend-specific assumptions everywhere?
+#+end_quote
+
+That is all this namespace should do.
+
+* Core Design
+
+The token is treated as:
+- opaque
+- optional
+- pass-through only
+
+This namespace must not know:
+- whether the token came from XTDB, Postgres, or anything else
+- whether the token is a vector, map, string, integer, UUID, or something stranger
+- whether the token encodes ordering, replay position, or basis information
+
+It only knows:
+- the stable request header name
+- the fallback parameter key
+- how to move the token in and out of request-shaped maps
+
+* Data Model
+
+** Token
+
+A token is an opaque value.
+
+Illustrative examples only:
+
+#+begin_src clojure
+[:tx 1024]
+"0001024"
+{:lsn "0/16B6A30"}
+42
+#+end_src
+
+These examples are not normative. The token may be any value acceptable to the backend-specific consistency adapter.
+
+** Request context
+
+This namespace assumes a Ring/Biff-like request map embedded in =ctx= or serving as =ctx= itself.
+
+Relevant locations are:
+
+*** Headers
+
+#+begin_src clojure
+[:headers "x-gesso-live-consistency-token"]
+#+end_src
+
+*** Params fallback
+
+#+begin_src clojure
+[:params :consistency-token]
+#+end_src
+
+The fallback param is useful for debugging, manual requests, or transitional transport situations, but the primary mechanism should be the header.
+
+** Header name
+
+The canonical header name should match =gesso.live.htmx/token-header-name=.
+
+For the initial design:
+
+#+begin_src text
+x-gesso-live-consistency-token
+#+end_src
+
+This namespace should not invent a different header name.
+
+* Functions
+
+** =header-name=
+
+Return the canonical request header used for the token.
+
+#+begin_src clojure
+(header-name) => "x-gesso-live-consistency-token"
+#+end_src
+
+This may delegate to =gesso.live.htmx/token-header-name= or be the canonical definition that other namespaces follow.
+
+The important thing is consistency.
+
+** =param-key=
+
+Return the fallback request param key for the token.
+
+#+begin_src clojure
+(param-key) => :consistency-token
+#+end_src
+
+This should remain stable and simple.
+
+** =extract-request-token=
+
+Read the current propagated token from request context.
+
+#+begin_src clojure
+(extract-request-token ctx) => token-or-nil
+#+end_src
+
+Lookup order:
+1. request header named by =header-name=
+2. request param named by =param-key=
+
+Behavior:
+- if both are absent, return nil
+- do not interpret or transform the token
+- do not coerce types unless a future explicit normalization step is added
+
+This is the primary read-side helper used by =gesso.live.core=.
+
+** =request-token-present?=
+
+Predicate for whether a request carries a token.
+
+#+begin_src clojure
+(request-token-present? ctx) => boolean
+#+end_src
+
+Equivalent to truthiness of =extract-request-token=, but useful as a named helper.
+
+** =assoc-request-token=
+
+Attach a token to a request-shaped map using the canonical header.
+
+#+begin_src clojure
+(assoc-request-token request token) => request'
+#+end_src
+
+Behavior:
+- if token is nil, request may be returned unchanged or with explicit nil omitted
+- otherwise assoc token under the canonical header name in =:headers=
+
+Example:
+
+#+begin_src clojure
+(assoc-request-token {:headers {}} [:tx 5])
+=> {:headers {"x-gesso-live-consistency-token" [:tx 5]}}
+#+end_src
+
+This is useful for tests and explicit request construction.
+
+** =dissoc-request-token=
+
+Remove the canonical token from a request-shaped map.
+
+#+begin_src clojure
+(dissoc-request-token request) => request'
+#+end_src
+
+Behavior:
+- remove header form
+- optionally remove fallback param form if present
+
+Useful for tests and cleanup.
+
+** =token->event-payload= (optional)
+
+Return the token payload as it should appear in a normalized live event payload.
+
+#+begin_src clojure
+(token->event-payload token) => token
+#+end_src
+
+Initially this is probably identity and may not even be needed.
+Only keep it if it helps centralize token opacity.
+
+** =normalize-token= (optional, probably deferred)
+
+#+begin_src clojure
+(normalize-token token) => token'
+#+end_src
+
+Only add this if a real backend or transport need appears.
+The default design should avoid inventing token semantics prematurely.
+
+* Recommended Behavior
+
+This namespace should prefer:
+- no coercion
+- no decoding
+- no semantic interpretation
+- no validation beyond existence checks
+
+The less this namespace "knows," the better.
+
+* Relationship to =gesso.live.core=
+
+Core should use this namespace for:
+- =current-consistency-token=
+- request token presence checks
+
+Core should not read raw headers directly.
+
+* Relationship to =gesso.live.htmx=
+
+The HTMX/browser layer defines how the browser places the token on outgoing requests.
+
+This namespace defines how the server-side request plumbing reads it back.
+
+So the shared contract is:
+- same header name
+- same token opacity
+
+This namespace should not know anything about HTMX triggers or fragment attrs.
+
+* Relationship to Backend-Specific Consistency Adapters
+
+Backends such as XTDB:
+- generate the token
+- consume the token in reads
+
+This namespace only passes the token through request context.
+
+That separation is important:
+- backend namespace owns token meaning
+- =gesso.live.token= owns token plumbing
+
+* Relationship to Transport
+
+This namespace should not know:
+- whether the token arrived because of SSE, WS, polling, or some other mechanism
+
+It only knows that the request now contains a token.
+
+That is exactly the right level of abstraction.
+
+* Recommended First Implementation
+
+The first implementation should include only:
+
+- =header-name=
+- =param-key=
+- =extract-request-token=
+- =request-token-present?=
+- =assoc-request-token=
+- =dissoc-request-token=
+
+Anything beyond that should wait for a concrete need.
+
+* Example Usage
+
+** Extract from ctx
+
+#+begin_src clojure
+(extract-request-token
+ {:headers {"x-gesso-live-consistency-token" [:tx 9]}})
+=> [:tx 9]
+#+end_src
+
+** Fallback param
+
+#+begin_src clojure
+(extract-request-token
+ {:params {:consistency-token [:tx 9]}})
+=> [:tx 9]
+#+end_src
+
+** Attach for a test request
+
+#+begin_src clojure
+(assoc-request-token {:headers {}} [:tx 9])
+=> {:headers {"x-gesso-live-consistency-token" [:tx 9]}}
+#+end_src
+
+* Non-Goals
+
+This namespace should not:
+- define token generation
+- define token ordering
+- compare tokens
+- validate backend-specific token structure
+- interpret tokens as graph/basis objects
+- know about subscriptions or matching
+
+* Design Notes
+
+- Keep this namespace tiny.
+- Keep it backend-agnostic.
+- Keep it transport-agnostic.
+- The best version of this namespace is almost boring enough to forget about.
+
+* Summary
+
+=gesso.live.token= is the small plumbing namespace for the live system's opaque consistency token.
+
+It:
+- defines where the token lives in request context
+- extracts it
+- attaches it
+- removes it
+
+It does not:
+- create the token
+- understand the token
+- interpret the token
+
+That is exactly what makes it reusable.

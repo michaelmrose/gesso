@@ -1,0 +1,365 @@
+#+title: gesso.live.core
+#+author: OpenAI
+#+startup: overview
+
+* Overview
+
+=gesso.live.core= is the thin generic entrypoint for the live system.
+
+It owns:
+- minimal live fragment rendering helpers
+- changed-entity event construction
+- publication of changed-entity events to the configured live bus
+- extraction of the current propagated consistency token from request context
+
+It does *not* own:
+- XTDB-specific writes or queries
+- subscriber matching logic
+- scope semantics
+- transport framing
+- durable routing/model derivation
+
+Core should stay small, unsurprising, and easy to load with mocks.
+
+* Design Principles
+
+** Core does not ask callers for affected scopes
+
+The live system does *not* ask write code to enumerate every possibly affected
+view, collection, org, or cross-cutting query.
+
+Write-side code should say only:
+
+- what changed
+- optional metadata about the change
+
+** Core does not ask view callsites to declare semantic scope sets
+
+The generic fragment helper should not require every callsite to manually name
+its semantic watch graph.
+
+Instead, semantic subscriptions should be produced by higher-level code
+(app/domain-specific subscription builders) and handed to transport/config
+machinery outside the generic core.
+
+** Core is structurally thin
+
+Core is the place for:
+- normalized changed events
+- fragment shell rendering
+- bus publication
+- request token access
+
+Core is *not* the place for:
+- business-specific subscription rules
+- graph/path matching
+- hierarchy discovery
+
+* Conceptual Model
+
+The live system is built from four different concerns:
+
+1. *Changed entities*
+   Writes publish a small honest fact saying what changed.
+
+2. *Subscriptions*
+   Active subscribers are watching some supported semantic subscription kind.
+   Core does not define those kinds.
+
+3. *Matching*
+   Another layer decides which subscribers should be notified for a changed entity.
+
+4. *Consistency*
+   A backend-specific layer may propagate an opaque token to later reads.
+
+This namespace directly handles only 1 and 4, and provides fragment helpers for the UI shell.
+
+* Data Model
+
+** Fragment options
+
+A generic live fragment is described by a map.
+
+#+begin_src clojure
+{:id "request-panel"
+ :src "/app/requests/req-123/fragment"
+ :event "live-update"
+ :swap "outerHTML"
+ :trigger "load"
+ :stream-url "/gesso/live/stream?subscription=..."
+ :attrs {:class "contents"}
+ :inner-attrs {:class "grow"}}
+#+end_src
+
+Semantics:
+- =:id= is the DOM id of the refresh target
+- =:src= is the endpoint HTMX re-fetches
+- =:event= is the event name expected from the transport
+- =:swap= is the HTMX swap strategy
+- =:trigger= is the HTMX trigger prefix, usually =load=
+- =:stream-url= is the already-derived transport endpoint
+- =:attrs= apply to the outer wrapper
+- =:inner-attrs= apply to the refresh target
+
+The key point is that =:stream-url= is already a transport/subscription artifact.
+Core does not derive semantic subscriptions itself.
+
+** Changed entity
+
+A changed entity is a small normalized map.
+
+#+begin_src clojure
+{:entity/type :request
+ :entity/id "req-123"
+ :change/kind :updated}
+#+end_src
+
+Possible =:change/kind= values are application-defined, but likely examples are:
+- =:created=
+- =:updated=
+- =:deleted=
+- =:status-changed=
+
+Changed entities should stay *local and honest*.
+They should not claim to enumerate all affected scopes.
+
+** Changed event
+
+A normalized live event is:
+
+#+begin_src clojure
+{:event "live-update"
+ :changed {:entity/type :request
+           :entity/id "req-123"
+           :change/kind :updated}
+ :consistency-token [:tx 1024]
+ :data {:reason :request-updated}}
+#+end_src
+
+Semantics:
+- =:event= is the transport event name
+- =:changed= is the changed entity fact
+- =:consistency-token= is opaque to core
+- =:data= is optional payload metadata
+
+** Consistency token
+
+At core level the consistency token is opaque.
+
+Core only assumes:
+- it may be absent
+- it may be extracted from request context
+- it may be attached to an event
+
+Core must not interpret its shape.
+
+* Functions
+
+** =default-event=
+
+A small constant naming the default event.
+
+#+begin_src clojure
+default-event => "live-update"
+#+end_src
+
+** =fragment-root-attrs=
+
+Build the outer wrapper attrs for a live fragment.
+
+#+begin_src clojure
+(fragment-root-attrs opts) => attrs-map
+#+end_src
+
+Input keys used:
+- =:stream-url=
+- =:attrs=
+
+Behavior:
+- require or use caller-provided =:stream-url=
+- delegate transport-specific attrs to =gesso.live.htmx=
+- merge caller attrs on top
+
+Returns:
+- attrs map for the outer wrapper element
+
+Core does not inspect semantic subscription contents here.
+
+** =fragment-target-attrs=
+
+Build the attrs for the live refresh target.
+
+#+begin_src clojure
+(fragment-target-attrs opts) => attrs-map
+#+end_src
+
+Input keys used:
+- =:id=
+- =:src=
+- =:event=
+- =:swap=
+- =:trigger=
+- =:inner-attrs=
+
+Behavior:
+- fill defaults for =:event=, =:swap=, =:trigger=
+- delegate HTMX-specific attrs to =gesso.live.htmx=
+- merge caller =:inner-attrs=
+
+Returns:
+- attrs map for the refresh target
+
+** =fragment=
+
+Construct the minimal Hiccup shell for a live fragment.
+
+#+begin_src clojure
+(fragment opts) => hiccup
+#+end_src
+
+Expected shape:
+
+#+begin_src clojure
+[:div outer-attrs
+ [:div inner-attrs]]
+#+end_src
+
+This function is intentionally minimal and does not try to encode semantic
+subscription logic.
+
+** =current-consistency-token=
+
+Read the propagated consistency token from request context.
+
+#+begin_src clojure
+(current-consistency-token ctx) => token-or-nil
+#+end_src
+
+Delegates to =gesso.live.token=.
+
+** =live-request?=
+
+Whether this request appears to participate in live-consistency flow.
+
+#+begin_src clojure
+(live-request? ctx) => boolean
+#+end_src
+
+Defined as truthiness of =current-consistency-token=.
+
+** =build-event=
+
+Construct a normalized changed-entity event.
+
+#+begin_src clojure
+(build-event {:changed changed
+              :event "live-update"
+              :consistency-token token
+              :data data})
+=> event-map
+#+end_src
+
+Rules:
+- =:changed= is required
+- =:event= defaults to =default-event=
+- =:changed= must remain a changed-entity fact, not a superset of all impacted scopes
+
+** =publish-change!=
+
+Publish a changed-entity event to the configured live bus.
+
+#+begin_src clojure
+(publish-change! ctx {:changed changed
+                      :event "live-update"
+                      :consistency-token token
+                      :data data})
+=> event-map
+#+end_src
+
+Behavior:
+1. normalize the event via =build-event=
+2. resolve the live bus from ctx
+3. publish the event to the bus
+4. return the normalized event
+
+Core does not itself determine which subscribers match the event.
+
+* Example Usage
+
+** Example fragment
+
+#+begin_src clojure
+(fragment
+ {:id "request-panel"
+  :src "/app/requests/req-123/fragment"
+  :stream-url "/gesso/live/stream?subscription=..."})
+#+end_src
+
+** Example changed event publication
+
+#+begin_src clojure
+(publish-change!
+ ctx
+ {:changed {:entity/type :request
+            :entity/id "req-123"
+            :change/kind :updated}
+  :data {:reason :request-updated}})
+#+end_src
+
+* Non-Goals
+
+Core should *not*:
+- accept =:affects=
+- accept =:scope= or =:scopes= as part of its primary public fragment API
+- discover graph hierarchy
+- encode app-specific live semantics
+- decide which subscriptions should be notified
+
+Those belong to other layers.
+
+* Collaborators
+
+Core expects these collaborators to exist:
+
+- =gesso.live.bus=
+  - resolve bus from ctx
+  - publish normalized events
+
+- =gesso.live.htmx=
+  - build transport-specific wrapper/target attrs
+  - define token header name
+
+- =gesso.live.token=
+  - extract current consistency token from ctx
+
+- =gesso.live.transport.sse= or future transport helpers
+  - provide or consume stream URLs
+  - frame outbound transport events
+
+- backend-specific consistency layer such as =gesso.live.consistency.xtdb=
+  - turn writes into changed-entity events with propagated token
+
+* Design Notes
+
+- Core must remain valid if XTDB is replaced later.
+- Core must remain valid if SSE is later joined by WebSockets.
+- Core should be loadable with mocks for all collaborators.
+- Core is intentionally not the semantic center of the live system.
+- The semantic center should live in subscription/matching code outside this namespace.
+
+* Summary
+
+This namespace is the thin shell of the live system.
+
+It knows:
+- how to render a live fragment shell
+- how to build a changed-entity event
+- how to publish that event
+- how to read the current propagated token
+
+It does not know:
+- what subscription kinds exist
+- what scopes contain what entities
+- who should be notified
+
+That separation is intentional and foundational.

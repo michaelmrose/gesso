@@ -1,0 +1,301 @@
+#+title: gesso.live.htmx
+#+author: OpenAI
+#+startup: overview
+
+* Overview
+
+=gesso.live.htmx= owns the HTMX-facing helpers for =gesso.live=.
+
+It is responsible for:
+- building HTMX attrs for a live fragment shell
+- defining how the browser should react to transport events
+- defining how the current consistency token is attached to outgoing HTMX requests
+- keeping the browser contract small and explicit
+
+It is *not* responsible for:
+- application/domain subscription semantics
+- subscriber matching
+- XTDB reads or writes
+- SSE framing itself
+- browser transport connection lifecycle beyond the attributes/scripts needed for HTMX cooperation
+
+This namespace is the browser-side integration boundary for HTMX, not the semantic center of the live system.
+
+* Purpose
+
+The live system needs a predictable browser contract.
+
+For HTMX-based pages, that means:
+
+1. a fragment can be refreshed from a URL
+2. some live transport event can trigger that refresh
+3. the current propagated consistency token is attached to the resulting HTMX request
+
+This namespace defines the helpers for that contract.
+
+* Core Design
+
+The HTMX layer should stay structurally thin.
+
+It should assume:
+- the transport stream URL has already been built elsewhere
+- semantic subscriptions were already chosen elsewhere
+- changed-entity events already exist elsewhere
+
+It should provide:
+- wrapper attrs for transport hookup
+- target attrs for HTMX refresh
+- a header name for consistency token propagation
+- optionally a tiny support script for browser token handling
+
+It should *not* try to encode app subscription meaning in fragment options.
+
+* Data Model
+
+** Fragment root attrs input
+
+The outer wrapper needs only transport-facing information.
+
+#+begin_src clojure
+{:stream-url "/gesso/live/stream?subscription=..."}
+#+end_src
+
+The HTMX layer should not need to know what the subscription means.
+
+** Fragment target attrs input
+
+The refresh target needs:
+
+#+begin_src clojure
+{:id "request-panel"
+ :src "/app/requests/req-123/fragment"
+ :event "live-update"
+ :swap "outerHTML"
+ :trigger "load"}
+#+end_src
+
+Semantics:
+- =:id= is the DOM id of the target
+- =:src= is the HTMX re-fetch URL
+- =:event= is the live event name that should trigger refresh
+- =:swap= is the HTMX swap strategy
+- =:trigger= is the HTMX trigger prefix, usually =load=
+
+** Consistency token header
+
+The browser should attach the current live consistency token to outgoing HTMX requests using one stable header name.
+
+Example:
+
+#+begin_src text
+x-gesso-live-consistency-token
+#+end_src
+
+The actual token value is opaque.
+
+* Functions
+
+** =default-swap=
+
+A small constant or helper for the default HTMX swap mode.
+
+#+begin_src clojure
+default-swap => "outerHTML"
+#+end_src
+
+** =default-trigger=
+
+A small constant or helper for the default HTMX trigger prefix.
+
+#+begin_src clojure
+default-trigger => "load"
+#+end_src
+
+** =token-header-name=
+
+Return the header name used for propagated consistency tokens.
+
+#+begin_src clojure
+(token-header-name) => "x-gesso-live-consistency-token"
+#+end_src
+
+This name should be stable and reused consistently across:
+- browser request attachment
+- request token extraction
+
+** =fragment-root-attrs=
+
+Build the attrs for the outer live wrapper element.
+
+#+begin_src clojure
+(fragment-root-attrs {:stream-url stream-url}) => attrs-map
+#+end_src
+
+Responsibilities:
+- attach transport-specific HTMX extension attrs
+- stay ignorant of app/domain semantics
+
+Initial SSE-oriented shape:
+
+#+begin_src clojure
+{:hx-ext "sse"
+ :sse-connect stream-url}
+#+end_src
+
+This is appropriate because:
+- HTMX SSE extension expects =hx-ext "sse"=
+- the stream URL is already prepared elsewhere
+
+If transport changes later, this namespace may adapt or branch through configuration, but the semantic boundary stays the same.
+
+** =fragment-target-attrs=
+
+Build the attrs for the refresh target element.
+
+#+begin_src clojure
+(fragment-target-attrs {:id id
+                        :src src
+                        :event event
+                        :swap swap
+                        :trigger trigger})
+=> attrs-map
+#+end_src
+
+Behavior:
+- default =:event= at a higher layer if absent
+- default =:swap= to =default-swap=
+- default =:trigger= to =default-trigger=
+- build HTMX attrs that cause:
+  - initial load
+  - reload on incoming live event
+
+Initial expected shape:
+
+#+begin_src clojure
+{:id id
+ :hx-get src
+ :hx-trigger (str trigger ", sse:" event)
+ :hx-swap swap}
+#+end_src
+
+This assumes SSE as the current transport.
+If another transport is added later, this helper may gain a transport-sensitive variant,
+but it should not absorb app semantics.
+
+** =request-token-script=
+
+Return the small browser script needed to propagate the latest seen consistency token
+onto outgoing HTMX requests.
+
+#+begin_src clojure
+(request-token-script) => hiccup-script-or-string
+#+end_src
+
+Responsibilities:
+- keep track of the latest token observed from live transport payloads
+- attach that token to outgoing HTMX requests under =token-header-name=
+- stay transport/browser-facing, not app/domain-facing
+
+This is optional in the sense that the exact script delivery mechanism may vary,
+but the behavior belongs to this namespace.
+
+** =support-script-tag=
+
+Return a script tag or resource reference for the HTMX live support script.
+
+#+begin_src clojure
+(support-script-tag) => hiccup
+#+end_src
+
+Possible outputs:
+- inline script
+- external script tag
+- resource include
+
+This helper is useful if the project wants a conventional way to include the needed browser support.
+
+* Browser Contract
+
+The intended HTMX/browser contract is:
+
+1. A fragment wrapper opens a live stream.
+2. The live transport emits normalized events.
+3. When the browser receives an event of the expected name, HTMX refreshes the target.
+4. The latest consistency token seen from live events is attached to the outgoing HTMX request.
+5. The server can then use that token to ensure a fresh enough read.
+
+This namespace defines only the HTMX/browser pieces of that contract.
+
+* Relationship to =gesso.live.core=
+
+Core should call this namespace to build:
+- outer wrapper attrs
+- target attrs
+- token header naming
+
+Core should not need to know HTMX attribute details directly.
+
+* Relationship to =gesso.live.transport.sse=
+
+This namespace is transport-adjacent but not the transport itself.
+
+It assumes:
+- SSE is the current transport for the initial implementation
+- stream URLs are provided by transport/application code
+- event framing and stream lifecycle are owned by =gesso.live.transport.sse=
+
+This namespace only encodes how HTMX reacts to transport events.
+
+* Relationship to =gesso.live.token=
+
+The token extraction layer reads the propagated token from incoming requests.
+This namespace defines how the browser puts the token onto outgoing requests.
+
+So the shared contract is:
+- same header name
+- opaque token payload
+
+* Recommended First Implementation
+
+The first implementation should support:
+
+- SSE wrapper attrs via HTMX SSE extension
+- HTMX target attrs for initial load and event-driven refresh
+- one stable consistency-token header name
+- one small browser helper for attaching the token to outgoing HTMX requests
+
+That is enough to validate the browser contract cleanly.
+
+* Non-Goals
+
+This namespace should not:
+- define subscription kinds
+- parse subscription meaning
+- define matcher logic
+- frame SSE events
+- own reconnect policy in a transport-specific way
+- become a large front-end framework layer
+
+* Design Notes
+
+- Keep helpers pure where possible.
+- Keep the browser contract explicit and inspectable.
+- Avoid letting transport or domain semantics leak into HTMX helpers.
+- This namespace should remain usable by any app that chooses HTMX as the browser-side refresh mechanism.
+
+* Summary
+
+=gesso.live.htmx= defines the HTMX-facing contract for live fragments.
+
+It:
+- builds wrapper attrs
+- builds target attrs
+- defines the consistency token header name
+- optionally provides the tiny browser helper needed for token propagation
+
+It does not:
+- define what is being watched
+- define who matches what
+- define transport framing
+
+That is exactly why it belongs in Gesso.
