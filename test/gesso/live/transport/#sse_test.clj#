@@ -1,0 +1,93 @@
+(ns gesso.live.transport.sse-test
+  (:require
+   [clojure.test :refer [deftest is testing]]
+   [gesso.live.transport.sse :as sse]))
+
+(deftest default-path-test
+  (is (= "/gesso/live/stream"
+         sse/default-path)))
+
+(deftest event-name-test
+  (testing "uses event field when present"
+    (is (= "custom-event"
+           (sse/event-name {:event "custom-event"}))))
+
+  (testing "defaults when event missing"
+    (is (= "live-update"
+           (sse/event-name {:changed {:entity/type :request
+                                      :entity/id "req-1"}})))))
+
+(deftest event-payload-test
+  (is (= {:changed {:entity/type :request
+                    :entity/id "req-1"}
+          :consistency-token [:tx 9]
+          :data {:reason :updated}}
+         (sse/event-payload
+          {:event "live-update"
+           :changed {:entity/type :request
+                     :entity/id "req-1"}
+           :consistency-token [:tx 9]
+           :data {:reason :updated}}))))
+
+(deftest encode-payload-test
+  (is (= "{:x 1}"
+         (sse/encode-payload {:x 1}))))
+
+(deftest event->sse-test
+  (let [event {:event "live-update"
+               :changed {:entity/type :request
+                         :entity/id "req-1"}
+               :consistency-token nil
+               :data nil}
+        expected (str "event: live-update\n"
+                      "data: "
+                      (pr-str {:changed {:entity/type :request
+                                         :entity/id "req-1"}
+                               :consistency-token nil
+                               :data nil})
+                      "\n\n")]
+    (testing "frames event and data"
+      (is (= expected
+             (sse/event->sse event))))
+
+    (testing "uses default event name when absent"
+      (is (= expected
+             (sse/event->sse
+              {:changed {:entity/type :request
+                         :entity/id "req-1"}
+               :consistency-token nil
+               :data nil}))))))
+
+(deftest keepalive-frame-test
+  (is (= ": keepalive\n\n"
+         (sse/keepalive-frame))))
+
+(deftest stream-url-test
+  (is (= "/gesso/live/stream?subscription=abc123"
+         (sse/stream-url "abc12(deftest event->sse-test
+  (let [event {:event "live-update"
+               :changed {:entity/type :request
+                         :entity/id "req-1"}
+               :consistency-token nil
+               :data nil}
+        expected (str "event: live-update\n"
+                      "data: "
+                      (pr-str {:changed {:entity/type :request
+                                         :entity/id "req-1"}
+                               :consistency-token nil
+                               :data nil})
+                      "\n\n")]
+    (testing "frames event and data"
+      (is (= expected
+             (sse/event->sse event))))
+
+    (testing "uses default event name when absent"
+      (is (= expected
+             (sse/event->sse
+              {:changed {:entity/type :request
+                         :entity/id "req-1"}
+               :consistency-token nil
+               :data nil}))))))3")))
+
+  (is (= "/gesso/live/stream?subscription={\"k\":1}"
+         (sse/stream-url "{\"k\":1}"))))
