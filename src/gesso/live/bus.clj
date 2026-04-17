@@ -24,6 +24,7 @@
   (empty-state matcher))
 
 (defn subscriber
+  "Return a normalized subscriber map."
   [{:keys [subscriber/id subscription send! meta] :as m}]
   (when-not id
     (throw (ex-info "Missing subscriber id" {:subscriber m})))
@@ -62,7 +63,10 @@
          :subscription (:subscription sub))
     (swap! (subscribers-atom live-bus) assoc sub-id sub)
     (swap! (indexes-atom live-bus) match/index-subscription m sub)
-    (prn :bus/subscribe!-indexes
+    (prn :bus/subscribe!
+         :subscriber-id sub-id
+         :subscription (:subscription sub)
+         :subscriber-count (count @(subscribers-atom live-bus))
          :indexes @(indexes-atom live-bus))
     sub-id))
 
@@ -78,7 +82,12 @@
          :had-subscriber? (boolean sub))
     (when sub
       (swap! idx* match/unindex-subscription m sub)
-      (swap! subs* dissoc subscriber-id))
+      (swap! subs* dissoc subscriber-id)
+      (prn :bus/unsubscribe!
+           :subscriber-id subscriber-id
+           :subscription (:subscription sub)
+           :subscriber-count (count @subs*)
+           :indexes @idx*))
     sub))
 
 (defn replace-subscription!
@@ -97,6 +106,11 @@
         (swap! idx* match/unindex-subscription m old-sub)
         (swap! subs* assoc subscriber-id new-sub)
         (swap! idx* match/index-subscription m new-sub)
+        (prn :bus/replace-subscription!
+             :subscriber-id subscriber-id
+             :old-subscription (:subscription old-sub)
+             :new-subscription new-subscription
+             :indexes @idx*)
         new-sub))))
 
 (defn candidate-subscriber-ids
@@ -109,8 +123,7 @@
     (prn :bus/candidate-subscriber-ids
          :changed changed
          :entries entries
-         :indexes indexes
-         :ids ids)
+         :candidate-ids ids)
     ids))
 
 (defn matching-subscriber-ids
@@ -128,7 +141,7 @@
     (prn :bus/matching-subscriber-ids
          :changed changed
          :indexes indexes
-         :subscriber-keys (keys subscribers)
+         :subscriber-ids (keys subscribers)
          :matched-ids ids)
     ids))
 
@@ -136,21 +149,25 @@
   "Deliver an event to the provided subscriber ids."
   [live-bus subscriber-ids event]
   (let [subscribers @(subscribers-atom live-bus)]
+    (prn :bus/notify!
+         :subscriber-ids subscriber-ids
+         :event event)
     (reduce
      (fn [summary subscriber-id]
        (if-let [sub (get subscribers subscriber-id)]
          (try
-           (prn :bus/notify!
+           (prn :bus/notify-one!
                 :subscriber-id subscriber-id
-                :event event)
+                :subscription (:subscription sub))
            ((:send! sub) event)
            (-> summary
                (update :matched-subscriber-ids conj subscriber-id)
                (update :delivered-count inc))
            (catch Throwable t
-             (prn :bus/notify!-error
+             (prn :bus/notify-error!
                   :subscriber-id subscriber-id
-                  :message (.getMessage t))
+                  :message (.getMessage t)
+                  :class (class t))
              (-> summary
                  (update :matched-subscriber-ids conj subscriber-id)
                  (update :errors conj {:subscriber/id subscriber-id
@@ -169,6 +186,7 @@
         summary (notify-subscribers! live-bus matched-ids event)]
     (prn :bus/publish!
          :event event
+         :changed changed
          :matched-ids matched-ids
          :summary summary)
     summary))
