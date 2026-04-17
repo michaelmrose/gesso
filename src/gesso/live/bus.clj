@@ -57,8 +57,13 @@
   (let [sub (subscriber raw-subscriber)
         sub-id (:subscriber/id sub)
         m (matcher live-bus)]
+    (prn :bus/subscribe!
+         :subscriber-id sub-id
+         :subscription (:subscription sub))
     (swap! (subscribers-atom live-bus) assoc sub-id sub)
     (swap! (indexes-atom live-bus) match/index-subscription m sub)
+    (prn :bus/subscribe!-indexes
+         :indexes @(indexes-atom live-bus))
     sub-id))
 
 (defn unsubscribe!
@@ -68,6 +73,9 @@
         idx* (indexes-atom live-bus)
         m (matcher live-bus)
         sub (get @subs* subscriber-id)]
+    (prn :bus/unsubscribe!
+         :subscriber-id subscriber-id
+         :had-subscriber? (boolean sub))
     (when sub
       (swap! idx* match/unindex-subscription m sub)
       (swap! subs* dissoc subscriber-id))
@@ -80,6 +88,10 @@
         idx* (indexes-atom live-bus)
         m (matcher live-bus)
         old-sub (get @subs* subscriber-id)]
+    (prn :bus/replace-subscription!
+         :subscriber-id subscriber-id
+         :old-subscription (:subscription old-sub)
+         :new-subscription new-subscription)
     (when old-sub
       (let [new-sub (assoc old-sub :subscription new-subscription)]
         (swap! idx* match/unindex-subscription m old-sub)
@@ -92,21 +104,33 @@
   [live-bus ctx changed]
   (let [m (matcher live-bus)
         indexes @(indexes-atom live-bus)
-        entries (match/candidate-entries m ctx changed)]
-    (match/candidate-subscriber-ids indexes entries)))
+        entries (match/candidate-entries m ctx changed)
+        ids (match/candidate-subscriber-ids indexes entries)]
+    (prn :bus/candidate-subscriber-ids
+         :changed changed
+         :entries entries
+         :indexes indexes
+         :ids ids)
+    ids))
 
 (defn matching-subscriber-ids
   "Return final matching subscriber ids for a changed value."
   [live-bus ctx changed]
   (let [m (matcher live-bus)
         indexes @(indexes-atom live-bus)
-        subscribers @(subscribers-atom live-bus)]
-    (match/matching-subscriber-ids
-     {:matcher m
-      :indexes indexes
-      :subscribers subscribers
-      :ctx ctx
-      :changed changed})))
+        subscribers @(subscribers-atom live-bus)
+        ids (match/matching-subscriber-ids
+             {:matcher m
+              :indexes indexes
+              :subscribers subscribers
+              :ctx ctx
+              :changed changed})]
+    (prn :bus/matching-subscriber-ids
+         :changed changed
+         :indexes indexes
+         :subscriber-keys (keys subscribers)
+         :matched-ids ids)
+    ids))
 
 (defn notify-subscribers!
   "Deliver an event to the provided subscriber ids."
@@ -116,11 +140,17 @@
      (fn [summary subscriber-id]
        (if-let [sub (get subscribers subscriber-id)]
          (try
+           (prn :bus/notify!
+                :subscriber-id subscriber-id
+                :event event)
            ((:send! sub) event)
            (-> summary
                (update :matched-subscriber-ids conj subscriber-id)
                (update :delivered-count inc))
            (catch Throwable t
+             (prn :bus/notify!-error
+                  :subscriber-id subscriber-id
+                  :message (.getMessage t))
              (-> summary
                  (update :matched-subscriber-ids conj subscriber-id)
                  (update :errors conj {:subscriber/id subscriber-id
@@ -137,6 +167,10 @@
   (let [changed (:changed event)
         matched-ids (matching-subscriber-ids live-bus {} changed)
         summary (notify-subscribers! live-bus matched-ids event)]
+    (prn :bus/publish!
+         :event event
+         :matched-ids matched-ids
+         :summary summary)
     summary))
 
 (defn subscribers-snapshot

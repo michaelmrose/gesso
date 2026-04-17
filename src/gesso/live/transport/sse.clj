@@ -76,7 +76,11 @@
 (defn- queue-send-fn
   [q]
   (fn [event]
-    (.offer q (event->sse event))))
+    (let [frame (event->sse event)]
+      (prn :sse/queue-send!
+           :event event
+           :frame frame)
+      (.offer q frame))))
 
 (defn build-subscriber
   "Build a bus subscriber backed by a blocking queue."
@@ -88,11 +92,13 @@
 
 (defn- write-frame!
   [^BufferedWriter writer frame]
+  (prn :sse/write-frame! :frame frame)
   (.write writer frame)
   (.flush writer))
 
 (defn- stream-loop!
   [^BufferedWriter writer q keepalive-ms]
+  (prn :sse/stream-loop-start)
   (write-frame! writer (keepalive-frame))
   (loop []
     (let [frame (.poll ^LinkedBlockingQueue q keepalive-ms TimeUnit/MILLISECONDS)]
@@ -102,9 +108,6 @@
       (recur))))
 
 (defn response
-  "Build a Ring SSE response for one subscriber.
-
-   The stream stays open until the client disconnects or writing fails."
   [{:keys [live-bus subscriber queue keepalive-ms]}]
   {:status 200
    :headers {"content-type" "text/event-stream; charset=utf-8"
@@ -115,14 +118,20 @@
    (ring-io/piped-input-stream
     (fn [out]
       (let [sub-id (:subscriber/id subscriber)]
+        (prn :sse/response-open :subscriber-id sub-id)
         (bus/subscribe! live-bus subscriber)
         (try
           (with-open [writer (BufferedWriter.
                               (OutputStreamWriter. out StandardCharsets/UTF_8))]
             (stream-loop! writer queue keepalive-ms))
-          (catch Throwable _
-            nil)
+          (catch Throwable t
+            (prn :sse/response-error
+                 :subscriber-id sub-id
+                 :class (class t)
+                 :message (.getMessage t))
+            (throw t))
           (finally
+            (prn :sse/response-close :subscriber-id sub-id)
             (bus/unsubscribe! live-bus sub-id))))))})
 
 (defn handler
