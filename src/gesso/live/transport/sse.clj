@@ -1,11 +1,34 @@
 (ns gesso.live.transport.sse
-  "SSE transport helpers for gesso.live.")
+  "SSE transport for gesso.live.
+
+   This namespace does four real things:
+   - formats SSE frames
+   - opens a long-lived Ring streaming response
+   - registers/unregisters a subscriber with the live bus
+   - writes matched events to the client as they arrive
+
+   Assumptions:
+   - request ctx contains :gesso.live/bus
+   - caller supplies a `subscription-fn` that turns ctx into an app subscription
+   - gesso.live.bus provides subscribe!/unsubscribe!"
+  (:require
+   [clojure.java.io :as io]
+   [ring.util.io :as ring-io]
+   [gesso.live.bus :as bus])
+  (:import
+   [java.io BufferedWriter OutputStreamWriter]
+   [java.nio.charset StandardCharsets]
+   [java.util UUID]
+   [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
 (def default-path
   "/gesso/live/stream")
 
 (def default-event
   "live-update")
+
+(def default-keepalive-ms
+  15000)
 
 (defn event-name
   "Return the SSE event name for a normalized live event."
@@ -46,3 +69,85 @@
    This version assumes the caller has already encoded the value if needed."
   [subscription]
   (str default-path "?subscription=" subscription))
+
+(defn- subscriber-id []
+  (str (UUID/randomUUID)))
+
+(defn- queue-send-fn
+  [q]
+  (fn [event]
+    (.offer q (event->sse event))))
+
+(defn build-subscriber
+  "Build a bus subscriber backed by a blocking queue."
+  [{:keys [subscription queue meta]}]
+  {:subscriber/id (subscriber-id)
+   :subscription subscription
+   :send! (queue-send-fn queue)
+   :meta meta})
+
+(defn- write-frame!
+  [^BufferedWriter writer frame]
+  (.write writer frame)
+  (.flush writer))
+
+(defn- stream-loop!
+  [^BufferedWriter writer q keepalive-ms]
+  (write-frame! writer (keepalive-frame))
+  (loop []
+    (let [frame (.poll ^LinkedBlockingQueue q keepalive-ms TimeUnit/MILLISECONDS)]
+      (if frame
+        (write-frame! writer frame)
+        (write-frame! writer (keepalive-frame)))
+      (recur))))
+
+(defn response
+  "Build a Ring SSE response for one subscriber.
+
+   The stream stays open until the client disconnects or writing fails."
+  [{:keys [live-bus subscriber queue keepalive-ms]}]
+  {:status 200
+   :headers {"content-type" "text/event-stream; charset=utf-8"
+             "cache-control" "no-cache, no-transform"
+             "connection" "keep-alive"
+             "x-accel-buffering" "no"}
+   :body
+   (ring-io/piped-input-stream
+    (fn [out]
+      (let [sub-id (:subscriber/id subscriber)]
+        (bus/subscribe! live-bus subscriber)
+        (try
+          (with-open [writer (BufferedWriter.
+                              (OutputStreamWriter. out StandardCharsets/UTF_8))]
+            (stream-loop! writer queue keepalive-ms))
+          (catch Throwable _
+            nil)
+          (finally
+            (bus/unsubscribe! live-bus sub-id))))))})
+
+(defn handler
+  "Open an SSE stream and subscribe it to the live bus.
+
+   Required opts:
+   - :ctx
+   - :subscription-fn  ; (fn [ctx] -> subscription-or-nil)
+
+   Optional opts:
+   - :keepalive-ms"
+  [{:keys [ctx subscription-fn keepalive-ms]
+    :or {keepalive-ms default-keepalive-ms}}]
+  (let [live-bus     (bus/bus-from-ctx ctx)
+        subscription (subscription-fn ctx)]
+    (when-not live-bus
+      (throw (ex-info "Missing :gesso.live/bus in ctx" {})))
+    (when-not subscription
+      (throw (ex-info "Missing or invalid live subscription" {})))
+    (let [queue      (LinkedBlockingQueue.)
+          subscriber (build-subscriber
+                      {:subscription subscription
+                       :queue queue
+                       :meta {:transport :sse}})]
+      (response {:live-bus live-bus
+                 :subscriber subscriber
+                 :queue queue
+                 :keepalive-ms keepalive-ms}))))
