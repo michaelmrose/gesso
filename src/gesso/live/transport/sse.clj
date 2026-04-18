@@ -1,9 +1,9 @@
 (ns gesso.live.transport.sse
   (:require
-   [gesso.live.bus :as bus])
+   [gesso.live.bus :as bus]
+   [ring.core.protocols :as protocols])
   (:import
-   [java.io BufferedWriter FilterInputStream InputStream
-    OutputStreamWriter PipedInputStream PipedOutputStream]
+   [java.io BufferedWriter OutputStream OutputStreamWriter]
    [java.nio.charset StandardCharsets]
    [java.util UUID]
    [java.util.concurrent LinkedBlockingQueue TimeUnit]))
@@ -16,9 +16,6 @@
 
 (def default-keepalive-ms
   15000)
-
-(def pipe-buffer-size
-  65536)
 
 (defn event-name
   [event]
@@ -71,24 +68,8 @@
 (defn- write-frame!
   [^BufferedWriter writer frame]
   (.write writer frame)
+  ;; Directly flush to the socket, bypassing Ring's stream buffer
   (.flush writer))
-
-(defn- close-quietly!
-  [x]
-  (when x
-    (try
-      (.close x)
-      (catch Throwable _
-        nil))))
-
-(defn- managed-input-stream
-  [^InputStream in on-close!]
-  (proxy [FilterInputStream] [in]
-    (close []
-      (try
-        (on-close!)
-        (finally
-          (proxy-super close))))))
 
 (defn- stream-loop!
   [^BufferedWriter writer q keepalive-ms closed?]
@@ -104,35 +85,25 @@
 (defn response
   [{:keys [live-bus subscriber queue keepalive-ms]}]
   (let [sub-id  (:subscriber/id subscriber)
-        closed? (or (:closed? subscriber) (atom false))
-        in      (PipedInputStream. pipe-buffer-size)
-        out     (PipedOutputStream. in)
-        stop!   (fn []
-                  (when (compare-and-set! closed? false true)
-                    (bus/unsubscribe! live-bus sub-id)
-                    (close-quietly! out)))
-        body    (managed-input-stream in stop!)]
-    (bus/subscribe! live-bus subscriber)
-    (doto
-      (Thread.
-       (fn []
-         (try
-           (with-open [writer (BufferedWriter.
-                               (OutputStreamWriter. out StandardCharsets/UTF_8))]
-             (stream-loop! writer queue keepalive-ms closed?))
-           (catch Throwable _
-             nil)
-           (finally
-             (stop!))))
-       (str "gesso-live-sse-" sub-id))
-      (.setDaemon true)
-      (.start))
+        closed? (or (:closed? subscriber) (atom false))]
     {:status 200
      :headers {"content-type" "text/event-stream; charset=utf-8"
                "cache-control" "no-cache, no-transform"
                "connection" "keep-alive"
                "x-accel-buffering" "no"}
-     :body body}))
+     ;; Reify the protocol, omitting the type hint on `out`
+     :body (reify protocols/StreamableResponseBody
+             (write-body-to-stream [_ _ out]
+               (bus/subscribe! live-bus subscriber)
+               (try
+                 (with-open [writer (BufferedWriter.
+                                     (OutputStreamWriter. out StandardCharsets/UTF_8))]
+                   (stream-loop! writer queue keepalive-ms closed?))
+                 (catch Throwable _
+                   nil)
+                 (finally
+                   (reset! closed? true)
+                   (bus/unsubscribe! live-bus sub-id)))))}))
 
 (defn handler
   [{:keys [ctx subscription-fn keepalive-ms]

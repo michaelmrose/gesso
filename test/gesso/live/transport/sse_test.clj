@@ -5,7 +5,7 @@
    [gesso.live.bus :as bus]
    [gesso.live.transport.sse :as sse])
   (:import
-   [java.io ByteArrayOutputStream BufferedWriter OutputStreamWriter]
+   [java.io ByteArrayOutputStream BufferedWriter OutputStreamWriter PipedInputStream PipedOutputStream]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
@@ -29,6 +29,18 @@
                     (if (pred s)
                       s
                       (recur))))))))))))
+
+;; Helper to wrap the new body-fn so tests can read it like an InputStream
+(defn stream-from-body-fn
+  [body-fn]
+  (let [in (PipedInputStream. 65536)
+        out (PipedOutputStream. in)]
+    (future
+      (try
+        (body-fn out)
+        (catch Throwable _ nil)
+        (finally (.close out))))
+    in))
 
 (def test-matcher
   {:subscription->entries
@@ -84,13 +96,11 @@
     (.toString out "UTF-8")))
 
 (deftest constants-test
-  (prn :TEST/START :constants-test)
   (is (= "/gesso/live/stream" sse/default-path))
   (is (= "live-update" sse/default-event))
   (is (pos? sse/default-keepalive-ms)))
 
 (deftest event-name-test
-  (prn :TEST/START :event-name-test)
   (testing "uses explicit event"
     (is (= "custom-event"
            (sse/event-name {:event "custom-event"}))))
@@ -100,7 +110,6 @@
                                       :entity/id "x"}})))))
 
 (deftest event-payload-test
-  (prn :TEST/START :event-payload-test)
   (is (= {:changed {:entity/type :demo-counter
                     :entity/id "x"}
           :consistency-token [:tx 9]
@@ -113,29 +122,24 @@
            :data {:reason :updated}}))))
 
 (deftest encode-payload-test
-  (prn :TEST/START :encode-payload-test)
   (is (= (pr-str {:x 1})
          (sse/encode-payload {:x 1}))))
 
 (deftest event->sse-test
-  (prn :TEST/START :event->sse-test)
   (let [frame (sse/event->sse (mk-event))]
     (is (str/includes? frame "event: live-update\n"))
     (is (str/includes? frame "data: "))
     (is (str/ends-with? frame "\n\n"))))
 
 (deftest keepalive-frame-test
-  (prn :TEST/START :keepalive-frame-test)
   (is (= ": keepalive\n\n"
          (sse/keepalive-frame))))
 
 (deftest stream-url-test
-  (prn :TEST/START :stream-url-test)
   (is (= "/gesso/live/stream?subscription=shared-counter"
          (sse/stream-url "shared-counter"))))
 
 (deftest build-subscriber-test
-  (prn :TEST/START :build-subscriber-test)
   (let [queue (LinkedBlockingQueue.)
         sub (sse/build-subscriber
              {:subscription (mk-subscription)
@@ -155,7 +159,6 @@
         (is (str/includes? frame "global-shared-counter"))))))
 
 (deftest handler-validation-test
-  (prn :TEST/START :handler-validation-test)
   (testing "missing bus"
     (is (thrown-with-msg?
          clojure.lang.ExceptionInfo
@@ -172,7 +175,6 @@
            :subscription-fn (mk-subscription-fn nil)})))))
 
 (deftest handler-response-shape-test
-  (prn :TEST/START :handler-response-shape-test)
   (let [resp (sse/handler
               {:ctx {:gesso.live/bus (mk-bus)}
                :subscription-fn (mk-subscription-fn)})]
@@ -186,7 +188,6 @@
     (is (some? (:body resp)))))
 
 (deftest response-subscribes-while-open-test
-  (prn :TEST/START :response-subscribes-while-open-test)
   (let [live-bus (mk-bus)
         queue (LinkedBlockingQueue.)
         subscriber (sse/build-subscriber
@@ -198,7 +199,7 @@
                :subscriber subscriber
                :queue queue
                :keepalive-ms 25})
-        body (:body resp)]
+        body (stream-from-body-fn (:body resp))]
     (try
       (Thread/sleep 50)
       (is (contains? (bus/subscribers-snapshot live-bus)
@@ -207,7 +208,6 @@
         (.close body)))))
 
 (deftest queue-send-fn-test
-  (prn :TEST/START :queue-send-fn-test)
   (let [queue (LinkedBlockingQueue.)
         send! ((fn [q]
                  (fn [event]
@@ -219,7 +219,6 @@
       (is (str/includes? frame "event: live-update")))))
 
 (deftest matching-event-reaches-subscriber-queue-test
-  (prn :TEST/START :matching-event-reaches-subscriber-queue-test)
   (let [live-bus (mk-bus)
         queue (LinkedBlockingQueue.)
         subscriber (sse/build-subscriber
@@ -234,7 +233,6 @@
       (is (str/includes? frame "global-shared-counter")))))
 
 (deftest non-matching-event-does-not-reach-subscriber-queue-test
-  (prn :TEST/START :non-matching-event-does-not-reach-subscriber-queue-test)
   (let [live-bus (mk-bus)
         queue (LinkedBlockingQueue.)
         subscriber (sse/build-subscriber
@@ -249,7 +247,6 @@
     (is (nil? (queue-poll queue 100)))))
 
 (deftest multiple-published-events-reach-queue-in-order-test
-  (prn :TEST/START :multiple-published-events-reach-queue-in-order-test)
   (let [live-bus (mk-bus)
         queue (LinkedBlockingQueue.)
         subscriber (sse/build-subscriber
@@ -269,12 +266,12 @@
       (is (str/includes? frame-2 ":second")))))
 
 (deftest write-frame-smoke-test
-  (prn :TEST/START :write-frame-smoke-test)
   (let [text (write-stream! [(sse/keepalive-frame)
                              (sse/event->sse (mk-event))])]
     (is (str/includes? text ": keepalive"))
     (is (str/includes? text "event: live-update"))
     (is (str/includes? text "global-shared-counter"))))
+
 (defn body-reader-future
   [body]
   (future
@@ -289,13 +286,12 @@
   (deref f timeout-ms ::timeout))
 
 (deftest response-body-stays-open-long-enough-to-emit-keepalive-test
-  (prn :TEST/START :response-body-stays-open-long-enough-to-emit-keepalive-test)
   (let [live-bus (mk-bus)
         resp (sse/handler
               {:ctx {:gesso.live/bus live-bus}
                :subscription-fn (mk-subscription-fn)
                :keepalive-ms 50})
-        body (:body resp)
+        body (stream-from-body-fn (:body resp))
         read-fut (body-reader-future body)]
     (try
       (let [text (await-future read-fut 1000)]
@@ -306,13 +302,12 @@
         (.close body)))))
 
 (deftest response-body-can-observe-published-event-while-open-test
-  (prn :TEST/START :response-body-can-observe-published-event-while-open-test)
   (let [live-bus (mk-bus)
         resp (sse/handler
               {:ctx {:gesso.live/bus live-bus}
                :subscription-fn (mk-subscription-fn)
                :keepalive-ms 1000})
-        body (:body resp)]
+        body (stream-from-body-fn (:body resp))]
     (try
       (Thread/sleep 100)
       (bus/publish! live-bus (mk-event {:data {:reason :transport-check}}))
@@ -324,40 +319,13 @@
       (finally
         (.close body)))))
 
-
-#_(deftest response-body-can-observe-published-event-while-open-test
-  (prn :TEST/START :response-body-can-observe-published-event-while-open-test)
-  (let [live-bus (mk-bus)
-        resp (sse/handler
-              {:ctx {:gesso.live/bus live-bus}
-               :subscription-fn (mk-subscription-fn)
-               :keepalive-ms 1000})
-        body (:body resp)
-        read-fut (future
-                   (with-open [rdr (clojure.java.io/reader body)]
-                     (let [buf (char-array 8192)
-                           n (.read rdr buf)]
-                       (when (pos? n)
-                         (String. buf 0 n)))))]
-    (try
-      (Thread/sleep 100)
-      (bus/publish! live-bus (mk-event {:data {:reason :transport-check}}))
-      (let [text (await-future read-fut 1500)]
-        (is (not= ::timeout text))
-        (is (string? text))
-        (is (str/includes? text "event: live-update"))
-        (is (str/includes? text ":transport-check")))
-      (finally
-        (.close body)))))
-
 (deftest response-close-removes-subscriber-test
-  (prn :TEST/START :response-close-removes-subscriber-test)
   (let [live-bus (mk-bus)
         resp (sse/handler
               {:ctx {:gesso.live/bus live-bus}
                :subscription-fn (mk-subscription-fn)
                :keepalive-ms 50})
-        body (:body resp)]
+        body (stream-from-body-fn (:body resp))]
     (try
       (Thread/sleep 100)
       (is (pos? (count (bus/subscribers-snapshot live-bus))))
@@ -367,14 +335,13 @@
     (is (= 0 (count (bus/subscribers-snapshot live-bus))))))
 
 (deftest repeated-open-close-does-not-leak-subscribers-test
-  (prn :TEST/START :repeated-open-close-does-not-leak-subscribers-test)
   (let [live-bus (mk-bus)]
     (dotimes [_ 5]
       (let [resp (sse/handler
                   {:ctx {:gesso.live/bus live-bus}
                    :subscription-fn (mk-subscription-fn)
                    :keepalive-ms 25})
-            body (:body resp)]
+            body (stream-from-body-fn (:body resp))]
         (Thread/sleep 50)
         (.close body)
         (Thread/sleep 50)))
