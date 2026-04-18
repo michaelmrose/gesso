@@ -58,9 +58,6 @@
   (let [sub (subscriber raw-subscriber)
         sub-id (:subscriber/id sub)
         m (matcher live-bus)]
-    (prn :bus/subscribe!
-         :subscriber-id sub-id
-         :subscription (:subscription sub))
     (swap! (subscribers-atom live-bus) assoc sub-id sub)
     (swap! (indexes-atom live-bus) match/index-subscription m sub)
     (prn :bus/subscribe!
@@ -77,9 +74,6 @@
         idx* (indexes-atom live-bus)
         m (matcher live-bus)
         sub (get @subs* subscriber-id)]
-    (prn :bus/unsubscribe!
-         :subscriber-id subscriber-id
-         :had-subscriber? (boolean sub))
     (when sub
       (swap! idx* match/unindex-subscription m sub)
       (swap! subs* dissoc subscriber-id)
@@ -97,10 +91,6 @@
         idx* (indexes-atom live-bus)
         m (matcher live-bus)
         old-sub (get @subs* subscriber-id)]
-    (prn :bus/replace-subscription!
-         :subscriber-id subscriber-id
-         :old-subscription (:subscription old-sub)
-         :new-subscription new-subscription)
     (when old-sub
       (let [new-sub (assoc old-sub :subscription new-subscription)]
         (swap! idx* match/unindex-subscription m old-sub)
