@@ -1,21 +1,14 @@
 (ns gesso.live.app
   "Higher-level live app/runtime helpers.
 
-   This namespace is meant to own the generic plumbing that apps should not have
+   This namespace owns the generic plumbing that apps should not have
    to rewrite:
    - subscription token extraction
    - token parsing
    - matcher construction for simple entry-based subscriptions
    - bus construction
    - bus middleware
-   - SSE handler construction
-
-   The common case is:
-   - a raw subscription token maps to a single live entry
-   - changed entities map to the same entry shape
-
-   Example entry:
-   [:demo-counter \"global-shared-counter\"]"
+   - SSE handler construction"
   (:require
    [gesso.live.bus :as bus]
    [gesso.live.transport.sse :as sse]))
@@ -78,11 +71,24 @@
        {:ctx ctx
         :subscription-fn (constantly subscription)}))))
 
+(defn subscriptions-from-configs
+  "Turn a collection of feature live configs into a token->entry map.
+
+   Each config is expected to contain:
+   - :subscription/token
+   - :entry"
+  [configs]
+  (into {}
+        (map (fn [{:keys [subscription/token entry]}]
+               [token entry]))
+        configs))
+
 (defn simple-system
   "Build a simple live system.
 
    Options:
    - :subscriptions      map of raw token -> live entry
+   - :configs            collection of feature live config maps
    - :parse-subscription optional raw-token -> normalized subscription fn
    - :changed->entries   optional custom changed mapping
 
@@ -91,9 +97,11 @@
    - :middleware
    - :sse-handler
    - :subscription-param"
-  [{:keys [subscriptions parse-subscription changed->entries]}]
-  (let [parse-subscription' (or parse-subscription
-                                (token-map-parser subscriptions))
+  [{:keys [subscriptions configs parse-subscription changed->entries]}]
+  (let [subscriptions'      (or subscriptions
+                                (subscriptions-from-configs configs))
+        parse-subscription' (or parse-subscription
+                                (token-map-parser subscriptions'))
         matcher             (entry-matcher {:changed->entries changed->entries})
         live-bus            (bus/memory-bus matcher)]
     {:live-bus live-bus

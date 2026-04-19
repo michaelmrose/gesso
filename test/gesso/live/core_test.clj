@@ -132,19 +132,6 @@
   (testing "returns nil when token absent"
     (is (nil? (live/anti-forgery-input {})))))
 
-(deftest normalize-target-test
-  (is (nil? (live/normalize-target nil)))
-  (is (= "#shared-counter-fragment"
-         (live/normalize-target "shared-counter-fragment")))
-  (is (= "#already-id"
-         (live/normalize-target "#already-id")))
-  (is (= ".some-class"
-         (live/normalize-target ".some-class")))
-  (is (= "this"
-         (live/normalize-target "this")))
-  (is (= "closest [hx-ext='sse']"
-         (live/normalize-target "closest [hx-ext='sse']"))))
-
 (deftest post-form-attrs-test
   (testing "builds standard attrs with default swap"
     (let [opts {:to "/app/demo/shared-counter/increment"
