@@ -79,7 +79,8 @@
    - :entry"
   [configs]
   (into {}
-        (map (fn [{:keys [subscription/token entry]}]
+        (map (fn [{:subscription/keys [token]
+                   :keys [entry]}]
                [token entry]))
         configs))
 
@@ -102,7 +103,10 @@
                                 (subscriptions-from-configs configs))
         parse-subscription' (or parse-subscription
                                 (token-map-parser subscriptions'))
-        matcher             (entry-matcher {:changed->entries changed->entries})
+        matcher-opts        (cond-> {}
+                              changed->entries
+                              (assoc :changed->entries changed->entries))
+        matcher             (entry-matcher matcher-opts)
         live-bus            (bus/memory-bus matcher)]
     {:live-bus live-bus
      :middleware (wrap-live-bus live-bus)
