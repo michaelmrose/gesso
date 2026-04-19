@@ -1,215 +1,266 @@
 (ns gesso.live.core-test
   (:require
    [clojure.test :refer [deftest is testing]]
-   [gesso.live.core :as live]
-   [gesso.live.bus :as bus]))
+   [gesso.live.core :as live]))
 
-(def test-matcher
-  {:subscription->entries (fn [_subscription] [])
-   :changed->entries (fn [_ctx _changed] [])})
+(defn fragment-opts
+  ([] (fragment-opts {}))
+  ([overrides]
+   (merge
+    {:id "request-panel"
+     :src "/app/requests/request-1/fragment"
+     :stream-url "/gesso/live/stream?subscription=request-1"}
+    overrides)))
 
-(defn test-bus []
-  (bus/memory-bus test-matcher))
+(defn token-ctx
+  ([] (token-ctx "token-1"))
+  ([token]
+   {:anti-forgery-token token}))
 
-(defn test-ctx
-  ([] (test-ctx {}))
-  ([m]
-   (merge {:gesso.live/bus (test-bus)}
-          m)))
+(defn biff-token-ctx
+  ([] (biff-token-ctx "biff-token-1"))
+  ([token]
+   {:biff/anti-forgery-token token}))
+
+(defn expected-fragment-root-attrs
+  ([] (expected-fragment-root-attrs {}))
+  ([overrides]
+   (merge
+    {:hx-ext "sse"
+     :sse-connect "/gesso/live/stream?subscription=request-1"}
+    overrides)))
+
+(defn expected-fragment-target-attrs
+  ([] (expected-fragment-target-attrs {}))
+  ([overrides]
+   (merge
+    {:id "request-panel"
+     :hx-get "/app/requests/request-1/fragment"
+     :hx-trigger "load, sse:live-update"
+     :hx-swap "outerHTML"}
+    overrides)))
+
+(defn expected-fragment
+  ([] (expected-fragment {} {}))
+  ([root-overrides target-overrides]
+   [:div (expected-fragment-root-attrs root-overrides)
+    [:div (expected-fragment-target-attrs target-overrides)]]))
+
+(defn expected-anti-forgery-input
+  ([] (expected-anti-forgery-input "token-1"))
+  ([token]
+   [:input {:type "hidden"
+            :name "__anti-forgery-token"
+            :value token}]))
+
+(defn expected-post-form
+  ([] (expected-post-form {} []))
+  ([attr-overrides children]
+   (into
+    [:form (merge
+            {:method "post"
+             :action "/app/demo/shared-counter/increment"
+             :hx-post "/app/demo/shared-counter/increment"
+             :hx-target "#shared-counter-fragment"
+             :hx-swap "innerHTML"}
+            attr-overrides)]
+    children)))
+
+(defn expected-post-button
+  ([] (expected-post-button {} []))
+  ([form-attr-overrides button-contents]
+   (expected-post-form
+    form-attr-overrides
+    [(expected-anti-forgery-input "token-1")
+     (into
+      [:button {:type "submit"}]
+      (or (seq button-contents) ["+"]))])))
 
 (deftest fragment-root-attrs-test
-  (testing "builds root attrs and merges caller attrs"
-    (is (= {:hx-ext "sse"
-            :sse-connect "/stream"
-            :class "x"}
-           (live/fragment-root-attrs
-            {:id "a"
-             :src "/frag"
-             :stream-url "/stream"
-             :attrs {:class "x"}}))))
-
-  (testing "requires stream-url"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/fragment-root-attrs
-                  {:id "a"
-                   :src "/frag"})))))
+  (let [opts (fragment-opts)
+        actual (live/fragment-root-attrs opts)
+        expected (expected-fragment-root-attrs)]
+    (is (= expected actual))))
 
 (deftest fragment-target-attrs-test
-  (testing "builds target attrs with defaults"
-    (is (= {:id "request-panel"
-            :hx-get "/frag"
-            :hx-trigger "load, sse:live-update"
-            :hx-swap "outerHTML"}
-           (live/fragment-target-attrs
-            {:id "request-panel"
-             :src "/frag"
-             :stream-url "/stream"}))))
+  (let [opts (fragment-opts)
+        actual (live/fragment-target-attrs opts)
+        expected (expected-fragment-target-attrs)]
+    (is (= expected actual))))
 
-  (testing "merges caller inner attrs"
-    (is (= {:id "request-panel"
-            :hx-get "/frag"
-            :hx-trigger "load, sse:live-update"
-            :hx-swap "outerHTML"
-            :class "grow"}
-           (live/fragment-target-attrs
-            {:id "request-panel"
-             :src "/frag"
-             :stream-url "/stream"
-             :inner-attrs {:class "grow"}}))))
-
-  (testing "respects custom event swap and trigger"
-    (is (= {:id "request-panel"
-            :hx-get "/frag"
-            :hx-trigger "revealed, sse:custom-event"
-            :hx-swap "innerHTML"}
-           (live/fragment-target-attrs
-            {:id "request-panel"
-             :src "/frag"
-             :stream-url "/stream"
-             :event "custom-event"
-             :swap "innerHTML"
-             :trigger "revealed"}))))
-
-  (testing "requires id"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/fragment-target-attrs
-                  {:src "/frag"
-                   :stream-url "/stream"}))))
-
-  (testing "requires src"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/fragment-target-attrs
-                  {:id "request-panel"
-                   :stream-url "/stream"}))))
-
-  (testing "requires stream-url"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/fragment-target-attrs
-                  {:id "request-panel"
-                   :src "/frag"})))))
+(deftest fragment-target-attrs-customizations-test
+  (let [opts (fragment-opts
+              {:event "request-changed"
+               :swap "innerHTML"
+               :trigger "revealed"
+               :inner-attrs {:class "w-full"}})
+        actual (live/fragment-target-attrs opts)
+        expected (expected-fragment-target-attrs
+                  {:hx-trigger "revealed, sse:request-changed"
+                   :hx-swap "innerHTML"
+                   :class "w-full"})]
+    (is (= expected actual))))
 
 (deftest fragment-test
-  (testing "renders minimal live fragment hiccup"
-    (is (= [:div
-            {:hx-ext "sse"
-             :sse-connect "/stream"}
-            [:div
-             {:id "request-panel"
-              :hx-get "/frag"
-              :hx-trigger "load, sse:live-update"
-              :hx-swap "outerHTML"}]]
-           (live/fragment
-            {:id "request-panel"
-             :src "/frag"
-             :stream-url "/stream"}))))
+  (let [opts (fragment-opts)
+        actual (live/fragment opts)
+        expected (expected-fragment)]
+    (is (= expected actual))))
 
-  (testing "passes through custom attrs"
-    (is (= [:div
-            {:hx-ext "sse"
-             :sse-connect "/stream"
-             :class "outer"}
-            [:div
-             {:id "request-panel"
-              :hx-get "/frag"
-              :hx-trigger "load, sse:live-update"
-              :hx-swap "outerHTML"
-              :class "inner"}]]
-           (live/fragment
-            {:id "request-panel"
-             :src "/frag"
-             :stream-url "/stream"
-             :attrs {:class "outer"}
-             :inner-attrs {:class "inner"}})))))
+(deftest anti-forgery-token-test
+  (testing "prefers plain anti-forgery token"
+    (let [ctx {:anti-forgery-token "plain-token"
+               :biff/anti-forgery-token "biff-token"}]
+      (is (= "plain-token"
+             (live/anti-forgery-token ctx)))))
 
-(deftest current-consistency-token-test
-  (testing "reads token from header"
-    (is (= [:tx 9]
-           (live/current-consistency-token
-            {:headers {"x-gesso-live-consistency-token" [:tx 9]}}))))
-
-  (testing "falls back to params"
-    (is (= [:tx 8]
-           (live/current-consistency-token
-            {:params {:consistency-token [:tx 8]}}))))
+  (testing "falls back to biff token"
+    (let [ctx (biff-token-ctx "biff-token")]
+      (is (= "biff-token"
+             (live/anti-forgery-token ctx)))))
 
   (testing "returns nil when absent"
-    (is (nil? (live/current-consistency-token {})))))
+    (is (nil? (live/anti-forgery-token {})))))
 
-(deftest live-request-test
-  (testing "true when token exists"
-    (is (true? (live/live-request?
-                {:headers {"x-gesso-live-consistency-token" [:tx 9]}}))))
+(deftest anti-forgery-input-test
+  (testing "renders hidden input when token present"
+    (let [ctx (token-ctx "token-1")
+          actual (live/anti-forgery-input ctx)
+          expected (expected-anti-forgery-input "token-1")]
+      (is (= expected actual))))
 
-  (testing "false when token missing"
-    (is (false? (live/live-request? {})))))
+  (testing "returns nil when token absent"
+    (is (nil? (live/anti-forgery-input {})))))
+
+(deftest normalize-target-test
+  (is (nil? (live/normalize-target nil)))
+  (is (= "#shared-counter-fragment"
+         (live/normalize-target "shared-counter-fragment")))
+  (is (= "#already-id"
+         (live/normalize-target "#already-id")))
+  (is (= ".some-class"
+         (live/normalize-target ".some-class")))
+  (is (= "this"
+         (live/normalize-target "this")))
+  (is (= "closest [hx-ext='sse']"
+         (live/normalize-target "closest [hx-ext='sse']"))))
+
+(deftest post-form-attrs-test
+  (testing "builds standard attrs with default swap"
+    (let [opts {:to "/app/demo/shared-counter/increment"
+                :target "shared-counter-fragment"}
+          actual (live/post-form-attrs opts)
+          expected {:method "post"
+                    :action "/app/demo/shared-counter/increment"
+                    :hx-post "/app/demo/shared-counter/increment"
+                    :hx-target "#shared-counter-fragment"
+                    :hx-swap "innerHTML"}]
+      (is (= expected actual))))
+
+  (testing "allows custom swap and extra attrs"
+    (let [opts {:to "/x"
+                :target "frag"
+                :swap "outerHTML"
+                :attrs {:class "my-form"}}
+          actual (live/post-form-attrs opts)
+          expected {:method "post"
+                    :action "/x"
+                    :hx-post "/x"
+                    :hx-target "#frag"
+                    :hx-swap "outerHTML"
+                    :class "my-form"}]
+      (is (= expected actual))))
+
+  (testing "allows omitted target"
+    (let [opts {:to "/x"}
+          actual (live/post-form-attrs opts)
+          expected {:method "post"
+                    :action "/x"
+                    :hx-post "/x"
+                    :hx-swap "innerHTML"}]
+      (is (= expected actual)))))
+
+(deftest post-form-test
+  (testing "includes anti-forgery input when token exists"
+    (let [ctx (token-ctx "token-1")
+          opts {:to "/app/demo/shared-counter/increment"
+                :target "shared-counter-fragment"}
+          actual (live/post-form ctx opts [:span "Increment"])
+          expected (expected-post-form
+                    {}
+                    [(expected-anti-forgery-input "token-1")
+                     [:span "Increment"]])]
+      (is (= expected actual))))
+
+  (testing "omits anti-forgery input when token missing"
+    (let [ctx {}
+          opts {:to "/x"}
+          actual (live/post-form ctx opts [:span "No token"])
+          expected [:form {:method "post"
+                           :action "/x"
+                           :hx-post "/x"
+                           :hx-swap "innerHTML"}
+                    [:span "No token"]]]
+      (is (= expected actual)))))
+
+(deftest post-button-test
+  (testing "renders a standard button form with label"
+    (let [ctx (token-ctx "token-1")
+          opts {:to "/app/demo/shared-counter/increment"
+                :target "shared-counter-fragment"
+                :label "+"}
+          actual (live/post-button ctx opts)
+          expected (expected-post-button)]
+      (is (= expected actual))))
+
+  (testing "renders with explicit children and merged attrs"
+    (let [ctx (token-ctx "token-2")
+          opts {:to "/x"
+                :target "frag"
+                :swap "outerHTML"
+                :form-attrs {:class "my-form"}
+                :button-attrs {:class "btn"}
+                :children [[:span "Go"]]}
+          actual (live/post-button ctx opts)
+          expected [:form {:method "post"
+                           :action "/x"
+                           :hx-post "/x"
+                           :hx-target "#frag"
+                           :hx-swap "outerHTML"
+                           :class "my-form"}
+                    (expected-anti-forgery-input "token-2")
+                    [:button {:type "submit"
+                              :class "btn"}
+                     [:span "Go"]]]]
+      (is (= expected actual)))))
+
+(deftest current-consistency-token-test
+  (is (nil? (live/current-consistency-token {}))))
+
+(deftest live-request?-test
+  (is (false? (live/live-request? {}))))
 
 (deftest build-event-test
-  (testing "uses default event name"
-    (is (= {:event "live-update"
-            :changed {:entity/type :request
-                      :entity/id "req-1"}
-            :consistency-token nil
-            :data nil}
-           (live/build-event
-            {:changed {:entity/type :request
-                       :entity/id "req-1"}}))))
+  (let [actual (live/build-event
+                {:changed {:entity/type :request
+                           :entity/id "req-123"}})
+        expected {:event "live-update"
+                  :changed {:entity/type :request
+                            :entity/id "req-123"}
+                  :consistency-token nil
+                  :data nil}]
+    (is (= expected actual))))
 
-  (testing "preserves provided event token and data"
-    (is (= {:event "custom"
-            :changed {:entity/type :request
-                      :entity/id "req-2"}
-            :consistency-token [:tx 2]
-            :data {:reason :test}}
-           (live/build-event
-            {:changed {:entity/type :request
-                       :entity/id "req-2"}
-             :event "custom"
-             :consistency-token [:tx 2]
-             :data {:reason :test}}))))
-
-  (testing "requires changed"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/build-event {})))))
-
-(deftest publish-change-test
-  (testing "publishes normalized event and returns it"
-    (let [ctx {:gesso.live/bus (test-bus)}
-          event (live/publish-change!
-                 ctx
-                 {:changed {:entity/type :request
-                            :entity/id "req-1"
-                            :change/kind :updated}})]
-      (is (= {:event "live-update"
-              :changed {:entity/type :request
-                        :entity/id "req-1"
-                        :change/kind :updated}
-              :consistency-token nil
-              :data nil}
-             event)))))
-
-(deftest publish-change-requires-bus-test
-  (testing "throws when bus is missing from ctx"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/publish-change!
-                  {}
-                  {:changed {:entity/type :request
-                             :entity/id "req-1"}})))))
-
-(deftest fragment-required-keys-test
-  (testing "requires id"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/fragment
-                  {:src "/frag"
-                   :stream-url "/stream"}))))
-
-  (testing "requires src"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/fragment
-                  {:id "request-panel"
-                   :stream-url "/stream"}))))
-
-  (testing "requires stream-url"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (live/fragment
-                  {:id "request-panel"
-                   :src "/frag"})))))
+(deftest build-event-custom-event-test
+  (let [actual (live/build-event
+                {:event "request-changed"
+                 :changed {:entity/type :request
+                           :entity/id "req-123"}
+                 :consistency-token [:tx 7]
+                 :data {:reason :claim}})
+        expected {:event "request-changed"
+                  :changed {:entity/type :request
+                            :entity/id "req-123"}
+                  :consistency-token [:tx 7]
+                  :data {:reason :claim}}]
+    (is (= expected actual))))

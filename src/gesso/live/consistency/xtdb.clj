@@ -100,6 +100,125 @@
      :consistency-token consistency-token
      :published published}))
 
+(def default-visible-attempts
+  "Default max retry count when waiting for a write to become query-visible."
+  20)
+
+(def default-visible-sleep-ms
+  "Default sleep between visibility checks."
+  50)
+
+(defn wait-until-visible!
+  "Poll until `visible?` returns truthy for ctx, or throw after the retry limit.
+
+   opts:
+   - :visible?   required predicate of ctx
+   - :attempts   optional, defaults to 20
+   - :sleep-ms   optional, defaults to 50
+
+   Returns true when the predicate succeeds."
+  [ctx {:keys [visible? attempts sleep-ms]
+        :or {attempts default-visible-attempts
+             sleep-ms default-visible-sleep-ms}}]
+  (when-not visible?
+    (throw (ex-info "Missing required visible predicate"
+                    {:missing-key :visible?})))
+  (loop [n 0]
+    (cond
+      (visible? ctx)
+      true
+
+      (>= n attempts)
+      (throw (ex-info "XTDB write did not become visible before timeout"
+                      {:attempts attempts
+                       :sleep-ms sleep-ms}))
+
+      :else
+      (do
+        (Thread/sleep sleep-ms)
+        (recur (inc n))))))
+
+(defn submit-visible-tx!
+  "Submit a tx, wait until it is visible to reads, then publish the changed event.
+
+   This is useful when the UI should not receive a live update until a follow-up
+   read through `q` can already observe the new value.
+
+   Required opts:
+   - :tx         tx ops
+   - :visible?   predicate of ctx that returns truthy once the write is visible
+   - :changed    normalized changed payload for gesso.live.core/publish-change!
+
+   Optional opts:
+   - :event
+   - :data
+   - :attempts
+   - :sleep-ms
+
+   Returns a map with:
+   - :tx-result
+   - :visible?
+   - :published"
+  [ctx {:keys [tx changed event data visible? attempts sleep-ms]}]
+  (when-not tx
+    (throw (ex-info "Missing required tx ops"
+                    {:missing-key :tx})))
+  (when-not changed
+    (throw (ex-info "Missing required changed payload"
+                    {:missing-key :changed})))
+  (let [connectable (connectable-from-ctx ctx)
+        tx-result (submit-tx-raw! connectable tx)
+        visible?* (wait-until-visible!
+                   ctx
+                   {:visible? visible?
+                    :attempts attempts
+                    :sleep-ms sleep-ms})
+        published (live/publish-change!
+                   ctx
+                   {:changed changed
+                    :event event
+                    :data data})]
+    {:tx-result tx-result
+     :visible? visible?*
+     :published published}))
+
+(defn put-and-publish!
+  "Put one XTDB document, wait until it is visible to reads, then publish the
+   corresponding live change.
+
+   Required opts:
+   - :table       XTDB table keyword
+   - :doc         document to put
+   - :visible?    predicate of ctx that returns truthy once the write is visible
+   - :changed     normalized changed payload for gesso.live.core/publish-change!
+
+   Optional opts:
+   - :event
+   - :data
+   - :attempts
+   - :sleep-ms
+
+   Returns a map with:
+   - :tx-result
+   - :visible?
+   - :published"
+  [ctx {:keys [table doc visible? changed event data attempts sleep-ms]}]
+  (when-not table
+    (throw (ex-info "Missing required XTDB table"
+                    {:missing-key :table})))
+  (when-not doc
+    (throw (ex-info "Missing required XTDB document"
+                    {:missing-key :doc})))
+  (submit-visible-tx!
+   ctx
+   {:tx [[:put-docs table doc]]
+    :visible? visible?
+    :changed changed
+    :event event
+    :data data
+    :attempts attempts
+    :sleep-ms sleep-ms}))
+
 (defn with-consistency
   "Provide token access to custom XTDB read logic."
   [ctx f]

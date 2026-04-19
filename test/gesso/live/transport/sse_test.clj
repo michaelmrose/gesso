@@ -3,9 +3,14 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [gesso.live.bus :as bus]
-   [gesso.live.transport.sse :as sse])
+   [gesso.live.transport.sse :as sse]
+   [ring.core.protocols :as protocols])
   (:import
-   [java.io ByteArrayOutputStream BufferedWriter OutputStreamWriter PipedInputStream PipedOutputStream]
+   [java.io ByteArrayOutputStream
+    BufferedWriter
+    OutputStreamWriter
+    PipedInputStream
+    PipedOutputStream]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
@@ -30,16 +35,16 @@
                       s
                       (recur))))))))))))
 
-;; Helper to wrap the new body-fn so tests can read it like an InputStream
-(defn stream-from-body-fn
-  [body-fn]
-  (let [in (PipedInputStream. 65536)
+(defn stream-from-body
+  [body]
+  (let [in  (PipedInputStream. 65536)
         out (PipedOutputStream. in)]
     (future
       (try
-        (body-fn out)
+        (protocols/write-body-to-stream body nil out)
         (catch Throwable _ nil)
-        (finally (.close out))))
+        (finally
+          (.close out))))
     in))
 
 (def test-matcher
@@ -199,7 +204,7 @@
                :subscriber subscriber
                :queue queue
                :keepalive-ms 25})
-        body (stream-from-body-fn (:body resp))]
+        body (stream-from-body (:body resp))]
     (try
       (Thread/sleep 50)
       (is (contains? (bus/subscribers-snapshot live-bus)
@@ -291,7 +296,7 @@
               {:ctx {:gesso.live/bus live-bus}
                :subscription-fn (mk-subscription-fn)
                :keepalive-ms 50})
-        body (stream-from-body-fn (:body resp))
+        body (stream-from-body (:body resp))
         read-fut (body-reader-future body)]
     (try
       (let [text (await-future read-fut 1000)]
@@ -307,7 +312,7 @@
               {:ctx {:gesso.live/bus live-bus}
                :subscription-fn (mk-subscription-fn)
                :keepalive-ms 1000})
-        body (stream-from-body-fn (:body resp))]
+        body (stream-from-body (:body resp))]
     (try
       (Thread/sleep 100)
       (bus/publish! live-bus (mk-event {:data {:reason :transport-check}}))
@@ -325,7 +330,7 @@
               {:ctx {:gesso.live/bus live-bus}
                :subscription-fn (mk-subscription-fn)
                :keepalive-ms 50})
-        body (stream-from-body-fn (:body resp))]
+        body (stream-from-body (:body resp))]
     (try
       (Thread/sleep 100)
       (is (pos? (count (bus/subscribers-snapshot live-bus))))
@@ -341,7 +346,7 @@
                   {:ctx {:gesso.live/bus live-bus}
                    :subscription-fn (mk-subscription-fn)
                    :keepalive-ms 25})
-            body (stream-from-body-fn (:body resp))]
+            body (stream-from-body (:body resp))]
         (Thread/sleep 50)
         (.close body)
         (Thread/sleep 50)))
