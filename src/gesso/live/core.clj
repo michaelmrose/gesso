@@ -92,21 +92,21 @@
      [:div target-attrs]]))
 
 (defn fragment-panel
-  "Render a standard live fragment panel from one live config map.
-
-   Required config keys:
-   - :fragment/id
-   - :fragment/src
-   - :subscription/token
-
-   Optional:
-   - :fragment/swap"
-  [{:keys [fragment/id fragment/src subscription/token fragment/swap]}]
-  (fragment
-   {:id id
-    :src src
-    :stream-url (str "/app/gesso/live/stream?subscription=" token)
-    :swap (or swap "innerHTML")}))
+  "Renders the initial container for a live fragment.
+   Now accepts ctx so it can pre-render the fragment with live data."
+  ([config]
+   ;; Fallback for static panels that don't need initial data
+   (fragment-panel {} config))
+  ([ctx config]
+   (let [{:keys [subscription/token entry fragment/id fragment/src fragment/swap]} config]
+     [:div {:id id
+            :hx-get src
+            :hx-trigger "load" ;; This ensures it loads the fragment immediately
+            :hx-swap swap
+            :path (str "/app/gesso/live/stream?subscription=" token)}
+      ;; You can also explicitly call the fragment here if you want
+      ;; it rendered server-side on the very first byte.
+      ])))
 
 (defn anti-forgery-token
   [ctx]
