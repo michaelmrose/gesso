@@ -156,58 +156,18 @@
     (is (= "custom-event"
            (get-in result [:published :event])))))
 
-(deftest wait-until-visible!-success-test
-  (let [state (atom 0)
-        result (live.xtdb/wait-until-visible!
-                (ctx)
-                {:visible? (fn [_]
-                             (let [n (swap! state inc)]
-                               (>= n 3)))
-                 :attempts 5
-                 :sleep-ms 1})]
-    (is (true? result))
-    (is (>= @state 3))))
-
-(deftest wait-until-visible!-timeout-test
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
-       #"XTDB write did not become visible before timeout"
-       (live.xtdb/wait-until-visible!
-        (ctx)
-        {:visible? (fn [_] false)
-         :attempts 2
-         :sleep-ms 1}))))
-
-(deftest wait-until-visible!-missing-predicate-test
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
-       #"Missing required visible predicate"
-       (live.xtdb/wait-until-visible!
-        (ctx)
-        {:attempts 2
-         :sleep-ms 1}))))
-
-(deftest submit-visible-tx!-test
-  (let [id "req-visible-1"
+(deftest submit-and-await-tx!-test
+  (let [id "req-await-1"
         changed {:entity/type :request
                  :entity/id id
                  :change/kind :updated}
-        result (live.xtdb/submit-visible-tx!
+        result (live.xtdb/submit-and-await-tx!
                 (ctx)
                 {:tx (put-request-tx id "open")
-                 :visible? (fn [ctx]
-                             (= [{:xt/id id
-                                  :status "open"}]
-                                (vec (live.xtdb/q-raw
-                                      (live.xtdb/connectable-from-ctx ctx)
-                                      (request-query id)))))
                  :changed changed
-                 :data {:reason :visible-write}
-                 :attempts 5
-                 :sleep-ms 10})]
-    (is (map? (:tx-result result)))
-    (is (contains? (:tx-result result) :tx-id))
-    (is (true? (:visible? result)))
+                 :data {:reason :visible-write}})]
+    (is (some? (:tx-result result)))
+    (is (some? (:tx-id (:tx-result result))))
     (is (= {:event "live-update"
             :changed changed
             :consistency-token nil
@@ -217,23 +177,15 @@
              :status "open"}]
            (vec (request-rows-raw id))))))
 
-(deftest submit-visible-tx!-custom-event-test
-  (let [id "req-visible-2"
-        result (live.xtdb/submit-visible-tx!
+(deftest submit-and-await-tx!-custom-event-test
+  (let [id "req-await-2"
+        result (live.xtdb/submit-and-await-tx!
                 (ctx)
                 {:tx (put-request-tx id "open")
-                 :visible? (fn [ctx]
-                             (= [{:xt/id id
-                                  :status "open"}]
-                                (vec (live.xtdb/q-raw
-                                      (live.xtdb/connectable-from-ctx ctx)
-                                      (request-query id)))))
                  :changed {:entity/type :request
                            :entity/id id
                            :change/kind :updated}
-                 :event "request-changed"
-                 :attempts 5
-                 :sleep-ms 10})]
+                 :event "request-changed"})]
     (is (= "request-changed"
            (get-in result [:published :event])))))
 
@@ -246,19 +198,10 @@
                 (ctx)
                 {:table :requests
                  :doc (request-doc id "open")
-                 :visible? (fn [ctx]
-                             (= [{:xt/id id
-                                  :status "open"}]
-                                (vec (live.xtdb/q-raw
-                                      (live.xtdb/connectable-from-ctx ctx)
-                                      (request-query id)))))
                  :changed changed
-                 :data {:reason :put-and-publish}
-                 :attempts 5
-                 :sleep-ms 10})]
-    (is (map? (:tx-result result)))
-    (is (contains? (:tx-result result) :tx-id))
-    (is (true? (:visible? result)))
+                 :data {:reason :put-and-publish}})]
+    (is (some? (:tx-result result)))
+    (is (some? (:tx-id (:tx-result result))))
     (is (= {:event "live-update"
             :changed changed
             :consistency-token nil
@@ -275,7 +218,6 @@
        (live.xtdb/put-and-publish!
         (ctx)
         {:doc (request-doc "req-put-missing-table" "open")
-         :visible? (fn [_] true)
          :changed {:entity/type :request
                    :entity/id "req-put-missing-table"
                    :change/kind :updated}}))))
@@ -287,7 +229,6 @@
        (live.xtdb/put-and-publish!
         (ctx)
         {:table :requests
-         :visible? (fn [_] true)
          :changed {:entity/type :request
                    :entity/id "req-put-missing-doc"
                    :change/kind :updated}}))))
