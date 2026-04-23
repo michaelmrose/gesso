@@ -113,3 +113,40 @@
   [ctx f]
   (let [consistency-token (live/current-consistency-token ctx)]
     (f {:consistency-token consistency-token})))
+
+;; --- State Management & Ergonomics ---
+
+(defn ->synced
+  "Helper to define a standardized map for a synced live variable."
+  [{:keys [table id col entity-type default] :or {default 0} :as opts}]
+  {:table table
+   :id id
+   :col-kw col
+   ;; Add entity-type for the event bus, fallback to table if not provided
+   :entity-type (or entity-type table)
+   :sql-str (str "SELECT * FROM " (name table) " WHERE _id = ?")
+   :default default})
+
+(defn live-read
+  "Reads the current value of a synced definition from XTDB."
+  [ctx {:keys [sql-str id col-kw default]}]
+  (let [row (first (q ctx [sql-str id]))]
+    (or (get row col-kw) default)))
+
+(defn live-swap!
+  "Reads the current state, applies f with args, writes to XTDB, and broadcasts."
+  [ctx {:keys [table id col-kw entity-type] :as synced-def} f & args]
+  (let [old-val (live-read ctx synced-def)
+        new-val (apply f old-val args)]
+
+    (put-and-publish!
+     ctx
+     {:table table
+      :doc {:xt/id id col-kw new-val}
+      ;; Route the broadcast using the correct entity-type
+      :changed {:entity/type entity-type
+                :entity/id id
+                :change/kind :updated}
+      :data {:reason :live-swap}})
+
+    new-val))
