@@ -1,0 +1,41 @@
+#+TITLE: Gesso Field Component Technical Specification
+#+DESCRIPTION: The structural shell that handles layout, ARIA coordination, and validation injection.
+
+* gesso.components.field.attr
+** (derive-ids [for-id])
+- Input :: String or Keyword =for-id= (e.g., =:user-email=).
+- Returns :: Map: ={:id "user-email" :desc-id "user-email-desc" :err-id "user-email-err"}=.
+
+** (build-aria [ids invalid?])
+- Input :: IDs map, boolean state.
+- Returns :: Map: ={:aria-describedby "user-email-desc user-email-err" :aria-errormessage "user-email-err" :aria-invalid (str invalid?)}=.
+
+** (annotate-control [control ids plan invalid?])
+- Input ::
+  - =control=: Hiccup vector (e.g., =[:input {:type "text"}]=).
+  - =ids=: Map from =derive-ids=.
+  - =plan=: Map from =validation.core/field-plan=.
+  - =invalid?=: Boolean.
+- Returns :: Modified Hiccup vector.
+- Logic ::
+  1. Utilizes =gesso.util/merge-attrs= to safely mutate the control.
+  2. Merges =(:attrs plan)= (the HTML5 constraints).
+  3. Merges =(build-aria ids invalid?)=.
+  4. Appends =(:script plan)= to any existing Hyperscript in the =:_= attribute.
+  5. Forces the =:id= to equal =(:id ids)= to guarantee label correlation.
+
+* gesso.components.field.scripts
+** (ui-recovery-script [err-id])
+- Returns :: String (Hyperscript).
+- Output :: ="on keydown add .hidden to #<err-id>"=
+- Logic :: Instantly clears server-provided OOB errors the moment the user attempts to fix the input, preventing stale UI.
+
+* gesso.components.field.core
+** (field [props control])
+- Input :: ={:keys [label-text for schema description error indicator]}= + =control= (Hiccup).
+- Returns :: Hiccup Vector (=[:div.flex.flex-col.gap-field ...]=).
+- Lifecycle ::
+  1. Destructure and derive: =ids= from =for=.
+  2. Plan phase: If =schema= is present, execute =(gesso.validation.core/field-plan schema (keyword for) (:err-id ids))=.
+  3. Mutation phase: Execute =(annotate-control control ids (boolean error) plan)=.
+  4. Render phase: Assemble the shell containing the Label, the mutated Control (+ Indicator), the Description, and the Error container.

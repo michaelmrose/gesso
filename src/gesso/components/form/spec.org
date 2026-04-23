@@ -1,0 +1,47 @@
+#+TITLE: Gesso Form Component Technical Specification
+#+DESCRIPTION: The undisputed authority for server submissions. Handles CSRF, HTMX routing, and local validation guarding.
+
+* gesso.components.form.attr
+** (post-form-attrs [opts])
+- Input :: ={:keys [to target swap attrs]}=.
+- Returns :: Map of base HTMX directives: ={:hx-post to, :hx-target target, :hx-swap swap}= + =attrs=.
+
+** (validation-attrs [opts])
+- Input :: ={:keys [validate-url]}=.
+- Returns :: Map of validation-specific HTMX:
+  #+BEGIN_SRC clojure
+  {:hx-trigger "validateField delay:250ms"
+   :hx-sync "closest .gesso-field:drop"}
+  #+END_SRC
+
+* gesso.components.form.scripts
+** (submission-guard [])
+- Returns :: String (Hyperscript).
+- Output :: ="on submit if <[aria-invalid='true']> in me length > 0 halt"=
+- Logic :: The bouncer. Kills native and HTMX submissions if any child field is flagged by the local gatekeeper.
+
+* gesso.components.form.core
+** (anti-forgery-token [ctx]) & (anti-forgery-input [ctx])
+- Logic :: Sucked straight out of the old live.clj. Extracts the Biff token and returns =[:input {:type "hidden" :name "__anti-forgery-token" :value token}]=.
+
+** (form [ctx opts & children])
+- Input :: Biff =ctx=, options map, children.
+- Returns :: Hiccup Vector (=[:form ...]=).
+- Logic ::
+  1. This is the "Dumb" base form. It does not validate.
+  2. Generates =(post-form-attrs opts)=.
+  3. Injects the =(anti-forgery-input ctx)=.
+  4. Wraps the children.
+
+** (validating-form [ctx opts & children])
+- Input :: Biff =ctx=, options map (must include =:validate-url=), children.
+- Returns :: Hiccup Vector (=[:form ...]=).
+- Logic ::
+  1. The "Smart" form.
+  2. Calculates =(validation-attrs opts)= and grabs the =(submission-guard)= script.
+  3. Upcycles the =opts= map to include these new attributes.
+  4. Delegates to the base =(form ctx upgraded-opts children)= to handle the actual HTML and CSRF token.
+
+** (post-button [ctx opts & children])
+- Input :: =ctx= and options (including =:label=, =:button-attrs=, =:form-attrs=).
+- Returns :: Hiccup Vector. A =[:button {:type "submit"}]= wrapped in a base =(form)=, perfect for standalone destructive actions (like "Delete Row") without needing a full UI form.
