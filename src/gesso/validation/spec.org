@@ -1,61 +1,983 @@
-#+TITLE: Gesso Validation Engine Technical Specification
-#+DESCRIPTION: The pure-logic bridge translating Malli AST into HTMX/Hyperscript UI states.
+#+title: Gesso Validation Specification
+#+description: Malli-to-HTML validation planning, client gatekeeper scripts, and HTMX server error rendering.
 
-* gesso.validation.malli
-** (extract-constraints [schema field-kw])
-- Input ::
-  - =schema=: A compiled Malli schema or raw vector (e.g., =[:map [:email [:string {:min 5 :gesso.error/min "Too short"}]]]=).
-  - =field-kw=: Keyword targeting the specific field (e.g., =:email=).
-- Returns ::
-  #+BEGIN_SRC clojure
-  {:rules {:minlength int? :maxlength int? :pattern string? :required boolean?}
-   :messages {:min str? :max str? :pattern str? :required str?}}
-  #+END_SRC
-- Logic ::
-  1. Uses =malli.core/ast= or =malli.util= to navigate to the =field-kw= child.
-  2. Maps internal Malli keys (=:min=, =:re=) to standard HTML5 attribute keys (=:minlength=, =:pattern=).
-  3. Extracts custom error strings looking for =:gesso.error/<type>=, falling back to standard =:error/message=, then library defaults.
+* Purpose
 
-** (resolve-error-message [constraints validity-state])
-- Input :: The =:messages= map and a string representing the HTML5 ValidityState failure (e.g., "valueMissing", "tooShort").
-- Returns :: The resolved string message.
+The validation namespaces provide a small bridge between:
 
-* gesso.validation.scripts
-** (gatekeeper-script [messages-map err-id])
-- Input :: =:messages= map from =extract-constraints= and the target =err-id= string.
-- Returns :: String (Hyperscript).
-- Output Example ::
-  #+BEGIN_SRC text
-  on input or blur
-    if my.checkValidity() is false
-      if my.validity.valueMissing set #<err-id>.innerHTML to '<messages-map.required>'
-      else if my.validity.tooShort set #<err-id>.innerHTML to '<messages-map.minlength>'
-      remove .hidden from #<err-id>
-      add .aria-invalid='true' to me
-    else
-      add .hidden to #<err-id>
-      set .aria-invalid='false' on me
-      trigger validateField
-  #+END_SRC
-- Logic :: Defers the actual math (regex/length) to the browser's native C++ engine, only waking up Hyperscript to map the failure to your custom Malli string and manage CSS.
+- Malli schemas
+- browser-native HTML5 validation
+- Gesso field components
+- Hyperscript client feedback
+- HTMX out-of-band server validation errors
 
-* gesso.validation.htmx
-** (render-oob-errors [explain-data])
-- Input :: Malli =explain-data= map resulting from a failed backend =m/explain=.
-- Returns :: Hiccup Vector.
-  #+BEGIN_SRC clojure
-  [:<>
-   [:div {:id "email-error" :hx-swap-oob "innerHTML"} "Email already taken"]
-   [:div {:id "password-error" :hx-swap-oob "innerHTML"} "Password too weak"]]
-  #+END_SRC
-- Logic :: Transforms the path vector in =explain-data= into the stable =id= format matching =gesso.components.field.attr/derive-ids=.
+The goal is not to build a complete Malli form compiler.
 
-* gesso.validation.core
-** (field-plan [schema field-kw err-id])
-- Input :: =schema=, =field-kw=, =err-id=.
-- Returns :: Map to be injected into the UI component.
-  #+BEGIN_SRC clojure
-  {:attrs {:minlength 5 :required true}
-   :script "on input or blur..."}
-  #+END_SRC
-- Logic :: The orchestrator. Calls =malli/extract-constraints=, plucks the =:rules= for =:attrs=, and passes the =:messages= to =scripts/gatekeeper-script= to bundle the plan.
+The goal is to provide a reliable validation planning layer that field and form
+components can consume.
+
+* Design principles
+
+** Browser validation is a shortcut, not the source of truth
+
+Client-side validation exists to give fast feedback and avoid obviously bad
+submissions.
+
+Server-side Malli validation remains authoritative.
+
+A browser pattern, length rule, or range rule should never be treated as the
+final validation guarantee.
+
+** Prefer browser-native validation where possible
+
+Simple constraints should be rendered as native HTML attributes.
+
+Examples:
+
+- required
+- minlength
+- maxlength
+- pattern
+- min
+- max
+
+The browser performs the fast local validity checks.
+
+Gesso maps schema-derived messages onto browser =ValidityState= failures.
+
+** Keep Malli extraction separate from UI rendering
+
+Malli-specific schema walking belongs in =gesso.validation.malli=.
+
+Field components should not inspect Malli schemas directly.
+
+Field components should consume a small validation plan.
+
+** Keep generated client scripts small
+
+The client-side script is a gatekeeper.
+
+It should:
+
+- listen to input and blur
+- call native =checkValidity=
+- inspect native =ValidityState=
+- show the correct message
+- hide the message when valid
+- mark the control with =aria-invalid=
+- trigger a form-level validation event when appropriate
+
+It should not reimplement Malli.
+
+** Keep server errors compatible with the same field IDs
+
+Server validation errors are rendered as HTMX out-of-band swaps.
+
+Those swaps must target the same stable error containers rendered by the field
+component.
+
+Client-side and server-side validation share the same visible error region.
+
+* Namespace overview
+
+** =gesso.validation.malli=
+
+Extracts simple HTML5-compatible constraints from Malli schemas.
+
+This namespace knows about Malli.
+
+It does not render Hiccup.
+
+It does not generate Hyperscript.
+
+** =gesso.validation.scripts=
+
+Generates Hyperscript strings used by controls.
+
+This namespace knows about browser validity states and error message maps.
+
+It does not know about Malli.
+
+** =gesso.validation.htmx=
+
+Transforms server-side Malli explain data into HTMX out-of-band error updates.
+
+This namespace knows about Malli explain output and the stable field error ID
+convention.
+
+** =gesso.validation.core=
+
+The orchestration layer.
+
+It combines Malli extraction and script generation into one plan that field
+components can consume.
+
+* Shared field ID convention
+
+Validation depends on stable field IDs.
+
+For a control with id:
+
+#+begin_src text
+email
+#+end_src
+
+The related IDs are:
+
+#+begin_src clojure
+{:id      "email"
+ :desc-id "email-description"
+ :err-id  "email-error"}
+#+end_src
+
+This convention must match the field component.
+
+The validation namespaces assume:
+
+- description container: =<field-id>-description=
+- error container: =<field-id>-error=
+
+Server-side OOB errors target the error container.
+
+Client-side scripts write to the same error container.
+
+* =gesso.validation.malli=
+
+** Purpose
+
+=gesso.validation.malli= translates a narrow, practical subset of Malli field
+schemas into HTML5-compatible validation attributes and message maps.
+
+It does not generate forms.
+
+It does not generate controls.
+
+It does not try to convert arbitrary Malli semantics into browser validation.
+
+** Current scope
+
+The current implementation supports:
+
+- top-level Malli =:map= schemas
+- direct field keys inside that map
+- map entries with or without an entry properties map
+- requiredness based on map entry optionality
+- simple =[:maybe ...]= field wrappers
+- simple string constraints
+- simple numeric constraints
+- explicit browser pattern strings
+- conservative Java regex fallback
+- custom per-rule messages
+
+This is a schema-to-validation-attribute extractor, not a form generator.
+
+** Supported schema shape
+
+Supported:
+
+#+begin_src clojure
+[:map
+ [:email
+  [:string {:min 5
+            :max 100
+            :gesso.html/pattern ".+@.+"
+            :gesso.error/pattern "Email format is invalid."}]]
+
+ [:username
+  [:string {:min 3
+            :max 24
+            :re #"^[a-z0-9_-]+$"
+            :gesso.html/pattern "^[a-z0-9_-]+$"
+            :gesso.error/pattern "Use lowercase letters, numbers, underscores, or hyphens."}]]
+
+ [:age
+  [:int {:min 18
+         :max 120}]]
+
+ [:nickname {:optional true}
+  [:string {:max 20}]]
+
+ [:middle-name
+  [:maybe [:string {:max 40}]]]]
+#+end_src
+
+The field key supplied to =extract-constraints= is expected to be a direct child
+of the top-level map.
+
+Supported:
+
+#+begin_src clojure
+(extract-constraints schema :email)
+#+end_src
+
+Not currently supported:
+
+#+begin_src clojure
+(extract-constraints schema [:user :email])
+#+end_src
+
+** Requiredness
+
+Map keys are treated as required unless the map entry has:
+
+#+begin_src clojure
+{:optional true}
+#+end_src
+
+A field wrapped in =[:maybe ...]= should not receive an HTML =required=
+attribute, even if the map key itself is required.
+
+Reason:
+
+- Malli requiredness may mean "the key must be present"
+- HTML =required= means "the submitted control must have a non-empty value"
+
+Those are related but not identical.
+
+Current rule:
+
+#+begin_src clojure
+required? = map entry is not optional AND field is not maybe/nilable
+#+end_src
+
+** Supported constraint conversion
+
+For string fields:
+
+#+begin_src clojure
+:min -> :minlength
+:max -> :maxlength
+#+end_src
+
+For numeric fields:
+
+#+begin_src clojure
+:min -> :min
+:max -> :max
+#+end_src
+
+For browser patterns:
+
+#+begin_src clojure
+:gesso.html/pattern -> :pattern
+:html/pattern       -> :pattern
+#+end_src
+
+For Java regex fallback:
+
+#+begin_src clojure
+:re -> :pattern
+#+end_src
+
+But only when the regex appears browser-compatible according to conservative
+checks.
+
+For required fields:
+
+#+begin_src clojure
+required? -> :required true
+#+end_src
+
+** Supported field types
+
+String-like types currently include:
+
+#+begin_src clojure
+:string
+#+end_src
+
+Numeric-like types currently include practical Malli numeric tags such as:
+
+#+begin_src clojure
+:int
+:int8
+:int16
+:int32
+:int64
+:long
+:float
+:double
+:number
+:integer
+:nat
+:pos-int
+:neg-int
+:pos
+:neg
+#+end_src
+
+The type sets are pragmatic, not a complete model of all Malli or custom schemas.
+
+** Browser pattern policy
+
+Browser pattern validation is intentionally separate from backend regex
+validation.
+
+Preferred authoring:
+
+#+begin_src clojure
+[:string {:re #"^[a-z0-9_-]+$"
+          :gesso.html/pattern "^[a-z0-9_-]+$"}]
+#+end_src
+
+Meaning:
+
+- =:re= is the backend/JVM/Malli validation rule
+- =:gesso.html/pattern= is the browser/HTML validation shortcut
+
+The browser pattern may be simpler or more conservative than the backend regex.
+
+Server validation remains authoritative.
+
+** Pattern precedence
+
+When extracting an HTML pattern:
+
+1. =:gesso.html/pattern= wins
+2. =:html/pattern= is accepted as a secondary shorthand
+3. =:re= is used only as a fallback
+
+This means an explicitly authored browser pattern bypasses Java-regex conversion.
+
+Example:
+
+#+begin_src clojure
+[:string {:re #"(?i)^[a-z]+$"
+          :gesso.html/pattern "^[A-Za-z]+$"}]
+#+end_src
+
+The browser receives:
+
+#+begin_src clojure
+{:pattern "^[A-Za-z]+$"}
+#+end_src
+
+The backend still has the Malli/JVM regex:
+
+#+begin_src clojure
+#"(?i)^[a-z]+$"
+#+end_src
+
+** Java regex fallback
+
+If no explicit browser pattern is provided, =:re= may be converted by taking the
+Java regex pattern string.
+
+This is only intended for simple browser-compatible regexes.
+
+The extractor should reject known Java-only or risky constructs.
+
+Examples of patterns that should require an explicit browser pattern:
+
+#+begin_src clojure
+#"(?i)^[a-z]+$"
+#"\Afoo\z"
+#"\Qfoo.bar\E"
+#"(?>foo|bar)"
+#"a++"
+#"[a-z&&[^aeiou]]"
+#"\R"
+#+end_src
+
+The error should explain that the Malli =:re= cannot be safely emitted as an
+HTML pattern and should suggest =:gesso.html/pattern=.
+
+** Regex compatibility limits
+
+Java regex and browser/HTML pattern regex are not identical.
+
+A regex can be:
+
+- valid Java regex
+- invalid browser regex
+- valid in both but semantically different
+
+The validation layer does not promise full Java-regex-to-browser-regex
+translation.
+
+It only supports:
+
+- explicit browser patterns
+- simple fallback patterns
+- conservative rejection of known incompatible Java constructs
+
+** Message lookup
+
+Messages are resolved per emitted rule.
+
+The implementation should support both Malli-ish and HTML-ish message keys.
+
+For string length:
+
+#+begin_src clojure
+:gesso.error/min
+:gesso.error/minlength
+
+:gesso.error/max
+:gesso.error/maxlength
+#+end_src
+
+For regex/browser pattern:
+
+#+begin_src clojure
+:gesso.error/re
+:gesso.error/pattern
+#+end_src
+
+For numeric ranges:
+
+#+begin_src clojure
+:gesso.error/min
+:gesso.error/max
+#+end_src
+
+For required:
+
+#+begin_src clojure
+:gesso.error/required
+#+end_src
+
+Equivalent =:error/<rule>= keys may also be supported.
+
+Fallback order:
+
+1. =:gesso.error/<rule>=
+2. =:error/<rule>=
+3. =:error/message=
+4. Gesso default message
+
+** Public function: =extract-constraints=
+
+Input:
+
+#+begin_src clojure
+(extract-constraints schema field-kw)
+#+end_src
+
+Returns:
+
+#+begin_src clojure
+{:rules    {:required true
+            :minlength 5
+            :maxlength 100
+            :pattern ".+@.+"}
+ :required true
+ :messages {:required "This field is required."
+            :minlength "Value is too short."
+            :maxlength "Value is too long."
+            :pattern "Format is invalid."}
+ :type     :string
+ :nilable? false}
+#+end_src
+
+For an unknown field, return an empty result:
+
+#+begin_src clojure
+{:rules {}
+ :required false
+ :messages {}
+ :type nil
+ :nilable? false}
+#+end_src
+
+** Out of scope for now
+
+The Malli extractor does not yet support:
+
+- nested field paths
+- generating controls from schemas
+- enum-to-select conversion
+- collection schemas
+- tuple schemas
+- arbitrary =:and= or =:or= composition
+- full custom registry alias expansion beyond what =m/schema= and =m/form= provide
+- complete Java regex to browser regex translation
+
+These can be added later only when required by real forms.
+
+* =gesso.validation.scripts=
+
+** Purpose
+
+This namespace generates the client-side Hyperscript used by individual
+controls.
+
+The generated script is attached to the control itself.
+
+It relies on the browser's native validity API.
+
+** Public function: =gatekeeper-script=
+
+Input:
+
+#+begin_src clojure
+(gatekeeper-script messages err-id)
+#+end_src
+
+Where =messages= is the message map returned by
+=gesso.validation.malli/extract-constraints=.
+
+Example messages:
+
+#+begin_src clojure
+{:required "Email is required."
+ :minlength "Email is too short."
+ :maxlength "Email is too long."
+ :pattern "Email format is invalid."
+ :min "Value is too small."
+ :max "Value is too large."}
+#+end_src
+
+Output:
+
+A Hyperscript string that can be merged into a control's =:_= attribute.
+
+** Required behavior
+
+The gatekeeper listens to:
+
+#+begin_src text
+input
+blur
+#+end_src
+
+On invalid input:
+
+- choose a message based on =my.validity=
+- write the message into the error container
+- show the error container
+- set =aria-invalid= to ="true"= on the control
+
+On valid input:
+
+- hide the error container
+- set =aria-invalid= to ="false"= on the control
+- trigger =validateField= so the parent form can debounce server validation if
+  configured
+
+** ValidityState mapping
+
+The gatekeeper should map:
+
+#+begin_src text
+valueMissing     -> :required
+tooShort         -> :minlength
+tooLong          -> :maxlength
+patternMismatch  -> :pattern
+rangeUnderflow   -> :min
+rangeOverflow    -> :max
+#+end_src
+
+Fallback message:
+
+#+begin_src text
+Invalid input.
+#+end_src
+
+** Script representation
+
+The first implementation uses a multiline Hyperscript template rather than the
+=gesso.hyperscript/hs= data DSL.
+
+Reason:
+
+The current =hs= DSL is useful for simple structured scripts, but the validation
+gatekeeper needs operations that are not yet modeled cleanly there, including:
+
+- =put msg into #<err-id>=
+- =remove .hidden from #<err-id>=
+- =add .hidden to #<err-id>=
+- chained =else if= checks against =my.validity=
+
+A multiline template is preferred here over a long =(str ...)= chain because the
+resulting Hyperscript is easier to read and compare with browser behavior.
+
+** Message escaping
+
+Schema-provided messages are interpolated into single-quoted Hyperscript
+strings.
+
+Before interpolation, messages must be escaped so that:
+
+- backslashes do not break the generated script
+- apostrophes do not terminate the string
+- newlines do not create malformed Hyperscript
+
+The implementation should route all user/schema-provided validation messages
+through an escaping helper before rendering the template.
+
+The helper may be named:
+
+#+begin_src clojure
+escape-hs-string
+#+end_src
+
+The message lookup helper should make the escaping obvious, for example:
+
+#+begin_src clojure
+escaped-message
+#+end_src
+
+** Non-goals
+
+The gatekeeper does not:
+
+- parse Malli
+- run Malli validation
+- perform server requests directly
+- know about HTMX response formats
+- create error containers
+
+* =gesso.validation.htmx=
+
+** Purpose
+
+This namespace renders server-side validation errors as HTMX out-of-band swaps.
+
+It is used when backend validation fails and the server wants to update one or
+more field error containers without replacing the entire form.
+
+** Public function: =path->field-id=
+
+Input:
+
+#+begin_src clojure
+(path->field-id [:user :email])
+#+end_src
+
+Output:
+
+#+begin_src clojure
+"user-email"
+#+end_src
+
+** Public function: =path->err-id=
+
+Input:
+
+#+begin_src clojure
+(path->err-id [:user :email])
+#+end_src
+
+Output:
+
+#+begin_src clojure
+"user-email-error"
+#+end_src
+
+** Public function: =render-oob-errors=
+
+Input:
+
+#+begin_src clojure
+(render-oob-errors explain-data)
+#+end_src
+
+Where =explain-data= is Malli explain data.
+
+Returns Hiccup:
+
+#+begin_src clojure
+[:<>
+ [:div {:id "email-error"
+        :hx-swap-oob "innerHTML"}
+  [:span {:data-validation-error-message true
+          :style {:color "var(--destructive)"}}
+   "Email is invalid."]
+  [:script "..."]]]
+#+end_src
+
+** Error path to ID conversion
+
+A simple top-level path:
+
+#+begin_src clojure
+[:email]
+#+end_src
+
+maps to:
+
+#+begin_src text
+email-error
+#+end_src
+
+A nested path maps by joining path segments with hyphens:
+
+#+begin_src clojure
+[:user :email]
+#+end_src
+
+maps to:
+
+#+begin_src text
+user-email-error
+#+end_src
+
+This keeps the convention compatible with future nested fields, even if the
+current Malli constraint extractor is top-level only.
+
+** Humanized error flattening
+
+=malli.error/humanize= may return nested maps.
+
+The HTMX renderer should flatten humanized errors into entries shaped like:
+
+#+begin_src clojure
+{:path [:user :email]
+ :messages ["Email is invalid."]}
+#+end_src
+
+Each flattened entry renders one OOB error update.
+
+** Required OOB behavior
+
+Each error update should:
+
+- target the field error container
+- replace its inner HTML
+- include accessible visible error text
+- remove hidden state from the error container
+- mark the related field control invalid when the control can be found by id
+
+The first version may use a small inline script to remove hidden state and mark
+the control invalid.
+
+A later version may prefer data attributes or a dedicated Hyperscript event
+instead of inline scripts.
+
+** Non-goals
+
+This namespace should not:
+
+- render full forms
+- infer field layout
+- generate controls
+- replace the local gatekeeper
+- decide whether a submission is authorized
+
+* =gesso.validation.core=
+
+** Purpose
+
+This namespace is the orchestration layer consumed by UI components.
+
+It hides the fact that validation currently involves:
+
+- Malli extraction
+- HTML5 attributes
+- custom messages
+- generated Hyperscript
+
+** Public function: =empty-field-plan=
+
+Input:
+
+#+begin_src clojure
+(empty-field-plan)
+#+end_src
+
+Output:
+
+#+begin_src clojure
+{:attrs {}
+ :script nil
+ :constraints nil}
+#+end_src
+
+This represents "no validation plan," not "a schema was found with no rules."
+
+** Public function: =field-plan=
+
+Input:
+
+#+begin_src clojure
+(field-plan schema field-kw err-id)
+#+end_src
+
+Output:
+
+#+begin_src clojure
+{:attrs  {:required true
+          :minlength 5
+          :maxlength 100
+          :pattern ".+@.+"}
+ :script "on input or blur ..."
+ :constraints {:rules {...}
+               :required true
+               :messages {...}
+               :type :string
+               :nilable? false}}
+#+end_src
+
+At minimum, the UI field layer needs:
+
+#+begin_src clojure
+{:attrs {...}
+ :script "..."}
+#+end_src
+
+The included =:constraints= map is useful for debugging and future consumers.
+
+** Behavior with nil schema
+
+If no schema is supplied, return:
+
+#+begin_src clojure
+{:attrs {}
+ :script nil
+ :constraints nil}
+#+end_src
+
+The field component must tolerate =nil= scripts.
+
+** Script generation
+
+=field-plan= only generates a gatekeeper script when:
+
+- there is an =err-id=
+- there are validation attrs to check
+
+If there are no local browser validation attrs, no local gatekeeper script is
+generated.
+
+Server-only validation recovery behavior belongs elsewhere, likely in field or
+form scripts.
+
+** Responsibilities
+
+=field-plan= is responsible for:
+
+1. normalizing a string field key into a keyword when needed
+2. calling =gesso.validation.malli/extract-constraints=
+3. removing nil-valued HTML attrs
+4. generating the gatekeeper script when useful
+5. returning a small plan that field components can inject into controls
+
+** Non-goals
+
+=field-plan= should not:
+
+- render fields
+- render labels
+- render forms
+- submit requests
+- know about Biff
+- know about anti-forgery tokens
+
+* Integration with field components
+
+The validation system expects the field component to:
+
+1. derive stable IDs
+2. render a description container when description is present
+3. render an error container
+4. annotate the control with:
+   - id
+   - aria-describedby
+   - aria-errormessage
+   - aria-invalid
+   - HTML5 validation attrs from =field-plan=
+   - Hyperscript from =field-plan=
+5. preserve existing user-provided attrs where possible
+
+The validation system should not itself render the field shell.
+
+* Integration with form components
+
+The validation system expects the form component to:
+
+1. optionally configure server-side validation via HTMX
+2. listen for =validateField= events from controls
+3. debounce validation requests
+4. prevent submission when any child control is marked invalid
+5. allow server responses to update field error containers via OOB swaps
+
+The validation system should not itself render form layout.
+
+* Current limitations
+
+This validation design is intentionally narrow.
+
+Current limitations include:
+
+- top-level map fields only for schema extraction
+- limited wrapper support
+- no full nested path extraction for HTML5 attrs
+- no enum/select metadata extraction
+- no control generation
+- no complete browser/Java regex compatibility checking
+- no direct authorization or business-rule validation
+
+This is acceptable for the first iteration.
+
+The immediate goal is to support common field-level constraints cleanly and
+reliably.
+
+* Future expansion candidates
+
+Only add these when real forms need them.
+
+** Nested paths
+
+Support:
+
+#+begin_src clojure
+(field-plan schema [:user :email] "user-email-error")
+#+end_src
+
+** Enum metadata
+
+Extract enum values for components like select, radio group, or segmented
+controls.
+
+** Type hints
+
+Expose UI hints such as:
+
+- string
+- number
+- email-like
+- url-like
+- password-like
+
+Only do this when there is a real component consumer.
+
+** More wrappers
+
+Potentially unwrap or interpret:
+
+- =:and=
+- =:or=
+- =:multi=
+- custom registry aliases
+
+Only if the behavior can stay predictable.
+
+** Better server error signaling
+
+Replace inline scripts in OOB error responses with a small event or
+data-attribute-based recovery protocol.
+
+* Summary
+
+The validation system is a narrow bridge, not a full form compiler.
+
+Its preferred flow is:
+
+1. Malli schema defines backend validation constraints and messages.
+2. Optional =:gesso.html/pattern= defines an explicit browser-side pattern.
+3. =gesso.validation.malli= extracts HTML5-compatible rules.
+4. =gesso.validation.core/field-plan= produces attrs and a gatekeeper script.
+5. Field components inject those attrs and scripts into controls.
+6. Browser validity handles fast local checks.
+7. Server-side Malli validation remains authoritative.
+8. HTMX server validation can update the same error containers through OOB swaps.
+
+The design favors:
+
+- small contracts
+- browser-native validation
+- explicit browser regexes when needed
+- stable IDs
+- component-level composition
+- incremental expansion only when real forms require it
