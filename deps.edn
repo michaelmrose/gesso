@@ -4,6 +4,7 @@
         com.xtdb/xtdb-api   {:mvn/version "2.x-SNAPSHOT"}
         com.xtdb/xtdb-aws   {:mvn/version "2.x-SNAPSHOT"}
         com.xtdb/xtdb-core  {:mvn/version "2.x-SNAPSHOT"}
+        metosin/malli {:mvn/version "0.20.1"}
         }
 
  :aliases
