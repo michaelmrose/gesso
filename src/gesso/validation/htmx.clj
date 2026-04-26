@@ -79,7 +79,10 @@
   (str
    "(function(){"
    "var err=document.getElementById(" (js-string err-id) ");"
-   "if(err){err.classList.remove('hidden');}"
+   "if(err){"
+   "err.classList.remove('hidden');"
+   "err.dataset.serverError='true';"
+   "}"
    "var field=document.getElementById(" (js-string field-id) ");"
    "if(field){field.setAttribute('aria-invalid','true');}"
    "})();"))

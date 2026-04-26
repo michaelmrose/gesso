@@ -1,126 +1,181 @@
-(ns gesso.components.form.core
-  "The comprehensive form component.
-   Handles visual hierarchy, CSRF injection, HTMX routing, and local/server validation."
-  (:require [clojure.string :as str]
-            [gesso.util :refer [class-names merge-attrs normalize-component-args split-opts el only-map-arg?]]
-            [gesso.components.form.attr :as attr]
-            [gesso.components.form.scripts :as scripts]
-            [gesso.components.field.core :as field]))
+(ns gesso.components.field.core
+  "Field wrapper for label, control, description, error, and validation wiring."
+  (:require
+   [gesso.components.field.attr :as attr]
+   [gesso.components.field.scripts :as field-scripts]
+   [gesso.components.label :as label]
+   [gesso.components.text :as text]
+   [gesso.validation.core :as validation]
+   [gesso.util :refer :all]))
 
-(declare form)
+(defn- validation-plan?
+  [plan]
+  (boolean
+   (or (seq (:attrs plan))
+       (seq (:script plan)))))
 
-;; -----------------------------------------------------------------------------
-;; 1. Security & Network Routing
-;; -----------------------------------------------------------------------------
+(defn- join-scripts
+  [a b]
+  (cond
+    (and (seq a) (seq b)) (str a "\n" b)
+    (seq a) a
+    (seq b) b
+    :else nil))
 
-(defn- anti-forgery-token [ctx]
-  (or (:anti-forgery-token ctx)
-      (:biff/anti-forgery-token ctx)))
+(defn- add-recovery-script
+  [plan err-id error-target?]
+  (let [recovery-script (when error-target?
+                          (field-scripts/ui-recovery-script err-id))]
+    (if recovery-script
+      (update plan :script join-scripts recovery-script)
+      plan)))
 
-(defn- anti-forgery-input [ctx]
-  (when-let [token (anti-forgery-token ctx)]
-    [:input {:type "hidden"
-             :name "__anti-forgery-token"
-             :value token}]))
+(defn- plan-for-field
+  [{:keys [schema field-key for]} {:keys [err-id]}]
+  (if schema
+    (validation/field-plan schema (or field-key for) err-id)
+    (validation/empty-field-plan)))
 
-(defn- resolve-verb-attrs
-  "Translates semantic HTTP verbs into HTMX directives."
-  [{:keys [post put patch delete target swap] :or {swap "innerHTML"}}]
-  (let [base (cond
-               post   {:hx-post post}
-               put    {:hx-put put}
-               patch  {:hx-patch patch}
-               delete {:hx-delete delete}
-               :else  {})]
-    (merge base {:hx-target target :hx-swap swap})))
+(defn- required-from-plan?
+  [plan]
+  (boolean
+   (or (get-in plan [:attrs :required])
+       (get-in plan [:constraints :required]))))
 
-;; -----------------------------------------------------------------------------
-;; 2. Shared Attribute Builder
-;; -----------------------------------------------------------------------------
+(defn- render-label
+  [{:keys [label-text required?]} ids plan]
+  (when label-text
+    (label/label
+     {:text label-text
+      :for (:id ids)
+      :required? (boolean (or required?
+                              (required-from-plan? plan)))})))
 
-(defn- build-form-attrs
-  "Calculates the merged attributes for the root form element, including
-   HTMX routing, Hyperscript validation guards, and semantic theme classes."
+(defn- render-description
+  [description ids]
+  (when description
+    (text/text
+     {:variant :caption
+      :as :p
+      :attrs (attr/description-attrs nil ids)
+      :text description})))
+
+(defn- render-error
+  [error ids error-target?]
+  (when error-target?
+    (text/text
+     {:variant :caption
+      :as :div
+      :attrs (attr/error-attrs nil
+                               (assoc ids :hidden? (not error)))
+      :text error})))
+
+(defn- control-row
+  [control indicator]
+  (if indicator
+    (el :div
+        (attr/control-row-attrs nil)
+        {}
+        [control indicator])
+    control))
+
+(defn- error-target?
+  "Whether this field should render a stable error container.
+
+   Active errors obviously need it.
+
+   Local browser validation needs it because the gatekeeper writes into it.
+
+   Schema-backed fields also need it, even when there are no local browser attrs,
+   so server-side HTMX OOB validation has a stable target."
+  [{:keys [schema]} ids plan error]
+  (boolean
+   (and (:err-id ids)
+        (or error
+            schema
+            (validation-plan? plan)))))
+
+(defn- render-short-form
   [opts]
   (let [{:keys [props class attrs]} (split-opts opts)
-        {:keys [validate-url] :as verbs} props
+        {:keys [for control indicator description error
+                orientation valid? invalid?] :as props} props
+        ids           (attr/derive-ids for)
+        plan          (plan-for-field props ids)
+        error-target? (error-target? props ids plan error)
+        plan          (add-recovery-script plan (:err-id ids) error-target?)
+        invalid?      (boolean (or invalid? error))
+        root-state    {:for for
+                       :orientation orientation
+                       :valid? valid?
+                       :invalid? invalid?}
+        control       (attr/annotate-control
+                       control
+                       ids
+                       plan
+                       {:description? (boolean description)
+                        :error? (boolean error)
+                        :invalid? invalid?
+                        :error-target? error-target?})]
+    (el :div
+        (attr/field-root-attrs class attrs root-state)
+        {}
+        [(render-label props ids plan)
+         (control-row control indicator)
+         (render-description description ids)
+         (render-error error ids error-target?)])))
 
-        network-attrs (resolve-verb-attrs verbs)
-        smart?        (boolean validate-url)
-        val-attrs     (when smart? (attr/validation-attrs validate-url))
-        guard-script  (when smart? (scripts/submission-guard))]
+(defn- render-long-form
+  [opts children]
+  (let [{:keys [props class attrs]} (split-opts opts)
+        {:keys [for orientation valid? invalid? error]} props
+        invalid? (boolean (or invalid? error))]
+    (el :div
+        (attr/field-root-attrs
+         class
+         attrs
+         {:for for
+          :orientation orientation
+          :valid? valid?
+          :invalid? invalid?})
+        {}
+        children)))
 
-    (merge-attrs
-     network-attrs
-     val-attrs
-     attrs
-     ;; Inherit the semantic theme layout (flex-col, gap-form)
-     {:class (class-names "form-theme w-full" class)}
-     (when smart?
-       {:_ guard-script
-        :novalidate true}))))
+(defn field
+  "Field wrapper for label + control + description + error.
 
-;; -----------------------------------------------------------------------------
-;; 3. Form Renderers
-;; -----------------------------------------------------------------------------
+  Short form:
+    (field {:label-text \"Email\"
+            :for :email
+            :schema UserSchema
+            :control (input {:type \"email\" :name \"email\"})
+            :description \"We will never share it.\"
+            :error nil})
 
-(defn- form-short-form
-  "Renders a completely data-driven form.
-   Takes a list of field configurations and a submit button definition."
-  [ctx opts]
-  (let [{:keys [props]} (split-opts opts)
-        {:keys [fields submit]} props
-        form-attrs (build-form-attrs opts)]
+  If :schema is supplied, the field derives a validation plan and annotates the
+  control with HTML5 validation attrs, ARIA wiring, and a Hyperscript
+  gatekeeper when local browser validation attrs exist.
 
-    (el :form
-        form-attrs
-        ;; Inject CSRF, then map fields, then append the submit button
-        (into [(anti-forgery-input ctx)]
-              (concat
-               (map #(field/field {:props %}) fields)
-               ;; Inherit semantic button sizing/typography
-               [[:button {:type "submit"
-                          :class (class-names "button-density weight-medium-theme"
-                                              (:class submit))}
-                 (:text submit "Submit")]])))))
+  Schema-backed fields always render a stable hidden error container when an
+  error id can be derived, even if the schema produces no local browser attrs.
+  This gives server-side HTMX OOB validation a target.
 
-(defn- form-long-form
-  "Renders the composition API form where developers explicitly pass children."
-  [ctx opts children]
-  (let [form-attrs (build-form-attrs opts)]
-    (el :form
-        form-attrs
-        (into [(anti-forgery-input ctx)] children))))
+  Use :field-key when the schema key differs from the rendered DOM id:
 
-;; -----------------------------------------------------------------------------
-;; 4. API Gateways
-;; -----------------------------------------------------------------------------
+    (field {:for \"user-email\"
+            :field-key :email
+            :schema UserSchema
+            :control ...})
 
-(defn form
-  "Renders a visually structured, secure form. Supported call styles: short-map or long-form."
-  [ctx & args]
+  Long form:
+    (field {:orientation :horizontal}
+      (label/label {:text \"Email\" :for \"email\"})
+      (input {:type \"email\" :id \"email\"}))
+
+  Long form is a structural wrapper only. It does not inspect or mutate child
+  controls."
+  [& args]
   (if (only-map-arg? args)
-    (form-short-form ctx (first args))
+    (render-short-form (first args))
     (let [[opts children] (normalize-component-args args)]
-      (form-long-form ctx opts children))))
-
-(defn post-button
-  "A standalone submit button that securely wraps itself in a minimal form.
-   Overrides .form-theme to prevent unwanted flex/gap spacing in inline contexts."
-  [ctx & args]
-  (let [[opts children] (normalize-component-args args)
-        {:keys [props class attrs]} (split-opts opts)
-        {:keys [post put patch delete target swap button-props]} props]
-
-    (form ctx {:props {:post post
-                       :put put
-                       :patch patch
-                       :delete delete
-                       :target target
-                       :swap swap}
-               ;; Reset form layout so it behaves inline
-               :class "inline-flex m-0 p-0 border-0 bg-transparent"}
-          (into [:button (merge-attrs {:type "submit"
-                                       :class (class-names "button-density" class)}
-                                      attrs)]
-                children))))
+      (render-long-form opts children))))

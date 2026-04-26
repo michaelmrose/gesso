@@ -1,47 +1,1164 @@
-#+TITLE: Gesso Form Component Technical Specification
-#+DESCRIPTION: The undisputed authority for server submissions. Handles CSRF, HTMX routing, and local validation guarding.
+#+title: Gesso Form Component Specification
+#+description: Form submission boundary, CSRF injection, HTMX routing, optional validation coordination, and inline action forms.
 
-* gesso.components.form.attr
-** (post-form-attrs [opts])
-- Input :: ={:keys [to target swap attrs]}=.
-- Returns :: Map of base HTMX directives: ={:hx-post to, :hx-target target, :hx-swap swap}= + =attrs=.
+* Purpose
 
-** (validation-attrs [opts])
-- Input :: ={:keys [validate-url]}=.
-- Returns :: Map of validation-specific HTMX:
-  #+BEGIN_SRC clojure
-  {:hx-trigger "validateField delay:250ms"
-   :hx-sync "closest .gesso-field:drop"}
-  #+END_SRC
+The form component provides the standard Gesso wrapper for an HTML form.
 
-* gesso.components.form.scripts
-** (submission-guard [])
-- Returns :: String (Hyperscript).
-- Output :: ="on submit if <[aria-invalid='true']> in me length > 0 halt"=
-- Logic :: The bouncer. Kills native and HTMX submissions if any child field is flagged by the local gatekeeper.
+A Gesso form is a submission boundary around arbitrary authored content.
 
-* gesso.components.form.core
-** (anti-forgery-token [ctx]) & (anti-forgery-input [ctx])
-- Logic :: Sucked straight out of the old live.clj. Extracts the Biff token and returns =[:input {:type "hidden" :name "__anti-forgery-token" :value token}]=.
+It may contain:
 
-** (form [ctx opts & children])
-- Input :: Biff =ctx=, options map, children.
-- Returns :: Hiccup Vector (=[:form ...]=).
-- Logic ::
-  1. This is the "Dumb" base form. It does not validate.
-  2. Generates =(post-form-attrs opts)=.
-  3. Injects the =(anti-forgery-input ctx)=.
-  4. Wraps the children.
+- fields
+- labels
+- sections
+- cards
+- explanatory text
+- buttons
+- radio groups
+- checkboxes
+- date pickers
+- toggles
+- hidden inputs
+- arbitrary nested layout
 
-** (validating-form [ctx opts & children])
-- Input :: Biff =ctx=, options map (must include =:validate-url=), children.
-- Returns :: Hiccup Vector (=[:form ...]=).
-- Logic ::
-  1. The "Smart" form.
-  2. Calculates =(validation-attrs opts)= and grabs the =(submission-guard)= script.
-  3. Upcycles the =opts= map to include these new attributes.
-  4. Delegates to the base =(form ctx upgraded-opts children)= to handle the actual HTML and CSRF token.
+The form component does not inspect, generate, or understand those children.
 
-** (post-button [ctx opts & children])
-- Input :: =ctx= and options (including =:label=, =:button-attrs=, =:form-attrs=).
-- Returns :: Hiccup Vector. A =[:button {:type "submit"}]= wrapped in a base =(form)=, perfect for standalone destructive actions (like "Delete Row") without needing a full UI form.
+The form component owns:
+
+- real HTML form rendering
+- CSRF / anti-forgery token injection
+- HTMX submission attributes
+- optional server-side validation coordination
+- optional local invalid-submission guard
+- a small inline form helper for standalone action buttons
+
+The form component is not a form builder.
+
+* Namespace layout
+
+The form component follows the new component folder convention.
+
+#+begin_src text
+src/gesso/components/form/core.clj
+src/gesso/components/form/attr.clj
+src/gesso/components/form/scripts.clj
+src/gesso/components/form/spec.org
+#+end_src
+
+* Namespace responsibilities
+
+** =gesso.components.form.core=
+
+Owns the public form API.
+
+Responsibilities:
+
+- render a normal form around arbitrary children
+- inject the anti-forgery token when available
+- render optional validation sentinel
+- attach optional submission guard script
+- provide convenience =post-button= helper
+- preserve arbitrary child structure
+
+** =gesso.components.form.attr=
+
+Owns form-related attribute construction.
+
+Responsibilities:
+
+- build HTMX submission attrs
+- build validation sentinel attrs
+- build root form attrs
+- build inline form attrs for button helpers
+- build submit button attrs
+
+** =gesso.components.form.scripts=
+
+Owns form-level scripts.
+
+Responsibilities:
+
+- provide a submission guard
+- prevent submission when any descendant control is marked invalid
+- avoid field-specific or Malli-specific behavior
+
+Validation gatekeeper scripts belong in:
+
+#+begin_src clojure
+gesso.validation.scripts
+#+end_src
+
+Field stale-error recovery scripts belong in:
+
+#+begin_src clojure
+gesso.components.field.scripts
+#+end_src
+
+* Design principles
+
+** Form is a submission boundary
+
+A form wraps arbitrary content and defines where that content submits.
+
+It does not model the content.
+
+The following are outside the form component's concern:
+
+- field layout
+- section layout
+- wizard step structure
+- "next form" and "previous form" relationships
+- radio group internals
+- date picker internals
+- generated field lists
+- schema-driven form generation
+
+The app composes those things as children.
+
+** Children submit by normal HTML rules
+
+Arbitrary children submit because the browser submits successful controls inside
+the form.
+
+The important descendants are normal form controls with =name= attributes.
+
+Examples:
+
+#+begin_src html
+<input name="email">
+<textarea name="bio"></textarea>
+<select name="role"></select>
+#+end_src
+
+The form component does not collect values itself.
+
+The browser and HTMX collect values from named controls inside the form.
+
+Important HTML rules:
+
+- controls need =name= attributes to submit values
+- disabled controls do not submit
+- unchecked checkboxes usually do not submit
+- multiple controls with the same name may submit repeated values
+- custom widgets must ultimately render real form controls, often hidden inputs
+
+** No nested forms
+
+HTML does not support nested =form= elements.
+
+Gesso form must not encourage nested forms.
+
+Sequential or chained forms should be implemented by replacing one form with
+another through normal server-rendered routing or HTMX swaps.
+
+** Chained forms are route-driven
+
+A multi-step flow should be modeled as a series of independent forms.
+
+Example:
+
+#+begin_src clojure
+(form ctx {:post "/signup/account"
+           :target "#signup-flow"
+           :swap "outerHTML"}
+  ...)
+#+end_src
+
+The server may then return:
+
+#+begin_src clojure
+[:div {:id "signup-flow"}
+ (form ctx {:post "/signup/profile"
+            :target "#signup-flow"
+            :swap "outerHTML"}
+   ...)]
+#+end_src
+
+Going back is also route-driven:
+
+#+begin_src clojure
+[:a {:hx-get "/signup/account"
+     :hx-target "#signup-flow"
+     :hx-swap "outerHTML"}
+ "Back"]
+#+end_src
+
+Form A does not need to know about Form B.
+
+Form B does not need to know about Form A.
+
+Each form only needs to know the URL it submits to.
+
+** Children are preserved
+
+The form component must preserve arbitrary children exactly.
+
+It should not walk children looking for fields.
+
+It should not mutate child controls.
+
+It should not infer form structure.
+
+** Validation is coordinated, not owned
+
+The form can coordinate validation by:
+
+- listening for =validateField= events
+- sending the current form to a validation endpoint
+- accepting server responses that use OOB swaps
+- preventing submit when child controls are marked invalid
+
+The form does not run Malli.
+
+The form does not inspect schemas.
+
+The form does not render field errors directly.
+
+** Server validation remains authoritative
+
+Client-side validation and form guards are UX helpers.
+
+Final validation belongs on the server.
+
+* Public API
+
+** =form=
+
+Main public form component.
+
+Expected call style:
+
+#+begin_src clojure
+(form ctx opts & children)
+#+end_src
+
+Example:
+
+#+begin_src clojure
+(form ctx
+  {:post "/settings/profile"
+   :target "#profile-form"
+   :swap "outerHTML"}
+  (field ...)
+  [:div {:class "actions"}
+   [:button {:type "submit"} "Save"]])
+#+end_src
+
+The form accepts arbitrary children.
+
+There is no =:fields= option.
+
+There is no =:submit= option.
+
+Submit buttons are authored as children.
+
+** =post-button=
+
+Convenience helper for a standalone action button.
+
+Expected call style:
+
+#+begin_src clojure
+(post-button ctx opts & children)
+#+end_src
+
+Example:
+
+#+begin_src clojure
+(post-button ctx
+  {:post "/items/123/delete"
+   :target "#items"
+   :swap "outerHTML"
+   :button-attrs {:class "btn-destructive"}}
+  "Delete")
+#+end_src
+
+=post-button= renders a minimal inline form containing one submit button.
+
+It is useful for destructive actions, menu actions, row actions, and other
+single-button submissions.
+
+It is not a replacement for normal authored forms.
+
+* Form options
+
+** Routing options
+
+Supported submission routing keys:
+
+#+begin_src clojure
+:to
+:post
+:put
+:patch
+:delete
+#+end_src
+
+=:to= is shorthand for POST.
+
+Examples:
+
+#+begin_src clojure
+(form ctx {:to "/contact"} ...)
+(form ctx {:post "/contact"} ...)
+(form ctx {:patch "/profile"} ...)
+(form ctx {:delete "/sessions/current"} ...)
+#+end_src
+
+Only one routing key should be supplied.
+
+If more than one routing key is supplied, precedence is implementation-defined
+and should be avoided by callers.
+
+** HTMX target and swap
+
+Supported options:
+
+#+begin_src clojure
+:target
+:swap
+#+end_src
+
+Example:
+
+#+begin_src clojure
+(form ctx
+  {:post "/profile"
+   :target "#profile-form"
+   :swap "outerHTML"}
+  ...)
+#+end_src
+
+Default swap:
+
+#+begin_src text
+innerHTML
+#+end_src
+
+** Validation options
+
+Supported options:
+
+#+begin_src clojure
+:validate-url
+:validation-trigger
+:validation-include
+:validation-target
+:validation-swap
+:validation-sync
+:guard?
+#+end_src
+
+=:validate-url= enables the validation sentinel.
+
+Other validation options override sentinel defaults.
+
+=:guard?= controls whether the form attaches the local invalid-submission guard.
+
+Recommended default:
+
+#+begin_src clojure
+:guard? true
+#+end_src
+
+when =:validate-url= is present.
+
+For non-validating forms, the guard may be omitted unless explicitly requested.
+
+** Styling and raw attrs
+
+Supported options:
+
+#+begin_src clojure
+:class
+:attrs
+#+end_src
+
+=:class= merges into the form root class.
+
+=:attrs= merges raw attrs into the form root.
+
+* Form root behavior
+
+A normal form root should render:
+
+#+begin_src clojure
+[:form form-attrs
+ anti-forgery-input
+ validation-sentinel
+ children...]
+#+end_src
+
+The form root should include:
+
+#+begin_src html
+data-form
+#+end_src
+
+The form root should include the semantic form layout class:
+
+#+begin_src text
+form-theme
+#+end_src
+
+and should default to:
+
+#+begin_src text
+w-full
+#+end_src
+
+The form root may submit through HTMX when routing attrs are provided.
+
+If no routing attrs are provided, the form may still be used as a plain form
+shell.
+
+* Anti-forgery behavior
+
+** Token lookup
+
+The form should look for an anti-forgery token in the request/app context.
+
+Supported keys:
+
+#+begin_src clojure
+:anti-forgery-token
+:biff/anti-forgery-token
+#+end_src
+
+** Hidden input
+
+When a token exists, the form should inject:
+
+#+begin_src clojure
+[:input {:type "hidden"
+         :name "__anti-forgery-token"
+         :value token}]
+#+end_src
+
+When no token exists, no anti-forgery input is rendered.
+
+** Scope
+
+Anti-forgery behavior belongs in =form.core=.
+
+It should be removed from =gesso.live.core=.
+
+* HTMX submission attrs
+
+Submission attrs are built by:
+
+#+begin_src clojure
+gesso.components.form.attr/submission-attrs
+#+end_src
+
+** POST shorthand
+
+Input:
+
+#+begin_src clojure
+{:to "/profile"}
+#+end_src
+
+Output:
+
+#+begin_src clojure
+{:hx-post "/profile"
+ :hx-swap "innerHTML"}
+#+end_src
+
+** Explicit POST
+
+Input:
+
+#+begin_src clojure
+{:post "/profile"
+ :target "#profile-form"
+ :swap "outerHTML"}
+#+end_src
+
+Output:
+
+#+begin_src clojure
+{:hx-post "/profile"
+ :hx-target "#profile-form"
+ :hx-swap "outerHTML"}
+#+end_src
+
+** Other verbs
+
+Examples:
+
+#+begin_src clojure
+{:hx-put "/resource"}
+{:hx-patch "/resource"}
+{:hx-delete "/resource"}
+#+end_src
+
+mapped from:
+
+#+begin_src clojure
+:put
+:patch
+:delete
+#+end_src
+
+* Validation sentinel
+
+** Purpose
+
+The validation sentinel is an optional hidden child element inside the form.
+
+It exists to listen for field-level validation events and submit the current
+form state to a server validation endpoint.
+
+It does not know field structure.
+
+It does not inspect children.
+
+It does not render errors.
+
+** Enabling
+
+The sentinel is rendered when:
+
+#+begin_src clojure
+:validate-url
+#+end_src
+
+is present.
+
+Example:
+
+#+begin_src clojure
+(form ctx
+  {:post "/signup"
+   :target "#signup-form"
+   :swap "outerHTML"
+   :validate-url "/signup/validate"}
+  ...)
+#+end_src
+
+** Sentinel attrs
+
+Default sentinel attrs:
+
+#+begin_src clojure
+{:data-form-validator true
+ :hidden true
+ :aria-hidden "true"
+ :hx-post validate-url
+ :hx-trigger "validateField from:closest form delay:250ms"
+ :hx-include "closest form"
+ :hx-target "this"
+ :hx-swap "none"
+ :hx-sync "closest form:drop"}
+#+end_src
+
+The validation response is expected to use HTMX out-of-band swaps targeting
+field error containers.
+
+** Why a sentinel instead of putting validation attrs on the form root
+
+The root form already owns the real submit action.
+
+The sentinel owns validation pings.
+
+Separating them avoids making the same element responsible for two different
+HTMX request behaviors.
+
+** Risk: sentinel browser behavior must be proven
+
+The sentinel design is plausible but must be tested in a real browser with HTMX.
+
+The risk is not the Clojure data structure.
+
+The risk is whether HTMX behaves exactly as expected for:
+
+#+begin_src clojure
+:hx-trigger "validateField from:closest form delay:250ms"
+:hx-include "closest form"
+:hx-target "this"
+:hx-swap "none"
+:hx-sync "closest form:drop"
+#+end_src
+
+This must be proven with a tiny validation demo before building more assumptions
+on top of it.
+
+Minimum browser proof:
+
+1. User edits a locally valid field.
+2. Field emits =validateField=.
+3. Sentinel posts to =:validate-url=.
+4. Request includes the current form values.
+5. Response with OOB error swaps updates field error containers.
+6. =hx-swap="none"= does not suppress OOB swaps.
+7. =hx-sync= prevents stale validation requests from winning.
+
+* Submission guard
+
+** Purpose
+
+The submission guard prevents form submission when any descendant control has:
+
+#+begin_src html
+aria-invalid="true"
+#+end_src
+
+This lets field-level browser validation and server validation state stop an
+invalid submit before the form request is sent.
+
+** Preferred first contract
+
+The first implementation should keep the guard small and conservative.
+
+The guard should:
+
+1. run during the HTMX validation/submission lifecycle
+2. trigger local validation checks on descendant controls when appropriate
+3. check for descendant =[aria-invalid='true']=
+4. halt submission when such a descendant exists
+
+** Candidate event
+
+Initial candidate:
+
+#+begin_src text
+htmx:validation:validate
+#+end_src
+
+This must be verified in a browser demo.
+
+** Expected script behavior
+
+A first-pass guard may:
+
+- mark controls as touched
+- trigger =blur= on controls so field gatekeepers run
+- halt the event if any descendant has =aria-invalid="true"=
+
+Conceptual Hyperscript:
+
+#+begin_src text
+on htmx:validation:validate
+  for el in <input, textarea, select/> in me
+    set el's @data-touched to 'true'
+    trigger blur on el
+  end
+  if <[aria-invalid='true']> in me length > 0
+    halt the event
+  end
+end
+#+end_src
+
+The exact syntax belongs in =gesso.components.form.scripts= and should be tested.
+
+** Risk: stale =aria-invalid= state
+
+The guard relies on =aria-invalid= as the shared invalid-state signal.
+
+This is useful because it allows local and server validation to converge on one
+state marker.
+
+The risk is stale state.
+
+Examples:
+
+- server error sets =aria-invalid="true"=
+- user fixes value locally
+- stale server error is not cleared
+- guard blocks submit even though current input may now be valid
+
+This is why field stale-error recovery matters.
+
+The field layer should clear server-originated errors on edit without fighting
+local browser validation errors.
+
+** Non-goals
+
+The guard does not:
+
+- run Malli
+- know field structure
+- know schema structure
+- render errors
+- decide business-rule validity
+- replace final server validation
+
+* Validation interaction flow
+
+A typical validating form flow:
+
+1. User edits a field.
+2. Field gatekeeper performs local browser validation.
+3. If locally valid, field triggers =validateField=.
+4. Form validation sentinel receives the event.
+5. Sentinel posts the current closest form to =:validate-url=.
+6. Server validates.
+7. Server returns OOB swaps for field error containers.
+8. Field errors update in place.
+9. If user submits while any control has =aria-invalid="true"=, the form guard
+   halts submission.
+10. Final submit still validates server-side.
+
+* Server OOB validation contract
+
+Server validation responses should use:
+
+#+begin_src clojure
+gesso.validation.htmx/render-oob-errors
+#+end_src
+
+or equivalent Hiccup.
+
+Field error containers follow the convention:
+
+#+begin_src text
+<field-id>-error
+#+end_src
+
+Example:
+
+#+begin_src text
+email-error
+#+end_src
+
+The form component does not render these targets.
+
+The field component renders them.
+
+* =post-button=
+
+** Purpose
+
+=post-button= replaces small generic submit helpers previously living in
+=gesso.live.core=.
+
+It should render:
+
+#+begin_src clojure
+[:form inline-form-attrs
+ anti-forgery-input
+ [:button button-attrs children...]]
+#+end_src
+
+** Options
+
+Supported options:
+
+#+begin_src clojure
+:to
+:post
+:put
+:patch
+:delete
+:target
+:swap
+:form-attrs
+:button-attrs
+:class
+:label
+:children
+#+end_src
+
+** Content precedence
+
+Button content may come from:
+
+1. explicit children passed to =post-button=
+2. =:children=
+3. =:label=
+
+** Inline form attrs
+
+The wrapper form should use inline/reset styling:
+
+#+begin_src text
+inline-flex m-0 p-0 border-0 bg-transparent
+#+end_src
+
+and should include:
+
+#+begin_src html
+data-form
+data-form-inline
+#+end_src
+
+** Button attrs
+
+The button should have:
+
+#+begin_src clojure
+{:type "submit"}
+#+end_src
+
+and should merge any user-provided button attrs.
+
+** Strict scope
+
+=post-button= must stay boring.
+
+It should not grow into a competing form or button abstraction.
+
+Allowed responsibilities:
+
+- render inline form
+- inject CSRF
+- submit to configured route
+- render one submit button
+- preserve user-provided button attrs and children
+
+Out of scope for =post-button=:
+
+- confirm dialogs
+- modal flows
+- variants
+- icons
+- loading indicators
+- destructive styling semantics
+- validation sentinels
+- generated menus
+- multi-button actions
+- form sections
+
+Those should be composed with other components or authored directly.
+
+* Relationship to =gesso.live.core=
+
+Form submission helpers should move out of =gesso.live.core=.
+
+The following concepts belong to form:
+
+- anti-forgery-token
+- anti-forgery-input
+- post-form
+- post-button
+- generic HTMX form submission attrs
+
+The following concepts remain in live:
+
+- live fragment roots
+- live fragment targets
+- subscription stream URLs
+- consistency token extraction
+- live event construction
+- publishing changed events
+
+After migration, live demos that need buttons should call:
+
+#+begin_src clojure
+gesso.components.form.core/post-button
+#+end_src
+
+or the public facade:
+
+#+begin_src clojure
+gesso.core/post-button
+#+end_src
+
+* Unit test plan
+
+Unit tests should prove the Clojure-side contract before browser testing.
+
+** Attribute tests
+
+Test:
+
+- =:to= maps to =:hx-post=
+- =:post= maps to =:hx-post=
+- =:put= maps to =:hx-put=
+- =:patch= maps to =:hx-patch=
+- =:delete= maps to =:hx-delete=
+- =:target= maps to =:hx-target=
+- =:swap= maps to =:hx-swap=
+- default swap is =innerHTML=
+- no route produces no submission attrs
+- form root attrs do not include validation sentinel attrs
+- inline form attrs include =data-form-inline=
+
+** Validation sentinel attr tests
+
+Test:
+
+- no =:validate-url= returns nil sentinel attrs
+- =:validate-url= returns hidden sentinel attrs
+- sentinel has =hx-post= validate URL
+- sentinel has =hx-include "closest form"=
+- sentinel has =hx-swap "none"=
+- sentinel has =hx-sync "closest form:drop"=
+- override options replace defaults
+
+** Script tests
+
+Test:
+
+- submission guard contains the chosen HTMX lifecycle event
+- guard checks =[aria-invalid='true']=
+- guard halts the event
+- guard triggers local field checks if that remains part of the contract
+
+** Core rendering tests
+
+Test:
+
+- =form= renders a real =:form=
+- anti-forgery input appears when token exists
+- anti-forgery input is omitted when token does not exist
+- arbitrary children are preserved
+- validation sentinel appears when =:validate-url= exists
+- validation sentinel is omitted when =:validate-url= is absent
+- submission guard is attached only under the intended conditions
+- =post-button= renders inline form + button
+- =post-button= content precedence works
+
+* Browser proof plan
+
+Unit tests are not enough for validation lifecycle.
+
+A tiny real browser demo must prove HTMX behavior.
+
+** Required demo shape
+
+Render:
+
+#+begin_src clojure
+(form ctx
+  {:post "/demo/submit"
+   :target "#demo-form"
+   :swap "outerHTML"
+   :validate-url "/demo/validate"}
+  (field {:label-text "Email"
+          :for :email
+          :schema DemoSchema
+          :control (input {:type "email"
+                           :name "email"})})
+  [:button {:type "submit"} "Submit"])
+#+end_src
+
+The validation route should return OOB errors.
+
+The submit route should validate server-side again.
+
+** Manual checks
+
+Check:
+
+1. invalid local input shows local error
+2. invalid local input does not trigger server validation
+3. valid local input triggers =:validate-url=
+4. validation request includes current form values
+5. server OOB error appears in field error container
+6. editing clears stale server error
+7. submit is blocked while =aria-invalid="true"=
+8. submit succeeds after the value is valid
+9. successful submit returns expected target swap
+
+** Automation candidate
+
+Later, automate with Playwright or another browser test tool.
+
+Do not expand form abstractions until this demo works.
+
+* Examples
+
+** Basic authored form
+
+#+begin_src clojure
+(form ctx
+  {:post "/profile"
+   :target "#profile-form"
+   :swap "outerHTML"}
+  (field {:label-text "Name"
+          :for :name
+          :control (input {:type "text" :name "name"})})
+  [:button {:type "submit"} "Save"])
+#+end_src
+
+** Validating form
+
+#+begin_src clojure
+(form ctx
+  {:post "/signup"
+   :target "#signup-flow"
+   :swap "outerHTML"
+   :validate-url "/signup/validate"}
+  (field {:label-text "Username"
+          :for :username
+          :schema SignupSchema
+          :control (input {:type "text" :name "username"})})
+  [:button {:type "submit"} "Continue"])
+#+end_src
+
+** Chained forms
+
+Step A:
+
+#+begin_src clojure
+(form ctx
+  {:post "/signup/account"
+   :target "#signup-flow"
+   :swap "outerHTML"}
+  ...)
+#+end_src
+
+Step B returned by server:
+
+#+begin_src clojure
+(form ctx
+  {:post "/signup/profile"
+   :target "#signup-flow"
+   :swap "outerHTML"}
+  ...)
+#+end_src
+
+Back action:
+
+#+begin_src clojure
+[:a {:hx-get "/signup/account"
+     :hx-target "#signup-flow"
+     :hx-swap "outerHTML"}
+ "Back"]
+#+end_src
+
+** Standalone action button
+
+#+begin_src clojure
+(post-button ctx
+  {:delete "/sessions/current"
+   :target "#session-panel"
+   :swap "outerHTML"
+   :button-attrs {:class "btn-outline"}}
+  "Sign out")
+#+end_src
+
+* Styling contract
+
+A normal form root uses:
+
+#+begin_src text
+form-theme w-full
+#+end_src
+
+An inline form root uses:
+
+#+begin_src text
+inline-flex m-0 p-0 border-0 bg-transparent
+#+end_src
+
+A submit button helper may use:
+
+#+begin_src text
+button-density
+#+end_src
+
+The component should rely on Gesso utilities and theme variables.
+
+It should not hardcode app-specific spacing or layout beyond form-shell
+defaults.
+
+* Accessibility
+
+The form component should:
+
+- render a real HTML =form=
+- preserve arbitrary child semantics
+- avoid nested forms
+- keep validation sentinel hidden from assistive technology
+- not interfere with field-level label/error semantics
+
+The form component should not:
+
+- synthesize labels
+- infer required fields
+- modify field ARIA
+- hide authored content
+- require JavaScript for basic form semantics
+
+* Current limitations
+
+The initial form implementation does not provide:
+
+- schema-driven form generation
+- wizard state management
+- automatic next/back handling
+- nested form support
+- child introspection
+- field layout
+- built-in submit button generation for normal forms
+- automatic business-rule validation
+- browser-proven validation lifecycle until the demo is complete
+
+These are intentional non-goals or known verification tasks.
+
+* Future expansion candidates
+
+** Named form sections
+
+A future layout component may provide section helpers.
+
+This should not change the form submission model.
+
+** Better validation lifecycle
+
+After an end-to-end validation demo exists, revisit:
+
+- exact HTMX event used by the guard
+- whether the sentinel should be a hidden input, div, button, or other element
+- whether validation responses should clear old server errors explicitly
+- how to represent "validating" indicators
+- whether =hx-sync= should be =drop=, =replace=, or another strategy
+
+** Multi-step flow helpers
+
+A future app-level helper could make chained forms more ergonomic.
+
+It should still be URL-driven and should not require forms to know about each
+other directly.
+
+** More button helpers
+
+Convenience wrappers for destructive actions, menu actions, or toolbar actions
+may be added if repeated usage justifies them.
+
+These helpers should not make =post-button= itself more complicated.
+
+* Summary
+
+A Gesso form is a submission boundary around arbitrary authored content.
+
+It owns:
+
+- HTML form rendering
+- CSRF injection
+- HTMX submission attrs
+- optional validation sentinel
+- submit guard
+- inline post-button helper
+
+It does not own:
+
+- field structure
+- schema inspection
+- control generation
+- wizard state
+- next/back knowledge
+- nested forms
+
+The preferred flow is:
+
+1. Author arbitrary form content.
+2. Wrap it in =form= with a submit URL.
+3. Optionally provide a validation URL.
+4. Let fields own field-level validation targets.
+5. Let server routes decide what form or fragment comes next.
+
+The riskiest parts of the design are explicitly identified:
+
+1. validation sentinel browser behavior
+2. submission guard lifecycle and stale invalid state
+3. keeping =post-button= narrow
+
+The next implementation should unit-test all pure Clojure attrs/rendering and
+then prove the validation lifecycle in a tiny browser-backed demo before adding
+more abstraction.

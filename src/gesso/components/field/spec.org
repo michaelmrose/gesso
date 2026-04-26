@@ -1,41 +1,950 @@
-#+TITLE: Gesso Field Component Technical Specification
-#+DESCRIPTION: The structural shell that handles layout, ARIA coordination, and validation injection.
+#+title: Gesso Field Component Specification
+#+description: Field shell, control annotation, validation wiring, ARIA coordination, and server-error recovery.
 
-* gesso.components.field.attr
-** (derive-ids [for-id])
-- Input :: String or Keyword =for-id= (e.g., =:user-email=).
-- Returns :: Map: ={:id "user-email" :desc-id "user-email-desc" :err-id "user-email-err"}=.
+* Purpose
 
-** (build-aria [ids invalid?])
-- Input :: IDs map, boolean state.
-- Returns :: Map: ={:aria-describedby "user-email-desc user-email-err" :aria-errormessage "user-email-err" :aria-invalid (str invalid?)}=.
+The field component provides the standard Gesso wrapper for a single form field.
 
-** (annotate-control [control ids plan invalid?])
-- Input ::
-  - =control=: Hiccup vector (e.g., =[:input {:type "text"}]=).
-  - =ids=: Map from =derive-ids=.
-  - =plan=: Map from =validation.core/field-plan=.
-  - =invalid?=: Boolean.
-- Returns :: Modified Hiccup vector.
-- Logic ::
-  1. Utilizes =gesso.util/merge-attrs= to safely mutate the control.
-  2. Merges =(:attrs plan)= (the HTML5 constraints).
-  3. Merges =(build-aria ids invalid?)=.
-  4. Appends =(:script plan)= to any existing Hyperscript in the =:_= attribute.
-  5. Forces the =:id= to equal =(:id ids)= to guarantee label correlation.
+A field may contain:
 
-* gesso.components.field.scripts
-** (ui-recovery-script [err-id])
-- Returns :: String (Hyperscript).
-- Output :: ="on keydown add .hidden to #<err-id>"=
-- Logic :: Instantly clears server-provided OOB errors the moment the user attempts to fix the input, preventing stale UI.
+- label
+- control
+- optional validation indicator
+- description text
+- error text
+- validation wiring
+- ARIA relationships
 
-* gesso.components.field.core
-** (field [props control])
-- Input :: ={:keys [label-text for schema description error indicator]}= + =control= (Hiccup).
-- Returns :: Hiccup Vector (=[:div.flex.flex-col.gap-field ...]=).
-- Lifecycle ::
-  1. Destructure and derive: =ids= from =for=.
-  2. Plan phase: If =schema= is present, execute =(gesso.validation.core/field-plan schema (keyword for) (:err-id ids))=.
-  3. Mutation phase: Execute =(annotate-control control ids (boolean error) plan)=.
-  4. Render phase: Assemble the shell containing the Label, the mutated Control (+ Indicator), the Description, and the Error container.
+The field component is not responsible for submitting forms.
+
+The field component is not responsible for running Malli validation directly.
+
+The field component is responsible for connecting a rendered control to the
+validation plan produced by =gesso.validation.core=.
+
+* Namespace layout
+
+The field component follows the new component folder convention.
+
+#+begin_src text
+src/gesso/components/field/core.clj
+src/gesso/components/field/attr.clj
+src/gesso/components/field/scripts.clj
+src/gesso/components/field/spec.org
+#+end_src
+
+The old flat namespace:
+
+#+begin_src text
+src/gesso/components/field.clj
+#+end_src
+
+is intended to be deleted once the split implementation is wired through
+=gesso.core= and downstream users have been updated.
+
+* Namespace responsibilities
+
+** =gesso.components.field.core=
+
+Owns the public =field= component.
+
+Responsibilities:
+
+- support short map form
+- support long composition form
+- derive field IDs
+- request validation plans from =gesso.validation.core=
+- render label, control row, description, and error containers
+- pass control annotation work to =gesso.components.field.attr=
+- keep markup structure understandable and shallow
+
+** =gesso.components.field.attr=
+
+Owns field attribute construction.
+
+Responsibilities:
+
+- derive stable IDs
+- build ARIA attrs
+- annotate Hiccup controls
+- merge validation attrs
+- append validation scripts to existing =:_= attrs
+- build root, description, error, and control-row attrs
+
+** =gesso.components.field.scripts=
+
+Owns small field-level UI scripts.
+
+Responsibilities:
+
+- provide server-error recovery behavior
+- avoid duplicating validation gatekeeper logic
+
+Validation gatekeeper scripts belong in:
+
+#+begin_src clojure
+gesso.validation.scripts
+#+end_src
+
+not in field scripts.
+
+* Design principles
+
+** Field is a shell, not a form
+
+A field wraps and annotates one control.
+
+It does not submit data.
+
+It does not know about CSRF.
+
+It does not own HTMX form routing.
+
+Those responsibilities belong to the form component.
+
+** Field consumes validation plans
+
+The field component does not inspect Malli schemas itself.
+
+Instead, it calls:
+
+#+begin_src clojure
+gesso.validation.core/field-plan
+#+end_src
+
+and consumes the resulting plan:
+
+#+begin_src clojure
+{:attrs       {...}
+ :script      "..."
+ :constraints {...}}
+#+end_src
+
+** The control is user-provided
+
+The field component does not generate controls.
+
+The caller provides the control:
+
+#+begin_src clojure
+(input {:type "email" :name "email"})
+#+end_src
+
+or raw Hiccup:
+
+#+begin_src clojure
+[:input {:type "email" :name "email"}]
+#+end_src
+
+Field may annotate that control, but it does not decide what kind of control
+should exist.
+
+** Stable IDs are central
+
+The same stable ID convention must be shared by:
+
+- label
+- control
+- description
+- error container
+- client validation script
+- server validation OOB swaps
+
+For a field id:
+
+#+begin_src text
+email
+#+end_src
+
+the derived IDs are:
+
+#+begin_src clojure
+{:id      "email"
+ :desc-id "email-description"
+ :err-id  "email-error"}
+#+end_src
+
+** Server and client validation share the same error container
+
+Local browser validation writes to the field error container.
+
+Server validation OOB swaps also target the same field error container.
+
+This avoids separate competing error regions.
+
+** Long form does not mutate children
+
+The long composition form is structural only.
+
+It wraps children in a field root, but it does not inspect or annotate arbitrary
+child controls.
+
+This keeps long form predictable.
+
+Use short form when automatic validation wiring is needed.
+
+* Public API
+
+** =field=
+
+Main public component.
+
+Supported call styles:
+
+- short map form
+- long composition form
+
+* Short form
+
+Short form is the validation-aware form.
+
+Example:
+
+#+begin_src clojure
+(field
+ {:label-text "Email"
+  :for :email
+  :schema UserSchema
+  :control (input {:type "email"
+                   :name "email"})
+  :description "We will never share it."
+  :error nil})
+#+end_src
+
+If =:schema= is supplied, the field derives a validation plan and annotates the
+control with:
+
+- id
+- HTML5 validation attrs
+- ARIA attrs
+- data-field-control marker
+- validation Hyperscript, when useful
+
+** Short form options
+
+#+begin_src clojure
+{:label-text  string-or-node
+ :for         keyword/string/symbol
+ :field-key   keyword/string
+ :schema      malli-schema
+ :control     hiccup-node
+ :indicator   hiccup-node
+ :description string-or-node
+ :error       string-or-node
+ :orientation keyword
+ :valid?      boolean
+ :invalid?    boolean
+ :class       class-values
+ :attrs       attr-map}
+#+end_src
+
+** =:label-text=
+
+Text or node rendered through the Gesso label component.
+
+If absent, no label is rendered.
+
+** =:for=
+
+The field/control DOM ID basis.
+
+Examples:
+
+#+begin_src clojure
+:email
+"email"
+'user-email
+#+end_src
+
+The rendered control ID is forced to this normalized value when present.
+
+** =:field-key=
+
+Optional schema key override.
+
+Use when the schema field key differs from the DOM ID.
+
+Example:
+
+#+begin_src clojure
+(field
+ {:for "user-email"
+  :field-key :email
+  :schema UserSchema
+  :control (input {:type "email" :name "email"})})
+#+end_src
+
+In this case:
+
+- DOM id is ="user-email"=
+- schema lookup key is =:email=
+- error id is ="user-email-error"=
+
+** =:schema=
+
+A Malli schema passed to =gesso.validation.core/field-plan=.
+
+The initial validation implementation supports top-level map fields.
+
+** =:control=
+
+The control Hiccup node.
+
+Usually one of:
+
+- input
+- textarea
+- select
+- custom Hiccup control
+
+The control should be a Hiccup element vector.
+
+If the control is not a Hiccup element, annotation is skipped and the value is
+returned unchanged.
+
+** =:indicator=
+
+Optional node rendered beside the control.
+
+Intended for:
+
+- HTMX indicators
+- inline spinners
+- validation status icons
+- availability checks
+
+When present, the control and indicator are wrapped in a small inline row.
+
+** =:description=
+
+Optional descriptive content rendered below the control.
+
+When present, a description ID is derived and included in the control's
+=aria-describedby=.
+
+** =:error=
+
+Optional active error content.
+
+When present:
+
+- the field is considered invalid
+- the error container is visible
+- the control receives invalid ARIA state
+- the field root receives =data-invalid="true"=
+
+** =:orientation=
+
+Optional layout marker.
+
+Example:
+
+#+begin_src clojure
+:horizontal
+#+end_src
+
+The component does not currently implement complex orientation layout itself.
+It emits:
+
+#+begin_src html
+data-orientation="horizontal"
+#+end_src
+
+for CSS and future component styling.
+
+** =:valid?= and =:invalid?=
+
+Optional state markers.
+
+=:invalid?= or =:error= marks the field invalid.
+
+=:valid?= marks the field valid.
+
+These are data-state helpers for styling and app logic.
+
+* Long form
+
+Long form is a structural wrapper only.
+
+Example:
+
+#+begin_src clojure
+(field {:orientation :horizontal}
+  (label/label {:text "Email" :for "email"})
+  (input {:type "email" :id "email" :name "email"}))
+#+end_src
+
+Long form:
+
+- renders a field root
+- applies field root attrs
+- preserves children exactly
+- does not call =field-plan=
+- does not annotate child controls
+- does not infer label/description/error relationships
+
+Use long form when the caller wants complete manual control.
+
+* Stable ID convention
+
+** =derive-ids=
+
+Owned by:
+
+#+begin_src clojure
+gesso.components.field.attr/derive-ids
+#+end_src
+
+Input:
+
+#+begin_src clojure
+(derive-ids :email)
+#+end_src
+
+Output:
+
+#+begin_src clojure
+{:id "email"
+ :desc-id "email-description"
+ :err-id "email-error"}
+#+end_src
+
+Nil input returns nil IDs:
+
+#+begin_src clojure
+{:id nil
+ :desc-id nil
+ :err-id nil}
+#+end_src
+
+* ARIA behavior
+
+** Description relationship
+
+When description content is rendered, the control receives:
+
+#+begin_src html
+aria-describedby="email-description"
+#+end_src
+
+If the control already had =aria-describedby=, the field appends to it instead
+of replacing it.
+
+** Error relationship
+
+When an active error exists, the control receives:
+
+#+begin_src html
+aria-describedby="email-description email-error"
+aria-errormessage="email-error"
+aria-invalid="true"
+#+end_src
+
+When validation behavior exists but no active error is currently shown, the
+control may still receive:
+
+#+begin_src html
+aria-errormessage="email-error"
+aria-invalid="false"
+#+end_src
+
+This allows the validation gatekeeper to toggle =aria-invalid= later without
+also needing to patch ARIA relationships.
+
+** Hidden validation error container
+
+If a validation plan exists, the field renders an error container even when
+there is no active error text.
+
+The container is initially hidden.
+
+Reason:
+
+- local validation scripts need a stable target
+- server OOB validation errors need a stable target
+- the target must exist before validation fires
+
+* Control annotation
+
+Control annotation is owned by:
+
+#+begin_src clojure
+gesso.components.field.attr/annotate-control
+#+end_src
+
+Inputs:
+
+#+begin_src clojure
+(annotate-control control ids plan state)
+#+end_src
+
+Where:
+
+#+begin_src clojure
+control ;; Hiccup control node
+ids     ;; result of derive-ids
+plan    ;; result of gesso.validation.core/field-plan
+state   ;; {:description? boolean
+        ;;  :error? boolean
+        ;;  :invalid? boolean}
+#+end_src
+
+Annotation does the following:
+
+1. preserves the original Hiccup tag
+2. preserves existing children
+3. merges user attrs
+4. merges validation attrs
+5. adds ARIA attrs
+6. adds =data-field-control=
+7. forces =:id= from =(:id ids)= when present
+8. appends validation script to existing =:_= script when present
+
+** Existing script preservation
+
+If a control already has:
+
+#+begin_src clojure
+{:_ "on click ..."}
+#+end_src
+
+and the validation plan provides another script, the scripts are joined with a
+newline.
+
+The user script is not discarded.
+
+* Validation integration
+
+** Planning
+
+Short form calls:
+
+#+begin_src clojure
+(validation/field-plan schema field-key err-id)
+#+end_src
+
+Where:
+
+- =schema= comes from field opts
+- =field-key= is =:field-key= or =:for=
+- =err-id= comes from =derive-ids=
+
+** Required label marker
+
+If the validation plan determines the field is required, the label receives:
+
+#+begin_src clojure
+:required? true
+#+end_src
+
+Explicit =:required?= passed to the field also marks the label required.
+
+** Validation plan detection
+
+A field is considered validation-aware when the plan has either:
+
+#+begin_src clojure
+(seq (:attrs plan))
+(seq (:script plan))
+#+end_src
+
+When validation-aware, the error container should be rendered even if empty.
+
+** Validation attrs
+
+Validation attrs are merged onto the control.
+
+Examples:
+
+#+begin_src clojure
+{:required true
+ :minlength 3
+ :maxlength 24
+ :pattern "^[a-z0-9_-]+$"}
+#+end_src
+
+** Validation script
+
+The validation script is generated by =gesso.validation.scripts= and returned
+through =gesso.validation.core/field-plan=.
+
+Field only attaches the script.
+
+Field does not generate the gatekeeper itself.
+
+* Field-level scripts
+
+** =gesso.components.field.scripts/ui-recovery-script=
+
+The field scripts namespace currently provides server-error recovery behavior:
+
+#+begin_src clojure
+(ui-recovery-script "email-error")
+#+end_src
+
+returns Hyperscript that hides the server error when the user starts editing
+again.
+
+The current event is:
+
+#+begin_src text
+keydown
+#+end_src
+
+Reason:
+
+- the validation gatekeeper also listens to =input=
+- using =keydown= avoids fighting local validity feedback
+- this gives stale server-side errors a lightweight recovery path
+
+This script is independent of Malli and independent of HTML5 validation rules.
+
+** Current integration status
+
+The initial =field.core= may not yet attach =ui-recovery-script= directly.
+
+It exists so field-level stale-error behavior has a home separate from validation
+gatekeeper scripts.
+
+A later pass may attach it in =field.core= when server-side OOB errors are fully
+wired into forms.
+
+* Rendered structure
+
+Short form renders conceptually:
+
+#+begin_src clojure
+[:div field-root-attrs
+ label-node
+ control-or-control-row
+ description-node
+ error-node]
+#+end_src
+
+When an indicator is present:
+
+#+begin_src clojure
+[:div field-root-attrs
+ label-node
+ [:div control-row-attrs
+  annotated-control
+  indicator]
+ description-node
+ error-node]
+#+end_src
+
+* Root attrs
+
+Field root emits:
+
+#+begin_src html
+data-field
+#+end_src
+
+When =:for= is present:
+
+#+begin_src html
+data-field-for="email"
+#+end_src
+
+When orientation is present:
+
+#+begin_src html
+data-orientation="horizontal"
+#+end_src
+
+When valid:
+
+#+begin_src html
+data-valid="true"
+#+end_src
+
+When invalid:
+
+#+begin_src html
+data-invalid="true"
+#+end_src
+
+* Styling contract
+
+The root uses the existing field layout utility:
+
+#+begin_src text
+flex flex-col gap-field
+#+end_src
+
+This may later be replaced or augmented by a more semantic field utility class.
+
+The control row uses:
+
+#+begin_src text
+flex items-center gap-inline
+#+end_src
+
+Error text uses:
+
+#+begin_src css
+color: var(--destructive)
+#+end_src
+
+The component should continue to rely on Gesso theme variables and utilities
+rather than hardcoded visual styling.
+
+* Accessibility expectations
+
+The field component should:
+
+- connect label to control using stable IDs
+- preserve existing user-provided ARIA attrs
+- include description IDs in =aria-describedby=
+- include error IDs when errors are active
+- expose =aria-invalid=
+- provide =aria-errormessage= when validation or active errors exist
+- render error containers with =role="alert"=
+- render error containers with =aria-live="polite"=
+
+The field component should not:
+
+- use visual-only error indicators without text
+- remove user-provided ARIA descriptions
+- require JavaScript for basic label/control association
+
+* Interaction with server-side validation
+
+Server validation may return HTMX OOB swaps targeting:
+
+#+begin_src text
+<field-id>-error
+#+end_src
+
+Example:
+
+#+begin_src html
+<div id="email-error" hx-swap-oob="innerHTML">
+  <span>Email is already taken.</span>
+  <script>...</script>
+</div>
+#+end_src
+
+The field component must render a matching error container when validation is
+enabled, so OOB swaps have a stable target.
+
+* Interaction with forms
+
+The form component may:
+
+- listen for =validateField= events from field controls
+- debounce server validation
+- prevent submission when controls are marked invalid
+- submit normally when local checks pass
+
+The field component does not need to know how the form submits.
+
+* Short form example
+
+#+begin_src clojure
+(field
+ {:label-text "Username"
+  :for :username
+  :schema UserSchema
+  :control (input {:type "text"
+                   :name "username"
+                   :autocomplete "username"})
+  :description "Use lowercase letters, numbers, underscores, or hyphens."})
+#+end_src
+
+Possible annotated control output:
+
+#+begin_src clojure
+[:input
+ {:type "text"
+  :name "username"
+  :autocomplete "username"
+  :id "username"
+  :required true
+  :minlength 3
+  :maxlength 24
+  :pattern "^[a-z0-9_-]+$"
+  :aria-describedby "username-description"
+  :aria-errormessage "username-error"
+  :aria-invalid "false"
+  :data-field-control true
+  :_ "on input or blur ..."}]
+#+end_src
+
+* Long form example
+
+#+begin_src clojure
+(field {:for :email}
+  (label/label {:text "Email" :for "email"})
+  (input {:type "email" :id "email" :name "email"})
+  (text/text {:variant :caption
+              :text "We will never share it."}))
+#+end_src
+
+In long form, the field does not annotate the input.
+
+* Migration from old field namespace
+
+The old flat field namespace provided:
+
+- ID derivation
+- ARIA annotation
+- field rendering
+- control row
+- description rendering
+- error rendering
+
+The new split keeps the same conceptual behavior but distributes it:
+
+#+begin_src text
+field.attr   -> IDs, ARIA, annotation, attrs
+field.core   -> rendering and public API
+field.scripts -> stale server-error recovery scripts
+#+end_src
+
+The public facade in =gesso.core= should eventually point:
+
+#+begin_src clojure
+(def field field/field)
+#+end_src
+
+to:
+
+#+begin_src clojure
+gesso.components.field.core/field
+#+end_src
+
+rather than the old flat namespace.
+
+* Current limitations
+
+The first split implementation intentionally does not support:
+
+- automatic control generation from schemas
+- nested field path schema extraction
+- complex orientation-specific layouts
+- automatic server validation endpoint wiring
+- automatic HTMX indicators
+- schema-driven select/radio generation
+- rich success messages
+- multiple controls inside one field
+- fieldsets or grouped controls
+
+Those should be added only when real forms require them.
+
+* Future expansion candidates
+
+** Attach stale-error recovery script
+
+Once server OOB validation is wired end to end, =field.core= may attach:
+
+#+begin_src clojure
+gesso.components.field.scripts/ui-recovery-script
+#+end_src
+
+to annotated controls.
+
+This should be done carefully so it does not fight the validation gatekeeper.
+
+** Orientation styles
+
+Add CSS support for:
+
+#+begin_src clojure
+:orientation :horizontal
+#+end_src
+
+without changing the field API.
+
+** Field status affordances
+
+Potential future support:
+
+- success text
+- warning text
+- loading state
+- async validation indicator
+
+** Nested field IDs
+
+If validation later supports nested schema paths, field IDs may need a formal
+path-to-id helper shared with =gesso.validation.htmx=.
+
+For now, field consumes a simple =:for= value.
+
+* Summary
+
+The field component is the bridge between a user-provided control and the Gesso
+validation/form system.
+
+It provides:
+
+- stable IDs
+- label/control association
+- description and error wiring
+- control annotation
+- validation plan injection
+- accessible error containers
+
+It deliberately does not:
+
+- submit forms
+- inspect Malli directly outside the validation plan call
+- generate controls
+- perform backend validation
+- own HTMX routing
+
+The intended flow is:
+
+1. Caller provides field opts and a control.
+2. Field derives stable IDs.
+3. Field asks validation.core for a plan when schema is present.
+4. Field annotates the control with attrs, ARIA, and scripts.
+5. Field renders label, control, description, and error target.
+6. Browser validation and server OOB validation share the same error container.
+
+
+* Implementation notes and future work
+
+The current field implementation intentionally treats short-form fields as
+single-control fields.
+
+This is appropriate for the first validation-aware field pass and works well for:
+
+- input
+- textarea
+- select
+- simple checkbox
+- custom controls that expose one annotatable Hiccup root
+
+This does not yet fully cover composite field shapes such as:
+
+- radio groups
+- checkbox groups
+- multi-input fields
+- date ranges
+- custom widgets where the actual input is nested inside wrapper markup
+- controls that need ARIA applied to a group rather than a single input
+
+Future work may introduce one or more of:
+
+- field-group
+- control-slot
+- specialized radio/checkbox group field helpers
+- an explicit annotatable-control convention
+- richer group-level ARIA handling
+
+Do not expand the current single-control field prematurely.
+
+First, finish the form refactor and build one end-to-end validating form demo
+that proves:
+
+1. local browser validation writes to the field error target
+2. server-side HTMX OOB validation writes to the same target
+3. stale server errors clear when the user edits
+4. the form prevents locally invalid submission
+5. successful submission still works normally
+
+Once that path is proven, revisit composite controls based on real needs rather
+than hypothetical component shapes.
