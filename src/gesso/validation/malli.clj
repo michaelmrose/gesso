@@ -78,6 +78,28 @@
     :else
     nil))
 
+(defn- form-type
+  [form]
+  (when (vector? form)
+    (first form)))
+
+(defn- maybe-form?
+  [form]
+  (= :maybe (form-type form)))
+
+(defn- and-form?
+  [form]
+  (= :and (form-type form)))
+
+(defn- re-form?
+  [form]
+  (= :re (form-type form)))
+
+(defn- re-form-pattern
+  [form]
+  (when (re-form? form)
+    (first (form-children form))))
+
 (defn- unwrap-maybe
   "Unwraps simple [:maybe ...] schemas.
 
@@ -89,8 +111,7 @@
   (loop [form (schema-form field-form)
          nilable? false
          wrapper-props {}]
-    (if (and (vector? form)
-             (= :maybe (first form)))
+    (if (maybe-form? form)
       (let [props (form-props form)
             inner (first (form-children form))]
         (recur inner
@@ -99,6 +120,45 @@
       {:form form
        :nilable? nilable?
        :wrapper-props wrapper-props})))
+
+(defn- and-forms
+  [form]
+  (if (and-form? form)
+    (vec (form-children form))
+    [form]))
+
+(defn- primary-field-form
+  [forms fallback]
+  (or (some (fn [form]
+              (when-not (re-form? form)
+                form))
+            forms)
+      fallback))
+
+(defn- normalize-field-form
+  "Normalize the narrow field-schema shapes we currently support.
+
+   Supported:
+     [:string {...}]
+     [:int {...}]
+     [:maybe inner]
+     [:and [:string {...}] [:re #\"...\"]]
+
+   The :and support is intentionally narrow. It exists so Malli can keep the
+   server-side regex truth in [:re ...] while Gesso still extracts browser attrs
+   from the string/numeric child."
+  [field-form]
+  (let [{:keys [form nilable? wrapper-props]} (unwrap-maybe field-form)
+        forms       (and-forms form)
+        primary     (primary-field-form forms form)
+        regex       (some re-form-pattern forms)
+        child-props (apply merge (map form-props forms))
+        props       (cond-> (merge wrapper-props child-props)
+                      (and regex (not (:re child-props)))
+                      (assoc :re regex))]
+    {:form primary
+     :nilable? nilable?
+     :props props}))
 
 (defn- incompatible-pattern-reasons
   [pattern]
@@ -176,9 +236,10 @@
 
 (defn- build-source-props
   [props]
-  (cond-> (dissoc props :re)
-    (browser-pattern props)
-    (assoc :pattern (browser-pattern props))))
+  (let [pattern (browser-pattern props)]
+    (cond-> (dissoc props :re)
+      pattern
+      (assoc :pattern pattern))))
 
 (defn- build-rules
   [type-tag props required?]
@@ -229,14 +290,12 @@
    Browser pattern policy:
      :gesso.html/pattern or :html/pattern wins over :re.
 
-   This allows :re to remain the backend/Malli validation truth while the HTML
-   pattern is used only as a browser-side shortcut for obviously bad input."
+   This allows Malli [:re ...] to remain the backend validation truth while the
+   HTML pattern is used only as a browser-side shortcut for obviously bad input."
   [schema field-kw]
   (if-let [{:keys [entry-props field-form]} (field-entry schema field-kw)]
-    (let [{:keys [form nilable? wrapper-props]} (unwrap-maybe field-form)
+    (let [{:keys [form nilable? props]} (normalize-field-form field-form)
           field-schema (m/schema form)
-          inner-props  (m/properties field-schema)
-          props        (merge wrapper-props inner-props)
           type-tag     (m/type field-schema)
           required?    (and (not (:optional entry-props))
                             (not nilable?))

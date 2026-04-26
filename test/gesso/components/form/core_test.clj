@@ -5,89 +5,9 @@
    [gesso.components.form.attr :as form-attr]
    [gesso.components.form.scripts :as form-scripts]
    [gesso.core :as g]
+   [gesso.test.hiccup :as h]
    [gesso.validation.malli :as vmalli]
    [malli.core :as m]))
-
-;; -----------------------------------------------------------------------------
-;; Hiccup test helpers
-;; -----------------------------------------------------------------------------
-
-(defn- hiccup-element?
-  [x]
-  (and (vector? x)
-       (keyword? (first x))))
-
-(defn- element-attrs
-  [node]
-  (if (and (hiccup-element? node)
-           (map? (second node)))
-    (second node)
-    {}))
-
-(defn- element-children
-  [node]
-  (when (hiccup-element? node)
-    (let [[_ maybe-attrs & more] node]
-      (if (map? maybe-attrs)
-        more
-        (cons maybe-attrs more)))))
-
-(defn- all-elements
-  [x]
-  (letfn [(walk [x]
-            (lazy-seq
-             (cond
-               (hiccup-element? x)
-               (cons x (mapcat walk (element-children x)))
-
-               (and (sequential? x) (not (string? x)))
-               (mapcat walk x)
-
-               :else
-               nil)))]
-    (walk x)))
-
-(defn- find-element
-  [pred hiccup]
-  (first (filter pred (all-elements hiccup))))
-
-(defn- elements
-  [pred hiccup]
-  (filter pred (all-elements hiccup)))
-
-(defn- by-id
-  [id hiccup]
-  (find-element #(= id (:id (element-attrs %))) hiccup))
-
-(defn- by-name
-  [name hiccup]
-  (find-element #(= name (:name (element-attrs %))) hiccup))
-
-(defn- by-attr
-  [k v hiccup]
-  (find-element #(= v (get (element-attrs %) k)) hiccup))
-
-(defn- elements-by-tag
-  [tag hiccup]
-  (elements #(= tag (first %)) hiccup))
-
-(defn- classes
-  [attrs]
-  (->> (str/split (or (:class attrs) "") #"\s+")
-       (remove str/blank?)
-       set))
-
-(defn- has-class?
-  [attrs class-name]
-  (contains? (classes attrs) class-name))
-
-(defn- script-includes?
-  [attrs s]
-  (str/includes? (or (:_ attrs) "") s))
-
-(defn- no-nil-children?
-  [node]
-  (not-any? nil? (element-children node)))
 
 ;; -----------------------------------------------------------------------------
 ;; Schemas
@@ -106,11 +26,13 @@
               :gesso.error/required "Username is required."}]]
 
    [:email
-    [:string {:min 5
-              :max 120
-              :gesso.html/pattern ".+@.+"
-              :gesso.error/pattern "Enter an email address."
-              :gesso.error/required "Email is required."}]]
+    [:and
+     [:string {:min 5
+               :max 120
+               :gesso.html/pattern ".+@.+"
+               :gesso.error/pattern "Enter an email address."
+               :gesso.error/required "Email is required."}]
+     [:re #".+@.+"]]]
 
    [:age
     [:int {:min 18
@@ -189,6 +111,18 @@
     (let [rules (:rules (vmalli/extract-constraints signup-schema :username))]
       (is (= "^[a-z0-9_-]+$" (:pattern rules)))))
 
+  (testing "narrow :and support extracts browser attrs from the primary child"
+    (let [{:keys [rules required messages type]}
+          (vmalli/extract-constraints signup-schema :email)]
+      (is (= :string type))
+      (is (= true required))
+      (is (= {:minlength 5
+              :maxlength 120
+              :pattern ".+@.+"
+              :required true}
+             rules))
+      (is (= "Enter an email address." (:pattern messages)))))
+
   (testing "unsafe Java regex fallback is rejected"
     (is (thrown-with-msg?
          clojure.lang.ExceptionInfo
@@ -231,12 +165,12 @@
                                     :aria-describedby "external-help"
                                     :_ "on focus add .focused to me"}]
                  :description "Lowercase letters, numbers, underscores, or hyphens."})
-          root-attrs (element-attrs node)
-          control (by-id "username" node)
-          control-attrs (element-attrs control)
-          description (by-id "username-description" node)
-          error (by-id "username-error" node)
-          error-attrs (element-attrs error)]
+          root-attrs (h/element-attrs node)
+          control (h/by-id "username" node)
+          control-attrs (h/element-attrs control)
+          description (h/by-id "username-description" node)
+          error (h/by-id "username-error" node)
+          error-attrs (h/element-attrs error)]
       (is (= :div (first node)))
       (is (= true (:data-field root-attrs)))
       (is (= "username" (:data-field-for root-attrs)))
@@ -256,20 +190,20 @@
       (is (= "username-error" (:aria-errormessage control-attrs)))
       (is (= "false" (:aria-invalid control-attrs)))
 
-      (is (script-includes? control-attrs "on focus add .focused to me"))
-      (is (script-includes? control-attrs "on input or blur"))
-      (is (script-includes? control-attrs "put msg into #username-error"))
-      (is (script-includes? control-attrs "on keydown"))
-      (is (script-includes? control-attrs "dataset.serverError"))
+      (is (h/script-includes? control-attrs "on focus add .focused to me"))
+      (is (h/script-includes? control-attrs "on input or blur"))
+      (is (h/script-includes? control-attrs "put msg into #username-error"))
+      (is (h/script-includes? control-attrs "on keydown"))
+      (is (h/script-includes? control-attrs "dataset.serverError"))
 
       (is description)
-      (is (= true (:data-field-description (element-attrs description))))
+      (is (= true (:data-field-description (h/element-attrs description))))
 
       (is error)
       (is (= true (:data-field-error error-attrs)))
       (is (= "alert" (:role error-attrs)))
       (is (= "polite" (:aria-live error-attrs)))
-      (is (has-class? error-attrs "hidden")))))
+      (is (h/has-class? error-attrs "hidden")))))
 
 (deftest field-schema-backed-error-target-test
   (testing "schema-backed optional field with no local attrs still renders an OOB error target"
@@ -278,18 +212,18 @@
                  :for :notes
                  :schema signup-schema
                  :control [:textarea {:name "notes"}]})
-          control (by-id "notes" node)
-          control-attrs (element-attrs control)
-          error (by-id "notes-error" node)
-          error-attrs (element-attrs error)]
+          control (h/by-id "notes" node)
+          control-attrs (h/element-attrs control)
+          error (h/by-id "notes-error" node)
+          error-attrs (h/element-attrs error)]
       (is control)
       (is (= "notes" (:id control-attrs)))
       (is (= "notes-error" (:aria-errormessage control-attrs)))
       (is (= "false" (:aria-invalid control-attrs)))
-      (is (script-includes? control-attrs "on keydown"))
-      (is (not (script-includes? control-attrs "on input or blur")))
+      (is (h/script-includes? control-attrs "on keydown"))
+      (is (not (h/script-includes? control-attrs "on input or blur")))
       (is error)
-      (is (has-class? error-attrs "hidden")))))
+      (is (h/has-class? error-attrs "hidden")))))
 
 (deftest field-active-error-test
   (testing "active errors mark root and control invalid and show the error container"
@@ -301,15 +235,15 @@
                                     :name "email"}]
                  :description "Used for recovery."
                  :error "Email is already taken."})
-          root-attrs (element-attrs node)
-          control-attrs (element-attrs (by-id "email" node))
-          error-attrs (element-attrs (by-id "email-error" node))]
+          root-attrs (h/element-attrs node)
+          control-attrs (h/element-attrs (h/by-id "email" node))
+          error-attrs (h/element-attrs (h/by-id "email-error" node))]
       (is (= "true" (:data-invalid root-attrs)))
       (is (= "true" (:aria-invalid control-attrs)))
       (is (= "email-description email-error"
              (:aria-describedby control-attrs)))
       (is (= "email-error" (:aria-errormessage control-attrs)))
-      (is (not (has-class? error-attrs "hidden"))))))
+      (is (not (h/has-class? error-attrs "hidden"))))))
 
 (deftest field-key-override-test
   (testing ":field-key lets schema lookup differ from the DOM id"
@@ -320,7 +254,7 @@
                  :schema signup-schema
                  :control [:input {:type "email"
                                     :name "email"}]})
-          control-attrs (element-attrs (by-id "user-email" node))]
+          control-attrs (h/element-attrs (h/by-id "user-email" node))]
       (is (= "user-email" (:id control-attrs)))
       (is (= true (:required control-attrs)))
       (is (= ".+@.+" (:pattern control-attrs)))
@@ -337,8 +271,8 @@
                  :valid? true}
                 [:div {:class "custom-layout"}
                  manual-input])
-          root-attrs (element-attrs node)
-          control-attrs (element-attrs (by-id "manual" node))]
+          root-attrs (h/element-attrs node)
+          control-attrs (h/element-attrs (h/by-id "manual" node))]
       (is (= true (:data-field root-attrs)))
       (is (= "manual" (:data-field-for root-attrs)))
       (is (= "horizontal" (:data-orientation root-attrs)))
@@ -456,37 +390,37 @@
                             :name "step"
                             :value "account"}]]]
                  [:button {:type "submit"} "Save"])
-          form-attrs (element-attrs node)
-          token-input (by-name "__anti-forgery-token" node)
-          sentinel (by-attr :data-form-validator true node)
-          username-control (by-id "username" node)
-          hidden-step (by-name "step" node)]
+          form-attrs (h/element-attrs node)
+          token-input (h/by-name "__anti-forgery-token" node)
+          sentinel (h/by-attr :data-form-validator true node)
+          username-control (h/by-id "username" node)
+          hidden-step (h/by-name "step" node)]
       (is (= :form (first node)))
       (is (= "profile-form" (:id form-attrs)))
       (is (= "yes" (:data-demo form-attrs)))
       (is (= true (:data-form form-attrs)))
-      (is (has-class? form-attrs "form-theme"))
-      (is (has-class? form-attrs "w-full"))
-      (is (has-class? form-attrs "extra-form"))
+      (is (h/has-class? form-attrs "form-theme"))
+      (is (h/has-class? form-attrs "w-full"))
+      (is (h/has-class? form-attrs "extra-form"))
 
       (is (= "/profile" (:hx-post form-attrs)))
       (is (= "#profile-form" (:hx-target form-attrs)))
       (is (= "outerHTML" (:hx-swap form-attrs)))
-      (is (script-includes? form-attrs "htmx:validation:validate"))
+      (is (h/script-includes? form-attrs "htmx:validation:validate"))
 
       (is token-input)
-      (is (= "hidden" (:type (element-attrs token-input))))
-      (is (= "TOKEN" (:value (element-attrs token-input))))
+      (is (= "hidden" (:type (h/element-attrs token-input))))
+      (is (= "TOKEN" (:value (h/element-attrs token-input))))
 
       (is sentinel)
-      (is (= "/profile/validate" (:hx-post (element-attrs sentinel))))
-      (is (= "closest form" (:hx-include (element-attrs sentinel))))
-      (is (= "none" (:hx-swap (element-attrs sentinel))))
+      (is (= "/profile/validate" (:hx-post (h/element-attrs sentinel))))
+      (is (= "closest form" (:hx-include (h/element-attrs sentinel))))
+      (is (= "none" (:hx-swap (h/element-attrs sentinel))))
 
       (is username-control)
-      (is (= "username" (:name (element-attrs username-control))))
+      (is (= "username" (:name (h/element-attrs username-control))))
       (is hidden-step)
-      (is (= "account" (:value (element-attrs hidden-step)))))))
+      (is (= "account" (:value (h/element-attrs hidden-step)))))))
 
 (deftest form-without-validation-test
   (testing "non-validating form does not attach sentinel or guard by default"
@@ -495,11 +429,11 @@
                   :attrs {:id "plain-form"}}
                  [:input {:name "plain"}]
                  [:button {:type "submit"} "Submit"])
-          form-attrs (element-attrs node)]
+          form-attrs (h/element-attrs node)]
       (is (= "/plain" (:hx-post form-attrs)))
       (is (nil? (:_ form-attrs)))
-      (is (nil? (by-attr :data-form-validator true node)))
-      (is (nil? (by-name "__anti-forgery-token" node))))))
+      (is (nil? (h/by-attr :data-form-validator true node)))
+      (is (nil? (h/by-name "__anti-forgery-token" node))))))
 
 (deftest form-existing-script-test
   (testing "validation guard appends to existing form scripts"
@@ -508,9 +442,9 @@
                   :validate-url "/validate"
                   :attrs {:_ "on submit log me"}}
                  [:input {:name "x"}])
-          form-attrs (element-attrs node)]
-      (is (script-includes? form-attrs "on submit log me"))
-      (is (script-includes? form-attrs "on htmx:validation:validate")))))
+          form-attrs (h/element-attrs node)]
+      (is (h/script-includes? form-attrs "on submit log me"))
+      (is (h/script-includes? form-attrs "on htmx:validation:validate")))))
 
 (deftest form-guard-override-test
   (testing "guard can be disabled even when validate-url is present"
@@ -519,9 +453,9 @@
                   :validate-url "/validate"
                   :guard? false}
                  [:input {:name "x"}])
-          form-attrs (element-attrs node)]
+          form-attrs (h/element-attrs node)]
       (is (nil? (:_ form-attrs)))
-      (is (by-attr :data-form-validator true node)))))
+      (is (h/by-attr :data-form-validator true node)))))
 
 ;; -----------------------------------------------------------------------------
 ;; post-button tests
@@ -541,10 +475,10 @@
                   :class "extra-button"
                   :attrs {:aria-label "Sign out"}}
                  "Sign out")
-          form-attrs (element-attrs node)
-          token-input (by-name "__anti-forgery-token" node)
-          button (first (elements-by-tag :button node))
-          button-attrs (element-attrs button)]
+          form-attrs (h/element-attrs node)
+          token-input (h/by-name "__anti-forgery-token" node)
+          button (first (h/elements-by-tag :button node))
+          button-attrs (h/element-attrs button)]
       (is (= :form (first node)))
       (is (= "signout-form" (:id form-attrs)))
       (is (= "action" (:data-form-kind form-attrs)))
@@ -553,18 +487,18 @@
       (is (= "/sessions/current" (:hx-delete form-attrs)))
       (is (= "#session-panel" (:hx-target form-attrs)))
       (is (= "outerHTML" (:hx-swap form-attrs)))
-      (is (has-class? form-attrs "inline-flex"))
+      (is (h/has-class? form-attrs "inline-flex"))
 
       (is token-input)
-      (is (= "BIFF-TOKEN" (:value (element-attrs token-input))))
+      (is (= "BIFF-TOKEN" (:value (h/element-attrs token-input))))
 
       (is button)
       (is (= "submit" (:type button-attrs)))
       (is (= "Sign out" (:aria-label button-attrs)))
       (is (= "sign-out" (:data-action button-attrs)))
-      (is (has-class? button-attrs "button-density"))
-      (is (has-class? button-attrs "btn-outline"))
-      (is (has-class? button-attrs "extra-button")))))
+      (is (h/has-class? button-attrs "button-density"))
+      (is (h/has-class? button-attrs "btn-outline"))
+      (is (h/has-class? button-attrs "extra-button")))))
 
 (deftest post-button-content-precedence-test
   (testing "explicit children beat :children and :label"
@@ -573,8 +507,8 @@
                   :children "From opts"
                   :label "From label"}
                  [:span {:id "explicit-child"} "Explicit"])
-          button (first (elements-by-tag :button node))
-          child (first (element-children button))]
+          button (first (h/elements-by-tag :button node))
+          child (first (h/element-children button))]
       (is (= [:span {:id "explicit-child"} "Explicit"] child))))
 
   (testing ":children beats :label and preserves Hiccup child nodes"
@@ -582,24 +516,24 @@
                  {:post "/do"
                   :children [:span {:id "opts-child"} "From opts"]
                   :label "From label"})
-          button (first (elements-by-tag :button node))
-          child (first (element-children button))]
+          button (first (h/elements-by-tag :button node))
+          child (first (h/element-children button))]
       (is (= [:span {:id "opts-child"} "From opts"] child))))
 
   (testing ":label is used when no children are provided"
     (let [node (g/post-button {}
                  {:post "/do"
                   :label "From label"})
-          button (first (elements-by-tag :button node))]
-      (is (= ["From label"] (vec (element-children button)))))))
+          button (first (h/elements-by-tag :button node))]
+      (is (= ["From label"] (vec (h/element-children button)))))))
 
 (deftest post-button-without-token-test
   (testing "post-button omits anti-forgery input when no token is present"
     (let [node (g/post-button {}
                  {:post "/do"}
                  "Do it")]
-      (is (nil? (by-name "__anti-forgery-token" node)))
-      (is (no-nil-children? node)))))
+      (is (nil? (h/by-name "__anti-forgery-token" node)))
+      (is (h/no-nil-children? node)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Server OOB validation tests
@@ -612,17 +546,17 @@
                     :age 12}
           explain-data (m/explain signup-schema bad-data)
           node (g/render-oob-errors explain-data)
-          username-error (by-id "username-error" node)
-          email-error (by-id "email-error" node)
-          age-error (by-id "age-error" node)
-          scripts (elements-by-tag :script node)]
+          username-error (h/by-id "username-error" node)
+          email-error (h/by-id "email-error" node)
+          age-error (h/by-id "age-error" node)
+          scripts (h/elements-by-tag :script node)]
       (is (= :<> (first node)))
       (is username-error)
-      (is (= "innerHTML" (:hx-swap-oob (element-attrs username-error))))
+      (is (= "innerHTML" (:hx-swap-oob (h/element-attrs username-error))))
       (is email-error)
-      (is (= "innerHTML" (:hx-swap-oob (element-attrs email-error))))
+      (is (= "innerHTML" (:hx-swap-oob (h/element-attrs email-error))))
       (is age-error)
-      (is (= "innerHTML" (:hx-swap-oob (element-attrs age-error))))
+      (is (= "innerHTML" (:hx-swap-oob (h/element-attrs age-error))))
       (is (some #(str/includes? (second %) "dataset.serverError='true'")
                 scripts))
       (is (some #(str/includes? (second %) "aria-invalid")

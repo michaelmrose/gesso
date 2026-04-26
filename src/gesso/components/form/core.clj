@@ -94,35 +94,7 @@
   "Render a real HTML form around arbitrary authored children.
 
    The form component is a submission boundary. It does not inspect, generate,
-   or mutate fields or controls.
-
-   Example:
-     (form ctx
-       {:post \"/profile\"
-        :target \"#profile-form\"
-        :swap \"outerHTML\"}
-       (field ...)
-       [:button {:type \"submit\"} \"Save\"])
-
-   Validation:
-     Supplying :validate-url renders a hidden validation sentinel and, by
-     default, attaches the submission guard.
-
-     Use {:guard? false} to disable the guard.
-
-   Supported route options:
-     :to      shorthand for POST
-     :post
-     :put
-     :patch
-     :delete
-
-   Other common options:
-     :target
-     :swap
-     :validate-url
-     :class
-     :attrs"
+   or mutate fields or controls."
   [ctx & args]
   (let [[opts children] (normalize-component-args args)
         {:keys [props]} (split-opts opts)
@@ -171,33 +143,15 @@
    (merge-attrs attrs (:button-attrs props))))
 
 (defn post-button
-  "Render a minimal inline form containing a single submit button.
-
-   This is useful for standalone actions such as delete, sign out, claim,
-   drop, complete, and other one-button POST/PUT/PATCH/DELETE actions.
-
-   Example:
-     (post-button ctx
-       {:delete \"/sessions/current\"
-        :target \"#session-panel\"
-        :swap \"outerHTML\"
-        :button-attrs {:class \"btn-outline\"}}
-       \"Sign out\")
-
-   Button content precedence:
-     1. explicit children passed to post-button
-     2. :children in opts
-     3. :label in opts
-
-   Top-level :class and :attrs apply to the button.
-   Use :form-attrs to customize the inline wrapper form."
+  "Render a minimal inline form containing a single submit button."
   [ctx & args]
   (let [[opts explicit-children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
         form-attrs (build-inline-form-attrs props)
         button-attrs (build-submit-button-attrs class attrs props)
-        content (post-button-content explicit-children props)]
-    (into
-     [:form form-attrs
-      (anti-forgery-input ctx)]
-     [(into [:button button-attrs] content)])))
+        content (post-button-content explicit-children props)
+        button (into [:button button-attrs] content)
+        children (remove nil?
+                         [(anti-forgery-input ctx)
+                          button])]
+    (into [:form form-attrs] children)))
