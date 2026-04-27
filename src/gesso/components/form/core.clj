@@ -1,10 +1,20 @@
 (ns gesso.components.form.core
   "Form submission boundary, CSRF injection, HTMX routing, optional validation
-   coordination, and inline action forms."
+   coordination, and inline action forms.
+
+   DEBUG VERSION: emits server-side println output while rendering forms."
   (:require
    [gesso.components.form.attr :as attr]
    [gesso.components.form.scripts :as scripts]
    [gesso.util :refer [merge-attrs nodes normalize-component-args split-opts]]))
+
+(def ^:dynamic *debug?*
+  true)
+
+(defn- dbg
+  [& xs]
+  (when *debug?*
+    (apply println "[gesso.form]" xs)))
 
 ;; -----------------------------------------------------------------------------
 ;; Anti-forgery
@@ -21,10 +31,13 @@
 (defn anti-forgery-input
   "Render the hidden anti-forgery input when a token is present."
   [ctx]
-  (when-let [token (anti-forgery-token ctx)]
-    [:input {:type "hidden"
-             :name "__anti-forgery-token"
-             :value token}]))
+  (let [token (anti-forgery-token ctx)]
+    (dbg "anti-forgery-input"
+         {:token-present? (boolean token)})
+    (when token
+      [:input {:type "hidden"
+               :name "__anti-forgery-token"
+               :value token}])))
 
 ;; -----------------------------------------------------------------------------
 ;; Script merging
@@ -47,21 +60,35 @@
 
 (defn- merge-script
   [attrs script]
-  (let [script' (join-scripts (:_ attrs) script)]
+  (let [existing (:_ attrs)
+        script'  (join-scripts existing script)]
+    (dbg "merge-script"
+         {:existing-script? (boolean (seq existing))
+          :new-script?      (boolean (seq script))
+          :merged-script?   (boolean (seq script'))})
     (cond-> attrs
       script' (assoc :_ script'))))
 
 (defn- guard-enabled?
   [{:keys [validate-url guard?] :as props}]
-  (if (contains? props :guard?)
-    (boolean guard?)
-    (boolean validate-url)))
+  (let [enabled? (if (contains? props :guard?)
+                   (boolean guard?)
+                   (boolean validate-url))]
+    (dbg "guard-enabled?"
+         {:validate-url validate-url
+          :guard?       guard?
+          :enabled?     enabled?})
+    enabled?))
 
 (defn- maybe-add-submission-guard
   [form-attrs props]
   (if (guard-enabled? props)
-    (merge-script form-attrs (scripts/submission-guard))
-    form-attrs))
+    (do
+      (dbg "adding submission guard")
+      (merge-script form-attrs (scripts/submission-guard)))
+    (do
+      (dbg "not adding submission guard")
+      form-attrs)))
 
 ;; -----------------------------------------------------------------------------
 ;; Validation sentinel
@@ -69,8 +96,13 @@
 
 (defn- validation-sentinel
   [props]
-  (when-let [attrs (attr/validation-sentinel-attrs props)]
-    [:div attrs]))
+  (let [attrs (attr/validation-sentinel-attrs props)]
+    (dbg "validation-sentinel"
+         {:validate-url (:validate-url props)
+          :sentinel?    (boolean attrs)
+          :attrs        attrs})
+    (when attrs
+      [:div attrs])))
 
 ;; -----------------------------------------------------------------------------
 ;; Form rendering
@@ -78,17 +110,33 @@
 
 (defn- form-children
   [ctx props children]
-  (remove nil?
-          (concat
-           [(anti-forgery-input ctx)
-            (validation-sentinel props)]
-           children)))
+  (let [anti-forgery (anti-forgery-input ctx)
+        sentinel     (validation-sentinel props)
+        all-children  (remove nil?
+                              (concat
+                               [anti-forgery sentinel]
+                               children))]
+    (dbg "form-children"
+         {:anti-forgery?  (boolean anti-forgery)
+          :sentinel?      (boolean sentinel)
+          :authored-count (count children)
+          :final-count    (count all-children)})
+    all-children))
 
 (defn- build-form-attrs
   [opts]
-  (let [{:keys [props class attrs]} (split-opts opts)]
-    (-> (attr/form-root-attrs class attrs props)
-        (maybe-add-submission-guard props))))
+  (let [{:keys [props class attrs]} (split-opts opts)
+        root-attrs                  (attr/form-root-attrs class attrs props)
+        guarded-attrs               (maybe-add-submission-guard root-attrs props)]
+    (dbg "build-form-attrs"
+         {:props        props
+          :class        class
+          :raw-attrs    attrs
+          :root-attrs   root-attrs
+          :final-attrs  guarded-attrs
+          :has-script?  (boolean (seq (:_ guarded-attrs)))
+          :novalidate?  (boolean (:novalidate guarded-attrs))})
+    guarded-attrs))
 
 (defn form
   "Render a real HTML form around arbitrary authored children.
@@ -98,9 +146,19 @@
   [ctx & args]
   (let [[opts children] (normalize-component-args args)
         {:keys [props]} (split-opts opts)
-        form-attrs (build-form-attrs opts)]
-    (into [:form form-attrs]
-          (form-children ctx props children))))
+        form-attrs      (build-form-attrs opts)
+        final-children  (form-children ctx props children)]
+    (dbg "render form"
+         {:route        (or (:to props)
+                            (:post props)
+                            (:put props)
+                            (:patch props)
+                            (:delete props))
+          :validate-url (:validate-url props)
+          :target       (:target props)
+          :swap         (:swap props)
+          :child-count  (count final-children)})
+    (into [:form form-attrs] final-children)))
 
 (defn post-form
   "Compatibility/convenience wrapper for a POST-like form.
@@ -108,6 +166,7 @@
    Prefer `form` for authored forms. This helper exists for small generic form
    submissions and for replacing the old live.core form helpers."
   [ctx opts & children]
+  (dbg "post-form" {:opts opts :child-count (count children)})
   (apply form ctx opts children))
 
 ;; -----------------------------------------------------------------------------
@@ -116,42 +175,67 @@
 
 (defn- post-button-content
   [explicit-children props]
-  (cond
-    (seq explicit-children)
-    explicit-children
+  (let [content (cond
+                  (seq explicit-children)
+                  explicit-children
 
-    (some? (:children props))
-    (nodes (:children props))
+                  (some? (:children props))
+                  (nodes (:children props))
 
-    (some? (:label props))
-    [(:label props)]
+                  (some? (:label props))
+                  [(:label props)]
 
-    :else
-    []))
+                  :else
+                  [])]
+    (dbg "post-button-content"
+         {:explicit-children? (boolean (seq explicit-children))
+          :opts-children?     (some? (:children props))
+          :label?             (some? (:label props))
+          :content-count      (count content)})
+    content))
 
 (defn- build-inline-form-attrs
   [props]
-  (attr/inline-form-root-attrs
-   nil
-   (:form-attrs props)
-   props))
+  (let [attrs (attr/inline-form-root-attrs
+               nil
+               (:form-attrs props)
+               props)]
+    (dbg "build-inline-form-attrs"
+         {:props props
+          :attrs attrs})
+    attrs))
 
 (defn- build-submit-button-attrs
   [class attrs props]
-  (attr/submit-button-attrs
-   class
-   (merge-attrs attrs (:button-attrs props))))
+  (let [button-attrs (attr/submit-button-attrs
+                      class
+                      (merge-attrs attrs (:button-attrs props)))]
+    (dbg "build-submit-button-attrs"
+         {:class        class
+          :attrs        attrs
+          :button-attrs (:button-attrs props)
+          :final        button-attrs})
+    button-attrs))
 
 (defn post-button
   "Render a minimal inline form containing a single submit button."
   [ctx & args]
   (let [[opts explicit-children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
-        form-attrs (build-inline-form-attrs props)
-        button-attrs (build-submit-button-attrs class attrs props)
-        content (post-button-content explicit-children props)
-        button (into [:button button-attrs] content)
-        children (remove nil?
-                         [(anti-forgery-input ctx)
-                          button])]
+        form-attrs                  (build-inline-form-attrs props)
+        button-attrs                (build-submit-button-attrs class attrs props)
+        content                     (post-button-content explicit-children props)
+        button                      (into [:button button-attrs] content)
+        children                    (remove nil?
+                                            [(anti-forgery-input ctx)
+                                             button])]
+    (dbg "render post-button"
+         {:route       (or (:to props)
+                           (:post props)
+                           (:put props)
+                           (:patch props)
+                           (:delete props))
+          :target      (:target props)
+          :swap        (:swap props)
+          :child-count (count children)})
     (into [:form form-attrs] children)))
