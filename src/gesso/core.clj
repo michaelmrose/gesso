@@ -32,9 +32,14 @@
    [gesso.components.page :as page]
    [gesso.components.bars.core :as bars]
    [gesso.components.background.core :as background]
+   [gesso.http :as http]
    [gesso.live.core :as live]))
 
 ;; public api
+
+;; http
+(def html-response http/html-response)
+(def no-content http/no-content)
 
 ;; live
 (def live-fragment live/fragment)
