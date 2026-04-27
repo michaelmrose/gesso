@@ -1,5 +1,5 @@
 (ns gesso.validation.htmx
-  "Transforms server-side Malli explain-data into HTMX OOB field-error swaps."
+  "Transforms server-side validation errors into HTMX OOB field-error swaps."
   (:require
    [clojure.string :as str]
    [malli.error :as me]))
@@ -87,6 +87,11 @@
    "if(field){field.setAttribute('aria-invalid','true');}"
    "})();"))
 
+(defn- script-node
+  [js]
+  [:script {:dangerouslySetInnerHTML
+            {:__html js}}])
+
 (defn- render-oob-error
   [{:keys [path messages]}]
   (let [field-id (path->field-id path)
@@ -97,8 +102,7 @@
      [:span {:data-validation-error-message true
              :style {:color "var(--destructive)"}}
       message]
-     [:script
-      (reveal-error-script field-id err-id)]]))
+     (script-node (reveal-error-script field-id err-id))]))
 
 (defn render-oob-errors
   "Render Malli explain-data as HTMX out-of-band updates for field error
@@ -121,3 +125,53 @@
         (into [:<>]
               (map render-oob-error)
               errors)))))
+
+(defn- normalize-error-messages
+  [messages]
+  (cond
+    (nil? messages)
+    []
+
+    (string? messages)
+    [messages]
+
+    (sequential? messages)
+    (->> messages
+         (remove nil?)
+         (map str)
+         vec)
+
+    :else
+    [(str messages)]))
+
+(defn- error-map-entry
+  [[path messages]]
+  {:path (path-segments path)
+   :messages (normalize-error-messages messages)})
+
+(defn render-oob-error-map
+  "Render a friendly field error map as HTMX out-of-band updates.
+
+   This is for app-controlled validation where the server already chose the
+   user-facing messages.
+
+   Examples:
+     (render-oob-error-map
+      {:username \"Username cannot start with a number.\"
+       :email \"That email is already in use.\"})
+
+     (render-oob-error-map
+      {[:user :email] \"That email is already in use.\"})
+
+   Keys may be keywords, strings, symbols, or vector paths.
+
+   Values may be strings or a sequence of strings. When multiple messages are
+   supplied, the first message is rendered."
+  [errors]
+  (let [entries (->> errors
+                     (map error-map-entry)
+                     (filter #(seq (:messages %))))]
+    (when (seq entries)
+      (into [:<>]
+            (map render-oob-error)
+            entries))))

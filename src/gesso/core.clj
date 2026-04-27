@@ -180,6 +180,7 @@
 (def field-plan validation/field-plan)
 (def empty-field-plan validation/empty-field-plan)
 (def render-oob-errors validation-htmx/render-oob-errors)
+(def render-oob-error-map validation-htmx/render-oob-error-map)
 (def path->field-id validation-htmx/path->field-id)
 (def path->err-id validation-htmx/path->err-id)
 

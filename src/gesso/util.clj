@@ -140,3 +140,67 @@
   (let [[opts & children] args
         opts (if (map? opts) opts {})]
     [opts (if (map? (first args)) children args)]))
+
+;; -----------------------------------------------------------------------------
+;; Request/value helpers
+;; -----------------------------------------------------------------------------
+
+(defn request-param
+  "Read a request param by keyword or string key.
+
+   Useful because Ring/Biff-style params may arrive with either keyword or
+   string keys depending on middleware and call site."
+  [params k]
+  (or (get params k)
+      (get params (name k))))
+
+(defn present-value?
+  "True when x is non-nil and not blank after string coercion."
+  [x]
+  (and (some? x)
+       (not (str/blank? (str x)))))
+
+(defn trim-value
+  "Trim a submitted value after string coercion, preserving nil."
+  [x]
+  (when (some? x)
+    (str/trim (str x))))
+
+(defn parse-int-value
+  "Parse an integer-ish submitted value.
+
+   Returns nil for absent or blank input.
+
+   Returns the original value when parsing fails so callers can distinguish:
+
+     nil       => missing
+     integer   => valid integer
+     original  => present but invalid"
+  [x]
+  (when (present-value? x)
+    (try
+      (Integer/parseInt (str x))
+      (catch Exception _
+        x))))
+
+(defn assoc-value
+  "Assoc :value into attrs when v is non-nil."
+  [attrs v]
+  (if (some? v)
+    (assoc attrs :value v)
+    attrs))
+
+(defn checked-value?
+  "Compare current/submitted values as strings.
+
+   Useful for radio, checkbox, and select state."
+  [value expected]
+  (= (str value) (str expected)))
+
+(defn select-option
+  "Render a Hiccup option node, marking it selected when current equals value."
+  [current value label]
+  [:option (cond-> {:value value}
+             (checked-value? current value)
+             (assoc :selected true))
+   label])
