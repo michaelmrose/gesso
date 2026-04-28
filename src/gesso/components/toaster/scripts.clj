@@ -23,7 +23,7 @@ end")
   "Return hyperscript for optional auto-dismiss.
 
    The script reads data-duration from the toast element. No duration means no
-   timeout. The toast is removed directly; exit animation can be added later."
+   timeout. Persistent toasts should not receive this script."
   []
   "init
   js(me)

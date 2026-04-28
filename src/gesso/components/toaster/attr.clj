@@ -55,7 +55,7 @@
   (let [{:keys [class attrs]} (split opts)]
     (merge-attrs
      {:id (toaster-id opts)
-      :class (class-names "toaster" class)
+      :class (class-names "gesso-toaster" class)
       :data-toaster true
       :data-position (toaster-position opts)
       :aria-live (toaster-live opts)
@@ -112,7 +112,7 @@
   (let [{:keys [props class attrs]} (split opts)
         {:keys [id duration]} props]
     (merge-attrs
-     {:class (class-names "toast" class)
+     {:class (class-names "gesso-toast" class)
       :data-toast true
       :data-variant (toast-variant opts)
       :data-dismissible (if (toast-close? opts) "true" "false")
@@ -126,7 +126,7 @@
   ([opts]
    (let [{:keys [class attrs]} (split opts)]
      (merge-attrs
-      {:class (class-names "toast-body" class)
+      {:class (class-names "gesso-toast-body" class)
        :data-toast-body true}
       attrs))))
 
@@ -135,7 +135,7 @@
   ([opts]
    (let [{:keys [class attrs]} (split opts)]
      (merge-attrs
-      {:class (class-names "toast-content" class)
+      {:class (class-names "gesso-toast-content" class)
        :data-toast-content true}
       attrs))))
 
@@ -144,7 +144,7 @@
   ([opts]
    (let [{:keys [class attrs]} (split opts)]
      (merge-attrs
-      {:class (class-names "toast-icon" class)
+      {:class (class-names "gesso-toast-icon" class)
        :data-toast-icon true}
       attrs))))
 
@@ -153,7 +153,7 @@
   ([opts]
    (let [{:keys [class attrs]} (split opts)]
      (merge-attrs
-      {:class (class-names "toast-title" class)
+      {:class (class-names "gesso-toast-title" class)
        :data-toast-title true}
       attrs))))
 
@@ -162,7 +162,7 @@
   ([opts]
    (let [{:keys [class attrs]} (split opts)]
      (merge-attrs
-      {:class (class-names "toast-description" class)
+      {:class (class-names "gesso-toast-description" class)
        :data-toast-description true}
       attrs))))
 
@@ -171,22 +171,24 @@
   ([opts]
    (let [{:keys [class attrs]} (split opts)]
      (merge-attrs
-      {:class (class-names "toast-action" class)
+      {:class (class-names "gesso-toast-action" class)
        :data-toast-action true}
       attrs))))
 
 (defn toast-close-attrs
   ([] (toast-close-attrs {}))
   ([opts]
-   (let [{:keys [props class attrs]} (split opts)
-         label (or (:close-label props)
-                   "Dismiss notification")]
+   (let [{:keys [props]} (split opts)
+         label       (or (:close-label props)
+                         "Dismiss notification")
+         close-class (:close-class props)
+         close-attrs (:close-attrs props)]
      (merge-attrs
       {:type "button"
-       :class (class-names "toast-close" class)
+       :class (class-names "gesso-toast-close" close-class)
        :data-toast-close true
        :aria-label label}
-      attrs))))
+      close-attrs))))
 
 (defn render-toast-oob-attrs
   "Return attrs for the HTMX OOB wrapper that appends a toast to the toaster.
@@ -202,6 +204,6 @@
         swap   (token (:swap props) default-oob-swap)]
     (merge-attrs
      {:id target
-      :class (class-names class)
+      :class (class-names "gesso-toast-oob" class)
       :hx-swap-oob swap}
      attrs)))

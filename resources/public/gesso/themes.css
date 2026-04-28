@@ -1510,17 +1510,58 @@ html.dark [data-background-root] > [data-background-layer="dark"] {
 }
 
 [data-toast] {
+  --toast-accent: color-mix(in srgb, var(--foreground) 34%, var(--border));
+  --toast-background: var(--card);
+
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
   pointer-events: auto;
+
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
   gap: 0.75rem;
-  border: var(--border-width, 1px) solid var(--border);
+
+  border: var(--border-width, 1px) solid
+    color-mix(in srgb, var(--toast-accent) 38%, var(--border));
   border-radius: var(--radius-lg);
-  background: var(--card);
+  background: var(--toast-background);
   color: var(--card-foreground);
   box-shadow: var(--shadow-lg, 0 18px 50px rgb(0 0 0 / 0.22));
-  padding: 0.875rem 1rem;
+
+  padding: 0.875rem 1rem 0.875rem 1.125rem;
+}
+
+[data-toast]::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: 0.25rem;
+  background: var(--toast-accent);
+}
+
+[data-toast][data-variant="success"] {
+  --toast-accent: var(--success, oklch(0.67 0.16 150));
+  --toast-background: color-mix(in srgb, var(--toast-accent) 8%, var(--card));
+}
+
+[data-toast][data-variant="info"] {
+  --toast-accent: var(--info, oklch(0.62 0.16 250));
+  --toast-background: color-mix(in srgb, var(--toast-accent) 8%, var(--card));
+}
+
+[data-toast][data-variant="warning"] {
+  --toast-accent: var(--warning, oklch(0.78 0.16 80));
+  --toast-background: color-mix(in srgb, var(--toast-accent) 14%, var(--card));
+  border-color: color-mix(in srgb, var(--toast-accent) 55%, var(--border));
+}
+
+[data-toast][data-variant="danger"] {
+  --toast-accent: var(--destructive);
+  --toast-background: color-mix(in srgb, var(--toast-accent) 10%, var(--card));
+  border-color: color-mix(in srgb, var(--toast-accent) 58%, var(--border));
 }
 
 [data-toast-body] {
@@ -1532,7 +1573,8 @@ html.dark [data-background-root] > [data-background-layer="dark"] {
 
 [data-toast-icon] {
   flex: 0 0 auto;
-  color: var(--muted-foreground);
+  color: var(--toast-accent);
+  margin-block-start: 0.125rem;
 }
 
 [data-toast-content] {
@@ -1570,41 +1612,12 @@ html.dark [data-background-root] > [data-background-layer="dark"] {
 }
 
 [data-toast-close]:hover {
-  background: var(--muted);
+  background: color-mix(in srgb, var(--toast-accent) 12%, var(--muted));
   color: var(--foreground);
 }
 
-[data-toast][data-variant="success"] {
-  border-color: var(--success, var(--primary));
-}
-
-[data-toast][data-variant="info"] {
-  border-color: var(--info, var(--primary));
-}
-
-[data-toast][data-variant="warning"] {
-  border-color: var(--warning, var(--accent));
-}
-
-[data-toast][data-variant="danger"] {
-  border-color: var(--destructive);
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  [data-toast] {
-    animation: gesso-toast-enter 140ms ease-out;
-  }
-
-  @keyframes gesso-toast-enter {
-    from {
-      opacity: 0;
-      transform: translateY(0.35rem) scale(0.98);
-    }
-
-    to {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-  }
+[data-toast-close]:focus-visible {
+  outline: 2px solid var(--toast-accent);
+  outline-offset: 2px;
 }
 

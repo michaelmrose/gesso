@@ -1,8 +1,15 @@
 (ns gesso.components.toaster.core
   (:require
+   [gesso.components.icon :as icon]
    [gesso.components.toaster.attr :as attr]
    [gesso.components.toaster.scripts :as scripts]
    [gesso.util :refer :all]))
+
+(def variant-icons
+  {"success" "check"
+   "info"    "info"
+   "warning" "triangle-alert"
+   "danger"  "x"})
 
 (defn toaster
   "Render the stable toaster region.
@@ -22,6 +29,30 @@
        (attr/toaster-attrs opts)
        [])))
 
+(defn- icon-content
+  [x]
+  (cond
+    (keyword? x)
+    (icon/icon (name x) {:size :sm})
+
+    (string? x)
+    (icon/icon x {:size :sm})
+
+    :else
+    x))
+
+(defn- resolved-icon
+  [opts icon-value]
+  (cond
+    (false? icon-value)
+    nil
+
+    (some? icon-value)
+    icon-value
+
+    :else
+    (get variant-icons (attr/toast-variant opts))))
+
 (defn- toast-slot
   [attrs content]
   (when (some? content)
@@ -29,8 +60,10 @@
           (nodes content))))
 
 (defn- toast-icon
-  [icon]
-  (toast-slot (attr/toast-icon-attrs) icon))
+  [icon-value]
+  (toast-slot
+   (attr/toast-icon-attrs)
+   (icon-content icon-value)))
 
 (defn- toast-title
   [title]
@@ -45,13 +78,14 @@
   (toast-slot (attr/toast-action-attrs) action))
 
 (defn- default-toast-content
-  [{:keys [icon title description action]}]
-  (normalize-children
-   [(toast-icon icon)
-    [:div (attr/toast-content-attrs)
-     (toast-title title)
-     (toast-description description)]
-    (toast-action action)]))
+  [opts {:keys [icon title description action]}]
+  (let [icon-value (resolved-icon opts icon)]
+    (normalize-children
+     [(toast-icon icon-value)
+      [:div (attr/toast-content-attrs)
+       (toast-title title)
+       (toast-description description)]
+      (toast-action action)])))
 
 (defn- close-button
   [opts]
@@ -84,7 +118,11 @@
   Custom content may be supplied as children:
 
     (toast {:variant :info}
-      [:div \"Custom toast content\"])"
+      [:div \"Custom toast content\"])
+
+  Pass :icon false to suppress the default variant icon.
+
+  Pass :icon \"circle-check\" or another icon name to override the default."
   [& args]
   (let [[opts children]        (normalize-component-args args)
         {:keys [props]}       (split-opts opts)
@@ -93,6 +131,7 @@
         content               (if (seq children)
                                 children
                                 (default-toast-content
+                                 opts
                                  {:icon icon
                                   :title title
                                   :description description
