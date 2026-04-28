@@ -17,10 +17,7 @@ the core toaster API.
 A toaster is a stable page-level notification region. Individual toasts are
 appended into that region.
 
-A toast is not fundamentally "something shown after a button click." A toast is
-event feedback.
-
-Events may originate from:
+A toast is event feedback. It may originate from:
 
 #+begin_src text
 direct user action responses
@@ -165,21 +162,40 @@ A submit failure may use both:
     :description "Please fix the highlighted fields."})])
 #+end_src
 
-** Be useful before adding complex scripts
+** Support persistent and timed toasts
 
-The first implementation should render visible toast items with CSS and minimal
-script behavior.
+By default, toasts should be persistent and dismissible.
 
-Initial script behavior may include manual dismiss only.
+A toast may opt into auto-dismiss by passing =:duration= in milliseconds:
 
-Future script behavior may include:
+#+begin_src clojure
+(g/toast
+ {:variant :success
+  :title "Saved"
+  :duration 4000})
+#+end_src
+
+Persistent default is safer for important messages, warnings, errors, and toasts
+with actions.
+
+Good auto-dismiss candidates:
 
 #+begin_src text
-auto-dismiss
-pause on hover/focus
-exit animation
-stack pruning
-dedupe
+Saved
+Copied
+Invite sent
+Draft restored
+Connection restored
+#+end_src
+
+Poor auto-dismiss candidates:
+
+#+begin_src text
+Could not submit
+Permission denied
+Report failed
+Any toast with an action button
+Any message the user must act on
 #+end_src
 
 * Non-goals
@@ -283,15 +299,34 @@ Options:
 
 #+begin_src clojure
 :id
-:variant      ;; :default, :success, :info, :warning, :danger
+:variant       ;; :default, :success, :info, :warning, :danger
 :title
 :description
 :icon
 :action
-:close?       ;; default true
-:duration     ;; future auto-dismiss behavior
+:close?        ;; default true
+:close-label   ;; close button aria-label
+:duration      ;; milliseconds; omitted means persistent
 :class
 :attrs
+#+end_src
+
+Timed toast:
+
+#+begin_src clojure
+(g/toast
+ {:variant :success
+  :title "Saved"
+  :duration 4000})
+#+end_src
+
+Persistent toast:
+
+#+begin_src clojure
+(g/toast
+ {:variant :danger
+  :title "Could not submit"
+  :description "Please fix the highlighted fields."})
 #+end_src
 
 Example with action:
@@ -351,10 +386,12 @@ Conceptual output:
 ** Toast item
 
 #+begin_src html
-<div data-toast data-variant="success" role="status">
-  <div data-toast-content>
-    <div data-toast-title>Saved</div>
-    <div data-toast-description>Your changes were saved.</div>
+<div data-toast data-variant="success" data-duration="4000" role="status">
+  <div data-toast-body>
+    <div data-toast-content>
+      <div data-toast-title>Saved</div>
+      <div data-toast-description>Your changes were saved.</div>
+    </div>
   </div>
 
   <button type="button" data-toast-close aria-label="Dismiss notification">
@@ -398,10 +435,12 @@ If close buttons are rendered, they must be normal buttons:
 <button type="button" aria-label="Dismiss notification">
 #+end_src
 
-** Toasts must not be required for task completion
+** Be careful with timed toasts
+
+Timed toasts should be reserved for brief, non-critical confirmations.
 
 Important validation errors, destructive confirmations, and messages that must
-remain visible should not exist only as transient toasts.
+remain visible should not exist only as auto-dismissing toasts.
 
 * CSS requirements
 
@@ -420,134 +459,26 @@ surface styling
 variant styling
 spacing
 mobile placement
-#+end_src
-
-Initial CSS sketch:
-
-#+begin_src css
-[data-toaster] {
-  position: fixed;
-  z-index: var(--z-toast, 60);
-  display: flex;
-  flex-direction: column;
-  gap: var(--toast-gap, 0.75rem);
-  inline-size: min(var(--toast-width, 24rem), calc(100vw - 2rem));
-  pointer-events: none;
-}
-
-[data-toaster][data-position="bottom-right"] {
-  inset-inline-end: max(1rem, env(safe-area-inset-right));
-  inset-block-end: max(1rem, env(safe-area-inset-bottom));
-}
-
-[data-toaster][data-position="bottom-left"] {
-  inset-inline-start: max(1rem, env(safe-area-inset-left));
-  inset-block-end: max(1rem, env(safe-area-inset-bottom));
-}
-
-[data-toaster][data-position="top-right"] {
-  inset-inline-end: max(1rem, env(safe-area-inset-right));
-  inset-block-start: max(1rem, env(safe-area-inset-top));
-}
-
-[data-toaster][data-position="top-left"] {
-  inset-inline-start: max(1rem, env(safe-area-inset-left));
-  inset-block-start: max(1rem, env(safe-area-inset-top));
-}
-
-[data-toaster][data-position="top-center"] {
-  inset-inline-start: 50%;
-  inset-block-start: max(1rem, env(safe-area-inset-top));
-  transform: translateX(-50%);
-}
-
-[data-toaster][data-position="bottom-center"] {
-  inset-inline-start: 50%;
-  inset-block-end: max(1rem, env(safe-area-inset-bottom));
-  transform: translateX(-50%);
-}
-
-[data-toast] {
-  pointer-events: auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.75rem;
-  border: var(--border-width, 1px) solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--card);
-  color: var(--card-foreground);
-  box-shadow: var(--shadow-lg, 0 18px 50px rgb(0 0 0 / 0.22));
-  padding: 0.875rem 1rem;
-}
-
-[data-toast-title] {
-  font-family: var(--font-heading);
-  font-weight: var(--font-weight-semibold, 600);
-  line-height: var(--leading-heading, 1.2);
-}
-
-[data-toast-description] {
-  margin-block-start: 0.25rem;
-  color: var(--muted-foreground);
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  line-height: var(--leading-body, 1.5);
-}
-
-[data-toast-close] {
-  inline-size: 1.75rem;
-  block-size: 1.75rem;
-}
-#+end_src
-
-Variant styling should use theme tokens:
-
-#+begin_src css
-[data-toast][data-variant="success"] {
-  border-color: var(--success, var(--primary));
-}
-
-[data-toast][data-variant="info"] {
-  border-color: var(--info, var(--primary));
-}
-
-[data-toast][data-variant="warning"] {
-  border-color: var(--warning, var(--accent));
-}
-
-[data-toast][data-variant="danger"] {
-  border-color: var(--destructive);
-}
+basic enter animation
+optional removing state
 #+end_src
 
 * Script behavior
 
-Initial implementation may have only close/dismiss behavior.
-
-Possible generated hyperscript for close button:
+Initial implementation includes:
 
 #+begin_src text
-on click
-  remove closest [data-toast]
-end
+manual dismiss
+optional auto-dismiss via :duration
 #+end_src
 
 Future behavior may include:
 
 #+begin_src text
-auto-dismiss timeout
 pause timer on hover/focus
-remove after exit animation
+exit animation before removal
 limit stack size
 dedupe by toast id
-#+end_src
-
-Possible future attrs:
-
-#+begin_src html
-data-duration="5000"
-data-toast-id="..."
-data-dismissible="true"
 #+end_src
 
 * Event producers
@@ -565,7 +496,7 @@ A normal HTMX response may include an OOB toast append.
     (g/render-toast-oob
      {:variant :success
       :title "Saved"
-      :description "Your changes were saved."})]))
+      :duration 4000})]))
 #+end_src
 
 ** Server-pushed event
@@ -618,49 +549,6 @@ local draft restored
 
 This is not required for the first implementation.
 
-* HTMX integration
-
-** Basic success response
-
-#+begin_src clojure
-(defn save!
-  [ctx]
-  (g/html-response
-   [:<>
-    (updated-fragment ctx)
-    (g/render-toast-oob
-     {:variant :success
-      :title "Saved"
-      :description "Your changes were saved."})]))
-#+end_src
-
-** Error response
-
-#+begin_src clojure
-(defn submit!
-  [ctx]
-  (g/html-response
-   [:<>
-    (form-fragment ctx errors)
-    (g/render-toast-oob
-     {:variant :danger
-      :title "Could not submit"
-      :description "Please fix the highlighted fields."})]))
-#+end_src
-
-** OOB-only response
-
-For actions that do not update the main page:
-
-#+begin_src clojure
-(defn ping!
-  [_ctx]
-  (g/html-response
-   (g/render-toast-oob
-    {:variant :info
-     :title "Ping sent"})))
-#+end_src
-
 * Placement guidance
 
 ** Preferred page-shell placement
@@ -703,6 +591,7 @@ toaster
 toast
 render-toast-oob
 close button behavior
+optional :duration auto-dismiss
 CSS positioning
 CSS variants
 basic accessibility roles
@@ -711,7 +600,6 @@ basic accessibility roles
 First version should not include:
 
 #+begin_src text
-auto-dismiss
 pause on hover
 stack pruning
 dedupe
@@ -720,122 +608,7 @@ client-side toast store
 complex animation
 #+end_src
 
-* Open questions
-
-** Auto-dismiss in first version?
-
-Option A: no auto-dismiss initially.
-
-Pros:
-
-#+begin_src text
-simple
-accessible
-testable
-no timing bugs
-#+end_src
-
-Cons:
-
-#+begin_src text
-toasts accumulate until manually dismissed or page changes
-#+end_src
-
-Option B: basic auto-dismiss.
-
-Pros:
-
-#+begin_src text
-feels more like a modern toaster
-#+end_src
-
-Cons:
-
-#+begin_src text
-requires script
-requires reduced-motion/timer/focus considerations
-#+end_src
-
-Recommendation: start without auto-dismiss or with close-only behavior. Add
-auto-dismiss after the rendering and OOB model is stable.
-
-** Should =toaster= be included in =page-shell= by default?
-
-Option A: explicit page shell usage.
-
-#+begin_src clojure
-(ui/page-shell ctx
-  [:<>
-   page
-   (g/toaster)])
-#+end_src
-
-Option B: page shell always includes it.
-
-Recommendation: explicit at first. Later, app shells can choose to mount a
-toaster by default.
-
-** Should duplicate toasts be deduped?
-
-Future option:
-
-#+begin_src clojure
-(g/render-toast-oob
- {:id "save-success"
-  :dedupe? true
-  :title "Saved"})
-#+end_src
-
-Not needed in first version.
-
-** How should pushed events choose between fetching and direct HTML payloads?
-
-Initial preference:
-
-#+begin_src text
-SSE event triggers a fetch.
-Server renders the OOB toast fragment.
-#+end_src
-
-Reason:
-
-#+begin_src text
-keeps rendering on the server
-keeps SSE payloads smaller
-keeps authorization/current-state checks in normal request handlers
-#+end_src
-
-Direct HTML SSE payloads may be considered later.
-
-* Initial implementation checklist
-
-** Files
-
-#+begin_src text
-src/gesso/components/toaster/spec.org
-src/gesso/components/toaster/attr.clj
-src/gesso/components/toaster/core.clj
-src/gesso/components/toaster/scripts.clj
-src/gesso/components/toaster/toaster.css
-#+end_src
-
-** Facade
-
-Add to =gesso.core=:
-
-#+begin_src clojure
-[gesso.components.toaster.core :as toaster]
-
-(def toaster toaster/toaster)
-(def toast toaster/toast)
-(def render-toast-oob toaster/render-toast-oob)
-#+end_src
-
-** Theme build
-
-Ensure =toaster.css= is included by the theme/component CSS build.
-
-** Tests
+* Tests
 
 #+begin_src text
 toaster renders a stable target with default id
@@ -844,6 +617,8 @@ toaster supports positions
 toaster sets aria-live and aria-atomic
 toast renders title and description
 toast sets variant data attr
+toast omits data-duration by default
+toast emits data-duration when :duration is provided
 normal toast uses role=status
 danger toast uses role=alert
 render-toast-oob targets default toaster
@@ -853,34 +628,4 @@ render-toast-oob can be returned without a surrounding page update
 :attrs merges last for toaster and toast
 toast close button is optional
 no nil attrs are emitted for omitted options
-#+end_src
-
-* Example
-
-#+begin_src clojure
-(ns my.app
-  (:require [gesso.core :as g]))
-
-(defn page
-  [ctx]
-  (ui/page-shell ctx
-    [:<>
-     [:main
-      [:h1 "Settings"]
-      [:form {:hx-post "/settings"
-              :hx-target "#settings-panel"
-              :hx-swap "outerHTML"}
-       ...]]
-     (g/toaster {:id "app-toaster"
-                 :position :bottom-right})]))
-
-(defn save-settings!
-  [ctx]
-  (g/html-response
-   [:<>
-    (settings-panel ctx)
-    (g/render-toast-oob
-     {:variant :success
-      :title "Settings saved"
-      :description "Your preferences have been updated."})]))
 #+end_src

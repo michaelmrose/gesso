@@ -34,10 +34,17 @@
    [gesso.components.background.core :as background]
    [gesso.http :as http]
    [gesso.components.scroll-buffer :as scroll-buffer]
+   [gesso.components.toaster.core :as toaster]
    [gesso.live.core :as live]))
+
 
 ;; public api
 
+
+; toaster
+(def toaster toaster/toaster)
+(def toast toaster/toast)
+(def render-toast-oob toaster/render-toast-oob)
 ;; http
 (def html-response http/html-response)
 (def no-content http/no-content)
