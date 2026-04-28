@@ -1,0 +1,886 @@
+#+title: Gesso Toaster Component Spec
+#+startup: content
+
+* Status
+
+Draft.
+
+The toaster component is a planned Gesso component for global, temporary,
+non-blocking event notifications.
+
+The toaster should work naturally in server-rendered HTMX applications. It
+should also be designed so Gesso Live / SSE can feed it later without changing
+the core toaster API.
+
+* Summary
+
+A toaster is a stable page-level notification region. Individual toasts are
+appended into that region.
+
+A toast is not fundamentally "something shown after a button click." A toast is
+event feedback.
+
+Events may originate from:
+
+#+begin_src text
+direct user action responses
+background jobs
+other users or remote actors
+Gesso Live / SSE streams
+local client actions
+#+end_src
+
+The toaster component should not depend on any one producer. It should expose
+stable markup and out-of-band rendering helpers so any producer can append a
+toast item.
+
+The basic model is:
+
+#+begin_src text
+page shell mounts once:
+  (g/toaster {:id "app-toaster"})
+
+server action or event producer returns:
+  normal fragment update
+  +
+  OOB toast append
+#+end_src
+
+Example:
+
+#+begin_src clojure
+(g/html-response
+ [:<>
+  updated-fragment
+
+  (g/render-toast-oob
+   {:title "Saved"
+    :description "Your changes were saved."
+    :variant :success})])
+#+end_src
+
+* Goals
+
+** Mount a stable toaster region once
+
+The toaster region should live outside ordinary page fragments that are swapped
+by HTMX.
+
+Preferred location:
+
+#+begin_src clojure
+[:body
+ page
+ (g/toaster {:id "app-toaster"})]
+#+end_src
+
+Temporary demo-local mounting is acceptable, but the toaster should not be inside
+a fragment that will routinely be replaced.
+
+** Support server-rendered notifications
+
+A route handler should be able to return a toast in the same response as a
+normal fragment update.
+
+#+begin_src clojure
+(g/html-response
+ [:<>
+  (flow-fragment ctx :done)
+  (g/render-toast-oob
+   {:variant :success
+    :title "Form submitted"
+    :description "No data was persisted in this demo."})])
+#+end_src
+
+** Treat pushed events as a core use case
+
+Toasts are event notifications. A toast may be created by a direct form/action
+response, or by a remote event delivered later through Gesso Live / SSE.
+
+The toaster component must not depend on SSE, but it must be easy for SSE or
+Gesso Live handlers to append OOB toast fragments into the same toaster region.
+
+Examples:
+
+#+begin_src text
+New request arrived
+Request claimed by Sam
+Background import finished
+Report is ready
+Connection restored
+#+end_src
+
+** Work well with HTMX out-of-band swaps
+
+The toaster region is an OOB append target.
+
+Mounted region:
+
+#+begin_src html
+<div id="app-toaster" data-toaster></div>
+#+end_src
+
+Toast response:
+
+#+begin_src html
+<div id="app-toaster" hx-swap-oob="beforeend">
+  <div data-toast>Saved</div>
+</div>
+#+end_src
+
+** Keep inline validation separate
+
+Toasts are not a replacement for field errors.
+
+Use inline field errors for:
+
+#+begin_src text
+invalid email
+required field
+username already taken
+password too short
+#+end_src
+
+Use toasts for:
+
+#+begin_src text
+saved
+deleted
+submitted
+background operation completed
+non-field-specific error
+connection restored or lost
+new remote event
+#+end_src
+
+A submit failure may use both:
+
+#+begin_src clojure
+(g/html-response
+ [:<>
+  (form-fragment ctx values errors)
+  (g/render-toast-oob
+   {:variant :danger
+    :title "Could not submit"
+    :description "Please fix the highlighted fields."})])
+#+end_src
+
+** Be useful before adding complex scripts
+
+The first implementation should render visible toast items with CSS and minimal
+script behavior.
+
+Initial script behavior may include manual dismiss only.
+
+Future script behavior may include:
+
+#+begin_src text
+auto-dismiss
+pause on hover/focus
+exit animation
+stack pruning
+dedupe
+#+end_src
+
+* Non-goals
+
+** Not a modal dialog
+
+A toast must not block the user from continuing work.
+
+** Not a tooltip
+
+A toast appears because something happened. It is not tied to pointer hover or
+focus on a specific element.
+
+** Not a form validation primitive
+
+Field validation belongs inline near the field.
+
+** Not a full client-side notification store
+
+The first implementation should not require client-side app state, React-style
+portals, or a persistent JavaScript store.
+
+** Not SSE-specific
+
+SSE / Gesso Live should be a first-class producer, but the toaster itself should
+not require SSE.
+
+* Proposed source layout
+
+#+begin_src text
+src/gesso/components/toaster/
+  attr.clj
+  core.clj
+  scripts.clj
+  toaster.css
+  spec.org
+#+end_src
+
+Facade exports in =gesso.core=:
+
+#+begin_src clojure
+(def toaster toaster/toaster)
+(def toast toaster/toast)
+(def render-toast-oob toaster/render-toast-oob)
+#+end_src
+
+* Public API
+
+** =toaster=
+
+Mounts the stable toast region.
+
+#+begin_src clojure
+(g/toaster)
+#+end_src
+
+Default output:
+
+#+begin_src clojure
+[:div {:id "app-toaster"
+       :data-toaster true
+       :data-position "bottom-right"
+       :aria-live "polite"
+       :aria-atomic "false"}]
+#+end_src
+
+Options:
+
+#+begin_src clojure
+(g/toaster
+ {:id "app-toaster"
+  :position :bottom-right
+  :live :polite
+  :class "extra-class"
+  :attrs {:data-demo true}})
+#+end_src
+
+Supported options:
+
+#+begin_src clojure
+:id        ;; default "app-toaster"
+:position  ;; :bottom-right, :bottom-left, :top-right, :top-left,
+           ;; :top-center, :bottom-center
+:live      ;; :polite or :assertive, default :polite
+:class     ;; extra classes
+:attrs     ;; raw attrs, merged last
+#+end_src
+
+** =toast=
+
+Renders a single toast item.
+
+#+begin_src clojure
+(g/toast
+ {:variant :success
+  :title "Saved"
+  :description "Your changes were saved."})
+#+end_src
+
+Options:
+
+#+begin_src clojure
+:id
+:variant      ;; :default, :success, :info, :warning, :danger
+:title
+:description
+:icon
+:action
+:close?       ;; default true
+:duration     ;; future auto-dismiss behavior
+:class
+:attrs
+#+end_src
+
+Example with action:
+
+#+begin_src clojure
+(g/toast
+ {:variant :danger
+  :title "Could not save"
+  :description "The server rejected the request."
+  :action [:a {:href "/app/help"} "Get help"]})
+#+end_src
+
+** =render-toast-oob=
+
+Renders an HTMX out-of-band append to the toaster target.
+
+#+begin_src clojure
+(g/render-toast-oob
+ {:target "app-toaster"
+  :variant :success
+  :title "Saved"
+  :description "Your changes were saved."})
+#+end_src
+
+Defaults:
+
+#+begin_src clojure
+:target "app-toaster"
+:swap "beforeend"
+#+end_src
+
+Conceptual output:
+
+#+begin_src clojure
+[:div {:id "app-toaster"
+       :hx-swap-oob "beforeend"}
+ (g/toast
+  {:variant :success
+   :title "Saved"
+   :description "Your changes were saved."})]
+#+end_src
+
+* Component structure
+
+** Toaster region
+
+#+begin_src html
+<div
+  id="app-toaster"
+  data-toaster
+  data-position="bottom-right"
+  aria-live="polite"
+  aria-atomic="false">
+</div>
+#+end_src
+
+** Toast item
+
+#+begin_src html
+<div data-toast data-variant="success" role="status">
+  <div data-toast-content>
+    <div data-toast-title>Saved</div>
+    <div data-toast-description>Your changes were saved.</div>
+  </div>
+
+  <button type="button" data-toast-close aria-label="Dismiss notification">
+    ×
+  </button>
+</div>
+#+end_src
+
+* Accessibility
+
+** Live region
+
+The toaster region should default to:
+
+#+begin_src html
+aria-live="polite"
+aria-atomic="false"
+#+end_src
+
+For normal toasts, use:
+
+#+begin_src html
+role="status"
+#+end_src
+
+For dangerous or error toasts, use:
+
+#+begin_src html
+role="alert"
+#+end_src
+
+** Do not steal focus by default
+
+A toast should not move focus away from the current form control or button.
+
+** Manual close must be keyboard reachable
+
+If close buttons are rendered, they must be normal buttons:
+
+#+begin_src html
+<button type="button" aria-label="Dismiss notification">
+#+end_src
+
+** Toasts must not be required for task completion
+
+Important validation errors, destructive confirmations, and messages that must
+remain visible should not exist only as transient toasts.
+
+* CSS requirements
+
+The toaster needs CSS. Without CSS, it is just a normal div in document flow.
+
+Minimum responsibilities:
+
+#+begin_src text
+fixed positioning
+stack layout
+safe-area support
+z-index
+max width
+pointer-events behavior
+surface styling
+variant styling
+spacing
+mobile placement
+#+end_src
+
+Initial CSS sketch:
+
+#+begin_src css
+[data-toaster] {
+  position: fixed;
+  z-index: var(--z-toast, 60);
+  display: flex;
+  flex-direction: column;
+  gap: var(--toast-gap, 0.75rem);
+  inline-size: min(var(--toast-width, 24rem), calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+[data-toaster][data-position="bottom-right"] {
+  inset-inline-end: max(1rem, env(safe-area-inset-right));
+  inset-block-end: max(1rem, env(safe-area-inset-bottom));
+}
+
+[data-toaster][data-position="bottom-left"] {
+  inset-inline-start: max(1rem, env(safe-area-inset-left));
+  inset-block-end: max(1rem, env(safe-area-inset-bottom));
+}
+
+[data-toaster][data-position="top-right"] {
+  inset-inline-end: max(1rem, env(safe-area-inset-right));
+  inset-block-start: max(1rem, env(safe-area-inset-top));
+}
+
+[data-toaster][data-position="top-left"] {
+  inset-inline-start: max(1rem, env(safe-area-inset-left));
+  inset-block-start: max(1rem, env(safe-area-inset-top));
+}
+
+[data-toaster][data-position="top-center"] {
+  inset-inline-start: 50%;
+  inset-block-start: max(1rem, env(safe-area-inset-top));
+  transform: translateX(-50%);
+}
+
+[data-toaster][data-position="bottom-center"] {
+  inset-inline-start: 50%;
+  inset-block-end: max(1rem, env(safe-area-inset-bottom));
+  transform: translateX(-50%);
+}
+
+[data-toast] {
+  pointer-events: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  border: var(--border-width, 1px) solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--shadow-lg, 0 18px 50px rgb(0 0 0 / 0.22));
+  padding: 0.875rem 1rem;
+}
+
+[data-toast-title] {
+  font-family: var(--font-heading);
+  font-weight: var(--font-weight-semibold, 600);
+  line-height: var(--leading-heading, 1.2);
+}
+
+[data-toast-description] {
+  margin-block-start: 0.25rem;
+  color: var(--muted-foreground);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body, 1.5);
+}
+
+[data-toast-close] {
+  inline-size: 1.75rem;
+  block-size: 1.75rem;
+}
+#+end_src
+
+Variant styling should use theme tokens:
+
+#+begin_src css
+[data-toast][data-variant="success"] {
+  border-color: var(--success, var(--primary));
+}
+
+[data-toast][data-variant="info"] {
+  border-color: var(--info, var(--primary));
+}
+
+[data-toast][data-variant="warning"] {
+  border-color: var(--warning, var(--accent));
+}
+
+[data-toast][data-variant="danger"] {
+  border-color: var(--destructive);
+}
+#+end_src
+
+* Script behavior
+
+Initial implementation may have only close/dismiss behavior.
+
+Possible generated hyperscript for close button:
+
+#+begin_src text
+on click
+  remove closest [data-toast]
+end
+#+end_src
+
+Future behavior may include:
+
+#+begin_src text
+auto-dismiss timeout
+pause timer on hover/focus
+remove after exit animation
+limit stack size
+dedupe by toast id
+#+end_src
+
+Possible future attrs:
+
+#+begin_src html
+data-duration="5000"
+data-toast-id="..."
+data-dismissible="true"
+#+end_src
+
+* Event producers
+
+** Direct action response
+
+A normal HTMX response may include an OOB toast append.
+
+#+begin_src clojure
+(defn save!
+  [ctx]
+  (g/html-response
+   [:<>
+    (updated-fragment ctx)
+    (g/render-toast-oob
+     {:variant :success
+      :title "Saved"
+      :description "Your changes were saved."})]))
+#+end_src
+
+** Server-pushed event
+
+A pushed event may eventually trigger an OOB toast.
+
+Preferred initial SSE pattern:
+
+#+begin_src html
+<div hx-ext="sse"
+     sse-connect="/gesso/live/stream?subscription=store"
+     hx-get="/app/toasts/pending"
+     hx-trigger="sse:toast"
+     hx-swap="none">
+</div>
+#+end_src
+
+The fetch response returns server-rendered toast HTML:
+
+#+begin_src clojure
+(g/render-toast-oob
+ {:variant :info
+  :title "New request"
+  :description "A customer needs help in aisle 4."})
+#+end_src
+
+Alternative future SSE pattern:
+
+#+begin_src text
+SSE event directly carries rendered OOB toast HTML.
+#+end_src
+
+The first version does not need to implement either SSE helper. It only needs a
+stable toaster target and OOB rendering helpers that make these integrations
+natural later.
+
+** Local client event
+
+A future client-side helper may append a toast for events that do not need a
+server response.
+
+Examples:
+
+#+begin_src text
+copied to clipboard
+offline
+reconnected
+local draft restored
+#+end_src
+
+This is not required for the first implementation.
+
+* HTMX integration
+
+** Basic success response
+
+#+begin_src clojure
+(defn save!
+  [ctx]
+  (g/html-response
+   [:<>
+    (updated-fragment ctx)
+    (g/render-toast-oob
+     {:variant :success
+      :title "Saved"
+      :description "Your changes were saved."})]))
+#+end_src
+
+** Error response
+
+#+begin_src clojure
+(defn submit!
+  [ctx]
+  (g/html-response
+   [:<>
+    (form-fragment ctx errors)
+    (g/render-toast-oob
+     {:variant :danger
+      :title "Could not submit"
+      :description "Please fix the highlighted fields."})]))
+#+end_src
+
+** OOB-only response
+
+For actions that do not update the main page:
+
+#+begin_src clojure
+(defn ping!
+  [_ctx]
+  (g/html-response
+   (g/render-toast-oob
+    {:variant :info
+     :title "Ping sent"})))
+#+end_src
+
+* Placement guidance
+
+** Preferred page-shell placement
+
+#+begin_src clojure
+[:body
+ page
+ (g/toaster {:id "app-toaster"})]
+#+end_src
+
+** Temporary page-local placement
+
+Acceptable during development:
+
+#+begin_src clojure
+[:div
+ page-content
+ (g/toaster {:id "app-toaster"})]
+#+end_src
+
+** Avoid placing inside ordinary swap targets
+
+Avoid:
+
+#+begin_src html
+<div id="complex-form-flow">
+  ...
+  <div id="app-toaster"></div>
+</div>
+#+end_src
+
+because the swap target may be replaced and lose existing notifications.
+
+* Initial implementation boundary
+
+First version should include:
+
+#+begin_src text
+toaster
+toast
+render-toast-oob
+close button behavior
+CSS positioning
+CSS variants
+basic accessibility roles
+#+end_src
+
+First version should not include:
+
+#+begin_src text
+auto-dismiss
+pause on hover
+stack pruning
+dedupe
+SSE helper component
+client-side toast store
+complex animation
+#+end_src
+
+* Open questions
+
+** Auto-dismiss in first version?
+
+Option A: no auto-dismiss initially.
+
+Pros:
+
+#+begin_src text
+simple
+accessible
+testable
+no timing bugs
+#+end_src
+
+Cons:
+
+#+begin_src text
+toasts accumulate until manually dismissed or page changes
+#+end_src
+
+Option B: basic auto-dismiss.
+
+Pros:
+
+#+begin_src text
+feels more like a modern toaster
+#+end_src
+
+Cons:
+
+#+begin_src text
+requires script
+requires reduced-motion/timer/focus considerations
+#+end_src
+
+Recommendation: start without auto-dismiss or with close-only behavior. Add
+auto-dismiss after the rendering and OOB model is stable.
+
+** Should =toaster= be included in =page-shell= by default?
+
+Option A: explicit page shell usage.
+
+#+begin_src clojure
+(ui/page-shell ctx
+  [:<>
+   page
+   (g/toaster)])
+#+end_src
+
+Option B: page shell always includes it.
+
+Recommendation: explicit at first. Later, app shells can choose to mount a
+toaster by default.
+
+** Should duplicate toasts be deduped?
+
+Future option:
+
+#+begin_src clojure
+(g/render-toast-oob
+ {:id "save-success"
+  :dedupe? true
+  :title "Saved"})
+#+end_src
+
+Not needed in first version.
+
+** How should pushed events choose between fetching and direct HTML payloads?
+
+Initial preference:
+
+#+begin_src text
+SSE event triggers a fetch.
+Server renders the OOB toast fragment.
+#+end_src
+
+Reason:
+
+#+begin_src text
+keeps rendering on the server
+keeps SSE payloads smaller
+keeps authorization/current-state checks in normal request handlers
+#+end_src
+
+Direct HTML SSE payloads may be considered later.
+
+* Initial implementation checklist
+
+** Files
+
+#+begin_src text
+src/gesso/components/toaster/spec.org
+src/gesso/components/toaster/attr.clj
+src/gesso/components/toaster/core.clj
+src/gesso/components/toaster/scripts.clj
+src/gesso/components/toaster/toaster.css
+#+end_src
+
+** Facade
+
+Add to =gesso.core=:
+
+#+begin_src clojure
+[gesso.components.toaster.core :as toaster]
+
+(def toaster toaster/toaster)
+(def toast toaster/toast)
+(def render-toast-oob toaster/render-toast-oob)
+#+end_src
+
+** Theme build
+
+Ensure =toaster.css= is included by the theme/component CSS build.
+
+** Tests
+
+#+begin_src text
+toaster renders a stable target with default id
+toaster supports custom id
+toaster supports positions
+toaster sets aria-live and aria-atomic
+toast renders title and description
+toast sets variant data attr
+normal toast uses role=status
+danger toast uses role=alert
+render-toast-oob targets default toaster
+render-toast-oob supports custom target
+render-toast-oob uses hx-swap-oob="beforeend" by default
+render-toast-oob can be returned without a surrounding page update
+:attrs merges last for toaster and toast
+toast close button is optional
+no nil attrs are emitted for omitted options
+#+end_src
+
+* Example
+
+#+begin_src clojure
+(ns my.app
+  (:require [gesso.core :as g]))
+
+(defn page
+  [ctx]
+  (ui/page-shell ctx
+    [:<>
+     [:main
+      [:h1 "Settings"]
+      [:form {:hx-post "/settings"
+              :hx-target "#settings-panel"
+              :hx-swap "outerHTML"}
+       ...]]
+     (g/toaster {:id "app-toaster"
+                 :position :bottom-right})]))
+
+(defn save-settings!
+  [ctx]
+  (g/html-response
+   [:<>
+    (settings-panel ctx)
+    (g/render-toast-oob
+     {:variant :success
+      :title "Settings saved"
+      :description "Your preferences have been updated."})]))
+#+end_src
