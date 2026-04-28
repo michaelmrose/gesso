@@ -33,6 +33,7 @@
    [gesso.components.bars.core :as bars]
    [gesso.components.background.core :as background]
    [gesso.http :as http]
+   [gesso.components.scroll-buffer :as scroll-buffer]
    [gesso.live.core :as live]))
 
 ;; public api
@@ -201,3 +202,6 @@
 (def menu bars/menu)
 (def menu-group bars/menu-group)
 (def menu-item bars/menu-item)
+
+;; misc
+(def scroll-buffer scroll-buffer/scroll-buffer)
