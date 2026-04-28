@@ -4,6 +4,10 @@
    [clojure.string :as str]
    [malli.error :as me]))
 
+;; -----------------------------------------------------------------------------
+;; Path/id helpers
+;; -----------------------------------------------------------------------------
+
 (defn- path-segments
   [path]
   (cond
@@ -15,9 +19,9 @@
   [x]
   (cond
     (keyword? x) (name x)
-    (symbol? x) (name x)
-    (string? x) x
-    :else (str x)))
+    (symbol? x)  (name x)
+    (string? x)  x
+    :else        (str x)))
 
 (defn path->field-id
   "Convert a Malli error path into a stable field id base.
@@ -41,6 +45,10 @@
      [:user :email] => \"user-email-error\""
   [path]
   (str (path->field-id path) "-error"))
+
+;; -----------------------------------------------------------------------------
+;; Malli humanized error flattening
+;; -----------------------------------------------------------------------------
 
 (defn- message-seq?
   [x]
@@ -70,6 +78,10 @@
   [humanized]
   (flatten-humanized* [] humanized))
 
+;; -----------------------------------------------------------------------------
+;; Client reveal script
+;; -----------------------------------------------------------------------------
+
 (defn- js-string
   [s]
   (pr-str (str s)))
@@ -91,6 +103,10 @@
   [js]
   [:script {:dangerouslySetInnerHTML
             {:__html js}}])
+
+;; -----------------------------------------------------------------------------
+;; OOB field-error rendering
+;; -----------------------------------------------------------------------------
 
 (defn- render-oob-error
   [{:keys [path messages]}]
@@ -125,6 +141,10 @@
         (into [:<>]
               (map render-oob-error)
               errors)))))
+
+;; -----------------------------------------------------------------------------
+;; Friendly app-controlled error maps
+;; -----------------------------------------------------------------------------
 
 (defn- normalize-error-messages
   [messages]
