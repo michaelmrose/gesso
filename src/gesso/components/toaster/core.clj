@@ -6,10 +6,10 @@
    [gesso.util :refer :all]))
 
 (def variant-icons
-  {"success" "check"
+  {"success" "circle-check"
    "info"    "info"
    "warning" "triangle-alert"
-   "danger"  "x"})
+   "danger"  "circle-x"})
 
 (defn toaster
   "Render the stable toaster region.
@@ -53,17 +53,19 @@
     :else
     (get variant-icons (attr/toast-variant opts))))
 
+(defn- toast-icon
+  [opts icon-value]
+  (let [resolved-icon-value (resolved-icon opts icon-value)
+        icon-node           (some-> resolved-icon-value icon-content)]
+    (when icon-node
+      (into [:div (attr/toast-icon-attrs)]
+            (nodes icon-node)))))
+
 (defn- toast-slot
   [attrs content]
   (when (some? content)
     (into [:div attrs]
           (nodes content))))
-
-(defn- toast-icon
-  [icon-value]
-  (toast-slot
-   (attr/toast-icon-attrs)
-   (icon-content icon-value)))
 
 (defn- toast-title
   [title]
@@ -79,13 +81,12 @@
 
 (defn- default-toast-content
   [opts {:keys [icon title description action]}]
-  (let [icon-value (resolved-icon opts icon)]
-    (normalize-children
-     [(toast-icon icon-value)
-      [:div (attr/toast-content-attrs)
-       (toast-title title)
-       (toast-description description)]
-      (toast-action action)])))
+  (normalize-children
+   [(toast-icon opts icon)
+    [:div (attr/toast-content-attrs)
+     (toast-title title)
+     (toast-description description)]
+    (toast-action action)]))
 
 (defn- close-button
   [opts]

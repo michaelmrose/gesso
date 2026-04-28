@@ -1577,6 +1577,10 @@ html.dark [data-background-root] > [data-background-layer="dark"] {
   margin-block-start: 0.125rem;
 }
 
+[data-toast-icon] svg {
+  display: block;
+}
+
 [data-toast-content] {
   min-inline-size: 0;
 }
