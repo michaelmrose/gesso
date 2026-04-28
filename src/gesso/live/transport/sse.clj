@@ -48,12 +48,16 @@
   "Offer an event onto a queue.
 
    Generic event shape:
-     {:event \"notifications-changed\"
+     {:event \"client-oob\"
       :data \"{}\"}
 
    Existing gesso.live.bus streams may also enqueue already-encoded SSE frame
-   strings."
+   strings.
+
+   Returns the boolean result from LinkedBlockingQueue.offer."
   [queue event]
+  (when-not queue
+    (throw (ex-info "Missing required SSE queue." {:missing-key :queue})))
   (.offer queue event))
 
 ;; -----------------------------------------------------------------------------

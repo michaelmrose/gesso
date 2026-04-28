@@ -35,7 +35,9 @@
    [gesso.http :as http]
    [gesso.components.scroll-buffer :as scroll-buffer]
    [gesso.components.toaster.core :as toaster]
-   [gesso.live.core :as live]))
+   [gesso.live.core :as live]
+   [gesso.htmx :as htmx]
+   ))
 
 
 ;; public api
@@ -212,3 +214,40 @@
 
 ;; misc
 (def scroll-buffer scroll-buffer/scroll-buffer)
+
+;; -----------------------------------------------------------------------------
+;; HTMX helpers
+;; -----------------------------------------------------------------------------
+
+(def oob-attrs
+  htmx/oob-attrs)
+
+(def with-oob
+  htmx/with-oob)
+
+(def oob-wrapper
+  htmx/oob-wrapper)
+
+(def oob-inner-html
+  htmx/oob-inner-html)
+
+(def oob-outer-html
+  htmx/oob-outer-html)
+
+(def oob-replace
+  htmx/oob-replace)
+
+(def oob-beforeend
+  htmx/oob-beforeend)
+
+(def oob-afterbegin
+  htmx/oob-afterbegin)
+
+(def oob-beforebegin
+  htmx/oob-beforebegin)
+
+(def oob-afterend
+  htmx/oob-afterend)
+
+(def oob-delete
+  htmx/oob-delete)
