@@ -1,6 +1,29 @@
 (ns gesso.components.input
   (:require [gesso.util :refer :all]))
 
+(defn- spellcheck-value
+  [x]
+  (cond
+    (true? x) "true"
+    (false? x) "false"
+    :else x))
+
+(defn- normalize-input-props
+  [props]
+  (let [type (or (:type props) "text")]
+    (cond-> (-> props
+                (dissoc :disabled? :required? :readonly?)
+                (assoc :type type)
+                (update :spellcheck spellcheck-value))
+      (contains? props :disabled?)
+      (assoc :disabled (:disabled? props))
+
+      (contains? props :required?)
+      (assoc :required (:required? props))
+
+      (contains? props :readonly?)
+      (assoc :readonly (:readonly? props)))))
+
 (defn input
   "Single-line input.
 
@@ -15,34 +38,30 @@
   Long form:
     (input {:type \"text\" :attrs {...}})
 
+  Any non-component props are passed through as HTML attributes.
+
+  Gesso aliases:
+    :disabled? -> :disabled
+    :required? -> :required
+    :readonly? -> :readonly
+
+  Escape hatch:
+    :attrs is merged last, so callers can override low-level attrs when needed.
+
   Uses Basecoat's .input class plus the shared control density utility.
 
   HTMX notes:
-    - HTMX attributes may be passed through :attrs.
+    - HTMX attributes may be passed through directly or through :attrs.
     - Common uses include live validation, autocomplete, search, preview, and
       incremental server-side form feedback."
   [& args]
   (let [[opts _children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
-        {:keys [type id name value placeholder disabled? required? autocomplete
-                readonly? checked min max step]} props
-        type (or type "text")]
+        input-attrs (normalize-input-props props)]
     (el :input
-        {:class (class-names "input control-theme" class)
-         :type type}
+        {:class (class-names "input control-theme" class)}
         (merge-attrs
-         attrs
          {:data-input true}
-         (when id {:id id})
-         (when name {:name name})
-         (when (some? value) {:value value})
-         (when placeholder {:placeholder placeholder})
-         (when autocomplete {:autocomplete autocomplete})
-         (when (some? disabled?) {:disabled disabled?})
-         (when (some? required?) {:required required?})
-         (when (some? readonly?) {:readonly readonly?})
-         (when (some? checked) {:checked checked})
-         (when (some? min) {:min min})
-         (when (some? max) {:max max})
-         (when (some? step) {:step step}))
+         input-attrs
+         attrs)
         [])))
