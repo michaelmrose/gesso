@@ -7,7 +7,7 @@
    - connected browser client registry
    - per-client pending OOB mailbox
    - SSE stream response for one connected client
-   - browser listener markup when given explicit stream/pending URLs
+   - browser listener markup
    - generic send! targeting by client, user, scope, or all
    - pending fragment draining
 
@@ -26,7 +26,10 @@
   (:require
    [clojure.string :as str]
    [gesso.live.htmx :as live-htmx]
-   [gesso.live.transport.sse :as sse]))
+   [gesso.live.transport.sse :as sse])
+  (:import
+   [java.net URLEncoder]
+   [java.nio.charset StandardCharsets]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
@@ -35,15 +38,15 @@
 (def default-event
   "client-oob")
 
+(def default-client-id-param
+  :client-id)
+
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
 ;; -----------------------------------------------------------------------------
 
 (defn new-client-id
-  "Return a fresh browser-client id.
-
-   App code can use this when rendering a listener that should be targetable
-   later, for example in a REPL/demo section."
+  "Return a fresh browser-client id."
   []
   (str (random-uuid)))
 
@@ -60,10 +63,32 @@
 
 (defn- id-part
   [x]
-  (-> (str x)
-      (str/replace #"[^A-Za-z0-9_-]+" "-")
-      (str/replace #"^-+" "")
-      (str/replace #"-+$" "")))
+  (let [s (-> (str x)
+              (str/replace #"[^A-Za-z0-9_-]+" "-")
+              (str/replace #"^-+" "")
+              (str/replace #"-+$" ""))]
+    (if (str/blank? s)
+      "oob"
+      s)))
+
+(defn- url-encode
+  [x]
+  (URLEncoder/encode (str x) (.name StandardCharsets/UTF_8)))
+
+(defn- append-query-param
+  [url k v]
+  (let [joiner (if (str/includes? url "?") "&" "?")]
+    (str url
+         joiner
+         (url-encode (name k))
+         "="
+         (url-encode v))))
+
+(defn- request-param
+  [params k]
+  (or (get params k)
+      (get params (name k))
+      (get params (keyword k))))
 
 (defn- hiccup-node?
   [x]
@@ -73,22 +98,22 @@
              (symbol? tag)
              (string? tag)))))
 
-(defn- normalize-oob-nodes
-  [oob]
+(defn- normalize-fragments
+  [fragments]
   (cond
-    (nil? oob)
+    (nil? fragments)
     []
 
-    (hiccup-node? oob)
-    [oob]
+    (hiccup-node? fragments)
+    [fragments]
 
-    (sequential? oob)
-    (->> oob
+    (sequential? fragments)
+    (->> fragments
          (remove nil?)
          vec)
 
     :else
-    [oob]))
+    [fragments]))
 
 (defn- normalize-scopes
   [scopes]
@@ -123,6 +148,15 @@
        SSE event name used to wake clients.
        Defaults to \"client-oob\".
 
+   - :endpoint
+       App-supplied URL config:
+         {:stream-path \"/app/client-plumbing/stream\"
+          :pending-path \"/app/client-plumbing/pending\"
+          :client-id-param :client-id}
+
+       Gesso uses this to build listener URLs and to read client ids from ctx.
+       The app still owns actual route definitions.
+
    - :client
        fn [ctx] => {:client/user-id ...
                     :client/scopes #{...}}
@@ -136,16 +170,18 @@
        Defaults to true.
 
    The returned channel is stateful. Define it once in an app adapter namespace."
-  [{:keys [id event client drop-pending-on-close?]
+  [{:keys [id event endpoint client drop-pending-on-close?]
     :or {event default-event
          client default-client
          drop-pending-on-close? true}}]
   {:channel/id (ensure-present id :id)
    :event event
+   :endpoint (merge {:client-id-param default-client-id-param}
+                    endpoint)
    :client client
    :drop-pending-on-close? drop-pending-on-close?
    :clients (atom {})
-   :pending-oob (atom {})})
+   :pending-fragments (atom {})})
 
 (defn reset-channel!
   "Clear all connected clients and pending OOB fragments for channel.
@@ -153,8 +189,50 @@
    Useful during REPL-driven development."
   [channel]
   (reset! (:clients channel) {})
-  (reset! (:pending-oob channel) {})
+  (reset! (:pending-fragments channel) {})
   :reset)
+
+;; -----------------------------------------------------------------------------
+;; Endpoint helpers
+;; -----------------------------------------------------------------------------
+
+(defn client-id-param
+  [channel]
+  (get-in channel [:endpoint :client-id-param] default-client-id-param))
+
+(defn client-id-from-ctx
+  [channel {:keys [params]}]
+  (or (request-param params (client-id-param channel))
+      (new-client-id)))
+
+(defn- client-id-value
+  [channel ctx-or-client-id]
+  (if (and (map? ctx-or-client-id)
+           (contains? ctx-or-client-id :params))
+    (client-id-from-ctx channel ctx-or-client-id)
+    ctx-or-client-id))
+
+(defn stream-path
+  [channel]
+  (ensure-present (get-in channel [:endpoint :stream-path])
+                  :endpoint/stream-path))
+
+(defn pending-path
+  [channel]
+  (ensure-present (get-in channel [:endpoint :pending-path])
+                  :endpoint/pending-path))
+
+(defn stream-url
+  [channel client-id]
+  (append-query-param (stream-path channel)
+                      (client-id-param channel)
+                      client-id))
+
+(defn pending-url
+  [channel client-id]
+  (append-query-param (pending-path channel)
+                      (client-id-param channel)
+                      client-id))
 
 ;; -----------------------------------------------------------------------------
 ;; Browser listener markup
@@ -163,37 +241,41 @@
 (defn listener
   "Render the browser-side SSE listener for this OOB channel.
 
-   Gesso does not own routes, so the app must provide explicit URLs.
+   Arity 2:
+     Creates a fresh client id and uses the channel endpoint config.
 
-   Required opts:
-   - :stream-url
-   - :pending-url
+   Arity 3 options:
+     :client/id
+     :id
+     :stream-url
+     :pending-url
+     :attrs
+     :trigger-attrs
 
-   Optional opts:
-   - :client/id
-   - :id
-   - :attrs
-   - :trigger-attrs
-
-   Example:
-     (listener channel
-      {:stream-url \"/app/client-plumbing/stream?client-id=abc\"
-       :pending-url \"/app/client-plumbing/pending?client-id=abc\"})"
-  [channel {:keys [stream-url pending-url id attrs trigger-attrs] :as opts}]
-  (let [client-id (:client/id opts)
-        root-id   (or id
-                      (str (id-part (:channel/id channel))
-                           (when client-id
-                             (str "-" (id-part client-id)))
-                           "-listener"))]
-    (live-htmx/sse-callback
-     {:id root-id
-      :stream-url (ensure-present stream-url :stream-url)
-      :event (:event channel)
-      :get (ensure-present pending-url :pending-url)
-      :swap "none"
-      :attrs attrs
-      :trigger-attrs trigger-attrs})))
+   Gesso does not own routes. The app either supplies :endpoint in channel or
+   passes explicit :stream-url and :pending-url."
+  ([channel ctx]
+   (listener channel ctx {}))
+  ([channel _ctx opts]
+   (let [client-id    (or (:client/id opts)
+                          (new-client-id))
+         stream-url'  (or (:stream-url opts)
+                          (stream-url channel client-id))
+         pending-url' (or (:pending-url opts)
+                          (pending-url channel client-id))
+         root-id      (or (:id opts)
+                          (str (id-part (:channel/id channel))
+                               "-"
+                               (id-part client-id)
+                               "-listener"))]
+     (live-htmx/sse-callback
+      {:id root-id
+       :stream-url stream-url'
+       :event (:event channel)
+       :get pending-url'
+       :swap "none"
+       :attrs (:attrs opts)
+       :trigger-attrs (:trigger-attrs opts)}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Client registry
@@ -285,9 +367,9 @@
 
 (defn pending-counts
   [channel]
-  (->> @(:pending-oob channel)
-       (map (fn [[client-id nodes]]
-              [client-id (count nodes)]))
+  (->> @(:pending-fragments channel)
+       (map (fn [[client-id fragments]]
+              [client-id (count fragments)]))
        (into {})))
 
 (defn state-summary
@@ -303,13 +385,17 @@
 (defn stream-response
   "Return an SSE stream response for one connected client.
 
-   The app owns the route handler and calls this with the client id it extracted
-   from the request.
+   Arity 2:
+     Extracts client id from ctx using channel endpoint config.
 
-   Example app route handler:
-     (defn stream [ctx]
-       (let [client-id (client-id-from-ctx ctx)]
-         (oob/stream-response channel ctx client-id)))"
+   Arity 3:
+     Uses caller-supplied client id.
+
+   Arity 4 options:
+     :on-register fn [client]
+     :on-close    fn [client]"
+  ([channel ctx]
+   (stream-response channel ctx (client-id-from-ctx channel ctx)))
   ([channel ctx client-id]
    (stream-response channel ctx client-id {}))
   ([channel ctx client-id {:keys [on-register on-close]}]
@@ -325,59 +411,64 @@
          (let [removed? (unregister-client! channel client-id queue)]
            (when (and removed?
                       (:drop-pending-on-close? channel))
-             (swap! (:pending-oob channel) dissoc client-id))
+             (swap! (:pending-fragments channel) dissoc client-id))
            (when on-close
              (on-close client))))}))))
 
 ;; -----------------------------------------------------------------------------
-;; Pending OOB mailbox
+;; Pending fragment mailbox
 ;; -----------------------------------------------------------------------------
 
-(defn- enqueue-pending-oobs!
-  [channel client-id nodes]
-  (swap! (:pending-oob channel)
+(defn- enqueue-pending-fragments!
+  [channel client-id fragments]
+  (swap! (:pending-fragments channel)
          update
          client-id
          (fnil into [])
-         nodes))
+         fragments))
 
 (defn drain!
-  "Drain and return pending OOB nodes for client-id.
+  "Drain and return pending OOB fragments.
 
-   Returns a vector of nodes, possibly empty.
+   Arity 2 accepts either ctx or a client id:
+     (drain! channel ctx)
+     (drain! channel client-id)
+
+   Returns a vector of fragments, possibly empty.
 
    This function intentionally returns data, not an HTTP response. The app owns
    whether to wrap the result with g/html-response, g/no-content, or something
    else."
-  [channel client-id]
-  (loop []
-    (let [m     @(:pending-oob channel)
-          nodes (get m client-id [])]
-      (if (compare-and-set! (:pending-oob channel)
-                            m
-                            (dissoc m client-id))
-        (vec nodes)
-        (recur)))))
+  [channel ctx-or-client-id]
+  (let [client-id (client-id-value channel ctx-or-client-id)]
+    (loop []
+      (let [m         @(:pending-fragments channel)
+            fragments (get m client-id [])]
+        (if (compare-and-set! (:pending-fragments channel)
+                              m
+                              (dissoc m client-id))
+          (vec fragments)
+          (recur))))))
 
 (defn drain-fragment!
-  "Drain pending OOB nodes and return a Hiccup fragment, or nil if empty.
-
-   Example app pending handler:
-     (defn pending [ctx]
-       (let [client-id (client-id-from-ctx ctx)]
-         (if-let [fragment (oob/drain-fragment! channel client-id)]
-           (g/html-response fragment)
-           (g/no-content))))"
-  [channel client-id]
-  (let [nodes (drain! channel client-id)]
-    (when (seq nodes)
-      (into [:<>] (remove nil?) nodes))))
+  "Drain pending OOB fragments and return a Hiccup fragment, or nil if empty."
+  [channel ctx-or-client-id]
+  (let [fragments (drain! channel ctx-or-client-id)]
+    (when (seq fragments)
+      (into [:<>] (remove nil?) fragments))))
 
 ;; -----------------------------------------------------------------------------
-;; Targeting and sending
+;; Targeting
 ;; -----------------------------------------------------------------------------
 
-(defn- target-clients
+(defn target-clients
+  "Return connected clients matching target.
+
+   Target forms:
+     :all
+     [:client client-id]
+     [:user user-id]
+     [:scope scope]"
   [channel to]
   (cond
     (= to :all)
@@ -412,8 +503,12 @@
                        :data "{}"})
     false))
 
+;; -----------------------------------------------------------------------------
+;; Sending
+;; -----------------------------------------------------------------------------
+
 (defn send!
-  "Send arbitrary OOB fragments to connected clients.
+  "Send arbitrary complete OOB fragments to connected clients.
 
    Required:
    - :to
@@ -422,23 +517,27 @@
        [:user user-id]
        [:scope scope]
 
-   - :oob
-       one Hiccup OOB node, or a sequence of OOB nodes
+   - :fragments
+       one complete OOB Hiccup fragment, or a sequence of complete OOB fragments
+
+   Compatibility:
+   - :oob is also accepted as an alias for :fragments.
 
    Returns a delivery summary.
 
    This is best-effort, in-process delivery. It is not durable and does not
    cross app server processes."
-  [channel {:keys [to oob]}]
-  (let [to'     (ensure-present to :to)
-        nodes   (normalize-oob-nodes oob)
-        targets (target-clients channel to')]
-    (when-not (seq nodes)
+  [channel {:keys [to fragments oob] :as opts}]
+  (let [to'        (ensure-present to :to)
+        raw        (if (contains? opts :fragments) fragments oob)
+        fragments' (normalize-fragments raw)
+        targets    (target-clients channel to')]
+    (when-not (seq fragments')
       (throw (ex-info "Missing live OOB fragments."
-                      {:missing-key :oob
+                      {:missing-key :fragments
                        :to to'})))
     (doseq [{:client/keys [id]} targets]
-      (enqueue-pending-oobs! channel id nodes))
+      (enqueue-pending-fragments! channel id fragments'))
     {:to to'
      :sent (count targets)
      :results
@@ -446,5 +545,33 @@
       (fn [{:client/keys [id]}]
         {:client/id id
          :woke? (wake-client! channel id)
-         :pending (count (get @(:pending-oob channel) id))})
+         :pending (count (get @(:pending-fragments channel) id))})
       targets)}))
+
+(defn send-to-client!
+  "Send arbitrary complete OOB fragments to one connected browser client."
+  [channel client-id & fragments]
+  (send! channel
+         {:to [:client client-id]
+          :fragments fragments}))
+
+(defn send-to-user!
+  "Send arbitrary complete OOB fragments to every connected browser client for user-id."
+  [channel user-id & fragments]
+  (send! channel
+         {:to [:user user-id]
+          :fragments fragments}))
+
+(defn send-to-scope!
+  "Send arbitrary complete OOB fragments to every connected browser client in scope."
+  [channel scope & fragments]
+  (send! channel
+         {:to [:scope scope]
+          :fragments fragments}))
+
+(defn broadcast!
+  "Send arbitrary complete OOB fragments to every connected browser client."
+  [channel & fragments]
+  (send! channel
+         {:to :all
+          :fragments fragments}))
