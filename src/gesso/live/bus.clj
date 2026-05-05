@@ -60,7 +60,7 @@
         m (matcher live-bus)]
     (swap! (subscribers-atom live-bus) assoc sub-id sub)
     (swap! (indexes-atom live-bus) match/index-subscription m sub)
-    (prn :bus/subscribe!
+    #_(prn :bus/subscribe!
          :subscriber-id sub-id
          :subscription (:subscription sub)
          :subscriber-count (count @(subscribers-atom live-bus))
@@ -77,7 +77,7 @@
     (when sub
       (swap! idx* match/unindex-subscription m sub)
       (swap! subs* dissoc subscriber-id)
-      (prn :bus/unsubscribe!
+      #_(prn :bus/unsubscribe!
            :subscriber-id subscriber-id
            :subscription (:subscription sub)
            :subscriber-count (count @subs*)
@@ -96,7 +96,7 @@
         (swap! idx* match/unindex-subscription m old-sub)
         (swap! subs* assoc subscriber-id new-sub)
         (swap! idx* match/index-subscription m new-sub)
-        (prn :bus/replace-subscription!
+        #_(prn :bus/replace-subscription!
              :subscriber-id subscriber-id
              :old-subscription (:subscription old-sub)
              :new-subscription new-subscription
@@ -110,7 +110,7 @@
         indexes @(indexes-atom live-bus)
         entries (match/candidate-entries m ctx changed)
         ids (match/candidate-subscriber-ids indexes entries)]
-    (prn :bus/candidate-subscriber-ids
+    #_(prn :bus/candidate-subscriber-ids
          :changed changed
          :entries entries
          :candidate-ids ids)
@@ -128,7 +128,7 @@
               :subscribers subscribers
               :ctx ctx
               :changed changed})]
-    (prn :bus/matching-subscriber-ids
+    #_(prn :bus/matching-subscriber-ids
          :changed changed
          :indexes indexes
          :subscriber-ids (keys subscribers)
@@ -139,14 +139,14 @@
   "Deliver an event to the provided subscriber ids."
   [live-bus subscriber-ids event]
   (let [subscribers @(subscribers-atom live-bus)]
-    (prn :bus/notify!
+    #_(prn :bus/notify!
          :subscriber-ids subscriber-ids
          :event event)
     (reduce
      (fn [summary subscriber-id]
        (if-let [sub (get subscribers subscriber-id)]
          (try
-           (prn :bus/notify-one!
+           #_(prn :bus/notify-one!
                 :subscriber-id subscriber-id
                 :subscription (:subscription sub))
            ((:send! sub) event)
@@ -154,7 +154,7 @@
                (update :matched-subscriber-ids conj subscriber-id)
                (update :delivered-count inc))
            (catch Throwable t
-             (prn :bus/notify-error!
+             #_(prn :bus/notify-error!
                   :subscriber-id subscriber-id
                   :message (.getMessage t)
                   :class (class t))
@@ -174,7 +174,7 @@
   (let [changed (:changed event)
         matched-ids (matching-subscriber-ids live-bus {} changed)
         summary (notify-subscribers! live-bus matched-ids event)]
-    (prn :bus/publish!
+    #_(prn :bus/publish!
          :event event
          :changed changed
          :matched-ids matched-ids
