@@ -56,6 +56,12 @@
    [:name
     [:string {:re #"(?i)^[a-z]+$"}]]])
 
+(defn- script-node-js
+  [node]
+  (when (and (vector? node)
+             (= :script (first node)))
+    (get-in (second node) [:dangerouslySetInnerHTML :__html] "")))
+
 ;; -----------------------------------------------------------------------------
 ;; Validation extraction and facade tests
 ;; -----------------------------------------------------------------------------
@@ -139,7 +145,10 @@
               :required true}
              attrs))
       (is (string? script))
-      (is (str/includes? script "on input or blur"))
+      (is (str/includes? script "on input"))
+      (is (str/includes? script "on blur"))
+      (is (str/includes? script "else if my.dataset.touched == 'true'"))
+      (is (str/includes? script "call me.setAttribute('data-touched', 'true')"))
       (is (str/includes? script "put msg into #username-error"))
       (is (= :string (:type constraints)))
       (is (= true (:required constraints)))))
@@ -191,7 +200,10 @@
       (is (= "false" (:aria-invalid control-attrs)))
 
       (is (h/script-includes? control-attrs "on focus add .focused to me"))
-      (is (h/script-includes? control-attrs "on input or blur"))
+      (is (h/script-includes? control-attrs "on input"))
+      (is (h/script-includes? control-attrs "on blur"))
+      (is (h/script-includes? control-attrs "else if my.dataset.touched == 'true'"))
+      (is (h/script-includes? control-attrs "call me.setAttribute('data-touched', 'true')"))
       (is (h/script-includes? control-attrs "put msg into #username-error"))
       (is (h/script-includes? control-attrs "on keydown"))
       (is (h/script-includes? control-attrs "dataset.serverError"))
@@ -221,7 +233,8 @@
       (is (= "notes-error" (:aria-errormessage control-attrs)))
       (is (= "false" (:aria-invalid control-attrs)))
       (is (h/script-includes? control-attrs "on keydown"))
-      (is (not (h/script-includes? control-attrs "on input or blur")))
+      (is (not (h/script-includes? control-attrs "on input")))
+      (is (not (h/script-includes? control-attrs "on blur")))
       (is error)
       (is (h/has-class? error-attrs "hidden")))))
 
@@ -549,7 +562,8 @@
           username-error (h/by-id "username-error" node)
           email-error (h/by-id "email-error" node)
           age-error (h/by-id "age-error" node)
-          scripts (h/elements-by-tag :script node)]
+          scripts (h/elements-by-tag :script node)
+          script-texts (keep script-node-js scripts)]
       (is (= :<> (first node)))
       (is username-error)
       (is (= "innerHTML" (:hx-swap-oob (h/element-attrs username-error))))
@@ -557,10 +571,10 @@
       (is (= "innerHTML" (:hx-swap-oob (h/element-attrs email-error))))
       (is age-error)
       (is (= "innerHTML" (:hx-swap-oob (h/element-attrs age-error))))
-      (is (some #(str/includes? (second %) "dataset.serverError='true'")
-                scripts))
-      (is (some #(str/includes? (second %) "aria-invalid")
-                scripts)))))
+      (is (some #(str/includes? % "dataset.serverError='true'")
+                script-texts))
+      (is (some #(str/includes? % "aria-invalid")
+                script-texts)))))
 
 (deftest validation-path-id-facade-test
   (testing "path id helpers are exposed through gesso.core"

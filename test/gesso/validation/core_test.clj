@@ -50,6 +50,12 @@
             x))
         (hiccup-seq hiccup)))
 
+(defn- script-node-js
+  [node]
+  (when (and (vector? node)
+             (= :script (first node)))
+    (get-in (second node) [:dangerouslySetInnerHTML :__html] "")))
+
 (deftest extract-string-field-constraints-test
   (testing "string fields map min/max/pattern/required into HTML5 attrs"
     (let [{:keys [rules required messages type nilable?]}
@@ -141,23 +147,35 @@
                    :min "Too small."
                    :max "Too large."}
                   "email-error")]
-      (is (str/includes? script "on input or blur"))
+      ;; The current gatekeeper intentionally uses separate event handlers:
+      ;; input validates quietly unless already touched; blur marks touched and
+      ;; reveals validation state.
+      (is (str/includes? script "on input"))
+      (is (str/includes? script "on blur"))
+      (is (not (str/includes? script "on input or blur")))
+
       (is (str/includes? script "my.checkValidity()"))
       (is (str/includes? script "my.validity.valueMissing"))
       (is (str/includes? script "my.validity.tooShort"))
       (is (str/includes? script "my.validity.tooLong"))
+      (is (str/includes? script "my.validity.typeMismatch"))
       (is (str/includes? script "my.validity.patternMismatch"))
       (is (str/includes? script "my.validity.rangeUnderflow"))
       (is (str/includes? script "my.validity.rangeOverflow"))
+
+      (is (str/includes? script "else if my.dataset.touched == 'true'"))
+      (is (str/includes? script "call me.setAttribute('data-touched', 'true')"))
       (is (str/includes? script "put msg into #email-error"))
-      (is (str/includes? script "trigger validateField"))))
+      (is (str/includes? script "remove .hidden from #email-error"))
+      (is (str/includes? script "call me.setAttribute('aria-invalid', 'true')"))
+      (is (str/includes? script "call me.setAttribute('aria-invalid', 'false')"))
+      (is (str/includes? script "trigger validateField on me"))))
 
   (testing "messages are escaped before interpolation"
     (let [script (vscripts/gatekeeper-script
                   {:required "Can't be blank"}
                   "field-error")]
       (is (str/includes? script "Can\\'t be blank")))))
-
 
 (deftest field-plan-test
   (testing "nil schema returns the empty plan"
@@ -175,6 +193,8 @@
               :required true}
              attrs))
       (is (string? script))
+      (is (str/includes? script "on input"))
+      (is (str/includes? script "on blur"))
       (is (str/includes? script "put msg into #email-error"))
       (is (= :string (:type constraints)))
       (is (= true (:required constraints)))))
@@ -199,48 +219,6 @@
       (is (= :string (:type constraints)))
       (is (= false (:required constraints))))))
 
-#_(deftest field-plan-test
-  (testing "nil schema returns the empty plan"
-    (is (= {:attrs {}
-            :script nil
-            :constraints nil}
-           (validation/field-plan nil :email "email-error"))))
-
-  (testing "field-plan returns attrs, script, and raw constraints"
-    (let [{:keys [attrs script constraints]}
-          (validation/field-plan user-schema :email "email-error")]
-      (is (= {:minlength 5
-              :maxlength 100
-              :pattern ".+@.+"
-              :required true}
-             attrs))
-      (is (string? script))
-      (is (str/includes? script "put msg into #email-error"))
-      (is (= :string (:type constraints)))
-      (is (= true (:required constraints)))))
-
-  (testing "field-plan accepts string field keys"
-    (let [{:keys [attrs]} (validation/field-plan user-schema "email" "email-error")]
-      (is (= 5 (:minlength attrs)))))
-
-  (testing "field-plan does not generate a script for optional fields without attrs"
-  (let [schema [:map
-                [:notes {:optional true} [:string]]]
-        {:keys [attrs script constraints]}
-        (validation/field-plan schema :notes "notes-error")]
-    (is (= {} attrs))
-    (is (nil? script))
-    (is (= :string (:type constraints)))))
-
-  (testing "field-plan does not generate a script for fields without attrs"
-    (let [schema [:map
-                  [:notes [:string]]]
-          {:keys [attrs script constraints]}
-          (validation/field-plan schema :notes "notes-error")]
-      (is (= {} attrs))
-      (is (nil? script))
-      (is (= :string (:type constraints))))))
-
 (deftest htmx-id-conversion-test
   (testing "paths are converted to stable field and error ids"
     (is (= "email" (vhtmx/path->field-id [:email])))
@@ -260,9 +238,23 @@
       (is (= :<> (first hiccup)))
       (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "email-error" hiccup))))
       (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "age-error" hiccup))))
-      (is (some #(and (vector? %)
-                      (= :script (first %))
-                      (str/includes? (second %) "aria-invalid"))
+      (is (some (fn [node]
+                  (when-let [js (script-node-js node)]
+                    (str/includes? js "aria-invalid")))
+                (hiccup-seq hiccup))))))
+
+#_(deftest render-oob-errors-test
+  (testing "Malli explain-data renders HTMX OOB updates"
+    (let [schema [:map
+                  [:email [:string {:min 5}]]
+                  [:age [:int {:min 18}]]]
+          explain-data (m/explain schema {:email "x"
+                                          :age 12})
+          hiccup (vhtmx/render-oob-errors explain-data)]
+      (is (= :<> (first hiccup)))
+      (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "email-error" hiccup))))
+      (is (= "innerHTML" (:hx-swap-oob (attrs-with-id "age-error" hiccup))))
+      (is (some #(str/includes? (script-node-js %) "aria-invalid")
                 (hiccup-seq hiccup))))))
 
 (deftest render-oob-errors-empty-test
