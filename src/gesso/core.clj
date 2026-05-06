@@ -35,7 +35,7 @@
    [gesso.http :as http]
    [gesso.components.scroll-buffer :as scroll-buffer]
    [gesso.components.toaster.core :as toaster]
-   [gesso.live.core :as live]
+   ;; [gesso.live.core :as live]
    [gesso.htmx :as htmx]
    ))
 
@@ -52,18 +52,18 @@
 (def no-content http/no-content)
 
 ;; live
-(def live-fragment live/fragment)
-(def live-fragment-root-attrs live/fragment-root-attrs)
-(def live-fragment-target-attrs live/fragment-target-attrs)
-(def live-anti-forgery-token live/anti-forgery-token)
-(def live-anti-forgery-input live/anti-forgery-input)
-(def live-post-form-attrs live/post-form-attrs)
-(def live-post-form live/post-form)
-(def live-post-button live/post-button)
-(def live-current-consistency-token live/current-consistency-token)
-(def live-request? live/live-request?)
-(def live-build-event live/build-event)
-(def live-publish-change! live/publish-change!)
+;; (def live-fragment live/fragment)
+;; (def live-fragment-root-attrs live/fragment-root-attrs)
+;; (def live-fragment-target-attrs live/fragment-target-attrs)
+;; (def live-anti-forgery-token live/anti-forgery-token)
+;; (def live-anti-forgery-input live/anti-forgery-input)
+;; (def live-post-form-attrs live/post-form-attrs)
+;; (def live-post-form live/post-form)
+;; (def live-post-button live/post-button)
+;; (def live-current-consistency-token live/current-consistency-token)
+;; (def live-request? live/live-request?)
+;; (def live-build-event live/build-event)
+;; (def live-publish-change! live/publish-change!)
 
 ;; background
 (def background background/background)

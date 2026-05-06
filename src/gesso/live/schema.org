@@ -1,0 +1,2338 @@
+#+title: Gesso Live v2 Design
+#+subtitle: App-declared invalidations with Missionary, HTMX, SSE, Aleph, Manifold, Malli, and XTDB 2
+#+author: Gesso
+#+date: 2026-05-05
+
+* Purpose
+
+=gesso.live= v2 is a from-scratch re-imagining of the live system.
+
+The old model was fundamentally:
+
+#+begin_src text
+publish! -> matcher/index -> subscriber send! -> queue -> SSE
+#+end_src
+
+That design introduced:
+
+- subscriber registries
+- index maintenance
+- imperative fanout
+- queue-backed transport state
+- lifecycle complexity
+- tight coupling between publication, matching, delivery, and transport
+
+v2 replaces that with:
+
+#+begin_src text
+app writer emits primary change
+  -> app invalidation rules expand it
+  -> shared app-local invalidation source receives expanded invalidations
+  -> per-client Missionary flow filters/coalesces
+  -> SSE invalidation
+  -> HTMX fragment refresh
+#+end_src
+
+This is not a system for discovering database changes.
+
+It is a system for moving explicit application invalidations efficiently,
+safely, and cheaply.
+
+* Core Contract
+
+The core contract is:
+
+#+begin_src text
+Writers declare primary changes.
+The app declares what those changes imply.
+Readers declare what they care about.
+Gesso Live delivers matching invalidations.
+#+end_src
+
+Missionary changes the runtime mechanics.
+
+It does not change who knows the meaning of application changes.
+
+* Non-Magic Principles
+
+=gesso.live= must not pretend it can infer semantic invalidations from arbitrary
+database writes.
+
+A changed request may affect:
+
+- the request detail view
+- a store queue
+- an employee dashboard
+- a manager dashboard
+- metrics
+- notifications
+- audit displays
+- other derived views
+
+Only the application knows those relationships.
+
+Therefore:
+
+#+begin_src text
+Gesso Live does not infer semantic invalidations from touched documents.
+Gesso Live does not invent old values.
+Gesso Live does not invent new values.
+Gesso Live does not inspect arbitrary write operations and decide what views changed.
+#+end_src
+
+The acceptable ergonomic shortcut is:
+
+#+begin_src text
+The app supplies enough metadata for a helper to derive an obvious primary change.
+#+end_src
+
+Example:
+
+#+begin_src clojure
+(live.xtdb/live-swap! ctx counter inc)
+#+end_src
+
+where =counter= contains:
+
+#+begin_src clojure
+{:table :demo_counters
+ :id "global-shared-counter"
+ :col :demo/value
+ :topic :demo-counter}
+#+end_src
+
+The helper may emit:
+
+#+begin_src clojure
+{:topic :demo-counter
+ :id "global-shared-counter"
+ :change/kind :updated}
+#+end_src
+
+That is not automatic database-change discovery. It is app-declared metadata
+being used to reduce boilerplate.
+
+* Primary Changes
+
+A primary change is the first semantic event emitted by writer code.
+
+The default shape should be minimal:
+
+#+begin_src clojure
+{:topic :request
+ :id request-id
+ :change/kind :updated}
+#+end_src
+
+This means:
+
+#+begin_src text
+The app writer says that request request-id was updated.
+#+end_src
+
+It does not mean:
+
+#+begin_src text
+Gesso knows what the request document looked like.
+Gesso knows old relationships.
+Gesso knows new relationships.
+Gesso knows every derived view affected.
+#+end_src
+
+A primary change may carry additional context, but only if the writer explicitly
+supplies it.
+
+Example where the writer already has a request value and chooses to provide it:
+
+#+begin_src clojure
+{:topic :request
+ :id request-id
+ :change/kind :updated
+ :request updated-request}
+#+end_src
+
+Example where the writer explicitly knows a relationship changed:
+
+#+begin_src clojure
+{:topic :request-assignment
+ :id request-id
+ :change/kind :changed
+ :from-employee/id old-employee-id
+ :to-employee/id new-employee-id}
+#+end_src
+
+These are app-level choices.
+
+They are not inferred by Gesso.
+
+* Primary Change Rules
+
+Primary changes should obey these rules:
+
+1. Always include =:topic=.
+2. Usually include =:id=.
+3. Usually include =:change/kind=.
+4. Additional keys are allowed.
+5. Additional keys must be values the writer explicitly knows or deliberately
+   queries.
+6. The live layer must not assume hidden old or new values exist.
+
+Recommended keys:
+
+#+begin_src clojure
+:topic
+:id
+:change/kind
+#+end_src
+
+Examples:
+
+#+begin_src clojure
+{:topic :request
+ :id request-id
+ :change/kind :updated}
+
+{:topic :demo-counter
+ :id "global-shared-counter"
+ :change/kind :updated}
+
+{:topic :request-assignment
+ :id request-id
+ :change/kind :changed
+ :from-employee/id old-employee-id
+ :to-employee/id new-employee-id}
+#+end_src
+
+* Invalidation Expansion
+
+Invalidation expansion is the middle layer between writer code and delivery.
+
+A writer should not need to remember every affected dashboard or derived view.
+
+Instead:
+
+#+begin_src text
+writer emits primary change
+-> app invalidation rules expand it
+-> expanded invalidations are emitted to the shared source
+#+end_src
+
+Example: a writer emits only this:
+
+#+begin_src clojure
+{:topic :request
+ :id request-id
+ :change/kind :updated}
+#+end_src
+
+The app rule may query current authoritative state to determine related store or
+employee views:
+
+#+begin_src clojure
+(def request-invalidation-rule
+  {:when-topic :request
+   :expand
+   (fn [ctx change]
+     (let [request     (load-request ctx (:id change))
+           store-id    (:request/store-id request)
+           employee-id (:request/employee-id request)]
+       (cond-> [{:topic :request
+                 :id (:id change)
+                 :change/kind (:change/kind change)}
+
+                {:topic :store-queue
+                 :id store-id
+                 :change/kind :updated}
+
+                {:topic :manager-dashboard
+                 :id store-id
+                 :change/kind :updated}]
+
+         employee-id
+         (conj {:topic :employee-dashboard
+                :id employee-id
+                :change/kind :updated})))))})
+#+end_src
+
+This avoids two bad extremes:
+
+#+begin_src text
+Bad extreme 1:
+  Gesso magically infers app semantics.
+
+Bad extreme 2:
+  Every writer manually lists every affected view every time.
+#+end_src
+
+The good middle:
+
+#+begin_src text
+The app declares invalidation relationships once.
+Writers emit primary semantic changes.
+Expansion rules derive related invalidations.
+Gesso delivers them.
+#+end_src
+
+* Expansion May Query State
+
+Expansion rules may query authoritative application state.
+
+This is often the right answer.
+
+For example, when a request changes, the expansion rule may load the current
+request to determine:
+
+- current store
+- current employee
+- current organization
+- current queue
+- current permission-relevant relationships
+
+This is explicit app behavior.
+
+It is not automatic database-change discovery.
+
+#+begin_src text
+Expansion rules may query because the app chose to query.
+Gesso itself does not inspect writes and infer relationships.
+#+end_src
+
+* Relationship-Sensitive Changes
+
+Some changes require invalidating both old and new relationships.
+
+Example:
+
+#+begin_src text
+request moves from employee A to employee B
+#+end_src
+
+If the app only queries current state, it can discover employee B. It may not know
+employee A.
+
+For these cases, the writer or domain service should emit a relationship-specific
+primary change:
+
+#+begin_src clojure
+{:topic :request-assignment
+ :id request-id
+ :change/kind :changed
+ :from-employee/id old-employee-id
+ :to-employee/id new-employee-id}
+#+end_src
+
+The expansion rule can then invalidate both sides:
+
+#+begin_src clojure
+(def request-assignment-rule
+  {:when-topic :request-assignment
+   :expand
+   (fn [_ctx change]
+     [{:topic :request
+       :id (:id change)
+       :change/kind :updated}
+
+      {:topic :employee-dashboard
+       :id (:from-employee/id change)
+       :change/kind :updated}
+
+      {:topic :employee-dashboard
+       :id (:to-employee/id change)
+       :change/kind :updated}])})
+#+end_src
+
+This keeps relationship-sensitive invalidation explicit without forcing every
+writer to list every derived view.
+
+* Expansion Rule Semantics
+
+=gesso.live.invalidation= owns generic rule expansion.
+
+It should not know app domains.
+
+Conceptual API:
+
+#+begin_src clojure
+(invalidation/expand rules ctx change)
+(invalidation/expand-many rules ctx changes)
+#+end_src
+
+Rules may be topic-based:
+
+#+begin_src clojure
+{:when-topic :request
+ :expand (fn [ctx change] ...)}
+#+end_src
+
+or predicate-based:
+
+#+begin_src clojure
+{:when (fn [ctx change] ...)
+ :expand (fn [ctx change] ...)}
+#+end_src
+
+Expansion output should be a sequence of canonical invalidation maps.
+
+If no rule matches, default behavior should be configurable.
+
+Initial recommendation:
+
+#+begin_src clojure
+{:on-unmatched :keep}
+#+end_src
+
+Meaning:
+
+#+begin_src text
+If no expansion rule matches, emit the original change as the invalidation.
+#+end_src
+
+This keeps simple cases simple.
+
+* Expansion Dispatch and Writer Thread Safety
+
+Expansion rules may query authoritative application state.
+
+That means expansion can be slower than simple source emission.
+
+Therefore =source/emit!= must not run expansion rules. It should only publish
+already-expanded invalidations into the shared source.
+
+The expansion pipeline is separate:
+
+#+begin_src text
+primary change
+  -> expansion dispatch
+  -> app rules
+  -> expanded invalidations
+  -> source/emit-many!
+#+end_src
+
+=gesso.live.core/emit!= may support both synchronous and asynchronous dispatch.
+
+Conceptual API:
+
+#+begin_src clojure
+(live/emit!
+ {:source source
+  :rules rules
+  :ctx ctx
+  :dispatch :sync}
+ primary-change)
+
+(live/emit!
+ {:source source
+  :rules rules
+  :ctx ctx
+  :dispatch :async
+  :dispatcher dispatcher}
+ primary-change)
+#+end_src
+
+** Synchronous dispatch
+
+Synchronous dispatch expands and emits before returning.
+
+Pros:
+
+- simple
+- deterministic
+- easier to test
+- caller knows expansion has completed
+
+Cons:
+
+- expansion can block the writer/request thread
+
+** Asynchronous dispatch
+
+Asynchronous dispatch enqueues the primary change and returns quickly.
+
+Pros:
+
+- releases web request threads
+- isolates slow expansion rules
+- allows bounded worker pools
+
+Cons:
+
+- invalidations are emitted later
+- failures happen out-of-band
+- queue overflow policy is required
+- consistency metadata must be carried into the worker when expansion queries
+  write-dependent state
+
+** Consistency requirement
+
+If expansion rules query state affected by the write, the async expansion job must
+carry enough consistency information to observe that write.
+
+Conceptual job shape:
+
+#+begin_src clojure
+{:primary-change primary-change
+ :consistency-token consistency-token
+ :ctx-data safe-context}
+#+end_src
+
+The worker must apply the consistency token before querying authoritative state.
+
+** Dispatcher
+
+=gesso.live.dispatch= should own optional async expansion dispatch.
+
+A dispatcher should provide:
+
+- dedicated worker pool
+- bounded queue
+- overflow policy
+- error logging
+- shutdown behavior
+
+Possible overflow policies:
+
+#+begin_src clojure
+:block
+:throw
+:drop
+:coalesce
+#+end_src
+
+Silent dropping should not be the default.
+
+Initial recommendation:
+
+#+begin_src clojure
+{:on-overflow :throw}
+#+end_src
+
+for development and tests, with production requiring explicit configuration.
+
+** Design rule
+
+Keep the fast path small:
+
+#+begin_src text
+source/emit! publishes expanded invalidations.
+core/emit! expands primary changes.
+dispatch controls where expansion runs.
+#+end_src
+
+* Canonical Invalidation Shape
+
+The preferred canonical invalidation shape is:
+
+#+begin_src clojure
+{:topic topic
+ :id id
+ :change/kind kind}
+#+end_src
+
+Examples:
+
+#+begin_src clojure
+{:topic :demo-counter
+ :id "global-shared-counter"
+ :change/kind :updated}
+
+{:topic :store-queue
+ :id store-id
+ :change/kind :updated}
+
+{:topic :manager-dashboard
+ :id store-id
+ :change/kind :updated}
+#+end_src
+
+Rationale:
+
+- =:topic= names the semantic thing.
+- =:id= names the instance of that thing.
+- =:change/kind= gives coarse change intent.
+- This maps directly to reader subscriptions.
+
+* Reader Interests
+
+Readers declare app-level interests.
+
+Example:
+
+#+begin_src clojure
+{:topic :store-queue
+ :id store-id}
+#+end_src
+
+or:
+
+#+begin_src clojure
+{:topic :demo-counter
+ :id "global-shared-counter"}
+#+end_src
+
+A default matching predicate can be simple:
+
+#+begin_src clojure
+(defn interested?
+  [subscription invalidation]
+  (= (select-keys subscription [:topic :id])
+     (select-keys invalidation [:topic :id])))
+#+end_src
+
+Apps may provide custom predicates when needed.
+
+* Malli Schemas
+
+=gesso.live.schema= should define Malli schemas for the small map shapes that
+carry the live system.
+
+Use schemas as edge validation and test fixtures, not as heavy internal ceremony.
+
+Validate:
+
+- primary changes
+- expanded invalidations
+- subscriptions
+- live fragment configs
+- source options
+- dispatch options
+- SSE event maps
+- fragment cache/singleflight options
+- OOB client descriptors
+
+Conceptual schemas:
+
+#+begin_src clojure
+(def Topic
+  keyword?)
+
+(def ChangeKind
+  keyword?)
+
+(def PrimaryChange
+  [:map
+   [:topic Topic]
+   [:id {:optional true} some?]
+   [:change/kind {:optional true} ChangeKind]])
+
+(def Invalidation
+  [:map
+   [:topic Topic]
+   [:id some?]
+   [:change/kind {:optional true} ChangeKind]])
+
+(def Subscription
+  [:map
+   [:topic Topic]
+   [:id some?]])
+
+(def LiveEvent
+  [:map
+   [:event string?]
+   [:invalidation Invalidation]
+   [:data {:optional true} any?]
+   [:consistency-token {:optional true} any?]])
+#+end_src
+
+Validation helpers should return the value or throw with useful data:
+
+#+begin_src clojure
+(schema/validate! schema-key value)
+(schema/explain schema-key value)
+#+end_src
+
+Example:
+
+#+begin_src clojure
+(schema/validate! :gesso.live/invalidation x)
+#+end_src
+
+This is especially useful because v2 intentionally uses app-declared data maps.
+Malli gives the map protocol guardrails.
+
+* Shared App-Local Invalidation Source
+
+The shared source is an app-scoped invalidation hub.
+
+It is not a database observer.
+
+It receives explicit expanded invalidations from app code.
+
+Conceptual topology:
+
+#+begin_src text
+writer code
+  -> primary change
+  -> expansion rules
+  -> shared invalidation source
+  -> client flows
+#+end_src
+
+The source is shared because all connected clients should tap the same app-level
+invalidation stream.
+
+It is not created per request.
+
+It is not created per browser tab.
+
+It is not tied to a particular fragment.
+
+* Source Semantics
+
+=gesso.live.source= owns the shared in-process invalidation source.
+
+Initial API:
+
+#+begin_src clojure
+(source/create opts)
+(source/emit! source invalidation)
+(source/emit-many! source invalidations)
+(source/changes source)
+(source/close! source)
+(source/closed? source)
+#+end_src
+
+Semantics:
+
+- =create= returns a source.
+- =emit!= publishes one already-expanded invalidation.
+- =emit-many!= publishes multiple already-expanded invalidations.
+- =changes= returns a client-consumable flow/tap.
+- =close!= releases source resources.
+- =closed?= reports source state.
+- =changes= must not allocate app-level source infrastructure.
+- emitting to a closed source should throw.
+
+Initial recommendation:
+
+#+begin_src clojure
+emit! to closed source => throw
+#+end_src
+
+This catches lifecycle mistakes early.
+
+No mandatory =start!= is needed for the initial in-process source. Future source
+implementations may add lifecycle for cross-process propagation, but that should
+remain behind the source abstraction.
+
+* Hot and Cold Reframed
+
+The useful distinction is:
+
+#+begin_src text
+hot = shared app-scoped invalidation hub
+cold = per-client flow over explicit invalidations
+#+end_src
+
+Hot does not mean:
+
+#+begin_src text
+automatic database change discovery
+#+end_src
+
+Cold does not mean:
+
+#+begin_src text
+create source infrastructure inside the request
+#+end_src
+
+A client flow is disposable.
+
+The source is shared.
+
+* Critical Rule: Never Create Source Infrastructure Per Request
+
+Bad:
+
+#+begin_src clojure
+(defn stream-handler [ctx]
+  (let [local-source (source/create {:id :request/live})]
+    ...))
+#+end_src
+
+Good:
+
+#+begin_src clojure
+(def app-source
+  (source/create {:id :app/live}))
+
+(defn stream-handler [ctx]
+  (let [<changes> (source/changes app-source)]
+    ...))
+#+end_src
+
+Writer code emits into the app source through live/core helpers:
+
+#+begin_src clojure
+(live/emit!
+ {:source app-source
+  :rules app-rules
+  :ctx ctx}
+ {:topic :demo-counter
+  :id "global-shared-counter"
+  :change/kind :updated})
+#+end_src
+
+* Source Implementation Strategy
+
+The first implementation may use a hybrid model:
+
+#+begin_src text
+Manifold for shared push substrate
+Missionary for per-client flow transformations
+#+end_src
+
+Rationale:
+
+- Manifold is a practical in-process async substrate.
+- Missionary is strong for per-client dataflow, cancellation, coalescing, and
+  transformation.
+- Using Manifold internally avoids prematurely hand-building multicast mechanics.
+
+However:
+
+#+begin_src text
+Manifold is an implementation detail.
+#+end_src
+
+The public API must not expose:
+
+- Manifold event bus objects
+- topic bus internals
+- subscriber registries
+- v1-style matcher/index mechanics
+
+The public API should expose source operations only.
+
+* Missionary's Role
+
+Missionary does not infer invalidations.
+
+Missionary helps with:
+
+- per-client filtering
+- coalescing invalidations
+- backpressure
+- cancellation on disconnect
+- client-flow isolation
+- composable transformations
+
+The semantic model remains:
+
+#+begin_src text
+writers declare primary changes
+app expands changes
+readers declare interests
+#+end_src
+
+Missionary makes the delivery pipeline composable, cancellable, and coalescible.
+
+* Flow Semantics
+
+=gesso.live.flow= owns Missionary transformations.
+
+Required helpers:
+
+#+begin_src clojure
+(flow/for-subscription opts <invalidations>)
+(flow/invalidation-events opts <invalidations>)
+(flow/coalesce-invalidations <events>)
+(flow/coalesce-by opts <invalidations>)
+(flow/isolate <flow> opts)
+(flow/seed+stream opts) ;; optional/future
+#+end_src
+
+** for-subscription
+
+Filters invalidations by subscription.
+
+Conceptual input:
+
+#+begin_src clojure
+{:subscription {:topic :demo-counter
+                :id "global-shared-counter"}
+ :interested?  interested?}
+#+end_src
+
+** invalidation-events
+
+Maps relevant invalidations to generic live event maps.
+
+Example output:
+
+#+begin_src clojure
+{:event "live-update"
+ :invalidation invalidation
+ :data data
+ :consistency-token token}
+#+end_src
+
+** coalesce-invalidations
+
+Applies the default invalidation backpressure policy.
+
+Intermediate stale notifications may be dropped.
+
+** coalesce-by
+
+Coalesces invalidations or events by a key over a small window.
+
+Useful for node-local topic-level coalescing.
+
+** isolate
+
+Ensures a per-client failure terminates that client flow without affecting the
+shared source or other clients.
+
+** seed+stream
+
+Deferred helper for snapshot + delta mode.
+
+Not required for the first HTMX invalidation implementation.
+
+* Default Model: HTMX Invalidation First
+
+The default live behavior is invalidation-first.
+
+#+begin_src text
+Initial state:
+  ordinary HTTP GET renders current fragment state
+
+Live update:
+  SSE sends "something relevant changed"
+
+Browser:
+  HTMX performs hx-get and re-renders the fragment
+#+end_src
+
+This keeps:
+
+- state authoritative on the server
+- rendering server-side
+- browser behavior simple
+- SSE payloads tiny
+- recovery from missed updates straightforward
+
+If a client misses an invalidation, the next fragment GET still queries
+authoritative state.
+
+* Invalidation Coalescing
+
+Invalidations are coalescible.
+
+For a live fragment, the important fact is usually not:
+
+#+begin_src text
+these exact 50 changes happened
+#+end_src
+
+but:
+
+#+begin_src text
+this fragment is now stale
+#+end_src
+
+Therefore, multiple relevant changes may collapse into one SSE invalidation.
+
+Example:
+
+#+begin_src text
+50 updates in 3 seconds
+-> 1 coalesced SSE invalidation
+-> 1 hx-get
+-> final authoritative render
+#+end_src
+
+The default HTMX invalidation pipeline should use Missionary backpressure or a
+tested helper with equivalent semantics.
+
+Conceptual shape:
+
+#+begin_src clojure
+(->> <client-events>
+     (flow/coalesce-invalidations))
+#+end_src
+
+This prevents:
+
+- browser request storms
+- self-DDOS
+- redundant server renders
+- redundant DOM swaps
+
+* Optional Model: Snapshot + Delta Streams
+
+Snapshot + delta streams are supported as a future/secondary mode, not the first
+default.
+
+#+begin_src text
+snapshot -> deltas -> reductions -> derived state
+#+end_src
+
+Use cases:
+
+- high-frequency dashboards
+- non-HTMX clients
+- stateful stream consumers
+- direct server-pushed rendered payloads
+
+But the default HTMX model remains:
+
+#+begin_src text
+HTTP snapshot + SSE invalidation
+#+end_src
+
+Do not prematurely make =gesso.live= responsible for client-side or flow-local
+state reconciliation when ordinary fragment re-rendering is simpler.
+
+* Isolation Boundary
+
+A client-specific flow may fail because of:
+
+- malformed subscription data
+- authorization failure
+- filtering error
+- rendering error
+- serialization error
+- network disconnect
+- slow client behavior
+
+Client failure must not:
+
+- affect the shared invalidation source
+- affect other clients
+- crash the app
+
+The topology must be:
+
+#+begin_src text
+shared invalidation source
+  independent
+
+client stream process
+  disposable
+  isolated
+  cancellable
+#+end_src
+
+=gesso.live.flow/isolate= should provide a tested client-flow isolation boundary.
+
+Conceptual API:
+
+#+begin_src clojure
+(flow/isolate
+ <client-flow>
+ {:on-error log-client-error
+  :on-close cleanup-client})
+#+end_src
+
+Important: do not use unverified Missionary exception/cancellation recipes in
+production. The implementation must be verified by tests against Missionary's
+actual semantics.
+
+* Backpressure Strategy
+
+Different event classes require different policies.
+
+** HTMX invalidation events
+
+Default policy:
+
+#+begin_src text
+coalesce / drop intermediate invalidations
+#+end_src
+
+Rationale:
+
+A stale fragment only needs one wake-up. Intermediate invalidations are not
+semantically important if the fragment GET renders current authoritative state.
+
+** OOB / notification events
+
+Default policy:
+
+#+begin_src text
+bounded buffer, do not silently drop by default
+#+end_src
+
+Rationale:
+
+A toast, notification, modal update, or user-directed message may be semantically
+distinct. Dropping it silently may surprise the app.
+
+Supported policy vocabulary should include:
+
+#+begin_src clojure
+:coalesce
+:drop-oldest
+:drop-newest
+:block
+:close-client
+#+end_src
+
+Initial defaults:
+
+#+begin_src clojure
+{:invalidation :coalesce
+ :oob          :bounded-buffer}
+#+end_src
+
+* High-Fanout Performance
+
+At small scale, =gesso.live= can deliver invalidations with simple per-client
+filtering.
+
+At large scale, the system must distinguish between two very different cases:
+
+#+begin_src text
+little fanout:
+  a change is relevant to a small number of clients
+
+large fanout:
+  a change is relevant to many clients
+#+end_src
+
+The performance bottlenecks are different.
+
+Little-fanout events primarily stress matching.
+
+Large-fanout events primarily stress browser refreshes, fragment rendering, and
+database reads.
+
+Missionary helps with per-client lifecycle, backpressure, coalescing, and
+cancellation. It does not remove the real cost of 100,000 clients caring about
+the same change.
+
+** Little-Fanout Events
+
+Example:
+
+#+begin_src clojure
+{:topic :request
+ :id request-id
+ :change/kind :updated}
+#+end_src
+
+If only a few connected clients care, the system should avoid scanning every
+connected client.
+
+At meaningful scale, =gesso.live= should maintain a local interest index per web
+node.
+
+Conceptual index:
+
+#+begin_src clojure
+{:topic :request
+ :id request-id}
+;; -> #{client-a client-b client-c}
+#+end_src
+
+This lets a web node handle an invalidation as:
+
+#+begin_src text
+invalidation arrives
+-> derive lookup key
+-> find locally interested clients
+-> deliver/coalesce only for those clients
+#+end_src
+
+This changes local matching from:
+
+#+begin_src text
+O(all connected clients on node)
+#+end_src
+
+to:
+
+#+begin_src text
+O(local interested clients)
+#+end_src
+
+The index is an internal optimization.
+
+It must not resurrect the old public =bus.clj= / =match.clj= model.
+
+Public app code should still talk in terms of:
+
+#+begin_src clojure
+{:topic :store-queue
+ :id store-id}
+#+end_src
+
+and app-provided interest predicates or subscription maps.
+
+Implementation rule:
+
+#+begin_src text
+Interest indexing belongs inside live delivery.
+It should not become the app-facing abstraction.
+#+end_src
+
+** Large-Fanout Events
+
+Example:
+
+#+begin_src clojure
+{:topic :global-announcement
+ :id :main
+ :change/kind :updated}
+#+end_src
+
+or a very busy topic:
+
+#+begin_src clojure
+{:topic :store-queue
+ :id store-id
+ :change/kind :updated}
+#+end_src
+
+where many clients care.
+
+For large fanout, matching is not the main problem. Even if matching is O(1), the
+system may still create:
+
+#+begin_src text
+100,000 SSE invalidations
+100,000 hx-get requests
+100,000 fragment renders
+100,000 database reads
+#+end_src
+
+That is the dangerous case.
+
+The goal is to prevent one semantic invalidation from becoming massive duplicate
+server work.
+
+** Coalescing Is Necessary But Not Sufficient
+
+Invalidation coalescing handles repeated changes to the same stale fragment.
+
+Example:
+
+#+begin_src text
+50 updates in 3 seconds
+-> 1 coalesced stale signal per client
+#+end_src
+
+This prevents multiplicative disaster:
+
+#+begin_src text
+50 updates * 100,000 clients = 5,000,000 refreshes
+#+end_src
+
+becomes approximately:
+
+#+begin_src text
+1 stale signal * 100,000 clients = 100,000 refreshes
+#+end_src
+
+But 100,000 refreshes may still be too many.
+
+Therefore high-fanout safety also requires facilities around the HTTP fragment
+render path.
+
+* Fragment Performance Helpers
+
+=gesso.live.fragment= owns opt-in helpers for protecting the ordinary HTTP
+fragment render path.
+
+SSE invalidates.
+
+HTTP renders.
+
+Fragment helpers protect rendering from large refresh bursts.
+
+** Fragment Singleflight
+
+Purpose:
+
+#+begin_src text
+If many clients request the same fragment at the same time,
+compute it once and share the result.
+#+end_src
+
+Conceptual API:
+
+#+begin_src clojure
+(live.fragment/singleflight
+ {:key [:store-queue store-id role-id]}
+ (fn []
+   (render-store-queue-fragment ctx store-id)))
+#+end_src
+
+or:
+
+#+begin_src clojure
+(live.fragment/with-singleflight
+ {:key [:store-queue store-id role-id]}
+ (fragment ctx))
+#+end_src
+
+The mechanism belongs in Gesso.
+
+The key semantics belong to the app.
+
+Gesso cannot know whether two users may safely share the same rendered fragment.
+The app must choose a key that includes all relevant authorization and
+personalization dimensions.
+
+Examples:
+
+#+begin_src clojure
+[:store-queue store-id role-id]
+[:manager-dashboard store-id permission-hash]
+[:request-detail request-id user-id]
+#+end_src
+
+Guiding rule:
+
+#+begin_src text
+Mechanism: Gesso.
+Safety and cache key semantics: app.
+#+end_src
+
+** Short TTL Fragment Cache
+
+Purpose:
+
+#+begin_src text
+Absorb refresh bursts by briefly reusing rendered fragment HTML.
+#+end_src
+
+Conceptual API:
+
+#+begin_src clojure
+(live.fragment/cache
+ {:key [:store-queue store-id role-id]
+  :ttl-ms 250}
+ (fn []
+   (render-store-queue-fragment ctx store-id)))
+#+end_src
+
+or combined with singleflight:
+
+#+begin_src clojure
+(live.fragment/cached-singleflight
+ {:key [:store-queue store-id role-id]
+  :ttl-ms 250}
+ (fn []
+   (render-store-queue-fragment ctx store-id)))
+#+end_src
+
+This is especially useful when thousands of clients react to the same
+invalidation at nearly the same time.
+
+Caching rendered HTML can be unsafe if the fragment contains:
+
+- user-specific controls
+- user-specific private data
+- permission-dependent buttons
+- one-time values
+- volatile security-sensitive values
+
+Therefore fragment caching must be opt-in.
+
+The app is responsible for choosing safe keys and deciding whether a fragment is
+shareable.
+
+Implementation may use Caffeine.
+
+** Refresh Jitter
+
+=gesso.live.htmx= should make refresh jitter easy.
+
+Problem:
+
+#+begin_src text
+100,000 clients receive the same SSE invalidation
+-> 100,000 clients perform hx-get immediately
+#+end_src
+
+Jitter intentionally smears the refresh burst over a short window.
+
+Conceptual API:
+
+#+begin_src clojure
+(live/fragment-panel
+ ctx
+ {:subscription {:topic :store-queue
+                 :id store-id}
+  :fragment/id "store-queue"
+  :fragment/src "/app/store/queue"
+  :fragment/jitter-ms 500})
+#+end_src
+
+Possible rendered behavior:
+
+#+begin_src text
+Each client waits a small randomized delay before refreshing.
+#+end_src
+
+There are two levels:
+
+#+begin_src text
+static per-client jitter:
+  delay chosen when the fragment/listener is rendered
+
+per-event jitter:
+  delay randomized for each received invalidation
+#+end_src
+
+Static per-client jitter may be sufficient for the first implementation.
+
+Per-event jitter may require a small client-side helper.
+
+Jitter is a high-fanout protection tool. It should be opt-in or configurable per
+fragment.
+
+** Topic-Level Coalescing
+
+Per-client coalescing is useful, but high-volume topics may also benefit from
+node-local topic-level coalescing.
+
+Example:
+
+#+begin_src text
+50 invalidations for [:store-queue 123] arrive within 100ms
+-> node emits one local fanout event for [:store-queue 123]
+#+end_src
+
+Conceptual API:
+
+#+begin_src clojure
+(flow/coalesce-by
+ {:key-fn #(select-keys % [:topic :id])
+  :window-ms 50}
+ <invalidations>)
+#+end_src
+
+or source-level configuration:
+
+#+begin_src clojure
+(source/create
+ {:id :app/live
+  :coalesce-window-ms 50})
+#+end_src
+
+This should remain an internal/configurable optimization.
+
+It should not change app semantics.
+
+* Subscription Tokens
+
+Application code should use rich subscription maps.
+
+Example:
+
+#+begin_src clojure
+{:topic :request
+ :id request-id}
+#+end_src
+
+The browser should receive an opaque encoded token.
+
+Example URL shape:
+
+#+begin_src text
+/app/gesso/live/stream?subscription=...
+#+end_src
+
+Rules:
+
+- app/server code deals with maps
+- browser receives opaque strings
+- encoding is not security
+- every decoded subscription must be authorized
+- signing should be supported for tamper detection
+
+Important:
+
+#+begin_src text
+Opaque encoding != authorization
+#+end_src
+
+A user must not gain access to a subscription merely because they can guess or
+edit a URL.
+
+Transit is a good candidate for encoding rich subscription maps.
+
+A signing implementation may be provided by the app or via a small Gesso token
+signer abstraction.
+
+* SSE Transport Semantics
+
+=gesso.live.transport.sse= owns Aleph SSE transport.
+
+Responsibilities:
+
+- SSE headers
+- frame encoding
+- keepalive frames
+- Aleph-compatible response maps
+- consumption of client flows
+- cancellation on disconnect
+- transport-level error handling
+
+It must not know about:
+
+- XTDB
+- app routes
+- app domains
+- OOB semantics
+- subscription authorization
+- business logic
+
+Required helpers:
+
+#+begin_src clojure
+(sse/event-name x)
+(sse/event-frame event data)
+(sse/keepalive-frame)
+(sse/response opts)
+#+end_src
+
+Conceptual response usage:
+
+#+begin_src clojure
+(sse/response
+ {:flow <events>
+  :keepalive-ms 15000})
+#+end_src
+
+The transport accepts a flow of normalized event maps or frames and writes them
+to an Aleph/Manifold stream as SSE.
+
+* HTMX Semantics
+
+=gesso.live.htmx= owns browser-facing HTMX attribute helpers.
+
+It should provide:
+
+- live fragment root attrs
+- live fragment target attrs
+- SSE trigger string helpers
+- callback attrs
+- post form attrs
+- consistency-token header naming
+- optional static per-client refresh jitter
+
+It should stay independent of:
+
+- source implementation
+- flow implementation
+- XTDB
+- OOB
+- Aleph internals
+
+Expected fragment behavior:
+
+#+begin_src html
+<div hx-ext="sse" sse-connect="...">
+  <div id="fragment-id"
+       hx-get="/fragment/src"
+       hx-trigger="load, sse:live-update"
+       hx-swap="outerHTML">
+  </div>
+</div>
+#+end_src
+
+* Token Semantics
+
+=gesso.live.token= owns token plumbing.
+
+There are two related but distinct token concerns.
+
+** Consistency token
+
+Used for XTDB/read-your-writes style consistency.
+
+Responsibilities:
+
+- canonical request header name
+- fallback request param
+- extract from ctx/request
+- assoc onto request
+- dissoc from request
+
+** Subscription token
+
+Used to encode a rich subscription map into a browser URL.
+
+Responsibilities:
+
+- encode subscription map
+- decode subscription token
+- optionally sign token
+- optionally verify signature
+- leave authorization decision to app/core layer
+
+Initial public API may be split later if needed, for example:
+
+#+begin_src clojure
+gesso.live.token
+gesso.live.subscription
+#+end_src
+
+For the first pass, keeping token plumbing together is acceptable if the
+namespace remains small and explicit.
+
+* Core API Semantics
+
+=gesso.live.core= is the app-facing ergonomic layer.
+
+Responsibilities:
+
+- live fragment rendering helpers
+- stream handler construction
+- normalized event construction
+- subscription token integration
+- invalidation expansion integration
+- dispatch integration
+- small POST helper wrappers
+- app-facing emit helper
+
+It should not own:
+
+- raw SSE frame writing
+- source internals
+- Missionary implementation details
+- XTDB-specific consistency details
+- fragment cache internals
+
+Conceptual API:
+
+#+begin_src clojure
+(live/fragment-panel ctx config)
+
+(live/stream-handler
+ {:source app-source
+  :parse-subscription parse-subscription
+  :authorize-subscription authorize-subscription
+  :interested? interested?})
+
+(live/emit!
+ {:source app-source
+  :rules app-rules
+  :ctx ctx}
+ primary-change)
+#+end_src
+
+* XTDB Consistency Semantics
+
+=gesso.live.consistency.xtdb= owns XTDB 2 consistency integration.
+
+Responsibilities:
+
+- resolve connectable/node from ctx
+- apply incoming consistency token before reads
+- submit tx
+- extract resulting consistency token
+- emit app-declared primary changes through live core/source
+- provide small synced-value helpers for demos
+
+It must not depend on the old bus model.
+
+It must not discover changes itself.
+
+New shape:
+
+#+begin_src text
+submit tx
+-> extract consistency token
+-> emit app-declared primary change
+-> expand via app rules
+-> source emits expanded invalidations
+#+end_src
+
+Conceptual API:
+
+#+begin_src clojure
+(live.xtdb/q ctx query)
+
+(live.xtdb/submit-tx! ctx opts)
+
+(live.xtdb/submit-and-emit!
+ ctx
+ {:tx [...]
+  :changes [{:topic :request
+             :id request-id
+             :change/kind :updated}]})
+
+(live.xtdb/put-and-emit! ctx opts)
+
+(live.xtdb/live-read ctx synced-def)
+
+(live.xtdb/live-swap! ctx synced-def f & args)
+#+end_src
+
+A =live-swap!= helper should use app-declared metadata in the synced definition.
+
+Example:
+
+#+begin_src clojure
+(def counter
+  (live.xtdb/->synced
+   {:table :demo_counters
+    :id "global-shared-counter"
+    :col :demo/value
+    :topic :demo-counter
+    :default 0}))
+#+end_src
+
+Then:
+
+#+begin_src clojure
+(live.xtdb/live-swap! ctx counter inc)
+#+end_src
+
+may emit:
+
+#+begin_src clojure
+{:topic :demo-counter
+ :id "global-shared-counter"
+ :change/kind :updated}
+#+end_src
+
+* OOB Semantics
+
+=gesso.live.oob= is a side-channel for direct connected-client delivery.
+
+It is not the main live fragment invalidation model.
+
+Use OOB for:
+
+- toasts
+- notifications
+- modal replacement
+- targeted user/client/scope messages
+- admin nudges
+
+v2 OOB should remove the old pending-mailbox HTTP fetch pattern.
+
+Old OOB shape:
+
+#+begin_src text
+SSE wake event
+-> browser performs second HTTP request
+-> server drains mailbox
+-> returns OOB HTML
+#+end_src
+
+New OOB shape:
+
+#+begin_src text
+SSE event carries OOB HTML directly
+-> HTMX applies OOB swap
+#+end_src
+
+Therefore, app client plumbing no longer needs a pending-fragment route.
+
+OOB may remain more imperative than the main live system because direct
+connected-client delivery is inherently targeted.
+
+Responsibilities:
+
+- connected client registry
+- browser connection markup
+- stream response
+- target by client/user/scope/all
+- encode/send OOB fragments
+- bounded buffering/backpressure policy
+- cleanup on disconnect
+
+* Client Plumbing and OOB Scopes
+
+One app-level client plumbing namespace should serve many feature namespaces.
+
+Example users:
+
+#+begin_src text
+gessotest.toaster-live-demo
+gessotest.notifications
+gessotest.admin-live
+gessotest.modal-demo
+#+end_src
+
+All can share:
+
+#+begin_src text
+gessotest.client-plumbing
+#+end_src
+
+The plumbing namespace owns:
+
+- route placement
+- middleware
+- current user id
+- client scopes
+- OOB channel
+- stream route
+- app-friendly send helpers
+
+Feature namespaces only render their own OOB fragments and call:
+
+#+begin_src clojure
+(plumbing/send-to-user! user-id fragment)
+(plumbing/send-to-scope! [:store store-id] fragment)
+(plumbing/broadcast! fragment)
+#+end_src
+
+Client/OOB scopes are distinct from fragment invalidation interests.
+
+Client scopes answer:
+
+#+begin_src text
+Which direct messages may this connected browser receive?
+#+end_src
+
+Fragment interests answer:
+
+#+begin_src text
+Which semantic state should this fragment refresh for?
+#+end_src
+
+* Library and Dependency Posture
+
+Use core dependencies deliberately.
+
+** Already core to the design
+
+#+begin_src text
+Aleph
+Manifold
+Missionary
+Malli
+#+end_src
+
+** Strong candidates
+
+Caffeine:
+
+- short TTL fragment cache
+- bounded cache
+- expire-after-write
+- maximum-size
+
+Transit:
+
+- rich subscription map encoding
+
+clojure.tools.logging:
+
+- library logging facade for errors, isolation, dispatch overflow, token failures
+
+Prometheus JVM client or equivalent:
+
+- production metrics
+
+** Avoid initially
+
+core.async:
+
+- would add a third async model next to Manifold and Missionary
+
+core.match:
+
+- not needed for simple map/rule matching
+- use plain predicates and Malli schemas
+
+Meander:
+
+- interesting future option for structural transformation-heavy invalidation
+  rules, but not part of first implementation
+
+* Proposed Source Namespace Layout
+
+The v2 branch should contain these source namespaces under =src/gesso/live=:
+
+#+begin_src text
+src/gesso/live/schema.clj
+src/gesso/live/htmx.clj
+src/gesso/live/token.clj
+src/gesso/live/invalidation.clj
+src/gesso/live/dispatch.clj
+src/gesso/live/source.clj
+src/gesso/live/flow.clj
+src/gesso/live/transport/sse.clj
+src/gesso/live/core.clj
+src/gesso/live/fragment.clj
+src/gesso/live/consistency/xtdb.clj
+src/gesso/live/oob.clj
+#+end_src
+
+Delete or omit:
+
+#+begin_src text
+src/gesso/live/app.clj
+src/gesso/live/bus.clj
+src/gesso/live/match.clj
+#+end_src
+
+* Proposed Test Namespace Layout
+
+The v2 branch should contain these tests:
+
+#+begin_src text
+test/gesso/live/schema_test.clj
+test/gesso/live/htmx_test.clj
+test/gesso/live/token_test.clj
+test/gesso/live/invalidation_test.clj
+test/gesso/live/dispatch_test.clj
+test/gesso/live/source_test.clj
+test/gesso/live/flow_test.clj
+test/gesso/live/transport/sse_test.clj
+test/gesso/live/core_test.clj
+test/gesso/live/fragment_test.clj
+test/gesso/live/consistency/xtdb_test.clj
+test/gesso/live/oob_test.clj
+#+end_src
+
+Delete or omit:
+
+#+begin_src text
+test/gesso/live/app_test.clj
+test/gesso/live/bus_test.clj
+test/gesso/live/match_test.clj
+#+end_src
+
+* Implementation Work Order
+
+Work in this order:
+
+#+begin_src text
+1.  src/gesso/live/schema.clj
+2.  test/gesso/live/schema_test.clj
+
+3.  src/gesso/live/htmx.clj
+4.  test/gesso/live/htmx_test.clj
+
+5.  src/gesso/live/token.clj
+6.  test/gesso/live/token_test.clj
+
+7.  src/gesso/live/invalidation.clj
+8.  test/gesso/live/invalidation_test.clj
+
+9.  src/gesso/live/dispatch.clj
+10. test/gesso/live/dispatch_test.clj
+
+11. src/gesso/live/source.clj
+12. test/gesso/live/source_test.clj
+
+13. src/gesso/live/flow.clj
+14. test/gesso/live/flow_test.clj
+
+15. src/gesso/live/transport/sse.clj
+16. test/gesso/live/transport/sse_test.clj
+
+17. src/gesso/live/core.clj
+18. test/gesso/live/core_test.clj
+
+19. src/gesso/live/fragment.clj
+20. test/gesso/live/fragment_test.clj
+
+21. src/gesso/live/consistency/xtdb.clj
+22. test/gesso/live/consistency/xtdb_test.clj
+
+23. src/gesso/live/oob.clj
+24. test/gesso/live/oob_test.clj
+#+end_src
+
+Rationale:
+
+- =schema= defines the map contracts.
+- =htmx= and =token= are low-risk and mostly independent.
+- =invalidation= captures app-level expansion before the source/flow pipeline.
+- =dispatch= handles sync/async expansion policy.
+- =source= and =flow= establish the delivery foundation.
+- =sse= adapts the flow model to Aleph.
+- =core= assembles the public API.
+- =fragment= protects the HTTP fragment render path.
+- =xtdb= plugs in consistency and write helpers after the live foundation exists.
+- =oob= comes last because it is a useful side-channel, not the core model.
+
+* Minimal First Implementation
+
+The first working milestone should demonstrate:
+
+#+begin_src text
+explicit primary change
+app expansion rule
+shared source
+many SSE clients
+subscription filtering
+coalesced invalidations
+HTMX fragment refresh
+client cancellation
+#+end_src
+
+Steps:
+
+1. Implement =schema=.
+2. Implement =htmx= helpers.
+3. Implement =token= consistency and subscription token helpers.
+4. Implement =invalidation/expand= and =expand-many=.
+5. Implement synchronous =dispatch=.
+6. Implement a shared in-process =source=.
+7. Implement =flow/for-subscription=.
+8. Implement =flow/invalidation-events=.
+9. Implement =flow/coalesce-invalidations=.
+10. Implement =flow/isolate=.
+11. Implement Aleph =sse/response=.
+12. Implement =core/fragment-panel=.
+13. Implement =core/stream-handler=.
+14. Implement =core/emit!= with invalidation expansion.
+15. Wire a simple shared counter demo.
+16. Add basic fragment singleflight/cache helpers.
+17. Add XTDB consistency helpers.
+18. Add direct OOB toast demo.
+
+* First API Sketch
+
+#+begin_src clojure
+(ns app.live
+  (:require
+   [gesso.live.core :as live]
+   [gesso.live.source :as source]))
+
+(def live-source
+  (source/create {:id :app/live}))
+
+(def invalidation-rules
+  [{:when-topic :request
+    :expand
+    (fn [ctx change]
+      (let [request  (load-request ctx (:id change))
+            store-id (:request/store-id request)]
+        [{:topic :request
+          :id (:id change)
+          :change/kind (:change/kind change)}
+
+         {:topic :store-queue
+          :id store-id
+          :change/kind :updated}
+
+         {:topic :manager-dashboard
+          :id store-id
+          :change/kind :updated}]))}])
+
+(defn parse-subscription [ctx raw-token]
+  ...)
+
+(defn authorize-subscription [ctx subscription]
+  ...)
+
+(defn interested? [subscription invalidation]
+  (= (select-keys subscription [:topic :id])
+     (select-keys invalidation [:topic :id])))
+
+(def stream-handler
+  (live/stream-handler
+   {:source live-source
+    :parse-subscription parse-subscription
+    :authorize-subscription authorize-subscription
+    :interested? interested?}))
+
+(defn emit! [ctx primary-change]
+  (live/emit!
+   {:source live-source
+    :rules invalidation-rules
+    :ctx ctx}
+   primary-change))
+#+end_src
+
+* Shared Counter Example Shape
+
+Feature namespace:
+
+#+begin_src clojure
+(def counter
+  (live.xtdb/->synced
+   {:table :demo_counters
+    :id "global-shared-counter"
+    :col :demo/value
+    :topic :demo-counter
+    :default 0}))
+
+(def live-config
+  {:subscription {:topic :demo-counter
+                  :id "global-shared-counter"}
+   :fragment/id "simple-shared-counter-fragment"
+   :fragment/src "/app/demo/simple-shared-counter/fragment"
+   :fragment/swap "innerHTML"})
+
+(defn section [ctx]
+  (live/fragment-panel ctx live-config))
+
+(defn increment! [ctx]
+  (live.xtdb/live-swap! ctx counter inc)
+  (fragment ctx))
+#+end_src
+
+Interpretation:
+
+- =section= declares what fragment subscribes to.
+- =fragment= renders current authoritative state.
+- =increment!= mutates XTDB and emits a primary change.
+- app rules may expand the primary change.
+- other connected viewers receive coalesced invalidations and refresh.
+
+* Request Update Example Shape
+
+Writer helper:
+
+#+begin_src clojure
+(defn request-updated-change
+  [request-id]
+  {:topic :request
+   :id request-id
+   :change/kind :updated})
+#+end_src
+
+Mutation:
+
+#+begin_src clojure
+(live.xtdb/submit-and-emit!
+ ctx
+ {:tx [[:put-docs :requests updated-request]]
+  :changes [(request-updated-change (:xt/id updated-request))]})
+#+end_src
+
+The writer says:
+
+#+begin_src text
+this request changed
+#+end_src
+
+The app rules say:
+
+#+begin_src text
+a changed request invalidates request detail, store queue, dashboard, etc.
+#+end_src
+
+The app rules may query current authoritative state to determine which store,
+employee, organization, or derived views are affected.
+
+Gesso Live handles:
+
+#+begin_src text
+expansion, matching, coalescing, and delivery
+#+end_src
+
+* Relationship Change Example Shape
+
+For a relationship-sensitive mutation, emit a more specific primary change.
+
+Example:
+
+#+begin_src clojure
+(defn request-assignment-changed
+  [{:keys [request-id old-employee-id new-employee-id]}]
+  {:topic :request-assignment
+   :id request-id
+   :change/kind :changed
+   :from-employee/id old-employee-id
+   :to-employee/id new-employee-id})
+#+end_src
+
+This is useful when current-state lookup alone is insufficient because old and
+new related views must both refresh.
+
+* Anti-Goals
+
+Do not:
+
+- rebuild the old subscriber registry
+- expose a public bus abstraction
+- expose Manifold topics as the app-facing model
+- couple SSE transport to business logic
+- couple XTDB helpers to transport details
+- infer semantic invalidations from arbitrary database writes
+- invent old values
+- invent new values
+- rely on browser state as authoritative
+- create source infrastructure per request
+- silently drop primary changes by default
+- prematurely reintroduce public indexing APIs
+- make OOB the core live-fragment model
+
+* Deferred Decisions
+
+** Distributed fanout
+
+Initial version is in-process.
+
+Cross-process fanout can be added later behind the source abstraction using
+explicit app invalidation events.
+
+** Indexed matching
+
+Initial implementation may use per-client filtering.
+
+Reintroduce local interest indexing internally when measured performance requires
+it or when the design is ready.
+
+** Replay
+
+Initial invalidation streams do not replay.
+
+Future state-stream mode may support replay/latest-value semantics.
+
+** Durable delivery
+
+Initial SSE/OOB delivery is ephemeral.
+
+Durable notifications should be represented in application state, not assumed
+from SSE delivery.
+
+** Async expansion
+
+Synchronous expansion should be implemented first.
+
+Async expansion should be added once consistency-token propagation, worker
+shutdown, overflow policy, and error reporting are tested.
+
+* Acceptance Tests
+
+The v2 implementation should have tests proving:
+
+** Schema
+
+- primary changes validate
+- invalidations validate
+- subscriptions validate
+- live events validate
+- invalid data produces useful explanations
+
+** HTMX
+
+- fragment root attrs include =hx-ext="sse"=
+- fragment root attrs include =sse-connect=
+- fragment target attrs include =hx-get=
+- fragment target attrs include =hx-trigger="load, sse:live-update"=
+- target normalization works for bare ids and selectors
+- jitter options remain within configured bounds when enabled
+
+** Token
+
+- consistency token extracts from canonical header
+- consistency token falls back to param
+- request token assoc/dissoc works
+- subscription maps round-trip through encode/decode
+- invalid/tampered signed tokens fail if signing is enabled
+
+** Invalidation
+
+- unmatched changes can be kept
+- topic-specific rules expand primary changes
+- predicate rules expand primary changes
+- expansion can query ctx/application state when rule chooses to
+- expansion can produce multiple invalidations
+- =expand-many= preserves expected order
+- nil outputs are ignored
+- duplicate invalidations can be optionally deduped
+- no rule assumes hidden old/new values
+
+** Dispatch
+
+- sync dispatch runs expansion before returning
+- async dispatch can enqueue work
+- overflow policy is honored
+- dispatch errors are reported
+- dispatcher shutdown prevents new work
+- async jobs can carry consistency metadata
+
+** Source
+
+- source emits to consumers
+- multiple consumers can tap one source
+- =changes= does not create a new source
+- emit to closed source follows documented policy
+- close releases resources
+
+** Flow
+
+- subscription filtering works
+- invalidation event mapping works
+- coalescing drops intermediate invalidations
+- topic-level coalescing keeps different keys distinct
+- client isolation prevents one failing flow from affecting another
+
+** SSE
+
+- event frames are encoded correctly
+- multiline data is encoded as multiple =data:= lines
+- keepalive frame is valid
+- response has correct SSE headers
+- closing connection cancels client flow
+
+** Core
+
+- =fragment-panel= builds expected HTMX structure
+- =stream-handler= parses subscription
+- =stream-handler= authorizes subscription
+- unauthorized subscription fails closed
+- =emit!= expands primary changes
+- relevant source invalidations produce SSE invalidation events
+
+** Fragment
+
+- concurrent singleflight calls for the same key run the body once
+- concurrent singleflight callers receive the same result
+- different singleflight keys run independently
+- errors do not poison a singleflight key forever
+- cached value is reused within TTL
+- cached value is recomputed after TTL
+- different cache keys are isolated
+
+** XTDB
+
+- incoming consistency token is applied before reads
+- tx helper extracts outgoing consistency token
+- mutation helper emits primary change through live core/source
+- synced counter helper reads default when missing
+- synced counter helper emits app-declared primary change
+- no helper pretends to discover arbitrary changed views from tx ops
+
+** OOB
+
+- browser connection registers client
+- send-to-client targets one client
+- send-to-user targets all clients for user
+- send-to-scope targets scope members
+- broadcast targets all connected clients
+- direct OOB payload does not require pending-fragment HTTP route
+- disconnect cleans up client registry
+
+* Branch Plan
+
+1. Create =live-v2= branch.
+2. Delete old source files under =src/gesso/live=.
+3. Delete old tests under =test/gesso/live=.
+4. Recreate files according to the source namespace layout.
+5. Implement in the specified work order.
+6. Keep Manifold hidden behind =gesso.live.source=.
+7. Use Missionary for per-client flow behavior.
+8. Use Malli for map-shaped API validation.
+9. Wire simple shared counter.
+10. Wire request invalidation expansion demo.
+11. Wire direct OOB toaster demo.
+12. Add XTDB consistency helpers.
+13. Add fragment burst-protection helpers.
+14. Reintroduce optimization only after tests and demos pass.
+
+* Final Guiding Principle
+
+#+begin_src text
+Writers declare primary changes.
+Primary changes contain only what writers explicitly emit.
+The app declares what those changes imply.
+Expansion rules may query authoritative state when needed.
+source/emit! emits expanded invalidations only.
+core/emit! owns expansion.
+dispatch controls where expansion runs.
+Readers declare interests.
+Gesso Live moves invalidations cheaply.
+State stays authoritative on the server.
+Flows stay disposable.
+Transport stays boring.
+Fragment rendering gets protected from fanout bursts.
+#+end_src
