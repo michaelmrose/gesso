@@ -23,7 +23,8 @@
    - source implementation
 
    Higher-level callers such as gesso.live.core should validate full public
-   configs. These low-level attr builders stay small and mostly mechanical."
+   configs with gesso.live.schema. These low-level attr builders still validate
+   obvious required options so they do not silently produce broken HTMX markup."
   (:require
    [clojure.string :as str]))
 
@@ -62,6 +63,127 @@
    This direct-OOB path should be verified with browser/integration tests before
    application code depends on it."
   "none")
+
+;; -----------------------------------------------------------------------------
+;; Small attr helpers
+;; -----------------------------------------------------------------------------
+
+(defn clean-attrs
+  "Remove nil values from an attr map.
+
+   False, empty strings, zeroes, and empty collections are preserved."
+  [attrs]
+  (into {}
+        (remove (comp nil? val))
+        attrs))
+
+(defn- non-blank-string?
+  [x]
+  (and (string? x)
+       (not (str/blank? x))))
+
+(defn- require-non-blank!
+  [opts k label]
+  (let [v (get opts k)]
+    (when-not (non-blank-string? v)
+      (throw
+       (ex-info (str label " is required and must be a non-blank string.")
+                {:key k
+                 :value v
+                 :opts opts})))
+    v))
+
+(defn- require-present!
+  [opts k label]
+  (let [v (get opts k)]
+    (when-not (some? v)
+      (throw
+       (ex-info (str label " is required.")
+                {:key k
+                 :value v
+                 :opts opts})))
+    v))
+
+(defn- ensure-one-method!
+  "Throw unless exactly one of get/post is supplied."
+  [get post]
+  (cond
+    (and get post)
+    (throw
+     (ex-info "HTMX SSE callback trigger may not include both :get and :post."
+              {:get get
+               :post post}))
+
+    (not (or get post))
+    (throw
+     (ex-info "HTMX SSE callback trigger requires either :get or :post."
+              {:get get
+               :post post}))
+
+    :else
+    nil))
+
+;; -----------------------------------------------------------------------------
+;; hx-ext composition
+;; -----------------------------------------------------------------------------
+
+(defn- extension-name
+  [x]
+  (cond
+    (keyword? x) (name x)
+    (symbol? x)  (name x)
+    :else        (str x)))
+
+(defn- split-hx-ext
+  [x]
+  (cond
+    (nil? x)
+    []
+
+    (sequential? x)
+    (mapcat split-hx-ext x)
+
+    :else
+    (->> (str/split (extension-name x) #"[,\s]+")
+         (remove str/blank?))))
+
+(defn hx-ext-value
+  "Build a normalized comma-separated hx-ext value.
+
+   Examples:
+     (hx-ext-value \"sse\" \"path-deps\")
+     => \"sse, path-deps\"
+
+     (hx-ext-value \"sse,path-deps\" :debug)
+     => \"sse, path-deps, debug\"
+
+   Duplicate extensions are removed while preserving first occurrence order."
+  [& xs]
+  (let [exts (->> xs
+                  (mapcat split-hx-ext)
+                  distinct
+                  vec)]
+    (when (seq exts)
+      (str/join ", " exts))))
+
+(defn merge-attrs
+  "Merge attr maps, remove nil values, and compose :hx-ext instead of letting
+   caller attrs accidentally replace required extensions.
+
+   Caller attrs still override ordinary attributes."
+  [& maps]
+  (let [merged (apply merge maps)
+        ext    (apply hx-ext-value (map :hx-ext maps))]
+    (clean-attrs
+     (cond-> merged
+       ext (assoc :hx-ext ext)))))
+
+(defn merge-sse-attrs
+  "Merge attrs while ensuring the HTMX SSE extension remains present."
+  [& maps]
+  (apply merge-attrs
+         {:hx-ext "sse"}
+         maps))
 
 ;; -----------------------------------------------------------------------------
 ;; Shared normalization
@@ -127,16 +249,6 @@
   [event]
   (str "sse:" (event-name event)))
 
-(defn- ensure-one-method!
-  "Throw when both get and post are supplied for a callback trigger."
-  [get post]
-  (when (and get post)
-    (throw
-     (ex-info "HTMX SSE callback trigger may not include both :get and :post."
-              {:get get
-               :post post})))
-  nil)
-
 ;; -----------------------------------------------------------------------------
 ;; Jitter helpers
 ;; -----------------------------------------------------------------------------
@@ -172,8 +284,9 @@
    :jitter-delay-ms is useful for deterministic tests.
    :jitter-ms chooses a static random delay during rendering."
   [{:keys [jitter-ms jitter-delay-ms]}]
-  (or jitter-delay-ms
-      (random-jitter-delay-ms jitter-ms)))
+  (if (some? jitter-delay-ms)
+    jitter-delay-ms
+    (random-jitter-delay-ms jitter-ms)))
 
 ;; -----------------------------------------------------------------------------
 ;; Live fragment refresh helpers
@@ -184,15 +297,15 @@
 
    Options:
    - :stream-url
-   - :attrs merged last
+   - :attrs merged last for ordinary attrs
 
-   Caller attrs are merged last intentionally. Higher-level helpers may choose
-   to prevent overriding required live attrs."
-  [{:keys [stream-url attrs]}]
-  (merge
-   {:hx-ext "sse"
-    :sse-connect stream-url}
-   attrs))
+   :hx-ext is composed rather than overwritten, so caller attrs like
+   {:hx-ext \"path-deps\"} become \"sse, path-deps\"."
+  [{:keys [attrs] :as opts}]
+  (let [stream-url (require-non-blank! opts :stream-url "SSE stream URL")]
+    (merge-sse-attrs
+     {:sse-connect stream-url}
+     attrs)))
 
 (defn fragment-trigger
   "Build the canonical live fragment trigger string.
@@ -228,19 +341,21 @@
    - :jitter-ms
    - :jitter-delay-ms
    - :attrs merged last"
-  [{:keys [id src event swap trigger attrs] :as opts
+  [{:keys [event swap trigger attrs] :as opts
     :or {event default-event
          swap default-fragment-swap
          trigger default-fragment-trigger}}]
-  (merge
-   {:id id
-    :hx-get src
-    :hx-trigger (fragment-trigger
-                 (assoc opts
-                        :event event
-                        :trigger trigger))
-    :hx-swap swap}
-   attrs))
+  (let [id  (require-non-blank! opts :id "Fragment id")
+        src (require-non-blank! opts :src "Fragment source URL")]
+    (merge-attrs
+     {:id id
+      :hx-get src
+      :hx-trigger (fragment-trigger
+                   (assoc opts
+                          :event event
+                          :trigger trigger))
+      :hx-swap swap}
+     attrs)))
 
 ;; -----------------------------------------------------------------------------
 ;; POST helper attrs
@@ -256,16 +371,17 @@
    - :target
    - :swap defaults to \"innerHTML\"
    - :attrs merged last"
-  [{:keys [to target swap attrs]
+  [{:keys [target swap attrs] :as opts
     :or {swap default-post-swap}}]
-  (merge
-   {:method "post"
-    :action to
-    :hx-post to
-    :hx-swap swap}
-   (when-let [target' (normalize-target target)]
-     {:hx-target target'})
-   attrs))
+  (let [to (require-non-blank! opts :to "POST URL")]
+    (merge-attrs
+     {:method "post"
+      :action to
+      :hx-post to
+      :hx-swap swap}
+     (when-let [target' (normalize-target target)]
+       {:hx-target target'})
+     attrs)))
 
 ;; -----------------------------------------------------------------------------
 ;; SSE callback helpers
@@ -280,14 +396,16 @@
    Options:
    - :id
    - :stream-url
-   - :attrs merged last"
-  [{:keys [id stream-url attrs]}]
-  (merge
-   (cond-> {:hx-ext "sse"
-            :sse-connect stream-url
-            :aria-hidden "true"}
-     id (assoc :id id))
-   attrs))
+   - :attrs merged last for ordinary attrs
+
+   :hx-ext is composed rather than overwritten."
+  [{:keys [id attrs] :as opts}]
+  (let [stream-url (require-non-blank! opts :stream-url "SSE stream URL")]
+    (merge-sse-attrs
+     (cond-> {:sse-connect stream-url
+              :aria-hidden "true"}
+       id (assoc :id id))
+     attrs)))
 
 (defn sse-callback-trigger-attrs
   "Attrs for a child element that reacts to an SSE event by making an HTMX
@@ -297,21 +415,21 @@
 
    Options:
    - :event
-   - :get
-   - :post
+   - exactly one of :get or :post
    - :target
    - :swap defaults to \"none\"
    - :jitter-ms
    - :jitter-delay-ms
    - :attrs merged last
 
-   Supplying both :get and :post throws."
+   Supplying both :get and :post throws.
+   Supplying neither :get nor :post throws."
   [{:keys [event get post target swap attrs] :as opts
     :or {event default-event
          swap default-sse-callback-swap}}]
   (ensure-one-method! get post)
   (let [delay-ms (effective-jitter-delay-ms opts)]
-    (merge
+    (merge-attrs
      (cond-> {:hx-trigger (trigger-with-delay (sse-trigger event) delay-ms)
               :hx-swap swap}
        get    (assoc :hx-get get)
@@ -366,25 +484,28 @@
    - :stream-url
    - :event
    - :swap defaults to \"none\"
-   - :attrs merged last"
-  [{:keys [id stream-url event swap attrs]
+   - :attrs merged last for ordinary attrs
+
+   :hx-ext is composed rather than overwritten."
+  [{:keys [id event swap attrs] :as opts
     :or {event default-event
          swap default-sse-direct-swap}}]
-  (merge
-   (cond-> {:hx-ext "sse"
-            :sse-connect stream-url
-            :sse-swap (event-name event)
-            :hx-swap swap
-            :aria-hidden "true"
-            :data-gesso-live-direct-sse true}
-     id (assoc :id id))
-   attrs))
+  (let [stream-url (require-non-blank! opts :stream-url "SSE stream URL")]
+    (merge-sse-attrs
+     (cond-> {:sse-connect stream-url
+              :sse-swap (event-name event)
+              :hx-swap swap
+              :aria-hidden "true"
+              :data-gesso-live-direct-sse true
+              :data-gesso-live-direct-sse-experimental true}
+       id (assoc :id id))
+     attrs)))
 
 (defn sse-swap-listener
   "Render an invisible direct SSE swap listener.
 
-   This helper is transport-markup only. Direct payload behavior should be
-   covered by browser/integration tests."
+   This helper is transport-markup only. Direct payload behavior must be covered
+   by browser/integration tests."
   [opts]
   [:div (sse-swap-attrs opts)])
 
@@ -393,10 +514,14 @@
 
    The incoming SSE data is expected to contain HTMX OOB markup.
 
-   This helper is intentionally marked with a data attribute so tests and app
-   code can identify that it is using the direct SSE/OOB path."
+   This helper is intentionally marked with data attributes so tests and app code
+   can identify that it is using the direct SSE/OOB path.
+
+   This path remains experimental until browser/integration tests prove that
+   HTMX processes hx-swap-oob content from SSE payloads as expected."
   [opts]
-  (sse-swap-listener
-   (merge {:swap "none"
-           :attrs {:data-gesso-live-oob-listener true}}
-          opts)))
+  (let [marker-attrs {:data-gesso-live-oob-listener true
+                      :data-gesso-live-oob-experimental true}
+        opts'        (update opts :attrs #(merge % marker-attrs))]
+    (sse-swap-listener
+     (merge {:swap "none"} opts'))))

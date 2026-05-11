@@ -173,7 +173,8 @@
 (def SourceOptions
   [:map
    [:id {:optional true} any?]
-   [:coalesce-window-ms {:optional true} Milliseconds]])
+   [:coalesce-window-ms {:optional true} Milliseconds]
+   [:on-error {:optional true} fn?]])
 
 (def DispatchMode
   [:enum :sync :async])
