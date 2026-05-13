@@ -81,6 +81,19 @@
         (remove (comp nil? val))
         m))
 
+(defn default-interested?
+  "Default subscription matcher.
+
+   A subscription is interested in an invalidation when :topic and :id match."
+  [subscription invalidation]
+  (= (select-keys subscription [:topic :id])
+     (select-keys invalidation [:topic :id])))
+
+(defn invalidation-key
+  "Return the default coalescing/matching key for an invalidation."
+  [invalidation]
+  (select-keys invalidation [:topic :id]))
+
 (defn- flow-option-contract
   [options]
   (compact-map
@@ -114,21 +127,25 @@
   options)
 
 (defn prepare-options!
-  "Merge defaults, validate the public flow option contracts, and return the
-   normalized option map.
+  "Merge defaults, normalize optional public options, validate contracts, and
+   return the normalized option map.
 
-   This is intentionally public-ish so tests can verify that flow-for-source
-   validates before opening a source tap."
+   Public API note:
+
+   :interested? is optional for callers. Internally it is normalized to
+   default-interested? before schema validation so downstream code can treat it
+   as present."
   [options]
-  (let [options' (opts options)]
+  (let [options'  (opts options)
+        options'' (update options' :interested? #(or % default-interested?))]
     (schema/validate! :gesso.live/flow-for-subscription-options
-                      (flow-option-contract options'))
+                      (flow-option-contract options''))
     (schema/validate! :gesso.live/invalidation-event-options
-                      (event-option-contract options'))
-    (require-fn-option! options' :debug-fn)
-    (require-fn-option! options' :on-close)
-    (require-boolean-option! options' :relieve?)
-    options'))
+                      (event-option-contract options''))
+    (require-fn-option! options'' :debug-fn)
+    (require-fn-option! options'' :on-close)
+    (require-boolean-option! options'' :relieve?)
+    options''))
 
 (defn- call-safely
   [f & args]
@@ -137,19 +154,6 @@
       (apply f args)
       (catch Exception _
         nil))))
-
-(defn default-interested?
-  "Default subscription matcher.
-
-   A subscription is interested in an invalidation when :topic and :id match."
-  [subscription invalidation]
-  (= (select-keys subscription [:topic :id])
-     (select-keys invalidation [:topic :id])))
-
-(defn invalidation-key
-  "Return the default coalescing/matching key for an invalidation."
-  [invalidation]
-  (select-keys invalidation [:topic :id]))
 
 (defn- data-value
   [data invalidation]
@@ -256,6 +260,14 @@
 (defn stream-flow
   "Convert a Manifold stream into a Missionary discrete flow.
 
+   The flow pulls one value at a time from the Manifold stream using s/take!.
+   This avoids the eager s/consume firehose.
+
+   The next s/take! is not installed until the previous value has crossed the
+   Missionary observe boundary. On the JVM, m/observe's emit callback blocks
+   while a transfer is pending, so this preserves downstream pressure better
+   than s/consume.
+
    The flow terminates when s/take! returns closed-sentinel.
 
    Options:
@@ -266,32 +278,88 @@
   ([stream]
    (stream-flow stream nil))
   ([stream {:keys [debug-fn on-close]}]
-   (m/ap
-    (try
-      (loop []
-        (let [value (m/? (deferred-task (s/take! stream closed-sentinel)))]
-          (if (= closed-sentinel value)
-            (do
-              (debug!
-               debug-fn
-               :gesso.live.flow/stream-closed
-               {:at (now-ms)})
-              (m/amb))
-            (do
-              (debug!
-               debug-fn
-               :gesso.live.flow/stream-value
-               {:value value
-                :at (now-ms)})
-              (m/amb value)
-              (recur)))))
-      (finally
-        (call-safely on-close)
-        (s/close! stream)
-        (debug!
-         debug-fn
-         :gesso.live.flow/stream-flow-closed
-         {:at (now-ms)}))))))
+   (let [close-once!
+         (let [closed? (atom false)]
+           (fn []
+             (when (compare-and-set! closed? false true)
+               (call-safely on-close)
+               (s/close! stream)
+               (debug!
+                debug-fn
+                :gesso.live.flow/stream-flow-closed
+                {:at (now-ms)}))))
+
+         raw-flow
+         (m/observe
+          (fn [emit!]
+            (let [cancelled? (atom false)]
+              (letfn [(fail! [error]
+                        (when-not @cancelled?
+                          (reset! cancelled? true)
+                          (try
+                            (emit! {::stream-error error})
+                            (finally
+                              (close-once!)))))
+
+                      (finish! []
+                        (when-not @cancelled?
+                          (debug!
+                           debug-fn
+                           :gesso.live.flow/stream-closed
+                           {:at (now-ms)})
+                          (reset! cancelled? true)
+                          (try
+                            (emit! closed-sentinel)
+                            (finally
+                              (close-once!)))))
+
+                      (pull! []
+                        (when-not @cancelled?
+                          (d/on-realized
+                           (s/take! stream closed-sentinel)
+
+                           (fn [value]
+                             (when-not @cancelled?
+                               (if (= closed-sentinel value)
+                                 (finish!)
+                                 (try
+                                   (debug!
+                                    debug-fn
+                                    :gesso.live.flow/stream-value
+                                    {:value value
+                                     :at (now-ms)})
+
+                                   ;; Critical bit:
+                                   ;; emit! may block until downstream accepts
+                                   ;; the value, so we do not schedule the next
+                                   ;; s/take! until this returns.
+                                   (emit! value)
+
+                                   (when-not @cancelled?
+                                     (pull!))
+                                   (catch Throwable e
+                                     (fail! e))))))
+
+                           (fn [error]
+                             (fail! error)))))]
+
+                (pull!)
+
+                (fn cancel []
+                  (reset! cancelled? true)
+                  (close-once!))))))]
+
+     (m/eduction
+      (comp
+       (take-while #(not= closed-sentinel %))
+       (map
+        (fn [value]
+          (if-let [error (::stream-error value)]
+            (throw error)
+            value))))
+      raw-flow))))
+
+
 
 ;; -----------------------------------------------------------------------------
 ;; Flow transforms
@@ -334,8 +402,12 @@
   "Apply Missionary relief/coalescing to a flow.
 
    With m/relieve, stale pending values can be discarded when the consumer is
-   slower than the producer. This is the intended behavior for invalidation-first
-   live fragments."
+   slower than the producer. This is appropriate for cheap invalidation-first
+   wakeups.
+
+   This does not cancel expensive render/data-load work. Rendered stream paths
+   should use m/?<= around the render branch when newer invalidations make older
+   render work stale."
   [flow]
   (m/relieve flow))
 
@@ -391,9 +463,9 @@
 
    This is the usual handoff from source.clj to flow.clj."
   [src options]
-  (let [options' (prepare-options! options)
-        debug-fn (:debug-fn options')
-        tap      (source/changes src)
+  (let [options'  (prepare-options! options)
+        debug-fn  (:debug-fn options')
+        tap       (source/changes src)
         options'' (assoc options'
                          :on-close
                          (fn []
