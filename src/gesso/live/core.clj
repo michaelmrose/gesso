@@ -10,7 +10,7 @@
    - SSE transport startup
    - fragment render protection
    - app-facing XTDB2 consistency helpers
-   - app-facing HTMX attribute helpers
+   - app-facing HTMX/UI helpers
 
    It intentionally stays thin. The specialized namespaces still own their own
    behavior:
@@ -37,7 +37,10 @@
        owns XTDB2 query/transaction consistency helpers
 
      gesso.live.htmx
-       owns browser-facing HTMX attribute builders"
+       owns browser-facing raw HTMX attribute builders
+
+     gesso.live.ui
+       owns Hiccup convenience helpers for live fragments and POST controls"
   (:require
    [gesso.live.consistency.xtdb :as live.xtdb]
    [gesso.live.dispatch :as dispatch]
@@ -47,7 +50,8 @@
    [gesso.live.invalidation :as invalidation]
    [gesso.live.source :as source]
    [gesso.live.synced :as synced]
-   [gesso.live.transport.sse :as sse]))
+   [gesso.live.transport.sse :as sse]
+   [gesso.live.ui :as live.ui]))
 
 ;; -----------------------------------------------------------------------------
 ;; Debug
@@ -429,7 +433,7 @@
   live.xtdb/delete-docs-op)
 
 ;; -----------------------------------------------------------------------------
-;; HTMX facade
+;; HTMX/raw attr facade
 ;; -----------------------------------------------------------------------------
 
 (def fragment-root-attrs
@@ -449,6 +453,46 @@
 
    Re-export of gesso.live.htmx/post-form-attrs."
   htmx/post-form-attrs)
+
+;; -----------------------------------------------------------------------------
+;; UI/Hiccup facade
+;; -----------------------------------------------------------------------------
+
+(def ->fragment
+  "Create a live fragment descriptor.
+
+   Re-export of gesso.live.ui/->fragment."
+  live.ui/->fragment)
+
+(def fragment-panel
+  "Render a standard live fragment panel.
+
+   Re-export of gesso.live.ui/fragment-panel."
+  live.ui/fragment-panel)
+
+(def post-form
+  "Render a POST form with anti-forgery input.
+
+   Re-export of gesso.live.ui/post-form."
+  live.ui/post-form)
+
+(def post-button
+  "Render a tiny HTMX POST form containing one submit button.
+
+   Re-export of gesso.live.ui/post-button."
+  live.ui/post-button)
+
+(def anti-forgery-token
+  "Extract an anti-forgery token from ctx.
+
+   Re-export of gesso.live.ui/anti-forgery-token."
+  live.ui/anti-forgery-token)
+
+(def anti-forgery-input
+  "Render a hidden anti-forgery input when ctx contains a token.
+
+   Re-export of gesso.live.ui/anti-forgery-input."
+  live.ui/anti-forgery-input)
 
 ;; -----------------------------------------------------------------------------
 ;; Invalidation and source emission
@@ -622,7 +666,6 @@
             :changes changes'
             :emit emit-mode
             :emit-results emit-results})))
-
 
 ;; -----------------------------------------------------------------------------
 ;; Synced value facade
