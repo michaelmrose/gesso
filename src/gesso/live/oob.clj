@@ -94,22 +94,27 @@
     (str x)))
 
 (defn- safe-id-value?
+  "Return true for an acceptable explicit HTML id value.
+
+   This intentionally does not enforce a CSS identifier regex. HTML ids may
+   start with digits, and UUID-style ids are common in application code.
+
+   We only reject nil and blank/whitespace-only strings."
   [s]
-  (boolean
-   (re-matches #"[A-Za-z_][A-Za-z0-9_-]*" s)))
+  (and (string? s)
+       (not (str/blank? s))))
 
 (defn- require-safe-id!
   [id]
-  (let [id' (require-nonblank! :id (normalize-name id))
+  (let [id'  (require-nonblank! :id (normalize-name id))
         id'' (if (str/starts-with? id' "#")
                (subs id' 1)
                id')]
     (when-not (safe-id-value? id'')
       (throw
-       (ex "gesso.live OOB id must be a simple CSS-id-safe value."
+       (ex "gesso.live OOB id must be a non-blank string."
            {:id id
-            :normalized id'
-            :allowed-pattern "[A-Za-z_][A-Za-z0-9_-]*"})))
+            :normalized id'})))
     id''))
 
 (defn- hiccup-node?
@@ -155,17 +160,23 @@
 ;; -----------------------------------------------------------------------------
 
 (defn id-selector
-  "Return a CSS id selector for a simple id.
+  "Return a CSS id selector for an id.
 
    Examples:
 
-     (id-selector \"request-1\") => \"#request-1\"
-     (id-selector :request-1)   => \"#request-1\"
+     (id-selector \"request-1\")
+     => \"#request-1\"
 
-   If the input already starts with #, the id part is validated and normalized.
+     (id-selector :request-1)
+     => \"#request-1\"
 
-   This helper intentionally accepts only simple CSS-id-safe values:
-     [A-Za-z_][A-Za-z0-9_-]*
+     (id-selector \"123e4567-e89b-12d3-a456-426614174000\")
+     => \"#123e4567-e89b-12d3-a456-426614174000\"
+
+   If the input already starts with #, the id part is normalized.
+
+   This helper intentionally does not enforce an artificial HTML id regex.
+   It only rejects nil and blank values.
 
    For complex selectors, use selector instead."
   [id]
