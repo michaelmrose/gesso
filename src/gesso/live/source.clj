@@ -23,7 +23,10 @@
   (:require
    [gesso.live.schema :as schema]
    [manifold.deferred :as d]
-   [manifold.stream :as s]))
+   [manifold.stream :as s])
+  (:import
+   [java.util.concurrent ConcurrentHashMap]
+   [java.util.concurrent.atomic AtomicLong LongAdder]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
@@ -102,12 +105,21 @@
 
 (defn- next-tap-id!
   [source]
-  (swap! (:tap-counter source) inc))
+  (.incrementAndGet ^AtomicLong (:tap-counter source)))
 
 (defn- remove-tap!
   [source tap-id]
-  (swap! (:taps source) dissoc tap-id)
+  (.remove ^ConcurrentHashMap (:taps source) tap-id)
   nil)
+
+(defn- remove-tap-if-same!
+  [source tap-id stream]
+  (.remove ^ConcurrentHashMap (:taps source) tap-id stream)
+  nil)
+
+(defn- tap-count
+  [source]
+  (.size ^ConcurrentHashMap (:taps source)))
 
 ;; -----------------------------------------------------------------------------
 ;; Error/rejection recording
@@ -154,29 +166,16 @@
 ;; Tap helpers
 ;; -----------------------------------------------------------------------------
 
-(defn- active-taps
-  [source]
-  (let [snapshot @(:taps source)]
-    (reduce-kv
-     (fn [acc tap-id stream]
-       (if (s/closed? stream)
-         (do
-           (remove-tap! source tap-id)
-           acc)
-         (assoc acc tap-id stream)))
-     {}
-     snapshot)))
-
 (defn- track-put-result!
-  [source tap-id invalidation put-result]
+  [source tap-id stream invalidation put-result]
   (d/on-realized
    put-result
    (fn [accepted?]
      (when-not accepted?
-       (remove-tap! source tap-id)
+       (remove-tap-if-same! source tap-id stream)
        (record-put-rejected! source tap-id invalidation)))
    (fn [error]
-     (remove-tap! source tap-id)
+     (remove-tap-if-same! source tap-id stream)
      (record-put-error! source tap-id invalidation error)))
   nil)
 
@@ -185,16 +184,16 @@
   (cond
     (s/closed? stream)
     (do
-      (remove-tap! source tap-id)
+      (remove-tap-if-same! source tap-id stream)
       false)
 
     :else
     (try
       (let [put-result (s/put! stream invalidation)]
-        (track-put-result! source tap-id invalidation put-result)
+        (track-put-result! source tap-id stream invalidation put-result)
         true)
       (catch Throwable e
-        (remove-tap! source tap-id)
+        (remove-tap-if-same! source tap-id stream)
         (record-put-error! source tap-id invalidation e)
         false))))
 
@@ -227,10 +226,10 @@
       :coalesce-window-ms (:coalesce-window-ms options')
       :on-error (:on-error options')
       :closed? (atom false)
-      :tap-counter (atom 0)
-      :taps (atom {})
-      :emitted-count (atom 0)
-      :attempted-count (atom 0)
+      :tap-counter (AtomicLong. 0)
+      :taps (ConcurrentHashMap.)
+      :emitted-count (LongAdder.)
+      :attempted-count (LongAdder.)
       :errors (atom [])})))
 
 (defn close!
@@ -239,9 +238,10 @@
    Idempotent."
   [source]
   (when (compare-and-set! (:closed? source) false true)
-    (doseq [[_tap-id stream] @(:taps source)]
-      (s/close! stream))
-    (reset! (:taps source) {}))
+    (let [taps ^ConcurrentHashMap (:taps source)]
+      (doseq [stream (.values taps)]
+        (s/close! stream))
+      (.clear taps)))
   :closed)
 
 (defn stats
@@ -250,9 +250,9 @@
   {:id (:id source)
    :created-at (:created-at source)
    :closed? (closed? source)
-   :tap-count (count @(:taps source))
-   :emitted-count @(:emitted-count source)
-   :attempted-count @(:attempted-count source)
+   :tap-count (tap-count source)
+   :emitted-count (.sum ^LongAdder (:emitted-count source))
+   :attempted-count (.sum ^LongAdder (:attempted-count source))
    :error-count (count @(:errors source))
    :coalesce-window-ms (:coalesce-window-ms source)})
 
@@ -271,9 +271,10 @@
   [source]
   (ensure-open! source)
   (let [tap-id (next-tap-id! source)
-        stream (s/stream)]
-    (swap! (:taps source) assoc tap-id stream)
-    (s/on-closed stream #(remove-tap! source tap-id))
+        stream (s/stream)
+        taps ^ConcurrentHashMap (:taps source)]
+    (.put taps tap-id stream)
+    (s/on-closed stream #(remove-tap-if-same! source tap-id stream))
     stream))
 
 ;; -----------------------------------------------------------------------------
@@ -300,19 +301,25 @@
   [source invalidation]
   (ensure-open! source)
   (let [invalidation' (validate-invalidation! invalidation)
-        taps (active-taps source)
-        attempted (reduce-kv
-                   (fn [n tap-id stream]
-                     (if (put-tap! source tap-id stream invalidation')
-                       (inc n)
-                       n))
-                   0
-                   taps)]
-    (swap! (:emitted-count source) inc)
-    (swap! (:attempted-count source) + attempted)
+        taps ^ConcurrentHashMap (:taps source)
+        attempted
+        (loop [attempted 0
+               it (.iterator (.entrySet taps))]
+          (if (.hasNext it)
+            (let [entry (.next it)
+                  tap-id (.getKey entry)
+                  stream (.getValue entry)]
+              (recur
+               (if (put-tap! source tap-id stream invalidation')
+                 (inc attempted)
+                 attempted)
+               it))
+            attempted))]
+    (.increment ^LongAdder (:emitted-count source))
+    (.add ^LongAdder (:attempted-count source) attempted)
     {:status :emitted
      :source/id (:id source)
-     :tap-count (count taps)
+     :tap-count (.size taps)
      :attempted attempted
      :invalidation invalidation'}))
 
