@@ -52,7 +52,10 @@
    :consistency-token nil
    :relieve? true
    :debug-fn nil
-   :on-close nil})
+   :on-close nil
+
+   ;; Internal/test seam. Production callers should normally ignore this.
+   :take! s/take!})
 
 (def closed-sentinel
   ::closed)
@@ -80,6 +83,13 @@
   (into {}
         (remove (comp nil? val))
         m))
+
+(defn- once
+  [f]
+  (let [called? (atom false)]
+    (fn [& args]
+      (when (compare-and-set! called? false true)
+        (apply f args)))))
 
 (defn default-interested?
   "Default subscription matcher.
@@ -134,7 +144,10 @@
 
    :interested? is optional for callers. Internally it is normalized to
    default-interested? before schema validation so downstream code can treat it
-   as present."
+   as present.
+
+   :take! is an internal/test seam used by stream-flow tests to avoid mocking
+   manifold.stream/take! globally."
   [options]
   (let [options'  (opts options)
         options'' (update options' :interested? #(or % default-interested?))]
@@ -144,6 +157,7 @@
                       (event-option-contract options''))
     (require-fn-option! options'' :debug-fn)
     (require-fn-option! options'' :on-close)
+    (require-fn-option! options'' :take!)
     (require-boolean-option! options'' :relieve?)
     options''))
 
@@ -257,109 +271,140 @@
 ;; Manifold stream -> Missionary flow
 ;; -----------------------------------------------------------------------------
 
+(defn- stream-error-value
+  [error]
+  {::stream-error error})
+
+(defn- stream-error-value?
+  [value]
+  (and (map? value)
+       (contains? value ::stream-error)))
+
+(defn- unwrap-stream-value
+  [value]
+  (if (stream-error-value? value)
+    (throw (::stream-error value))
+    value))
+
+(defn- stream-terminal-xf
+  "Turn the m/observe event stream into a finite stream-flow.
+
+   closed-sentinel is emitted once when the Manifold stream closes. The
+   take-while stage turns that sentinel into normal flow termination.
+
+   stream-error-value is emitted once when take! fails. The map stage unwraps
+   it by throwing the wrapped exception so Missionary's downstream machinery
+   sees a normal flow failure."
+  []
+  (comp
+   (map unwrap-stream-value)
+   (take-while #(not= closed-sentinel %))))
+
+(defn- emit-safely!
+  "Emit a value into m/observe.
+
+   Returns true when emit! accepted the value. Returns false when emit! itself
+   throws, which normally means the consumer is gone or not ready. In that case
+   the caller should stop pulling."
+  [emit! value debug-fn]
+  (try
+    (emit! value)
+    true
+    (catch Throwable e
+      (debug!
+       debug-fn
+       :gesso.live.flow/emit-failed
+       {:value value
+        :error e
+        :at (now-ms)})
+      false)))
+
 (defn stream-flow
-  "Convert a Manifold stream into a Missionary discrete flow.
+  "Convert a Manifold stream into a finite Missionary discrete flow.
 
-   The flow pulls one value at a time from the Manifold stream using s/take!.
-   This avoids the eager s/consume firehose.
+   This is the serial Manifold -> Missionary bridge:
 
-   The next s/take! is not installed until the previous value has crossed the
-   Missionary observe boundary. On the JVM, m/observe's emit callback blocks
-   while a transfer is pending, so this preserves downstream pressure better
-   than s/consume.
-
-   The flow terminates when s/take! returns closed-sentinel.
+   - no s/consume
+   - at most one outstanding take! at a time
+   - emit the current value before installing the next take!
+   - emit closed-sentinel once to trigger normal flow termination
+   - emit a wrapped stream error once to trigger normal flow failure
+   - rely on m/observe cleanup for downstream cancellation/early termination
 
    Options:
      :debug-fn
      :on-close
-
-   The stream is closed when the Missionary flow is cancelled or terminates."
+     :take!      internal/test seam; defaults to manifold.stream/take!"
   ([stream]
    (stream-flow stream nil))
-  ([stream {:keys [debug-fn on-close]}]
-   (let [close-once!
-         (let [closed? (atom false)]
-           (fn []
-             (when (compare-and-set! closed? false true)
-               (call-safely on-close)
-               (s/close! stream)
-               (debug!
-                debug-fn
-                :gesso.live.flow/stream-flow-closed
-                {:at (now-ms)}))))
+  ([stream {:keys [debug-fn on-close take!]
+            :or {take! s/take!}}]
+   (let [stopped? (atom false)
 
-         raw-flow
-         (m/observe
-          (fn [emit!]
-            (let [cancelled? (atom false)]
-              (letfn [(fail! [error]
-                        (when-not @cancelled?
-                          (reset! cancelled? true)
-                          (try
-                            (emit! {::stream-error error})
-                            (finally
-                              (close-once!)))))
-
-                      (finish! []
-                        (when-not @cancelled?
-                          (debug!
-                           debug-fn
-                           :gesso.live.flow/stream-closed
-                           {:at (now-ms)})
-                          (reset! cancelled? true)
-                          (try
-                            (emit! closed-sentinel)
-                            (finally
-                              (close-once!)))))
-
-                      (pull! []
-                        (when-not @cancelled?
-                          (d/on-realized
-                           (s/take! stream closed-sentinel)
-
-                           (fn [value]
-                             (when-not @cancelled?
-                               (if (= closed-sentinel value)
-                                 (finish!)
-                                 (try
-                                   (debug!
-                                    debug-fn
-                                    :gesso.live.flow/stream-value
-                                    {:value value
-                                     :at (now-ms)})
-
-                                   ;; Critical bit:
-                                   ;; emit! may block until downstream accepts
-                                   ;; the value, so we do not schedule the next
-                                   ;; s/take! until this returns.
-                                   (emit! value)
-
-                                   (when-not @cancelled?
-                                     (pull!))
-                                   (catch Throwable e
-                                     (fail! e))))))
-
-                           (fn [error]
-                             (fail! error)))))]
-
-                (pull!)
-
-                (fn cancel []
-                  (reset! cancelled? true)
-                  (close-once!))))))]
+         close-once!
+         (once
+          (fn []
+            (reset! stopped? true)
+            (call-safely on-close)
+            (s/close! stream)
+            (debug!
+             debug-fn
+             :gesso.live.flow/stream-flow-closed
+             {:at (now-ms)})))]
 
      (m/eduction
-      (comp
-       (take-while #(not= closed-sentinel %))
-       (map
-        (fn [value]
-          (if-let [error (::stream-error value)]
-            (throw error)
-            value))))
-      raw-flow))))
+      (stream-terminal-xf)
 
+      (m/observe
+       (fn [emit!]
+         (letfn [(stop! []
+                   (reset! stopped? true)
+                   (close-once!))
 
+                 (emit-and-stop! [value]
+                   (when (emit-safely! emit! value debug-fn)
+                     (stop!)))
+
+                 (emit-error-and-stop! [cause]
+                   (let [wrapped (ex "gesso.live stream failed."
+                                     {}
+                                     cause)]
+                     (debug!
+                      debug-fn
+                      :gesso.live.flow/stream-error
+                      {:error cause
+                       :at (now-ms)})
+                     (emit-and-stop! (stream-error-value wrapped))))
+
+                 (pull! []
+                   (when-not @stopped?
+                     (let [deferred (take! stream closed-sentinel)]
+                       (d/on-realized
+                        deferred
+                        (fn [value]
+                          (when-not @stopped?
+                            (if (= closed-sentinel value)
+                              (do
+                                (debug!
+                                 debug-fn
+                                 :gesso.live.flow/stream-closed
+                                 {:at (now-ms)})
+                                (emit-and-stop! closed-sentinel))
+                              (do
+                                (debug!
+                                 debug-fn
+                                 :gesso.live.flow/stream-value
+                                 {:value value
+                                  :at (now-ms)})
+                                (when (emit-safely! emit! value debug-fn)
+                                  (pull!))))))
+                        (fn [cause]
+                          (when-not @stopped?
+                            (emit-error-and-stop! cause)))))))]
+           (pull!)
+
+           (fn cleanup []
+             (stop!)))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Flow transforms
@@ -434,7 +479,8 @@
 
     (->> (stream-flow stream
                       {:debug-fn debug-fn
-                       :on-close (:on-close options)})
+                       :on-close (:on-close options)
+                       :take! (:take! options)})
          (m/eduction (subscription-xf options))
          (#(maybe-relieve % options)))))
 
@@ -450,6 +496,7 @@
      :relieve?           default true
      :debug-fn           optional pay-for-play debug hook
      :on-close           optional internal cleanup/debug hook
+     :take!              internal/test seam; defaults to manifold.stream/take!
 
    Returns a Missionary flow of live-event maps."
   [stream options]

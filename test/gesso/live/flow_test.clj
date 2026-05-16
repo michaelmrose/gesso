@@ -1,8 +1,9 @@
 (ns gesso.live.flow-test
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.flow :as flow]
    [gesso.live.source :as source]
+   [manifold.deferred :as d]
    [manifold.stream :as s]
    [missionary.core :as m]))
 
@@ -96,6 +97,18 @@
 (defn event-count
   [events event-name]
   (count (filter #(= event-name (:event %)) events)))
+
+(defn first-event
+  [events event-name]
+  (first (filter #(= event-name (:event %)) events)))
+
+(defn complete!
+  [deferred value]
+  (d/success! deferred value))
+
+(defn fail!
+  [deferred error]
+  (d/error! deferred error))
 
 ;; -----------------------------------------------------------------------------
 ;; Pure helper behavior
@@ -275,12 +288,178 @@
     (is (= {:status :success
             :value [:a]}
            (task-result runner)))
-    (is (eventually #(contains? (event-names @events)
-                                :gesso.live.flow/stream-flow-closed)))
     (is (contains? (event-names @events)
                    :gesso.live.flow/stream-value))
     (is (contains? (event-names @events)
-                   :gesso.live.flow/stream-closed))))
+                   :gesso.live.flow/stream-closed))
+    (is (eventually
+         #(contains? (event-names @events)
+                     :gesso.live.flow/stream-flow-closed)))))
+
+;; -----------------------------------------------------------------------------
+;; stream-flow bridge assumptions for the m/ap implementation
+;; -----------------------------------------------------------------------------
+
+(deftest stream-flow-does-not-use-s-consume-test
+  (with-redefs [s/consume (fn [& _]
+                            (throw
+                             (ex-info "s/consume must not be used by stream-flow."
+                                      {})))]
+    (let [stream (s/stream)
+          f (flow/stream-flow stream)
+          runner (collect-runner f)]
+      (is (= true (put-value stream :a)))
+      (s/close! stream)
+      (is (= {:status :success
+              :value [:a]}
+             (task-result runner))))))
+
+(deftest stream-flow-debug-return-values-are-not-emitted-test
+  (let [events (atom [])
+        stream (s/stream)
+        f (flow/stream-flow
+           stream
+           {:debug-fn (fn [event]
+                        (swap! events conj event)
+                        {:debug-return (:event event)})})
+        runner (collect-runner f)]
+    (is (= true (put-value stream :a)))
+    (s/close! stream)
+    (let [result (task-result runner)]
+      (is (= :success (:status result)))
+      (is (= [:a] (:value result)))
+      (is (not-any? nil? (:value result)))
+      (is (not-any? #(and (map? %)
+                          (contains? % :debug-return))
+                    (:value result))))
+    (is (contains? (event-names @events)
+                   :gesso.live.flow/stream-value))))
+
+
+(deftest stream-flow-installs-one-take-at-a-time-test
+  (let [stream (s/stream)
+        take-count (atom 0)
+        takes (atom [])]
+    (with-redefs [s/take! (fn [_stream _closed-sentinel]
+                            (swap! take-count inc)
+                            (let [p (d/deferred)]
+                              (swap! takes conj p)
+                              p))]
+      (let [f (flow/stream-flow stream)
+            runner (collect-runner f)]
+        (when-not (eventually #(= 1 @take-count))
+          (cancel-runner! runner))
+        (is (= 1 @take-count)
+            "stream-flow should install its first s/take! when collection starts.")
+
+        (when (= 1 @take-count)
+          (sleep-briefly)
+          (is (= 1 @take-count)
+              "stream-flow should not install a second take before the first take has completed.")
+
+          (complete! (nth @takes 0) :a)
+          (is (eventually #(= 2 @take-count)))
+
+          (complete! (nth @takes 1) :b)
+          (is (eventually #(= 3 @take-count)))
+
+          (complete! (nth @takes 2) flow/closed-sentinel)
+
+          (is (= {:status :success
+                  :value [:a :b]}
+                 (task-result runner))))))))
+
+(deftest stream-flow-early-downstream-termination-does-not-install-next-take-test
+  (let [stream (s/stream)
+        close-count (atom 0)
+        take-count (atom 0)
+        first-take (d/deferred)]
+    (with-redefs [s/take! (fn [_stream _closed-sentinel]
+                            (swap! take-count inc)
+                            first-take)]
+      (let [f (m/eduction
+               (take 1)
+               (flow/stream-flow
+                stream
+                {:on-close #(swap! close-count inc)}))
+            runner (collect-runner f)]
+        (is (eventually #(= 1 @take-count)))
+
+        (complete! first-take :a)
+
+        (is (= {:status :success
+                :value [:a]}
+               (task-result runner)))
+        (is (eventually #(s/closed? stream)))
+        (is (eventually #(= 1 @close-count)))
+        (sleep-briefly)
+        (is (= 1 @take-count)
+            "After downstream take 1 terminates the flow, stream-flow must not install another s/take!.")))))
+
+(deftest stream-flow-cancel-while-take-pending-closes-stream-once-test
+  (let [stream (s/stream)
+        events (atom [])
+        close-count (atom 0)
+        take-count (atom 0)
+        pending-take (d/deferred)]
+    (with-redefs [s/take! (fn [_stream _closed-sentinel]
+                            (swap! take-count inc)
+                            pending-take)]
+      (let [f (flow/stream-flow
+               stream
+               {:debug-fn #(swap! events conj %)
+                :on-close #(swap! close-count inc)})
+            runner (collect-runner f)]
+        (is (eventually #(= 1 @take-count)))
+
+        (cancel-runner! runner)
+
+        (is (eventually #(s/closed? stream)))
+        (is (eventually #(= 1 @close-count)))
+        (is (eventually
+             #(contains? (event-names @events)
+                         :gesso.live.flow/stream-flow-closed)))
+
+        (complete! pending-take :late)
+        (sleep-briefly)
+        (is (not (contains? (event-names @events)
+                            :gesso.live.flow/stream-value)))))))
+
+(deftest stream-flow-stream-error-is-wrapped-debugged-and-closes-once-test
+  (let [stream (s/stream)
+        events (atom [])
+        close-count (atom 0)
+        take-count (atom 0)
+        pending-take (d/deferred)]
+    (with-redefs [s/take! (fn [_stream _closed-sentinel]
+                            (swap! take-count inc)
+                            pending-take)]
+      (let [f (flow/stream-flow
+               stream
+               {:debug-fn #(swap! events conj %)
+                :on-close #(swap! close-count inc)})
+            runner (collect-runner f)
+            cause (RuntimeException. "stream boom")]
+        (is (eventually #(= 1 @take-count)))
+
+        (fail! pending-take cause)
+
+        (let [result (task-result runner)
+              error (:error result)]
+          (is (= :failure (:status result)))
+          (is (= "gesso.live stream failed."
+                 (ex-message error)))
+          (is (identical? cause (ex-cause error))))
+
+        (is (eventually #(s/closed? stream)))
+        (is (eventually #(= 1 @close-count)))
+        (is (contains? (event-names @events)
+                       :gesso.live.flow/stream-error))
+        (is (contains? (event-names @events)
+                       :gesso.live.flow/stream-flow-closed))
+        (is (identical? cause
+                        (:error (first-event @events
+                                             :gesso.live.flow/stream-error))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; flow-for-stream behavior
@@ -400,6 +579,7 @@
     (is (= true (put-value stream store-invalidation)))
     (is (= true (put-value stream request-invalidation)))
     (s/close! stream)
+
     (is (= :success (:status (task-result runner))))
 
     (let [names (event-names @events)]
@@ -407,13 +587,18 @@
       (is (contains? names :gesso.live.flow/invalidation-received))
       (is (contains? names :gesso.live.flow/invalidation-ignored))
       (is (contains? names :gesso.live.flow/invalidation-matched))
-      (is (contains? names :gesso.live.flow/stream-value))
-      (is (eventually #(contains? (event-names @events)
-                                  :gesso.live.flow/stream-flow-closed))))
+      (is (contains? names :gesso.live.flow/stream-value)))
 
-    (is (= 2 (event-count @events :gesso.live.flow/invalidation-received)))
-    (is (= 1 (event-count @events :gesso.live.flow/invalidation-ignored)))
-    (is (= 1 (event-count @events :gesso.live.flow/invalidation-matched)))))
+    (is (eventually
+         #(contains? (event-names @events)
+                     :gesso.live.flow/stream-flow-closed)))
+
+    (is (= 2
+           (event-count @events :gesso.live.flow/invalidation-received)))
+    (is (= 1
+           (event-count @events :gesso.live.flow/invalidation-ignored)))
+    (is (= 1
+           (event-count @events :gesso.live.flow/invalidation-matched)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Failure behavior
@@ -490,22 +675,6 @@
     (is (= :failure (:status (task-result runner))))
     (is (contains? (event-names @events)
                    :gesso.live.flow/event-build-failed))))
-
-#_(deftest invalid-live-event-failure-is-wrapped-test
-  (let [stream (s/stream)
-        f (flow/flow-for-stream
-           stream
-           {:subscription request-sub
-            :relieve? false})
-        runner (collect-runner f)]
-    (is (= true (put-value stream invalid-invalidation)))
-    (s/close! stream)
-    (let [result (task-result runner)
-          error (:error result)]
-      (is (= :failure (:status result)))
-      (is (= "gesso.live flow failed to build live event."
-             (ex-message error)))
-      (is (some? (ex-cause error))))))
 
 (deftest invalid-live-event-failure-is-wrapped-test
   (let [stream (s/stream)
@@ -626,11 +795,16 @@
     (try
       (source/emit! src request-invalidation)
       (source/close! src)
+
       (is (= :success (:status (task-result runner))))
+
       (is (contains? (event-names @events)
                      :gesso.live.flow/source-tap-opened))
-      (is (eventually #(contains? (event-names @events)
-                                  :gesso.live.flow/source-tap-closed)))
+
+      (is (eventually
+           #(contains? (event-names @events)
+                       :gesso.live.flow/source-tap-closed)))
+
       (finally
         (source/close! src)))))
 
