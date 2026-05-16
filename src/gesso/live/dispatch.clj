@@ -148,41 +148,101 @@
     info))
 
 ;; -----------------------------------------------------------------------------
+;; Coalesce slots
+;; -----------------------------------------------------------------------------
+
+(defn- coalesce-slot
+  [key job]
+  {:dispatch/type :coalesce-slot
+   :coalesce-key key
+   :job* (atom job)})
+
+(defn- coalesce-slot?
+  [x]
+  (= :coalesce-slot (:dispatch/type x)))
+
+(defn- slot-job
+  [slot]
+  @(:job* slot))
+
+(defn- replace-slot-job!
+  "Replace the latest job in a queued coalesce slot.
+
+   Returns the old job so the caller can notify it as dropped. This does not
+   touch the queue and therefore cannot lose both old and new jobs due to queue
+   capacity races."
+  [slot job]
+  (let [job* (:job* slot)
+        old  @job*]
+    (reset! job* job)
+    old))
+
+(defn- remove-pending-slot!
+  [dispatcher slot]
+  (let [key (:coalesce-key slot)]
+    (locking (:coalesce-lock dispatcher)
+      (swap! (:pending-by-key dispatcher)
+             (fn [pending]
+               (if (identical? slot (get pending key))
+                 (dissoc pending key)
+                 pending))))))
+
+;; -----------------------------------------------------------------------------
 ;; Worker loop
 ;; -----------------------------------------------------------------------------
 
-(defn- remove-pending!
+(defn- remove-pending-job!
+  "Compatibility cleanup for normal job maps.
+
+   Coalesced jobs are represented by slots in pending-by-key, so normal jobs
+   usually have nothing to remove. This function is still harmless for direct
+   job maps and keeps run-job! robust."
   [dispatcher job]
   (when-let [k (:coalesce-key job)]
     (locking (:coalesce-lock dispatcher)
       (swap! (:pending-by-key dispatcher)
              (fn [pending]
-               (if (= (:dispatch/job-id job)
-                      (:dispatch/job-id (get pending k)))
-                 (dissoc pending k)
-                 pending))))))
+               (let [entry (get pending k)]
+                 (if (and (map? entry)
+                          (not (coalesce-slot? entry))
+                          (= (:dispatch/job-id job)
+                             (:dispatch/job-id entry)))
+                   (dissoc pending k)
+                   pending)))))))
 
 (defn- run-job!
   [dispatcher job]
-  (remove-pending! dispatcher job)
+  (remove-pending-job! dispatcher job)
   (try
     ((:run job))
     (catch Throwable e
       (record-error! dispatcher job e))))
 
+(defn- run-coalesce-slot!
+  [dispatcher slot]
+  ;; Remove the slot from the pending index before reading/running its latest
+  ;; job. After this point, later submissions with the same key create a fresh
+  ;; slot rather than replacing the job that is about to run.
+  (remove-pending-slot! dispatcher slot)
+  (run-job! dispatcher (slot-job slot)))
 
+(defn- run-queue-item!
+  [dispatcher item]
+  (if (coalesce-slot? item)
+    (run-coalesce-slot! dispatcher item)
+    (run-job! dispatcher item)))
 
 (defn- worker-loop
   [dispatcher]
   (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
     (loop []
       (when-not @(:closed? dispatcher)
-        (let [job (try
-                    (.take queue)
-                    (catch InterruptedException _
-                      nil))]
-          (when job
-            (run-job! dispatcher job))
+        (let [item (try
+                     (.take queue)
+                     (catch InterruptedException _
+                       nil))]
+          (when item
+            (run-queue-item! dispatcher item))
           (recur))))))
 
 (defn- start-worker!
@@ -219,17 +279,21 @@
        Drop the new job when the queue is full and call its :on-drop hook.
 
      :coalesce
-       Requires jobs to provide :coalesce-key. Replaces an older queued job
-       with the same key when possible.
+       Requires jobs to provide :coalesce-key.
+
+       The queue contains one coalesce slot per pending key. Submitting another
+       job for the same key replaces the latest job in that slot without removing
+       anything from the queue. This avoids the data-loss race caused by
+       remove-old-then-offer-new logic.
 
        This only coalesces queued jobs. It does not cancel or replace a job that
        has already started running."
   ([] (create nil))
   ([options]
-   (let [options' (validate-options! (opts options))
-         id       (random-uuid)
-         queue    (ArrayBlockingQueue. (:queue-size options'))
-         counter  (AtomicLong. 0)
+   (let [options'   (validate-options! (opts options))
+         id         (random-uuid)
+         queue      (ArrayBlockingQueue. (:queue-size options'))
+         counter    (AtomicLong. 0)
          dispatcher {:id id
                      :name (:name options')
                      :threads (:threads options')
@@ -240,10 +304,12 @@
                      :counter counter
                      :closed? (atom false)
                      :errors (atom [])
+                     ;; For :coalesce, this maps coalesce-key -> coalesce slot.
+                     ;; A slot contains an atom holding the latest queued job.
                      :pending-by-key (atom {})
                      :coalesce-lock (Object.)}
-         workers (mapv #(start-worker! dispatcher %)
-                       (range (:threads options')))]
+         workers    (mapv #(start-worker! dispatcher %)
+                           (range (:threads options')))]
      (assoc dispatcher :workers workers))))
 
 (defn closed?
@@ -251,15 +317,22 @@
   [dispatcher]
   (true? @(:closed? dispatcher)))
 
+(defn- queued-item-job
+  [item]
+  (if (coalesce-slot? item)
+    (slot-job item)
+    item))
+
 (defn- drain-queued-jobs!
   [dispatcher reason]
   (locking (:coalesce-lock dispatcher)
     (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
       (loop [dropped []
-             job (.poll queue)]
-        (if job
-          (recur (conj dropped (notify-drop! job reason))
-                 (.poll queue))
+             item (.poll queue)]
+        (if item
+          (let [job (queued-item-job item)]
+            (recur (conj dropped (notify-drop! job reason))
+                   (.poll queue)))
           (do
             (reset! (:pending-by-key dispatcher) {})
             dropped))))))
@@ -341,20 +414,19 @@
       (submitted job)
       (dropped job :queue-full))))
 
-
-(defn- remove-coalesced-job!
-  "Best-effort removal of a queued coalesced job.
-
-   Returns true only when the old job was actually removed from the queue.
-
-   Important: pending-by-key is not changed here. The caller updates it only
-   after the replacement job is successfully enqueued. This prevents data loss
-   if enqueueing the replacement fails."
-  [dispatcher old-job]
-  (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
-    (boolean
-     (and old-job
-          (.remove queue old-job)))))
+(defn- enqueue-new-coalesce-slot!
+  [dispatcher key job]
+  (let [queue ^ArrayBlockingQueue (:queue dispatcher)
+        slot  (coalesce-slot key job)]
+    (if (.offer queue slot)
+      (do
+        (swap! (:pending-by-key dispatcher) assoc key slot)
+        {:status :submitted
+         :job job
+         :old-job nil})
+      {:status :queue-full
+       :job job
+       :old-job nil})))
 
 (defn- enqueue-coalesce!
   [dispatcher job]
@@ -364,34 +436,22 @@
        (ex "Coalescing dispatch jobs require :coalesce-key."
            {:job-id (:dispatch/job-id job)
             :job job})))
-    (locking (:coalesce-lock dispatcher)
-      (let [queue ^ArrayBlockingQueue (:queue dispatcher)
-            old-job (get @(:pending-by-key dispatcher) key)
-            removed-old? (remove-coalesced-job! dispatcher old-job)]
-        (if (.offer queue job)
-          (do
-            (swap! (:pending-by-key dispatcher) assoc key job)
-            (when removed-old?
-              (notify-drop! old-job :coalesced))
-            (submitted job))
+    (let [{:keys [status old-job]}
+          (locking (:coalesce-lock dispatcher)
+            (if-let [slot (get @(:pending-by-key dispatcher) key)]
+              {:status :submitted
+               :job job
+               :old-job (replace-slot-job! slot job)}
+              (enqueue-new-coalesce-slot! dispatcher key job)))]
+      (case status
+        :submitted
+        (do
+          (when old-job
+            (notify-drop! old-job :coalesced))
+          (submitted job))
 
-          (do
-            ;; If we removed the old job but somehow failed to enqueue the new
-            ;; one, restore the old job and leave pending-by-key pointing at it.
-            ;; With this dispatcher's lock and a successful removal this should
-            ;; normally succeed; if it doesn't, fail loudly rather than silently
-            ;; losing work.
-            (when removed-old?
-              (when-not (.offer queue old-job)
-                (throw
-                 (ex "gesso.live dispatcher failed to restore coalesced job."
-                     {:dispatcher/id (:id dispatcher)
-                      :name (:name dispatcher)
-                      :old-job-id (:dispatch/job-id old-job)
-                      :new-job-id (:dispatch/job-id job)
-                      :coalesce-key key}))))
-            (throw (queue-full-error dispatcher job))))))))
-
+        :queue-full
+        (throw (queue-full-error dispatcher job))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public submission API

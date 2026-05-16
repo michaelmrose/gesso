@@ -15,23 +15,31 @@
   (is (= "#request-1"
          (oob/id-selector "#request-1"))))
 
-(deftest id-selector-rejects-blank-or-unsafe-values-test
+(deftest id-selector-rejects-blank-values-test
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"must not be blank"
+       (oob/id-selector nil)))
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
        #"must not be blank"
        (oob/id-selector "")))
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
-       #"CSS-id-safe"
-       (oob/id-selector "request 1")))
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
-       #"CSS-id-safe"
-       (oob/id-selector "1-request")))
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
-       #"CSS-id-safe"
-       (oob/id-selector "request#1"))))
+       #"must not be blank"
+       (oob/id-selector "   "))))
+
+(deftest id-selector-allows-nonblank-html-id-values-test
+  (is (= "#request-1"
+         (oob/id-selector "request-1")))
+  (is (= "#1-request"
+         (oob/id-selector "1-request")))
+  (is (= "#123e4567-e89b-12d3-a456-426614174000"
+         (oob/id-selector "123e4567-e89b-12d3-a456-426614174000")))
+  (is (= "#request 1"
+         (oob/id-selector "request 1")))
+  (is (= "#request#1"
+         (oob/id-selector "request#1"))))
 
 (deftest selector-allows-complex-selectors-test
   (is (= "#request-panel .item[data-x='1']"
@@ -164,11 +172,29 @@
            [:div {:class "card"} "Hello"]
            "request-1"))))
 
-(deftest ensure-id-rejects-unsafe-id-test
+(deftest ensure-id-rejects-blank-id-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
-       #"CSS-id-safe"
-       (oob/ensure-id [:div "Hello"] "bad id"))))
+       #"must not be blank"
+       (oob/ensure-id [:div "Hello"] nil)))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"must not be blank"
+       (oob/ensure-id [:div "Hello"] "")))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"must not be blank"
+       (oob/ensure-id [:div "Hello"] "   "))))
+
+(deftest ensure-id-allows-nonblank-html-id-values-test
+  (is (= [:div {:id "1-request"} "Hello"]
+         (oob/ensure-id [:div "Hello"] "1-request")))
+  (is (= [:div {:id "123e4567-e89b-12d3-a456-426614174000"} "Hello"]
+         (oob/ensure-id
+          [:div "Hello"]
+          "123e4567-e89b-12d3-a456-426614174000")))
+  (is (= [:div {:id "bad id"} "Hello"]
+         (oob/ensure-id [:div "Hello"] "bad id"))))
 
 ;; -----------------------------------------------------------------------------
 ;; Common OOB operations

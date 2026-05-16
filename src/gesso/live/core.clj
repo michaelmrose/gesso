@@ -9,6 +9,8 @@
    - per-client flow construction
    - SSE transport startup
    - fragment render protection
+   - app-facing XTDB2 consistency helpers
+   - app-facing HTMX attribute helpers
 
    It intentionally stays thin. The specialized namespaces still own their own
    behavior:
@@ -29,11 +31,19 @@
        owns SSE frame formatting and response stream lifecycle
 
      gesso.live.fragment
-       owns render singleflight/cache protection"
+       owns render singleflight/cache protection
+
+     gesso.live.consistency.xtdb
+       owns XTDB2 query/transaction consistency helpers
+
+     gesso.live.htmx
+       owns browser-facing HTMX attribute builders"
   (:require
+   [gesso.live.consistency.xtdb :as live.xtdb]
    [gesso.live.dispatch :as dispatch]
    [gesso.live.flow :as flow]
    [gesso.live.fragment :as fragment]
+   [gesso.live.htmx :as htmx]
    [gesso.live.invalidation :as invalidation]
    [gesso.live.source :as source]
    [gesso.live.transport.sse :as sse]))
@@ -68,6 +78,9 @@
    :fragment-options nil
 
    :debug-fn nil})
+
+(def ^:private valid-emit-modes
+  #{:async :sync false})
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -160,6 +173,41 @@
   (let [dispatcher (dispatch/create (:dispatch-options options'))]
     (swap! created conj #(dispatch/close! dispatcher))
     dispatcher))
+
+(defn- normalize-emit-mode
+  [emit]
+  (let [emit' (if (nil? emit) :async emit)]
+    (when-not (contains? valid-emit-modes emit')
+      (throw
+       (ex "Unsupported gesso.live transact-and-notify! emit mode."
+           {:emit emit
+            :normalized emit'
+            :valid valid-emit-modes})))
+    emit'))
+
+(defn- normalize-changes
+  [{:keys [change changes]}]
+  (cond
+    (some? changes)
+    (vec changes)
+
+    (some? change)
+    [change]
+
+    :else
+    []))
+
+(defn- dispatch-entry-for
+  [entry entry-fn change]
+  (cond
+    entry-fn
+    (entry-fn change)
+
+    entry
+    entry
+
+    :else
+    nil))
 
 ;; -----------------------------------------------------------------------------
 ;; System lifecycle
@@ -295,6 +343,113 @@
    :fragment (fragment/stats (:fragment-manager system))})
 
 ;; -----------------------------------------------------------------------------
+;; XTDB2 consistency facade
+;; -----------------------------------------------------------------------------
+
+(defn consistency
+  "Return explicit gesso.live/XTDB2 consistency from ctx.
+
+   This delegates to gesso.live.consistency.xtdb/consistency-from and does not
+   inspect or mutate shared XTDB node/DataSource state."
+  [ctx]
+  (live.xtdb/consistency-from ctx))
+
+(defn with-consistency
+  "Assoc explicit consistency onto ctx.
+
+   The consistency value is normalized before being stored under
+   :gesso.live/consistency. Passing nil or an empty consistency map stores an
+   empty normalized map."
+  [ctx consistency]
+  (assoc ctx
+         :gesso.live/consistency
+         (live.xtdb/normalize-consistency consistency)))
+
+(defn attach-consistency
+  "Attach explicit consistency to a change/invalidation map.
+
+   This is plain immutable data. It is not used to mutate XTDB state.
+
+   The attached value is intentionally namespaced so app rules can opt into
+   reading it without colliding with domain keys."
+  [change consistency]
+  (let [consistency' (live.xtdb/normalize-consistency consistency)]
+    (if (seq consistency')
+      (assoc change :gesso.live/consistency consistency')
+      change)))
+
+(defn q
+  "App-facing XTDB2 read helper.
+
+   Uses the ctx-aware, consistency-aware read path. Prefer this for live fragment
+   reads so a ctx carrying :gesso.live/consistency, :xtdb/consistency, or
+   :consistency automatically applies that read basis to the individual query."
+  ([ctx query]
+   (live.xtdb/q-consistent-from ctx query))
+  ([ctx query opts]
+   (live.xtdb/q-consistent-from ctx query opts)))
+
+(defn execute-tx!
+  "Execute XTDB2 tx ops using a raw connectable or app ctx.
+
+   Returns the result from gesso.live.consistency.xtdb/execute-tx-from!:
+
+     {:tx-result ...
+      :consistency ...}
+
+   execute-tx! is preferred for write paths that need immediate live
+   read-after-write consistency because XTDB2 execute-tx returns tx-id and
+   system-time, from which the XTDB helper derives :snapshot-time."
+  ([ctx tx-ops]
+   (live.xtdb/execute-tx-from! ctx tx-ops))
+  ([ctx tx-ops opts]
+   (live.xtdb/execute-tx-from! ctx tx-ops opts)))
+
+(defn submit-tx!
+  "Submit XTDB2 tx ops using a raw connectable or app ctx.
+
+   Public XTDB2 submit-tx returns only :tx-id. The returned consistency is
+   therefore metadata-only unless XTDB changes that public result shape."
+  ([ctx tx-ops]
+   (live.xtdb/submit-tx-from! ctx tx-ops))
+  ([ctx tx-ops opts]
+   (live.xtdb/submit-tx-from! ctx tx-ops opts)))
+
+(def put-docs-op
+  "Build an XTDB2 :put-docs tx op.
+
+   Re-export of gesso.live.consistency.xtdb/put-docs-op."
+  live.xtdb/put-docs-op)
+
+(def delete-docs-op
+  "Build an XTDB2 :delete-docs tx op.
+
+   Re-export of gesso.live.consistency.xtdb/delete-docs-op."
+  live.xtdb/delete-docs-op)
+
+;; -----------------------------------------------------------------------------
+;; HTMX facade
+;; -----------------------------------------------------------------------------
+
+(def fragment-root-attrs
+  "Build attrs for the outer live wrapper.
+
+   Re-export of gesso.live.htmx/fragment-root-attrs."
+  htmx/fragment-root-attrs)
+
+(def fragment-target-attrs
+  "Build attrs for a live fragment refresh target.
+
+   Re-export of gesso.live.htmx/fragment-target-attrs."
+  htmx/fragment-target-attrs)
+
+(def post-form-attrs
+  "Build standard attrs for a POST form that refreshes a target fragment.
+
+   Re-export of gesso.live.htmx/post-form-attrs."
+  htmx/post-form-attrs)
+
+;; -----------------------------------------------------------------------------
 ;; Invalidation and source emission
 ;; -----------------------------------------------------------------------------
 
@@ -372,6 +527,100 @@
        :entry-keys (set (keys (or entry {})))
        :at (now-ms)})
      (dispatch/submit! (:dispatcher system) entry'))))
+
+(defn transact-and-notify!
+  "Common XTDB2 write + live invalidation workflow.
+
+   Steps:
+     1. execute XTDB2 tx ops with execute-tx!
+     2. capture returned consistency
+     3. assoc consistency onto ctx
+     4. attach consistency to change maps
+     5. optionally emit or submit expanded invalidations
+     6. return tx/ctx/change/emission metadata
+
+   Arguments:
+     system
+       gesso.live system map.
+
+     ctx
+       app ctx or XTDB connectable-containing ctx.
+
+     options map:
+       :tx-ops
+         Required XTDB2 tx ops.
+
+       :change
+         One primary app change.
+
+       :changes
+         Multiple primary app changes.
+
+       :tx-options
+         Optional XTDB tx options passed to execute-tx!.
+
+       :emit
+         :async | :sync | false. Defaults to :async.
+
+         :async submits each change through submit-expanded!.
+         :sync expands and emits each change on the caller thread.
+         false performs the transaction and returns metadata without emitting.
+
+       :entry
+         Optional dispatch entry metadata used for every async submission.
+
+       :entry-fn
+         Optional function of attached change -> dispatch entry metadata.
+
+   Returns:
+     {:tx-result ...
+      :consistency ...
+      :ctx ...
+      :changes ...
+      :emit ...
+      :emit-results ...}"
+  [system ctx {:keys [tx-ops tx-options emit entry entry-fn] :as options}]
+  (when-not tx-ops
+    (throw
+     (ex "gesso.live transact-and-notify! requires :tx-ops."
+         {:options options})))
+  (let [debug-fn (get-in system [:options :debug-fn])
+        emit-mode (normalize-emit-mode emit)
+        tx-result-map (execute-tx! ctx tx-ops tx-options)
+        consistency' (:consistency tx-result-map)
+        ctx' (with-consistency ctx consistency')
+        changes' (mapv #(attach-consistency % consistency')
+                       (normalize-changes options))
+        emit-results
+        (case emit-mode
+          false
+          []
+
+          :sync
+          (mapv #(emit-expanded! system ctx' %) changes')
+
+          :async
+          (mapv (fn [change]
+                  (submit-expanded!
+                   system
+                   ctx'
+                   change
+                   (dispatch-entry-for entry entry-fn change)))
+                changes'))]
+    (debug!
+     debug-fn
+     :gesso.live.core/transact-and-notify
+     {:tx-result (:tx-result tx-result-map)
+      :consistency consistency'
+      :change-count (count changes')
+      :emit emit-mode
+      :emit-result-count (count emit-results)
+      :at (now-ms)})
+    (merge tx-result-map
+           {:ctx ctx'
+            :changes changes'
+            :emit emit-mode
+            :emit-results emit-results})))
 
 ;; -----------------------------------------------------------------------------
 ;; Flow and SSE

@@ -2,7 +2,6 @@
   (:require
    [clojure.test :refer [deftest is]]
    [gesso.live.consistency.xtdb :as xtdb-live]
-   [xtdb.api :as xt]
    [gesso.live.dispatch :as dispatch]
    [gesso.live.flow :as flow]
    [gesso.live.fragment :as fragment]
@@ -11,15 +10,11 @@
    [gesso.live.core :as live]
    [manifold.stream :as s]
    [gesso.live.transport.sse :as sse]
-   [missionary.core :as m])
-  (:import
-   [xtdb.api DataSource])
-  )
+   [missionary.core :as m]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
 ;; -----------------------------------------------------------------------------
-
 
 (def timeout-ms 1000)
 
@@ -74,22 +69,9 @@
     :params {:tab :summary}
     :consistency-token token}))
 
-
 (def sample-xtdb-tx
   [[:put-docs :requests {:xt/id "req-1"
                          :status :open}]])
-
-(defn fake-xtdb-datasource
-  ([] (fake-xtdb-datasource nil))
-  ([initial-token]
-   (let [token (atom initial-token)]
-     (reify DataSource
-       (getAwaitToken [_]
-         @token)
-       (setAwaitToken [_ token']
-         (reset! token token'))
-       (createConnectionBuilder [_]
-         nil)))))
 
 (defn request-panel-key-from-consistency
   [consistency]
@@ -111,6 +93,18 @@
       :params {:tab :summary}}
      ctx)))
 
+(defn xtdb-var
+  [sym]
+  (or (ns-resolve 'gesso.live.consistency.xtdb sym)
+      (throw
+       (ex-info "Missing test seam var in gesso.live.consistency.xtdb."
+                {:sym sym}))))
+
+(defn with-xtdb-stub
+  [sym replacement thunk]
+  (with-redefs-fn
+    {(xtdb-var sym) replacement}
+    thunk))
 
 (def ctx
   {:app/name :integration-test})
@@ -182,12 +176,6 @@
 (defn close-dispatcher
   [dispatcher]
   (dispatch/close! dispatcher))
-
-
-
-
-
-
 
 (defn collect-runner
   [f]
@@ -769,12 +757,10 @@
         render-count (atom 0)
         key (request-fragment-key "tx-1")]
     (try
-      ;; Live layer wakes the client.
       (source/emit! src request-change)
       (is (= "event: live-update\ndata: wake\n\n"
              (take-value (:stream started-sse))))
 
-      ;; Fragment endpoint render is protected separately.
       (is (= {:status :success
               :value "<section>request</section>"}
              (run-task
@@ -785,7 +771,6 @@
                  (swap! render-count inc)
                  "<section>request</section>")))))
 
-      ;; Same key within TTL reuses cached render.
       (is (= {:status :success
               :value "<section>request</section>"}
              (run-task
@@ -849,13 +834,11 @@
         render-count (atom 0)
         render-fn (fn []
                     (str "<section>render-" (swap! render-count inc) "</section>"))]
-    ;; First refresh renders.
     (is (= {:status :success
             :value "<section>render-1</section>"}
            (run-task
             (fragment/render-task manager key render-fn))))
 
-    ;; Staggered refreshes inside TTL reuse cached HTML.
     (swap! clock + 10)
     (is (= {:status :success
             :value "<section>render-1</section>"}
@@ -870,7 +853,6 @@
 
     (is (= 1 @render-count))
 
-    ;; After TTL, render runs again.
     (swap! clock + 100)
     (is (= {:status :success
             :value "<section>render-2</section>"}
@@ -888,25 +870,21 @@
                     (str "<section>render-" (swap! render-count inc) "</section>"))]
     (is (not= key-tx-1 key-tx-2))
 
-    ;; First consistency point renders and caches.
     (is (= {:status :success
             :value "<section>render-1</section>"}
            (run-task
             (fragment/render-task manager key-tx-1 render-fn))))
 
-    ;; Same consistency point reuses cache.
     (is (= {:status :success
             :value "<section>render-1</section>"}
            (run-task
             (fragment/render-task manager key-tx-1 render-fn))))
 
-    ;; New consistency point does not reuse old token's cached HTML.
     (is (= {:status :success
             :value "<section>render-2</section>"}
            (run-task
             (fragment/render-task manager key-tx-2 render-fn))))
 
-    ;; Same new consistency point now reuses its own cache.
     (is (= {:status :success
             :value "<section>render-2</section>"}
            (run-task
@@ -937,7 +915,6 @@
                                                  (deliver done {:error error
                                                                 :entry entry}))})]
     (try
-      ;; App write path emits derived store invalidation through dispatcher.
       (dispatch/submit!
        dispatcher
        {:run (fn []
@@ -946,11 +923,9 @@
 
       (is (= :ok (deref done timeout-ms ::timeout)))
 
-      ;; SSE wakes the matching store subscriber.
       (is (= "event: live-update\ndata: store-wake\n\n"
              (take-value (:stream started-sse))))
 
-      ;; The resulting fragment endpoint render is cached/protected.
       (is (= {:status :success
               :value "<section>store queue</section>"}
              (run-task
@@ -1025,14 +1000,11 @@
               :consistency-token "tx-1"})
         render-count (atom 0)]
     (try
-      ;; App write submits the primary change.
       (live/submit-expanded! system ctx request-change)
 
-      ;; Derived store invalidation wakes the matching subscriber over SSE.
       (is (= "event: live-update\ndata: store-wake\n\n"
              (take-value (:stream started))))
 
-      ;; The fragment endpoint render is protected by the system fragment manager.
       (is (= {:status :success
               :value "<section>store queue</section>"}
              (run-task
@@ -1043,7 +1015,6 @@
                  (swap! render-count inc)
                  "<section>store queue</section>")))))
 
-      ;; Same render key inside TTL reuses cached output.
       (is (= {:status :success
               :value "<section>store queue</section>"}
              (run-task
@@ -1152,59 +1123,55 @@
       (is (= 2 (get-in (live/stats system) [:fragment :cache-count])))
       (finally
         (live/close! system)))))
+
 ;; -----------------------------------------------------------------------------
 ;; XTDB2 consistency propagation
 ;; -----------------------------------------------------------------------------
 
-(deftest xtdb-consistent-read-prefers-node-over-stale-request-connection-test
-  (let [node (fake-xtdb-datasource "await-from-node")
-        ctx {:biff/conn :stale-request-conn
-             :biff/node node}
+(deftest xtdb-consistent-read-uses-explicit-read-connectable-and-consistency-test
+  (let [ctx {:biff/conn :stale-request-conn
+             :biff/node :shared-node
+             :xtdb/read-connectable :read-node
+             :gesso.live/consistency {:snapshot-time :snapshot-1}}
+        query ["SELECT * FROM requests WHERE _id = ?" "req-1"]
         seen (atom nil)]
-    (with-redefs [xt/q (fn [& args]
-                         (reset! seen args)
-                         [{:status :fresh}])]
-      (is (= [{:status :fresh}]
-             (xtdb-live/q-consistent-from
-              ctx
-              ["SELECT * FROM requests WHERE _id = ?" "req-1"])))
+    (with-xtdb-stub
+      '*q*
+      (fn [connectable query' opts]
+        (reset! seen [connectable query' opts])
+        [{:status :fresh}])
+      (fn []
+        (is (= [{:status :fresh}]
+               (xtdb-live/q-consistent-from ctx query)))
 
-      ;; This is the critical stale-ctx regression check:
-      ;; q-consistent-from should read via the node/DataSource, not :biff/conn.
-      (is (= [node
-              ["SELECT * FROM requests WHERE _id = ?" "req-1"]
-              {:await-token "await-from-node"}]
-             @seen)))))
+        (is (= [:read-node
+                query
+                {:snapshot-time :snapshot-1}]
+               @seen))))))
 
 (deftest xtdb-context-consistency-partitions-fragment-cache-test
-  (let [node (fake-xtdb-datasource "await-1")
-        ctx {:biff/conn :stale-request-conn
-             :biff/node node}
+  (let [ctx-1 {:gesso.live/consistency {:await-token "await-1"}}
+        ctx-2 {:gesso.live/consistency {:await-token "await-2"}}
         system (live/create {:fragment-options {:ttl-ms 1000}})
         render-count (atom 0)
         render-fn (fn []
                     (str "<section>render-" (swap! render-count inc) "</section>"))]
     (try
-      (let [key-1 (request-panel-key-from-ctx ctx)]
+      (let [key-1 (request-panel-key-from-ctx ctx-1)]
         (is (= "<section>render-1</section>"
                (:value
                 (run-task
                  (live/render-task system key-1 render-fn)))))
 
-        ;; Same await token produces same fragment key and reuses cache.
-        (is (= key-1 (request-panel-key-from-ctx ctx)))
+        (is (= key-1 (request-panel-key-from-ctx ctx-1)))
         (is (= "<section>render-1</section>"
                (:value
                 (run-task
                  (live/render-task system key-1 render-fn))))))
 
-      ;; New XTDB2 await token produces a different fragment cache key.
-      (.setAwaitToken ^DataSource node "await-2")
-
-      (let [key-2 (request-panel-key-from-ctx ctx)]
-        (is (not= (request-panel-key-from-ctx
-                   {:biff/node (fake-xtdb-datasource "await-1")})
-                  key-2))
+      (let [key-1 (request-panel-key-from-ctx ctx-1)
+            key-2 (request-panel-key-from-ctx ctx-2)]
+        (is (not= key-1 key-2))
 
         (is (= "<section>render-2</section>"
                (:value
@@ -1222,9 +1189,8 @@
         (live/close! system)))))
 
 (deftest xtdb-write-consistency-feeds-live-wakeup-and-fragment-key-test
-  (let [node (fake-xtdb-datasource)
-        ctx {:biff/conn :stale-request-conn
-             :biff/node node}
+  (let [ctx {:biff/conn :stale-request-conn
+             :biff/node :shared-node}
         system (live/create {:rules (request-rules)
                              :dispatch-options {:threads 1
                                                 :queue-size 8
@@ -1238,64 +1204,57 @@
         seen-tx (atom nil)
         render-count (atom 0)]
     (try
-      (with-redefs [xt/execute-tx
-                    (fn [connectable tx-ops opts]
-                      ;; execute-tx-from! should write through connectable-from,
-                      ;; which may be the request connection, but capture
-                      ;; consistency from the await-token source.
-                      (reset! seen-tx [connectable tx-ops opts])
-                      (.setAwaitToken ^DataSource node "await-after-write")
-                      {:tx-id 42
-                       :system-time :system-time-42})]
-        (let [{:keys [consistency] :as tx-result}
-              (xtdb-live/execute-tx-from! ctx sample-xtdb-tx)
+      (with-xtdb-stub
+        '*execute-tx*
+        (fn [connectable tx-ops opts]
+          (reset! seen-tx [connectable tx-ops opts])
+          {:tx-id 42
+           :system-time :system-time-42})
+        (fn []
+          (let [{:keys [consistency] :as tx-result}
+                (xtdb-live/execute-tx-from! ctx sample-xtdb-tx)
 
-              key
-              (request-panel-key-from-consistency consistency)]
+                key
+                (request-panel-key-from-consistency consistency)]
 
-          (is (= [:stale-request-conn sample-xtdb-tx {}]
-                 @seen-tx))
+            (is (= [:stale-request-conn sample-xtdb-tx {}]
+                   @seen-tx))
 
-          (is (= {:tx-result {:tx-id 42
-                              :system-time :system-time-42}
-                  :consistency {:tx-id 42
-                                :system-time :system-time-42
-                                :await-token "await-after-write"}}
-                 tx-result))
+            (is (= {:tx-result {:tx-id 42
+                                :system-time :system-time-42}
+                    :consistency {:tx-id 42
+                                  :system-time :system-time-42
+                                  :snapshot-time :system-time-42}}
+                   tx-result))
 
-          ;; The app still explicitly emits the primary change.
-          ;; XTDB helper does not publish anything by itself.
-          (live/submit-expanded! system ctx request-change)
+            (live/submit-expanded! system ctx request-change)
 
-          ;; The live pipeline wakes the browser/client.
-          (is (= "event: live-update\ndata: wake\n\n"
-                 (take-value (:stream started))))
+            (is (= "event: live-update\ndata: wake\n\n"
+                   (take-value (:stream started))))
 
-          ;; The fragment render key includes the XTDB2 consistency dimension,
-          ;; so the post-write render does not share stale cached HTML.
-          (is (= "<section>request 1</section>"
-                 (:value
-                  (run-task
-                   (live/render-task
-                    system
-                    key
-                    (fn []
-                      (str "<section>request "
-                           (swap! render-count inc)
-                           "</section>")))))))
+            (is (= "<section>request 1</section>"
+                   (:value
+                    (run-task
+                     (live/render-task
+                      system
+                      key
+                      (fn []
+                        (str "<section>request "
+                             (swap! render-count inc)
+                             "</section>")))))))
 
-          (is (= "<section>request 1</section>"
-                 (:value
-                  (run-task
-                   (live/render-task
-                    system
-                    key
-                    (fn []
-                      (str "<section>request "
-                           (swap! render-count inc)
-                           "</section>")))))))
+            (is (= "<section>request 1</section>"
+                   (:value
+                    (run-task
+                     (live/render-task
+                      system
+                      key
+                      (fn []
+                        (str "<section>request "
+                             (swap! render-count inc)
+                             "</section>")))))))
 
-          (is (= 1 @render-count))))
+            (is (= 1 @render-count)))))
 
       (source/close! (:source system))
       (is (eventually #(sse/closed? started)))
@@ -1306,7 +1265,7 @@
 (deftest xtdb-consistency-token-can-be-attached-to-live-event-when-caller-supplies-it-test
   (let [system (live/create)
         seen-payload (atom nil)
-        consistency {:await-token "await-from-write"
+        consistency {:snapshot-time :system-time-42
                      :tx-id 42}
         consistency-token (xtdb-live/consistency-fragment-dimension consistency)
         started (live/start-sse!
@@ -1325,9 +1284,135 @@
 
       (is (= {:invalidation request-change
               :consistency-token [:xtdb2/read-consistency
-                                  {:await-token "await-from-write"
+                                  {:snapshot-time :system-time-42
                                    :tx-id 42}]}
              @seen-payload))
+
+      (source/close! (:source system))
+      (is (eventually #(sse/closed? started)))
+      (finally
+        (live/cancel-sse! started)
+        (live/close! system)))))
+
+;; -----------------------------------------------------------------------------
+;; core.clj facade integration
+;; -----------------------------------------------------------------------------
+
+(deftest transact-and-notify-executes-tx-wakes-sse-and-partitions-fragment-cache-test
+  (let [system (live/create {:rules (request-rules)
+                             :dispatch-options {:threads 1
+                                                :queue-size 8
+                                                :on-overflow :throw}
+                             :fragment-options {:ttl-ms 1000}})
+        started (live/start-sse!
+                 system
+                 request-sub
+                 {:flow-options {:relieve? false}
+                  :sse-options {:encoder (constantly "wake")}})
+        tx-calls (atom [])
+        render-count (atom 0)
+        render-fn (fn []
+                    (str "<section>request "
+                         (swap! render-count inc)
+                         "</section>"))
+        consistency-1 {:tx-id 100
+                       :system-time :system-time-100
+                       :snapshot-time :system-time-100}
+        consistency-2 {:tx-id 101
+                       :system-time :system-time-101
+                       :snapshot-time :system-time-101}]
+    (try
+      (with-redefs [xtdb-live/execute-tx-from!
+                    (fn [ctx' tx-ops opts]
+                      (swap! tx-calls conj [ctx' tx-ops opts])
+                      {:tx-result {:tx-id 100
+                                   :system-time :system-time-100}
+                       :consistency consistency-1})]
+        (let [result (live/transact-and-notify!
+                      system
+                      ctx
+                      {:tx-ops sample-xtdb-tx
+                       :change request-change
+                       :tx-options {:database :xtdb}
+                       :emit :async})
+              ctx' (:ctx result)
+              change' (first (:changes result))
+              key-1 (request-panel-key-from-consistency (:consistency result))]
+
+          ;; Transaction went through the app-facing facade.
+          (is (= [[ctx sample-xtdb-tx {:database :xtdb}]]
+                 @tx-calls))
+
+          ;; Returned metadata carries the transaction result and read basis.
+          (is (= {:tx-result {:tx-id 100
+                              :system-time :system-time-100}
+                  :consistency consistency-1}
+                 (select-keys result [:tx-result :consistency])))
+
+          ;; The facade puts consistency onto ctx and the submitted change.
+          (is (= consistency-1
+                 (:gesso.live/consistency ctx')))
+          (is (= (assoc request-change
+                        :gesso.live/consistency
+                        consistency-1)
+                 change'))
+
+          ;; Async emit goes through submit-expanded! and wakes the subscriber.
+          (is (= :async (:emit result)))
+          (is (= 1 (count (:emit-results result))))
+          (is (= :submitted
+                 (get-in result [:emit-results 0 :status])))
+
+          (is (= "event: live-update\ndata: wake\n\n"
+                 (take-value (:stream started))))
+
+          ;; The returned consistency can be used to partition fragment rendering.
+          (is (= "<section>request 1</section>"
+                 (:value
+                  (run-task
+                   (live/render-task system key-1 render-fn)))))
+
+          ;; Same consistency reuses cache.
+          (is (= "<section>request 1</section>"
+                 (:value
+                  (run-task
+                   (live/render-task system key-1 render-fn)))))))
+
+      ;; A later transaction/read basis should partition the fragment cache.
+      ;; Use :emit false here because the wakeup path was already proven above.
+      (with-redefs [xtdb-live/execute-tx-from!
+                    (fn [ctx' tx-ops opts]
+                      (swap! tx-calls conj [ctx' tx-ops opts])
+                      {:tx-result {:tx-id 101
+                                   :system-time :system-time-101}
+                       :consistency consistency-2})]
+        (let [result-2 (live/transact-and-notify!
+                        system
+                        ctx
+                        {:tx-ops sample-xtdb-tx
+                         :change request-change
+                         :emit false})
+              key-1 (request-panel-key-from-consistency consistency-1)
+              key-2 (request-panel-key-from-consistency (:consistency result-2))]
+
+          (is (not= key-1 key-2))
+
+          (is (= "<section>request 2</section>"
+                 (:value
+                  (run-task
+                   (live/render-task system key-2 render-fn)))))
+
+          ;; Same newer consistency now reuses its own cache.
+          (is (= "<section>request 2</section>"
+                 (:value
+                  (run-task
+                   (live/render-task system key-2 render-fn)))))
+
+          (is (= false (:emit result-2)))
+          (is (= [] (:emit-results result-2)))))
+
+      (is (= 2 @render-count))
+      (is (= 2 (get-in (live/stats system) [:fragment :cache-count])))
 
       (source/close! (:source system))
       (is (eventually #(sse/closed? started)))
