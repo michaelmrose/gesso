@@ -341,15 +341,20 @@
       (submitted job)
       (dropped job :queue-full))))
 
+
 (defn- remove-coalesced-job!
-  [dispatcher key]
-  (let [old (get @(:pending-by-key dispatcher) key)
-        queue ^ArrayBlockingQueue (:queue dispatcher)]
-    (when old
-      (swap! (:pending-by-key dispatcher) dissoc key)
-      (when (.remove queue old)
-        (notify-drop! old :coalesced)))
-    old))
+  "Best-effort removal of a queued coalesced job.
+
+   Returns true only when the old job was actually removed from the queue.
+
+   Important: pending-by-key is not changed here. The caller updates it only
+   after the replacement job is successfully enqueued. This prevents data loss
+   if enqueueing the replacement fails."
+  [dispatcher old-job]
+  (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
+    (boolean
+     (and old-job
+          (.remove queue old-job)))))
 
 (defn- enqueue-coalesce!
   [dispatcher job]
@@ -360,13 +365,33 @@
            {:job-id (:dispatch/job-id job)
             :job job})))
     (locking (:coalesce-lock dispatcher)
-      (remove-coalesced-job! dispatcher key)
-      (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
+      (let [queue ^ArrayBlockingQueue (:queue dispatcher)
+            old-job (get @(:pending-by-key dispatcher) key)
+            removed-old? (remove-coalesced-job! dispatcher old-job)]
         (if (.offer queue job)
           (do
             (swap! (:pending-by-key dispatcher) assoc key job)
+            (when removed-old?
+              (notify-drop! old-job :coalesced))
             (submitted job))
-          (throw (queue-full-error dispatcher job)))))))
+
+          (do
+            ;; If we removed the old job but somehow failed to enqueue the new
+            ;; one, restore the old job and leave pending-by-key pointing at it.
+            ;; With this dispatcher's lock and a successful removal this should
+            ;; normally succeed; if it doesn't, fail loudly rather than silently
+            ;; losing work.
+            (when removed-old?
+              (when-not (.offer queue old-job)
+                (throw
+                 (ex "gesso.live dispatcher failed to restore coalesced job."
+                     {:dispatcher/id (:id dispatcher)
+                      :name (:name dispatcher)
+                      :old-job-id (:dispatch/job-id old-job)
+                      :new-job-id (:dispatch/job-id job)
+                      :coalesce-key key}))))
+            (throw (queue-full-error dispatcher job))))))))
+
 
 ;; -----------------------------------------------------------------------------
 ;; Public submission API
