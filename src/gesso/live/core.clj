@@ -46,6 +46,7 @@
    [gesso.live.htmx :as htmx]
    [gesso.live.invalidation :as invalidation]
    [gesso.live.source :as source]
+   [gesso.live.synced :as synced]
    [gesso.live.transport.sse :as sse]))
 
 ;; -----------------------------------------------------------------------------
@@ -621,6 +622,127 @@
             :changes changes'
             :emit emit-mode
             :emit-results emit-results})))
+
+
+;; -----------------------------------------------------------------------------
+;; Synced value facade
+;; -----------------------------------------------------------------------------
+
+(def ->synced
+  "Define one persisted live value.
+
+   Re-export of gesso.live.synced/->synced."
+  synced/->synced)
+
+(defn- system-from
+  [ctx options]
+  (or (:system options)
+      (:gesso.live/system options)
+      (:gesso.live/system ctx)
+      (:live/system ctx)
+      (throw
+       (ex "gesso.live synced write requires a live system."
+           {:ctx-keys (when (map? ctx) (set (keys ctx)))
+            :options-keys (when (map? options) (set (keys options)))
+            :expected-one-of [:system
+                              :gesso.live/system
+                              [:ctx :gesso.live/system]
+                              [:ctx :live/system]]}))))
+
+(defn live-read
+  "Read a synced value through the ctx-aware XTDB consistency path.
+
+   Example:
+
+     (def counter
+       (live/->synced
+        {:table :demo_counters
+         :id \"global-shared-counter\"
+         :col :demo/value
+         :topic :demo-counter
+         :default 0}))
+
+     (live/live-read ctx counter)"
+  ([ctx synced-value]
+   (synced/live-read ctx synced-value))
+  ([ctx synced-value opts]
+   (synced/live-read ctx synced-value opts)))
+
+(defn live-set!
+  "Set a synced value, execute an XTDB tx, and optionally notify live subscribers.
+
+   Requires the live system under one of:
+
+     (:system options)
+     (:gesso.live/system options)
+     (:gesso.live/system ctx)
+     (:live/system ctx)
+
+   Options:
+     :system
+       Explicit live system.
+
+     :emit
+       :async | :sync | false. Defaults to :async.
+
+     :tx-options
+       XTDB tx options.
+
+     :entry
+       Dispatch entry metadata. Defaults to the synced descriptor's
+       coalesce-key entry.
+
+     :entry-fn
+       Optional function of attached change -> dispatch entry metadata.
+
+     :change
+       Explicit primary change. Defaults to synced/change.
+
+     :data
+       Optional data included in the generated change.
+
+     :change/kind
+       Override generated change kind.
+
+   Returns the transact-and-notify! result, assoc'd with :value."
+  ([ctx synced-value value]
+   (live-set! ctx synced-value value nil))
+  ([ctx synced-value value options]
+   (let [options' (or options {})
+         system (system-from ctx options')
+         change' (or (:change options')
+                     (synced/change synced-value value options'))
+         entry' (if (contains? options' :entry)
+                  (:entry options')
+                  (synced/entry synced-value))
+         result (transact-and-notify!
+                 system
+                 ctx
+                 {:tx-ops (synced/tx-ops synced-value value)
+                  :change change'
+                  :tx-options (:tx-options options')
+                  :emit (:emit options')
+                  :entry entry'
+                  :entry-fn (:entry-fn options')})]
+     (assoc result :value value))))
+
+(defn live-swap!
+  "Read a synced value, apply f to it, set the result, and notify subscribers.
+
+   f is called as a unary function with the current value.
+
+   Example:
+
+     (live/live-swap! ctx counter inc)"
+  ([ctx synced-value f]
+   (live-swap! ctx synced-value f nil))
+  ([ctx synced-value f options]
+   (let [old-value (live-read ctx synced-value (:read-options options))
+         new-value (f old-value)
+         options' (assoc (or options {})
+                         :old-value old-value
+                         :new-value new-value)]
+     (live-set! ctx synced-value new-value options'))))
 
 ;; -----------------------------------------------------------------------------
 ;; Flow and SSE
