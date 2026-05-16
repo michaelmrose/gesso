@@ -41,11 +41,7 @@
   "outerHTML")
 
 (def default-fragment-trigger
-  "Default HTMX trigger prefix for live fragment refresh.
-
-   Includes pageshow from:window so browser back/forward cache restores refetch
-   the fragment instead of showing a stale DOM snapshot until the next SSE event."
-  "load, pageshow from:window")
+  "load, pageshow from:window, focus from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body ")
 
 (def default-post-swap
   "Default HTMX swap mode for helper POST forms/buttons."
@@ -78,6 +74,14 @@
 ;; -----------------------------------------------------------------------------
 ;; Small attr helpers
 ;; -----------------------------------------------------------------------------
+
+(defn- append-hyperscript
+  [attrs script]
+  (let [existing (:_ attrs)]
+    (assoc attrs :_
+           (if (and existing (not (str/blank? existing)))
+             (str existing "\n" script)
+             script))))
 
 (defn clean-attrs
   "Remove nil values from an attr map.
@@ -308,6 +312,7 @@
 ;; Live fragment refresh helpers
 ;; -----------------------------------------------------------------------------
 
+
 (defn fragment-root-attrs
   "Build attrs for the outer live wrapper.
 
@@ -316,12 +321,19 @@
    - :attrs merged last for ordinary attrs
 
    :hx-ext is composed rather than overwritten, so caller attrs like
-   {:hx-ext \"path-deps\"} become \"sse, path-deps\"."
+   {:hx-ext \"path-deps\"} become \"sse, path-deps\".
+
+   The root also emits gesso:live-connected whenever the HTMX SSE extension opens
+   or reconnects the EventSource. Fragment targets can listen for that event to
+   re-fetch current server state after missed live wakeups."
   [{:keys [attrs] :as opts}]
   (let [stream-url (require-non-blank! opts :stream-url "SSE stream URL")]
-    (merge-sse-attrs
-     {:sse-connect stream-url}
-     attrs)))
+    (-> (merge-sse-attrs
+         {:sse-connect stream-url}
+         attrs)
+        (append-hyperscript
+         "on htmx:sseOpen send gesso:live-connected to body"))))
+
 
 (defn fragment-trigger
   "Build the canonical live fragment trigger string.
