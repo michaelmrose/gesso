@@ -7,10 +7,10 @@
 
    - XTDB2 connectable/context helpers
    - explicit read-consistency/query option helpers
-   - await-token helpers for XTDB2 DataSource values
    - thin q/plan-q task wrappers
    - thin submit-tx/execute-tx task wrappers
    - fragment-key consistency dimensions
+   - small tx-op constructors
 
    It does not:
 
@@ -20,21 +20,48 @@
    - publish live invalidations
    - depend on gesso.live.core
    - decide what changed in the application
+   - expose or use mutable await-token-source helpers
+   - call .setAwaitToken or .getAwaitToken
 
-   The app write path should remain explicit:
+   Important XTDB2 behavior:
 
-     write to XTDB2
-     -> app constructs a primary change
-     -> app calls gesso.live.core/submit-expanded! or emit-expanded!
+   XTDB's own public submit-tx/execute-tx mutate a DataSource's await-token
+   internally when the connectable is a DataSource. XTDB q/plan-q also use a
+   DataSource's current await-token as the default query await-token.
 
-   Live fragment reads should use q-consistent-from / plan-q-consistent-from
-   rather than a request-scoped connection when read-after-write visibility
-   matters."
+   This namespace does not add another mutable consistency layer. For
+   request-specific read-after-write behavior, pass explicit immutable
+   consistency data to q-consistent / plan-q-consistent.
+
+   execute-tx! is the preferred write helper when the immediate live fragment
+   must read at/after the write, because XTDB2 execute-tx returns a
+   TransactionKey containing tx-id and system-time. We derive :snapshot-time
+   from that system-time for per-query consistency.
+
+   submit-tx! returns only the public metadata available from XTDB submit-tx,
+   currently :tx-id. That is useful metadata, but not a complete per-query read
+   basis by itself."
   (:require
    [missionary.core :as m]
    [xtdb.api :as xt])
   (:import
-   [xtdb.api DataSource]))
+   [xtdb.api TransactionKey]))
+
+;; -----------------------------------------------------------------------------
+;; Internal XTDB call seams
+;; -----------------------------------------------------------------------------
+
+(def ^:private ^:dynamic *q*
+  xt/q)
+
+(def ^:private ^:dynamic *plan-q*
+  xt/plan-q)
+
+(def ^:private ^:dynamic *submit-tx*
+  xt/submit-tx)
+
+(def ^:private ^:dynamic *execute-tx*
+  xt/execute-tx)
 
 ;; -----------------------------------------------------------------------------
 ;; Debug
@@ -60,10 +87,15 @@
    :current-time
    :default-tz])
 
-(def tx-consistency-keys
+(def tx-metadata-keys
   [:tx-id
-   :system-time
-   :await-token])
+   :system-time])
+
+(def tx-consistency-keys
+  (vec
+   (distinct
+    (concat tx-metadata-keys
+            query-consistency-keys))))
 
 (def query-option-keys
   [:await-token
@@ -82,12 +114,10 @@
    :authn])
 
 (def adapter-option-keys
-  [:debug-fn
-   :await-token-source])
+  [:debug-fn])
 
 (def default-options
-  {:debug-fn nil
-   :await-token-source nil})
+  {:debug-fn nil})
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -132,11 +162,6 @@
     (require-fn-option! options' :debug-fn)
     options'))
 
-(defn xtdb-datasource?
-  "Return true when x is an XTDB2 DataSource that supports await-token methods."
-  [x]
-  (instance? DataSource x))
-
 (defn require-connectable!
   [connectable]
   (when-not connectable
@@ -150,6 +175,31 @@
                             :biff/node]})))
   connectable)
 
+(defn- transaction-key?
+  [x]
+  (instance? TransactionKey x))
+
+(defn- transaction-key->map
+  [tx-key]
+  {:tx-id (.getTxId ^TransactionKey tx-key)
+   :system-time (.getSystemTime ^TransactionKey tx-key)})
+
+(defn- tx-result-map
+  "Return a plain map view of known public XTDB tx result shapes.
+
+   XTDB submit-tx returns a map such as {:tx-id ...}.
+   XTDB execute-tx returns a TransactionKey with tx-id/system-time."
+  [tx-result]
+  (cond
+    (map? tx-result)
+    tx-result
+
+    (transaction-key? tx-result)
+    (transaction-key->map tx-result)
+
+    :else
+    {}))
+
 ;; -----------------------------------------------------------------------------
 ;; Context helpers
 ;; -----------------------------------------------------------------------------
@@ -157,9 +207,6 @@
 (defn connectable-from
   "Return a general XTDB2 connectable from either a raw connectable or a context
    map.
-
-   This is the raw/general lookup. It may return a request-scoped connection
-   such as :biff/conn or :xtdb/conn.
 
    Preferred context keys:
 
@@ -170,10 +217,7 @@
    Biff-compatible fallback keys:
 
      :biff/conn
-     :biff/node
-
-   For live fragment reads where read-after-write visibility matters, prefer
-   read-connectable-from or q-consistent-from."
+     :biff/node"
   [x]
   (if (map? x)
     (or (:xtdb/connectable x)
@@ -186,109 +230,27 @@
 (defn read-connectable-from
   "Return the preferred XTDB2 connectable for live/read-after-write queries.
 
-   This intentionally prefers node/DataSource-like values over request-scoped
-   connections, because request ctx connections can carry stale read state.
+   Prefer explicit read connectables and request-scoped connections first.
+   Shared DataSource/node values are valid XTDB connectables, but XTDB q/plan-q
+   may implicitly use their shared await-token state.
 
    Preferred context keys:
 
      :xtdb/read-connectable
-     :xtdb/node
-     :xtdb/connectable
-     :biff/node
      :xtdb/conn
-     :biff/conn"
+     :biff/conn
+     :xtdb/connectable
+     :xtdb/node
+     :biff/node"
   [x]
   (if (map? x)
     (or (:xtdb/read-connectable x)
-        (:xtdb/node x)
-        (:xtdb/connectable x)
-        (:biff/node x)
         (:xtdb/conn x)
-        (:biff/conn x))
-    x))
-
-(defn await-token-source-from
-  "Return the preferred XTDB2 DataSource used for await-token tracking.
-
-   Preferred context keys:
-
-     :xtdb/await-token-source
-     :xtdb/node
-     :xtdb/connectable
-     :xtdb/read-connectable
-
-   Biff-compatible fallback:
-
-     :biff/node
-
-   Request-scoped connections such as :biff/conn are intentionally not used
-   here."
-  [x]
-  (if (map? x)
-    (or (:xtdb/await-token-source x)
-        (:xtdb/node x)
+        (:biff/conn x)
         (:xtdb/connectable x)
-        (:xtdb/read-connectable x)
+        (:xtdb/node x)
         (:biff/node x))
     x))
-
-;; -----------------------------------------------------------------------------
-;; Await token helpers
-;; -----------------------------------------------------------------------------
-
-(defn can-use-await-token?
-  "Return true if x can store/read XTDB2 await tokens."
-  [x]
-  (xtdb-datasource? x))
-
-(defn current-await-token
-  "Return the current await token from an XTDB2 DataSource, or nil."
-  [await-token-source]
-  (when (can-use-await-token? await-token-source)
-    (.getAwaitToken ^DataSource await-token-source)))
-
-(defn apply-await-token!
-  "Strictly apply an await token to an XTDB2 DataSource.
-
-   Passing nil token is a no-op. Passing a non-nil token with a non-XTDB2
-   DataSource is an error."
-  [await-token-source token]
-  (cond
-    (nil? token)
-    await-token-source
-
-    (can-use-await-token? await-token-source)
-    (do
-      (.setAwaitToken ^DataSource await-token-source token)
-      await-token-source)
-
-    :else
-    (throw
-     (ex "Cannot apply XTDB2 await token to non-XTDB2 DataSource."
-         {:await-token-source await-token-source
-          :token token}))))
-
-(defn try-apply-await-token!
-  "Best-effort await-token application.
-
-   Returns true when the token was applied, false when no compatible
-   await-token source was available.
-
-   Passing nil token returns false."
-  [await-token-source token]
-  (boolean
-   (when (and token (can-use-await-token? await-token-source))
-     (.setAwaitToken ^DataSource await-token-source token)
-     true)))
-
-(defn current-consistency
-  "Return the current read consistency visible from an await-token source.
-
-   Currently this captures only :await-token because that is the mutable
-   consistency value exposed by XTDB2 DataSource."
-  [await-token-source]
-  (compact-map
-   {:await-token (current-await-token await-token-source)}))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options
@@ -299,22 +261,26 @@
 
    Accepted keys:
 
-     :await-token
-     :snapshot-token
-     :snapshot-time
-     :current-time
-     :default-tz
-     :tx-id
-     :system-time
+     Query consistency:
+       :await-token
+       :snapshot-token
+       :snapshot-time
+       :current-time
+       :default-tz
 
-   Extra keys are discarded."
+     Transaction metadata:
+       :tx-id
+       :system-time
+
+   Extra keys are discarded.
+
+   :tx-id and :system-time are preserved as metadata, but only
+   query-consistency keys are passed to XTDB query opts."
   [consistency]
-  (select-compact consistency
-                  (concat query-consistency-keys
-                          tx-consistency-keys)))
+  (select-compact consistency tx-consistency-keys))
 
 (defn consistency-from
-  "Return consistency from a raw await-token source or context map.
+  "Return explicit consistency from a context map.
 
    Context precedence:
 
@@ -322,19 +288,16 @@
      :gesso.live.xtdb/consistency
      :xtdb/consistency
      :consistency
-     current await-token from await-token-source-from
 
-   This is the helper live fragment reads should use when the browser/request
-   does not provide an explicit consistency token."
+   This function intentionally does not inspect or mutate XTDB DataSource/node
+   state. A context without explicit consistency returns an empty map."
   [x]
   (normalize-consistency
-   (if (map? x)
+   (when (map? x)
      (or (:gesso.live/consistency x)
          (:gesso.live.xtdb/consistency x)
          (:xtdb/consistency x)
-         (:consistency x)
-         (current-consistency (await-token-source-from x)))
-     (current-consistency x))))
+         (:consistency x)))))
 
 (defn query-consistency
   "Return only consistency fields that XTDB2 query opts can use."
@@ -353,7 +316,10 @@
 (defn consistent-query-opts
   "Build XTDB2 query opts from consistency plus explicit opts.
 
-   Consistency-derived values are applied first. Explicit opts win."
+   Consistency-derived values are applied first. Explicit opts win.
+
+   This is the only place this namespace applies read consistency. It is
+   per-query data, not mutation on a shared XTDB object."
   ([consistency]
    (consistent-query-opts consistency nil))
   ([consistency opts]
@@ -364,7 +330,7 @@
 (defn tx-opts
   "Return only options intended for XTDB2 submit-tx/execute-tx.
 
-   Adapter-only options such as :debug-fn and :await-token-source are removed."
+   Adapter-only options such as :debug-fn are removed."
   [opts]
   (select-compact opts tx-option-keys))
 
@@ -386,7 +352,7 @@
     (or dimensions {})))
 
 (defn with-consistency-dimension-from
-  "Assoc consistency from a context/source into a fragment key dimension map."
+  "Assoc explicit consistency from a context into a fragment key dimension map."
   [dimensions ctx-or-source]
   (with-consistency-dimension dimensions
     (consistency-from ctx-or-source)))
@@ -401,17 +367,17 @@
    Arity mirrors xtdb.api/q. It does not reinterpret the third argument as a
    consistency map. For consistency-aware reads, use q-consistent."
   ([connectable query]
-   (xt/q (require-connectable! connectable) query))
+   (*q* (require-connectable! connectable) query))
   ([connectable query opts]
-   (xt/q (require-connectable! connectable)
-         query
-         (query-opts opts))))
+   (*q* (require-connectable! connectable)
+        query
+        (query-opts opts))))
 
 (defn q-from
   "Run plain q against a raw connectable or context map.
 
-   This uses connectable-from and may use request-scoped connections. For live
-   fragment reads, prefer q-consistent-from."
+   This uses connectable-from. For live fragment reads, prefer
+   q-consistent-from."
   ([ctx-or-connectable query]
    (q (connectable-from ctx-or-connectable) query))
   ([ctx-or-connectable query opts]
@@ -425,15 +391,14 @@
   ([connectable query consistency]
    (q-consistent connectable query consistency nil))
   ([connectable query consistency opts]
-   (xt/q (require-connectable! connectable)
-         query
-         (consistent-query-opts consistency opts))))
+   (*q* (require-connectable! connectable)
+        query
+        (consistent-query-opts consistency opts))))
 
 (defn q-consistent-from
   "Run q-consistent against a raw connectable or context map.
 
-   Unlike q-from, this uses read-connectable-from and consistency-from, making it
-   the safer default for live fragment reads."
+   Uses read-connectable-from and consistency-from."
   ([ctx-or-connectable query]
    (q-consistent (read-connectable-from ctx-or-connectable)
                  query
@@ -477,11 +442,11 @@
    Returns XTDB2's reducible result. This is useful for large result sets.
    This function does not realize the result set."
   ([connectable query]
-   (xt/plan-q (require-connectable! connectable) query))
+   (*plan-q* (require-connectable! connectable) query))
   ([connectable query opts]
-   (xt/plan-q (require-connectable! connectable)
-              query
-              (query-opts opts))))
+   (*plan-q* (require-connectable! connectable)
+             query
+             (query-opts opts))))
 
 (defn plan-q-from
   "Run plain plan-q against a raw connectable or context map."
@@ -495,9 +460,9 @@
   ([connectable query consistency]
    (plan-q-consistent connectable query consistency nil))
   ([connectable query consistency opts]
-   (xt/plan-q (require-connectable! connectable)
-              query
-              (consistent-query-opts consistency opts))))
+   (*plan-q* (require-connectable! connectable)
+             query
+             (consistent-query-opts consistency opts))))
 
 (defn plan-q-consistent-from
   "Run plan-q-consistent against a raw connectable or context map.
@@ -520,37 +485,29 @@
 (defn tx-result-consistency
   "Extract consistency-relevant fields from an XTDB2 transaction result.
 
-   submit-tx returns at least :tx-id.
-   execute-tx returns transaction details including tx/system-time in XTDB2.
+   Known public XTDB2 shapes:
 
-   This helper intentionally avoids XTDB v1 tx/basis concepts."
+   - submit-tx returns a map with :tx-id.
+   - execute-tx returns a TransactionKey with tx-id/system-time.
+
+   When system-time is present, this helper also derives :snapshot-time. XTDB2
+   q/plan-q support :snapshot-time as a per-query option, so execute-tx! results
+   can be used for per-query read-after-write consistency without manually
+   mutating DataSource await-token state."
   [tx-result]
-  (select-compact tx-result
-                  [:tx-id
-                   :system-time]))
+  (let [{:keys [tx-id system-time]} (tx-result-map tx-result)]
+    (compact-map
+     {:tx-id tx-id
+      :system-time system-time
+      :snapshot-time system-time})))
 
 (defn tx-consistency
-  "Build a consistency map from a tx result and optional await-token source."
-  ([tx-result]
-   (tx-consistency tx-result nil))
-  ([tx-result await-token-source]
-   (compact-map
-    (merge
-     (tx-result-consistency tx-result)
-     {:await-token (current-await-token await-token-source)}))))
+  "Build a consistency map from a tx result.
 
-(defn- tx-await-token-source
-  [connectable opts]
-  (let [explicit (:await-token-source opts)]
-    (cond
-      (can-use-await-token? explicit)
-      explicit
-
-      (can-use-await-token? connectable)
-      connectable
-
-      :else
-      nil)))
+   The second arity is intentionally not provided. There is no await-token-source
+   argument because this namespace does not inspect shared XTDB state."
+  [tx-result]
+  (tx-result-consistency tx-result))
 
 ;; -----------------------------------------------------------------------------
 ;; Transaction wrappers
@@ -564,30 +521,31 @@
      {:tx-result ...
       :consistency ...}
 
-   Options may include XTDB2 submit-tx opts plus adapter opts:
+   XTDB public submit-tx returns only :tx-id. The returned consistency is
+   therefore metadata only unless XTDB changes that public result shape.
 
-     :await-token-source
-       Optional XTDB2 DataSource used to capture the current await token after
-       the write. Useful when connectable is a JDBC Connection.
+   Options may include XTDB2 submit-tx opts plus adapter opts:
 
      :debug-fn
        Optional pay-for-play debug hook.
 
-   This function does not emit live invalidations."
+   This function does not emit live invalidations and does not manually mutate
+   shared XTDB consistency state."
   ([connectable tx-ops]
    (submit-tx! connectable tx-ops nil))
   ([connectable tx-ops opts]
-   (let [connectable' (require-connectable! connectable)
-         adapter-options (prepare-options! opts)
-         debug-fn (:debug-fn adapter-options)]
+   (let [connectable'     (require-connectable! connectable)
+         adapter-options  (prepare-options! opts)
+         debug-fn         (:debug-fn adapter-options)
+         tx-options       (tx-opts opts)]
      (debug!
       debug-fn
       :gesso.live.xtdb/submit-tx-started
-      {:at (now-ms)})
+      {:tx-opts tx-options
+       :at (now-ms)})
      (try
-       (let [tx-result (xt/submit-tx connectable' tx-ops (tx-opts opts))
-             await-source (tx-await-token-source connectable' adapter-options)
-             consistency (tx-consistency tx-result await-source)]
+       (let [tx-result   (*submit-tx* connectable' tx-ops tx-options)
+             consistency (tx-consistency tx-result)]
          (debug!
           debug-fn
           :gesso.live.xtdb/submit-tx-succeeded
@@ -607,19 +565,14 @@
 (defn submit-tx-from!
   "Submit tx ops using a context/raw connectable.
 
-   Uses connectable-from for the write and await-token-source-from for returned
-   consistency unless :await-token-source is explicitly supplied."
+   Uses connectable-from for the write. Returned consistency is extracted only
+   from the public tx result."
   ([ctx-or-connectable tx-ops]
    (submit-tx-from! ctx-or-connectable tx-ops nil))
   ([ctx-or-connectable tx-ops opts]
-   (let [opts' (if (contains? (or opts {}) :await-token-source)
-                 opts
-                 (assoc (or opts {})
-                        :await-token-source
-                        (await-token-source-from ctx-or-connectable)))]
-     (submit-tx! (connectable-from ctx-or-connectable)
-                 tx-ops
-                 opts'))))
+   (submit-tx! (connectable-from ctx-or-connectable)
+               tx-ops
+               opts)))
 
 (defn execute-tx!
   "Execute XTDB2 tx ops and wait for the receiving node to index them.
@@ -629,30 +582,38 @@
      {:tx-result ...
       :consistency ...}
 
-   Options may include XTDB2 execute-tx opts plus adapter opts:
+   XTDB public execute-tx returns a TransactionKey containing tx-id and
+   system-time. The returned consistency includes:
 
-     :await-token-source
-       Optional XTDB2 DataSource used to capture the current await token after
-       the write. Useful when connectable is a JDBC Connection.
+     :tx-id
+     :system-time
+     :snapshot-time
+
+   :snapshot-time is derived from :system-time and can be passed to q-consistent
+   / plan-q-consistent as per-query consistency data.
+
+   Options may include XTDB2 execute-tx opts plus adapter opts:
 
      :debug-fn
        Optional pay-for-play debug hook.
 
-   This function does not emit live invalidations."
+   This function does not emit live invalidations and does not manually mutate
+   shared XTDB consistency state."
   ([connectable tx-ops]
    (execute-tx! connectable tx-ops nil))
   ([connectable tx-ops opts]
-   (let [connectable' (require-connectable! connectable)
-         adapter-options (prepare-options! opts)
-         debug-fn (:debug-fn adapter-options)]
+   (let [connectable'     (require-connectable! connectable)
+         adapter-options  (prepare-options! opts)
+         debug-fn         (:debug-fn adapter-options)
+         tx-options       (tx-opts opts)]
      (debug!
       debug-fn
       :gesso.live.xtdb/execute-tx-started
-      {:at (now-ms)})
+      {:tx-opts tx-options
+       :at (now-ms)})
      (try
-       (let [tx-result (xt/execute-tx connectable' tx-ops (tx-opts opts))
-             await-source (tx-await-token-source connectable' adapter-options)
-             consistency (tx-consistency tx-result await-source)]
+       (let [tx-result   (*execute-tx* connectable' tx-ops tx-options)
+             consistency (tx-consistency tx-result)]
          (debug!
           debug-fn
           :gesso.live.xtdb/execute-tx-succeeded
@@ -672,19 +633,14 @@
 (defn execute-tx-from!
   "Execute tx ops using a context/raw connectable.
 
-   Uses connectable-from for the write and await-token-source-from for returned
-   consistency unless :await-token-source is explicitly supplied."
+   Uses connectable-from for the write. Returned consistency is extracted only
+   from the public tx result."
   ([ctx-or-connectable tx-ops]
    (execute-tx-from! ctx-or-connectable tx-ops nil))
   ([ctx-or-connectable tx-ops opts]
-   (let [opts' (if (contains? (or opts {}) :await-token-source)
-                 opts
-                 (assoc (or opts {})
-                        :await-token-source
-                        (await-token-source-from ctx-or-connectable)))]
-     (execute-tx! (connectable-from ctx-or-connectable)
-                  tx-ops
-                  opts'))))
+   (execute-tx! (connectable-from ctx-or-connectable)
+                tx-ops
+                opts)))
 
 (defn submit-tx-task
   "Return a Missionary task that runs submit-tx! on m/blk."
@@ -709,7 +665,7 @@
 ;; -----------------------------------------------------------------------------
 
 (defn put-docs-op
-  "Build a XTDB2 :put-docs tx op."
+  "Build an XTDB2 :put-docs tx op."
   [table & docs]
   (when-not table
     (throw
@@ -722,7 +678,7 @@
   (into [:put-docs table] docs))
 
 (defn delete-docs-op
-  "Build a XTDB2 :delete-docs tx op."
+  "Build an XTDB2 :delete-docs tx op."
   [table & doc-ids]
   (when-not table
     (throw
