@@ -41,12 +41,23 @@
   "outerHTML")
 
 (def default-fragment-trigger
-  "Default HTMX trigger prefix for live fragment refresh."
-  "load")
+  "Default HTMX trigger prefix for live fragment refresh.
+
+   Includes pageshow from:window so browser back/forward cache restores refetch
+   the fragment instead of showing a stale DOM snapshot until the next SSE event."
+  "load, pageshow from:window")
 
 (def default-post-swap
   "Default HTMX swap mode for helper POST forms/buttons."
   "innerHTML")
+
+(def default-post-sync
+  "Default HTMX request synchronization for helper POST forms/buttons.
+
+   This drops rapid duplicate submissions against the same closest form while a
+   request is already in flight. It is especially important for mobile tap
+   storms."
+  "closest form:drop")
 
 (def default-sse-callback-swap
   "Default HTMX swap mode for SSE callback requests.
@@ -122,6 +133,11 @@
 
     :else
     nil))
+
+(defn- maybe-sync-attrs
+  [sync]
+  (when sync
+    {:hx-sync sync}))
 
 ;; -----------------------------------------------------------------------------
 ;; hx-ext composition
@@ -316,8 +332,8 @@
    - :jitter-ms
    - :jitter-delay-ms
 
-   Initial load is not delayed. Only the SSE-triggered refresh receives the
-   delay modifier.
+   Initial load/pageshow refreshes are not delayed. Only the SSE-triggered
+   refresh receives the delay modifier.
 
    :jitter-delay-ms is useful for deterministic tests.
    :jitter-ms chooses a static random delay during rendering."
@@ -370,17 +386,29 @@
    Optional:
    - :target
    - :swap defaults to \"innerHTML\"
-   - :attrs merged last"
-  [{:keys [target swap attrs] :as opts
-    :or {swap default-post-swap}}]
+   - :sync defaults to \"closest form:drop\"
+   - :native-action? defaults to false
+   - :attrs merged last
+
+   By default this helper intentionally does not emit native :action. These live
+   helper forms are meant to be HTMX-only controls; omitting :action prevents a
+   missed/interrupted HTMX submit from navigating to a fragment-only mutation
+   route under mobile tap storms.
+
+   Set :native-action? true to include ordinary form :action fallback behavior."
+  [{:keys [target swap sync native-action? attrs] :as opts
+    :or {swap default-post-swap
+         sync default-post-sync
+         native-action? false}}]
   (let [to (require-non-blank! opts :to "POST URL")]
     (merge-attrs
-     {:method "post"
-      :action to
-      :hx-post to
-      :hx-swap swap}
+     (cond-> {:method "post"
+              :hx-post to
+              :hx-swap swap}
+       native-action? (assoc :action to))
      (when-let [target' (normalize-target target)]
        {:hx-target target'})
+     (maybe-sync-attrs sync)
      attrs)))
 
 ;; -----------------------------------------------------------------------------

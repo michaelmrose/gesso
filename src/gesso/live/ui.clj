@@ -31,6 +31,9 @@
 (def default-post-swap
   htmx/default-post-swap)
 
+(def default-post-sync
+  "closest [data-gesso-live-fragment]:drop")
+
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
 ;; -----------------------------------------------------------------------------
@@ -168,13 +171,13 @@
      :attrs / :root-attrs
      :target-attrs / :inner-attrs"
   [fragment]
-  (let [fragment' (canonical-fragment-map fragment)
-        id'       (require-present! :id (:id fragment'))
-        src'      (require-present! :src (:src fragment'))
-        token     (or (:subscription/token fragment')
-                      (subscription-token (:subscription fragment')))
-        base-url  (or (:stream-base-url fragment')
-                      default-stream-base-url)
+  (let [fragment'   (canonical-fragment-map fragment)
+        id'         (require-present! :id (:id fragment'))
+        src'        (require-present! :src (:src fragment'))
+        token       (or (:subscription/token fragment')
+                        (subscription-token (:subscription fragment')))
+        base-url    (or (:stream-base-url fragment')
+                        default-stream-base-url)
         stream-url' (or (:stream-url fragment')
                         (when token
                           (stream-url-from-token base-url token)))]
@@ -241,10 +244,16 @@
   "Render a standard live fragment panel.
 
    The outer element owns the SSE connection. The inner element owns the HTMX
-   refresh target that reloads on page load and on matching SSE events."
+   refresh target that reloads on page load, pageshow, and matching SSE events.
+
+   The outer element also carries data-gesso-live-fragment so child live POST
+   controls can synchronize against the whole fragment instead of each tiny
+   button wrapper. This prevents rapid tap storms from creating overlapping
+   fragment mutation requests."
   [fragment]
   (let [fragment' (ensure-fragment fragment)]
-    [:div (fragment-root-attrs fragment')
+    [:div (merge {:data-gesso-live-fragment (:id fragment')}
+                 (fragment-root-attrs fragment'))
      [:div (fragment-target-attrs fragment')]]))
 
 ;; -----------------------------------------------------------------------------
@@ -267,7 +276,7 @@
              :value token}]))
 
 ;; -----------------------------------------------------------------------------
-;; POST helpers
+;; POST form helper
 ;; -----------------------------------------------------------------------------
 
 (defn post-form-attrs
@@ -280,11 +289,17 @@
      :target
      :swap
      :attrs
+     :native-action?
+     :sync
 
-   If :target is a fragment descriptor, its :id is used."
-  [{:keys [to target swap attrs]
+   If :target is a fragment descriptor, its :id is used.
+
+   This delegates to gesso.live.htmx/post-form-attrs. That helper intentionally
+   omits native :action by default, so missed HTMX submits do not navigate to
+   fragment-only mutation routes."
+  [{:keys [to target swap attrs native-action? sync]
     :or {swap default-post-swap}}]
-  (let [to' (require-present! :to to)
+  (let [to'     (require-present! :to to)
         target' (if (fragment? target)
                   (:id target)
                   target)]
@@ -292,23 +307,28 @@
      {:to to'
       :target target'
       :swap swap
+      :sync sync
+      :native-action? native-action?
       :attrs attrs})))
 
 (defn post-form
   "Render a POST form with anti-forgery input.
 
-   Usage:
+   This is useful when you explicitly want form semantics.
 
-     (post-form ctx
-       {:to \"/increment\"
-        :target \"counter-fragment\"}
-       [:button {:type \"submit\"} \"+\"])"
+   For ordinary live buttons, prefer post-button. post-button uses type=button
+   with hx-post directly on the button so missed HTMX events cannot fall back to
+   native form submission."
   [ctx opts & children]
   (into
    [:form (post-form-attrs opts)]
    (concat
     (keep identity [(anti-forgery-input ctx)])
     children)))
+
+;; -----------------------------------------------------------------------------
+;; POST button helper
+;; -----------------------------------------------------------------------------
 
 (defn- post-button-args
   [fragment-or-opts maybe-opts]
@@ -323,8 +343,22 @@
        fragment])
     [(or fragment-or-opts {}) nil]))
 
+(defn- post-button-attrs
+  [{:keys [to target swap sync button-attrs]
+    :or {swap default-post-swap
+         sync default-post-sync}}]
+  (merge
+   {:type "button"
+    :hx-post (require-present! :to to)
+    :hx-swap swap
+    :hx-sync sync
+    :hx-include "closest [data-gesso-live-post]"}
+   (when-let [target' (htmx/normalize-target target)]
+     {:hx-target target'})
+   button-attrs))
+
 (defn post-button
-  "Render a tiny HTMX POST form containing one submit button.
+  "Render a tiny HTMX POST button.
 
    Supported call shapes:
 
@@ -336,6 +370,14 @@
      (post-button ctx fragment
        {:to \"/increment\"
         :label \"+\"})
+
+   Unlike post-form, this intentionally does not render a submit button. It
+   renders a type=button with hx-post directly on the button. If HTMX misses a
+   click under mobile tap storms, the native browser fallback is therefore a
+   no-op rather than navigation or native POST.
+
+   A lightweight wrapping form is still used so anti-forgery input can be
+   included by hx-include.
 
    Options:
      :to
@@ -354,8 +396,13 @@
        HTMX swap. Defaults to fragment swap in the 3-arity form, otherwise
        \"innerHTML\".
 
+     :sync
+       HTMX request synchronization. Defaults to synchronizing against the
+       nearest live fragment panel and dropping overlapping requests:
+       \"closest [data-gesso-live-fragment]:drop\".
+
      :form-attrs
-       Extra attrs merged into form attrs.
+       Extra attrs merged into the lightweight wrapper form.
 
      :button-attrs
        Extra attrs merged into button attrs."
@@ -363,15 +410,13 @@
    (post-button ctx opts nil))
   ([ctx fragment-or-opts maybe-opts]
    (let [[opts _fragment] (post-button-args fragment-or-opts maybe-opts)
-         {:keys [to label children target swap form-attrs button-attrs]
-          :or {swap default-post-swap}} opts
+         {:keys [label children form-attrs]} opts
          button-children (or children [label])]
-     (post-form
-      ctx
-      {:to to
-       :target target
-       :swap swap
-       :attrs form-attrs}
-      (into
-       [:button (merge {:type "submit"} button-attrs)]
-       button-children)))))
+     (into
+      [:form (merge {:data-gesso-live-post true}
+                    form-attrs)]
+      (concat
+       (keep identity [(anti-forgery-input ctx)])
+       [(into
+         [:button (post-button-attrs opts)]
+         button-children)])))))
