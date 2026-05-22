@@ -41,7 +41,7 @@
   "outerHTML")
 
 (def default-fragment-trigger
-  "load, pageshow from:window, focus from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body ")
+  "load, pageshow from:window, focus from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body")
 
 (def default-post-swap
   "Default HTMX swap mode for helper POST forms/buttons."
@@ -334,6 +334,15 @@
         (append-hyperscript
          "on htmx:sseOpen send gesso:live-connected to body"))))
 
+(defn- join-triggers
+  [& triggers]
+  (->> triggers
+       flatten
+       (remove nil?)
+       (map str)
+       (map str/trim)
+       (remove str/blank?)
+       (str/join ", ")))
 
 (defn fragment-trigger
   "Build the canonical live fragment trigger string.
@@ -353,9 +362,9 @@
     :or {event default-event
          trigger default-fragment-trigger}}]
   (let [delay-ms (effective-jitter-delay-ms opts)]
-    (str trigger
-         ", "
-         (trigger-with-delay (sse-trigger event) delay-ms))))
+    (join-triggers
+     trigger
+     (trigger-with-delay (sse-trigger event) delay-ms))))
 
 (defn fragment-target-attrs
   "Build attrs for a live fragment refresh target.

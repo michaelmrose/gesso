@@ -1,8 +1,17 @@
 (ns gesso.live.htmx-test
   (:require
-   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [gesso.live.htmx :as h]))
+
+;; -----------------------------------------------------------------------------
+;; Shared expected values
+;; -----------------------------------------------------------------------------
+
+(def default-fragment-trigger
+  "load, pageshow from:window, focus from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body, sse:live-update")
+
+(def default-live-connected-script
+  "on htmx:sseOpen send gesso:live-connected to body")
 
 ;; -----------------------------------------------------------------------------
 ;; Small attr helpers
@@ -135,16 +144,18 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest fragment-root-attrs-test
-  (testing "fragment-root-attrs builds the SSE connection wrapper attrs"
+  (testing "fragment-root-attrs builds the SSE connection wrapper attrs and emits a reconnect signal"
     (is (= {:hx-ext "sse"
-            :sse-connect "/app/live/stream"}
+            :sse-connect "/app/live/stream"
+            :_ default-live-connected-script}
            (h/fragment-root-attrs
             {:stream-url "/app/live/stream"}))))
 
   (testing "fragment-root-attrs composes hx-ext instead of overwriting SSE"
     (is (= {:hx-ext "sse, path-deps"
             :sse-connect "/app/live/stream"
-            :class "live-root"}
+            :class "live-root"
+            :_ default-live-connected-script}
            (h/fragment-root-attrs
             {:stream-url "/app/live/stream"
              :attrs {:hx-ext "path-deps"
@@ -162,8 +173,8 @@
          (h/fragment-root-attrs {:stream-url ""})))))
 
 (deftest fragment-trigger-test
-  (testing "fragment-trigger builds load + SSE trigger"
-    (is (= "load, sse:live-update"
+  (testing "fragment-trigger builds load/recovery triggers plus the SSE trigger by default"
+    (is (= default-fragment-trigger
            (h/fragment-trigger {})))
 
     (is (= "revealed, sse:store-update"
@@ -172,7 +183,7 @@
              :event :store-update}))))
 
   (testing "fragment-trigger applies delay only to the SSE trigger"
-    (is (= "load, sse:live-update delay:250ms"
+    (is (= (str default-fragment-trigger " delay:250ms")
            (h/fragment-trigger
             {:event :live-update
              :jitter-delay-ms 250})))))
@@ -181,7 +192,7 @@
   (testing "fragment-target-attrs builds the live fragment target attrs"
     (is (= {:id "store-queue"
             :hx-get "/app/store/queue"
-            :hx-trigger "load, sse:live-update"
+            :hx-trigger default-fragment-trigger
             :hx-swap "outerHTML"}
            (h/fragment-target-attrs
             {:id "store-queue"
@@ -220,25 +231,50 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest post-form-attrs-test
-  (testing "post-form-attrs builds standard POST attrs"
+  (testing "post-form-attrs builds HTMX POST attrs without native action by default"
     (is (= {:method "post"
-            :action "/save"
             :hx-post "/save"
-            :hx-swap "innerHTML"}
+            :hx-swap "innerHTML"
+            :hx-sync "closest form:drop"}
            (h/post-form-attrs
             {:to "/save"}))))
 
-  (testing "post-form-attrs supports target normalization, custom swap, and attrs"
+  (testing "post-form-attrs supports explicit native action fallback"
     (is (= {:method "post"
             :action "/save"
             :hx-post "/save"
+            :hx-swap "innerHTML"
+            :hx-sync "closest form:drop"}
+           (h/post-form-attrs
+            {:to "/save"
+             :native-action? true}))))
+
+  (testing "post-form-attrs supports target normalization, custom swap, and attrs"
+    (is (= {:method "post"
+            :hx-post "/save"
             :hx-swap "outerHTML"
             :hx-target "#profile"
+            :hx-sync "closest form:drop"
             :class "inline-form"}
            (h/post-form-attrs
             {:to "/save"
              :target "profile"
              :swap "outerHTML"
+             :attrs {:class "inline-form"}}))))
+
+  (testing "post-form-attrs supports target normalization, custom swap, attrs, and explicit native fallback together"
+    (is (= {:method "post"
+            :action "/save"
+            :hx-post "/save"
+            :hx-swap "outerHTML"
+            :hx-target "#profile"
+            :hx-sync "closest form:drop"
+            :class "inline-form"}
+           (h/post-form-attrs
+            {:to "/save"
+             :target "profile"
+             :swap "outerHTML"
+             :native-action? true
              :attrs {:class "inline-form"}}))))
 
   (testing "post-form-attrs rejects missing or blank POST URLs"
