@@ -565,19 +565,23 @@
 (defn flow-for-source
   "Open a source stream and build a client live-event flow from it.
 
-   The normal path uses source/subscribe, which registers the subscription in
-   source.clj's topic/id interest index. Unrelated invalidations are not sent to
-   this flow.
+   The normal non-debug path uses source/subscribe, which registers the
+   subscription in source.clj's topic/id interest index. Unrelated invalidations
+   are not sent to this flow.
 
-   If callers provide a custom :interested? predicate, flow-for-source falls
-   back to source/changes plus subscription-xf because arbitrary predicates
-   cannot be safely indexed by the generic source."
+   Compatibility/debug note: callers that provide a custom :interested?
+   predicate, or a :debug-fn, use the older source/changes broadcast tap path.
+   Arbitrary predicates cannot be safely indexed by the generic source, and the
+   existing debug tests intentionally observe ignored invalidations. Production
+   callers normally do not pass :debug-fn, so they take the indexed path."
   [src options]
   (let [custom-interested? (custom-interested-supplied? options)
         options'          (prepare-options! options)
         debug-fn          (:debug-fn options')
         subscription      (:subscription options')
-        indexed?          (not custom-interested?)
+        debug-path?       (some? debug-fn)
+        indexed?          (and (not custom-interested?)
+                               (not debug-path?))
         tap               (if indexed?
                             (source/subscribe src subscription)
                             (source/changes src))

@@ -379,22 +379,32 @@
   :closed)
 
 (defn stats
-  "Return a small source status map."
+  "Return a small source status map.
+
+   Compatibility note: :tap-count intentionally reports all active consumer
+   streams, including indexed subscriptions. Older tests and callers used
+   :tap-count as the upstream-consumer count. Newer diagnostics can use
+   :broadcast-tap-count and :subscription-count when they need the split."
   [source]
-  {:id (:id source)
-   :created-at (:created-at source)
-   :closed? (closed? source)
-   :tap-count (tap-count source)
-   :subscription-count (subscription-count source)
-   :indexed-scope-count (indexed-scope-count source)
-   :pending-count (pending-count source)
-   :scheduled-count (scheduled-count source)
-   :accepted-count (.sum ^LongAdder (:accepted-count source))
-   :fanout-count (.sum ^LongAdder (:fanout-count source))
-   :attempted-count (.sum ^LongAdder (:attempted-count source))
-   :coalesced-count (.sum ^LongAdder (:coalesced-count source))
-   :error-count (count @(:errors source))
-   :coalesce-window-ms (:coalesce-window-ms source)})
+  (let [broadcast-count (tap-count source)
+        subscription-count (subscription-count source)
+        accepted-count (.sum ^LongAdder (:accepted-count source))]
+    {:id (:id source)
+     :created-at (:created-at source)
+     :closed? (closed? source)
+     :tap-count (+ broadcast-count subscription-count)
+     :broadcast-tap-count broadcast-count
+     :subscription-count subscription-count
+     :indexed-scope-count (indexed-scope-count source)
+     :pending-count (pending-count source)
+     :scheduled-count (scheduled-count source)
+     :emitted-count accepted-count
+     :accepted-count accepted-count
+     :fanout-count (.sum ^LongAdder (:fanout-count source))
+     :attempted-count (.sum ^LongAdder (:attempted-count source))
+     :coalesced-count (.sum ^LongAdder (:coalesced-count source))
+     :error-count (count @(:errors source))
+     :coalesce-window-ms (:coalesce-window-ms source)}))
 
 ;; -----------------------------------------------------------------------------
 ;; Consumers
@@ -555,7 +565,7 @@
     (.increment ^LongAdder (:accepted-count source))
     (if-let [window-ms (positive-coalesce-window-ms source)]
       (enqueue-coalesced! source invalidation' window-ms)
-      (deliver-now! source invalidation'))))
+      (assoc (deliver-now! source invalidation') :status :emitted))))
 
 (defn emit-many!
   "Emit many already-expanded invalidations into source.
