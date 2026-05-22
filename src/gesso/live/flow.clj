@@ -1,13 +1,16 @@
 (ns gesso.live.flow
   "Per-client flow construction for gesso.live.
 
-   This namespace bridges a source tap into a Missionary flow and applies
+   This namespace bridges source streams into Missionary flows and applies
    client-local policy:
 
-   - subscription filtering
    - invalidation -> live-event wrapping
    - optional stale invalidation relief/coalescing
    - conditional debug tracing
+
+   The normal source path is indexed: flow-for-source uses source/subscribe so
+   unrelated invalidations are never sent to this flow. The older broadcast tap
+   path remains available for custom :interested? predicates and tests.
 
    It does not:
    - expand primary changes
@@ -16,7 +19,7 @@
    - render HTMX attrs
    - read XTDB
 
-   source.clj is the hot in-process broadcaster.
+   source.clj is the hot in-process indexed source.
    flow.clj is the cold per-client recipe."
   (:require
    [gesso.live.htmx :as htmx]
@@ -412,7 +415,11 @@
 
 (defn subscription-xf
   "Return a transducer that filters invalidations for a subscription and maps
-   matching invalidations to live events."
+   matching invalidations to live events.
+
+   This is still used for flow-for-stream and for flow-for-source when a caller
+   supplies a custom :interested? predicate that cannot be represented by the
+   default source topic/id index."
   [{:keys [subscription interested? debug-fn] :as options}]
   (let [interested-fn (or interested? default-interested?)]
     (mapcat
@@ -422,6 +429,7 @@
         :gesso.live.flow/invalidation-received
         {:subscription subscription
          :invalidation invalidation
+         :indexed? false
          :at (now-ms)})
 
        (if (safe-interested? interested-fn subscription invalidation debug-fn)
@@ -442,6 +450,32 @@
              :invalidation invalidation
              :at (now-ms)})
            []))))))
+
+(defn indexed-subscription-xf
+  "Return a transducer for indexed source streams.
+
+   The source has already matched invalidations by topic/id, so this transducer
+   only wraps each invalidation as a live event. It does not run the interested?
+   predicate on the normal hot path."
+  [{:keys [subscription debug-fn] :as options}]
+  (map
+   (fn [invalidation]
+     (debug!
+      debug-fn
+      :gesso.live.flow/indexed-invalidation-received
+      {:subscription subscription
+       :invalidation invalidation
+       :indexed? true
+       :at (now-ms)})
+     (let [event (safe-event invalidation options debug-fn)]
+       (debug!
+        debug-fn
+        :gesso.live.flow/indexed-invalidation-matched
+        {:subscription subscription
+         :invalidation invalidation
+         :live-event event
+         :at (now-ms)})
+       event))))
 
 (defn relieve
   "Apply Missionary relief/coalescing to a flow.
@@ -475,6 +509,7 @@
      :gesso.live.flow/flow-for-stream-created
      {:subscription (:subscription options)
       :relieve? (:relieve? options)
+      :indexed? false
       :at (now-ms)})
 
     (->> (stream-flow stream
@@ -484,8 +519,29 @@
          (m/eduction (subscription-xf options))
          (#(maybe-relieve % options)))))
 
+(defn- indexed-flow-for-stream*
+  [stream options]
+  (let [debug-fn (:debug-fn options)]
+    (debug!
+     debug-fn
+     :gesso.live.flow/indexed-flow-for-stream-created
+     {:subscription (:subscription options)
+      :relieve? (:relieve? options)
+      :indexed? true
+      :at (now-ms)})
+
+    (->> (stream-flow stream
+                      {:debug-fn debug-fn
+                       :on-close (:on-close options)
+                       :take! (:take! options)})
+         (m/eduction (indexed-subscription-xf options))
+         (#(maybe-relieve % options)))))
+
 (defn flow-for-stream
   "Build a client live-event flow from a Manifold stream tap.
+
+   This API treats the supplied stream as a broadcast stream, so it still filters
+   invalidations with subscription-xf.
 
    Options:
      :subscription       required
@@ -502,36 +558,56 @@
   [stream options]
   (flow-for-stream* stream (prepare-options! options)))
 
+(defn- custom-interested-supplied?
+  [options]
+  (contains? options :interested?))
+
 (defn flow-for-source
-  "Open a source tap and build a client live-event flow from it.
+  "Open a source stream and build a client live-event flow from it.
 
-   This validates options before opening the tap so invalid options do not leak
-   a registered source tap.
+   The normal path uses source/subscribe, which registers the subscription in
+   source.clj's topic/id interest index. Unrelated invalidations are not sent to
+   this flow.
 
-   This is the usual handoff from source.clj to flow.clj."
+   If callers provide a custom :interested? predicate, flow-for-source falls
+   back to source/changes plus subscription-xf because arbitrary predicates
+   cannot be safely indexed by the generic source."
   [src options]
-  (let [options'  (prepare-options! options)
-        debug-fn  (:debug-fn options')
-        tap       (source/changes src)
-        options'' (assoc options'
-                         :on-close
-                         (fn []
-                           (call-safely (:on-close options'))
-                           (debug!
-                            debug-fn
-                            :gesso.live.flow/source-tap-closed
-                            {:source/id (:id src)
-                             :subscription (:subscription options')
-                             :at (now-ms)})))]
+  (let [custom-interested? (custom-interested-supplied? options)
+        options'          (prepare-options! options)
+        debug-fn          (:debug-fn options')
+        subscription      (:subscription options')
+        indexed?          (not custom-interested?)
+        tap               (if indexed?
+                            (source/subscribe src subscription)
+                            (source/changes src))
+        options''         (assoc options'
+                                 :on-close
+                                 (fn []
+                                   (call-safely (:on-close options'))
+                                   (debug!
+                                    debug-fn
+                                    (if indexed?
+                                      :gesso.live.flow/source-subscription-closed
+                                      :gesso.live.flow/source-tap-closed)
+                                    {:source/id (:id src)
+                                     :subscription subscription
+                                     :indexed? indexed?
+                                     :at (now-ms)})))]
     (try
       (debug!
        debug-fn
-       :gesso.live.flow/source-tap-opened
+       (if indexed?
+         :gesso.live.flow/source-subscription-opened
+         :gesso.live.flow/source-tap-opened)
        {:source/id (:id src)
-        :subscription (:subscription options')
+        :subscription subscription
+        :indexed? indexed?
         :at (now-ms)})
 
-      (flow-for-stream* tap options'')
+      (if indexed?
+        (indexed-flow-for-stream* tap options'')
+        (flow-for-stream* tap options''))
       (catch Throwable e
         (s/close! tap)
         (throw e)))))
