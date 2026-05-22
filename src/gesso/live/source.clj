@@ -21,8 +21,10 @@
    unusual consumers, tests, or custom predicates that cannot be indexed.
 
    Source-level coalescing happens before fanout when :coalesce-window-ms is a
-   positive integer. Repeated invalidations for the same scope within that window
-   are collapsed to the latest invalidation and fanned out once."
+   positive integer. The source uses leading-edge + trailing-edge per-scope
+   throttling: the first invalidation for a scope is delivered immediately,
+   repeated invalidations during the cooldown are collapsed to the latest value,
+   and one trailing invalidation is delivered when the cooldown expires."
   (:require
    [gesso.live.schema :as schema]
    [manifold.deferred :as d]
@@ -156,7 +158,7 @@
 
 (defn- scheduled-count
   [source]
-  (.size ^ConcurrentHashMap (:scheduled source)))
+  (.size ^ConcurrentHashMap (:cooldowns source)))
 
 ;; -----------------------------------------------------------------------------
 ;; Error/rejection recording
@@ -312,11 +314,14 @@
        Optional source id.
 
      :coalesce-window-ms
-       Optional positive integer. When set, repeated invalidations for the same
-       topic/id scope within this window are collapsed before fanout. The latest
-       invalidation wins.
+       Optional positive integer. When set, source delivery uses leading-edge +
+       trailing-edge per-scope throttling. The first invalidation for a scope is
+       delivered immediately. Repeated invalidations for that scope during the
+       cooldown window are suppressed and collapsed to the latest pending value.
+       If anything changed during the cooldown, one trailing invalidation is
+       delivered when the window expires.
 
-       nil or 0 disables source-level coalescing.
+       nil or 0 disables source-level coalescing/throttling.
 
      :on-error
        Optional function called with source error entries.
@@ -344,9 +349,10 @@
       :subscription-keys (ConcurrentHashMap.)
       :by-scope (ConcurrentHashMap.)
 
-      ;; Source-level pre-fanout coalescing.
+      ;; Source-level pre-fanout coalescing/throttling.
       :pending (ConcurrentHashMap.)
-      :scheduled (ConcurrentHashMap.)
+      :cooldowns (ConcurrentHashMap.)
+      :coalesce-lock (Object.)
       :scheduler scheduler
 
       ;; Counters.
@@ -354,6 +360,9 @@
       :fanout-count (LongAdder.)
       :attempted-count (LongAdder.)
       :coalesced-count (LongAdder.)
+      :leading-count (LongAdder.)
+      :trailing-count (LongAdder.)
+      :suppressed-count (LongAdder.)
       :errors (atom [])})))
 
 (defn close!
@@ -374,7 +383,7 @@
       (.clear ^ConcurrentHashMap (:subscription-keys source))
       (.clear ^ConcurrentHashMap (:by-scope source))
       (.clear ^ConcurrentHashMap (:pending source))
-      (.clear ^ConcurrentHashMap (:scheduled source))
+      (.clear ^ConcurrentHashMap (:cooldowns source))
       (.shutdownNow scheduler)))
   :closed)
 
@@ -403,6 +412,9 @@
      :fanout-count (.sum ^LongAdder (:fanout-count source))
      :attempted-count (.sum ^LongAdder (:attempted-count source))
      :coalesced-count (.sum ^LongAdder (:coalesced-count source))
+     :leading-count (.sum ^LongAdder (:leading-count source))
+     :trailing-count (.sum ^LongAdder (:trailing-count source))
+     :suppressed-count (.sum ^LongAdder (:suppressed-count source))
      :error-count (count @(:errors source))
      :coalesce-window-ms (:coalesce-window-ms source)}))
 
@@ -494,49 +506,86 @@
      :attempted attempted
      :invalidation invalidation}))
 
-(defn- flush-scope!
-  [source k]
-  ;; Remove the scheduled marker first. If a concurrent emit for the same key
-  ;; arrives while this flush is running, it will be allowed to schedule a fresh
-  ;; flush. In the benign race where this flush also delivers that newer pending
-  ;; value immediately, the later scheduled flush becomes a no-op.
-  (.remove ^ConcurrentHashMap (:scheduled source) k)
-  (when-not (closed? source)
-    (when-let [invalidation (.remove ^ConcurrentHashMap (:pending source) k)]
-      (deliver-now! source invalidation)))
-  nil)
+(declare flush-cooldown!)
 
-(defn- schedule-flush!
+(defn- schedule-cooldown-flush!
   [source k window-ms]
-  (when (nil? (.putIfAbsent ^ConcurrentHashMap (:scheduled source) k Boolean/TRUE))
+  (when-not (closed? source)
     (.schedule ^ScheduledThreadPoolExecutor (:scheduler source)
-               ^Runnable (fn []
-                           (try
-                             (flush-scope! source k)
-                             (catch Throwable e
-                               (record-error!
-                                source
-                                {:kind :coalesce-flush-error
-                                 :scope-key k
-                                 :error e}))))
+               ^Runnable
+               (fn []
+                 (try
+                   (flush-cooldown! source k window-ms)
+                   (catch Throwable e
+                     (record-error!
+                      source
+                      {:kind :coalesce-flush-error
+                       :scope-key k
+                       :error e}))))
                (long window-ms)
                TimeUnit/MILLISECONDS))
   nil)
 
-(defn- enqueue-coalesced!
+(defn- flush-cooldown!
+  [source k window-ms]
+  ;; Leading/trailing throttle semantics:
+  ;; - cooldown marker remains active while a trailing value is delivered and
+  ;;   the next cooldown window is scheduled.
+  ;; - cooldown marker is removed only when the window expires with no pending
+  ;;   invalidation.
+  ;;
+  ;; The coalesce-lock protects the small pending/cooldown state transition so a
+  ;; concurrent emit cannot strand a pending invalidation while a flush removes
+  ;; the cooldown marker. Fanout happens outside the lock.
+  (let [invalidation
+        (locking (:coalesce-lock source)
+          (when-not (closed? source)
+            (if-let [pending (.remove ^ConcurrentHashMap (:pending source) k)]
+              pending
+              (do
+                (.remove ^ConcurrentHashMap (:cooldowns source) k)
+                nil))))]
+    (when invalidation
+      (.increment ^LongAdder (:trailing-count source))
+      (deliver-now! source invalidation)
+      (schedule-cooldown-flush! source k window-ms)))
+  nil)
+
+(defn- throttle-coalesced!
   [source invalidation window-ms]
   (let [k (scope-key invalidation)
-        previous (.put ^ConcurrentHashMap (:pending source) k invalidation)
-        coalesced? (some? previous)]
-    (when coalesced?
-      (.increment ^LongAdder (:coalesced-count source)))
-    (schedule-flush! source k window-ms)
-    {:status :queued
-     :source/id (:id source)
-     :scope-key k
-     :coalesced? coalesced?
-     :attempted 0
-     :invalidation invalidation}))
+        action
+        (locking (:coalesce-lock source)
+          (if (nil? (.putIfAbsent ^ConcurrentHashMap (:cooldowns source) k Boolean/TRUE))
+            :leading
+            (do
+              (.put ^ConcurrentHashMap (:pending source) k invalidation)
+              :suppressed)))]
+    (case action
+      :leading
+      (do
+        (.increment ^LongAdder (:leading-count source))
+        (let [result (deliver-now! source invalidation)]
+          (schedule-cooldown-flush! source k window-ms)
+          (assoc result
+                 :status :emitted
+                 :coalescing :leading
+                 :coalesced? false)))
+
+      :suppressed
+      (do
+        ;; Count every suppressed logical invalidation, not only replacements of
+        ;; an already-pending value. This matches the benchmark's idea of
+        ;; logical wakeups that do not become separate physical SSE wakeups.
+        (.increment ^LongAdder (:coalesced-count source))
+        (.increment ^LongAdder (:suppressed-count source))
+        {:status :queued
+         :source/id (:id source)
+         :scope-key k
+         :coalescing :suppressed
+         :coalesced? true
+         :attempted 0
+         :invalidation invalidation}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Emission
@@ -550,21 +599,24 @@
 
    With no positive :coalesce-window-ms, delivery is immediate.
 
-   With :coalesce-window-ms, delivery is delayed until the per-scope coalescing
-   window flushes. Multiple invalidations for the same topic/id scope collapse
-   to the latest invalidation before fanout.
+   With :coalesce-window-ms, delivery uses leading-edge + trailing-edge
+   per-scope throttling. The first invalidation for a scope is delivered
+   immediately. Later invalidations for that scope during the cooldown window
+   are suppressed and collapsed to the latest value; one trailing fanout is
+   delivered when the cooldown expires if anything changed.
 
    Manifold put! is asynchronous. The returned :attempted count means the source
    attempted to put the invalidation onto open consumer streams. It does not
    mean the consumer has synchronously processed the value.
 
-   In coalescing mode, :attempted is 0 because fanout happens later."
+   Suppressed invalidations return :status :queued and :attempted 0 because
+   their fanout is represented by a later trailing delivery."
   [source invalidation]
   (ensure-open! source)
   (let [invalidation' (validate-invalidation! invalidation)]
     (.increment ^LongAdder (:accepted-count source))
     (if-let [window-ms (positive-coalesce-window-ms source)]
-      (enqueue-coalesced! source invalidation' window-ms)
+      (throttle-coalesced! source invalidation' window-ms)
       (assoc (deliver-now! source invalidation') :status :emitted))))
 
 (defn emit-many!
