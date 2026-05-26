@@ -9,19 +9,23 @@
    - exposes cancel/close hooks for client disconnect handling
    - supports optional keepalive comments
    - supports conditional debug tracing
+   - supports model-backed fragment stream startup
 
    It does not:
    - expand primary changes
    - filter subscriptions
    - render fragments
    - know XTDB
-   - know application authorization
+   - know application authorization except when explicitly using the
+     model-backed fragment stream helper
 
    flow.clj decides which live events a client should receive.
    transport.sse decides how those events become text/event-stream bytes."
   (:require
    [clojure.string :as str]
+   [gesso.live.flow :as flow]
    [gesso.live.htmx :as htmx]
+   [gesso.live.model :as model]
    [gesso.live.schema :as schema]
    [manifold.deferred :as d]
    [manifold.stream :as s]
@@ -515,3 +519,56 @@
   "Return true if a started SSE stream has been closed/cancelled/completed."
   [started]
   (true? @(:closed? started)))
+
+;; -----------------------------------------------------------------------------
+;; Model-backed fragment streams
+;; -----------------------------------------------------------------------------
+
+(defn- with-inherited-debug
+  [system options]
+  (let [options' (or options {})
+        debug-fn (get-in system [:options :debug-fn])]
+    (cond-> options'
+      (and debug-fn
+           (not (contains? options' :debug-fn)))
+      (assoc :debug-fn debug-fn))))
+
+(defn start-fragment-stream!
+  "Start an SSE stream for a compiled model fragment.
+
+   This is the model-backed equivalent of core/start-sse!, but it lives at the
+   lower transport layer so core may safely re-export it without creating a
+   dependency cycle.
+
+   It:
+
+   - derives the runtime subscription from compiled model fragment metadata
+   - checks the model scope authorization policy
+   - builds the Missionary live-event flow from the system source
+   - starts the SSE transport with start!
+
+   Options:
+     :flow-options
+       Passed to flow/flow-for-source.
+
+     :sse-options
+       Passed to start!.
+
+   Returns the map from start!:
+
+     {:stream ...
+      :response ...
+      :cancel! ...
+      :closed? ...}"
+  ([system compiled ctx fragment-name id]
+   (start-fragment-stream! system compiled ctx fragment-name id nil))
+  ([system compiled ctx fragment-name id {:keys [flow-options sse-options]}]
+   (let [scope-name    (model/fragment-scope-name compiled fragment-name)
+         subscription  (model/fragment-scope-instance compiled fragment-name id)
+         flow-options' (-> (with-inherited-debug system flow-options)
+                           (assoc :subscription subscription))
+         sse-options'  (with-inherited-debug system sse-options)]
+     (model/require-scope-authorized! compiled ctx scope-name id)
+     (start!
+      (flow/flow-for-source (:source system) flow-options')
+      sse-options'))))

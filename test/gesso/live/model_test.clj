@@ -1,7 +1,6 @@
 (ns gesso.live.model-test
   (:require
    [clojure.test :refer [deftest is testing]]
-   [gesso.live.core :as live]
    [gesso.live.model :as model]))
 
 ;; -----------------------------------------------------------------------------
@@ -163,6 +162,10 @@
   [scopes]
   (set (map model/scope-key scopes)))
 
+(defn scope-summaries
+  [scopes]
+  (mapv #(select-keys % [:topic :id]) scopes))
+
 ;; -----------------------------------------------------------------------------
 ;; Compilation and normalization
 ;; -----------------------------------------------------------------------------
@@ -202,6 +205,16 @@
                :optional/missing
                :conditional/change}
              (set (map :when-topic (model/live-rules compiled))))))))
+
+(deftest validate-live-app-returns-errors-without-throwing
+  (let [errors (model/validate-live-app
+                (assoc-in base-app
+                          [:graph :task/assigned]
+                          [{:scope :store-qeue}]))]
+    (is (vector? errors))
+    (is (has-error? errors
+                    :unknown-scope
+                    [:graph :task/assigned 0 :scope]))))
 
 (deftest explain-live-app-returns-non-runtime-summary
   (let [compiled (compiled-app)
@@ -291,8 +304,6 @@
     (is (has-error? errors
                     :unknown-scope
                     [:graph :task/assigned 0 :scope]))
-    ;; The important regression: unknown scope should not be masked primarily as
-    ;; a missing :id-key problem.
     (is (not (has-error? errors
                          :missing-id-key
                          [:graph :task/assigned 0 :id-key])))))
@@ -319,8 +330,6 @@
   (let [bad-app (-> base-app
                     (assoc-in [:scopes :broken-scope]
                               {:topic :humanhelp/broken
-                               ;; structurally invalid scope, but this test
-                               ;; also verifies the semantic graph checker.
                                :authorized? allow})
                     (assoc-in [:graph :broken/event]
                               [{:scope :broken-scope}]))
@@ -329,6 +338,16 @@
     (is (has-error? errors
                     :missing-id-key
                     [:graph :broken/event 0 :id-key]))))
+
+;; -----------------------------------------------------------------------------
+;; Event topic helpers
+;; -----------------------------------------------------------------------------
+
+(deftest event-topic-supports-common-topic-keys
+  (is (= :x (model/event-topic {:topic :x})))
+  (is (= :x (model/event-topic {:event/type :x})))
+  (is (= :x (model/event-topic {:change/topic :x})))
+  (is (nil? (model/event-topic {}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Scope construction and graph expansion
@@ -342,6 +361,8 @@
            (select-keys scope [:topic :id])))
     (is (= :store-queue
            (:gesso.live/scope scope)))
+    (is (= "store queue"
+           (:gesso.live/scope-label scope)))
     (is (= [:humanhelp/store-queue "store-42"]
            (model/scope-key scope)))))
 
@@ -365,7 +386,22 @@
              [:humanhelp/customer "customer-9"]}
            (scope-keys scopes)))))
 
-(deftest expand-change-dedupes-scopes
+(deftest expand-change-supports-event-type-and-change-topic
+  (let [compiled (compiled-app)]
+    (is (= #{[:humanhelp/public-feed "feed-1"]}
+           (scope-keys
+            (model/expand-change
+             compiled
+             {:event/type :public/changed
+              :feed/id "feed-1"}))))
+    (is (= #{[:humanhelp/public-feed "feed-2"]}
+           (scope-keys
+            (model/expand-change
+             compiled
+             {:change/topic :public/changed
+              :feed/id "feed-2"}))))))
+
+(deftest expand-change-dedupes-scopes-preserving-first-order
   (let [compiled (compiled-app)
         scopes (model/expand-change
                 compiled
@@ -373,7 +409,7 @@
                  :store/id "store-42"})]
     (is (= [{:topic :humanhelp/store-queue
              :id "store-42"}]
-           (mapv #(select-keys % [:topic :id]) scopes)))))
+           (scope-summaries scopes)))))
 
 (deftest expand-changes-dedupes-across-many-changes
   (let [compiled (compiled-app)
@@ -382,10 +418,14 @@
                 [{:topic :task/assigned-duplicate
                   :store/id "store-42"}
                  {:topic :task/assigned-duplicate
-                  :store/id "store-42"}])]
+                  :store/id "store-42"}
+                 {:topic :public/changed
+                  :feed/id "feed-1"}])]
     (is (= [{:topic :humanhelp/store-queue
-             :id "store-42"}]
-           (mapv #(select-keys % [:topic :id]) scopes)))))
+             :id "store-42"}
+            {:topic :humanhelp/public-feed
+             :id "feed-1"}]
+           (scope-summaries scopes)))))
 
 (deftest compiled-live-rules-expand-like-current-rules
   (let [compiled (compiled-app)
@@ -493,6 +533,14 @@
     (is (= "helper-panel-helper-7"
            (model/fragment-dom-id compiled :helper-panel "helper-7")))))
 
+(deftest fragment-scope-instance-builds-runtime-scope
+  (let [compiled (compiled-app)
+        scope (model/fragment-scope-instance compiled :store-queue "store-42")]
+    (is (= {:topic :humanhelp/store-queue
+            :id "store-42"}
+           (select-keys scope [:topic :id])))
+    (is (= :store-queue (:gesso.live/scope scope)))))
+
 (deftest unknown-fragment-throws
   (let [compiled (compiled-app)
         data (thrown-data #(model/fragment-descriptor compiled :missing))]
@@ -556,6 +604,20 @@
     (is (= :gesso.live.model/missing-response-renderer
            (:error/type data)))))
 
+(deftest render-fragment-response-checks-auth-by-default
+  (let [compiled (model/compile-live-app
+                  (assoc-in base-app
+                            [:scopes :store-queue :authorized?]
+                            deny))
+        data (thrown-data
+              #(model/render-fragment-response
+                compiled
+                {}
+                :store-queue
+                "store-42"))]
+    (is (= :gesso.live/not-authorized
+           (:error/type data)))))
+
 (deftest render-fragment-response-can-skip-auth-when-route-already-checked
   (let [compiled (model/compile-live-app
                   (assoc-in base-app
@@ -570,116 +632,7 @@
     (is (= 200 (:status response)))))
 
 ;; -----------------------------------------------------------------------------
-;; Delegation to existing gesso.live UI/runtime helpers
-;; -----------------------------------------------------------------------------
-
-(deftest fragment-runtime-descriptor-only-passes-current-ui-keys
-  (let [compiled (compiled-app)]
-    (with-redefs [live/->fragment identity]
-      (let [runtime-fragment
-            (model/fragment->runtime-fragment
-             compiled
-             :store-queue
-             "store-42"
-             {:fragment-url "/app/stores/store-42/queue/fragment"
-              :stream-url "/app/stores/store-42/queue/stream"})]
-        (is (= "store-queue-store-42"
-               (:id runtime-fragment)))
-        (is (= "/app/stores/store-42/queue/fragment"
-               (:src runtime-fragment)))
-        (is (= "/app/stores/store-42/queue/stream"
-               (:stream-url runtime-fragment)))
-        (is (= {:topic :humanhelp/store-queue
-                :id "store-42"}
-               (select-keys (:subscription runtime-fragment) [:topic :id])))
-        (is (= :outerHTML
-               (:swap runtime-fragment)))
-
-        ;; These remain model metadata only until gesso.live.ui supports them.
-        (is (not (contains? runtime-fragment :request-policy)))
-        (is (not (contains? runtime-fragment :consistency)))))))
-
-(deftest fragment-runtime-descriptor-requires-explicit-urls
-  (let [compiled (compiled-app)]
-    (is (some?
-         (thrown-data
-          #(model/fragment->runtime-fragment
-            compiled
-            :store-queue
-            "store-42"
-            {:stream-url "/stream"}))))
-    (is (some?
-         (thrown-data
-          #(model/fragment->runtime-fragment
-            compiled
-            :store-queue
-            "store-42"
-            {:fragment-url "/fragment"}))))))
-
-(deftest fragment-panel-delegates-to-current-live-ui
-  (let [compiled (compiled-app)]
-    (with-redefs [live/->fragment identity
-                  live/fragment-panel (fn [fragment]
-                                        [:panel fragment])]
-      (let [panel (model/fragment-panel
-                   compiled
-                   :store-queue
-                   "store-42"
-                   {:fragment-url "/fragment"
-                    :stream-url "/stream"})]
-        (is (= :panel (first panel)))
-        (is (= "/fragment"
-               (get-in panel [1 :src])))
-        (is (= "/stream"
-               (get-in panel [1 :stream-url])))))))
-
-(deftest start-fragment-stream-checks-auth-and-delegates-to-live
-  (let [compiled (compiled-app)]
-    (with-redefs [live/start-sse!
-                  (fn [system subscription opts]
-                    {:response {:status 200
-                                :body {:system system
-                                       :subscription subscription
-                                       :opts opts}}})]
-      (let [response (model/start-fragment-stream
-                      compiled
-                      {}
-                      ::system
-                      :store-queue
-                      "store-42"
-                      {:flow-options {:relieve? true}})]
-        (is (= 200 (:status response)))
-        (is (= ::system
-               (get-in response [:body :system])))
-        (is (= {:topic :humanhelp/store-queue
-                :id "store-42"}
-               (select-keys
-                (get-in response [:body :subscription])
-                [:topic :id])))
-        (is (= {:flow-options {:relieve? true}}
-               (get-in response [:body :opts])))))))
-
-(deftest start-fragment-stream-denies-unauthorized-scope
-  (let [compiled (model/compile-live-app
-                  (assoc-in base-app
-                            [:scopes :store-queue :authorized?]
-                            deny))]
-    (with-redefs [live/start-sse!
-                  (fn [& _]
-                    (throw
-                     (ex-info "should not be called" {})))]
-      (is (= :gesso.live/not-authorized
-             (:error/type
-              (thrown-data
-               #(model/start-fragment-stream
-                 compiled
-                 {}
-                 ::system
-                 :store-queue
-                 "store-42"))))))))
-
-;; -----------------------------------------------------------------------------
-;; Current-runtime integration shape
+;; Runtime boundary
 ;; -----------------------------------------------------------------------------
 
 (deftest model-live-rules-are-suitable-for-core-system-options
@@ -689,12 +642,17 @@
     (is (every? #(contains? % :when-topic) rules))
     (is (every? #(fn? (:expand %)) rules))))
 
-(deftest write-path-should-use-live-rules-with-current-core
-  (let [compiled (compiled-app)]
-    ;; This is not calling live/transact-and-notify!, because this namespace
-    ;; should not need XTDB or a real system in its unit tests.
-    ;;
-    ;; The assertion is about shape: app handlers should pass these rules to
-    ;; current core helpers rather than asking model.clj to own dispatch.
-    (is (= (model/live-rules compiled)
-           (:live-rules compiled)))))
+(deftest model-test-does-not-exercise-ui-or-sse-adapters
+  ;; The model namespace now owns validation, expansion, fragment metadata,
+  ;; query/render, and response wrapping only.
+  ;;
+  ;; These belong in separate tests:
+  ;;   gesso.live.fragment-test
+  ;;     fragment->runtime-fragment
+  ;;     model-fragment-panel
+  ;;
+  ;;   gesso.live.transport.sse-test
+  ;;     start-fragment-stream!
+  (is (nil? (resolve 'gesso.live.model/fragment->runtime-fragment)))
+  (is (nil? (resolve 'gesso.live.model/model-fragment-panel)))
+  (is (nil? (resolve 'gesso.live.model/start-fragment-stream!))))

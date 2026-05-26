@@ -11,8 +11,10 @@
    - consistency-token-aware key helpers
    - Missionary render tasks using m/via-call
    - conditional debug tracing
+   - model-backed adapters from gesso.live.model fragment descriptors to
+     gesso.live.ui fragment descriptors
 
-   It does not:
+   The render-protection machinery does not:
 
    - know HTMX
    - know SSE
@@ -20,10 +22,16 @@
    - know Ring response maps
    - decide subscription interests
 
+   The model-backed adapter section at the bottom delegates to gesso.live.ui.
+   It still does not own routes, streams, Ring handlers, or subscriptions beyond
+   constructing the current UI fragment descriptor from compiled model metadata.
+
    The caller is responsible for choosing a key that includes every value that
    can affect the rendered HTML, such as user/scope/params/theme/locale and any
    consistency token."
   (:require
+   [gesso.live.model :as model]
+   [gesso.live.ui :as ui]
    [missionary.core :as m]))
 
 ;; -----------------------------------------------------------------------------
@@ -657,3 +665,47 @@
    (let [options' (effective-options manager options)
          task (call-task (:executor options') render-fn)]
      (protect-task* manager key task options'))))
+
+;; -----------------------------------------------------------------------------
+;; Model-backed fragment adapters
+;; -----------------------------------------------------------------------------
+
+(defn fragment->runtime-fragment
+  "Build the current Gesso Live UI fragment descriptor from a compiled model
+   fragment.
+
+   The app must pass explicit URLs. This function does not own routing.
+
+   Note: :request-policy and :consistency are intentionally not passed to
+   ui/->fragment in this first version because current gesso.live.ui/->fragment
+   does not define those as runtime keys. They remain model metadata available via
+   model/fragment-descriptor and model/explain-live-app."
+  [compiled fragment-name id {:keys [fragment-url stream-url]}]
+  (when-not (model/present? fragment-url)
+    (throw
+     (ex-info
+      "fragment-url is required to build a live fragment panel."
+      {:fragment fragment-name
+       :id id})))
+  (when-not (model/present? stream-url)
+    (throw
+     (ex-info
+      "stream-url is required to build a live fragment panel."
+      {:fragment fragment-name
+       :id id})))
+  (let [fragment (model/fragment-descriptor compiled fragment-name)]
+    (ui/->fragment
+     {:id (model/fragment-dom-id compiled fragment-name id)
+      :src fragment-url
+      :stream-url stream-url
+      :subscription (model/fragment-scope-instance compiled fragment-name id)
+      :swap (:swap fragment :outerHTML)})))
+
+(defn model-fragment-panel
+  "Render a client-side live fragment panel using a compiled model fragment.
+
+   Routes remain explicit in the app. This is a convenience adapter around
+   gesso.live.ui/fragment-panel."
+  [compiled fragment-name id opts]
+  (ui/fragment-panel
+   (fragment->runtime-fragment compiled fragment-name id opts)))

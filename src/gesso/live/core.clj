@@ -3,6 +3,7 @@
 
    This namespace wires the lower-level live pieces together:
 
+   - plain-data live model validation/compilation
    - invalidation rules
    - async dispatch
    - hot source broadcast
@@ -14,6 +15,10 @@
 
    It intentionally stays thin. The specialized namespaces still own their own
    behavior:
+
+     gesso.live.model
+       owns plain-data app live metadata, validation, graph expansion, and
+       model fragment query/render helpers
 
      gesso.live.invalidation
        expands primary app changes into invalidations
@@ -31,7 +36,8 @@
        owns SSE frame formatting and response stream lifecycle
 
      gesso.live.fragment
-       owns render singleflight/cache protection
+       owns render singleflight/cache protection and model fragment -> UI
+       fragment adapters
 
      gesso.live.consistency.xtdb
        owns XTDB2 query/transaction consistency helpers
@@ -48,6 +54,7 @@
    [gesso.live.fragment :as fragment]
    [gesso.live.htmx :as htmx]
    [gesso.live.invalidation :as invalidation]
+   [gesso.live.model :as model]
    [gesso.live.source :as source]
    [gesso.live.synced :as synced]
    [gesso.live.transport.sse :as sse]
@@ -348,6 +355,129 @@
    :fragment (fragment/stats (:fragment-manager system))})
 
 ;; -----------------------------------------------------------------------------
+;; Plain-data model facade
+;; -----------------------------------------------------------------------------
+
+(def compile-live-app
+  "Validate and compile app-owned live metadata.
+
+   Re-export of gesso.live.model/compile-live-app."
+  model/compile-live-app)
+
+(def validate-live-app
+  "Validate app-owned live metadata.
+
+   Re-export of gesso.live.model/validate-live-app."
+  model/validate-live-app)
+
+(def normalize-live-app
+  "Normalize app-owned live metadata.
+
+   Re-export of gesso.live.model/normalize-live-app."
+  model/normalize-live-app)
+
+(def model-live-rules
+  "Return compiled live rules from a compiled live app model.
+
+   Re-export of gesso.live.model/live-rules.
+
+   Named model-live-rules in the core facade to avoid ambiguity with the
+   system-level :rules option."
+  model/live-rules)
+
+(def expand-change
+  "Expand one primary app change into concrete runtime scopes.
+
+   Re-export of gesso.live.model/expand-change."
+  model/expand-change)
+
+(def expand-changes
+  "Expand many primary app changes into concrete runtime scopes.
+
+   Re-export of gesso.live.model/expand-changes."
+  model/expand-changes)
+
+(def live-scope
+  "Construct a runtime scope map from a compiled live app, scope name, and id.
+
+   Named live-scope in the core facade to avoid confusion with lexical scope and
+   to keep the model namespace's lower-level name available as
+   gesso.live.model/scope."
+  model/scope)
+
+(def live-scope-key
+  "Return the stable [:topic :id] key for a runtime live scope.
+
+   Re-export of gesso.live.model/scope-key."
+  model/scope-key)
+
+(def scope-descriptor
+  "Return a scope descriptor from a compiled live app.
+
+   Re-export of gesso.live.model/scope-descriptor."
+  model/scope-descriptor)
+
+(def authorized-for-scope?
+  "Return true if ctx is authorized for the named model scope/id.
+
+   Re-export of gesso.live.model/authorized-for-scope?."
+  model/authorized-for-scope?)
+
+(def require-scope-authorized!
+  "Throw if ctx is not authorized for the named model scope/id.
+
+   Re-export of gesso.live.model/require-scope-authorized!."
+  model/require-scope-authorized!)
+
+(def fragment-descriptor
+  "Return a model fragment descriptor from a compiled live app.
+
+   Re-export of gesso.live.model/fragment-descriptor."
+  model/fragment-descriptor)
+
+(def fragment-scope-name
+  "Return the model scope name used by a model fragment.
+
+   Re-export of gesso.live.model/fragment-scope-name."
+  model/fragment-scope-name)
+
+(def fragment-dom-id
+  "Return the DOM id for a compiled model fragment/id pair.
+
+   Re-export of gesso.live.model/fragment-dom-id."
+  model/fragment-dom-id)
+
+(def fragment-scope-instance
+  "Return the runtime scope instance for a compiled model fragment/id pair.
+
+   Re-export of gesso.live.model/fragment-scope-instance."
+  model/fragment-scope-instance)
+
+(def query-fragment
+  "Run a model fragment query.
+
+   Re-export of gesso.live.model/query-fragment."
+  model/query-fragment)
+
+(def render-fragment-node
+  "Render a model fragment to a Hiccup/HTML node.
+
+   Re-export of gesso.live.model/render-fragment-node."
+  model/render-fragment-node)
+
+(def render-fragment-response
+  "Render a model fragment and wrap it in a Ring response.
+
+   Re-export of gesso.live.model/render-fragment-response."
+  model/render-fragment-response)
+
+(def explain-live-app
+  "Return an inspectable summary of a compiled live app model.
+
+   Re-export of gesso.live.model/explain-live-app."
+  model/explain-live-app)
+
+;; -----------------------------------------------------------------------------
 ;; XTDB2 consistency facade
 ;; -----------------------------------------------------------------------------
 
@@ -493,6 +623,25 @@
 
    Re-export of gesso.live.ui/anti-forgery-input."
   live.ui/anti-forgery-input)
+
+;; -----------------------------------------------------------------------------
+;; Model-backed fragment UI facade
+;; -----------------------------------------------------------------------------
+
+(def fragment->runtime-fragment
+  "Build the current Gesso Live UI fragment descriptor from a compiled model
+   fragment.
+
+   Re-export of gesso.live.fragment/fragment->runtime-fragment."
+  fragment/fragment->runtime-fragment)
+
+(def model-fragment-panel
+  "Render a client-side live fragment panel from a compiled model fragment.
+
+   This intentionally does not replace the existing UI-level fragment-panel API.
+
+   Re-export of gesso.live.fragment/model-fragment-panel."
+  fragment/model-fragment-panel)
 
 ;; -----------------------------------------------------------------------------
 ;; Invalidation and source emission
@@ -844,6 +993,12 @@
        :options-keys (set (keys (or options {})))
        :at (now-ms)})
      started)))
+
+(def start-fragment-stream!
+  "Start an SSE stream for a compiled model fragment.
+
+   Re-export of gesso.live.transport.sse/start-fragment-stream!."
+  sse/start-fragment-stream!)
 
 (defn cancel-sse!
   "Cancel a started SSE stream."

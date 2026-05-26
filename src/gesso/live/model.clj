@@ -11,15 +11,18 @@
 
   It does not generate routes. It does not own Ring handlers. It does not hide
   the HTTP response lifecycle. It compiles to the current Gesso Live runtime
-  concepts: live rules, runtime scope maps, current fragment panels, and
-  start-sse!.
+  concepts: live rules and runtime scope maps.
 
   Important boundary:
 
+    - This namespace does not require gesso.live.core.
+
+    - This namespace does not know about gesso.live.ui, SSE, Manifold, Missionary
+      transports, dispatcher queues, or concrete live runtime startup.
+
     - :request-policy and :consistency are model metadata in this namespace.
       They are exposed through fragment descriptors and explain-live-app.
-      They are not passed through to live/->fragment because current
-      gesso.live.ui/->fragment does not define those as runtime keys.
+      They are not passed through to live UI runtime helpers here.
 
     - render-fragment-response requires an explicit response renderer, either
       via opts {:response ...} or compiled app metadata {:response ...}. This
@@ -35,7 +38,6 @@
       compatible function."
   (:require
    [clojure.string :as str]
-   [gesso.live.core :as live]
    [malli.core :as m]
    [malli.error :as me]))
 
@@ -555,7 +557,7 @@
   true)
 
 ;; -----------------------------------------------------------------------------
-;; Fragment helpers
+;; Fragment metadata, query, and rendering
 ;; -----------------------------------------------------------------------------
 
 (defn fragment-descriptor
@@ -624,62 +626,6 @@
    ((response-fn compiled opts)
     (render-fragment-node compiled ctx fragment-name id))))
 
-(defn fragment->runtime-fragment
-  "Build the current Gesso Live UI fragment descriptor from a model fragment.
-
-  The app must pass explicit URLs. This function does not own routing.
-
-  Note: :request-policy and :consistency are intentionally not passed to
-  live/->fragment in this first version because current gesso.live.ui/->fragment
-  does not define those as runtime keys. They remain model metadata available via
-  fragment-descriptor and explain-live-app."
-  [compiled fragment-name id {:keys [fragment-url stream-url]}]
-  (when-not (present? fragment-url)
-    (throw
-     (ex-info
-      "fragment-url is required to build a live fragment panel."
-      {:fragment fragment-name
-       :id id})))
-  (when-not (present? stream-url)
-    (throw
-     (ex-info
-      "stream-url is required to build a live fragment panel."
-      {:fragment fragment-name
-       :id id})))
-  (let [fragment (fragment-descriptor compiled fragment-name)]
-    (live/->fragment
-     {:id (fragment-dom-id compiled fragment-name id)
-      :src fragment-url
-      :stream-url stream-url
-      :subscription (fragment-scope-instance compiled fragment-name id)
-      :swap (:swap fragment :outerHTML)})))
-
-(defn fragment-panel
-  "Render a client-side live fragment panel using the existing Gesso Live UI
-  helper. Routes remain explicit in the app."
-  [compiled fragment-name id opts]
-  (live/fragment-panel
-   (fragment->runtime-fragment compiled fragment-name id opts)))
-
-(defn start-fragment-stream
-  "Start an SSE stream for a named fragment.
-
-  This is only a convenience wrapper around live/start-sse!. The app still owns
-  the route."
-  ([compiled ctx system fragment-name id]
-   (start-fragment-stream compiled ctx system fragment-name id {}))
-  ([compiled ctx system fragment-name id opts]
-   (require-scope-authorized!
-    compiled
-    ctx
-    (fragment-scope-name compiled fragment-name)
-    id)
-   (:response
-    (live/start-sse!
-     system
-     (fragment-scope-instance compiled fragment-name id)
-     opts))))
-
 ;; -----------------------------------------------------------------------------
 ;; Introspection
 ;; -----------------------------------------------------------------------------
@@ -719,46 +665,3 @@
 
    :live-rules
    (mapv :when-topic (:live-rules compiled))})
-
-(comment
-  ;; Minimal valid app:
-  ;;
-  ;; (def app
-  ;;   {:response gesso.core/html-response
-  ;;    :scopes
-  ;;    {:store-queue
-  ;;     {:topic :humanhelp/store-queue
-  ;;      :id-key :store/id
-  ;;      :authorized? (fn [_ctx _store-id] true)}}
-  ;;
-  ;;    :graph
-  ;;    {:task/assigned [:store-queue]}
-  ;;
-  ;;    :fragments
-  ;;    {:store-queue
-  ;;     {:scope :store-queue
-  ;;      :query (fn [_ctx store-id]
-  ;;               {:fragment/id (str "store-queue-" store-id)
-  ;;                :store/id store-id})
-  ;;      :render (fn [{:keys [fragment/id store/id]}]
-  ;;                [:div {:id id}
-  ;;                 "Store " id])}}})
-  ;;
-  ;; (def compiled (compile-live-app app))
-  ;;
-  ;; (expand-change compiled
-  ;;                {:topic :task/assigned
-  ;;                 :store/id "store-42"})
-  ;; => [{:topic :humanhelp/store-queue
-  ;;      :id "store-42"
-  ;;      :gesso.live/scope :store-queue
-  ;;      :gesso.live/scope-label "store queue"}]
-  ;;
-  ;; Typo protection:
-  ;;
-  ;; (compile-live-app
-  ;;  (assoc app :graph {:task/assigned [{:scope :store-qeue}]}))
-  ;;
-  ;; => throws ex-info with :error/type :gesso.live/validation-failed
-  ;;    and an :unknown-scope error at [:graph :task/assigned 0 :scope].
-  )
