@@ -313,7 +313,7 @@
 ;; -----------------------------------------------------------------------------
 
 
-(defn fragment-root-attrs
+#_(defn fragment-root-attrs
   "Build attrs for the outer live wrapper.
 
    Options:
@@ -333,6 +333,27 @@
          attrs)
         (append-hyperscript
          "on htmx:sseOpen send gesso:live-connected to body"))))
+
+(defn fragment-root-attrs
+  "Build attrs for the outer live wrapper.
+
+   Options:
+   - :stream-url
+   - :attrs merged last for ordinary attrs
+
+   :hx-ext is composed rather than overwritten, so caller attrs like
+   {:hx-ext \"path-deps\"} become \"sse, path-deps\".
+
+   The root also emits gesso:live-connected whenever the HTMX SSE extension opens
+   or reconnects the EventSource. Fragment targets can listen for that event to
+   re-fetch current server state after missed live wakeups."
+  [{:keys [attrs] :as opts}]
+  (let [stream-url (require-non-blank! opts :stream-url "SSE stream URL")]
+    (-> (merge-sse-attrs
+         {:sse-connect stream-url}
+         attrs)
+        (append-hyperscript
+         "on 'htmx:sseOpen' send 'gesso:live-connected' to body"))))
 
 (defn- join-triggers
   [& triggers]
