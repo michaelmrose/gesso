@@ -142,10 +142,10 @@
     (throw (ex-info "Expected a Hiccup vector node."
                     {:node node
                      :attrs attrs})))
-  (let [[tag & rest] node
-        [existing-attrs children] (if (map? (first rest))
-                                    [(first rest) (rest rest)]
-                                    [{} rest])]
+  (let [[tag & body] node
+        [existing-attrs children] (if (map? (first body))
+                                    [(first body) (rest body)]
+                                    [{} body])]
     (into [tag (merge-attrs existing-attrs attrs)]
           children)))
 
