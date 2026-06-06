@@ -28,8 +28,8 @@
 (def ^:private utilities-css-resource
   "gesso/theme-utilities.css")
 
-(def ^:private default-component-css-dir
-  "src/gesso/components")
+(def ^:private default-component-css-dirs
+  ["src/gesso/components"])
 
 (defn- preset-name-from-path
   [path]
@@ -129,24 +129,67 @@
     (throw (ex-info "Theme utilities CSS resource does not exist"
                     {:resource utilities-css-resource}))))
 
-(defn- discover-component-css-files
+(defn- coerce-dir-list
+  [x]
+  (cond
+    (nil? x)
+    []
+
+    (string? x)
+    [x]
+
+    (sequential? x)
+    (vec x)
+
+    :else
+    [(str x)]))
+
+(defn- normalize-component-css-dirs
+  [{:keys [component-css-dir component-css-dirs]}]
+  (let [plural-dirs  (coerce-dir-list component-css-dirs)
+        singular-dir (coerce-dir-list component-css-dir)]
+    (cond
+      (seq plural-dirs)
+      plural-dirs
+
+      (seq singular-dir)
+      singular-dir
+
+      :else
+      default-component-css-dirs)))
+
+(defn- discover-component-css-files-in-dir
   [component-css-dir]
   (let [dir (fs/path component-css-dir)]
-    (if (fs/exists? dir)
-      (->> (fs/list-dir dir)
-           (filter fs/directory?)
-           (map component-css-path)
-           (filter #(and (fs/exists? %)
-                         (fs/regular-file? %)))
-           (sort-by str))
-      [])))
+    (when-not (fs/exists? dir)
+      (throw
+       (ex-info "Component CSS root does not exist"
+                {:component-css-dir (str dir)})))
+    (when-not (fs/directory? dir)
+      (throw
+       (ex-info "Component CSS root is not a directory"
+                {:component-css-dir (str dir)})))
+    (->> (fs/list-dir dir)
+         (filter fs/directory?)
+         (map component-css-path)
+         (filter #(and (fs/exists? %)
+                       (fs/regular-file? %)))
+         (sort-by str))))
+
+(defn- discover-component-css-files
+  [component-css-dirs]
+  (->> component-css-dirs
+       (mapcat discover-component-css-files-in-dir)
+       distinct
+       (sort-by str)))
 
 (defn- component-css
   [path]
-  (let [component-name (component-name-from-path path)]
+  (let [component-name (component-name-from-path path)
+        css            (slurp (str path))]
     (str "/* component: " component-name " */\n"
-         (slurp (str path))
-         (when-not (str/ends-with? (slurp (str path)) "\n")
+         css
+         (when-not (str/ends-with? css "\n")
            "\n"))))
 
 (defn build!
@@ -167,34 +210,52 @@
 
     1. Generated preset CSS
     2. Shared utility CSS from gesso/theme-utilities.css
-    3. Optional per-component CSS discovered from component-css-dir
+    3. Optional per-component CSS discovered from component CSS roots
+
+  Component CSS roots are expected to contain one subdirectory per component.
+  Each component subdirectory may include a CSS file whose basename matches the
+  component directory name:
+
+    src/gesso/components/button/button.css
+    src/gesso/components/card/card.css
+
+  Downstream apps can pass additional component CSS roots:
+
+    :component-css-dirs [\"src/my_app/components\"
+                         \"src/my_app/site/components\"
+                         \"src/components\"]
 
   Component CSS discovery is silent:
-    - if component-css-dir does not exist, nothing is added
+    - if a component CSS root does not exist an exception is thrown
     - if a component directory has no matching component_name.css, nothing is added
 
-  Defaults are intended for the gesso repo itself:
-    input-dir         => resources/themes
-    output-file       => resources/public/gesso/themes.css
-    component-css-dir => src/gesso/components
+  Options:
 
-  Downstream apps can override any of these."
+    :input-dir           defaults to resources/themes
+    :output-file         defaults to resources/public/gesso/themes.css
+    :component-css-dir   backward-compatible singular component root
+    :component-css-dirs  preferred plural component roots
+
+  Defaults are intended for the gesso repo itself:
+
+    :component-css-dirs [\"src/gesso/components\"]"
   ([] (build! {}))
-  ([{:keys [input-dir output-file component-css-dir]
+  ([{:keys [input-dir output-file] :as opts
      :or   {input-dir "resources/themes"
-            output-file "resources/public/gesso/themes.css"
-            component-css-dir default-component-css-dir}}]
-   (let [input-dir (fs/path input-dir)]
+            output-file "resources/public/gesso/themes.css"}}]
+   (let [input-dir          (fs/path input-dir)
+         output-file        (fs/path output-file)
+         component-css-dirs (normalize-component-css-dirs opts)]
      (when-not (fs/exists? input-dir)
        (throw (ex-info "Theme input directory does not exist"
                        {:input-dir (str input-dir)})))
      (let [presets             (discover-presets input-dir)
-           component-css-files (discover-component-css-files component-css-dir)]
+           component-css-files (discover-component-css-files component-css-dirs)]
        (when (empty? presets)
          (throw (ex-info "No preset CSS files found"
                          {:input-dir (str input-dir)})))
        (fs/create-dirs (fs/parent output-file))
-       (spit output-file
+       (spit (str output-file)
              (str
               (str/join
                "\n\n"
@@ -205,9 +266,11 @@
                 [(utilities-css)]
                 (map component-css component-css-files)))
               "\n"))
-       (println "Wrote" output-file)
+       (println "Wrote" (str output-file))
        (doseq [{:keys [spec path]} presets]
          (println " -" (name (:axis spec)) (preset-name-from-path path)))
+       (doseq [dir component-css-dirs]
+         (println " -" "component-css-root" dir))
        (doseq [path component-css-files]
          (println " -" "component-css" (component-name-from-path path)))))))
 
