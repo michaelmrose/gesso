@@ -6,7 +6,7 @@
    [gesso.components.alert :as alert]
    [gesso.components.badge :as badge]
    [gesso.components.button :as button]
-   [gesso.components.card :as card]
+   [gesso.components.card.core :as card]
    [gesso.components.checkbox :as checkbox]
 
    [gesso.components.field.core :as field]

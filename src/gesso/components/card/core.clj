@@ -1,7 +1,8 @@
-(ns gesso.components.card
+(ns gesso.components.card.core
   (:require
-   [gesso.util :refer :all]
-   [gesso.components.text :as text]))
+   [gesso.components.card.attr :as attr]
+   [gesso.components.text :as text]
+   [gesso.util :refer :all]))
 
 (defn card-title
   "Card title subcomponent.
@@ -15,7 +16,7 @@
        {:level 3
         :as :h2
         :class class
-        :attrs (merge-attrs attrs {:data-card-title true})
+        :attrs (attr/title-attrs attrs)
         :text (:text props)}))
     (let [[opts children] (normalize-component-args args)
           {:keys [class attrs]} (split-opts opts)]
@@ -23,7 +24,7 @@
              {:level 3
               :as :h2
               :class class
-              :attrs (merge-attrs attrs {:data-card-title true})}
+              :attrs (attr/title-attrs attrs)}
              children))))
 
 (defn card-description
@@ -37,14 +38,14 @@
       (text/muted-text
        {:as :p
         :class class
-        :attrs (merge-attrs attrs {:data-card-description true})
+        :attrs (attr/description-attrs attrs)
         :text (:text props)}))
     (let [[opts children] (normalize-component-args args)
           {:keys [class attrs]} (split-opts opts)]
       (apply text/muted-text
              {:as :p
               :class class
-              :attrs (merge-attrs attrs {:data-card-description true})}
+              :attrs (attr/description-attrs attrs)}
              children))))
 
 (defn card-header
@@ -56,8 +57,8 @@
     (let [{:keys [props class attrs]} (split-opts (first args))
           {:keys [title description children]} props]
       (el :header
-          {:class (class-names "flex flex-col gap-title" class)}
-          (merge-attrs attrs {:data-card-header true})
+          {:class (attr/header-class class)}
+          (attr/header-attrs attrs)
           [(when title
              (card-title {:text title}))
            (when description
@@ -66,8 +67,8 @@
     (let [[opts children] (normalize-component-args args)
           {:keys [class attrs]} (split-opts opts)]
       (el :header
-          {:class (class-names "flex flex-col gap-title" class)}
-          (merge-attrs attrs {:data-card-header true})
+          {:class (attr/header-class class)}
+          (attr/header-attrs attrs)
           children))))
 
 (defn card-content
@@ -78,14 +79,14 @@
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
       (el :section
-          {:class (class-names "flex flex-col gap-content" class)}
-          (merge-attrs attrs {:data-card-content true})
+          {:class (attr/content-class class)}
+          (attr/content-attrs attrs)
           (nodes (:children props))))
     (let [[opts children] (normalize-component-args args)
           {:keys [class attrs]} (split-opts opts)]
       (el :section
-          {:class (class-names "flex flex-col gap-content" class)}
-          (merge-attrs attrs {:data-card-content true})
+          {:class (attr/content-class class)}
+          (attr/content-attrs attrs)
           children))))
 
 (defn card-footer
@@ -96,22 +97,31 @@
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))]
       (el :footer
-          {:class (class-names "flex flex-col gap-content" class)}
-          (merge-attrs attrs {:data-card-footer true})
+          {:class (attr/footer-class class)}
+          (attr/footer-attrs attrs)
           (nodes (:children props))))
     (let [[opts children] (normalize-component-args args)
           {:keys [class attrs]} (split-opts opts)]
       (el :footer
-          {:class (class-names "flex flex-col gap-content" class)}
-          (merge-attrs attrs {:data-card-footer true})
+          {:class (attr/footer-class class)}
+          (attr/footer-attrs attrs)
           children))))
 
 (defn card
   "Long form:
-    (card {:class ... :attrs ...} children...)
+    (card {:class ... :attrs ... :as ...} children...)
 
   Short form (map-only):
-    (card {:class ... :attrs ... :header <node> :title <node> :description <node> :content <node|seq> :footer <node|seq>})
+    (card {:class ...
+           :attrs ...
+           :as :article
+           :header <node>
+           :title <node>
+           :description <node>
+           :content <node|seq>
+           :footer <node|seq>})
+
+  :as controls the root element tag and defaults to :div.
 
   HTMX notes:
     - Cards make good fragment boundaries for server-rendered partial updates.
@@ -121,23 +131,27 @@
   [& args]
   (if (only-map-arg? args)
     (let [{:keys [props class attrs]} (split-opts (first args))
-          {:keys [header title description content footer]} props
+          {:keys [as header title description content footer]} props
+          tag         (attr/root-tag as)
           header-node (or header
                           (when (or title description)
                             (card-header {}
-                              (when title (card-title {} title))
-                              (when description (card-description {} description)))))
+                              (when title
+                                (card-title {} title))
+                              (when description
+                                (card-description {} description)))))
           content-node (when (some? content)
                          (apply card-content {} (nodes content)))
-          footer-node (when (some? footer)
-                        (apply card-footer {} (nodes footer)))]
-      (el :div
-          {:class (class-names "card" class)}
-          (merge-attrs attrs {:data-card true})
+          footer-node  (when (some? footer)
+                         (apply card-footer {} (nodes footer)))]
+      (el tag
+          {:class (attr/root-class class)}
+          (attr/root-attrs attrs)
           [header-node content-node footer-node]))
     (let [[opts children] (normalize-component-args args)
-          {:keys [class attrs]} (split-opts opts)]
-      (el :div
-          {:class (class-names "card" class)}
-          (merge-attrs attrs {:data-card true})
+          {:keys [props class attrs]} (split-opts opts)
+          tag (attr/root-tag (:as props))]
+      (el tag
+          {:class (attr/root-class class)}
+          (attr/root-attrs attrs)
           children))))
