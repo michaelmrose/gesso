@@ -122,6 +122,9 @@
      :stream-base-url (:stream/base-url m)
      :event (:event m)
      :trigger (:trigger m)
+     :include (:include m)
+     :jitter-ms (:jitter-ms m)
+     :jitter-delay-ms (:jitter-delay-ms m)
      :attrs (:attrs m)
      :root-attrs (:root-attrs m)
      :target-attrs (or (:target-attrs m)
@@ -168,8 +171,17 @@
      :event
      :swap
      :trigger
+     :include
+     :jitter-ms
+     :jitter-delay-ms
      :attrs / :root-attrs
-     :target-attrs / :inner-attrs"
+     :target-attrs / :inner-attrs
+
+   Markup model:
+     fragment-panel renders a stable outer live wrapper and a replaceable inner
+     target. The outer wrapper owns SSE, hx-get, hx-trigger, hx-target, hx-swap,
+     and hx-include. The inner target owns only the replaceable DOM id plus
+     target attrs."
   [fragment]
   (let [fragment'   (canonical-fragment-map fragment)
         id'         (require-present! :id (:id fragment'))
@@ -199,7 +211,10 @@
       :root-attrs {}
       :target-attrs {}}
      (compact-map
-      {:attrs (:attrs fragment')
+      {:include (:include fragment')
+       :jitter-ms (:jitter-ms fragment')
+       :jitter-delay-ms (:jitter-delay-ms fragment')
+       :attrs (:attrs fragment')
        :root-attrs (:root-attrs fragment')
        :target-attrs (:target-attrs fragment')}))))
 
@@ -219,41 +234,73 @@
 ;; -----------------------------------------------------------------------------
 
 (defn fragment-root-attrs
-  "Build attrs for the outer live fragment SSE root."
+  "Build attrs for the stable outer live fragment wrapper.
+
+   The outer wrapper owns both the SSE connection and the HTMX refresh request.
+   This keeps hx-get/hx-trigger stable even when the replaceable inner target is
+   swapped with outerHTML."
   [fragment]
-  (let [{:keys [stream-url attrs root-attrs]} (ensure-fragment fragment)]
-    (merge
-     (htmx/fragment-root-attrs {:stream-url stream-url})
+  (let [{:keys [stream-url
+                src
+                event
+                swap
+                trigger
+                include
+                jitter-ms
+                jitter-delay-ms
+                id
+                attrs
+                root-attrs]} (ensure-fragment fragment)]
+    (htmx/merge-attrs
+     (htmx/fragment-root-attrs
+      {:stream-url stream-url})
+     {:data-gesso-live-fragment id
+      :hx-get src
+      :hx-trigger (htmx/fragment-trigger
+                   {:event event
+                    :trigger trigger
+                    :jitter-ms jitter-ms
+                    :jitter-delay-ms jitter-delay-ms})
+      :hx-target (htmx/normalize-target id)
+      :hx-swap swap}
+     (when include
+       {:hx-include include})
      attrs
      root-attrs)))
 
 (defn fragment-target-attrs
-  "Build attrs for the inner HTMX refresh target."
+  "Build attrs for the replaceable inner fragment target.
+
+   The target intentionally does not own hx-get or hx-trigger. Those attrs live
+   on the stable outer wrapper rendered by fragment-panel."
   [fragment]
-  (let [{:keys [id src event swap trigger target-attrs]} (ensure-fragment fragment)]
-    (merge
-     (htmx/fragment-target-attrs
-      {:id id
-       :src src
-       :event event
-       :swap swap
-       :trigger trigger})
-     target-attrs)))
+  (let [{:keys [id target-attrs]} (ensure-fragment fragment)]
+    (htmx/clean-attrs
+     (merge
+      {:id id}
+      target-attrs))))
 
 (defn fragment-panel
   "Render a standard live fragment panel.
 
-   The outer element owns the SSE connection. The inner element owns the HTMX
-   refresh target that reloads on page load, pageshow, and matching SSE events.
+   The outer element is stable and owns:
+     - hx-ext=\"sse\"
+     - sse-connect
+     - hx-get
+     - hx-trigger
+     - hx-target
+     - hx-swap
+     - optional hx-include
 
-   The outer element also carries data-gesso-live-fragment so child live POST
-   controls can synchronize against the whole fragment instead of each tiny
-   button wrapper. This prevents rapid tap storms from creating overlapping
-   fragment mutation requests."
+   The inner element owns only the replaceable fragment id and optional
+   target-attrs.
+
+   This prevents the common outerHTML failure mode where a swapped fragment
+   response replaces the element that used to own hx-get/hx-trigger, causing
+   later SSE events to arrive without triggering a follow-up fetch."
   [fragment]
   (let [fragment' (ensure-fragment fragment)]
-    [:div (merge {:data-gesso-live-fragment (:id fragment')}
-                 (fragment-root-attrs fragment'))
+    [:div (fragment-root-attrs fragment')
      [:div (fragment-target-attrs fragment')]]))
 
 ;; -----------------------------------------------------------------------------
@@ -298,18 +345,19 @@
    omits native :action by default, so missed HTMX submits do not navigate to
    fragment-only mutation routes."
   [{:keys [to target swap attrs native-action? sync]
-    :or {swap default-post-swap}}]
+    :or {swap default-post-swap
+         sync default-post-sync}}]
   (let [to'     (require-present! :to to)
         target' (if (fragment? target)
                   (:id target)
-                  target)]
-    (htmx/post-form-attrs
-     {:to to'
-      :target target'
-      :swap swap
-      :sync sync
-      :native-action? native-action?
-      :attrs attrs})))
+                  target)
+        request (cond-> {:to to'
+                         :target target'
+                         :swap swap
+                         :native-action? native-action?
+                         :attrs attrs}
+                  (some? sync) (assoc :sync sync))]
+    (htmx/post-form-attrs request)))
 
 (defn post-form
   "Render a POST form with anti-forgery input.
