@@ -11,7 +11,7 @@
   "load, pageshow from:window, focus from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body, sse:live-update")
 
 (def default-live-connected-script
-  "on htmx:sseOpen send gesso:live-connected to body")
+  "on 'htmx:sseOpen' send 'gesso:live-connected' to body")
 
 ;; -----------------------------------------------------------------------------
 ;; Small attr helpers
