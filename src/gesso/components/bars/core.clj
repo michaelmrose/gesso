@@ -284,6 +284,17 @@
        vec))
 
 ;; -----------------------------------------------------------------------------
+;; Segment slots
+;; -----------------------------------------------------------------------------
+
+(defn- segment-slot
+  [segments region fallback]
+  (concat
+   (nodes (or (get segments region)
+              (get segments (name region))))
+   (nodes fallback)))
+
+;; -----------------------------------------------------------------------------
 ;; Rendering helpers
 ;; -----------------------------------------------------------------------------
 
@@ -395,8 +406,8 @@
                        {}
                        (dropdown-content-children menu))
         node    (dropdown/dropdown-menu {}
-                                      trigger
-                                      content)]
+                                        trigger
+                                        content)]
     (el :div
         (bars-menu-attrs :topbar class home-visible)
         attrs
@@ -475,7 +486,13 @@
          (map #(render-vertical-menu % :hamburger) menus)))))
 
 (defn- build-header-children
-  [brand left-menus center-menus right-menus]
+  [{:keys [brand
+           left-menus
+           center-menus
+           right-menus
+           leftmost-nodes
+           center-nodes
+           rightmost-nodes]}]
   (concat
    [(el :div
         (bars-brand-attrs nil)
@@ -484,15 +501,21 @@
    [(el :nav
         (bars-segment-attrs :leftmost nil)
         {}
-        (map render-topbar-menu left-menus))]
+        (concat
+         (map render-topbar-menu left-menus)
+         leftmost-nodes))]
    [(el :nav
         (bars-segment-attrs :center nil)
         {}
-        (render-topbar-center-cluster center-menus))]
+        (concat
+         (render-topbar-center-cluster center-menus)
+         center-nodes))]
    [(el :nav
         (bars-segment-attrs :rightmost nil)
         {}
-        (map render-topbar-menu right-menus))]
+        (concat
+         (map render-topbar-menu right-menus)
+         rightmost-nodes))]
    [(el :button
         (bars-toggle-attrs nil)
         (merge-script-attr {} (bars-toggle-script))
@@ -520,7 +543,16 @@
 (defn- bars-map-form
   [opts]
   (let [{:keys [props class attrs]} (split-opts opts)
-        {:keys [brand menus sidebar-collapse-at content children]} props
+        {:keys [brand
+                menus
+                sidebar-collapse-at
+                content
+                children
+                segments
+                leftmost
+                center
+                rightmost
+                topbar-only?]} props
         sidebar-collapse-at (or sidebar-collapse-at :medium)
         menus               (prepare-menus menus sidebar-collapse-at)
         left-menus          (topbar-home-menus menus :leftmost)
@@ -533,9 +565,34 @@
         has-hamburger-sm?   (boolean (some #(get-in % [:hamburger-visible :sm]) menus))
         root-attrs          (merge-script-attr attrs (bars-root-script))
         content-nodes       (concat (nodes content) (nodes children))
-        header-children     (build-header-children brand left-menus center-menus right-menus)
+        leftmost-nodes      (segment-slot segments :leftmost leftmost)
+        center-nodes        (segment-slot segments :center center)
+        rightmost-nodes     (segment-slot segments :rightmost rightmost)
+        header-children     (build-header-children
+                             {:brand brand
+                              :left-menus left-menus
+                              :center-menus center-menus
+                              :right-menus right-menus
+                              :leftmost-nodes leftmost-nodes
+                              :center-nodes center-nodes
+                              :rightmost-nodes rightmost-nodes})
         hamburger-children  (build-hamburger-children hamburger-groups)
-        body-children       (build-body-children sidebar-menus content-nodes)]
+        body-children       (build-body-children sidebar-menus content-nodes)
+        shell-children      (cond-> [(el :header
+                                          (bars-topbar-attrs nil)
+                                          {}
+                                          header-children)
+
+                                     (el :section
+                                         (bars-hamburger-panel-attrs nil)
+                                         {}
+                                         hamburger-children)]
+                              (not topbar-only?)
+                              (conj
+                               (el :div
+                                   (bars-body-attrs nil)
+                                   {}
+                                   body-children)))]
     (el :div
         (bars-root-attrs class
                          {:has-sidebar? has-sidebar?
@@ -543,30 +600,17 @@
                           :has-hamburger-md? has-hamburger-md?
                           :has-hamburger-sm? has-hamburger-sm?})
         root-attrs
-        [(el :header
-             (bars-topbar-attrs nil)
-             {}
-             header-children)
-
-         (el :section
-             (bars-hamburger-panel-attrs nil)
-             {}
-             hamburger-children)
-
-         (el :div
-             (bars-body-attrs nil)
-             {}
-             body-children)])))
+        shell-children)))
 
 (defn bars
   "Responsive navigation shell.
 
-  This iteration owns:
+  This component owns:
 
   - topbar
   - optional sidebar
   - hamburger panel
-  - wrapped page content
+  - optional wrapped page content
 
   Menus are normalized into the strict structure:
 
@@ -583,6 +627,23 @@
 
   Sidebar behavior:
     :sidebar-collapse-at => :medium (default) | :small | :never
+
+  Topbar segment slots:
+    :leftmost  arbitrary Hiccup rendered after leftmost menus
+    :center    arbitrary Hiccup rendered after center menus
+    :rightmost arbitrary Hiccup rendered after rightmost menus
+
+  Segment slots may also be supplied as:
+
+    :segments {:leftmost  [...]
+               :center    [...]
+               :rightmost [...]}
+
+  Slot content is topbar-only. Use :menus for navigation that should
+  participate in responsive collapse/hamburger behavior.
+
+  Set :topbar-only? true to render only the topbar/hamburger portion without
+  the body/sidebar/content wrapper.
 
   Simple topbar menus render directly.
   Richer topbar menus render as click-open dropdown menus."
