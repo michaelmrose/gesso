@@ -90,6 +90,12 @@
   [options]
   (merge default-options options))
 
+(defn- compact-map
+  [m]
+  (into {}
+        (remove (comp nil? val))
+        m))
+
 (defn- require-fn-option!
   [options k]
   (when-let [f (get options k)]
@@ -136,7 +142,7 @@
 (defn- require-positive-int-option!
   [options k]
   (when-let [v (get options k)]
-    (when-not (and (integer? v) (pos? v))
+    (when-not (and (integer? v) (pos? v)))
       (throw
        (ex (str "gesso.live fragment " k " must be a positive integer.")
            {k v}))))
@@ -670,36 +676,82 @@
 ;; Model-backed fragment adapters
 ;; -----------------------------------------------------------------------------
 
+(defn- runtime-fragment-extra-options
+  "Generic passthrough options accepted by gesso.live.ui/->fragment.
+
+   These are intentionally domain-neutral. App-specific needs such as
+   {:target-attrs {:hx-include \"#some-form\"}} belong in the app layer; this
+   adapter merely preserves and forwards the caller's generic UI fragment opts."
+  [opts]
+  (select-keys opts
+               [:attrs
+                :root-attrs
+                :target-attrs
+                :event
+                :trigger
+                :jitter-ms
+                :jitter-delay-ms]))
+
 (defn fragment->runtime-fragment
   "Build the current Gesso Live UI fragment descriptor from a compiled model
    fragment.
 
    The app must pass explicit URLs. This function does not own routing.
 
-   Note: :request-policy and :consistency are intentionally not passed to
-   ui/->fragment in this first version because current gesso.live.ui/->fragment
-   does not define those as runtime keys. They remain model metadata available via
-   model/fragment-descriptor and model/explain-live-app."
-  [compiled fragment-name id {:keys [fragment-url stream-url]}]
+   Required opts:
+     :fragment-url
+     :stream-url
+
+   Generic UI passthrough opts:
+     :attrs
+       General fragment attrs, when supported by gesso.live.ui.
+
+     :root-attrs
+       Attrs merged onto the outer SSE wrapper.
+
+     :target-attrs
+       Attrs merged onto the inner HTMX refresh target. This is useful for
+       ordinary app-local HTMX behavior such as hx-include, hx-indicator, or
+       app-specific data attrs.
+
+     :event
+     :trigger
+     :jitter-ms
+     :jitter-delay-ms
+
+   :swap may be supplied by opts to override the compiled fragment descriptor's
+   :swap value.
+
+   Note: :request-policy and :consistency remain model metadata. They are not
+   passed to ui/->fragment here."
+  [compiled fragment-name id {:keys [fragment-url
+                                     stream-url
+                                     swap]
+                              :as opts}]
   (when-not (model/present? fragment-url)
     (throw
      (ex-info
       "fragment-url is required to build a live fragment panel."
       {:fragment fragment-name
-       :id id})))
+       :id id
+       :opts opts})))
   (when-not (model/present? stream-url)
     (throw
      (ex-info
       "stream-url is required to build a live fragment panel."
       {:fragment fragment-name
-       :id id})))
+       :id id
+       :opts opts})))
   (let [fragment (model/fragment-descriptor compiled fragment-name)]
     (ui/->fragment
-     {:id (model/fragment-dom-id compiled fragment-name id)
-      :src fragment-url
-      :stream-url stream-url
-      :subscription (model/fragment-scope-instance compiled fragment-name id)
-      :swap (:swap fragment :outerHTML)})))
+     (compact-map
+      (merge
+       {:id (model/fragment-dom-id compiled fragment-name id)
+        :src fragment-url
+        :stream-url stream-url
+        :subscription (model/fragment-scope-instance compiled fragment-name id)
+        :swap (or swap (:swap fragment :outerHTML))}
+       (runtime-fragment-extra-options opts))))))
 
 (defn model-fragment-panel
   "Render a client-side live fragment panel using a compiled model fragment.
