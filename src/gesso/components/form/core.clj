@@ -1,15 +1,13 @@
 (ns gesso.components.form.core
   "Form submission boundary, CSRF injection, HTMX routing, optional validation
-   coordination, and inline action forms.
-
-   DEBUG VERSION: emits server-side println output while rendering forms."
+   coordination, and inline action forms."
   (:require
    [gesso.components.form.attr :as attr]
    [gesso.components.form.scripts :as scripts]
    [gesso.util :refer [merge-attrs nodes normalize-component-args split-opts]]))
 
 (def ^:dynamic *debug?*
-  true)
+  false)
 
 (defn- dbg
   [& xs]
@@ -38,6 +36,12 @@
       [:input {:type "hidden"
                :name "__anti-forgery-token"
                :value token}])))
+
+(defn- csrf-enabled?
+  [{:keys [csrf?] :as props}]
+  (if (contains? props :csrf?)
+    (boolean csrf?)
+    (attr/csrf-default? props)))
 
 ;; -----------------------------------------------------------------------------
 ;; Script merging
@@ -110,7 +114,8 @@
 
 (defn- form-children
   [ctx props children]
-  (let [anti-forgery (anti-forgery-input ctx)
+  (let [anti-forgery (when (csrf-enabled? props)
+                       (anti-forgery-input ctx))
         sentinel     (validation-sentinel props)
         all-children  (remove nil?
                               (concat
@@ -142,14 +147,39 @@
   "Render a real HTML form around arbitrary authored children.
 
    The form component is a submission boundary. It does not inspect, generate,
-   or mutate fields or controls."
+   or mutate fields or controls.
+
+   Route keys:
+     :get
+     :to       POST shorthand
+     :post
+     :put
+     :patch
+     :delete
+
+   Common HTMX opts:
+     :target
+     :swap
+     :trigger
+     :include
+     :indicator
+     :sync
+     :confirm
+     :select
+     :push-url
+
+   Other useful opts:
+     :inline?  true  Use inline form chrome.
+     :csrf?    false Disable anti-forgery input. Defaults to false for GET
+                      forms and true otherwise."
   [ctx & args]
   (let [[opts children] (normalize-component-args args)
         {:keys [props]} (split-opts opts)
         form-attrs      (build-form-attrs opts)
         final-children  (form-children ctx props children)]
     (dbg "render form"
-         {:route        (or (:to props)
+         {:route        (or (:get props)
+                            (:to props)
                             (:post props)
                             (:put props)
                             (:patch props)
@@ -218,7 +248,10 @@
     button-attrs))
 
 (defn post-button
-  "Render a minimal inline form containing a single submit button."
+  "Render a minimal inline form containing a single submit button.
+
+   This preserves the real HTML form boundary and CSRF behavior while avoiding
+   normal form layout spacing."
   [ctx & args]
   (let [[opts explicit-children] (normalize-component-args args)
         {:keys [props class attrs]} (split-opts opts)
@@ -227,10 +260,12 @@
         content                     (post-button-content explicit-children props)
         button                      (into [:button button-attrs] content)
         children                    (remove nil?
-                                            [(anti-forgery-input ctx)
+                                            [(when (csrf-enabled? props)
+                                               (anti-forgery-input ctx))
                                              button])]
     (dbg "render post-button"
-         {:route       (or (:to props)
+         {:route       (or (:get props)
+                           (:to props)
                            (:post props)
                            (:put props)
                            (:patch props)
