@@ -346,6 +346,10 @@
 ;; Pending OOB fragments
 ;; -----------------------------------------------------------------------------
 
+;; -----------------------------------------------------------------------------
+;; Pending OOB fragments
+;; -----------------------------------------------------------------------------
+
 (defn- enqueue-pending!
   [channel client-id fragments]
   (swap! (:state channel)
@@ -360,7 +364,11 @@
 (defn drain-fragments!
   "Drain and return pending fragments for client-id.
 
-   Returns nil when no fragments are pending."
+   Returns nil when no fragments are pending.
+
+   Pending fragments are intentionally not rendered here, because some pending
+   entries may be functions that need the receiving request ctx. Rendering
+   happens in drain-fragment!."
   [channel client-id]
   (let [drained (atom nil)]
     (swap! (:state channel)
@@ -371,6 +379,58 @@
     (when (seq @drained)
       (vec @drained))))
 
+(defn- pending-render-ctx
+  [channel ctx client-id]
+  (let [client (get-in @(:state channel) [:clients client-id])]
+    (cond-> (assoc ctx
+                   :gesso.live.client/client-id client-id
+                   :gesso.live.client/channel-id (:id channel))
+      client
+      (assoc :gesso.live.client/client
+             (strip-runtime-fields client)))))
+
+(defn- hiccup-node?
+  [x]
+  (and (vector? x)
+       (keyword? (first x))))
+
+(defn- normalize-fragment-result
+  [x]
+  (cond
+    (nil? x)
+    []
+
+    (hiccup-node? x)
+    [x]
+
+    (sequential? x)
+    (vec (mapcat normalize-fragment-result x))
+
+    :else
+    [x]))
+
+(defn- render-pending-fragment
+  "Render one pending fragment entry.
+
+   A pending entry may be either:
+     - a complete OOB Hiccup node
+     - a function of receiving ctx -> OOB Hiccup node
+     - a function of receiving ctx -> seq of OOB Hiccup nodes
+
+   Function entries are the important case for receiver-specific UI, such as
+   rendering a toolbar using the receiving browser's request params."
+  [ctx fragment]
+  (normalize-fragment-result
+   (if (fn? fragment)
+     (fragment ctx)
+     fragment)))
+
+(defn- render-pending-fragments
+  [ctx fragments]
+  (vec
+   (mapcat #(render-pending-fragment ctx %)
+           fragments)))
+
 (defn drain-fragment!
   "Drain pending fragments for the client identified by ctx.
 
@@ -378,13 +438,19 @@
    when none are pending.
 
    Wrapping is intentional: HTMX still processes nested hx-swap-oob content, and
-   the wrapper gives response renderers a single Hiccup root."
+   the wrapper gives response renderers a single Hiccup root.
+
+   Pending entries may be complete OOB Hiccup nodes or functions of receiving
+   ctx. Function entries are rendered after drain using the pending request ctx."
   [channel ctx]
   (when-let [client-id (client-id-from-ctx channel ctx)]
     (when-let [fragments (drain-fragments! channel client-id)]
-      (into [:div {:data-gesso-live-client-pending true
-                   :data-gesso-live-client-id client-id}]
-            fragments))))
+      (let [ctx'     (pending-render-ctx channel ctx client-id)
+            rendered (render-pending-fragments ctx' fragments)]
+        (when (seq rendered)
+          (into [:div {:data-gesso-live-client-pending true
+                       :data-gesso-live-client-id client-id}]
+                rendered))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Targeting
@@ -446,7 +512,7 @@
 ;; -----------------------------------------------------------------------------
 
 (defn send!
-  "Send complete OOB fragments to a target.
+  "Send OOB fragments to a target.
 
    Target forms:
      :all
@@ -454,9 +520,19 @@
      [:user user-id]
      [:scope scope]
 
-   Fragments should already be HTMX OOB Hiccup, for example:
+   Fragments may be either complete HTMX OOB Hiccup nodes:
+
      (g/oob-inner-html \"notification-count\" \"3\")
      (g/render-toast-oob toast)
+
+   or functions of receiving ctx -> OOB Hiccup:
+
+     (fn [ctx]
+       (render-receiver-specific-oob ctx))
+
+   Function fragments are rendered when the receiving browser drains pending
+   work, so they can use that browser's request ctx, params, session, user, and
+   included board state.
 
    Returns:
      {:sent ...
