@@ -1,7 +1,9 @@
 (ns gesso.live.fragment-test
   (:require
-   [clojure.test :refer [deftest is]]
+   [clojure.string :as str]
+   [clojure.test :refer [deftest is testing]]
    [gesso.live.fragment :as fragment]
+   [gesso.live.model :as model]
    [missionary.core :as m]))
 
 ;; -----------------------------------------------------------------------------
@@ -18,6 +20,57 @@
 
 (def other-fragment-key
   [:fragment :store-queue "store-2"])
+
+(defn hiccup-node?
+  [x]
+  (and (vector? x)
+       (seq x)
+       (or (keyword? (first x))
+           (symbol? (first x))
+           (string? (first x)))))
+
+(defn attrs
+  [node]
+  (if (and (vector? node)
+           (map? (second node)))
+    (second node)
+    {}))
+
+(defn children
+  [node]
+  (cond
+    (and (vector? node)
+         (map? (second node)))
+    (nnext node)
+
+    (vector? node)
+    (next node)
+
+    (sequential? node)
+    node
+
+    :else
+    nil))
+
+(defn hiccup-nodes
+  [root]
+  (filter
+   hiccup-node?
+   (tree-seq
+    (fn [x]
+      (or (hiccup-node? x)
+          (and (sequential? x)
+               (not (string? x)))))
+    children
+    root)))
+
+(defn find-by-id
+  [root id]
+  (some
+   (fn [node]
+     (when (= id (:id (attrs node)))
+       node))
+   (hiccup-nodes root)))
 
 (defn start-task
   [task]
@@ -99,6 +152,37 @@
         (reset! cancelled? true)
         (deliver cancelled :cancelled)
         (future-cancel worker)))))
+
+(defn allow-all?
+  [_ctx _id]
+  true)
+
+(defn compiled-live-model
+  []
+  (model/compile-live-app
+   {:response identity
+
+    :scopes
+    {:store
+     {:topic :demo/store
+      :id-key :store/id
+      :label "Store"
+      :authorized? allow-all?}}
+
+    :graph
+    {:demo/store-updated
+     [:store]}
+
+    :fragments
+    {:store-panel
+     {:scope :store
+      :id-fn (fn [id]
+               (str "store-panel-" id))
+      :query (fn [_ctx id]
+               {:store/id id})
+      :render (fn [data]
+                [:div data])
+      :swap :outerHTML}}}))
 
 ;; -----------------------------------------------------------------------------
 ;; Option validation
@@ -607,3 +691,140 @@
                           (fragment/render-task manager fragment-key render-fn)))))
     (is (contains? (event-names @events)
                    :gesso.live.fragment/cache-expired))))
+
+;; -----------------------------------------------------------------------------
+;; Model-backed fragment adapters
+;; -----------------------------------------------------------------------------
+
+(deftest fragment-runtime-fragment-defaults-from-model-test
+  (let [compiled (compiled-live-model)
+        runtime (fragment/fragment->runtime-fragment
+                 compiled
+                 :store-panel
+                 "store-1"
+                 {:fragment-url "/stores/store-1/fragment"
+                  :stream-url "/stores/store-1/stream"})]
+    (is (= "store-panel-store-1" (:id runtime)))
+    (is (= "/stores/store-1/fragment" (:src runtime)))
+    (is (= "/stores/store-1/stream" (:stream-url runtime)))
+    (is (= :outerHTML (:swap runtime)))
+    (is (= {:topic :demo/store
+            :id "store-1"
+            :gesso.live/scope :store
+            :gesso.live/scope-label "Store"}
+           (:subscription runtime)))))
+
+(deftest fragment-runtime-fragment-requires-fragment-url-test
+  (let [compiled (compiled-live-model)]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"fragment-url is required"
+         (fragment/fragment->runtime-fragment
+          compiled
+          :store-panel
+          "store-1"
+          {:stream-url "/stores/store-1/stream"})))))
+
+(deftest fragment-runtime-fragment-requires-stream-url-test
+  (let [compiled (compiled-live-model)]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"stream-url is required"
+         (fragment/fragment->runtime-fragment
+          compiled
+          :store-panel
+          "store-1"
+          {:fragment-url "/stores/store-1/fragment"})))))
+
+(deftest fragment-runtime-fragment-passes-generic-ui-options-test
+  (let [compiled (compiled-live-model)
+        runtime (fragment/fragment->runtime-fragment
+                 compiled
+                 :store-panel
+                 "store-1"
+                 {:fragment-url "/stores/store-1/fragment"
+                  :stream-url "/stores/store-1/stream"
+                  :swap :innerHTML
+                  :attrs {:data-fragment "store-panel"}
+                  :root-attrs {:data-root "root"
+                               :hx-ext "path-deps"}
+                  :target-attrs {:data-target "target"
+                                 :hx-include "#store-board-state"
+                                 :hx-indicator "#spinner"}
+                  :event :store-updated
+                  :trigger "load, gesso:live-connected from:body"
+                  :jitter-delay-ms 25})]
+    (is (= "store-panel-store-1" (:id runtime)))
+    (is (= "/stores/store-1/fragment" (:src runtime)))
+    (is (= "/stores/store-1/stream" (:stream-url runtime)))
+    (is (= :innerHTML (:swap runtime)))
+    (is (= {:data-fragment "store-panel"}
+           (:attrs runtime)))
+    (is (= {:data-root "root"
+            :hx-ext "path-deps"}
+           (:root-attrs runtime)))
+    (is (= {:data-target "target"
+            :hx-include "#store-board-state"
+            :hx-indicator "#spinner"}
+           (:target-attrs runtime)))
+    (is (= :store-updated (:event runtime)))
+    (is (= "load, gesso:live-connected from:body"
+           (:trigger runtime)))
+    (is (= 25 (:jitter-delay-ms runtime)))))
+
+(deftest model-fragment-panel-renders-generic-passthrough-attrs-test
+  (let [compiled (compiled-live-model)
+        panel (fragment/model-fragment-panel
+               compiled
+               :store-panel
+               "store-1"
+               {:fragment-url "/stores/store-1/fragment"
+                :stream-url "/stores/store-1/stream"
+
+                ;; In this UI shape, the stable/root node owns the live request
+                ;; attrs, so request-affecting attrs such as hx-include belong
+                ;; here.
+                :root-attrs {:data-root "root"
+                             :hx-ext "path-deps"
+                             :hx-include "#store-board-state"
+                             :hx-indicator "#spinner"}
+
+                ;; The target attrs belong to the replaceable placeholder node.
+                :target-attrs {:data-target "target"}
+
+                :event :store-updated
+                :trigger "load, gesso:live-connected from:body"
+                :jitter-delay-ms 25})
+        root-attrs (attrs panel)
+        target (find-by-id panel "store-panel-store-1")
+        target-attrs (attrs target)
+        request-node (some
+                      (fn [node]
+                        (when (:hx-get (attrs node))
+                          node))
+                      (hiccup-nodes panel))
+        request-attrs (attrs request-node)]
+    (is (= :div (first panel)))
+    (is (= "store-panel-store-1"
+           (:data-gesso-live-fragment root-attrs)))
+    (is (= "/stores/store-1/stream"
+           (:sse-connect root-attrs)))
+    (is (str/includes? (:hx-ext root-attrs) "sse"))
+    (is (str/includes? (:hx-ext root-attrs) "path-deps"))
+    (is (= "root" (:data-root root-attrs)))
+
+    (is (some? target))
+    (is (= :div (first target)))
+    (is (= "store-panel-store-1" (:id target-attrs)))
+    (is (= "target" (:data-target target-attrs)))
+
+    (is (some? request-node))
+    (is (= "/stores/store-1/fragment" (:hx-get request-attrs)))
+    (is (= "outerHTML" (:hx-swap request-attrs)))
+    (is (= "#store-board-state" (:hx-include request-attrs)))
+    (is (= "#spinner" (:hx-indicator request-attrs)))
+    (is (str/includes? (:hx-trigger request-attrs) "load"))
+    (is (str/includes? (:hx-trigger request-attrs)
+                       "gesso:live-connected from:body"))
+    (is (str/includes? (:hx-trigger request-attrs)
+                       "sse:store-updated delay:25ms"))))
