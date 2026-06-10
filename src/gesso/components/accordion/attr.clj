@@ -39,7 +39,6 @@
            :font-weight 600
            :box-shadow "inset 0 -1px 0 0 color-mix(in srgb, var(--foreground) 16%, transparent)"}})
 
-
 (defn accordion-content-attrs
   "Returns the attribute map for the accordion content region.
 

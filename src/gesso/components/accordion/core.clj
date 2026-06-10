@@ -3,7 +3,8 @@
    [gesso.util :refer :all]
    [gesso.components.accordion.scripts :refer :all]
    [gesso.components.accordion.attr :refer :all]
-   [gesso.hyperscript :refer [hs merge-script-attr attach-script-to-node attach-script-to-children-by-tag]]))
+   [gesso.hyperscript :refer [merge-script-attr
+                              attach-script-to-children-by-tag]]))
 
 (declare accordion)
 
@@ -82,6 +83,44 @@
                 :value value
                 :open? (compute-open? item value type default-one default-many))))
      items*)))
+
+;; -----------------------------------------------------------------------------
+;; Root state helpers
+;; -----------------------------------------------------------------------------
+
+(defn- append-hx-include
+  [existing selector]
+  (cond
+    (nil? existing)
+    selector
+
+    (= "" existing)
+    selector
+
+    :else
+    (str existing ", " selector)))
+
+(defn- root-attrs-with-state-include
+  "When :state-include? is true, include the configured state input in HTMX
+   requests issued from the accordion root/descendants.
+
+   This is intentionally additive: if callers already supplied :hx-include, the
+   state input selector is appended instead of replacing it."
+  [attrs state-input state-include?]
+  (if (and state-include? state-input)
+    (update (or attrs {}) :hx-include append-hx-include state-input)
+    attrs))
+
+(defn- accordion-script-options
+  [{:keys [type collapsible? state-input state-name]}]
+  {:type type
+   :collapsible? collapsible?
+   :state-input state-input
+   :state-name state-name})
+
+;; -----------------------------------------------------------------------------
+;; Trigger / content helpers
+;; -----------------------------------------------------------------------------
 
 (defn- accordion-title-node
   "Wraps trigger content in the heading element used for accordion titles.
@@ -216,8 +255,18 @@
         {:keys [items item-fn type
                 default-value default-values
                 default-index default-indexes
-                collapsible?]} props
-        script (accordion-script {:type type :collapsible? collapsible?})
+                collapsible?
+                state-input state-name state-include?]} props
+        script (accordion-script
+                (accordion-script-options
+                 {:type type
+                  :collapsible? collapsible?
+                  :state-input state-input
+                  :state-name state-name}))
+        attrs  (root-attrs-with-state-include
+                attrs
+                state-input
+                state-include?)
         items* (prepare-accordion-items
                 {:items items
                  :item-fn item-fn
@@ -239,7 +288,7 @@
               :items items}))
 
 (defn- accordion-opts-fn-items-form
-  "Supports the shorthand form where root opts, an item-fn, and an item
+  "Supports the shorthand form where root opts, an item-fn, and item
    collection are passed directly to accordion."
   [opts item-fn items]
   (accordion (assoc opts :item-fn item-fn :items items)))
@@ -251,8 +300,17 @@
    root container."
   [opts children]
   (let [{:keys [props class attrs]} (split-opts opts)
-        {:keys [type collapsible?]} props
-        script   (accordion-script {:type type :collapsible? collapsible?})
+        {:keys [type collapsible? state-input state-name state-include?]} props
+        script   (accordion-script
+                  (accordion-script-options
+                   {:type type
+                    :collapsible? collapsible?
+                    :state-input state-input
+                    :state-name state-name}))
+        attrs    (root-attrs-with-state-include
+                  attrs
+                  state-input
+                  state-include?)
         children (attach-script-to-children-by-tag children :details script)]
     (el :div
         (accordion-root-attrs class)
@@ -286,7 +344,21 @@
      :default-index    zero-based initially open index for :single
      :default-indexes  zero-based initially open indexes for :multiple
      :collapsible?     whether a :single accordion may close its last open item
-                       (default true)."
+                       (default true)
+
+   State sync options:
+     :state-input      CSS selector for a stable input that should store the
+                       currently open item value. Currently applies to :single
+                       accordions.
+
+     :state-name       Form field name to inject into descendant submitted forms.
+                       Use this with :state-input when forms/buttons inside
+                       accordion items should preserve the open item across
+                       server re-render.
+
+     :state-include?   When true, append :state-input to the root :hx-include
+                       attribute. This is useful for HTMX requests issued from
+                       inside or under the accordion root."
   [& args]
   (cond
     (only-map-arg? args)
