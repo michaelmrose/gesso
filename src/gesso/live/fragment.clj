@@ -142,7 +142,7 @@
 (defn- require-positive-int-option!
   [options k]
   (when-let [v (get options k)]
-    (when-not (and (integer? v) (pos? v)))
+    (when-not (and (integer? v) (pos? v))
       (throw
        (ex (str "gesso.live fragment " k " must be a positive integer.")
            {k v}))))
@@ -592,35 +592,37 @@
   (require-task! task)
   (m/sp
     (let [cached (cache-lookup manager key options)]
-      (if-not (= miss cached)
+      (cond
+        (not= miss cached)
         cached
 
-        (if-not (:singleflight? options)
-          (m/? (render-store-task manager key task options))
+        (not (:singleflight? options))
+        (m/? (render-store-task manager key task options))
 
-          (let [flight (new-flight)
-                [role flight'] (acquire-flight! manager key flight)
-                debug-fn (:debug-fn options)
-                clock (:clock options)]
-            (case role
-              :owner
-              (do
-                (debug!
-                 debug-fn
-                 :gesso.live.fragment/singleflight-owner
-                 {:key key
-                  :at (clock)})
-                (start-flight! manager key task options flight')
-                (m/? (await-flight-task key options flight' :owner)))
+        :else
+        (let [flight (new-flight)
+              [role flight'] (acquire-flight! manager key flight)
+              debug-fn (:debug-fn options)
+              clock (:clock options)]
+          (case role
+            :owner
+            (do
+              (debug!
+               debug-fn
+               :gesso.live.fragment/singleflight-owner
+               {:key key
+                :at (clock)})
+              (start-flight! manager key task options flight')
+              (m/? (await-flight-task key options flight' :owner)))
 
-              :join
-              (do
-                (debug!
-                 debug-fn
-                 :gesso.live.fragment/singleflight-joined
-                 {:key key
-                  :at (clock)})
-                (m/? (await-flight-task key options flight' :join))))))))))
+            :join
+            (do
+              (debug!
+               debug-fn
+               :gesso.live.fragment/singleflight-joined
+               {:key key
+                :at (clock)})
+              (m/? (await-flight-task key options flight' :join)))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Public render helpers
@@ -692,6 +694,14 @@
                 :jitter-ms
                 :jitter-delay-ms]))
 
+(defn- normalize-fragment-swap
+  [swap]
+  (cond
+    (keyword? swap) (name swap)
+    (symbol? swap)  (name swap)
+    (nil? swap)     nil
+    :else           swap))
+
 (defn fragment->runtime-fragment
   "Build the current Gesso Live UI fragment descriptor from a compiled model
    fragment.
@@ -704,16 +714,8 @@
 
    Generic UI passthrough opts:
      :attrs
-       General fragment attrs, when supported by gesso.live.ui.
-
      :root-attrs
-       Attrs merged onto the outer SSE wrapper.
-
      :target-attrs
-       Attrs merged onto the inner HTMX refresh target. This is useful for
-       ordinary app-local HTMX behavior such as hx-include, hx-indicator, or
-       app-specific data attrs.
-
      :event
      :trigger
      :jitter-ms
@@ -757,7 +759,13 @@
   "Render a client-side live fragment panel using a compiled model fragment.
 
    Routes remain explicit in the app. This is a convenience adapter around
-   gesso.live.ui/fragment-panel."
+   gesso.live.ui/fragment-panel.
+
+   Runtime fragment descriptors may keep model-level keyword swap values.
+   Before rendering browser-facing HTMX attrs, normalize the swap to a string."
   [compiled fragment-name id opts]
   (ui/fragment-panel
-   (fragment->runtime-fragment compiled fragment-name id opts)))
+   (update
+    (fragment->runtime-fragment compiled fragment-name id opts)
+    :swap
+    normalize-fragment-swap)))

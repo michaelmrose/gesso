@@ -73,12 +73,6 @@
   [opts]
   (not= :get (route-method opts)))
 
-(defn- html-method
-  [semantic-method]
-  (case semantic-method
-    :get "get"
-    "post"))
-
 (defn- optional-htmx-attrs
   [{:keys [target
            swap
@@ -140,12 +134,15 @@
      :push-url
 
    If no route key is present, returns an empty map. This allows a Gesso form
-   to be used as a plain HTML form shell when needed."
+   to be used as a plain HTML form shell when needed.
+
+   Deliberately does not emit native :method. This preserves the original
+   submission-attrs contract and keeps HTMX routing attrs separate from native
+   form fallback behavior."
   [{:keys [swap] :or {swap default-swap} :as opts}]
-  (if-let [[semantic-method htmx-attr url] (route-entry opts)]
+  (if-let [[_semantic-method htmx-attr url] (route-entry opts)]
     (merge
-     {:method (html-method semantic-method)
-      htmx-attr url
+     {htmx-attr url
       :hx-swap swap}
      (optional-htmx-attrs (assoc opts :swap swap)))
     {}))
