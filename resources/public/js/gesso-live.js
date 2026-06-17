@@ -1,5 +1,5 @@
 /*
- * gesso-live.js / Gesso Live client-continuity runtime
+ * gesso-live.js / Gesso Live client-continuity runtime v0.10.0
  *
  * Framework-owned browser runtime for preserving local interaction context
  * across Gesso Live / HTMX fragment replacement.
@@ -25,6 +25,18 @@
  * Anchor scroll is preferred, but every scroll capture also records raw scroll
  * positions so a missing/moved anchor cannot degrade into a hostile jump to the
  * top of the page.
+ *
+ * v0.8.0 additionally height-locks the stable continuity root while HTMX swaps
+ * the replaceable target. This prevents the document from briefly collapsing
+ * and clamping window scroll to the top before restoration runs.
+ *
+ * v0.9.0 adds request-start capture for hx-swap="none" + OOB response paths,
+ * safer focus preservation, and a short post-restore scroll shield so late
+ * browser/HTMX focus/reveal behavior cannot navigate the viewport after
+ * continuity restoration.
+ *
+ * v0.10.0 corrects the direct htmx-ext-sse lifecycle hooks to the documented
+ * htmx:sseBeforeMessage / htmx:sseMessage events.
  */
 (function () {
   "use strict";
@@ -38,6 +50,34 @@
   // Slots are also indexed globally by replaceable target id so OOB lifecycle
   // events can restore even if HTMX reports the old detached target element.
   var activeSlotsByTargetId = {};
+
+  var lastUserScrollIntentAt = 0;
+
+  function markUserScrollIntent() {
+    lastUserScrollIntentAt = now();
+  }
+
+  function keyCouldScroll(event) {
+    var key = event && event.key;
+    return key === "ArrowUp" ||
+      key === "ArrowDown" ||
+      key === "ArrowLeft" ||
+      key === "ArrowRight" ||
+      key === "PageUp" ||
+      key === "PageDown" ||
+      key === "Home" ||
+      key === "End" ||
+      key === " " ||
+      key === "Spacebar";
+  }
+
+  window.addEventListener("wheel", markUserScrollIntent, { passive: true, capture: true });
+  window.addEventListener("touchmove", markUserScrollIntent, { passive: true, capture: true });
+  window.addEventListener("pointerdown", markUserScrollIntent, { passive: true, capture: true });
+  window.addEventListener("keydown", function (event) {
+    if (keyCouldScroll(event)) markUserScrollIntent();
+  }, true);
+
 
   function now() {
     return Date.now ? Date.now() : new Date().getTime();
@@ -194,7 +234,7 @@
   function keyForElement(element, opts) {
     if (!element) return null;
 
-    var keyAttr = opts && (opts.keyAttr || opts.keyAttribute);
+    var keyAttr = opts && (opts.keyAttr || opts.keyAttribute || opts["key-attr"] || opts["key-attribute"]);
     if (keyAttr && element.getAttribute(keyAttr)) {
       return { kind: "attr", attr: keyAttr, value: element.getAttribute(keyAttr) };
     }
@@ -443,7 +483,7 @@
   }
 
   function scrollContainerFor(element, root, box) {
-    var selector = box && (box.containerSelector || box.container || box.containerSelector);
+    var selector = box && (box.containerSelector || box["container-selector"] || box.container);
     if (selector) {
       return query(root, selector) || query(document, selector) || window;
     }
@@ -556,9 +596,20 @@
   }
 
   var builtIns = {
+    "raw-scroll": {
+      capture: function (root, target, box) {
+        var scroller = scrollContainerFor(target, root, box);
+        return rawElementScrollState(scroller, root, box);
+      },
+
+      restore: function (root, _target, _box, state) {
+        restoreRawScroll(root, state);
+      }
+    },
+
     "anchor-scroll": {
       capture: function (root, target, box) {
-        var selector = box.selector || box.anchorSelector;
+        var selector = box.selector || box.anchorSelector || box["anchor-selector"];
         var candidates = selector ? queryAll(target, selector) : [];
         var initialScroller = null;
 
@@ -640,6 +691,32 @@
 
         var selector = box.selector;
         if (selector && !active.matches(selector)) return null;
+
+        var tag = (active.tagName || "").toLowerCase();
+        var type = (active.type || "").toLowerCase();
+        var editable =
+          tag === "input" ||
+          tag === "textarea" ||
+          tag === "select" ||
+          active.isContentEditable;
+
+        var allowNonEditable =
+          box.allowNonEditable === true ||
+          box["allow-non-editable"] === true ||
+          box.includeButtons === true ||
+          box["include-buttons"] === true;
+
+        // Restoring focus to a clicked button/link inside a collaborative list can
+        // itself cause the browser to reveal the changed card. Preserve editable
+        // focus by default; allow button/link focus only by explicit opt-in.
+        if (!editable && !allowNonEditable) return null;
+
+        // Most non-text input types do not have meaningful caret state. They are
+        // still editable controls, so focus can be restored without treating them
+        // like buttons.
+        if (tag === "input" && (type === "button" || type === "submit" || type === "reset")) {
+          if (!allowNonEditable) return null;
+        }
 
         var key = keyForElement(active, box);
         if (!key) return null;
@@ -813,8 +890,17 @@
     });
 
     if (preserve.scroll) {
-      var scroll = preserve.scroll === true ? {} : preserve.scroll;
-      boxes.push(Object.assign({ type: "anchor-scroll" }, scroll));
+      if (preserve.scroll === true) {
+        boxes.push({ type: "raw-scroll" });
+      } else {
+        var scroll = preserve.scroll || {};
+        var mode = scroll.mode || scroll.type;
+        if (mode === "raw" || mode === "position" || mode === "scroll" || mode === "raw-scroll") {
+          boxes.push(Object.assign({ type: "raw-scroll" }, scroll));
+        } else {
+          boxes.push(Object.assign({ type: "anchor-scroll" }, scroll));
+        }
+      }
     }
 
     if (preserve.focus) {
@@ -865,7 +951,109 @@
     }
   }
 
+  function currentWindowScrollY() {
+    return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+  }
+
+  function numericCssPx(value) {
+    if (!value) return 0;
+    var parsed = parseFloat(value);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+
+  function lockContinuityHeight(root, target) {
+    if (!root || !target || !isConnected(root)) {
+      return null;
+    }
+
+    var rootRect = null;
+    var targetRect = null;
+
+    try {
+      rootRect = root.getBoundingClientRect();
+      targetRect = target.getBoundingClientRect();
+    } catch (_measureError) {
+      return null;
+    }
+
+    var height = Math.max(
+      rootRect && rootRect.height ? rootRect.height : 0,
+      targetRect && targetRect.height ? targetRect.height : 0
+    );
+
+    if (!height || height < 1) {
+      return null;
+    }
+
+    var previousMinHeight = root.style.minHeight || "";
+    var previousOverflowAnchor = root.style.overflowAnchor || "";
+    var previousDataLock = root.getAttribute("data-gesso-live-continuity-height-locked");
+
+    var computed = window.getComputedStyle ? window.getComputedStyle(root) : null;
+    var existingMinHeight = computed ? numericCssPx(computed.minHeight) : numericCssPx(previousMinHeight);
+    var lockedHeight = Math.ceil(Math.max(height, existingMinHeight));
+
+    root.style.minHeight = lockedHeight + "px";
+
+    // Browser scroll anchoring can fight explicit continuity restoration while a
+    // large subtree is being replaced. Disable it only on the stable root and
+    // restore the previous inline value afterward.
+    root.style.overflowAnchor = "none";
+    root.setAttribute("data-gesso-live-continuity-height-locked", "true");
+
+    var released = false;
+
+    return {
+      height: lockedHeight,
+      release: function () {
+        if (released) return;
+        released = true;
+
+        root.style.minHeight = previousMinHeight;
+        root.style.overflowAnchor = previousOverflowAnchor;
+
+        if (previousDataLock == null) {
+          root.removeAttribute("data-gesso-live-continuity-height-locked");
+        } else {
+          root.setAttribute("data-gesso-live-continuity-height-locked", previousDataLock);
+        }
+      }
+    };
+  }
+
+  function releaseHeightLock(root, slot, reason) {
+    if (!slot || !slot.heightLock || typeof slot.heightLock.release !== "function") {
+      return false;
+    }
+
+    try {
+      slot.heightLock.release();
+      emit(root || slot.root, "height-unlocked", {
+        source: slot.source,
+        reason: reason || "release",
+        root: root || slot.root,
+        targetId: slot.targetId,
+        height: slot.heightLock.height
+      });
+      return true;
+    } catch (error) {
+      emit(root || slot.root, "error", {
+        phase: "height-unlock",
+        reason: reason || "release",
+        error: error
+      });
+      return false;
+    } finally {
+      slot.heightLock = null;
+    }
+  }
+
   function storeSlot(root, slot) {
+    var previous = root && root[STATE_SLOT];
+    if (previous && previous !== slot) {
+      releaseHeightLock(root, previous, "replace-slot");
+    }
+
     root[STATE_SLOT] = slot;
 
     if (slot.targetId) {
@@ -878,6 +1066,38 @@
     if (targetId && activeSlotsByTargetId[targetId]) {
       delete activeSlotsByTargetId[targetId];
     }
+  }
+
+  function captureContextForRoot(root, event, source) {
+    if (!root) return null;
+
+    var target = findContinuityTarget(root, event);
+    if (!target) {
+      var targetId = continuityTargetId(root);
+      if (targetId) target = findById(root, targetId) || findById(document, targetId);
+    }
+
+    if (!target) {
+      emit(root, "missed", {
+        phase: "capture",
+        source: source || "request",
+        reason: "no-matching-target",
+        root: root,
+        targetId: continuityTargetId(root)
+      });
+      return null;
+    }
+
+    var config = parseConfig(root);
+    if (!configEnabled(config)) return null;
+
+    return {
+      source: source || "request",
+      root: root,
+      target: target,
+      targetId: target.id || continuityTargetId(root),
+      config: config
+    };
   }
 
   function captureContext(event, source) {
@@ -962,6 +1182,8 @@
       return captureBox(context.root, context.target, box);
     }).filter(Boolean);
 
+    var heightLock = lockContinuityHeight(context.root, context.target);
+
     storeSlot(context.root, {
       source: context.source,
       root: context.root,
@@ -969,7 +1191,8 @@
       capturedAt: now(),
       config: context.config,
       captured: captured,
-      fallbackScroll: rawWindowScrollState()
+      fallbackScroll: rawWindowScrollState(),
+      heightLock: heightLock
     });
 
     emit(context.root, "captured", {
@@ -977,8 +1200,57 @@
       root: context.root,
       target: context.target,
       targetId: context.targetId,
-      count: captured.length
+      count: captured.length,
+      heightLocked: !!heightLock,
+      lockedHeight: heightLock && heightLock.height
     });
+  }
+
+  function installPostRestoreScrollShield(root, slot, reason) {
+    if (!root || !slot || !slot.fallbackScroll || slot.fallbackScroll.kind !== "window") {
+      return;
+    }
+
+    var startedAt = now();
+    var desired = rawWindowScrollState();
+    var framesLeft = 10;
+    var tolerance = 2;
+
+    function tick() {
+      if (lastUserScrollIntentAt > slot.capturedAt) {
+        emit(root, "scroll-shield-cancelled", {
+          source: slot.source,
+          reason: "user-scroll-intent",
+          root: root,
+          targetId: slot.targetId
+        });
+        return;
+      }
+
+      var current = rawWindowScrollState();
+      var dx = Math.abs((current.x || 0) - (desired.x || 0));
+      var dy = Math.abs((current.y || 0) - (desired.y || 0));
+
+      if (dx > tolerance || dy > tolerance) {
+        restoreRawScroll(root, desired);
+        emit(root, "scroll-shield-restored", {
+          source: slot.source,
+          reason: reason || "late-scroll",
+          root: root,
+          targetId: slot.targetId,
+          from: current,
+          to: desired,
+          ageMs: now() - startedAt
+        });
+      }
+
+      framesLeft -= 1;
+      if (framesLeft > 0) {
+        requestAnimationFrame(tick);
+      }
+    }
+
+    requestAnimationFrame(tick);
   }
 
   function restore(context) {
@@ -1009,8 +1281,7 @@
     var fallback = slot.fallbackScroll;
     if (fallback && fallback.kind === "window" && fallback.y > 0) {
       requestAnimationFrame(function () {
-        var currentY = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
-        if (currentY === 0) {
+        if (currentWindowScrollY() === 0) {
           restoreRawScroll(context.root, fallback);
           emit(context.root, "fallback-restored", {
             source: context.source,
@@ -1022,6 +1293,16 @@
       });
     }
 
+    // Keep the min-height lock through one more frame so the browser paints the
+    // restored scroll position before the stable root is allowed to shrink.
+    installPostRestoreScrollShield(context.root, slot, "post-restore");
+
+    if (slot.heightLock) {
+      requestAnimationFrame(function () {
+        releaseHeightLock(context.root, slot, "after-restore");
+      });
+    }
+
     clearSlot(context.root, slot.targetId);
 
     emit(context.root, "restored", {
@@ -1029,7 +1310,16 @@
       root: context.root,
       target: context.target,
       targetId: context.targetId,
-      count: slot.captured.length
+      count: slot.captured.length,
+      heightLocked: !!slot.heightLock
+    });
+  }
+
+  function afterLayoutSettles(fn) {
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        fn();
+      });
     });
   }
 
@@ -1039,10 +1329,12 @@
 
     queryAll(target, ROOT_SELECTOR).forEach(function (root) {
       var targetId = continuityTargetId(root);
+      releaseHeightLock(root, root[STATE_SLOT], "cleanup-child-root");
       clearSlot(root, targetId);
     });
 
     if (target.matches && target.matches(ROOT_SELECTOR)) {
+      releaseHeightLock(target, target[STATE_SLOT], "cleanup-root");
       clearSlot(target, continuityTargetId(target));
     }
   }
@@ -1054,7 +1346,12 @@
 
   function onAfterSettle(event) {
     var context = restoreContext(event, "swap");
-    if (context) restore(context);
+    if (!context) return;
+
+    afterLayoutSettles(function () {
+      var refreshed = restoreContext(event, "swap") || context;
+      restore(refreshed);
+    });
   }
 
   function onOobBeforeSwap(event) {
@@ -1066,27 +1363,63 @@
     var context = restoreContext(event, "oob");
     if (!context) return;
 
-    // Give the browser one frame to attach and measure the OOB-replaced target.
-    requestAnimationFrame(function () {
+    afterLayoutSettles(function () {
       var refreshed = restoreContext(event, "oob") || context;
       restore(refreshed);
     });
   }
 
+  function onBeforeRequest(event) {
+    var elements = eventElements(event);
+    var seen = [];
+
+    for (var i = 0; i < elements.length; i += 1) {
+      var root = closestContinuityRoot(elements[i]);
+      if (!root || seen.indexOf(root) !== -1) continue;
+      seen.push(root);
+
+      var context = captureContextForRoot(root, event, "request");
+      if (context) capture(context);
+    }
+  }
+
+  function onSseBeforeMessage(event) {
+    var context = captureContext(event, "sse-message");
+    if (context) capture(context);
+  }
+
+  function onSseMessage(event) {
+    var context = restoreContext(event, "sse-message");
+    if (!context) return;
+
+    afterLayoutSettles(function () {
+      var refreshed = restoreContext(event, "sse-message") || context;
+      restore(refreshed);
+    });
+  }
+
   // Attach to document, not document.body, so this file is safe to load in <head>.
+  document.addEventListener("htmx:beforeRequest", onBeforeRequest);
   document.addEventListener("htmx:beforeSwap", onBeforeSwap);
   document.addEventListener("htmx:afterSettle", onAfterSettle);
+
+  // Direct HTMX SSE-extension message swaps, for components that use sse-swap rather
+  // than using sse:<event> as an hx-trigger for a normal request.
+  document.addEventListener("htmx:sseBeforeMessage", onSseBeforeMessage);
+  document.addEventListener("htmx:sseMessage", onSseMessage);
+
   document.addEventListener("htmx:oobBeforeSwap", onOobBeforeSwap);
   document.addEventListener("htmx:oobAfterSwap", onOobAfterSwap);
   document.addEventListener("htmx:beforeCleanupElement", clearOnBeforeCleanup);
 
   window.gessoLive = window.gessoLive || {};
   window.gessoLive.continuity = {
-    version: "0.5.0",
+    version: "0.10.0",
     parseConfig: parseConfig,
     boxesFromConfig: boxesFromConfig,
     captureContext: captureContext,
     restoreContext: restoreContext,
+    captureContextForRoot: captureContextForRoot,
     capture: capture,
     restore: restore,
     emit: emit,

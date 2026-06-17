@@ -42,7 +42,7 @@
   "outerHTML")
 
 (def default-fragment-trigger
-  "load, pageshow from:window, focus from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body")
+  "load, pageshow from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body")
 
 (def default-post-swap
   "Default HTMX swap mode for helper POST forms/buttons."
@@ -529,7 +529,8 @@
 
     (true? client-continuity)
     {:enabled true
-     :preserve {:focus true}}
+     :preserve {:scroll true
+                :focus true}}
 
     (map? client-continuity)
     (normalize-continuity-map client-continuity)

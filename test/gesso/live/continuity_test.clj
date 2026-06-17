@@ -1,7 +1,31 @@
 (ns gesso.live.continuity-test
   (:require
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
-   [gesso.live.continuity :as continuity]))
+   [gesso.live.continuity :as continuity]
+   [gesso.live.htmx :as htmx]
+   [gesso.live.ui :as ui]))
+
+;; -----------------------------------------------------------------------------
+;; Hiccup helpers
+;; -----------------------------------------------------------------------------
+
+(defn attrs
+  [node]
+  (when (and (vector? node)
+             (map? (second node)))
+    (second node)))
+
+(defn children
+  [node]
+  (let [xs (rest node)]
+    (if (map? (first xs))
+      (rest xs)
+      xs)))
+
+;; -----------------------------------------------------------------------------
+;; Continuity constructor tests
+;; -----------------------------------------------------------------------------
 
 (deftest anchor-scroll-test
   (testing "selector string shorthand"
@@ -25,7 +49,7 @@
            (continuity/anchor-scroll
             {:anchor-selector "[data-card]"}))))
 
-  (testing "selector or anchor-selector is required"
+  (testing "selector or anchor-selector is required for explicit anchor-scroll"
     (is (thrown-with-msg?
          clojure.lang.ExceptionInfo
          #"anchor-scroll requires :selector or :anchor-selector"
@@ -164,6 +188,14 @@
              :focus true
              :inputs {:selector "[data-preserve-input]"}}))))
 
+  (testing "raw/basic scroll preservation is expressible without an anchor selector"
+    (is (= {:enabled true
+            :preserve {:scroll true
+                       :focus true}}
+           (continuity/preserve
+            {:scroll true
+             :focus true}))))
+
   (testing "preserve can include explicit boxes"
     (is (= {:enabled true
             :preserve {:focus true}
@@ -230,3 +262,96 @@
   (testing "hx-preserve-attrs constant"
     (is (= {:hx-preserve true}
            continuity/hx-preserve-attrs))))
+
+;; -----------------------------------------------------------------------------
+;; HTMX attr/config contract tests
+;; -----------------------------------------------------------------------------
+
+(deftest normalize-client-continuity-test
+  (testing "true means useful conservative defaults, including basic scroll"
+    ;; This is intentionally stricter than the earlier focus-only default.
+    ;; A feature called client continuity should not require app code to opt into
+    ;; basic no-jump scroll preservation.
+    (is (= {:enabled true
+            :preserve {:scroll true
+                       :focus true}}
+           (htmx/normalize-client-continuity true))))
+
+  (testing "preserve sugar normalizes into the runtime preserve map"
+    (is (= {:enabled true
+            :preserve {:scroll true
+                       :focus true
+                       :inputs {:selector "[data-input]"}}}
+           (htmx/normalize-client-continuity
+            {:preserve-scroll true
+             :preserve-focus true
+             :preserve-inputs {:selector "[data-input]"}}))))
+
+  (testing "selector scroll remains an anchor-scroll intent at the data boundary"
+    (is (= {:enabled true
+            :preserve {:scroll {:selector "[data-card]"}
+                       :focus true}}
+           (htmx/normalize-client-continuity
+            (continuity/preserve
+             {:scroll {:selector "[data-card]"}
+              :focus true}))))))
+
+(deftest client-continuity-attrs-test
+  (testing "disabled continuity emits no attrs"
+    (is (= {}
+           (htmx/client-continuity-attrs
+            {:fragment-id "request-list"
+             :client-continuity false}))))
+
+  (testing "raw scroll/focus config is encoded on the stable root"
+    (let [attrs (htmx/client-continuity-attrs
+                 {:fragment-id "request-list"
+                  :client-continuity (continuity/preserve
+                                      {:scroll true
+                                       :focus true})})
+          config (:data-gesso-live-continuity-config attrs)]
+      (is (= "true" (:data-gesso-live-continuity attrs)))
+      (is (= "request-list" (:data-gesso-live-continuity-fragment attrs)))
+      (is (string? config))
+      (is (str/includes? config "\"enabled\":true"))
+      (is (str/includes? config "\"scroll\":true"))
+      (is (str/includes? config "\"focus\":true"))))
+
+  (testing "anchor selector config is encoded on the stable root"
+    (let [attrs (htmx/client-continuity-attrs
+                 {:fragment-id "request-list"
+                  :client-continuity (continuity/preserve
+                                      {:scroll {:selector "[data-card]"}
+                                       :focus true})})
+          config (:data-gesso-live-continuity-config attrs)]
+      (is (= "true" (:data-gesso-live-continuity attrs)))
+      (is (= "request-list" (:data-gesso-live-continuity-fragment attrs)))
+      (is (str/includes? config "\"selector\":\"[data-card]\"")))))
+
+(deftest fragment-panel-continuity-contract-test
+  (let [panel (ui/fragment-panel
+               {:id "request-list"
+                :src "/app/fragments/requests"
+                :stream-url "/app/streams/requests"
+                :client-continuity (continuity/preserve
+                                    {:scroll true
+                                     :focus true})})
+        root-attrs (attrs panel)
+        target (first (children panel))
+        target-attrs (attrs target)
+        config (:data-gesso-live-continuity-config root-attrs)]
+    (testing "stable root owns live behavior and continuity config"
+      (is (= :div (first panel)))
+      (is (= "sse" (:hx-ext root-attrs)))
+      (is (= "/app/streams/requests" (:sse-connect root-attrs)))
+      (is (= "/app/fragments/requests" (:hx-get root-attrs)))
+      (is (= "#request-list" (:hx-target root-attrs)))
+      (is (= "outerHTML" (:hx-swap root-attrs)))
+      (is (= "true" (:data-gesso-live-continuity root-attrs)))
+      (is (= "request-list" (:data-gesso-live-continuity-fragment root-attrs)))
+      (is (str/includes? config "\"scroll\":true"))
+      (is (str/includes? config "\"focus\":true")))
+
+    (testing "replaceable target owns only the fragment id by default"
+      (is (= :div (first target)))
+      (is (= {:id "request-list"} target-attrs)))))
