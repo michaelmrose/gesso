@@ -325,6 +325,30 @@
     :else
     (str x)))
 
+(defn- box-type-name
+  "Normalize a Clojure-facing continuity box type to the browser runtime's
+   registry key format.
+
+   Built-in box types are intentionally unqualified on the browser side:
+   :anchor-scroll => \"anchor-scroll\". Namespaced keywords can still be used by
+   higher-level Clojure helpers, but the browser runtime receives the local name.
+
+   Raw strings are preserved so advanced callers may target app/framework custom
+   registry keys explicitly."
+  [x]
+  (cond
+    (nil? x)
+    nil
+
+    (keyword? x)
+    (name x)
+
+    (symbol? x)
+    (name x)
+
+    :else
+    (str x)))
+
 (declare json-value)
 
 (defn- json-array
@@ -384,13 +408,18 @@
   [box]
   (cond
     (map? box)
-    box
+    (cond-> box
+      (contains? box :type)
+      (update :type box-type-name)
+
+      (contains? box :name)
+      (update :name json-name))
 
     (keyword? box)
-    {:type box}
+    {:type (box-type-name box)}
 
     (symbol? box)
-    {:type (json-name box)}
+    {:type (box-type-name box)}
 
     (string? box)
     {:type box}
@@ -414,6 +443,55 @@
      (ex-info "gesso.live client-continuity :boxes must be a sequential collection."
               {:boxes boxes}))))
 
+(defn- normalize-preserve
+  [preserve]
+  (cond
+    (nil? preserve)
+    {}
+
+    (false? preserve)
+    {}
+
+    (true? preserve)
+    {:focus true}
+
+    (map? preserve)
+    preserve
+
+    :else
+    (throw
+     (ex-info "gesso.live client-continuity :preserve must be nil, false, true, or a map."
+              {:preserve preserve}))))
+
+(def ^:private preserve-sugar
+  {:preserve-scroll :scroll
+   :preserve-focus :focus
+   :preserve-inputs :inputs})
+
+(defn- apply-preserve-sugar
+  [preserve client-continuity]
+  (reduce-kv
+   (fn [preserve' public-k preserve-k]
+     (if (contains? client-continuity public-k)
+       (let [v (get client-continuity public-k)]
+         (if (false? v)
+           (dissoc preserve' preserve-k)
+           (assoc preserve' preserve-k v)))
+       preserve'))
+   preserve
+   preserve-sugar))
+
+(defn- normalize-continuity-map
+  [client-continuity]
+  (let [preserve (-> (:preserve client-continuity)
+                     normalize-preserve
+                     (apply-preserve-sugar client-continuity))
+        boxes    (normalize-continuity-boxes (:boxes client-continuity))
+        base     (apply dissoc client-continuity (keys preserve-sugar))]
+    (cond-> (assoc base :enabled true)
+      (seq preserve) (assoc :preserve preserve)
+      boxes          (assoc :boxes boxes))))
+
 (defn normalize-client-continuity
   "Normalize app-facing client-continuity config into data suitable for the
    browser runtime.
@@ -424,12 +502,18 @@
        disabled, returns nil
 
      true
-       enabled with an empty config
+       enables the conservative default: preserve focus/caret when possible
 
-     {:preserve ... :boxes [...] ...}
+     {:preserve {:scroll {...} :focus true :inputs {...}}
+      :boxes [...]}
        Clojure/data-first continuity config. Unknown keys are preserved so app
-       and component libraries can evolve custom box options without changing
-       this low-level attr builder.
+       and component libraries can evolve custom options without changing this
+       low-level attr builder.
+
+     {:preserve-scroll {...}
+      :preserve-focus true
+      :preserve-inputs {...}}
+       public sugar normalized into the browser runtime's :preserve map
 
      [{:type :anchor-scroll ...} ...]
        shorthand for {:boxes [...]}
@@ -444,12 +528,11 @@
     nil
 
     (true? client-continuity)
-    {:enabled true}
+    {:enabled true
+     :preserve {:focus true}}
 
     (map? client-continuity)
-    (let [boxes (normalize-continuity-boxes (:boxes client-continuity))]
-      (cond-> (assoc client-continuity :enabled true)
-        boxes (assoc :boxes boxes)))
+    (normalize-continuity-map client-continuity)
 
     (sequential? client-continuity)
     {:enabled true
@@ -479,9 +562,10 @@
    Optional opts:
      :client-continuity
        App-facing Clojure/data-first config. Normal app authors should prefer
-       built-in declarative options such as preserve-scroll/focus/input boxes.
-       Advanced component authors may provide boxes whose capture/restore code is
-       named browser functions or Hyperscript strings produced by an hs macro.
+       built-in declarative options such as :preserve-scroll, :preserve-focus,
+       and :preserve-inputs or the nested :preserve map. Advanced component
+       authors may provide boxes whose capture/restore behavior is implemented
+       by browser functions, dispatched custom events, or Hyperscript handlers.
 
    This helper only emits data attrs. The browser runtime is expected to attach
    delegated HTMX lifecycle listeners and read these attrs; app authors should

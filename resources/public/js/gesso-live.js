@@ -1,0 +1,1099 @@
+/*
+ * gesso-live.js / Gesso Live client-continuity runtime
+ *
+ * Framework-owned browser runtime for preserving local interaction context
+ * across Gesso Live / HTMX fragment replacement.
+ *
+ * Expected stable root attrs:
+ *
+ *   data-gesso-live-fragment="<stable root name/id>"
+ *   data-gesso-live-continuity="true"
+ *   data-gesso-live-continuity-fragment="<replaceable target id>"
+ *   data-gesso-live-continuity-config='{"enabled":true,...}'
+ *
+ * A future/alternate config carrier is also supported:
+ *
+ *   <script type="application/json" data-gesso-live-continuity-config>
+ *     {"enabled":true,...}
+ *   </script>
+ *
+ * This runtime handles both:
+ *
+ *   - normal HTMX swaps: htmx:beforeSwap / htmx:afterSettle
+ *   - out-of-band swaps: htmx:oobBeforeSwap / htmx:oobAfterSwap
+ *
+ * Anchor scroll is preferred, but every scroll capture also records raw scroll
+ * positions so a missing/moved anchor cannot degrade into a hostile jump to the
+ * top of the page.
+ */
+(function () {
+  "use strict";
+
+  var ROOT_SELECTOR = "[data-gesso-live-continuity='true']";
+  var CONFIG_ATTR = "data-gesso-live-continuity-config";
+  var CONFIG_SCRIPT_SELECTOR = "script[type='application/json'][data-gesso-live-continuity-config]";
+  var FRAGMENT_ATTR = "data-gesso-live-continuity-fragment";
+  var STATE_SLOT = "__gessoLiveContinuity";
+
+  // Slots are also indexed globally by replaceable target id so OOB lifecycle
+  // events can restore even if HTMX reports the old detached target element.
+  var activeSlotsByTargetId = {};
+
+  function now() {
+    return Date.now ? Date.now() : new Date().getTime();
+  }
+
+  function emit(root, name, detail) {
+    if (!root || typeof root.dispatchEvent !== "function") return null;
+
+    var event = null;
+    var eventDetail = detail || {};
+
+    try {
+      event = new CustomEvent("gesso:live-continuity:" + name, {
+        bubbles: true,
+        cancelable: false,
+        detail: eventDetail
+      });
+    } catch (_customEventError) {
+      event = document.createEvent("CustomEvent");
+      event.initCustomEvent("gesso:live-continuity:" + name, true, false, eventDetail);
+    }
+
+    try {
+      root.dispatchEvent(event);
+    } catch (_dispatchError) {
+      // Debug/event plumbing must never break HTMX swaps.
+    }
+
+    return eventDetail;
+  }
+
+  function isElement(value) {
+    return value && value.nodeType === 1;
+  }
+
+  function contains(root, node) {
+    return !!(root && node && (root === node || root.contains(node)));
+  }
+
+  function isConnected(element) {
+    if (!element) return false;
+    if (typeof element.isConnected === "boolean") return element.isConnected;
+    return document.documentElement && document.documentElement.contains(element);
+  }
+
+  function asArray(value) {
+    if (value == null || value === false) return [];
+    return Array.isArray(value) ? value : [value];
+  }
+
+  function cssEscape(value) {
+    var string = String(value);
+    if (window.CSS && typeof window.CSS.escape === "function") {
+      return window.CSS.escape(string);
+    }
+
+    // Minimal fallback sufficient for id selectors in old browsers.
+    return string.replace(/[^a-zA-Z0-9_-]/g, function (ch) {
+      var hex = ch.charCodeAt(0).toString(16);
+      return "\\" + hex + " ";
+    });
+  }
+
+  function query(root, selector) {
+    if (!root || !selector) return null;
+    try {
+      return root.querySelector(selector);
+    } catch (_selectorError) {
+      return null;
+    }
+  }
+
+  function queryAll(root, selector) {
+    if (!root || !selector) return [];
+    try {
+      return Array.prototype.slice.call(root.querySelectorAll(selector));
+    } catch (_selectorError) {
+      return [];
+    }
+  }
+
+  function findById(scope, id) {
+    if (!scope || !id) return null;
+    if (scope.id === id) return scope;
+
+    var selector = "#" + cssEscape(id);
+    return query(scope, selector);
+  }
+
+  function findByAttr(scope, attr, value) {
+    if (!scope || !attr) return null;
+
+    // Do not interpolate arbitrary attr values into a selector. Query by attr
+    // presence and compare DOM values directly.
+    var candidates = queryAll(scope, "[" + attr + "]");
+    var stringValue = String(value);
+
+    for (var i = 0; i < candidates.length; i += 1) {
+      if (candidates[i].getAttribute(attr) === stringValue) {
+        return candidates[i];
+      }
+    }
+
+    return null;
+  }
+
+  function findByName(scope, name) {
+    return findByAttr(scope, "name", name);
+  }
+
+  function childConfigScript(root) {
+    if (!root || !root.children) return null;
+
+    // Prefer an immediate child so a replaced target cannot accidentally become
+    // the root's active config source.
+    for (var i = 0; i < root.children.length; i += 1) {
+      var child = root.children[i];
+      if (child.matches && child.matches(CONFIG_SCRIPT_SELECTOR)) {
+        return child;
+      }
+    }
+
+    return null;
+  }
+
+  function parseJson(root, raw, source) {
+    if (!raw) return null;
+
+    try {
+      return JSON.parse(raw);
+    } catch (error) {
+      emit(root, "error", {
+        phase: "parse-config",
+        source: source,
+        error: error,
+        raw: raw
+      });
+      return null;
+    }
+  }
+
+  function parseConfig(root) {
+    if (!root) return null;
+
+    var attrConfig = root.getAttribute(CONFIG_ATTR);
+    if (attrConfig) return parseJson(root, attrConfig, "attr");
+
+    var script = childConfigScript(root);
+    if (script) return parseJson(root, script.textContent || script.innerText || "", "script");
+
+    return null;
+  }
+
+  function keyForElement(element, opts) {
+    if (!element) return null;
+
+    var keyAttr = opts && (opts.keyAttr || opts.keyAttribute);
+    if (keyAttr && element.getAttribute(keyAttr)) {
+      return { kind: "attr", attr: keyAttr, value: element.getAttribute(keyAttr) };
+    }
+
+    if (element.id) {
+      return { kind: "id", value: element.id };
+    }
+
+    if (element.getAttribute("data-gesso-continuity-key")) {
+      return {
+        kind: "attr",
+        attr: "data-gesso-continuity-key",
+        value: element.getAttribute("data-gesso-continuity-key")
+      };
+    }
+
+    if (element.getAttribute("data-key")) {
+      return { kind: "attr", attr: "data-key", value: element.getAttribute("data-key") };
+    }
+
+    if (element.name) {
+      return { kind: "name", value: element.name };
+    }
+
+    return null;
+  }
+
+  function findByKey(scope, key) {
+    if (!scope || !key) return null;
+
+    if (key.kind === "id") return findById(scope, key.value);
+    if (key.kind === "attr") return findByAttr(scope, key.attr, key.value);
+    if (key.kind === "name") return findByName(scope, key.value);
+
+    return null;
+  }
+
+  function eventElements(event) {
+    var elements = [];
+    var detail = event && event.detail;
+
+    function add(value) {
+      if (isElement(value) && elements.indexOf(value) === -1) elements.push(value);
+    }
+
+    // HTMX versions/extensions differ in which field is the request element and
+    // which field is the swap target. OOB events also vary. Treat all known
+    // element-bearing fields as candidates and derive the real root/target below.
+    if (detail) {
+      add(detail.target);
+      add(detail.elt);
+      add(detail.source);
+      add(detail.fragment);
+      add(detail.oobElement);
+      add(detail.swappedElement);
+      add(detail.oobTarget);
+      if (detail.requestConfig) add(detail.requestConfig.elt);
+    }
+
+    add(event && event.target);
+
+    return elements;
+  }
+
+  function eventTarget(event) {
+    var detail = event && event.detail;
+    if (detail && isElement(detail.target)) return detail.target;
+    if (isElement(event && event.target)) return event.target;
+    return null;
+  }
+
+  function firstElementId(elements) {
+    for (var i = 0; i < elements.length; i += 1) {
+      if (elements[i] && elements[i].id) return elements[i].id;
+    }
+    return null;
+  }
+
+  function closestContinuityRoot(element) {
+    if (!element) return null;
+
+    if (element.matches && element.matches(ROOT_SELECTOR)) {
+      return element;
+    }
+
+    if (element.closest) {
+      return element.closest(ROOT_SELECTOR);
+    }
+
+    return null;
+  }
+
+  function rootTargetId(root) {
+    return root && root.getAttribute(FRAGMENT_ATTR);
+  }
+
+  function hxTargetId(root) {
+    if (!root) return null;
+
+    var hxTarget = root.getAttribute("hx-target");
+    if (hxTarget && hxTarget.charAt(0) === "#") {
+      return hxTarget.slice(1);
+    }
+
+    return null;
+  }
+
+  function continuityTargetId(root) {
+    return rootTargetId(root) || hxTargetId(root);
+  }
+
+  function rootForTargetId(targetId) {
+    if (!targetId) return null;
+
+    var roots = queryAll(document, ROOT_SELECTOR);
+    for (var i = 0; i < roots.length; i += 1) {
+      if (continuityTargetId(roots[i]) === targetId) return roots[i];
+    }
+
+    return null;
+  }
+
+  function targetIdFromEvent(event) {
+    var elements = eventElements(event);
+    var id = firstElementId(elements);
+    if (id) return id;
+
+    var detail = event && event.detail;
+    if (!detail) return null;
+
+    if (typeof detail.target === "string" && detail.target.charAt(0) === "#") {
+      return detail.target.slice(1);
+    }
+
+    if (typeof detail.oobTarget === "string" && detail.oobTarget.charAt(0) === "#") {
+      return detail.oobTarget.slice(1);
+    }
+
+    return null;
+  }
+
+  function rootFromEvent(event) {
+    var elements = eventElements(event);
+
+    for (var i = 0; i < elements.length; i += 1) {
+      var root = closestContinuityRoot(elements[i]);
+      if (root) return root;
+    }
+
+    var targetId = targetIdFromEvent(event);
+    if (targetId && activeSlotsByTargetId[targetId] && activeSlotsByTargetId[targetId].root) {
+      return activeSlotsByTargetId[targetId].root;
+    }
+
+    return rootForTargetId(targetId);
+  }
+
+  function targetMatchesRoot(root, target, fallbackId) {
+    if (!root || !target) return false;
+
+    // With hx-swap="outerHTML", lifecycle events can still mention the old
+    // target element after it has been detached. Matching by id alone would then
+    // restore into a dead subtree. Only accept a target that is currently inside
+    // the stable continuity root.
+    if (!contains(root, target)) return false;
+
+    var targetId = fallbackId || continuityTargetId(root);
+    if (targetId && target.id === targetId) return true;
+
+    return false;
+  }
+
+  function findContinuityTarget(root, event, fallbackId) {
+    if (!root) return null;
+
+    var targetId = fallbackId || continuityTargetId(root);
+    var elements = eventElements(event);
+
+    for (var i = 0; i < elements.length; i += 1) {
+      if (targetMatchesRoot(root, elements[i], targetId)) return elements[i];
+    }
+
+    if (targetId) {
+      // Prefer finding the new/current target inside the stable root. Falling
+      // back to document supports unusual markup but avoids using detached event
+      // targets as restore destinations.
+      return findById(root, targetId) || findById(document, targetId);
+    }
+
+    return null;
+  }
+
+  function configEnabled(config) {
+    return !!config && config.enabled !== false;
+  }
+
+  function rawWindowScrollState() {
+    return {
+      kind: "window",
+      x: window.pageXOffset || document.documentElement.scrollLeft || document.body.scrollLeft || 0,
+      y: window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0
+    };
+  }
+
+  function rawElementScrollState(element, root, opts) {
+    if (!element || element === window) return rawWindowScrollState();
+
+    return {
+      kind: "element",
+      key: keyForElement(element, opts),
+      top: element.scrollTop,
+      left: element.scrollLeft,
+      // If the scroller cannot be keyed, we can still use the same element when
+      // it survives, or fall back to window rather than doing nothing.
+      transientElement: contains(root, element) ? element : null
+    };
+  }
+
+  function restoreRawScroll(root, raw) {
+    if (!raw) return false;
+
+    if (raw.kind === "window") {
+      window.scrollTo(raw.x || 0, raw.y || 0);
+      return true;
+    }
+
+    if (raw.kind === "element") {
+      var element = null;
+
+      if (raw.key) {
+        element = findByKey(root || document, raw.key);
+      }
+
+      if (!element && raw.transientElement && isConnected(raw.transientElement)) {
+        element = raw.transientElement;
+      }
+
+      if (element) {
+        element.scrollTop = raw.top || 0;
+        element.scrollLeft = raw.left || 0;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
+  function scrollContainerFor(element, root, box) {
+    var selector = box && (box.containerSelector || box.container || box.containerSelector);
+    if (selector) {
+      return query(root, selector) || query(document, selector) || window;
+    }
+
+    var current = element && element.parentElement;
+    while (current && current !== document.documentElement && current !== document.body) {
+      var style = window.getComputedStyle(current);
+      var overflowY = style.overflowY;
+      if ((overflowY === "auto" || overflowY === "scroll") && current.scrollHeight > current.clientHeight) {
+        return current;
+      }
+      current = current.parentElement;
+    }
+
+    return window;
+  }
+
+  function viewportForScroller(scroller) {
+    if (!scroller || scroller === window) {
+      return { top: 0, bottom: window.innerHeight || document.documentElement.clientHeight || 0 };
+    }
+
+    var rect = scroller.getBoundingClientRect();
+    return { top: rect.top, bottom: rect.bottom };
+  }
+
+  function visibleScore(element, viewport) {
+    var rect = element.getBoundingClientRect();
+    var visible = rect.bottom >= viewport.top && rect.top <= viewport.bottom;
+    if (!visible) return null;
+    return Math.abs(rect.top - viewport.top);
+  }
+
+  function chooseAnchor(candidates, scroller) {
+    var viewport = viewportForScroller(scroller);
+    var best = null;
+    var bestScore = Infinity;
+
+    candidates.forEach(function (candidate) {
+      var score = visibleScore(candidate, viewport);
+      if (score != null && score < bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    });
+
+    return best || candidates[0] || null;
+  }
+
+  function scrollerKey(scroller, root, box) {
+    if (!scroller || scroller === window) return null;
+    return keyForElement(scroller, box) || keyForElement(scroller) || (contains(root, scroller) ? null : null);
+  }
+
+  function scrollBy(scroller, delta) {
+    if (!delta) return;
+
+    if (!scroller || scroller === window) {
+      window.scrollBy(0, delta);
+    } else {
+      scroller.scrollTop += delta;
+    }
+  }
+
+  function inputElementValue(element) {
+    if (!element) return null;
+
+    var tag = (element.tagName || "").toLowerCase();
+    var type = (element.type || "").toLowerCase();
+
+    if (type === "checkbox" || type === "radio") {
+      return { checked: !!element.checked };
+    }
+
+    if (tag === "select" && element.multiple) {
+      return {
+        selectedValues: Array.prototype.slice.call(element.options)
+          .filter(function (option) { return option.selected; })
+          .map(function (option) { return option.value; })
+      };
+    }
+
+    if ("value" in element) return { value: element.value };
+    return null;
+  }
+
+  function restoreInputElementValue(element, saved) {
+    if (!element || !saved) return;
+
+    if (Object.prototype.hasOwnProperty.call(saved, "checked")) {
+      element.checked = !!saved.checked;
+      return;
+    }
+
+    if (Array.isArray(saved.selectedValues) && element.options) {
+      var values = saved.selectedValues.reduce(function (m, value) {
+        m[String(value)] = true;
+        return m;
+      }, {});
+
+      Array.prototype.slice.call(element.options).forEach(function (option) {
+        option.selected = !!values[String(option.value)];
+      });
+      return;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(saved, "value") && "value" in element) {
+      element.value = saved.value;
+    }
+  }
+
+  var builtIns = {
+    "anchor-scroll": {
+      capture: function (root, target, box) {
+        var selector = box.selector || box.anchorSelector;
+        var candidates = selector ? queryAll(target, selector) : [];
+        var initialScroller = null;
+
+        if (candidates.length) {
+          initialScroller = scrollContainerFor(candidates[0], root, box);
+        } else {
+          initialScroller = scrollContainerFor(target, root, box);
+        }
+
+        var raw = rawElementScrollState(initialScroller, root, box);
+
+        if (!selector || !candidates.length) {
+          return {
+            rawOnly: true,
+            raw: raw,
+            reason: selector ? "no-candidates" : "no-selector"
+          };
+        }
+
+        var anchor = chooseAnchor(candidates, initialScroller);
+        if (!anchor) {
+          return {
+            rawOnly: true,
+            raw: raw,
+            reason: "no-anchor"
+          };
+        }
+
+        var scroller = scrollContainerFor(anchor, root, box);
+        var key = keyForElement(anchor, box);
+        var rawForScroller = rawElementScrollState(scroller, root, box);
+
+        if (!key) {
+          return {
+            rawOnly: true,
+            raw: rawForScroller,
+            reason: "no-anchor-key"
+          };
+        }
+
+        return {
+          key: key,
+          top: anchor.getBoundingClientRect().top,
+          scroller: scrollerKey(scroller, root, box),
+          raw: rawForScroller
+        };
+      },
+
+      restore: function (root, target, box, state) {
+        if (!state) return;
+
+        if (!state.rawOnly && state.key) {
+          var anchor = findByKey(target, state.key);
+          if (anchor) {
+            var beforeTop = state.top;
+            var afterTop = anchor.getBoundingClientRect().top;
+            var delta = afterTop - beforeTop;
+
+            if (delta) {
+              var scroller = state.scroller ? findByKey(root, state.scroller) : scrollContainerFor(anchor, root, box);
+              scrollBy(scroller, delta);
+            }
+
+            return;
+          }
+        }
+
+        // Fallback: if the anchor disappeared, cannot be keyed, or cannot be
+        // found after an OOB swap, restore the raw scroll position captured at
+        // the exact pre-swap moment.
+        restoreRawScroll(root, state.raw);
+      }
+    },
+
+    "focus": {
+      capture: function (root, _target, box) {
+        var active = document.activeElement;
+        if (!active || !contains(root, active)) return null;
+
+        var selector = box.selector;
+        if (selector && !active.matches(selector)) return null;
+
+        var key = keyForElement(active, box);
+        if (!key) return null;
+
+        var state = {
+          key: key,
+          rawWindowScroll: rawWindowScrollState()
+        };
+
+        if (typeof active.selectionStart === "number" && typeof active.selectionEnd === "number") {
+          state.selectionStart = active.selectionStart;
+          state.selectionEnd = active.selectionEnd;
+          state.selectionDirection = active.selectionDirection;
+        }
+
+        return state;
+      },
+
+      restore: function (root, target, _box, state) {
+        if (!state || !state.key) return;
+
+        var element = findByKey(target, state.key);
+        if (!element || typeof element.focus !== "function") return;
+
+        try {
+          element.focus({ preventScroll: true });
+        } catch (_focusOptionsError) {
+          element.focus();
+          restoreRawScroll(root, state.rawWindowScroll);
+        }
+
+        if (typeof element.setSelectionRange === "function" && typeof state.selectionStart === "number") {
+          try {
+            element.setSelectionRange(
+              state.selectionStart,
+              state.selectionEnd,
+              state.selectionDirection || "none"
+            );
+          } catch (_selectionError) {
+            // Some input types do not support text selection ranges.
+          }
+        }
+
+        // Some browsers still scroll focused controls into view even with
+        // preventScroll. Undo that on the next frame.
+        if (state.rawWindowScroll) {
+          requestAnimationFrame(function () {
+            restoreRawScroll(root, state.rawWindowScroll);
+          });
+        }
+      }
+    },
+
+    "inputs": {
+      capture: function (_root, target, box) {
+        var selector = box.selector || "input, textarea, select";
+        var elements = queryAll(target, selector);
+
+        return elements.map(function (element, index) {
+          var key = keyForElement(element, box) || { kind: "index", value: index };
+          return {
+            key: key,
+            value: inputElementValue(element)
+          };
+        }).filter(function (item) {
+          return item.value != null;
+        });
+      },
+
+      restore: function (_root, target, box, state) {
+        if (!Array.isArray(state)) return;
+
+        var selector = box.selector || "input, textarea, select";
+        var elements = queryAll(target, selector);
+
+        state.forEach(function (item) {
+          var element = null;
+
+          if (item.key && item.key.kind === "index") {
+            element = elements[item.key.value];
+          } else {
+            element = findByKey(target, item.key);
+          }
+
+          restoreInputElementValue(element, item.value);
+        });
+      }
+    },
+
+    "js": {
+      capture: function (root, target, box) {
+        var fn = resolvePath(box.capture);
+        if (typeof fn !== "function") return null;
+        return fn(root, target, box);
+      },
+
+      restore: function (root, target, box, state) {
+        var fn = resolvePath(box.restore);
+        if (typeof fn === "function") fn(root, target, box, state);
+      }
+    },
+
+    "event": {
+      capture: function (root, target, box) {
+        var name = box.name || box.event || "custom";
+        var detail = emit(root, "capture-box:" + name, {
+          root: root,
+          target: target,
+          box: box,
+          state: null
+        });
+        return detail ? detail.state : null;
+      },
+
+      restore: function (root, target, box, state) {
+        var name = box.name || box.event || "custom";
+        emit(root, "restore-box:" + name, {
+          root: root,
+          target: target,
+          box: box,
+          state: state
+        });
+      }
+    },
+
+    "hyperscript": {
+      capture: function (root, target, box) {
+        // Prefer event-backed Hyperscript custom boxes. A component can install
+        // handlers like:
+        //   on gesso:live-continuity:capture-box:selected-row
+        //     set event.detail.state to ...
+        var eventBox = Object.assign({}, box, { type: "event" });
+        return builtIns.event.capture(root, target, eventBox);
+      },
+
+      restore: function (root, target, box, state) {
+        var eventBox = Object.assign({}, box, { type: "event" });
+        builtIns.event.restore(root, target, eventBox, state);
+      }
+    }
+  };
+
+  function resolvePath(path) {
+    if (!path || typeof path !== "string") return null;
+
+    return path.split(".").reduce(function (value, part) {
+      return value && value[part];
+    }, window);
+  }
+
+  function normalizeBox(box) {
+    if (typeof box === "string") return { type: box };
+    if (!box || typeof box !== "object") return null;
+
+    var normalized = Object.assign({}, box);
+    if (!normalized.type && normalized.name && builtIns[normalized.name]) {
+      normalized.type = normalized.name;
+    }
+    if (!normalized.type) normalized.type = "event";
+
+    return normalized;
+  }
+
+  function boxesFromConfig(config) {
+    var boxes = [];
+    var preserve = config.preserve || {};
+
+    asArray(config.boxes).forEach(function (box) {
+      var normalized = normalizeBox(box);
+      if (normalized) boxes.push(normalized);
+    });
+
+    if (preserve.scroll) {
+      var scroll = preserve.scroll === true ? {} : preserve.scroll;
+      boxes.push(Object.assign({ type: "anchor-scroll" }, scroll));
+    }
+
+    if (preserve.focus) {
+      var focus = preserve.focus === true ? {} : preserve.focus;
+      boxes.push(Object.assign({ type: "focus" }, focus));
+    }
+
+    if (preserve.inputs) {
+      var inputs = preserve.inputs === true ? {} : preserve.inputs;
+      boxes.push(Object.assign({ type: "inputs" }, inputs));
+    }
+
+    return boxes;
+  }
+
+  function captureBox(root, target, box) {
+    var type = box.type || "event";
+    var impl = builtIns[type];
+
+    if (!impl || typeof impl.capture !== "function") {
+      emit(root, "error", { phase: "capture", reason: "unknown-box-type", box: box });
+      return null;
+    }
+
+    try {
+      return {
+        type: type,
+        name: box.name || type,
+        box: box,
+        state: impl.capture(root, target, box)
+      };
+    } catch (error) {
+      emit(root, "error", { phase: "capture", box: box, error: error });
+      return null;
+    }
+  }
+
+  function restoreBox(root, target, captured) {
+    if (!captured) return;
+
+    var impl = builtIns[captured.type];
+    if (!impl || typeof impl.restore !== "function") return;
+
+    try {
+      impl.restore(root, target, captured.box, captured.state);
+    } catch (error) {
+      emit(root, "error", { phase: "restore", box: captured.box, error: error });
+    }
+  }
+
+  function storeSlot(root, slot) {
+    root[STATE_SLOT] = slot;
+
+    if (slot.targetId) {
+      activeSlotsByTargetId[slot.targetId] = slot;
+    }
+  }
+
+  function clearSlot(root, targetId) {
+    if (root) delete root[STATE_SLOT];
+    if (targetId && activeSlotsByTargetId[targetId]) {
+      delete activeSlotsByTargetId[targetId];
+    }
+  }
+
+  function captureContext(event, source) {
+    if (source !== "oob" && event && event.detail && event.detail.shouldSwap === false) return null;
+
+    var root = rootFromEvent(event);
+    if (!root) return null;
+
+    var target = findContinuityTarget(root, event);
+    if (!target) {
+      emit(root, "missed", {
+        phase: "capture",
+        source: source || "swap",
+        reason: "no-matching-target",
+        root: root,
+        targetId: continuityTargetId(root)
+      });
+      return null;
+    }
+
+    var config = parseConfig(root);
+    if (!configEnabled(config)) return null;
+
+    return {
+      source: source || "swap",
+      root: root,
+      target: target,
+      targetId: target.id || continuityTargetId(root),
+      config: config
+    };
+  }
+
+  function restoreContext(event, source) {
+    var eventTargetId = targetIdFromEvent(event);
+    var root = rootFromEvent(event);
+
+    var slot = null;
+    if (root && root[STATE_SLOT]) {
+      slot = root[STATE_SLOT];
+    }
+
+    if (!slot && eventTargetId && activeSlotsByTargetId[eventTargetId]) {
+      slot = activeSlotsByTargetId[eventTargetId];
+    }
+
+    if (!slot && root) {
+      var rootTarget = continuityTargetId(root);
+      if (rootTarget && activeSlotsByTargetId[rootTarget]) {
+        slot = activeSlotsByTargetId[rootTarget];
+      }
+    }
+
+    if (!slot) return null;
+
+    if (!root) {
+      root = slot.root || rootForTargetId(slot.targetId);
+    }
+
+    if (!root) return null;
+
+    var targetId = slot.targetId || eventTargetId || continuityTargetId(root);
+    var newTarget = findContinuityTarget(root, event, targetId);
+
+    var config = parseConfig(root) || slot.config;
+    if (!configEnabled(config)) return null;
+
+    return {
+      source: source || "swap",
+      root: root,
+      target: newTarget,
+      targetId: targetId,
+      config: config,
+      slot: slot
+    };
+  }
+
+  function capture(context) {
+    var boxes = boxesFromConfig(context.config);
+    if (!boxes.length) return;
+
+    var captured = boxes.map(function (box) {
+      return captureBox(context.root, context.target, box);
+    }).filter(Boolean);
+
+    storeSlot(context.root, {
+      source: context.source,
+      root: context.root,
+      targetId: context.targetId,
+      capturedAt: now(),
+      config: context.config,
+      captured: captured,
+      fallbackScroll: rawWindowScrollState()
+    });
+
+    emit(context.root, "captured", {
+      source: context.source,
+      root: context.root,
+      target: context.target,
+      targetId: context.targetId,
+      count: captured.length
+    });
+  }
+
+  function restore(context) {
+    var slot = context.slot || context.root[STATE_SLOT];
+    if (!slot) return;
+
+    if (slot.targetId && context.targetId && slot.targetId !== context.targetId) return;
+
+    if (context.target) {
+      slot.captured.forEach(function (captured) {
+        restoreBox(context.root, context.target, captured);
+      });
+    } else {
+      restoreRawScroll(context.root, slot.fallbackScroll);
+      emit(context.root, "missed", {
+        phase: "restore",
+        source: context.source,
+        reason: "no-matching-target-fallback-scroll",
+        root: context.root,
+        targetId: context.targetId
+      });
+    }
+
+    // Do a second raw fallback pass on the next frame only if the browser/HTMX
+    // clamped to the very top while we had previously captured a non-top scroll.
+    // This avoids fighting successful anchor restoration, but catches the bad
+    // "jump to top after OOB outerHTML" failure mode.
+    var fallback = slot.fallbackScroll;
+    if (fallback && fallback.kind === "window" && fallback.y > 0) {
+      requestAnimationFrame(function () {
+        var currentY = window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
+        if (currentY === 0) {
+          restoreRawScroll(context.root, fallback);
+          emit(context.root, "fallback-restored", {
+            source: context.source,
+            root: context.root,
+            targetId: context.targetId,
+            y: fallback.y
+          });
+        }
+      });
+    }
+
+    clearSlot(context.root, slot.targetId);
+
+    emit(context.root, "restored", {
+      source: context.source,
+      root: context.root,
+      target: context.target,
+      targetId: context.targetId,
+      count: slot.captured.length
+    });
+  }
+
+  function clearOnBeforeCleanup(event) {
+    var target = eventTarget(event);
+    if (!target) return;
+
+    queryAll(target, ROOT_SELECTOR).forEach(function (root) {
+      var targetId = continuityTargetId(root);
+      clearSlot(root, targetId);
+    });
+
+    if (target.matches && target.matches(ROOT_SELECTOR)) {
+      clearSlot(target, continuityTargetId(target));
+    }
+  }
+
+  function onBeforeSwap(event) {
+    var context = captureContext(event, "swap");
+    if (context) capture(context);
+  }
+
+  function onAfterSettle(event) {
+    var context = restoreContext(event, "swap");
+    if (context) restore(context);
+  }
+
+  function onOobBeforeSwap(event) {
+    var context = captureContext(event, "oob");
+    if (context) capture(context);
+  }
+
+  function onOobAfterSwap(event) {
+    var context = restoreContext(event, "oob");
+    if (!context) return;
+
+    // Give the browser one frame to attach and measure the OOB-replaced target.
+    requestAnimationFrame(function () {
+      var refreshed = restoreContext(event, "oob") || context;
+      restore(refreshed);
+    });
+  }
+
+  // Attach to document, not document.body, so this file is safe to load in <head>.
+  document.addEventListener("htmx:beforeSwap", onBeforeSwap);
+  document.addEventListener("htmx:afterSettle", onAfterSettle);
+  document.addEventListener("htmx:oobBeforeSwap", onOobBeforeSwap);
+  document.addEventListener("htmx:oobAfterSwap", onOobAfterSwap);
+  document.addEventListener("htmx:beforeCleanupElement", clearOnBeforeCleanup);
+
+  window.gessoLive = window.gessoLive || {};
+  window.gessoLive.continuity = {
+    version: "0.5.0",
+    parseConfig: parseConfig,
+    boxesFromConfig: boxesFromConfig,
+    captureContext: captureContext,
+    restoreContext: restoreContext,
+    capture: capture,
+    restore: restore,
+    emit: emit,
+    builtIns: builtIns,
+    registerBox: function (type, impl) {
+      if (!type || !impl) return;
+      builtIns[type] = impl;
+    }
+  };
+}());

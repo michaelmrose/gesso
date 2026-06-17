@@ -7,6 +7,7 @@
 
    - ->fragment
    - fragment-panel
+   - live-script
    - post-form
    - post-button
    - anti-forgery-token
@@ -24,6 +25,13 @@
 
 (def default-stream-base-url
   "/app/gesso/live/stream")
+
+(def default-live-script-src
+  "Default public path for the Gesso Live browser runtime.
+
+   Downstream apps should include this script when they use browser-side
+   Gesso Live behavior such as client-continuity capture/restore."
+  "/gesso/gesso-live.js")
 
 (def default-fragment-swap
   htmx/default-fragment-swap)
@@ -326,6 +334,33 @@
   (let [fragment' (ensure-fragment fragment)]
     [:div (fragment-root-attrs fragment')
      [:div (fragment-target-attrs fragment')]]))
+
+;; -----------------------------------------------------------------------------
+;; Browser runtime script helper
+;; -----------------------------------------------------------------------------
+
+(defn live-script
+  "Render the Gesso Live browser runtime script tag.
+
+   The runtime is framework-owned browser code for live-fragment behavior such as
+   client-continuity capture/restore. It is intentionally separate from
+   gesso-theme.js and from downstream app-owned main.js files.
+
+   Options:
+     :src
+       Override script URL. Defaults to /gesso/gesso-live.js.
+
+     :attrs
+       Extra attrs merged last. Use this for cache-busting, nonce, integrity,
+       crossorigin, or to override :defer."
+  ([] (live-script nil))
+  ([{:keys [src attrs]}]
+   [:script
+    (htmx/clean-attrs
+     (merge
+      {:src (or src default-live-script-src)
+       :defer true}
+      attrs))]))
 
 ;; -----------------------------------------------------------------------------
 ;; Anti-forgery helpers
