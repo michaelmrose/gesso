@@ -11,6 +11,7 @@
    - SSE callback attrs
    - direct SSE swap/OOB listener attrs
    - canonical consistency-token header naming
+   - client-continuity attrs and config encoding
 
    It intentionally does not know about:
 
@@ -70,6 +71,25 @@
    This direct-OOB path should be verified with browser/integration tests before
    application code depends on it."
   "none")
+
+(def default-client-continuity-attr
+  "Attribute used to mark a stable live fragment root as owning client-continuity
+   capture/restore configuration."
+  :data-gesso-live-continuity)
+
+(def default-client-continuity-config-attr
+  "Attribute used to carry normalized client-continuity config for the browser
+   runtime.
+
+   The value is JSON so the small browser runtime can parse it without an EDN
+   parser."
+  :data-gesso-live-continuity-config)
+
+(def default-client-continuity-fragment-attr
+  "Attribute used to record the fragment target id associated with a
+   client-continuity root."
+  :data-gesso-live-continuity-fragment)
+
 
 ;; -----------------------------------------------------------------------------
 ;; Small attr helpers
@@ -268,6 +288,212 @@
      (sse-trigger :toast)   => \"sse:toast\""
   [event]
   (str "sse:" (event-name event)))
+
+
+;; -----------------------------------------------------------------------------
+;; Client-continuity helpers
+;; -----------------------------------------------------------------------------
+
+(defn- json-string-escape
+  [s]
+  (let [sb (StringBuilder.)]
+    (doseq [ch (str s)]
+      (case ch
+        \\ (.append sb "\\\\")
+        \" (.append sb "\\\"")
+        \backspace (.append sb "\\b")
+        \formfeed (.append sb "\\f")
+        \newline (.append sb "\\n")
+        \return (.append sb "\\r")
+        \tab (.append sb "\\t")
+        (if (< (int ch) 32)
+          (.append sb (format "\\u%04x" (int ch)))
+          (.append sb ch))))
+    (str sb)))
+
+(defn- json-name
+  [x]
+  (cond
+    (keyword? x)
+    (if-let [ns (namespace x)]
+      (str ns "/" (name x))
+      (name x))
+
+    (symbol? x)
+    (str x)
+
+    :else
+    (str x)))
+
+(declare json-value)
+
+(defn- json-array
+  [xs]
+  (str "[" (str/join "," (map json-value xs)) "]"))
+
+(defn- json-object
+  [m]
+  (str "{"
+       (str/join
+        ","
+        (map (fn [[k v]]
+               (str "\"" (json-string-escape (json-name k)) "\":"
+                    (json-value v)))
+             m))
+       "}"))
+
+(defn- json-value
+  [x]
+  (cond
+    (nil? x)
+    "null"
+
+    (string? x)
+    (str "\"" (json-string-escape x) "\"")
+
+    (keyword? x)
+    (str "\"" (json-string-escape (json-name x)) "\"")
+
+    (symbol? x)
+    (str "\"" (json-string-escape (json-name x)) "\"")
+
+    (or (true? x) (false? x))
+    (if x "true" "false")
+
+    (number? x)
+    (str x)
+
+    (map? x)
+    (json-object x)
+
+    (sequential? x)
+    (json-array x)
+
+    (set? x)
+    (json-array (sort-by pr-str x))
+
+    (fn? x)
+    (throw
+     (ex-info "gesso.live client-continuity config cannot contain Clojure functions. Use Clojure data, Hyperscript strings, or browser function names instead."
+              {:value x}))
+
+    :else
+    (str "\"" (json-string-escape (str x)) "\"")))
+
+(defn- normalize-continuity-box
+  [box]
+  (cond
+    (map? box)
+    box
+
+    (keyword? box)
+    {:type box}
+
+    (symbol? box)
+    {:type (json-name box)}
+
+    (string? box)
+    {:type box}
+
+    :else
+    (throw
+     (ex-info "gesso.live client-continuity :boxes entries must be maps, keywords, symbols, or strings."
+              {:box box}))))
+
+(defn- normalize-continuity-boxes
+  [boxes]
+  (cond
+    (nil? boxes)
+    nil
+
+    (sequential? boxes)
+    (mapv normalize-continuity-box boxes)
+
+    :else
+    (throw
+     (ex-info "gesso.live client-continuity :boxes must be a sequential collection."
+              {:boxes boxes}))))
+
+(defn normalize-client-continuity
+  "Normalize app-facing client-continuity config into data suitable for the
+   browser runtime.
+
+   Accepted shapes:
+
+     nil / false
+       disabled, returns nil
+
+     true
+       enabled with an empty config
+
+     {:preserve ... :boxes [...] ...}
+       Clojure/data-first continuity config. Unknown keys are preserved so app
+       and component libraries can evolve custom box options without changing
+       this low-level attr builder.
+
+     [{:type :anchor-scroll ...} ...]
+       shorthand for {:boxes [...]}
+
+   This function intentionally does not execute or understand capture/restore
+   behavior. It only validates obvious serialization problems and normalizes the
+   few shapes that htmx attrs need to carry."
+  [client-continuity]
+  (cond
+    (or (nil? client-continuity)
+        (false? client-continuity))
+    nil
+
+    (true? client-continuity)
+    {:enabled true}
+
+    (map? client-continuity)
+    (let [boxes (normalize-continuity-boxes (:boxes client-continuity))]
+      (cond-> (assoc client-continuity :enabled true)
+        boxes (assoc :boxes boxes)))
+
+    (sequential? client-continuity)
+    {:enabled true
+     :boxes (normalize-continuity-boxes client-continuity)}
+
+    :else
+    (throw
+     (ex-info "gesso.live client-continuity must be nil, false, true, a map, or a sequential collection of boxes."
+              {:client-continuity client-continuity}))))
+
+(defn client-continuity-json
+  "Encode normalized client-continuity config as JSON for the browser runtime."
+  [client-continuity]
+  (some-> client-continuity
+          normalize-client-continuity
+          json-value))
+
+(defn client-continuity-attrs
+  "Build browser-facing attrs for client-continuity on a stable live fragment
+   root.
+
+   Required opts:
+     :fragment-id
+       DOM id of the replaceable fragment target associated with this stable
+       root. This should be the same id used for hx-target.
+
+   Optional opts:
+     :client-continuity
+       App-facing Clojure/data-first config. Normal app authors should prefer
+       built-in declarative options such as preserve-scroll/focus/input boxes.
+       Advanced component authors may provide boxes whose capture/restore code is
+       named browser functions or Hyperscript strings produced by an hs macro.
+
+   This helper only emits data attrs. The browser runtime is expected to attach
+   delegated HTMX lifecycle listeners and read these attrs; app authors should
+   not need to write that runtime themselves."
+  [{:keys [fragment-id client-continuity] :as opts}]
+  (let [fragment-id' (require-non-blank! opts :fragment-id "Client-continuity fragment id")
+        config       (normalize-client-continuity client-continuity)]
+    (if-not config
+      {}
+      {default-client-continuity-attr "true"
+       default-client-continuity-fragment-attr fragment-id'
+       default-client-continuity-config-attr (json-value config)})))
 
 ;; -----------------------------------------------------------------------------
 ;; Jitter helpers

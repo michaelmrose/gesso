@@ -13,6 +13,7 @@
    - conditional debug tracing
    - model-backed adapters from gesso.live.model fragment descriptors to
      gesso.live.ui fragment descriptors
+   - passthrough of generic runtime UI options such as client continuity
 
    The render-protection machinery does not:
 
@@ -23,8 +24,9 @@
    - decide subscription interests
 
    The model-backed adapter section at the bottom delegates to gesso.live.ui.
-   It still does not own routes, streams, Ring handlers, or subscriptions beyond
-   constructing the current UI fragment descriptor from compiled model metadata.
+   It still does not own routes, streams, Ring handlers, browser lifecycle
+   behavior, or subscriptions beyond constructing the current UI fragment
+   descriptor from compiled model metadata.
 
    The caller is responsible for choosing a key that includes every value that
    can affect the rendered HTML, such as user/scope/params/theme/locale and any
@@ -683,7 +685,11 @@
 
    These are intentionally domain-neutral. App-specific needs such as
    {:target-attrs {:hx-include \"#some-form\"}} belong in the app layer; this
-   adapter merely preserves and forwards the caller's generic UI fragment opts."
+   adapter merely preserves and forwards the caller's generic UI fragment opts.
+
+   Client continuity is passed through here as runtime UI metadata, but the
+   capture/restore mechanics belong to gesso.live.ui / gesso.live.htmx and the
+   browser runtime, not to fragment render protection."
   [opts]
   (select-keys opts
                [:attrs
@@ -692,7 +698,8 @@
                 :event
                 :trigger
                 :jitter-ms
-                :jitter-delay-ms]))
+                :jitter-delay-ms
+                :client-continuity]))
 
 (defn- normalize-fragment-swap
   [swap]
@@ -720,12 +727,14 @@
      :trigger
      :jitter-ms
      :jitter-delay-ms
+     :client-continuity
 
    :swap may be supplied by opts to override the compiled fragment descriptor's
    :swap value.
 
    Note: :request-policy and :consistency remain model metadata. They are not
-   passed to ui/->fragment here."
+   passed to ui/->fragment here. Client continuity is runtime UI metadata and is
+   therefore passed through unchanged."
   [compiled fragment-name id {:keys [fragment-url
                                      stream-url
                                      swap]

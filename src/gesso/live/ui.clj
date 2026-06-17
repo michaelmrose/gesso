@@ -123,6 +123,7 @@
      :event (:event m)
      :trigger (:trigger m)
      :include (:include m)
+     :client-continuity (:client-continuity m)
      :jitter-ms (:jitter-ms m)
      :jitter-delay-ms (:jitter-delay-ms m)
      :attrs (:attrs m)
@@ -172,16 +173,24 @@
      :swap
      :trigger
      :include
+     :client-continuity
      :jitter-ms
      :jitter-delay-ms
      :attrs / :root-attrs
      :target-attrs / :inner-attrs
 
+   :client-continuity is app-facing, Clojure/data-first configuration for
+   preserving browser interaction context across fragment refreshes. Examples
+   include scroll anchoring, focus/caret restoration, preserved DOM islands, and
+   custom capture/restore boxes. This namespace stores the config on the
+   fragment descriptor and delegates browser-facing attribute construction to
+   gesso.live.htmx.
+
    Markup model:
      fragment-panel renders a stable outer live wrapper and a replaceable inner
      target. The outer wrapper owns SSE, hx-get, hx-trigger, hx-target, hx-swap,
-     and hx-include. The inner target owns only the replaceable DOM id plus
-     target attrs."
+     hx-include, and client-continuity attrs. The inner target owns only the
+     replaceable DOM id plus target attrs."
   [fragment]
   (let [fragment'   (canonical-fragment-map fragment)
         id'         (require-present! :id (:id fragment'))
@@ -212,6 +221,7 @@
       :target-attrs {}}
      (compact-map
       {:include (:include fragment')
+       :client-continuity (:client-continuity fragment')
        :jitter-ms (:jitter-ms fragment')
        :jitter-delay-ms (:jitter-delay-ms fragment')
        :attrs (:attrs fragment')
@@ -238,7 +248,10 @@
 
    The outer wrapper owns both the SSE connection and the HTMX refresh request.
    This keeps hx-get/hx-trigger stable even when the replaceable inner target is
-   swapped with outerHTML."
+   swapped with outerHTML.
+
+   Client-continuity attrs also belong on this stable outer wrapper, since it is
+   the element that survives the inner target replacement."
   [fragment]
   (let [{:keys [stream-url
                 src
@@ -246,6 +259,7 @@
                 swap
                 trigger
                 include
+                client-continuity
                 jitter-ms
                 jitter-delay-ms
                 id
@@ -265,14 +279,19 @@
       :hx-swap swap}
      (when include
        {:hx-include include})
+     (when client-continuity
+       (htmx/client-continuity-attrs
+        {:fragment-id id
+         :client-continuity client-continuity}))
      attrs
      root-attrs)))
 
 (defn fragment-target-attrs
   "Build attrs for the replaceable inner fragment target.
 
-   The target intentionally does not own hx-get or hx-trigger. Those attrs live
-   on the stable outer wrapper rendered by fragment-panel."
+   The target intentionally does not own hx-get, hx-trigger, or
+   client-continuity attrs. Those attrs live on the stable outer wrapper rendered
+   by fragment-panel."
   [fragment]
   (let [{:keys [id target-attrs]} (ensure-fragment fragment)]
     (htmx/clean-attrs
@@ -291,13 +310,18 @@
      - hx-target
      - hx-swap
      - optional hx-include
+     - optional client-continuity attrs
 
    The inner element owns only the replaceable fragment id and optional
    target-attrs.
 
    This prevents the common outerHTML failure mode where a swapped fragment
    response replaces the element that used to own hx-get/hx-trigger, causing
-   later SSE events to arrive without triggering a follow-up fetch."
+   later SSE events to arrive without triggering a follow-up fetch.
+
+   It also gives client-continuity code a stable root from which it can capture
+   state before the inner target is replaced and restore state after HTMX
+   settles."
   [fragment]
   (let [fragment' (ensure-fragment fragment)]
     [:div (fragment-root-attrs fragment')
