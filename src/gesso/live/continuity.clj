@@ -17,6 +17,10 @@
        (continuity/boxes
         (continuity/anchor-scroll
          {:selector \"[data-humanhelp-request-card]\"})
+        (continuity/details-open
+         {:selector \"details[data-accordion-value]\"
+          :key-attr \"data-accordion-value\"
+          :single? true})
         (continuity/focus))})
 
    For simpler built-in preservation, raw data also remains valid:
@@ -107,6 +111,14 @@
     (require-present! :type type')
     type'))
 
+(defn- normalize-details-open-options
+  [opts]
+  (let [single (if (contains? opts :single?)
+                 (:single? opts)
+                 (:single opts))]
+    (cond-> (dissoc opts :single?)
+      (contains? opts :single?) (assoc :single single))))
+
 ;; -----------------------------------------------------------------------------
 ;; Box constructors
 ;; -----------------------------------------------------------------------------
@@ -184,6 +196,36 @@
   ([] (inputs nil))
   ([selector-or-opts]
    (box :inputs (selector-options selector-or-opts))))
+
+(defn details-open
+  "Preserve the open state of native <details> elements inside a replaceable
+   fragment target.
+
+   Required:
+     :selector
+       Selector for candidate <details> elements. The selector should match the
+       details elements themselves, not their summaries or contents.
+
+   Optional:
+     :key-attr / :keyAttribute
+       Attribute used to identify the same details element after replacement.
+       If absent, the browser runtime should use id, data-gesso-continuity-key,
+       data-key, name, or position as a last resort.
+
+     :single? / :single
+       When true, restore at most one open details element. The Clojure-facing
+       :single? key is normalized to browser-facing :single.
+
+   Shorthand:
+     (details-open \"details[data-accordion-value]\")"
+  [selector-or-opts]
+  (let [opts (selector-options selector-or-opts)]
+    (when-not (present? (:selector opts))
+      (throw
+       (ex "gesso.live continuity details-open requires :selector."
+           {:opts opts})))
+    (box :details-open
+         (normalize-details-open-options opts))))
 
 (defn event
   "Create an event-backed custom box.
@@ -264,6 +306,9 @@
 
      (boxes
       (anchor-scroll {:selector \"[data-card]\"})
+      (details-open {:selector \"details[data-card]\"
+                     :key-attr \"data-card-id\"
+                     :single? true})
       (focus))"
   [& boxes]
   {:enabled true

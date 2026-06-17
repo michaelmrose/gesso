@@ -1,5 +1,5 @@
 /*
- * gesso-live.js / Gesso Live client-continuity runtime v0.10.0
+ * gesso-live.js / Gesso Live client-continuity runtime v0.11.1
  *
  * Framework-owned browser runtime for preserving local interaction context
  * across Gesso Live / HTMX fragment replacement.
@@ -19,7 +19,7 @@
  *
  * This runtime handles both:
  *
- *   - normal HTMX swaps: htmx:beforeSwap / htmx:afterSettle
+ *   - normal HTMX swaps: htmx:beforeSwap / htmx:afterSwap / htmx:afterSettle
  *   - out-of-band swaps: htmx:oobBeforeSwap / htmx:oobAfterSwap
  *
  * Anchor scroll is preferred, but every scroll capture also records raw scroll
@@ -37,6 +37,12 @@
  *
  * v0.10.0 corrects the direct htmx-ext-sse lifecycle hooks to the documented
  * htmx:sseBeforeMessage / htmx:sseMessage events.
+ *
+ * v0.11.0 adds the built-in details-open continuity box for preserving native
+ * <details open> state across fragment replacement.
+ *
+ * v0.11.1 restores details-open immediately after swap to avoid visible
+ * collapsed/open flicker before the delayed full restore path runs.
  */
 (function () {
   "use strict";
@@ -77,7 +83,6 @@
   window.addEventListener("keydown", function (event) {
     if (keyCouldScroll(event)) markUserScrollIntent();
   }, true);
-
 
   function now() {
     return Date.now ? Date.now() : new Date().getTime();
@@ -595,6 +600,51 @@
     }
   }
 
+  function isDetailsElement(element) {
+    return !!element && (element.tagName || "").toLowerCase() === "details";
+  }
+
+  function matchesSelector(element, selector) {
+    if (!element || !selector || typeof element.matches !== "function") return false;
+
+    try {
+      return element.matches(selector);
+    } catch (_selectorError) {
+      return false;
+    }
+  }
+
+  function detailsElements(scope, selector) {
+    var selectorValue = selector || "details";
+    var elements = queryAll(scope, selectorValue);
+
+    if (isDetailsElement(scope) && matchesSelector(scope, selectorValue)) {
+      elements.unshift(scope);
+    }
+
+    return elements.filter(isDetailsElement);
+  }
+
+  function detailsSingle(box) {
+    return box &&
+      (box.single === true ||
+       box["single?"] === true ||
+       box.singleOpen === true ||
+       box["single-open"] === true);
+  }
+
+  function detailsElementForKey(target, elements, key) {
+    var element = null;
+
+    if (key && key.kind === "index") {
+      element = elements[key.value];
+    } else {
+      element = findByKey(target, key);
+    }
+
+    return isDetailsElement(element) ? element : null;
+  }
+
   var builtIns = {
     "raw-scroll": {
       capture: function (root, target, box) {
@@ -806,6 +856,57 @@
       }
     },
 
+    "details-open": {
+      capture: function (_root, target, box) {
+        var selector = box.selector || "details";
+        var elements = detailsElements(target, selector);
+
+        return {
+          single: detailsSingle(box),
+          items: elements.map(function (element, index) {
+            return {
+              key: keyForElement(element, box) || { kind: "index", value: index },
+              open: !!element.open
+            };
+          })
+        };
+      },
+
+      restore: function (_root, target, box, state) {
+        if (!state || !Array.isArray(state.items)) return;
+
+        var selector = box.selector || "details";
+        var elements = detailsElements(target, selector);
+        var single = state.single === true || detailsSingle(box);
+
+        if (single) {
+          elements.forEach(function (element) {
+            element.open = false;
+          });
+
+          for (var i = 0; i < state.items.length; i += 1) {
+            var item = state.items[i];
+            if (!item || item.open !== true) continue;
+
+            var selected = detailsElementForKey(target, elements, item.key);
+            if (selected) {
+              selected.open = true;
+              break;
+            }
+          }
+
+          return;
+        }
+
+        state.items.forEach(function (item) {
+          if (!item) return;
+
+          var element = detailsElementForKey(target, elements, item.key);
+          if (element) element.open = !!item.open;
+        });
+      }
+    },
+
     "js": {
       capture: function (root, target, box) {
         var fn = resolvePath(box.capture);
@@ -949,6 +1050,24 @@
     } catch (error) {
       emit(root, "error", { phase: "restore", box: captured.box, error: error });
     }
+  }
+
+  function restoreBoxesOfType(context, types) {
+    if (!context || !context.target) return;
+
+    var slot = context.slot || context.root[STATE_SLOT];
+    if (!slot || !Array.isArray(slot.captured)) return;
+
+    var wanted = {};
+    types.forEach(function (type) {
+      wanted[type] = true;
+    });
+
+    slot.captured.forEach(function (captured) {
+      if (captured && wanted[captured.type]) {
+        restoreBox(context.root, context.target, captured);
+      }
+    });
   }
 
   function currentWindowScrollY() {
@@ -1344,6 +1463,15 @@
     if (context) capture(context);
   }
 
+  function onAfterSwap(event) {
+    var context = restoreContext(event, "swap");
+    if (!context) return;
+
+    // Visual state should be restored as soon as the replacement DOM exists.
+    // Scroll/focus restoration stays on afterSettle + layout frames below.
+    restoreBoxesOfType(context, ["details-open"]);
+  }
+
   function onAfterSettle(event) {
     var context = restoreContext(event, "swap");
     if (!context) return;
@@ -1362,6 +1490,11 @@
   function onOobAfterSwap(event) {
     var context = restoreContext(event, "oob");
     if (!context) return;
+
+    // OOB swaps can visibly collapse native <details> before the delayed full
+    // restore path runs. Restore details immediately; the later full restore is
+    // idempotent and still handles scroll/focus.
+    restoreBoxesOfType(context, ["details-open"]);
 
     afterLayoutSettles(function () {
       var refreshed = restoreContext(event, "oob") || context;
@@ -1392,6 +1525,9 @@
     var context = restoreContext(event, "sse-message");
     if (!context) return;
 
+    // Direct SSE swaps should also get immediate visual restoration.
+    restoreBoxesOfType(context, ["details-open"]);
+
     afterLayoutSettles(function () {
       var refreshed = restoreContext(event, "sse-message") || context;
       restore(refreshed);
@@ -1401,6 +1537,7 @@
   // Attach to document, not document.body, so this file is safe to load in <head>.
   document.addEventListener("htmx:beforeRequest", onBeforeRequest);
   document.addEventListener("htmx:beforeSwap", onBeforeSwap);
+  document.addEventListener("htmx:afterSwap", onAfterSwap);
   document.addEventListener("htmx:afterSettle", onAfterSettle);
 
   // Direct HTMX SSE-extension message swaps, for components that use sse-swap rather
@@ -1414,7 +1551,7 @@
 
   window.gessoLive = window.gessoLive || {};
   window.gessoLive.continuity = {
-    version: "0.10.0",
+    version: "0.11.1",
     parseConfig: parseConfig,
     boxesFromConfig: boxesFromConfig,
     captureContext: captureContext,
