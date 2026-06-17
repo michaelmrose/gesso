@@ -59,6 +59,10 @@
   [tree]
   (vec (nodes-by-tag tree :details)))
 
+(defn- rendered-summaries
+  [tree]
+  (vec (nodes-by-tag tree :summary)))
+
 (defn- rendered-root
   [tree]
   (first-node-by-tag tree :div))
@@ -78,54 +82,49 @@
 ;; Script generation
 ;; -----------------------------------------------------------------------------
 
-(deftest single-accordion-script-syncs-state-on-toggle
-  (let [script (scripts/accordion-script
-                {:type :single
-                 :collapsible? true
-                 :state-input "#board-state input[name=selected]"})]
-    (is (str/includes? script "on toggle"))
-    (is (str/includes? script "closest <div[data-accordion-root]/>"))
-    (is (str/includes? script "first <#board-state input[name=selected]/> in document"))
-    (is (str/includes? script "me.dataset.accordionValue"))
-    (is (str/includes? script "stateInput.value"))
-    (is (str/includes? script "stateInput.value == value"))))
-
-(deftest single-accordion-script-syncs-descendant-form-submit
-  (let [script (scripts/accordion-script
-                {:type :single
-                 :collapsible? true
-                 :state-input "#board-state input[name=selected]"
-                 :state-name "selected"})]
-    (is (str/includes? script "on submit from <form/> in me"))
-    (is (str/includes? script "set form to event.target"))
-    (is (str/includes? script "me.dataset.accordionValue"))
-    (is (str/includes? script "first <input[name='selected']/> in form"))
-    (is (str/includes? script "make an <input/> called input"))
-    (is (str/includes? script "input.type"))
-    (is (str/includes? script "input.name"))
-    (is (str/includes? script "form.appendChild(input)"))
-    (is (str/includes? script "input.value"))))
-
-(deftest accordion-script-without-state-options-keeps-existing-behavior-only
+(deftest single-accordion-script-keeps-single-open-and-chevron-behavior
   (let [script (scripts/accordion-script
                 {:type :single
                  :collapsible? true})]
     (is (str/includes? script "on toggle"))
     (is (str/includes? script "closest <div[data-accordion-root]/>"))
+    (is (str/includes? script "for d in <details/> in root"))
+    (is (str/includes? script "set d.open to false"))
     (is (str/includes? script "svg[data-accordion-chevron]"))
-    (is (not (str/includes? script "stateInput")))
-    (is (not (str/includes? script "on submit from <form/> in me")))
-    (is (not (str/includes? script "form.appendChild(input)")))))
+    (is (str/includes? script "rotate(180deg)"))
+    (is (str/includes? script "rotate(0deg)"))))
 
-(deftest multiple-accordion-does-not-enable-single-state-sync-yet
+(deftest accordion-script-does-not-own-submitted-open-state
+  (let [script (scripts/accordion-script
+                {:type :single
+                 :collapsible? true
+                 :state-input "#board-state input[name=selected]"
+                 :state-name "selected"})]
+    (is (str/includes? script "on toggle"))
+    (is (str/includes? script "svg[data-accordion-chevron]"))
+
+    (testing "server/form selected-state plumbing is not accordion behavior"
+      (is (not (str/includes? script "stateInput")))
+      (is (not (str/includes? script "me.dataset.accordionValue")))
+      (is (not (str/includes? script "on submit from <form/> in me")))
+      (is (not (str/includes? script "form.appendChild(input)")))
+      (is (not (str/includes? script "input[name='selected']")))
+      (is (not (str/includes? script "first <#board-state input[name=selected]/> in document"))))))
+
+(deftest multiple-accordion-script-keeps-chevron-behavior
   (let [script (scripts/accordion-script
                 {:type :multiple
                  :state-input "#board-state input[name=selected]"
                  :state-name "selected"})]
     (is (str/includes? script "on toggle"))
     (is (str/includes? script "svg[data-accordion-chevron]"))
-    (is (not (str/includes? script "stateInput")))
-    (is (not (str/includes? script "on submit from <form/> in me")))))
+    (is (str/includes? script "rotate(180deg)"))
+    (is (str/includes? script "rotate(0deg)"))
+
+    (testing "multiple accordions do not own hidden selected-state either"
+      (is (not (str/includes? script "stateInput")))
+      (is (not (str/includes? script "on submit from <form/> in me")))
+      (is (not (str/includes? script "form.appendChild(input)"))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Map-form rendering
@@ -143,23 +142,36 @@
     (is (= [false true]
            (mapv #(true? (get (node-attrs %) :open)) details)))))
 
-(deftest map-form-attaches-state-script-to-each-item
+(deftest map-form-renders-root-and-details-contract
+  (let [tree    (accordion/accordion
+                 {:type :single
+                  :items (test-items)})
+        root    (rendered-root tree)
+        details (rendered-details tree)]
+    (is root)
+    (is (contains? (node-attrs root) :data-accordion-root))
+    (is (= 2 (count details)))
+    (is (every? #(= :details (first %)) details))
+    (is (= ["one" "two"]
+           (mapv #(get (node-attrs %) :data-accordion-value) details)))))
+
+(deftest map-form-attaches-behavior-script-to-each-item
   (let [tree    (accordion/accordion
                  {:type :single
                   :default-value "two"
-                  :state-input "#board-state input[name=selected]"
-                  :state-name "selected"
                   :items (test-items)})
         details (rendered-details tree)
         scripts (mapv script-attr details)]
     (is (= 2 (count details)))
     (is (every? some? scripts))
-    (is (every? #(str/includes? % "first <#board-state input[name=selected]/> in document")
-                scripts))
-    (is (every? #(str/includes? % "on submit from <form/> in me")
-                scripts))
-    (is (every? #(str/includes? % "first <input[name='selected']/> in form")
-                scripts))))
+    (is (every? #(str/includes? % "on toggle") scripts))
+    (is (every? #(str/includes? % "closest <div[data-accordion-root]/>") scripts))
+    (is (every? #(str/includes? % "svg[data-accordion-chevron]") scripts))
+
+    (testing "accordion behavior scripts do not inject form state"
+      (is (not-any? #(str/includes? % "stateInput") scripts))
+      (is (not-any? #(str/includes? % "on submit from <form/> in me") scripts))
+      (is (not-any? #(str/includes? % "form.appendChild(input)") scripts)))))
 
 (deftest map-form-state-include-appends-root-hx-include
   (let [tree (accordion/accordion
@@ -167,11 +179,16 @@
                :state-input "#board-state input[name=selected]"
                :state-name "selected"
                :state-include? true
-               :attrs {:hx-include "#other-state"}
+               :attrs {:id "test-accordion"
+                       :hx-include "#other-state"
+                       :data-extra "extra"}
                :items (test-items)})
-        root (rendered-root tree)]
+        root (rendered-root tree)
+        a    (node-attrs root)]
+    (is (= "test-accordion" (:id a)))
     (is (= "#other-state, #board-state input[name=selected]"
-           (get (node-attrs root) :hx-include)))))
+           (:hx-include a)))
+    (is (= "extra" (:data-extra a)))))
 
 (deftest map-form-state-include-adds-root-hx-include-when-absent
   (let [tree (accordion/accordion
@@ -197,11 +214,25 @@
 ;; Long-form rendering
 ;; -----------------------------------------------------------------------------
 
-(deftest long-form-attaches-state-script-to-details-children
+(deftest long-form-renders-details-children
   (let [tree    (accordion/accordion
-                 {:type :single
-                  :state-input "#board-state input[name=selected]"
-                  :state-name "selected"}
+                 {:type :single}
+                 (accordion/accordion-item
+                  {:value "one"}
+                  [:summary "One"]
+                  [:section "One body"])
+                 (accordion/accordion-item
+                  {:value "two"}
+                  [:summary "Two"]
+                  [:section "Two body"]))
+        details (rendered-details tree)]
+    (is (= 2 (count details)))
+    (is (= ["one" "two"]
+           (mapv #(get (node-attrs %) :data-accordion-value) details)))))
+
+(deftest long-form-attaches-behavior-script-to-details-children
+  (let [tree    (accordion/accordion
+                 {:type :single}
                  (accordion/accordion-item
                   {:value "one"}
                   [:summary "One"]
@@ -213,13 +244,15 @@
         details (rendered-details tree)
         scripts (mapv script-attr details)]
     (is (= 2 (count details)))
-    (is (= ["one" "two"]
-           (mapv #(get (node-attrs %) :data-accordion-value) details)))
     (is (every? some? scripts))
-    (is (every? #(str/includes? % "first <#board-state input[name=selected]/> in document")
-                scripts))
-    (is (every? #(str/includes? % "on submit from <form/> in me")
-                scripts))))
+    (is (every? #(str/includes? % "on toggle") scripts))
+    (is (every? #(str/includes? % "closest <div[data-accordion-root]/>") scripts))
+    (is (every? #(str/includes? % "svg[data-accordion-chevron]") scripts))
+
+    (testing "long-form accordion items do not inject submitted selected state"
+      (is (not-any? #(str/includes? % "stateInput") scripts))
+      (is (not-any? #(str/includes? % "on submit from <form/> in me") scripts))
+      (is (not-any? #(str/includes? % "form.appendChild(input)") scripts)))))
 
 (deftest long-form-state-include-adds-root-hx-include
   (let [tree (accordion/accordion
@@ -234,3 +267,20 @@
         root (rendered-root tree)]
     (is (= "#board-state input[name=selected]"
            (get (node-attrs root) :hx-include)))))
+
+(deftest long-form-preserves-summary-and-content
+  (let [tree (accordion/accordion
+              {:type :single}
+              (accordion/accordion-item
+               {:value "one"}
+               [:summary "One"]
+               [:section "One body"])
+              (accordion/accordion-item
+               {:value "two"}
+               [:summary "Two"]
+               [:section "Two body"]))]
+    (is (= 2 (count (rendered-summaries tree))))
+    (is (some #(= [:summary "One"] %) (all-nodes tree)))
+    (is (some #(= [:summary "Two"] %) (all-nodes tree)))
+    (is (some #(= [:section "One body"] %) (all-nodes tree)))
+    (is (some #(= [:section "Two body"] %) (all-nodes tree)))))
