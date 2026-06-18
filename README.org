@@ -29,15 +29,21 @@ For local development against a sibling checkout:
 
 * Try it
 
-The easiest starting point is Gessokit:
+The easiest starting point is Gessokit, which contains a deps-new template and an example app.
 
 #+begin_src sh
 git clone https://github.com/michaelmrose/gessokit
 cd gessokit
+bb to-template
+bb new ../myapp myapp
+cd ../myapp
 clojure -M:dev dev
 #+end_src
 
-Gessokit includes an example app showing routing, HTMX forms, SSE invalidation, live fragments, toasts, theme building, and continuity across fragment replacement.
+The generated app includes the basic Gesso project shape, theme build setup, routing, HTMX forms, SSE invalidation, live fragments, toasts, and continuity across fragment replacement.
+
+For local framework development, clone Gesso and Gessokit side by side and temporarily point Gessokit at the local checkout. For normal generated projects, use the released Git dependency.
+
 
 * Live fragments
 
