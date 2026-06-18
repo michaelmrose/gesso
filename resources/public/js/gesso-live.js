@@ -1,5 +1,5 @@
 /*
- * gesso-live.js / Gesso Live client-continuity runtime v0.11.1
+ * gesso-live.js / Gesso Live client-continuity runtime v0.12.0
  *
  * Framework-owned browser runtime for preserving local interaction context
  * across Gesso Live / HTMX fragment replacement.
@@ -43,6 +43,10 @@
  *
  * v0.11.1 restores details-open immediately after swap to avoid visible
  * collapsed/open flicker before the delayed full restore path runs.
+ *
+ * v0.12.0 adds generic optimistic-template support. Server-rendered hidden
+ * <template> elements can be swapped into an existing HTMX target immediately
+ * on request start, while the later HTMX response remains authoritative.
  */
 (function () {
   "use strict";
@@ -53,9 +57,18 @@
   var FRAGMENT_ATTR = "data-gesso-live-continuity-fragment";
   var STATE_SLOT = "__gessoLiveContinuity";
 
+  var OPTIMISTIC_TEMPLATE_ATTR = "data-gesso-optimistic-template";
+  var OPTIMISTIC_ACTION_ATTR = "data-gesso-optimistic-action";
+  var OPTIMISTIC_TARGET_ATTR = "data-gesso-optimistic-target";
+  var OPTIMISTIC_ACTIVE_ATTR = "data-gesso-optimistic-active";
+  var OPTIMISTIC_PENDING_ATTR = "data-gesso-optimistic-pending";
+  var OPTIMISTIC_ERROR_EVENT = "gesso:optimistic:error";
+
   // Slots are also indexed globally by replaceable target id so OOB lifecycle
   // events can restore even if HTMX reports the old detached target element.
   var activeSlotsByTargetId = {};
+  var optimisticSlotsById = {};
+  var optimisticSeq = 0;
 
   var lastUserScrollIntentAt = 0;
 
@@ -1070,6 +1083,419 @@
     });
   }
 
+  function optimisticEventRoot(source, target) {
+    return closestContinuityRoot(source) ||
+      closestContinuityRoot(target) ||
+      target ||
+      source ||
+      document.documentElement;
+  }
+
+  function requestElementFromEvent(event) {
+    var detail = event && event.detail;
+
+    if (detail && detail.requestConfig && isElement(detail.requestConfig.elt)) {
+      return detail.requestConfig.elt;
+    }
+
+    if (detail && isElement(detail.elt)) return detail.elt;
+    if (isElement(event && event.target)) return event.target;
+
+    return null;
+  }
+
+  function closestWithAnyOptimisticAttr(element) {
+    if (!element) return null;
+
+    var selector =
+      "[" + OPTIMISTIC_TEMPLATE_ATTR + "]," +
+      "[" + OPTIMISTIC_ACTION_ATTR + "]," +
+      "[" + OPTIMISTIC_TARGET_ATTR + "]";
+
+    if (element.matches && element.matches(selector)) return element;
+    if (element.closest) return element.closest(selector);
+
+    return null;
+  }
+
+  function optimisticSourceFromEvent(event) {
+    return closestWithAnyOptimisticAttr(requestElementFromEvent(event));
+  }
+
+  function optimisticTemplateName(source) {
+    if (!source) return null;
+
+    return source.getAttribute(OPTIMISTIC_TEMPLATE_ATTR) ||
+      source.getAttribute(OPTIMISTIC_ACTION_ATTR);
+  }
+
+  function selectorAfterPrefix(value, prefix) {
+    if (!value || value.indexOf(prefix) !== 0) return null;
+    var selector = value.slice(prefix.length);
+    return selector.replace(/^\s+|\s+$/g, "");
+  }
+
+  function resolveOptimisticTarget(source) {
+    if (!source) return null;
+
+    var spec = source.getAttribute(OPTIMISTIC_TARGET_ATTR);
+    if (!spec || spec === "this") return source;
+
+    var closestSelector = selectorAfterPrefix(spec, "closest ");
+    if (closestSelector && source.closest) {
+      return source.closest(closestSelector);
+    }
+
+    var root = closestContinuityRoot(source) || document;
+    return query(root, spec) || query(document, spec);
+  }
+
+  function templateNameMatches(template, name) {
+    if (!template) return false;
+
+    if (name) {
+      return template.getAttribute(OPTIMISTIC_TEMPLATE_ATTR) === name ||
+        template.getAttribute(OPTIMISTIC_ACTION_ATTR) === name;
+    }
+
+    return template.hasAttribute(OPTIMISTIC_TEMPLATE_ATTR) ||
+      template.hasAttribute(OPTIMISTIC_ACTION_ATTR);
+  }
+
+  function findOptimisticTemplateIn(scope, name) {
+    if (!scope) return null;
+
+    if ((scope.tagName || "").toLowerCase() === "template" && templateNameMatches(scope, name)) {
+      return scope;
+    }
+
+    var templates = queryAll(
+      scope,
+      "template[" + OPTIMISTIC_TEMPLATE_ATTR + "],template[" + OPTIMISTIC_ACTION_ATTR + "]"
+    );
+
+    for (var i = 0; i < templates.length; i += 1) {
+      if (templateNameMatches(templates[i], name)) return templates[i];
+    }
+
+    return null;
+  }
+
+  function findOptimisticTemplate(source, target, name) {
+    var template = findOptimisticTemplateIn(target, name);
+    if (template) return template;
+
+    if (source && source.parentElement) {
+      template = findOptimisticTemplateIn(source.parentElement, name);
+      if (template) return template;
+    }
+
+    var root = closestContinuityRoot(source) || closestContinuityRoot(target);
+    template = findOptimisticTemplateIn(root, name);
+    if (template) return template;
+
+    return findOptimisticTemplateIn(document, name);
+  }
+
+  function firstTemplateElement(template) {
+    if (!template) return null;
+
+    if (template.content && template.content.firstElementChild) {
+      return template.content.firstElementChild;
+    }
+
+    var wrapper = document.createElement("div");
+    wrapper.innerHTML = template.innerHTML || "";
+    return wrapper.firstElementChild;
+  }
+
+  function snapshotAttributes(element) {
+    return Array.prototype.slice.call(element.attributes || []).map(function (attr) {
+      return { name: attr.name, value: attr.value };
+    });
+  }
+
+  function elementSnapshot(element) {
+    if (!element) return null;
+
+    return {
+      tagName: element.tagName,
+      attributes: snapshotAttributes(element),
+      innerHTML: element.innerHTML,
+      open: isDetailsElement(element) ? !!element.open : null
+    };
+  }
+
+  function removeAllAttributes(element) {
+    Array.prototype.slice.call(element.attributes || []).forEach(function (attr) {
+      element.removeAttribute(attr.name);
+    });
+  }
+
+  function restoreAttributes(element, attributes) {
+    removeAllAttributes(element);
+
+    (attributes || []).forEach(function (attr) {
+      element.setAttribute(attr.name, attr.value);
+    });
+  }
+
+  function restoreElementSnapshot(element, snapshot) {
+    if (!element || !snapshot) return false;
+
+    restoreAttributes(element, snapshot.attributes);
+    element.innerHTML = snapshot.innerHTML || "";
+
+    if (snapshot.open != null && isDetailsElement(element)) {
+      element.open = !!snapshot.open;
+    }
+
+    return true;
+  }
+
+  function copyElementIntoExistingTarget(target, sourceElement, slotId) {
+    if (!target || !sourceElement) return false;
+
+    var originalId = target.id;
+    var sourceHasId = !!sourceElement.id;
+
+    restoreAttributes(target, snapshotAttributes(sourceElement));
+
+    // Preserve the HTMX target id if the optimistic template forgot to include
+    // it. HTMX already has the target element reference, but keeping the id
+    // stable helps continuity/OOB lookup during the request lifecycle.
+    if (originalId && !sourceHasId) {
+      target.id = originalId;
+    }
+
+    target.innerHTML = sourceElement.innerHTML;
+    target.setAttribute(OPTIMISTIC_ACTIVE_ATTR, slotId);
+    target.setAttribute(OPTIMISTIC_PENDING_ATTR, "true");
+
+    if (isDetailsElement(target) && isDetailsElement(sourceElement)) {
+      target.open = !!sourceElement.open;
+    }
+
+    return true;
+  }
+
+  function nextOptimisticSlotId() {
+    optimisticSeq += 1;
+    return "gesso-optimistic-" + optimisticSeq + "-" + now();
+  }
+
+  function storeOptimisticSlot(source, target, snapshot, templateName) {
+    var slotId = nextOptimisticSlotId();
+    var root = optimisticEventRoot(source, target);
+
+    var slot = {
+      id: slotId,
+      root: root,
+      source: source,
+      target: target,
+      templateName: templateName,
+      snapshot: snapshot,
+      startedAt: now()
+    };
+
+    optimisticSlotsById[slotId] = slot;
+
+    try {
+      source.__gessoOptimisticSlotId = slotId;
+    } catch (_sourceSlotError) {
+      // Expando bookkeeping is best-effort only.
+    }
+
+    return slot;
+  }
+
+  function optimisticSlotById(slotId) {
+    return slotId ? optimisticSlotsById[slotId] : null;
+  }
+
+  function optimisticSlotFromElement(element) {
+    if (!element) return null;
+
+    if (element.__gessoOptimisticSlotId) {
+      var direct = optimisticSlotById(element.__gessoOptimisticSlotId);
+      if (direct) return direct;
+    }
+
+    var active = null;
+
+    if (element.getAttribute && element.getAttribute(OPTIMISTIC_ACTIVE_ATTR)) {
+      active = element.getAttribute(OPTIMISTIC_ACTIVE_ATTR);
+    }
+
+    if (!active && element.closest) {
+      var activeElement = element.closest("[" + OPTIMISTIC_ACTIVE_ATTR + "]");
+      if (activeElement) active = activeElement.getAttribute(OPTIMISTIC_ACTIVE_ATTR);
+    }
+
+    return optimisticSlotById(active);
+  }
+
+  function optimisticSlotFromEvent(event) {
+    var source = requestElementFromEvent(event);
+    var slot = optimisticSlotFromElement(source);
+    if (slot) return slot;
+
+    var elements = eventElements(event);
+    for (var i = 0; i < elements.length; i += 1) {
+      slot = optimisticSlotFromElement(elements[i]);
+      if (slot) return slot;
+    }
+
+    return null;
+  }
+
+  function clearOptimisticSlot(slot, reason) {
+    if (!slot) return false;
+
+    delete optimisticSlotsById[slot.id];
+
+    if (slot.source && slot.source.__gessoOptimisticSlotId === slot.id) {
+      try {
+        delete slot.source.__gessoOptimisticSlotId;
+      } catch (_deleteError) {
+        slot.source.__gessoOptimisticSlotId = null;
+      }
+    }
+
+    if (slot.target && isConnected(slot.target) &&
+        slot.target.getAttribute &&
+        slot.target.getAttribute(OPTIMISTIC_ACTIVE_ATTR) === slot.id) {
+      slot.target.removeAttribute(OPTIMISTIC_ACTIVE_ATTR);
+      slot.target.removeAttribute(OPTIMISTIC_PENDING_ATTR);
+    }
+
+    emit(slot.root, "optimistic-cleared", {
+      reason: reason || "clear",
+      slotId: slot.id,
+      template: slot.templateName,
+      target: slot.target
+    });
+
+    return true;
+  }
+
+  function restoreOptimisticSlot(slot, reason) {
+    if (!slot) return false;
+
+    var restored = false;
+    if (slot.target && isConnected(slot.target)) {
+      restored = restoreElementSnapshot(slot.target, slot.snapshot);
+    }
+
+    clearOptimisticSlot(slot, reason || "restore");
+
+    emit(slot.root, "optimistic-restored", {
+      reason: reason || "restore",
+      slotId: slot.id,
+      template: slot.templateName,
+      target: slot.target,
+      restored: restored
+    });
+
+    return restored;
+  }
+
+  function emitOptimisticError(root, detail) {
+    emit(root || document.documentElement, "optimistic-error", detail);
+
+    try {
+      document.dispatchEvent(new CustomEvent(OPTIMISTIC_ERROR_EVENT, {
+        bubbles: true,
+        cancelable: false,
+        detail: detail || {}
+      }));
+    } catch (_customEventError) {
+      // Custom diagnostics must never break the request.
+    }
+  }
+
+  function applyOptimisticFromEvent(event) {
+    var source = optimisticSourceFromEvent(event);
+    if (!source) return null;
+
+    var target = resolveOptimisticTarget(source);
+    var templateName = optimisticTemplateName(source);
+    var root = optimisticEventRoot(source, target);
+
+    if (!target) {
+      emitOptimisticError(root, {
+        phase: "apply",
+        reason: "no-target",
+        source: source,
+        template: templateName
+      });
+      return null;
+    }
+
+    if (optimisticSlotFromElement(target)) {
+      return null;
+    }
+
+    var snapshot = elementSnapshot(target);
+    var slot = storeOptimisticSlot(source, target, snapshot, templateName);
+
+    var template = findOptimisticTemplate(source, target, templateName);
+    var optimisticElement = firstTemplateElement(template);
+
+    if (optimisticElement) {
+      if ((target.tagName || "").toLowerCase() !== (optimisticElement.tagName || "").toLowerCase()) {
+        emitOptimisticError(root, {
+          phase: "apply",
+          reason: "template-root-tag-mismatch",
+          source: source,
+          target: target,
+          template: templateName,
+          targetTag: target.tagName,
+          templateTag: optimisticElement.tagName
+        });
+        clearOptimisticSlot(slot, "template-root-tag-mismatch");
+        return null;
+      }
+
+      copyElementIntoExistingTarget(target, optimisticElement, slot.id);
+    } else {
+      // Template-less optimistic actions are still useful for CSS-only pending
+      // affordances. The server response remains authoritative.
+      target.setAttribute(OPTIMISTIC_ACTIVE_ATTR, slot.id);
+      target.setAttribute(OPTIMISTIC_PENDING_ATTR, "true");
+    }
+
+    emit(root, "optimistic-applied", {
+      slotId: slot.id,
+      source: source,
+      target: target,
+      template: templateName,
+      hasTemplate: !!optimisticElement
+    });
+
+    return slot;
+  }
+
+  function onOptimisticAfterRequest(event) {
+    var slot = optimisticSlotFromEvent(event);
+    if (!slot) return;
+
+    var detail = event && event.detail;
+    if (detail && (detail.failed === true || detail.successful === false)) {
+      restoreOptimisticSlot(slot, "request-failed");
+    } else {
+      // Successful HTMX responses are authoritative. If they swapped the target,
+      // the old optimistic element may already be detached; if not, the app has
+      // deliberately kept the optimistic/pending DOM.
+      clearOptimisticSlot(slot, "request-success");
+    }
+  }
+
+  function onOptimisticRequestFailed(event) {
+    var slot = optimisticSlotFromEvent(event);
+    if (slot) restoreOptimisticSlot(slot, "request-error");
+  }
+
   function currentWindowScrollY() {
     return window.pageYOffset || document.documentElement.scrollTop || document.body.scrollTop || 0;
   }
@@ -1503,17 +1929,36 @@
   }
 
   function onBeforeRequest(event) {
-    var elements = eventElements(event);
-    var seen = [];
+  // Optimistic actions must be visually immediate. Do not put generic
+  // request-start continuity capture in front of them; that can block the
+  // browser from painting the optimistic mutation and makes localhost clicks
+  // feel like they are waiting for the server.
+  //
+  // For these action forms hx-swap is normally "none". If the response includes
+  // OOB HTML, the OOB lifecycle captures/restores around that swap. If the
+  // eventual update comes from SSE, the SSE lifecycle captures/restores around
+  // that swap. If the request fails, the optimistic slot snapshot is restored.
+  if (optimisticSourceFromEvent(event)) {
+    applyOptimisticFromEvent(event);
+    return;
+  }
 
-    for (var i = 0; i < elements.length; i += 1) {
-      var root = closestContinuityRoot(elements[i]);
-      if (!root || seen.indexOf(root) !== -1) continue;
-      seen.push(root);
+  var elements = eventElements(event);
+  var seen = [];
 
-      var context = captureContextForRoot(root, event, "request");
-      if (context) capture(context);
-    }
+  for (var i = 0; i < elements.length; i += 1) {
+    var root = closestContinuityRoot(elements[i]);
+    if (!root || seen.indexOf(root) !== -1) continue;
+    seen.push(root);
+
+    var context = captureContextForRoot(root, event, "request");
+    if (context) capture(context);
+  }
+}
+
+    // Capture continuity before applying optimistic DOM, so rollback and later
+    // authoritative swaps are based on the user-visible pre-click state.
+    applyOptimisticFromEvent(event);
   }
 
   function onSseBeforeMessage(event) {
@@ -1536,6 +1981,11 @@
 
   // Attach to document, not document.body, so this file is safe to load in <head>.
   document.addEventListener("htmx:beforeRequest", onBeforeRequest);
+  document.addEventListener("htmx:afterRequest", onOptimisticAfterRequest);
+  document.addEventListener("htmx:responseError", onOptimisticRequestFailed);
+  document.addEventListener("htmx:sendError", onOptimisticRequestFailed);
+  document.addEventListener("htmx:timeout", onOptimisticRequestFailed);
+  document.addEventListener("htmx:abort", onOptimisticRequestFailed);
   document.addEventListener("htmx:beforeSwap", onBeforeSwap);
   document.addEventListener("htmx:afterSwap", onAfterSwap);
   document.addEventListener("htmx:afterSettle", onAfterSettle);
@@ -1551,7 +2001,7 @@
 
   window.gessoLive = window.gessoLive || {};
   window.gessoLive.continuity = {
-    version: "0.11.1",
+    version: "0.12.0",
     parseConfig: parseConfig,
     boxesFromConfig: boxesFromConfig,
     captureContext: captureContext,
@@ -1565,5 +2015,14 @@
       if (!type || !impl) return;
       builtIns[type] = impl;
     }
+  };
+
+  window.gessoLive.optimistic = {
+    version: "0.12.0",
+    applyFromEvent: applyOptimisticFromEvent,
+    restoreFromEvent: onOptimisticRequestFailed,
+    slotFromEvent: optimisticSlotFromEvent,
+    clearSlot: clearOptimisticSlot,
+    restoreSlot: restoreOptimisticSlot
   };
 }());
