@@ -1,101 +1,16 @@
 #+title: Gesso
-#+author: Michael Rose
-#+options: toc:2
+#+subtitle: Server-rendered live UI for Clojure
+#+options: toc:nil
 
+A small Clojure library for building server-rendered applications with Hiccup, HTMX, SSE, and Biff.
 
-Gesso is a small Clojure web application library for building server-rendered, live-updating applications with plain data, Hiccup, HTMX, SSE, and Biff.
+The basic model is ordinary HTTP: handlers receive requests, views return HTML, and HTMX swaps fragments into the page. For live updates, the server sends an SSE invalidation event and the browser asks for the affected fragment again.
 
-It is not a SPA framework. It is not trying to hide HTTP. The goal is to make rich web interfaces feel like ordinary server-rendered Clojure applications, while still supporting live updates, reusable UI components, theme generation, and tested application structure.
+Gesso adds helpers for reusable components, live fragments, client-side continuity across swaps, and theme CSS generation.
 
-Gesso is currently early software. The API is expected to become more stable as real applications are built with it.
+* Install
 
-* What Gesso is for
-
-Gesso is for applications where:
-
-* HTML is primarily rendered on the server.
-* Application state lives on the server.
-* UI updates can be expressed as fragments.
-* HTMX is enough for most interactions.
-* SSE is enough for live invalidation and refresh.
-* You want Clojure data and functions instead of a client-side app framework.
-* You want reusable UI components without giving up normal HTML semantics.
-
-The reference application style is demonstrated by Gessokit, especially the Human Help example app.
-
-* Design goals
-
-** Server-rendered first
-
-Gesso assumes the server owns the truth. Pages, panels, forms, and cards are rendered as HTML fragments from Clojure data.
-
-The browser should not need to reimplement the application model.
-
-** HTMX-shaped interactions
-
-Gesso leans into HTMX instead of fighting it. Forms submit normally through HTTP. Buttons and links can request fragments. Server responses replace small parts of the page.
-
-** Live updates without a SPA
-
-Gesso Live uses SSE to notify connected browsers that some part of the UI may be stale. The browser can then ask the server for the relevant fragment again.
-
-The important event is not “replicate every mutation to every browser.” The important event is “the state you are looking at may have changed; refresh the affected fragment.”
-
-** Reusable components
-
-Gesso includes component helpers for common HTML/UI patterns. Components are intended to produce ordinary Hiccup and ordinary HTML, not opaque widgets.
-
-** Theme generation
-
-Gesso includes a theme build path that can scan component CSS roots and generate application theme CSS.
-
-This lets a starter kit or app combine framework component styles with app-specific component styles.
-
-** Client continuity
-
-Live fragment replacement can otherwise destroy useful browser-local state. Gesso Live includes continuity helpers for restoring browser-local context across swaps, such as:
-
-* scroll anchoring
-* focused input/caret state
-* selected or in-progress inputs
-* native ~<details open>~ state
-
-This lets the server stay responsible for real application state while the browser keeps transient interaction state.
-
-* Non-goals
-
-Gesso is not trying to be:
-
-* a React replacement
-* a client-side router
-* a general-purpose component compiler
-* a CSS framework
-* a GraphQL client
-* a distributed database
-* a magic state synchronization system
-
-It is intentionally boring where possible: Clojure functions, Ring handlers, Hiccup, HTTP, HTMX, and SSE.
-
-* Status
-
-Current release: ~v0.2.0~
-
-This release focuses on making Gesso Live more useful for real application fragments, especially by preserving client continuity across live fragment replacement.
-
-Notable areas in ~v0.2.0~:
-
-* Gesso Live fragment refresh
-* SSE-triggered invalidation
-* client continuity boxes
-* native ~<details>~ open-state preservation
-* theme build support
-* reusable component CSS roots
-
-- Installation
-
-Gesso is currently consumed directly from Git.
-
-In ~deps.edn~:
+Use the released Git coordinate in ~deps.edn~:
 
 #+begin_src clojure
 {:deps
@@ -105,18 +20,16 @@ In ~deps.edn~:
 :git/sha "3f22e0c3e3cd34fca9cbb5a03625e203d5b3ad37"}}}
 #+end_src
 
-If you are developing Gesso and an application side by side, you may temporarily use a local root dependency:
+For local development against a sibling checkout:
 
 #+begin_src clojure
 {:deps
 {michaelmrose/gesso {:local/root "../gesso"}}}
 #+end_src
 
-Do not leave the local root dependency in a released starter project.
+* Try it
 
-* Quick start
-
-The easiest way to try Gesso is through Gessokit, the starter/example project.
+The easiest starting point is Gessokit:
 
 #+begin_src sh
 git clone https://github.com/michaelmrose/gessokit
@@ -124,77 +37,28 @@ cd gessokit
 clojure -M:dev dev
 #+end_src
 
-Gessokit demonstrates:
+Gessokit includes an example app showing routing, HTMX forms, SSE invalidation, live fragments, toasts, theme building, and continuity across fragment replacement.
 
-* app routing
-* server-rendered pages
-* HTMX forms
-* live fragments
-* SSE invalidation
-* toasts
-* reusable components
-* theme building
-* tested request flows
-* Gesso Live continuity
+* Live fragments
 
-- Core ideas
-
-** Pages
-
-A page is ordinary server-rendered HTML.
-
-In practice this usually means:
-
-* a Ring route receives a request
-* the route builds a context map
-* application code queries data
-* a view function returns Hiccup
-* the response is sent as HTML
-
-** Fragments
-
-A fragment is a smaller renderable part of the page.
-
-Fragments are useful for HTMX because the browser can request just the part of the interface that changed.
-
-For example, an app might have fragments for:
-
-* a toolbar
-* a request list
-* a request card
-* a notification area
-* a sidebar
-* a search result panel
-
-** Invalidation
-
-Live applications do not need to push full HTML every time data changes.
-
-Instead, a mutation can invalidate a logical scope. Browsers subscribed to that scope receive an SSE event and ask the server for the relevant fragment.
-
-This gives you a simple mental model:
+A live fragment is a server-rendered piece of HTML that can be refreshed when its backing state changes.
 
 #+begin_src text
 data changes
--> affected live scope is invalidated
--> browser receives SSE notification
--> HTMX refreshes the fragment
--> server renders fresh HTML
+-> server invalidates a live scope
+-> browser receives an SSE event
+-> HTMX requests the fragment again
+-> server returns fresh HTML
+-> browser swaps it into place
 #+end_src
 
-** Continuity
+This keeps the application model server-side without giving up live UI.
 
-Fragment replacement is powerful, but it can be rude. If the browser replaces a whole list, it might accidentally lose:
+* Continuity
 
-* scroll position
-* the focused input
-* the caret position
-* open details/accordion state
-* partially typed local input
+Replacing a fragment can accidentally lose browser-local state: focus, caret position, scroll anchoring, open cards, or local input state.
 
-Gesso Live continuity exists to keep that browser-local state stable.
-
-Example:
+Gesso Live can preserve that state across swaps.
 
 #+begin_src clojure
 (require '[gesso.live.continuity :as continuity])
@@ -209,61 +73,11 @@ Example:
 :single? true})]}))
 #+end_src
 
-This says:
-
-* preserve scroll context using request cards as anchors
-* restore focus/caret where possible
-* preserve which native ~<details>~ card is open
-* identify cards by their ~data-accordion-value~
-* restore at most one open card
-
-The open card is intentionally not server state. It is local browser continuity.
-
-* Gesso Live
-
-Gesso Live is the live-fragment layer.
-
-At a high level it coordinates:
-
-* fragment URLs
-* SSE streams
-* invalidation scopes
-* HTMX triggers
-* client-side continuity
-* refresh behavior after reconnects or browser visibility changes
-
-A typical live fragment needs:
-
-* a stable DOM target
-* a URL that can render the fragment
-* an SSE event that can trigger refresh
-* enough included state for the server to render the same view
-* optional continuity settings for browser-local context
-
-- Components
-
-Gesso components are Hiccup-producing helpers.
-
-They should be boring and inspectable. A component should generally render understandable HTML with useful attributes and predictable classes.
-
-The component layer is not intended to hide the web platform. It is intended to make application views smaller, more consistent, and easier to test.
+That example preserves scroll position, focus/caret state, and the currently open native ~<details>~ card.
 
 * Themes
 
-Gesso supports theme CSS generation from one or more component CSS roots.
-
-A Gessokit application may combine component CSS from:
-
-#+begin_src text
-Gesso framework components
-Gessokit shared components
-Gessokit example app components
-User application components
-#+end_src
-
-A typical theme build task resolves the installed Gesso dependency, adds its source/resources to the Babashka classpath, and calls the Gesso theme builder.
-
-Example shape:
+Gesso can build theme CSS from framework and application component roots.
 
 #+begin_src clojure
 ((requiring-resolve 'gesso.build.themes/build!)
@@ -274,41 +88,7 @@ Example shape:
 "src/myapp/site/components"]})
 #+end_src
 
-Applications should build themes before startup and ideally rebuild them during development when theme or component CSS files change.
-
-* Testing
-
-Gesso is designed to be tested at the level of ordinary Clojure functions and rendered HTML.
-
-Useful test layers include:
-
-* route tests
-* model/view-state tests
-* component rendering tests
-* live-fragment option tests
-* HTMX attribute tests
-* application flow tests
-
-Run the test suite with:
-
-#+begin_src sh
-clojure -M:test
-#+end_src
-
-If the project also has Babashka test tasks:
-
-#+begin_src sh
-bb test
-#+end_src
-
 * Development
-
-Clone the repository:
-
-#+begin_src sh
-git clone https://github.com/michaelmrose/gesso
-cd gesso
-#+end_src
 
 Run tests:
 
@@ -316,136 +96,19 @@ Run tests:
 clojure -M:test
 #+end_src
 
-For local application development, point an app or starter kit at the checkout:
-
-#+begin_src clojure
-{:deps
-{michaelmrose/gesso {:local/root "../gesso"}}}
-#+end_src
-
-Before releasing an app or template, switch back to a Git coordinate with a tag and SHA.
-
-* Release checklist
-
-For a Gesso release:
-
-#+begin_src sh
-clojure -M:test
-git status
-git log --oneline --decorate -5
-#+end_src
-
-Create an annotated tag:
+Create a release tag:
 
 #+begin_src sh
 git tag -a v0.2.0 -m "Gesso 0.2.0"
 git push origin v0.2.0
 #+end_src
 
-Create a GitHub release from the tag:
-
-#+begin_src sh
-gh release create v0.2.0
---verify-tag
---title "Gesso 0.2.0"
---notes-from-tag
-#+end_src
-
-Get the commit SHA for downstream ~deps.edn~ files:
+Get the SHA for downstream deps:
 
 #+begin_src sh
 git rev-parse 'v0.2.0^{commit}'
 #+end_src
 
-* Relationship to Biff
+* License
 
-Gesso is built in the same spirit as Biff applications: small pieces, server-rendered HTML, Clojure data, and plain web primitives.
-
-Biff provides a productive base for Clojure web apps. Gesso adds application/UI conventions around:
-
-* reusable components
-* theme generation
-* HTMX-oriented fragment rendering
-* SSE-driven live invalidation
-* client continuity across fragment swaps
-
-- Relationship to HTMX
-
-HTMX is the browser interaction layer Gesso expects.
-
-Gesso does not replace HTMX. It helps Clojure applications produce consistent HTMX-enabled markup and live fragment behavior.
-
-The intended model is still normal HTTP:
-
-#+begin_src text
-browser event
--> HTTP request
--> Clojure handler
--> Hiccup render
--> HTML response
--> HTMX swap
-#+end_src
-
-Gesso Live adds:
-
-#+begin_src text
-server invalidation
--> SSE event
--> HTMX fragment refresh
-#+end_src
-
-* Relationship to client-side JavaScript
-
-Gesso uses JavaScript where it is useful, especially for:
-
-* SSE connection handling
-* HTMX integration
-* continuity capture/restore
-* browser-local interaction state
-
-But application logic should generally remain on the server unless there is a clear reason to move it into the browser.
-
-* Example: preserving open request cards
-
-A common live UI problem is preserving which card the user has open while the surrounding list updates.
-
-The wrong fix is to make the server remember every open card as application state.
-
-The better fix is:
-
-* server remembers real board/filter state
-* browser remembers local open-card state
-* Gesso Live restores the open ~<details>~ element after fragment replacement
-
-Example continuity configuration:
-
-#+begin_src clojure
-(continuity/preserve
-{:scroll {:selector "[data-humanhelp-request-card]"}
-:focus true
-:boxes [(continuity/details-open
-{:selector "details[data-humanhelp-request-card][data-accordion-value]"
-:key-attr "data-accordion-value"
-:single? true})]})
-#+end_src
-
-This keeps the application model clean while still making live updates feel stable.
-
-* Project maturity
-
-Gesso is early and intentionally evolving.
-
-The best current way to understand the library is to read it alongside Gessokit. The Human Help example app is the proving ground for the framework’s conventions.
-
-Expect the library to improve around:
-
-* documentation
-* starter templates
-* component APIs
-* theme build ergonomics
-* live invalidation patterns
-* production deployment guidance
-
-- License
-
-FIXME: Add license information.
+FIXME
