@@ -1,5 +1,5 @@
 /*
- * gesso-live.js / Gesso Live client-continuity runtime v0.12.0
+ * gesso-live.js / Gesso Live client-continuity runtime v0.12.1
  *
  * Framework-owned browser runtime for preserving local interaction context
  * across Gesso Live / HTMX fragment replacement.
@@ -47,6 +47,11 @@
  * v0.12.0 adds generic optimistic-template support. Server-rendered hidden
  * <template> elements can be swapped into an existing HTMX target immediately
  * on request start, while the later HTMX response remains authoritative.
+ *
+ * v0.12.1 adds an immediate optimistic press phase. Elements with optimistic
+ * action attrs are marked on pointerdown/click/submit before the HTMX request
+ * lifecycle, so the user gets local button-press feedback before the optional
+ * optimistic template swap and before the authoritative server/SSE result.
  */
 (function () {
   "use strict";
@@ -62,6 +67,9 @@
   var OPTIMISTIC_TARGET_ATTR = "data-gesso-optimistic-target";
   var OPTIMISTIC_ACTIVE_ATTR = "data-gesso-optimistic-active";
   var OPTIMISTIC_PENDING_ATTR = "data-gesso-optimistic-pending";
+  var OPTIMISTIC_PRESSED_ATTR = "data-gesso-optimistic-pressed";
+  var OPTIMISTIC_TRIGGER_ATTR = "data-gesso-optimistic-trigger";
+  var OPTIMISTIC_LABEL_ATTR = "data-gesso-optimistic-label";
   var OPTIMISTIC_ERROR_EVENT = "gesso:optimistic:error";
 
   // Slots are also indexed globally by replaceable target id so OOB lifecycle
@@ -1414,6 +1422,142 @@
     }
   }
 
+  function optimisticSourceFromDomEvent(event) {
+    var target = event && event.target;
+    if (!isElement(target)) return null;
+    return closestWithAnyOptimisticAttr(target);
+  }
+
+  function optimisticTriggerFromEvent(event, source) {
+    if (event && isElement(event.submitter)) return event.submitter;
+
+    var target = event && event.target;
+    if (!isElement(target)) return null;
+
+    var triggerSelector = "button,input[type='submit'],input[type='button']";
+    var trigger = null;
+
+    if (target.matches && target.matches(triggerSelector)) {
+      trigger = target;
+    } else if (target.closest) {
+      trigger = target.closest(triggerSelector);
+    }
+
+    if (trigger && source && source.contains && source.contains(trigger)) {
+      return trigger;
+    }
+
+    return null;
+  }
+
+  function triggerTextSnapshot(trigger) {
+    if (!trigger) return null;
+
+    if ((trigger.tagName || "").toLowerCase() === "input") {
+      return { kind: "value", value: trigger.value };
+    }
+
+    return { kind: "text", value: trigger.textContent };
+  }
+
+  function restoreTriggerText(trigger, snapshot) {
+    if (!trigger || !snapshot) return;
+
+    if (snapshot.kind === "value") {
+      trigger.value = snapshot.value;
+    } else {
+      trigger.textContent = snapshot.value;
+    }
+  }
+
+  function setTriggerText(trigger, text) {
+    if (!trigger || !text) return;
+
+    if ((trigger.tagName || "").toLowerCase() === "input") {
+      trigger.value = text;
+    } else {
+      trigger.textContent = text;
+    }
+  }
+
+  function clearOptimisticPressed(source) {
+    if (!source) return false;
+
+    var state = source.__gessoOptimisticPressState || null;
+    var target = state && state.target;
+    var trigger = state && state.trigger;
+
+    source.removeAttribute(OPTIMISTIC_PRESSED_ATTR);
+
+    if (target && isConnected(target) && target.getAttribute) {
+      target.removeAttribute(OPTIMISTIC_PRESSED_ATTR);
+    }
+
+    if (trigger && isConnected(trigger) && trigger.getAttribute) {
+      trigger.removeAttribute(OPTIMISTIC_TRIGGER_ATTR);
+      restoreTriggerText(trigger, state.triggerText);
+    }
+
+    try {
+      delete source.__gessoOptimisticPressState;
+    } catch (_deletePressError) {
+      source.__gessoOptimisticPressState = null;
+    }
+
+    return true;
+  }
+
+  function markOptimisticPressed(source, trigger) {
+    if (!source) return null;
+
+    var existing = source.__gessoOptimisticPressState || null;
+    if (existing) return existing;
+
+    var target = resolveOptimisticTarget(source);
+    var label = source.getAttribute(OPTIMISTIC_LABEL_ATTR);
+
+    var state = {
+      source: source,
+      target: target,
+      trigger: trigger || null,
+      triggerText: triggerTextSnapshot(trigger),
+      startedAt: now()
+    };
+
+    try {
+      source.__gessoOptimisticPressState = state;
+    } catch (_pressStateError) {
+      // Expando bookkeeping is best-effort only.
+    }
+
+    source.setAttribute(OPTIMISTIC_PRESSED_ATTR, "true");
+
+    if (target && target.setAttribute) {
+      target.setAttribute(OPTIMISTIC_PRESSED_ATTR, "true");
+    }
+
+    if (trigger && trigger.setAttribute) {
+      trigger.setAttribute(OPTIMISTIC_TRIGGER_ATTR, "true");
+      setTriggerText(trigger, label);
+    }
+
+    return state;
+  }
+
+  function onOptimisticPress(event) {
+    var source = optimisticSourceFromDomEvent(event);
+    if (!source) return;
+
+    markOptimisticPressed(source, optimisticTriggerFromEvent(event, source));
+  }
+
+  function onOptimisticSubmitCapture(event) {
+    var source = optimisticSourceFromDomEvent(event);
+    if (!source) return;
+
+    markOptimisticPressed(source, optimisticTriggerFromEvent(event, source));
+  }
+
   function applyOptimisticFromEvent(event) {
     var source = optimisticSourceFromEvent(event);
     if (!source) return null;
@@ -1477,6 +1621,9 @@
   }
 
   function onOptimisticAfterRequest(event) {
+    var source = optimisticSourceFromEvent(event);
+    if (source) clearOptimisticPressed(source);
+
     var slot = optimisticSlotFromEvent(event);
     if (!slot) return;
 
@@ -1492,6 +1639,9 @@
   }
 
   function onOptimisticRequestFailed(event) {
+    var source = optimisticSourceFromEvent(event);
+    if (source) clearOptimisticPressed(source);
+
     var slot = optimisticSlotFromEvent(event);
     if (slot) restoreOptimisticSlot(slot, "request-error");
   }
@@ -1929,36 +2079,25 @@
   }
 
   function onBeforeRequest(event) {
-  // Optimistic actions must be visually immediate. Do not put generic
-  // request-start continuity capture in front of them; that can block the
-  // browser from painting the optimistic mutation and makes localhost clicks
-  // feel like they are waiting for the server.
-  //
-  // For these action forms hx-swap is normally "none". If the response includes
-  // OOB HTML, the OOB lifecycle captures/restores around that swap. If the
-  // eventual update comes from SSE, the SSE lifecycle captures/restores around
-  // that swap. If the request fails, the optimistic slot snapshot is restored.
-  if (optimisticSourceFromEvent(event)) {
-    applyOptimisticFromEvent(event);
-    return;
-  }
+    var source = optimisticSourceFromEvent(event);
 
-  var elements = eventElements(event);
-  var seen = [];
+    if (source) {
+      markOptimisticPressed(source, null);
+      applyOptimisticFromEvent(event);
+      return;
+    }
 
-  for (var i = 0; i < elements.length; i += 1) {
-    var root = closestContinuityRoot(elements[i]);
-    if (!root || seen.indexOf(root) !== -1) continue;
-    seen.push(root);
+    var elements = eventElements(event);
+    var seen = [];
 
-    var context = captureContextForRoot(root, event, "request");
-    if (context) capture(context);
-  }
-}
+    for (var i = 0; i < elements.length; i += 1) {
+      var root = closestContinuityRoot(elements[i]);
+      if (!root || seen.indexOf(root) !== -1) continue;
+      seen.push(root);
 
-    // Capture continuity before applying optimistic DOM, so rollback and later
-    // authoritative swaps are based on the user-visible pre-click state.
-    applyOptimisticFromEvent(event);
+      var context = captureContextForRoot(root, event, "request");
+      if (context) capture(context);
+    }
   }
 
   function onSseBeforeMessage(event) {
@@ -1980,6 +2119,9 @@
   }
 
   // Attach to document, not document.body, so this file is safe to load in <head>.
+  document.addEventListener("pointerdown", onOptimisticPress, true);
+  document.addEventListener("click", onOptimisticPress, true);
+  document.addEventListener("submit", onOptimisticSubmitCapture, true);
   document.addEventListener("htmx:beforeRequest", onBeforeRequest);
   document.addEventListener("htmx:afterRequest", onOptimisticAfterRequest);
   document.addEventListener("htmx:responseError", onOptimisticRequestFailed);
@@ -2001,7 +2143,7 @@
 
   window.gessoLive = window.gessoLive || {};
   window.gessoLive.continuity = {
-    version: "0.12.0",
+    version: "0.12.1",
     parseConfig: parseConfig,
     boxesFromConfig: boxesFromConfig,
     captureContext: captureContext,
@@ -2018,7 +2160,7 @@
   };
 
   window.gessoLive.optimistic = {
-    version: "0.12.0",
+    version: "0.12.1",
     applyFromEvent: applyOptimisticFromEvent,
     restoreFromEvent: onOptimisticRequestFailed,
     slotFromEvent: optimisticSlotFromEvent,
