@@ -2,7 +2,6 @@
 #+author: Michael Rose
 #+options: toc:2
 
-* Gesso
 
 Gesso is a small Clojure web application library for building server-rendered, live-updating applications with plain data, Hiccup, HTMX, SSE, and Biff.
 
