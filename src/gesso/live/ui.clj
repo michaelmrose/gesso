@@ -10,6 +10,7 @@
    - live-script
    - post-form
    - post-button
+   - optimistic-post-button
    - anti-forgery-token
    - anti-forgery-input
 
@@ -17,7 +18,8 @@
    this namespace and re-export its public helpers."
   (:require
    [clojure.string :as str]
-   [gesso.live.htmx :as htmx]))
+   [gesso.live.htmx :as htmx]
+   [gesso.live.optimistic :as optimistic]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
@@ -41,6 +43,13 @@
 
 (def default-post-sync
   "closest [data-gesso-live-fragment]:drop")
+
+(def default-post-include
+  "Selector that includes the lightweight post-button wrapper form.
+
+   The wrapper owns the anti-forgery input and any app-supplied hidden inputs.
+   Additional :include selectors are appended rather than replacing this value."
+  "closest [data-gesso-live-post]")
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -146,6 +155,43 @@
         (remove (comp nil? val))
         m))
 
+(defn- include-selectors
+  [include]
+  (cond
+    (or (nil? include)
+        (false? include))
+    []
+
+    (string? include)
+    (let [include' (str/trim include)]
+      (when (str/blank? include')
+        (throw
+         (ex "gesso.live UI :include selectors must not be blank."
+             {:include include})))
+      [include'])
+
+    (sequential? include)
+    (mapcat include-selectors include)
+
+    :else
+    (throw
+     (ex "gesso.live UI :include must be nil, false, a selector string, or a sequential collection of selector strings."
+         {:include include}))))
+
+(defn- post-include-value
+  [include]
+  (->> (concat [default-post-include]
+               (include-selectors include))
+       distinct
+       (str/join ", ")))
+
+(defn- button-children
+  [{:keys [label children]}]
+  (cond
+    (nil? children) [label]
+    (sequential? children) children
+    :else [children]))
+
 ;; -----------------------------------------------------------------------------
 ;; Fragment descriptor
 ;; -----------------------------------------------------------------------------
@@ -156,24 +202,24 @@
    Preferred shape:
 
      (live/->fragment
-      {:id \"simple-shared-counter-fragment\"
-       :src \"/app/demo/simple-shared-counter/fragment\"
+      {:id 'simple-shared-counter-fragment'
+       :src '/app/demo/simple-shared-counter/fragment'
        :subscription {:topic :demo-counter
-                      :id \"global-shared-counter\"}
-       :stream-url \"/app/gesso/live/stream?subscription=shared-counter\"
+                      :id 'global-shared-counter'}
+       :stream-url '/app/gesso/live/stream?subscription=shared-counter'
        :swap :innerHTML})
 
    Legacy config maps are also accepted for migration:
 
-     {:subscription/token \"shared-counter\"
-      :fragment/id \"simple-shared-counter-fragment\"
-      :fragment/src \"/app/demo/simple-shared-counter/fragment\"
-      :fragment/swap \"innerHTML\"}
+     {:subscription/token 'shared-counter'
+      :fragment/id 'simple-shared-counter-fragment'
+      :fragment/src '/app/demo/simple-shared-counter/fragment'
+      :fragment/swap 'innerHTML'}
 
    Required:
      :id
      :src
-     either :stream-url or :subscription / :subscription/token
+     either :stream-url or :subscription / :subscription-token
 
    Optional:
      :stream-base-url
@@ -311,7 +357,7 @@
   "Render a standard live fragment panel.
 
    The outer element is stable and owns:
-     - hx-ext=\"sse\"
+     - hx-ext='sse'
      - sse-connect
      - hx-get
      - hx-trigger
@@ -434,7 +480,7 @@
     children)))
 
 ;; -----------------------------------------------------------------------------
-;; POST button helper
+;; POST button helpers
 ;; -----------------------------------------------------------------------------
 
 (defn- post-button-args
@@ -450,19 +496,60 @@
        fragment])
     [(or fragment-or-opts {}) nil]))
 
+(def ^:private optimistic-protocol-attrs
+  [optimistic/template-attr
+   optimistic/action-attr
+   optimistic/target-attr
+   optimistic/label-attr])
+
+(defn- split-optimistic-source-attrs
+  [source-attrs]
+  {:request-attrs (apply dissoc source-attrs optimistic-protocol-attrs)
+   :protocol-attrs (select-keys source-attrs optimistic-protocol-attrs)})
+
 (defn- post-button-attrs
-  [{:keys [to target swap sync button-attrs]
-    :or {swap default-post-swap
-         sync default-post-sync}}]
-  (merge
-   {:type "button"
-    :hx-post (require-present! :to to)
-    :hx-swap swap
-    :hx-sync sync
-    :hx-include "closest [data-gesso-live-post]"}
-   (when-let [target' (htmx/normalize-target target)]
-     {:hx-target target'})
-   button-attrs))
+  [{:keys [to
+           target
+           include
+           button-attrs
+           request-attrs
+           protocol-attrs]
+    :as opts}]
+  (let [swap (if (contains? opts :swap)
+               (:swap opts)
+               default-post-swap)
+        sync (if (contains? opts :sync)
+               (:sync opts)
+               default-post-sync)]
+    (htmx/merge-attrs
+     request-attrs
+     {:type "button"
+      :hx-post (require-present! :to to)
+      :hx-swap swap
+      :hx-include (post-include-value include)}
+     (when sync
+       {:hx-sync sync})
+     (when-let [target' (htmx/normalize-target target)]
+       {:hx-target target'})
+     button-attrs
+     protocol-attrs)))
+
+(defn- post-button-form-attrs
+  [form-attrs]
+  (htmx/merge-attrs
+   form-attrs
+   {:data-gesso-live-post true}))
+
+(defn- render-post-button
+  [ctx opts siblings]
+  (into
+   [:form (post-button-form-attrs (:form-attrs opts))]
+   (concat
+    (keep identity [(anti-forgery-input ctx)])
+    [(into
+      [:button (post-button-attrs opts)]
+      (button-children opts))]
+    siblings)))
 
 (defn post-button
   "Render a tiny HTMX POST button.
@@ -470,13 +557,13 @@
    Supported call shapes:
 
      (post-button ctx
-       {:to \"/increment\"
-        :target \"counter-fragment\"
-        :label \"+\"})
+       {:to '/increment'
+        :target 'counter-fragment'
+        :label '+'})
 
      (post-button ctx fragment
-       {:to \"/increment\"
-        :label \"+\"})
+       {:to '/increment'
+        :label '+'})
 
    Unlike post-form, this intentionally does not render a submit button. It
    renders a type=button with hx-post directly on the button. If HTMX misses a
@@ -494,19 +581,24 @@
        Button label when :children is absent.
 
      :children
-       Button children.
+       Button children. A single non-sequential value is accepted.
 
      :target
        HTMX target. Defaults to fragment id in the 3-arity form.
 
      :swap
        HTMX swap. Defaults to fragment swap in the 3-arity form, otherwise
-       \"innerHTML\".
+       'innerHTML'.
 
      :sync
        HTMX request synchronization. Defaults to synchronizing against the
        nearest live fragment panel and dropping overlapping requests:
-       \"closest [data-gesso-live-fragment]:drop\".
+       'closest [data-gesso-live-fragment]:drop'.
+
+     :include
+       One additional hx-include selector, or a sequential collection of
+       selectors. These are appended to the required lightweight wrapper-form
+       selector rather than replacing it.
 
      :form-attrs
        Extra attrs merged into the lightweight wrapper form.
@@ -516,14 +608,44 @@
   ([ctx opts]
    (post-button ctx opts nil))
   ([ctx fragment-or-opts maybe-opts]
+   (let [[opts _fragment] (post-button-args fragment-or-opts maybe-opts)]
+     (render-post-button ctx opts []))))
+
+(defn optimistic-post-button
+  "Render a type=button HTMX POST control with a matched optimistic template.
+
+   This mirrors post-button's two call shapes and ordinary options, adding one
+   required option:
+
+     :optimistic
+       A prepared gesso.live.optimistic descriptor or a raw options map accepted
+       by optimistic/render-parts. The optimistic source attrs are placed on the
+       actual button, and the associated <template> is rendered beside it inside
+       the lightweight wrapper form.
+
+   Unless :sync is explicitly supplied on the button options, the optimistic
+   descriptor's target-scoped sync value is used. Explicit nil or false disables
+   hx-sync. This keeps one request card's mutation from unnecessarily blocking
+   unrelated cards in the surrounding live fragment.
+
+   :include has the same additive behavior as post-button: the anti-forgery form
+   remains included, and app selectors such as a stable board-state form are
+   appended."
+  ([ctx opts]
+   (optimistic-post-button ctx opts nil))
+  ([ctx fragment-or-opts maybe-opts]
    (let [[opts _fragment] (post-button-args fragment-or-opts maybe-opts)
-         {:keys [label children form-attrs]} opts
-         button-children (or children [label])]
-     (into
-      [:form (merge {:data-gesso-live-post true}
-                    form-attrs)]
-      (concat
-       (keep identity [(anti-forgery-input ctx)])
-       [(into
-         [:button (post-button-attrs opts)]
-         button-children)])))))
+         optimistic-config (require-present! :optimistic (:optimistic opts))
+         {:keys [source-attrs template sync]}
+         (optimistic/render-parts optimistic-config)
+         {:keys [request-attrs protocol-attrs]}
+         (split-optimistic-source-attrs source-attrs)
+         effective-sync (if (contains? opts :sync)
+                          (:sync opts)
+                          sync)
+         opts' (-> opts
+                   (dissoc :optimistic)
+                   (assoc :sync effective-sync
+                          :request-attrs request-attrs
+                          :protocol-attrs protocol-attrs))]
+     (render-post-button ctx opts' [template]))))

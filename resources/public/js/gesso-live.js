@@ -1,5 +1,5 @@
 /*
- * gesso-live.js / Gesso Live client-continuity runtime v0.12.1
+ * gesso-live.js / Gesso Live client-continuity runtime v0.13.0
  *
  * Framework-owned browser runtime for preserving local interaction context
  * across Gesso Live / HTMX fragment replacement.
@@ -52,6 +52,12 @@
  * action attrs are marked on pointerdown/click/submit before the HTMX request
  * lifecycle, so the user gets local button-press feedback before the optional
  * optimistic template swap and before the authoritative server/SSE result.
+ *
+ * v0.13.0 turns optimistic rendering into a single-flight state machine. It
+ * captures a clean pre-press rollback snapshot, synchronously suppresses repeat
+ * actions against the same target, keeps successful hx-swap="none" projections
+ * pending until an authoritative normal/OOB/SSE replacement is observed, and
+ * restores the original target on request failure.
  */
 (function () {
   "use strict";
@@ -70,7 +76,10 @@
   var OPTIMISTIC_PRESSED_ATTR = "data-gesso-optimistic-pressed";
   var OPTIMISTIC_TRIGGER_ATTR = "data-gesso-optimistic-trigger";
   var OPTIMISTIC_LABEL_ATTR = "data-gesso-optimistic-label";
+  var OPTIMISTIC_LOCKED_ATTR = "data-gesso-optimistic-locked";
+  var OPTIMISTIC_ACCEPTED_ATTR = "data-gesso-optimistic-accepted";
   var OPTIMISTIC_ERROR_EVENT = "gesso:optimistic:error";
+  var OPTIMISTIC_PRE_REQUEST_TIMEOUT_MS = 2000;
 
   // Slots are also indexed globally by replaceable target id so OOB lifecycle
   // events can restore even if HTMX reports the old detached target element.
@@ -1234,6 +1243,40 @@
     };
   }
 
+  function attributeState(element, name) {
+    if (!element || !element.getAttribute) {
+      return { present: false, value: null };
+    }
+
+    return {
+      present: element.hasAttribute(name),
+      value: element.getAttribute(name)
+    };
+  }
+
+  function snapshotAttributeState(snapshot, name) {
+    var attributes = snapshot && snapshot.attributes;
+    if (!Array.isArray(attributes)) return { present: false, value: null };
+
+    for (var i = 0; i < attributes.length; i += 1) {
+      if (attributes[i].name === name) {
+        return { present: true, value: attributes[i].value };
+      }
+    }
+
+    return { present: false, value: null };
+  }
+
+  function restoreAttributeState(element, name, state) {
+    if (!element || !element.setAttribute || !element.removeAttribute) return;
+
+    if (state && state.present) {
+      element.setAttribute(name, state.value == null ? "" : state.value);
+    } else {
+      element.removeAttribute(name);
+    }
+  }
+
   function removeAllAttributes(element) {
     Array.prototype.slice.call(element.attributes || []).forEach(function (attr) {
       element.removeAttribute(attr.name);
@@ -1261,6 +1304,54 @@
     return true;
   }
 
+  function optimisticControlElements(target) {
+    if (!target) return [];
+
+    var selector =
+      "[" + OPTIMISTIC_TEMPLATE_ATTR + "]," +
+      "[" + OPTIMISTIC_ACTION_ATTR + "]," +
+      "[" + OPTIMISTIC_TARGET_ATTR + "]";
+    var controls = queryAll(target, selector).filter(function (element) {
+      return (element.tagName || "").toLowerCase() !== "template";
+    });
+
+    if (target.matches && target.matches(selector) &&
+        (target.tagName || "").toLowerCase() !== "template") {
+      controls.unshift(target);
+    }
+
+    return controls;
+  }
+
+  function disableOptimisticControls(target) {
+    return optimisticControlElements(target).map(function (element) {
+      var state = {
+        element: element,
+        disabled: "disabled" in element ? !!element.disabled : null,
+        disabledAttr: attributeState(element, "disabled"),
+        ariaDisabled: attributeState(element, "aria-disabled")
+      };
+
+      if ("disabled" in element) element.disabled = true;
+      element.setAttribute("aria-disabled", "true");
+      return state;
+    });
+  }
+
+  function restoreOptimisticControls(states) {
+    (states || []).forEach(function (state) {
+      var element = state && state.element;
+      if (!element) return;
+
+      if (state.disabled != null && "disabled" in element) {
+        element.disabled = !!state.disabled;
+      }
+
+      restoreAttributeState(element, "disabled", state.disabledAttr);
+      restoreAttributeState(element, "aria-disabled", state.ariaDisabled);
+    });
+  }
+
   function copyElementIntoExistingTarget(target, sourceElement, slotId) {
     if (!target || !sourceElement) return false;
 
@@ -1279,6 +1370,9 @@
     target.innerHTML = sourceElement.innerHTML;
     target.setAttribute(OPTIMISTIC_ACTIVE_ATTR, slotId);
     target.setAttribute(OPTIMISTIC_PENDING_ATTR, "true");
+    target.setAttribute(OPTIMISTIC_LOCKED_ATTR, "true");
+    target.setAttribute("aria-busy", "true");
+    target.removeAttribute(OPTIMISTIC_ACCEPTED_ATTR);
 
     if (isDetailsElement(target) && isDetailsElement(sourceElement)) {
       target.open = !!sourceElement.open;
@@ -1292,7 +1386,34 @@
     return "gesso-optimistic-" + optimisticSeq + "-" + now();
   }
 
-  function storeOptimisticSlot(source, target, snapshot, templateName) {
+  function clearTimer(timer) {
+    if (timer != null) {
+      window.clearTimeout(timer);
+    }
+  }
+
+  function optimisticPressState(source) {
+    return source && source.__gessoOptimisticPressState || null;
+  }
+
+  function optimisticLockForTarget(target) {
+    if (!target) return null;
+
+    if (target.__gessoOptimisticLock) {
+      return target.__gessoOptimisticLock;
+    }
+
+    var slot = optimisticSlotFromElement(target);
+    if (slot) return slot;
+
+    if (target.getAttribute && target.getAttribute(OPTIMISTIC_LOCKED_ATTR) === "true") {
+      return { target: target, orphaned: true };
+    }
+
+    return null;
+  }
+
+  function storeOptimisticSlot(source, target, snapshot, templateName, pressState) {
     var slotId = nextOptimisticSlotId();
     var root = optimisticEventRoot(source, target);
 
@@ -1301,12 +1422,24 @@
       root: root,
       source: source,
       target: target,
+      targetId: target && target.id || null,
       templateName: templateName,
       snapshot: snapshot,
+      pressState: pressState || null,
+      controlStates: [],
+      accepted: false,
       startedAt: now()
     };
 
     optimisticSlotsById[slotId] = slot;
+
+    if (target) {
+      try {
+        target.__gessoOptimisticLock = slot;
+      } catch (_targetLockError) {
+        // Expando bookkeeping is best-effort only.
+      }
+    }
 
     try {
       source.__gessoOptimisticSlotId = slotId;
@@ -1327,6 +1460,11 @@
     if (element.__gessoOptimisticSlotId) {
       var direct = optimisticSlotById(element.__gessoOptimisticSlotId);
       if (direct) return direct;
+    }
+
+    if (element.__gessoOptimisticLock && element.__gessoOptimisticLock.id) {
+      var locked = optimisticSlotById(element.__gessoOptimisticLock.id);
+      if (locked) return locked;
     }
 
     var active = null;
@@ -1357,10 +1495,292 @@
     return null;
   }
 
+  function triggerTextSnapshot(trigger) {
+    if (!trigger) return null;
+
+    if ((trigger.tagName || "").toLowerCase() === "input") {
+      return { kind: "value", value: trigger.value };
+    }
+
+    return { kind: "text", value: trigger.textContent };
+  }
+
+  function restoreTriggerText(trigger, snapshot) {
+    if (!trigger || !snapshot) return;
+
+    if (snapshot.kind === "value") {
+      trigger.value = snapshot.value;
+    } else {
+      trigger.textContent = snapshot.value;
+    }
+  }
+
+  function setTriggerText(trigger, text) {
+    if (!trigger || !text) return;
+
+    if ((trigger.tagName || "").toLowerCase() === "input") {
+      trigger.value = text;
+    } else {
+      trigger.textContent = text;
+    }
+  }
+
+  function clearOptimisticPressedState(state) {
+    if (!state) return false;
+
+    clearTimer(state.watchdog);
+    state.watchdog = null;
+
+    restoreAttributeState(state.source, OPTIMISTIC_PRESSED_ATTR, state.sourcePressed);
+    restoreAttributeState(state.target, OPTIMISTIC_PRESSED_ATTR, state.targetPressed);
+    restoreAttributeState(state.trigger, OPTIMISTIC_TRIGGER_ATTR, state.triggerMarker);
+    restoreTriggerText(state.trigger, state.triggerText);
+
+    if (state.source && state.source.__gessoOptimisticPressState === state) {
+      try {
+        delete state.source.__gessoOptimisticPressState;
+      } catch (_deletePressError) {
+        state.source.__gessoOptimisticPressState = null;
+      }
+    }
+
+    return true;
+  }
+
+  function releaseOptimisticLockState(state) {
+    if (!state) return false;
+
+    clearOptimisticPressedState(state);
+
+    if (state.target && state.target.__gessoOptimisticLock === state) {
+      try {
+        delete state.target.__gessoOptimisticLock;
+      } catch (_deleteLockError) {
+        state.target.__gessoOptimisticLock = null;
+      }
+    }
+
+    restoreAttributeState(state.target, OPTIMISTIC_LOCKED_ATTR, state.targetLocked);
+    restoreAttributeState(state.target, "aria-busy", state.targetAriaBusy);
+    state.lockCommitted = false;
+    return true;
+  }
+
+  function cancelOptimisticPressState(state, reason) {
+    if (!state) return false;
+
+    releaseOptimisticLockState(state);
+
+    emit(optimisticEventRoot(state.source, state.target), "optimistic-press-cancelled", {
+      reason: reason || "cancelled",
+      source: state.source,
+      target: state.target
+    });
+
+    return true;
+  }
+
+  function scheduleOptimisticPressWatchdog(state) {
+    if (!state) return;
+
+    clearTimer(state.watchdog);
+    state.watchdog = window.setTimeout(function () {
+      if (state.requestStarted) return;
+      if (optimisticPressState(state.source) !== state) return;
+      cancelOptimisticPressState(state, "request-not-started");
+    }, OPTIMISTIC_PRE_REQUEST_TIMEOUT_MS);
+  }
+
+  function markOptimisticPressed(source, trigger) {
+    if (!source) return null;
+
+    var existing = optimisticPressState(source);
+    if (existing) {
+      if (!existing.lockCommitted && !existing.requestStarted &&
+          trigger && existing.trigger && trigger !== existing.trigger) {
+        cancelOptimisticPressState(existing, "superseded-press");
+      } else {
+        return existing;
+      }
+    }
+
+    var target = resolveOptimisticTarget(source);
+    var label = source.getAttribute(OPTIMISTIC_LABEL_ATTR);
+
+    var state = {
+      source: source,
+      target: target,
+      trigger: trigger || null,
+      triggerText: triggerTextSnapshot(trigger),
+      sourcePressed: attributeState(source, OPTIMISTIC_PRESSED_ATTR),
+      targetPressed: attributeState(target, OPTIMISTIC_PRESSED_ATTR),
+      triggerMarker: attributeState(trigger, OPTIMISTIC_TRIGGER_ATTR),
+      targetLocked: attributeState(target, OPTIMISTIC_LOCKED_ATTR),
+      targetAriaBusy: attributeState(target, "aria-busy"),
+      cleanSnapshot: elementSnapshot(target),
+      lockCommitted: false,
+      requestStarted: false,
+      watchdog: null,
+      startedAt: now()
+    };
+
+    try {
+      source.__gessoOptimisticPressState = state;
+    } catch (_pressStateError) {
+      // Expando bookkeeping is best-effort only.
+    }
+
+    source.setAttribute(OPTIMISTIC_PRESSED_ATTR, "true");
+
+    if (target && target.setAttribute) {
+      target.setAttribute(OPTIMISTIC_PRESSED_ATTR, "true");
+    }
+
+    if (trigger && trigger.setAttribute) {
+      trigger.setAttribute(OPTIMISTIC_TRIGGER_ATTR, "true");
+      setTriggerText(trigger, label);
+    }
+
+    scheduleOptimisticPressWatchdog(state);
+    return state;
+  }
+
+  function commitOptimisticLock(state) {
+    if (!state) return false;
+
+    if (!state.target) {
+      emitOptimisticError(optimisticEventRoot(state.source, null), {
+        phase: "lock",
+        reason: "no-target",
+        source: state.source,
+        template: optimisticTemplateName(state.source)
+      });
+      return false;
+    }
+
+    if (state.lockCommitted) return true;
+
+    var existing = optimisticLockForTarget(state.target);
+    if (existing && existing !== state) return false;
+
+    state.lockCommitted = true;
+    state.target.setAttribute(OPTIMISTIC_LOCKED_ATTR, "true");
+    state.target.setAttribute("aria-busy", "true");
+
+    try {
+      state.target.__gessoOptimisticLock = state;
+    } catch (_lockStateError) {
+      // Expando bookkeeping is best-effort only.
+    }
+
+    return true;
+  }
+
+  function preventOptimisticEvent(event) {
+    if (!event) return;
+
+    if (event.cancelable !== false && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
+
+    if (typeof event.stopImmediatePropagation === "function") {
+      event.stopImmediatePropagation();
+    } else if (typeof event.stopPropagation === "function") {
+      event.stopPropagation();
+    }
+  }
+
+  function optimisticSourceFromDomEvent(event) {
+    var target = event && event.target;
+    if (!isElement(target)) return null;
+    return closestWithAnyOptimisticAttr(target);
+  }
+
+  function optimisticTriggerFromEvent(event, source) {
+    if (event && isElement(event.submitter)) return event.submitter;
+
+    var target = event && event.target;
+    if (!isElement(target)) return null;
+
+    var triggerSelector = "button,input[type='submit'],input[type='button']";
+    var trigger = null;
+
+    if (target.matches && target.matches(triggerSelector)) {
+      trigger = target;
+    } else if (target.closest) {
+      trigger = target.closest(triggerSelector);
+    }
+
+    if (trigger && source && source.contains && source.contains(trigger)) {
+      return trigger;
+    }
+
+    return null;
+  }
+
+  function sourceIsForm(source) {
+    return !!source && (source.tagName || "").toLowerCase() === "form";
+  }
+
+  function eventTargetsLockedOptimisticRegion(source) {
+    var target = resolveOptimisticTarget(source);
+    return !!optimisticLockForTarget(target);
+  }
+
+  function onOptimisticPointerDown(event) {
+    var source = optimisticSourceFromDomEvent(event);
+    if (!source) return;
+
+    if (eventTargetsLockedOptimisticRegion(source)) {
+      preventOptimisticEvent(event);
+      return;
+    }
+
+    markOptimisticPressed(source, optimisticTriggerFromEvent(event, source));
+  }
+
+  function onOptimisticClickCapture(event) {
+    var source = optimisticSourceFromDomEvent(event);
+    if (!source) return;
+
+    if (eventTargetsLockedOptimisticRegion(source)) {
+      preventOptimisticEvent(event);
+      return;
+    }
+
+    var state = markOptimisticPressed(source, optimisticTriggerFromEvent(event, source));
+
+    // Legacy form-owned optimistic actions commit on submit. Committing here
+    // would cause the submit event generated by this same click to be mistaken
+    // for a duplicate and blocked.
+    if (sourceIsForm(source)) return;
+
+    if (!commitOptimisticLock(state)) {
+      preventOptimisticEvent(event);
+    }
+  }
+
+  function onOptimisticSubmitCapture(event) {
+    var source = optimisticSourceFromDomEvent(event);
+    if (!source) return;
+
+    if (eventTargetsLockedOptimisticRegion(source)) {
+      preventOptimisticEvent(event);
+      return;
+    }
+
+    var state = markOptimisticPressed(source, optimisticTriggerFromEvent(event, source));
+    if (!commitOptimisticLock(state)) {
+      preventOptimisticEvent(event);
+    }
+  }
+
   function clearOptimisticSlot(slot, reason) {
     if (!slot) return false;
 
     delete optimisticSlotsById[slot.id];
+    clearOptimisticPressedState(slot.pressState);
+    restoreOptimisticControls(slot.controlStates);
 
     if (slot.source && slot.source.__gessoOptimisticSlotId === slot.id) {
       try {
@@ -1370,18 +1790,49 @@
       }
     }
 
-    if (slot.target && isConnected(slot.target) &&
-        slot.target.getAttribute &&
+    if (slot.target && slot.target.__gessoOptimisticLock === slot) {
+      try {
+        delete slot.target.__gessoOptimisticLock;
+      } catch (_deleteTargetLockError) {
+        slot.target.__gessoOptimisticLock = null;
+      }
+    }
+
+    if (slot.target && slot.target.getAttribute &&
         slot.target.getAttribute(OPTIMISTIC_ACTIVE_ATTR) === slot.id) {
-      slot.target.removeAttribute(OPTIMISTIC_ACTIVE_ATTR);
-      slot.target.removeAttribute(OPTIMISTIC_PENDING_ATTR);
+      restoreAttributeState(
+        slot.target,
+        OPTIMISTIC_ACTIVE_ATTR,
+        snapshotAttributeState(slot.snapshot, OPTIMISTIC_ACTIVE_ATTR)
+      );
+      restoreAttributeState(
+        slot.target,
+        OPTIMISTIC_PENDING_ATTR,
+        snapshotAttributeState(slot.snapshot, OPTIMISTIC_PENDING_ATTR)
+      );
+      restoreAttributeState(
+        slot.target,
+        OPTIMISTIC_LOCKED_ATTR,
+        snapshotAttributeState(slot.snapshot, OPTIMISTIC_LOCKED_ATTR)
+      );
+      restoreAttributeState(
+        slot.target,
+        OPTIMISTIC_ACCEPTED_ATTR,
+        snapshotAttributeState(slot.snapshot, OPTIMISTIC_ACCEPTED_ATTR)
+      );
+      restoreAttributeState(
+        slot.target,
+        "aria-busy",
+        snapshotAttributeState(slot.snapshot, "aria-busy")
+      );
     }
 
     emit(slot.root, "optimistic-cleared", {
       reason: reason || "clear",
       slotId: slot.id,
       template: slot.templateName,
-      target: slot.target
+      target: slot.target,
+      accepted: slot.accepted === true
     });
 
     return true;
@@ -1422,142 +1873,6 @@
     }
   }
 
-  function optimisticSourceFromDomEvent(event) {
-    var target = event && event.target;
-    if (!isElement(target)) return null;
-    return closestWithAnyOptimisticAttr(target);
-  }
-
-  function optimisticTriggerFromEvent(event, source) {
-    if (event && isElement(event.submitter)) return event.submitter;
-
-    var target = event && event.target;
-    if (!isElement(target)) return null;
-
-    var triggerSelector = "button,input[type='submit'],input[type='button']";
-    var trigger = null;
-
-    if (target.matches && target.matches(triggerSelector)) {
-      trigger = target;
-    } else if (target.closest) {
-      trigger = target.closest(triggerSelector);
-    }
-
-    if (trigger && source && source.contains && source.contains(trigger)) {
-      return trigger;
-    }
-
-    return null;
-  }
-
-  function triggerTextSnapshot(trigger) {
-    if (!trigger) return null;
-
-    if ((trigger.tagName || "").toLowerCase() === "input") {
-      return { kind: "value", value: trigger.value };
-    }
-
-    return { kind: "text", value: trigger.textContent };
-  }
-
-  function restoreTriggerText(trigger, snapshot) {
-    if (!trigger || !snapshot) return;
-
-    if (snapshot.kind === "value") {
-      trigger.value = snapshot.value;
-    } else {
-      trigger.textContent = snapshot.value;
-    }
-  }
-
-  function setTriggerText(trigger, text) {
-    if (!trigger || !text) return;
-
-    if ((trigger.tagName || "").toLowerCase() === "input") {
-      trigger.value = text;
-    } else {
-      trigger.textContent = text;
-    }
-  }
-
-  function clearOptimisticPressed(source) {
-    if (!source) return false;
-
-    var state = source.__gessoOptimisticPressState || null;
-    var target = state && state.target;
-    var trigger = state && state.trigger;
-
-    source.removeAttribute(OPTIMISTIC_PRESSED_ATTR);
-
-    if (target && isConnected(target) && target.getAttribute) {
-      target.removeAttribute(OPTIMISTIC_PRESSED_ATTR);
-    }
-
-    if (trigger && isConnected(trigger) && trigger.getAttribute) {
-      trigger.removeAttribute(OPTIMISTIC_TRIGGER_ATTR);
-      restoreTriggerText(trigger, state.triggerText);
-    }
-
-    try {
-      delete source.__gessoOptimisticPressState;
-    } catch (_deletePressError) {
-      source.__gessoOptimisticPressState = null;
-    }
-
-    return true;
-  }
-
-  function markOptimisticPressed(source, trigger) {
-    if (!source) return null;
-
-    var existing = source.__gessoOptimisticPressState || null;
-    if (existing) return existing;
-
-    var target = resolveOptimisticTarget(source);
-    var label = source.getAttribute(OPTIMISTIC_LABEL_ATTR);
-
-    var state = {
-      source: source,
-      target: target,
-      trigger: trigger || null,
-      triggerText: triggerTextSnapshot(trigger),
-      startedAt: now()
-    };
-
-    try {
-      source.__gessoOptimisticPressState = state;
-    } catch (_pressStateError) {
-      // Expando bookkeeping is best-effort only.
-    }
-
-    source.setAttribute(OPTIMISTIC_PRESSED_ATTR, "true");
-
-    if (target && target.setAttribute) {
-      target.setAttribute(OPTIMISTIC_PRESSED_ATTR, "true");
-    }
-
-    if (trigger && trigger.setAttribute) {
-      trigger.setAttribute(OPTIMISTIC_TRIGGER_ATTR, "true");
-      setTriggerText(trigger, label);
-    }
-
-    return state;
-  }
-
-  function onOptimisticPress(event) {
-    var source = optimisticSourceFromDomEvent(event);
-    if (!source) return;
-
-    markOptimisticPressed(source, optimisticTriggerFromEvent(event, source));
-  }
-
-  function onOptimisticSubmitCapture(event) {
-    var source = optimisticSourceFromDomEvent(event);
-    if (!source) return;
-
-    markOptimisticPressed(source, optimisticTriggerFromEvent(event, source));
-  }
-
   function applyOptimisticFromEvent(event) {
     var source = optimisticSourceFromEvent(event);
     if (!source) return null;
@@ -1565,6 +1880,7 @@
     var target = resolveOptimisticTarget(source);
     var templateName = optimisticTemplateName(source);
     var root = optimisticEventRoot(source, target);
+    var pressState = optimisticPressState(source);
 
     if (!target) {
       emitOptimisticError(root, {
@@ -1580,8 +1896,10 @@
       return null;
     }
 
-    var snapshot = elementSnapshot(target);
-    var slot = storeOptimisticSlot(source, target, snapshot, templateName);
+    var snapshot = pressState && pressState.target === target && pressState.cleanSnapshot
+      ? pressState.cleanSnapshot
+      : elementSnapshot(target);
+    var slot = storeOptimisticSlot(source, target, snapshot, templateName, pressState);
 
     var template = findOptimisticTemplate(source, target, templateName);
     var optimisticElement = firstTemplateElement(template);
@@ -1603,11 +1921,23 @@
 
       copyElementIntoExistingTarget(target, optimisticElement, slot.id);
     } else {
-      // Template-less optimistic actions are still useful for CSS-only pending
-      // affordances. The server response remains authoritative.
+      // Template-less optimistic actions are still supported for CSS-only
+      // pending affordances, although the Clojure helper currently requires a
+      // projected template for ordinary application use.
       target.setAttribute(OPTIMISTIC_ACTIVE_ATTR, slot.id);
       target.setAttribute(OPTIMISTIC_PENDING_ATTR, "true");
+      target.setAttribute(OPTIMISTIC_LOCKED_ATTR, "true");
+      target.setAttribute("aria-busy", "true");
+      target.removeAttribute(OPTIMISTIC_ACCEPTED_ATTR);
     }
+
+    try {
+      target.__gessoOptimisticLock = slot;
+    } catch (_slotLockError) {
+      // Expando bookkeeping is best-effort only.
+    }
+
+    slot.controlStates = disableOptimisticControls(target);
 
     emit(root, "optimistic-applied", {
       slotId: slot.id,
@@ -1620,30 +1950,107 @@
     return slot;
   }
 
+  function markOptimisticAccepted(slot) {
+    if (!slot) return false;
+
+    slot.accepted = true;
+    slot.acceptedAt = now();
+    clearOptimisticPressedState(slot.pressState);
+
+    if (slot.target && slot.target.getAttribute &&
+        slot.target.getAttribute(OPTIMISTIC_ACTIVE_ATTR) === slot.id) {
+      slot.target.setAttribute(OPTIMISTIC_ACCEPTED_ATTR, "true");
+      slot.target.setAttribute(OPTIMISTIC_PENDING_ATTR, "true");
+      slot.target.setAttribute(OPTIMISTIC_LOCKED_ATTR, "true");
+      slot.target.setAttribute("aria-busy", "true");
+    }
+
+    emit(slot.root, "optimistic-accepted", {
+      slotId: slot.id,
+      template: slot.templateName,
+      target: slot.target
+    });
+
+    return true;
+  }
+
   function onOptimisticAfterRequest(event) {
     var source = optimisticSourceFromEvent(event);
-    if (source) clearOptimisticPressed(source);
-
     var slot = optimisticSlotFromEvent(event);
-    if (!slot) return;
-
     var detail = event && event.detail;
+
     if (detail && (detail.failed === true || detail.successful === false)) {
-      restoreOptimisticSlot(slot, "request-failed");
-    } else {
-      // Successful HTMX responses are authoritative. If they swapped the target,
-      // the old optimistic element may already be detached; if not, the app has
-      // deliberately kept the optimistic/pending DOM.
-      clearOptimisticSlot(slot, "request-success");
+      if (slot) {
+        restoreOptimisticSlot(slot, "request-failed");
+      } else if (source) {
+        cancelOptimisticPressState(optimisticPressState(source), "request-failed-before-apply");
+      }
+      return;
     }
+
+    if (!slot) {
+      if (source) {
+        cancelOptimisticPressState(optimisticPressState(source), "request-completed-without-slot");
+      }
+      return;
+    }
+
+    if (!slot.target || !isConnected(slot.target)) {
+      clearOptimisticSlot(slot, "authoritative-response");
+      return;
+    }
+
+    // A successful POST is accepted, but it is not necessarily authoritative.
+    // With hx-swap="none", the later fragment/OOB/SSE replacement is the event
+    // that clears the optimistic projection and unlocks the region.
+    markOptimisticAccepted(slot);
   }
 
   function onOptimisticRequestFailed(event) {
     var source = optimisticSourceFromEvent(event);
-    if (source) clearOptimisticPressed(source);
-
     var slot = optimisticSlotFromEvent(event);
-    if (slot) restoreOptimisticSlot(slot, "request-error");
+
+    if (slot) {
+      restoreOptimisticSlot(slot, "request-error");
+    } else if (source) {
+      cancelOptimisticPressState(optimisticPressState(source), "request-error-before-apply");
+    }
+  }
+
+  function optimisticSlotIntersectsElement(slot, element, exactOnly) {
+    if (!slot || !element) return false;
+
+    if (slot.target === element) return true;
+    if (slot.targetId && element.id === slot.targetId) return true;
+
+    // Replacing an ancestor replaces the optimistic target as a whole. A swap
+    // confined to a descendant does not prove that the projected card itself is
+    // authoritative, so it must not unlock the region.
+    if (!exactOnly && contains(element, slot.target)) return true;
+    return false;
+  }
+
+  function optimisticSlotIntersectsEvent(slot, event, exactOnly) {
+    var elements = eventElements(event);
+
+    for (var i = 0; i < elements.length; i += 1) {
+      if (optimisticSlotIntersectsElement(slot, elements[i], exactOnly)) return true;
+    }
+
+    var targetId = targetIdFromEvent(event);
+    return !!(targetId && slot.targetId && targetId === slot.targetId);
+  }
+
+  function clearAuthoritativeOptimisticSlots(event, reason, exactOnly) {
+    Object.keys(optimisticSlotsById).forEach(function (slotId) {
+      var slot = optimisticSlotsById[slotId];
+      if (!slot) return;
+
+      if (!slot.target || !isConnected(slot.target) ||
+          optimisticSlotIntersectsEvent(slot, event, exactOnly === true)) {
+        clearOptimisticSlot(slot, reason || "authoritative-swap");
+      }
+    });
   }
 
   function currentWindowScrollY() {
@@ -2019,6 +2426,8 @@
   }
 
   function clearOnBeforeCleanup(event) {
+    clearAuthoritativeOptimisticSlots(event, "authoritative-cleanup");
+
     var target = eventTarget(event);
     if (!target) return;
 
@@ -2040,6 +2449,8 @@
   }
 
   function onAfterSwap(event) {
+    clearAuthoritativeOptimisticSlots(event, "authoritative-swap");
+
     var context = restoreContext(event, "swap");
     if (!context) return;
 
@@ -2064,6 +2475,8 @@
   }
 
   function onOobAfterSwap(event) {
+    clearAuthoritativeOptimisticSlots(event, "authoritative-oob-swap");
+
     var context = restoreContext(event, "oob");
     if (!context) return;
 
@@ -2082,7 +2495,25 @@
     var source = optimisticSourceFromEvent(event);
 
     if (source) {
-      markOptimisticPressed(source, null);
+      var target = resolveOptimisticTarget(source);
+      var state = optimisticPressState(source);
+      var existingLock = optimisticLockForTarget(target);
+
+      if (existingLock && (!state || existingLock !== state)) {
+        preventOptimisticEvent(event);
+        return;
+      }
+
+      state = state || markOptimisticPressed(source, null);
+
+      if (!state || state.requestStarted || !commitOptimisticLock(state)) {
+        preventOptimisticEvent(event);
+        return;
+      }
+
+      state.requestStarted = true;
+      clearTimer(state.watchdog);
+      state.watchdog = null;
       applyOptimisticFromEvent(event);
       return;
     }
@@ -2106,6 +2537,8 @@
   }
 
   function onSseMessage(event) {
+    clearAuthoritativeOptimisticSlots(event, "authoritative-sse-swap", true);
+
     var context = restoreContext(event, "sse-message");
     if (!context) return;
 
@@ -2119,8 +2552,8 @@
   }
 
   // Attach to document, not document.body, so this file is safe to load in <head>.
-  document.addEventListener("pointerdown", onOptimisticPress, true);
-  document.addEventListener("click", onOptimisticPress, true);
+  document.addEventListener("pointerdown", onOptimisticPointerDown, true);
+  document.addEventListener("click", onOptimisticClickCapture, true);
   document.addEventListener("submit", onOptimisticSubmitCapture, true);
   document.addEventListener("htmx:beforeRequest", onBeforeRequest);
   document.addEventListener("htmx:afterRequest", onOptimisticAfterRequest);
@@ -2143,7 +2576,7 @@
 
   window.gessoLive = window.gessoLive || {};
   window.gessoLive.continuity = {
-    version: "0.12.1",
+    version: "0.13.0",
     parseConfig: parseConfig,
     boxesFromConfig: boxesFromConfig,
     captureContext: captureContext,
@@ -2160,11 +2593,12 @@
   };
 
   window.gessoLive.optimistic = {
-    version: "0.12.1",
+    version: "0.13.0",
     applyFromEvent: applyOptimisticFromEvent,
     restoreFromEvent: onOptimisticRequestFailed,
     slotFromEvent: optimisticSlotFromEvent,
     clearSlot: clearOptimisticSlot,
-    restoreSlot: restoreOptimisticSlot
+    restoreSlot: restoreOptimisticSlot,
+    clearAuthoritativeFromEvent: clearAuthoritativeOptimisticSlots
   };
 }());
