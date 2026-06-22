@@ -1,6 +1,7 @@
 (ns gesso.live.ui-optimistic-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [gesso.live.optimistic :as optimistic]
    [gesso.live.ui :as ui]))
 
 (def ctx
@@ -72,7 +73,22 @@
               :hx-sync "closest [data-gesso-live-fragment]:drop"
               :hx-target "#counter-fragment"}
              (second button')))
-      (is (= "+" (nth button' 2))))))
+      (is (= "+" (nth button' 2))))
+
+    (testing "ordinary post buttons do not emit optimistic templates"
+      (is (nil? (template markup))))))
+
+(deftest post-button-nil-or-false-optimistic-is-ordinary-test
+  (doseq [optimistic-value [nil false]]
+    (let [markup (ui/post-button
+                  ctx
+                  {:to "/increment"
+                   :label "+"
+                   :optimistic optimistic-value})
+          attrs (second (button markup))]
+      (is (nil? (:data-gesso-optimistic-template attrs)))
+      (is (nil? (template markup)))
+      (is (= ui/default-post-sync (:hx-sync attrs))))))
 
 (deftest post-button-additive-include-test
   (testing "one additional selector is appended to the wrapper form selector"
@@ -118,9 +134,9 @@
            :label "+"
            :include :board-state})))))
 
-(deftest optimistic-post-button-test
+(deftest post-button-with-optimistic-config-test
   (let [markup
-        (ui/optimistic-post-button
+        (ui/post-button
          ctx
          {:to "/app/requests/request-1/claim"
           :swap "none"
@@ -163,9 +179,44 @@
               pending-card]
              template')))))
 
-(deftest optimistic-post-button-protects-protocol-attrs-test
+(deftest post-button-optimistic-inherits-top-level-target-test
   (let [markup
-        (ui/optimistic-post-button
+        (ui/post-button
+         ctx
+         {:to "/claim"
+          :target "closest [data-request-card]"
+          :label "Claim"
+          :optimistic
+          {:template-name "request-1-claim"
+           :action :claim
+           :pending-label "Claiming…"
+           :content pending-card}})
+        attrs (second (button markup))]
+    (is (= "closest [data-request-card]"
+           (:hx-target attrs)))
+    (is (= "closest [data-request-card]"
+           (:data-gesso-optimistic-target attrs)))
+    (is (= "closest [data-request-card]:drop"
+           (:hx-sync attrs)))))
+
+(deftest post-button-allows-distinct-optimistic-target-test
+  (let [markup
+        (ui/post-button
+         ctx
+         {:to "/claim"
+          :target "request-list"
+          :label "Claim"
+          :optimistic optimistic-config})
+        attrs (second (button markup))]
+    (is (= "#request-list" (:hx-target attrs)))
+    (is (= "closest [data-request-card]"
+           (:data-gesso-optimistic-target attrs)))
+    (is (= "closest [data-request-card]:drop"
+           (:hx-sync attrs)))))
+
+(deftest post-button-protects-optimistic-protocol-attrs-test
+  (let [markup
+        (ui/post-button
          ctx
          {:to "/claim"
           :label "Claim"
@@ -185,11 +236,11 @@
     (is (= "Claiming…"
            (:data-gesso-optimistic-label attrs)))))
 
-(deftest optimistic-post-button-sync-override-test
+(deftest post-button-optimistic-sync-override-test
   (testing "an explicit UI sync overrides the descriptor recommendation"
     (is (= "closest form:abort"
            (get-in
-            (ui/optimistic-post-button
+            (ui/post-button
              ctx
              {:to "/claim"
               :label "Claim"
@@ -200,7 +251,7 @@
   (testing "explicit nil or false disables hx-sync"
     (is (nil?
          (get-in
-          (ui/optimistic-post-button
+          (ui/post-button
            ctx
            {:to "/claim"
             :label "Claim"
@@ -210,7 +261,7 @@
 
     (is (nil?
          (get-in
-          (ui/optimistic-post-button
+          (ui/post-button
            ctx
            {:to "/claim"
             :label "Claim"
@@ -218,7 +269,7 @@
             :optimistic optimistic-config})
           [3 1 :hx-sync])))))
 
-(deftest optimistic-post-button-fragment-call-shape-test
+(deftest post-button-optimistic-fragment-call-shape-test
   (let [fragment
         (ui/->fragment
          {:id "request-list"
@@ -226,7 +277,7 @@
           :stream-url "/app/streams/requests"
           :swap "outerHTML"})
         markup
-        (ui/optimistic-post-button
+        (ui/post-button
          ctx
          fragment
          {:to "/claim"
@@ -241,14 +292,28 @@
       (is (= "closest [data-request-card]:drop"
              (:hx-sync attrs))))))
 
-(deftest optimistic-post-button-requires-config-test
+(deftest post-button-rejects-invalid-optimistic-value-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
-       #"requires :optimistic"
-       (ui/optimistic-post-button
+       #":optimistic must be"
+       (ui/post-button
         ctx
         {:to "/claim"
-         :label "Claim"}))))
+         :label "Claim"
+         :optimistic true}))))
+
+(deftest post-button-accepts-prepared-optimistic-descriptor-test
+  (let [descriptor (optimistic/->optimistic optimistic-config)
+        markup (ui/post-button
+                ctx
+                {:to "/claim"
+                 :label "Claim"
+                 :optimistic descriptor})]
+    (is (= "request-1-claim"
+           (get-in (button markup)
+                   [1 :data-gesso-optimistic-template])))
+    (is (= pending-card
+           (nth (template markup) 2)))))
 
 (deftest wrapper-marker-cannot-be-overridden-test
   (is (= true

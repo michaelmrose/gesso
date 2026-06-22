@@ -10,7 +10,6 @@
    - live-script
    - post-form
    - post-button
-   - optimistic-post-button
    - anti-forgery-token
    - anti-forgery-input
 
@@ -496,23 +495,33 @@
        fragment])
     [(or fragment-or-opts {}) nil]))
 
-(def ^:private optimistic-protocol-attrs
-  [optimistic/template-attr
-   optimistic/action-attr
-   optimistic/target-attr
-   optimistic/label-attr])
+(defn- post-button-optimistic
+  [{:keys [target] :as opts}]
+  (let [value (:optimistic opts)]
+    (cond
+      (or (nil? value)
+          (false? value))
+      nil
 
-(defn- split-optimistic-source-attrs
-  [source-attrs]
-  {:request-attrs (apply dissoc source-attrs optimistic-protocol-attrs)
-   :protocol-attrs (select-keys source-attrs optimistic-protocol-attrs)})
+      (optimistic/optimistic? value)
+      value
+
+      (map? value)
+      (optimistic/ensure-optimistic
+       (cond-> value
+         (not (present? (:target value)))
+         (assoc :target target)))
+
+      :else
+      (throw
+       (ex "gesso.live UI :optimistic must be nil, false, a prepared optimistic descriptor, or an optimistic options map."
+           {:optimistic value})))))
 
 (defn- post-button-attrs
   [{:keys [to
            target
            include
            button-attrs
-           request-attrs
            protocol-attrs]
     :as opts}]
   (let [swap (if (contains? opts :swap)
@@ -522,7 +531,6 @@
                (:sync opts)
                default-post-sync)]
     (htmx/merge-attrs
-     request-attrs
      {:type "button"
       :hx-post (require-present! :to to)
       :hx-swap swap
@@ -532,6 +540,8 @@
      (when-let [target' (htmx/normalize-target target)]
        {:hx-target target'})
      button-attrs
+     ;; Framework protocol attrs merge last so callers cannot break the source /
+     ;; template association through :button-attrs.
      protocol-attrs)))
 
 (defn- post-button-form-attrs
@@ -551,27 +561,43 @@
       (button-children opts))]
     siblings)))
 
+(defn- prepare-post-button
+  [opts]
+  (if-let [descriptor (post-button-optimistic opts)]
+    (let [{:keys [source-attrs template sync]}
+          (optimistic/render-parts descriptor)
+          effective-sync (if (contains? opts :sync)
+                           (:sync opts)
+                           sync)]
+      {:opts (-> opts
+                 (dissoc :optimistic)
+                 (assoc :sync effective-sync
+                        :protocol-attrs source-attrs))
+       :siblings [template]})
+    {:opts (dissoc opts :optimistic)
+     :siblings []}))
+
 (defn post-button
-  "Render a tiny HTMX POST button.
+  "Render a tiny HTMX POST button, optionally with optimistic rendering.
 
    Supported call shapes:
 
      (post-button ctx
-       {:to '/increment'
-        :target 'counter-fragment'
-        :label '+'})
+       {:to \"/increment\"
+        :target \"counter-fragment\"
+        :label \"+\"})
 
      (post-button ctx fragment
-       {:to '/increment'
-        :label '+'})
+       {:to \"/increment\"
+        :label \"+\"})
 
    Unlike post-form, this intentionally does not render a submit button. It
    renders a type=button with hx-post directly on the button. If HTMX misses a
    click under mobile tap storms, the native browser fallback is therefore a
    no-op rather than navigation or native POST.
 
-   A lightweight wrapping form is still used so anti-forgery input can be
-   included by hx-include.
+   A lightweight wrapping form is still used so anti-forgery input and optional
+   app-owned hidden state can be included by hx-include.
 
    Options:
      :to
@@ -584,68 +610,47 @@
        Button children. A single non-sequential value is accepted.
 
      :target
-       HTMX target. Defaults to fragment id in the 3-arity form.
+       HTMX target. Defaults to fragment id in the 3-arity form. It is also the
+       default optimistic target when :optimistic is an unprepared options map
+       without its own :target.
 
      :swap
        HTMX swap. Defaults to fragment swap in the 3-arity form, otherwise
-       'innerHTML'.
+       \"innerHTML\".
 
      :sync
-       HTMX request synchronization. Defaults to synchronizing against the
-       nearest live fragment panel and dropping overlapping requests:
-       'closest [data-gesso-live-fragment]:drop'.
+       HTMX request synchronization. Ordinary buttons default to synchronizing
+       against the nearest live fragment panel and dropping overlapping requests:
+       \"closest [data-gesso-live-fragment]:drop\".
+
+       Optimistic buttons instead default to the optimistic descriptor's
+       target-scoped sync value. An explicit top-level :sync always wins;
+       explicit nil or false disables hx-sync.
 
      :include
        One additional hx-include selector, or a sequential collection of
        selectors. These are appended to the required lightweight wrapper-form
        selector rather than replacing it.
 
+     :optimistic
+       Optional optimistic options map or prepared gesso.live.optimistic
+       descriptor. nil and false mean an ordinary post button.
+
+       A raw options map may omit :target and inherit the top-level :target. It
+       must otherwise satisfy gesso.live.optimistic/->optimistic, including
+       providing one rooted :content value. When present, the optimistic protocol
+       attrs are placed on the actual button and the matched <template> is
+       rendered beside it inside the lightweight wrapper form.
+
      :form-attrs
        Extra attrs merged into the lightweight wrapper form.
 
      :button-attrs
-       Extra attrs merged into button attrs."
+       Extra attrs merged into button attrs. Framework-owned optimistic protocol
+       attrs win over conflicting caller values."
   ([ctx opts]
    (post-button ctx opts nil))
   ([ctx fragment-or-opts maybe-opts]
-   (let [[opts _fragment] (post-button-args fragment-or-opts maybe-opts)]
-     (render-post-button ctx opts []))))
-
-(defn optimistic-post-button
-  "Render a type=button HTMX POST control with a matched optimistic template.
-
-   This mirrors post-button's two call shapes and ordinary options, adding one
-   required option:
-
-     :optimistic
-       A prepared gesso.live.optimistic descriptor or a raw options map accepted
-       by optimistic/render-parts. The optimistic source attrs are placed on the
-       actual button, and the associated <template> is rendered beside it inside
-       the lightweight wrapper form.
-
-   Unless :sync is explicitly supplied on the button options, the optimistic
-   descriptor's target-scoped sync value is used. Explicit nil or false disables
-   hx-sync. This keeps one request card's mutation from unnecessarily blocking
-   unrelated cards in the surrounding live fragment.
-
-   :include has the same additive behavior as post-button: the anti-forgery form
-   remains included, and app selectors such as a stable board-state form are
-   appended."
-  ([ctx opts]
-   (optimistic-post-button ctx opts nil))
-  ([ctx fragment-or-opts maybe-opts]
-   (let [[opts _fragment] (post-button-args fragment-or-opts maybe-opts)
-         optimistic-config (require-present! :optimistic (:optimistic opts))
-         {:keys [source-attrs template sync]}
-         (optimistic/render-parts optimistic-config)
-         {:keys [request-attrs protocol-attrs]}
-         (split-optimistic-source-attrs source-attrs)
-         effective-sync (if (contains? opts :sync)
-                          (:sync opts)
-                          sync)
-         opts' (-> opts
-                   (dissoc :optimistic)
-                   (assoc :sync effective-sync
-                          :request-attrs request-attrs
-                          :protocol-attrs protocol-attrs))]
-     (render-post-button ctx opts' [template]))))
+   (let [[raw-opts _fragment] (post-button-args fragment-or-opts maybe-opts)
+         {:keys [opts siblings]} (prepare-post-button raw-opts)]
+     (render-post-button ctx opts siblings))))
