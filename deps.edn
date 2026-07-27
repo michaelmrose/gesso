@@ -10,6 +10,12 @@
         manifold/manifold {:mvn/version "0.5.0"}
         missionary/missionary {:mvn/version "b.47"}
         org.msgpack/msgpack-core {:mvn/version "0.9.12"}
+        com.zaxxer/HikariCP {:mvn/version "7.0.2"}
+        com.biffweb/biff {:git/url "https://github.com/jacobobryant/biff", :git/sha "0e1e207df27acb1758ec3604eb56af50b7bb47ea"
+                             :exclusions [com.xtdb/xtdb-core
+                                          com.xtdb/xtdb-jdbc
+                                          com.xtdb/xtdb-rocksdb
+                                          org.postgresql/postgresql]}
         }
 
  :aliases
