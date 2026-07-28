@@ -1059,3 +1059,14 @@
         normalized
         (:malli-options
          options))))))
+
+(def instant-schema
+  [:fn
+   {:gesso.model/codec :instant
+    :error/message "must be a java.time.Instant"}
+   #(instance? Instant %)])
+
+(def revision-schema
+  [:fn
+   {:error/message "must be a natural integer"}
+   nat-int?])
