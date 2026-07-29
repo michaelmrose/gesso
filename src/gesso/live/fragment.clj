@@ -565,9 +565,9 @@
         cancel!
         (render-task
          (fn [value]
+           (release-flight! manager key flight)
            (assign-flight! flight {:status :success
                                    :value value})
-           (release-flight! manager key flight)
            (debug!
             debug-fn
             :gesso.live.fragment/singleflight-released
@@ -575,9 +575,9 @@
              :status :success
              :at (clock)}))
          (fn [error]
+           (release-flight! manager key flight)
            (assign-flight! flight {:status :failure
                                    :error error})
-           (release-flight! manager key flight)
            (debug!
             debug-fn
             :gesso.live.fragment/singleflight-released
