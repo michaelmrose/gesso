@@ -171,6 +171,7 @@
                             :xtdb/read-connectable
                             :xtdb/conn
                             :xtdb/node
+                            :biff.xtdb/node
                             :biff/conn
                             :biff/node]})))
   connectable)
@@ -216,6 +217,7 @@
 
    Biff-compatible fallback keys:
 
+     :biff.xtdb/node
      :biff/conn
      :biff/node"
   [x]
@@ -223,6 +225,7 @@
     (or (:xtdb/connectable x)
         (:xtdb/conn x)
         (:xtdb/node x)
+        (:biff.xtdb/node x)
         (:biff/conn x)
         (:biff/node x))
     x))
@@ -241,6 +244,7 @@
      :biff/conn
      :xtdb/connectable
      :xtdb/node
+     :biff.xtdb/node
      :biff/node"
   [x]
   (if (map? x)
@@ -249,6 +253,7 @@
         (:biff/conn x)
         (:xtdb/connectable x)
         (:xtdb/node x)
+        (:biff.xtdb/node x)
         (:biff/node x))
     x))
 

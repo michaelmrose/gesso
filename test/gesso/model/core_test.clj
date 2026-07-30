@@ -1,7 +1,8 @@
 (ns gesso.model.core-test
   (:require
    [clojure.test :refer [deftest is testing]]
-   [com.biffweb.experimental :as biffx]
+   [com.biffweb.core :as biff.core]
+   [com.biffweb.xtdb :as biff.xtdb]
    [gesso.graph :as graph]
    [gesso.model.command :as command]
    [gesso.model.core :as model]
@@ -761,7 +762,7 @@
         (atom [])]
 
     (with-redefs
-     [biffx/q
+     [biff.xtdb/q
       (fn [connectable query]
         (swap!
          calls
@@ -770,7 +771,7 @@
           query])
         [raw])]
 
-      (testing "load-by-id uses the explicit Biff connection and schema-derived columns"
+      (testing "load-by-id uses the Biff 2 XTDB context and schema-derived columns"
         (is
          (=
           (assoc
@@ -779,18 +780,19 @@
            "Widget")
           (model/load-by-id
            read-descriptor
-           {:biff/conn :connection}
+           {:biff.xtdb/node :node}
            id)))
 
         (is
          (=
-          [[:connection
+          [[{:biff.xtdb/node
+             :node}
             {:select
              (model/document-columns
               read-descriptor)
 
              :from
-             :widget
+             [:widget]
 
              :where
              [:=
@@ -800,19 +802,19 @@
 
   (testing "no current row returns nil"
     (with-redefs
-     [biffx/q
+     [biff.xtdb/q
       (fn [_ _]
         [])]
       (is
        (nil?
         (model/load-by-id
          read-descriptor
-         {:biff/conn :connection}
+         {:biff.xtdb/node :node}
          (UUID/randomUUID))))))
 
   (testing "nil identity is treated as a missing lookup without querying"
     (with-redefs
-     [biffx/q
+     [biff.xtdb/q
       (fn [& _]
         (throw
          (AssertionError.
@@ -824,14 +826,14 @@
          {}
          nil)))))
 
-  (testing "there is deliberately no alternate connection fallback"
+  (testing "there is deliberately no Biff 1 connection fallback"
     (is
      (=
       ::model/missing-biff-connection
       (error-type
        #(model/load-by-id
          read-descriptor
-         {:xtdb/node :not-the-supported-contract}
+         {:biff/conn :old-biff1-connection}
          (UUID/randomUUID)))))))
 
 (deftest load-by-lookup-test
@@ -843,7 +845,7 @@
             (atom nil)]
 
         (with-redefs
-         [biffx/q
+         [biff.xtdb/q
           (fn [connectable query]
             (reset!
              seen
@@ -855,19 +857,20 @@
             document
             (model/load-by-lookup
              read-descriptor
-             {:biff/conn :connection}
+             {:biff.xtdb/node :node}
              :widget/email
              "widget@example.com")))
 
           (is
            (=
-            [:connection
+            [{:biff.xtdb/node
+              :node}
              {:select
               (model/document-columns
                read-descriptor)
 
               :from
-              :widget
+              [:widget]
 
               :where
               [:=
@@ -877,7 +880,7 @@
 
     (testing "nil alternate lookup does not query"
       (with-redefs
-       [biffx/q
+       [biff.xtdb/q
         (fn [& _]
           (throw
            (AssertionError.
@@ -897,13 +900,13 @@
         (error-type
          #(model/load-by-lookup
            read-descriptor
-           {:biff/conn :connection}
+           {:biff.xtdb/node :node}
            :widget/secret
            "private")))))
 
     (testing "a declared unique-style lookup refuses to choose among duplicates"
       (with-redefs
-       [biffx/q
+       [biff.xtdb/q
         (fn [_ _]
           [document
            (assoc
@@ -916,7 +919,7 @@
           (error-type
            #(model/load-by-lookup
              read-descriptor
-             {:biff/conn :connection}
+             {:biff.xtdb/node :node}
              :widget/email
              "widget@example.com"))))))))
 
@@ -1089,7 +1092,7 @@
 
     (testing "found document is wrapped in the conventional envelope"
       (with-redefs
-       [biffx/q
+       [biff.xtdb/q
         (fn [_ _]
           [document])]
 
@@ -1102,12 +1105,12 @@
            document}
           (resolve-resolver
            resolver
-           {:biff/conn :connection}
+           {:biff.xtdb/node :node}
            {:widget/id id})))))
 
     (testing "missing document reports only found? false"
       (with-redefs
-       [biffx/q
+       [biff.xtdb/q
         (fn [_ _]
           [])]
 
@@ -1117,7 +1120,7 @@
            false}
           (resolve-resolver
            resolver
-           {:biff/conn :connection}
+           {:biff.xtdb/node :node}
            {:widget/id id})))))))
 
 (deftest field-resolver-behavior-test
@@ -1149,7 +1152,7 @@
          :widget/email)]
 
     (with-redefs
-     [biffx/q
+     [biff.xtdb/q
       (fn [_ query]
         (is
          (=
@@ -1168,7 +1171,7 @@
          document}
         (resolve-resolver
          resolver
-         {:biff/conn :connection}
+         {:biff.xtdb/node :node}
          {:widget/email
           "widget@example.com"}))))))
 
@@ -1929,6 +1932,31 @@
          [:schema
           :gadget]))))
 
+    (testing "Biff 2 module init registers the complete generated schema"
+      (let [registered
+            (atom nil)]
+
+        (with-redefs
+         [biff.core/register
+          (fn [schema]
+            (reset!
+             registered
+             schema))]
+
+          (is
+           (=
+            {}
+            ((:biff.core/init
+              module)
+             (atom
+              [module]))))
+
+          (is
+           (=
+            (:schema
+             module)
+            @registered)))))
+
     (testing "generated and custom resolvers coexist"
       (is
        (contains?
@@ -2194,6 +2222,13 @@
          compiled
          [:module
           :schema])))
+
+      (is
+       (ifn?
+        (get-in
+         compiled
+         [:module
+          :biff.core/init])))
 
       (is
        (=
