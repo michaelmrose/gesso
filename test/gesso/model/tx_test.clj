@@ -1,7 +1,7 @@
 (ns gesso.model.tx-test
   (:require
    [clojure.test :refer [deftest is testing]]
-   [com.biffweb.experimental :as biffx]
+   [com.biffweb.core :as biff.core]
    [gesso.live.core :as live]
    [gesso.model.command :as command]
    [gesso.model.tx :as tx]))
@@ -923,14 +923,7 @@
 
 (deftest prepare-test
   (let [validated
-        (atom nil)
-
-        formatted
         (atom [])
-
-        malli-opts
-        {:registry
-         ::test-registry}
 
         expected-unformatted
         (tx/transaction-ops
@@ -947,27 +940,17 @@
           [widget-change]})]
 
     (with-redefs
-     [biffx/validate-tx
-      (fn [ops options]
-        (reset!
-         validated
-         [ops options])
-        nil)
-
-      biffx/format-query
-      (fn [op]
+     [biff.core/validate-with-ex
+      (fn [documents]
         (swap!
-         formatted
+         validated
          conj
-         op)
-        [:formatted
-         op])]
+         documents)
+        documents)]
 
       (let [prepared
             (tx/prepare
-             {:biff/malli-opts
-              (atom
-               malli-opts)}
+             {}
 
              {:commands
               [widget-update]
@@ -975,30 +958,44 @@
               :changes
               [widget-change]})]
 
-        (testing "Biff sees the complete unformatted transaction and dereferenced Malli options"
+        (testing "Biff 2 validates each put/patch document batch"
           (is
            (=
-            [expected-unformatted
-             malli-opts]
+            [[widget-after]]
             @validated)))
 
-        (testing "every operation is then formatted"
+        (testing "HoneySQL assertions are formatted while XTDB vector writes remain unchanged"
           (is
            (=
-            expected-unformatted
-            @formatted))
-
-          (is
-           (=
-            (mapv
-             (fn [op]
-               [:formatted
-                op])
+            (count
              expected-unformatted)
-            (:tx-ops
-             prepared))))
+            (count
+             (:tx-ops
+              prepared))))
 
-        (testing "normalized plan is returned alongside formatted operations"
+          (is
+           (vector?
+            (first
+             (:tx-ops
+              prepared))))
+
+          (is
+           (string?
+            (first
+             (first
+              (:tx-ops
+               prepared)))))
+
+          (is
+           (=
+            [:put-docs
+             :widget
+             widget-after]
+            (last
+             (:tx-ops
+              prepared)))))
+
+        (testing "normalized plan is returned alongside prepared operations"
           (is
            (=
             :async
@@ -1015,20 +1012,39 @@
              [:plan
               :changes])))))))
 
-  (testing "missing Malli options fail before transaction submission"
+  (testing "prepare no longer requires Biff 1 Malli options in ctx"
     (with-redefs
-     [biffx/validate-tx
-      (fn [& _]
+     [biff.core/validate-with-ex
+      identity]
+
+      (is
+       (map?
+        (tx/prepare
+         {}
+
+         {:commands
+          [widget-update]
+
+          :changes
+          [widget-change]})))))
+
+  (testing "Biff 2 document validation failures propagate"
+    (with-redefs
+     [biff.core/validate-with-ex
+      (fn [_documents]
         (throw
-         (AssertionError.
-          "validate-tx should not run")))]
+         (ex-info
+          "invalid document"
+          {:error/type
+           ::invalid-document})))]
 
       (is
        (=
-        ::tx/missing-malli-options
+        ::invalid-document
         (error-type
          #(tx/prepare
            {}
+
            {:commands
             [widget-update]
 
@@ -1076,14 +1092,14 @@
         (atom 0)
 
         returned-ctx
-        {:biff/conn
-         :consistent-connection}
+        {:biff.xtdb/snapshot-token
+         "consistent-snapshot"}
 
         ctx
         {:gesso.live/system
          ::live-system
 
-         :biff.xtdb.listener/poll-now
+         :biff.xtdb/poll-now
          #(swap!
            polls
            inc)}]
@@ -1390,7 +1406,7 @@
          :commit/status
          :committed}
         (tx/transact!
-         {:biff.xtdb.listener/poll-now
+         {:biff.xtdb/poll-now
           #(throw
             (ex-info
              "listener unavailable"

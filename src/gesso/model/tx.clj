@@ -28,15 +28,18 @@
      commit.
 
    This namespace owns transaction-fragment composition, conflict detection,
-   ASSERT generation, command translation, Biff transaction validation and
-   formatting, and the final Gesso Live commit boundary.
+   ASSERT generation, command translation, Biff 2-compatible transaction
+   validation/formatting, and the final Gesso Live commit boundary.
 
    It deliberately does not own domain transitions, authorization policy,
    Graph reads, or Live invalidation rules."
   (:require
-   [com.biffweb.experimental :as biffx]
+   [clojure.walk :as walk]
+   [com.biffweb.core :as biff.core]
    [gesso.live.core :as live]
-   [gesso.model.command :as command]))
+   [gesso.model.command :as command]
+   [honey.sql :as hsql]
+   [xtdb.util :as xt.util]))
 
 ;; =============================================================================
 ;; Public transaction contract
@@ -82,15 +85,6 @@
      (cond-> {:error/type error-type}
        (some? details)
        (assoc :error/details details))))))
-
-(defn- deref-if-needed
-  [value]
-  (if
-   (instance?
-    clojure.lang.IDeref
-    value)
-    @value
-    value))
 
 (defn- unknown-keys
   [allowed value]
@@ -892,59 +886,71 @@
      tx-options}))
 
 ;; =============================================================================
-;; Biff preparation
+;; Biff 2 preparation
 ;; =============================================================================
 
-(defn- malli-opts!
-  [ctx]
-  (or
-   (some->
-    (:biff/malli-opts ctx)
-    deref-if-needed)
+(defn- validate-tx!
+  "Mirror Biff 2's transaction document validation before Gesso Live executes
+   the formatted XTDB operations.
 
-   (fail!
-    ::missing-malli-options
-    "Model transactions require :biff/malli-opts."
-    {:ctx-keys
-     (when
-      (map?
-       ctx)
-       (set
-        (keys ctx)))})))
+   Biff 2 performs this validation inside com.biffweb.xtdb/execute-tx. Gesso
+   Live still owns execution here, so model.tx performs the same public
+   biff.core validation step before handing the transaction to Live."
+  [tx-ops]
+  (doseq [tx-op tx-ops
+          :when (vector? tx-op)
+          :let [[op _table-or-options & documents] tx-op]
+          :when (#{:put-docs :patch-docs} op)]
+    (biff.core/validate-with-ex documents))
+  tx-ops)
+
+(defn- format-query
+  "Format a HoneySQL query/transaction form exactly as Biff 2 does before
+   passing it to XTDB.
+
+   Vector XTDB operations already have the representation XTDB expects and are
+   returned unchanged."
+  [query]
+  (if (map? query)
+    (hsql/format
+     (walk/postwalk
+      (fn [value]
+        (cond-> value
+          (qualified-keyword? value)
+          xt.util/kw->normal-form-kw))
+      query))
+    query))
 
 (defn prepare
-  "Validates and formats one transaction plan for Gesso Live.
+  "Normalizes, validates, and formats one transaction plan for Gesso Live.
 
    Returns:
 
      {:plan   normalized-plan
       :tx-ops formatted-xtdb-operations}
 
-   biffx/validate-tx sees the complete unformatted transaction before any
-   HoneySQL forms are converted."
-  [ctx plan]
+   Biff 2 moved transaction validation into com.biffweb.xtdb/execute-tx.
+   Current Gesso Live remains the execution boundary, so this function mirrors
+   Biff 2's validation and HoneySQL normalization without depending on the old
+   com.biffweb.experimental namespace or Biff's private impl namespaces."
+  [_ctx plan]
   (let [plan
         (normalize-plan
          plan)
 
         tx-ops
         (transaction-ops
-         plan)
+         plan)]
 
-        malli-opts
-        (malli-opts!
-         ctx)]
-
-    (biffx/validate-tx
-     tx-ops
-     malli-opts)
+    (validate-tx!
+     tx-ops)
 
     {:plan
      plan
 
      :tx-ops
      (mapv
-      biffx/format-query
+      format-query
       tx-ops)}))
 
 ;; =============================================================================
@@ -969,13 +975,13 @@
         :live/system]}))))
 
 (defn- request-biff-listener-poll!
-  "Requests an immediate optional Biff XTDB2 listener poll.
+  "Requests an immediate optional Biff 2 XTDB listener poll.
 
    This is only a latency optimization. A listener-hook failure after a
    successful commit must not make the transaction appear to have failed."
   [ctx]
   (when-some [poll-now
-              (:biff.xtdb.listener/poll-now
+              (:biff.xtdb/poll-now
                ctx)]
     (try
       (poll-now)

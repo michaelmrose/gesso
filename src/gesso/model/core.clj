@@ -8,7 +8,7 @@
    - ordinary by-id and equality Graph lookups
    - ordinary document Graph projections and their registry schemas
    - simple single-document Gesso FX operations
-   - Biff module assembly
+   - Biff 2 module assembly
 
    Complex Graph relationships and complex FX workflows stay application code
    and use the same gesso.model.command / gesso.model.tx primitives.
@@ -53,7 +53,8 @@
    :now is added. Anything that does not naturally fit those conventions
    belongs in ordinary hand-written gesso.fx code."
   (:require
-   [com.biffweb.experimental :as biffx]
+   [com.biffweb.core :as biff.core]
+   [com.biffweb.xtdb :as biff.xtdb]
    [gesso.fx :as fx]
    [gesso.graph :as graph]
    [gesso.model.command :as command]
@@ -561,11 +562,27 @@
 ;; Persistence read boundary
 ;; =============================================================================
 
-(defn- connection! [ctx]
-  (or (:biff/conn ctx)
-      (fail! ::missing-biff-connection
-             "Generated model reads require :biff/conn."
-             {:ctx-keys (when (map? ctx) (set (keys ctx)))})))
+(defn- query-context!
+  [ctx]
+  (if
+   (and
+    (map?
+     ctx)
+    (or
+     (:biff.xtdb/connection-pool ctx)
+     (:biff.xtdb/node ctx)))
+    ctx
+
+    (fail!
+     ::missing-biff-connection
+     "Generated model reads require Biff 2 XTDB context with :biff.xtdb/connection-pool or :biff.xtdb/node."
+     {:ctx-keys
+      (when
+       (map?
+        ctx)
+       (set
+        (keys
+         ctx)))})))
 
 (defn- normalize-loaded-document [descriptor ctx document]
   (model.schema/normalize-and-validate
@@ -581,10 +598,10 @@
   (when (some? id)
     (when-let [raw
                (first
-                (biffx/q
-                 (connection! ctx)
+                (biff.xtdb/q
+                 (query-context! ctx)
                  {:select (document-columns descriptor)
-                  :from (:entity-type descriptor)
+                  :from [(:entity-type descriptor)]
                   :where [:= (identity-storage-key descriptor) id]}))]
       (normalize-loaded-document descriptor ctx raw))))
 
@@ -603,10 +620,10 @@
     (let [documents
           (mapv
            #(normalize-loaded-document descriptor ctx %)
-           (biffx/q
-            (connection! ctx)
+           (biff.xtdb/q
+            (query-context! ctx)
             {:select (document-columns descriptor)
-             :from (:entity-type descriptor)
+             :from [(:entity-type descriptor)]
              :where [:= field value]}))]
       (case (count documents)
         0 nil
@@ -1028,6 +1045,18 @@
    {}
    descriptors))
 
+(defn- schema-init
+  "Returns a Biff 2 module initializer that installs schemas into the global
+   biff.core registry.
+
+   The module also retains its :schema value during the staged Gesso migration
+   because the current gesso.graph implementation still consumes that key."
+  [schema]
+  (fn [_modules-var]
+    (biff.core/register
+     schema)
+    {}))
+
 (defn build-module
   "Compiles descriptors plus explicit application escape hatches.
 
@@ -1035,6 +1064,10 @@
      {:schema      {...}
       :resolvers   [...]
       :fx-handlers {...}}
+
+   Schemas are registered with Biff 2 through :biff.core/init. The :schema
+   key remains in the returned module during the staged Gesso migration because
+   current gesso.graph still consumes it.
 
    Install (gesso.model.tx/module) separately once for the application."
   ([descriptors]
@@ -1093,8 +1126,15 @@
           ::custom-fx-handler-collision
           "Custom FX handlers must not replace generated model operations.")]
      (cond->
-      {:schema complete-schema
-       :biff.graph/resolvers complete-resolvers}
+      {:schema
+       complete-schema
+
+       :biff.core/init
+       (schema-init
+        complete-schema)
+
+       :biff.graph/resolvers
+       complete-resolvers}
        (seq complete-handlers)
        (assoc :biff.fx/handlers complete-handlers)))))
 
@@ -1128,7 +1168,14 @@
      :fx-handlers handlers
      :module
      (cond->
-      {:schema schema
-       :biff.graph/resolvers resolvers}
+      {:schema
+       schema
+
+       :biff.core/init
+       (schema-init
+        schema)
+
+       :biff.graph/resolvers
+       resolvers}
        (seq handlers)
        (assoc :biff.fx/handlers handlers))}))
