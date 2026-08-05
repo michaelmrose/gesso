@@ -61,7 +61,12 @@ com.biffweb/xtdb
   {:mvn/version "7.0.2"}}
 
  :aliases
- {:test
+ {
+  :dev
+  {:extra-deps
+   {org.clojure/clojurescript
+    {:mvn/version "1.12.145"}}}
+  :test
   {:extra-paths ["test"]
 
    :extra-deps

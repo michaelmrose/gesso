@@ -1,6 +1,18 @@
 {:paths ["src" "resources"]
  :tasks
- {themes
+ {
+  optimistic
+  {:doc "Generate the Gesso Live runtime responsible for optimistic rendering."
+   :task
+   (shell "clojure"
+          "-M:dev"
+          "-m" "cljs.main"
+          "-O" "advanced"
+          "-co" "{:output-dir \"target/gesso-live-cljs\"}"
+          "-o" "resources/public/js/gesso-live.js"
+          "-c" "gesso.live.runtime")}
+
+  themes
   (do
     (println "running themes task")
     ((requiring-resolve 'gesso.build.themes/build!)

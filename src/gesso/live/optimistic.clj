@@ -1,26 +1,25 @@
 (ns gesso.live.optimistic
-  "Server-rendered optimistic UI protocol helpers for gesso.live.
+  "Server-side API and wire protocol for Gesso Live optimistic transitions.
 
-   This namespace owns the Clojure-facing half of the browser protocol already
-   implemented by gesso-live.js:
+   This namespace owns the JVM-facing half of optimistic execution:
 
-   - optimistic template identity
-   - optimistic source attrs
-   - optimistic target selection
-   - optional action and pending-label metadata
-   - one-root <template> markup
-   - target-scoped single-flight sync defaults
+   - transition descriptor validation and normalization
+   - server-rendered optimistic projection templates
+   - browser protocol attributes
+   - stable semantic scope and revision metadata
+   - explicit semantic settlement markers
 
-   It intentionally does not own:
+   It deliberately does not own:
 
-   - HTMX POST controls or anti-forgery markup
-   - application routes
-   - application/domain transitions
-   - visual components
-   - browser snapshot, swap, rollback, or reconciliation behavior
+   - application/domain transition policy
+   - HTMX request controls or anti-forgery markup
+   - browser execution state
+   - DOM capture, projection, rollback, or reconciliation
+   - authoritative rendering
 
-   gesso.live.ui should compose these helpers with post-button. Application
-   views should supply already-rendered optimistic content."
+   gesso.live.ui composes transition descriptors with HTMX controls.
+   gesso.live.optimistic-machine owns the shared execution semantics.
+   gesso.live.runtime owns irreducibly browser-specific effects."
   (:require
    [clojure.string :as str]
    [gesso.live.htmx :as htmx])
@@ -28,34 +27,138 @@
    [java.util UUID]))
 
 ;; -----------------------------------------------------------------------------
-;; Browser protocol names
+;; Protocol identity
 ;; -----------------------------------------------------------------------------
+
+(def protocol-version
+  "Wire protocol version emitted by this namespace and consumed by the browser
+   runtime. Increment this when markup or settlement semantics become
+   incompatible."
+  "1")
 
 (def descriptor-type
   :gesso.live.optimistic/descriptor)
 
-(def template-attr
-  "Source/template attribute used to associate an optimistic action with its
-   server-rendered <template>."
-  :data-gesso-optimistic-template)
+(def settlement-type
+  :gesso.live.optimistic/settlement)
 
-(def action-attr
-  "Optional semantic action name exposed to the browser runtime and CSS."
-  :data-gesso-optimistic-action)
-
-(def target-attr
-  "Selector understood by gesso-live.js for resolving the replaceable target."
-  :data-gesso-optimistic-target)
-
-(def label-attr
-  "Optional immediate press/pending label used by the browser runtime."
-  :data-gesso-optimistic-label)
+(def default-machine
+  :gesso.live.optimistic/default)
 
 (def default-template-prefix
   "gesso-optimistic-template-")
 
 (def default-sync-strategy
   "drop")
+
+(def default-projection-mode
+  :provisional)
+
+(def projection-modes
+  "Presentation strength advertised to application CSS and diagnostics.
+
+   :pending
+     Immediate pending presentation without claiming the expected final result.
+
+   :provisional
+     Likely result rendered with visible pending/uncertain presentation.
+
+   :full
+     Final-looking speculative presentation. Use only when the expected outcome
+     is sufficiently deterministic."
+  #{:pending :provisional :full})
+
+(def settlement-outcomes
+  "Generic semantic outcomes understood by Gesso.
+
+   :confirmed
+     The command was applied and canonical state materially confirms the
+     projection.
+
+   :reconciled
+     The command was applied, but canonical state differs because of concurrent
+     activity or application policy.
+
+   :rejected
+     The application deliberately did not apply the command.
+
+   :failed
+     The server produced an explicit infrastructure/application failure result.
+     Network failures that produce no response are handled by the browser
+     runtime rather than by a settlement marker."
+  #{:confirmed :reconciled :rejected :failed})
+
+;; -----------------------------------------------------------------------------
+;; Browser protocol names
+;; -----------------------------------------------------------------------------
+
+(def protocol-attr
+  :data-gesso-optimistic-protocol)
+
+(def machine-attr
+  :data-gesso-optimistic-machine)
+
+(def transition-attr
+  :data-gesso-optimistic-transition)
+
+(def template-attr
+  :data-gesso-optimistic-template)
+
+(def target-attr
+  :data-gesso-optimistic-target)
+
+(def scope-attr
+  :data-gesso-optimistic-scope)
+
+(def base-revision-attr
+  :data-gesso-optimistic-base-revision)
+
+(def revision-attr
+  :data-gesso-optimistic-revision)
+
+(def pending-label-attr
+  :data-gesso-optimistic-label)
+
+(def projection-mode-attr
+  :data-gesso-optimistic-mode)
+
+(def settlement-attr
+  :data-gesso-optimistic-settlement)
+
+(def execution-attr
+  :data-gesso-optimistic-execution)
+
+(def outcome-attr
+  :data-gesso-optimistic-outcome)
+
+(def command-applied-attr
+  :data-gesso-optimistic-command-applied)
+
+(def reason-attr
+  :data-gesso-optimistic-reason)
+
+(def execution-request-header
+  "Lower-case Ring request header used to correlate an HTMX command with its
+   browser-side optimistic execution. The browser sends the corresponding HTTP
+   header `Gesso-Optimistic-Execution`."
+  "gesso-optimistic-execution")
+
+(def ^:private reserved-protocol-attrs
+  [protocol-attr
+   machine-attr
+   transition-attr
+   template-attr
+   target-attr
+   scope-attr
+   base-revision-attr
+   revision-attr
+   pending-label-attr
+   projection-mode-attr
+   settlement-attr
+   execution-attr
+   outcome-attr
+   command-applied-attr
+   reason-attr])
 
 ;; -----------------------------------------------------------------------------
 ;; Validation and normalization
@@ -100,23 +203,41 @@
          {k value})))
   value)
 
-(defn- normalize-name
+(defn- qualified-name
   [x]
   (cond
-    (keyword? x) (name x)
-    (symbol? x)  (name x)
-    (nil? x)     nil
-    :else        (str x)))
+    (keyword? x)
+    (if-some [namespace' (namespace x)]
+      (str namespace' "/" (name x))
+      (name x))
+
+    (symbol? x)
+    (str x)
+
+    (nil? x)
+    nil
+
+    :else
+    (str x)))
+
+(defn- normalize-name
+  [k value]
+  (let [value' (qualified-name value)]
+    (when-not (and value'
+                   (not (str/blank? value')))
+      (throw
+       (ex (str "gesso.live optimistic " k " must not be blank.")
+           {k value})))
+    value'))
 
 (defn- normalize-optional-name
   [k value]
   (when (some? value)
-    (let [value' (normalize-name value)]
-      (when (str/blank? value')
-        (throw
-         (ex (str "gesso.live optimistic " k " must not be blank.")
-             {k value})))
-      value')))
+    (normalize-name k value)))
+
+(defn- normalize-transition
+  [transition]
+  (normalize-name :transition transition))
 
 (defn- normalize-pending-label
   [value]
@@ -138,6 +259,47 @@
     (throw
      (ex "gesso.live optimistic :sync must be nil, false, or a non-blank string."
          {:sync sync}))))
+
+(defn- normalize-projection-mode
+  [mode]
+  (let [mode' (or mode default-projection-mode)]
+    (when-not (contains? projection-modes mode')
+      (throw
+       (ex "gesso.live optimistic :projection-mode is invalid."
+           {:projection-mode mode
+            :allowed projection-modes})))
+    mode'))
+
+(defn- wire-scope
+  [scope]
+  (require-present! :scope scope)
+  (let [scope' (if (string? scope)
+                 scope
+                 (pr-str scope))]
+    (require-non-blank-string! :scope scope')))
+
+(defn- normalize-revision
+  [k revision]
+  (when (some? revision)
+    (cond
+      (and (integer? revision)
+           (not (neg? revision)))
+      revision
+
+      (and (string? revision)
+           (not (str/blank? revision)))
+      revision
+
+      :else
+      (throw
+       (ex (str "gesso.live optimistic " k
+                " must be a non-negative integer or non-blank string.")
+           {k revision})))))
+
+(defn- revision->wire
+  [revision]
+  (when (some? revision)
+    (str revision)))
 
 (defn- hiccup-tag?
   [x]
@@ -164,8 +326,12 @@
          {:content content})))
   content)
 
+(defn- remove-protocol-attrs
+  [attrs protocol-attrs]
+  (apply dissoc attrs protocol-attrs))
+
 ;; -----------------------------------------------------------------------------
-;; Descriptor construction
+;; Projection descriptor construction
 ;; -----------------------------------------------------------------------------
 
 (defn new-template-name
@@ -185,81 +351,106 @@
    (let [target'   (->> target
                         (require-non-blank-string! :target)
                         htmx/normalize-target)
-         strategy' (normalize-optional-name :strategy strategy)]
-     (when-not strategy'
-       (throw
-        (ex "gesso.live optimistic sync strategy is required."
-            {:strategy strategy})))
+         strategy' (normalize-name :strategy strategy)]
      (str target' ":" strategy'))))
 
 (defn ->optimistic
-  "Create an optimistic-render descriptor.
+  "Create a prepared optimistic transition descriptor.
 
    Required:
+
+     :transition
+       Semantic transition identifier. Qualified keywords are preserved on the
+       wire, e.g. :request/join becomes \"request/join\".
+
+     :scope
+       Stable semantic identity for the projected region or entity. Strings are
+       emitted unchanged; other values are emitted with `pr-str` and treated by
+       the browser as opaque identities.
+
      :target
-       Selector for the existing element that gesso-live.js should replace in
-       place. Bare ids are normalized to CSS id selectors.
+       Selector for the existing element that the browser runtime should
+       project into. Bare ids are normalized to CSS id selectors.
 
      :content
        Exactly one rooted Hiccup element. Its rendered root tag must match the
-       current target element's tag; the browser runtime validates that at use
-       time.
+       existing target element's tag; the browser runtime validates this before
+       installation.
 
    Optional:
-     :template-name
-       Explicit template identity. Normally generated automatically. This is
-       primarily useful for deterministic tests or app-owned diagnostics.
 
-     :action
-       Semantic action name, usually a keyword such as :claim.
+     :machine
+       Browser machine identifier. Defaults to
+       :gesso.live.optimistic/default.
+
+     :base-revision
+       Canonical revision from which this projection was rendered. May be a
+       non-negative integer or opaque non-blank string.
+
+     :projection-mode
+       One of :pending, :provisional, or :full. Defaults to :provisional.
+
+     :template-name
+       Explicit template identity. Normally generated automatically; useful for
+       deterministic tests and diagnostics.
 
      :pending-label
-       Immediate press/pending text such as \"Claiming…\".
+       Immediate press/pending text such as \"Joining…\".
 
      :sync
-       HTMX hx-sync value consumed later by gesso.live.ui. When omitted, a
-       target-scoped \"...:drop\" value is derived. Explicit nil/false disables
-       the suggested sync value.
+       HTMX hx-sync value consumed by gesso.live.ui. When omitted, a
+       target-scoped `...:drop` value is derived. Explicit nil/false disables the
+       suggested sync value.
 
      :attrs
-       Extra attrs for the action source. Required optimistic protocol attrs
-       always win over conflicting caller values.
+       Extra attrs for the HTMX request owner. Required protocol attrs always
+       win over conflicting caller values.
 
      :template-attrs
-       Extra attrs for the <template>. The generated template identity always
-       wins over conflicting caller values."
-  [{:keys [target
+       Extra attrs for the hidden <template>. Required protocol attrs always win
+       over conflicting caller values."
+  [{:keys [transition
+           target
+           scope
+           base-revision
            content
+           machine
+           projection-mode
            template-name
-           action
            pending-label
            attrs
            template-attrs]
     :as opts}]
-  (let [target'         (->> target
-                             (require-non-blank-string! :target)
-                             htmx/normalize-target)
-        content'        (->> content
-                             (require-present! :content)
-                             require-single-root!)
-        template-name'  (or (normalize-optional-name :template-name
-                                                     template-name)
-                            (new-template-name))
-        action'         (normalize-optional-name :action action)
-        pending-label'  (normalize-pending-label pending-label)
-        attrs'          (require-map! :attrs (if (nil? attrs) {} attrs))
-        template-attrs' (require-map! :template-attrs
-                                      (if (nil? template-attrs)
-                                        {}
-                                        template-attrs))
-        sync'           (if (contains? opts :sync)
-                          (normalize-sync (:sync opts))
-                          (target-sync target'))]
+  (let [transition'      (normalize-transition transition)
+        target'          (->> target
+                              (require-non-blank-string! :target)
+                              htmx/normalize-target)
+        scope'           (wire-scope scope)
+        base-revision'   (normalize-revision :base-revision base-revision)
+        content'         (->> content
+                              (require-present! :content)
+                              require-single-root!)
+        machine'         (normalize-name :machine (or machine default-machine))
+        mode'            (normalize-projection-mode projection-mode)
+        template-name'   (or (normalize-optional-name :template-name
+                                                       template-name)
+                             (new-template-name))
+        pending-label'   (normalize-pending-label pending-label)
+        attrs'           (require-map! :attrs (or attrs {}))
+        template-attrs'  (require-map! :template-attrs (or template-attrs {}))
+        sync'            (if (contains? opts :sync)
+                           (normalize-sync (:sync opts))
+                           (target-sync target'))]
     {:gesso.live.optimistic/type descriptor-type
-     :template-name template-name'
+     :protocol-version protocol-version
+     :machine machine'
+     :transition transition'
+     :scope scope'
+     :base-revision base-revision'
      :target target'
      :content content'
-     :action action'
+     :projection-mode mode'
+     :template-name template-name'
      :pending-label pending-label'
      :sync sync'
      :attrs attrs'
@@ -272,7 +463,7 @@
           (:gesso.live.optimistic/type x))))
 
 (defn ensure-optimistic
-  "Return descriptor unchanged, or normalize a raw optimistic options map."
+  "Return a prepared descriptor unchanged, or normalize a raw options map."
   [optimistic]
   (if (optimistic? optimistic)
     optimistic
@@ -288,58 +479,247 @@
   optimistic)
 
 ;; -----------------------------------------------------------------------------
-;; Browser-facing markup pieces
+;; Canonical scope metadata
+;; -----------------------------------------------------------------------------
+
+(defn canonical-attrs
+  "Return attrs for an authoritative rendered scope.
+
+   The browser runtime uses these attrs to compare canonical replacements with
+   pending optimistic executions. `scope` is required. `revision` is optional,
+   but revision-aware reconciliation requires it."
+  [{:keys [scope revision]}]
+  (let [scope'    (wire-scope scope)
+        revision' (normalize-revision :revision revision)]
+    (htmx/clean-attrs
+     {protocol-attr protocol-version
+      scope-attr scope'
+      revision-attr (revision->wire revision')})))
+
+;; -----------------------------------------------------------------------------
+;; Browser-facing projection markup
 ;; -----------------------------------------------------------------------------
 
 (defn source-attrs
-  "Build browser-protocol attrs for the element that owns the HTMX request.
+  "Build protocol attrs for the element that owns the HTMX request.
 
-   optimistic must be a prepared descriptor so source attrs and template markup
-   cannot accidentally generate different identities. Caller attrs are
-   preserved, but may not override Gesso's optimistic protocol attrs."
+   `optimistic` must be a prepared descriptor so source attrs and template
+   markup cannot accidentally receive different generated identities."
   [optimistic]
-  (let [{:keys [template-name
+  (let [{:keys [protocol-version
+                machine
+                transition
+                template-name
                 target
-                action
+                scope
+                base-revision
                 pending-label
+                projection-mode
                 attrs]} (require-descriptor! optimistic)
-        attrs' (apply dissoc
-                      attrs
-                      [template-attr action-attr target-attr label-attr])]
+        attrs' (remove-protocol-attrs attrs reserved-protocol-attrs)]
     (htmx/merge-attrs
      attrs'
-     {template-attr template-name
-      target-attr target}
-     (when action
-       {action-attr action})
+     {protocol-attr protocol-version
+      machine-attr machine
+      transition-attr transition
+      template-attr template-name
+      target-attr target
+      scope-attr scope
+      projection-mode-attr (name projection-mode)}
+     (when (some? base-revision)
+       {base-revision-attr (revision->wire base-revision)})
      (when pending-label
-       {label-attr pending-label}))))
+       {pending-label-attr pending-label}))))
 
 (defn template
-  "Render the hidden optimistic <template> associated with a prepared descriptor."
+  "Render the hidden optimistic projection <template> for a prepared descriptor."
   [optimistic]
-  (let [{:keys [template-name
+  (let [{:keys [protocol-version
+                transition
+                template-name
+                scope
+                projection-mode
                 content
                 template-attrs]} (require-descriptor! optimistic)
-        template-attrs' (apply dissoc
-                               template-attrs
-                               [template-attr action-attr target-attr label-attr])]
+        template-attrs' (remove-protocol-attrs template-attrs
+                                               reserved-protocol-attrs)]
     [:template
      (htmx/clean-attrs
       (merge
        template-attrs'
-       {template-attr template-name}))
+       {protocol-attr protocol-version
+        transition-attr transition
+        template-attr template-name
+        scope-attr scope
+        projection-mode-attr (name projection-mode)}))
      content]))
 
 (defn render-parts
-  "Return all pieces needed by a higher-level UI helper.
+  "Return all pieces needed by a higher-level HTMX UI helper.
 
-   :source-attrs belongs on the actual HTMX request owner.
-   :template should be rendered close to that source.
-   :sync is the suggested hx-sync value."
+   :source-attrs
+     Belongs on the actual HTMX request owner.
+
+   :template
+     Should be rendered near the action source or within the same stable scope.
+
+   :sync
+     Suggested hx-sync value.
+
+   :optimistic
+     Prepared descriptor for diagnostics or higher-level composition."
   [optimistic]
   (let [optimistic' (ensure-optimistic optimistic)]
     {:optimistic optimistic'
      :source-attrs (source-attrs optimistic')
      :template (template optimistic')
      :sync (:sync optimistic')}))
+
+;; -----------------------------------------------------------------------------
+;; Request execution identity
+;; -----------------------------------------------------------------------------
+
+(defn request-execution-id
+  "Return the optimistic execution id supplied by the browser, when present.
+
+   Supports the normal lower-case Ring header and explicit context injection for
+   tests or custom adapters."
+  [ctx]
+  (or (:gesso.live.optimistic/execution-id ctx)
+      (get-in ctx [:headers execution-request-header])
+      (get-in ctx [:headers "Gesso-Optimistic-Execution"])
+      (get-in ctx [:request :headers execution-request-header])
+      (get-in ctx [:request :headers "Gesso-Optimistic-Execution"])))
+
+;; -----------------------------------------------------------------------------
+;; Explicit semantic settlement
+;; -----------------------------------------------------------------------------
+
+(defn- default-command-applied?
+  [outcome]
+  (contains? #{:confirmed :reconciled} outcome))
+
+(defn ->settlement
+  "Create a prepared explicit settlement descriptor.
+
+   Required:
+
+     :execution-id
+       Browser-generated execution identity from `request-execution-id`.
+
+     :transition
+       Semantic transition identifier originally rendered on the action.
+
+     :scope
+       Stable semantic scope settled by this response.
+
+     :outcome
+       One of :confirmed, :reconciled, :rejected, or :failed.
+
+   Optional:
+
+     :revision
+       Newest canonical revision represented by the response.
+
+     :command-applied?
+       Whether the application command took effect. Defaults to true for
+       :confirmed/:reconciled and false for :rejected/:failed.
+
+     :reason
+       Opaque application reason identifier for diagnostics or application UI.
+       Gesso does not interpret it.
+
+   A semantic settlement should normally accompany authoritative rendered
+   content for the affected scope, including rejection responses. Snapshot
+   restoration is reserved for failures that produce no authoritative result."
+  [{:keys [execution-id
+           transition
+           scope
+           outcome
+           revision
+           command-applied?
+           reason]
+    :as opts}]
+  (let [execution-id' (require-non-blank-string! :execution-id execution-id)
+        transition'   (normalize-name :transition transition)
+        scope'        (wire-scope scope)
+        revision'     (normalize-revision :revision revision)
+        reason'       (normalize-optional-name :reason reason)]
+    (when-not (contains? settlement-outcomes outcome)
+      (throw
+       (ex "gesso.live optimistic settlement :outcome is invalid."
+           {:outcome outcome
+            :allowed settlement-outcomes})))
+    (when (and (contains? opts :command-applied?)
+               (not (instance? Boolean command-applied?)))
+      (throw
+       (ex "gesso.live optimistic settlement :command-applied? must be boolean."
+           {:command-applied? command-applied?})))
+    {:gesso.live.optimistic/type settlement-type
+     :protocol-version protocol-version
+     :execution-id execution-id'
+     :transition transition'
+     :scope scope'
+     :outcome outcome
+     :revision revision'
+     :command-applied? (if (contains? opts :command-applied?)
+                         command-applied?
+                         (default-command-applied? outcome))
+     :reason reason'}))
+
+(defn settlement?
+  [x]
+  (and (map? x)
+       (= settlement-type
+          (:gesso.live.optimistic/type x))))
+
+(defn ensure-settlement
+  "Return a prepared settlement unchanged, or normalize a raw options map."
+  [settlement]
+  (if (settlement? settlement)
+    settlement
+    (->settlement settlement)))
+
+(defn settlement-for-request
+  "Create a settlement descriptor using the browser execution id from `ctx`."
+  [ctx opts]
+  (->settlement
+   (assoc opts :execution-id (or (:execution-id opts)
+                                 (request-execution-id ctx)))))
+
+(defn settlement-marker
+  "Render an inert <template> carrying explicit semantic settlement metadata.
+
+   The browser runtime reads this marker from the HTMX response. It is not a DOM
+   replacement and contains no application content."
+  [settlement]
+  (let [{:keys [protocol-version
+                execution-id
+                transition
+                scope
+                outcome
+                revision
+                command-applied?
+                reason]} (ensure-settlement settlement)]
+    [:template
+     (htmx/clean-attrs
+      {protocol-attr protocol-version
+       settlement-attr "true"
+       execution-attr execution-id
+       transition-attr transition
+       scope-attr scope
+       outcome-attr (name outcome)
+       revision-attr (revision->wire revision)
+       command-applied-attr (if command-applied? "true" "false")
+       reason-attr reason})]))
+
+(defn with-settlement
+  "Wrap authoritative response nodes with an explicit settlement marker first.
+
+   The display-contents wrapper is suitable for responses that otherwise consist
+   of OOB fragments and/or toast markup."
+  [settlement & nodes]
+  (into
+   [:div {:style {:display "contents"}}]
+   (cons (settlement-marker settlement)
+         (remove nil? nodes))))
