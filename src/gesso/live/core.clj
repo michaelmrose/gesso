@@ -12,6 +12,7 @@
    - fragment render protection
    - app-facing XTDB2 consistency helpers
    - app-facing HTMX/UI helpers
+   - optimistic rendering/settlement facade
 
    It intentionally stays thin. The specialized namespaces still own their own
    behavior:
@@ -46,7 +47,10 @@
        owns browser-facing raw HTMX attribute builders
 
      gesso.live.ui
-       owns Hiccup convenience helpers for live fragments and POST controls"
+       owns Hiccup convenience helpers for live fragments and POST controls
+
+     gesso.live.optimistic
+       owns the JVM-facing optimistic protocol-v2 rendering/settlement edge"
   (:require
    [gesso.live.consistency.xtdb :as live.xtdb]
    [gesso.live.dispatch :as dispatch]
@@ -55,6 +59,7 @@
    [gesso.live.htmx :as htmx]
    [gesso.live.invalidation :as invalidation]
    [gesso.live.model :as model]
+   [gesso.live.optimistic :as optimistic]
    [gesso.live.source :as source]
    [gesso.live.synced :as synced]
    [gesso.live.transport.sse :as sse]
@@ -607,10 +612,17 @@
   live.ui/post-form)
 
 (def post-button
-  "Render a tiny HTMX POST form containing one submit button.
+  "Render a tiny type=button HTMX POST control, optionally with :optimistic.
 
    Re-export of gesso.live.ui/post-button."
   live.ui/post-button)
+
+(def optimistic-post-button
+  "Compatibility alias for optimistic POST controls. New code should pass
+   :optimistic directly to post-button.
+
+   Re-export of gesso.live.ui/optimistic-post-button."
+  live.ui/optimistic-post-button)
 
 (def anti-forgery-token
   "Extract an anti-forgery token from ctx.
@@ -623,6 +635,75 @@
 
    Re-export of gesso.live.ui/anti-forgery-input."
   live.ui/anti-forgery-input)
+
+
+;; -----------------------------------------------------------------------------
+;; Optimistic protocol-v2 facade
+;; -----------------------------------------------------------------------------
+
+(def ->optimistic
+  "Prepare one optimistic rendering descriptor.
+
+   Re-export of gesso.live.optimistic/->optimistic."
+  optimistic/->optimistic)
+
+(def optimistic?
+  "Return true for a prepared optimistic protocol-v2 descriptor.
+
+   Re-export of gesso.live.optimistic/optimistic?."
+  optimistic/optimistic?)
+
+(def canonical
+  "Mark one rooted Hiccup element explicitly authoritative for a semantic scope
+   and optional revision.
+
+   Re-export of gesso.live.optimistic/canonical."
+  optimistic/canonical)
+
+(def canonical-attrs
+  "Build explicit canonical protocol attrs for a semantic scope/revision.
+
+   Prefer canonical when rendering a complete authoritative Hiccup root.
+   Re-export of gesso.live.optimistic/canonical-attrs."
+  optimistic/canonical-attrs)
+
+(def request-execution-id
+  "Read the browser-generated optimistic execution id from request context.
+
+   Re-export of gesso.live.optimistic/request-execution-id."
+  optimistic/request-execution-id)
+
+(def ->settlement
+  "Prepare one semantic optimistic settlement descriptor.
+
+   Re-export of gesso.live.optimistic/->settlement."
+  optimistic/->settlement)
+
+(def settlement?
+  "Return true for a prepared optimistic protocol-v2 settlement.
+
+   Re-export of gesso.live.optimistic/settlement?."
+  optimistic/settlement?)
+
+(def settlement-for-request
+  "Prepare a settlement using the optimistic execution id carried by request ctx.
+
+   Re-export of gesso.live.optimistic/settlement-for-request."
+  optimistic/settlement-for-request)
+
+(def settlement-marker
+  "Render the inert semantic settlement marker.
+
+   Normal response code should prefer with-settlement, which also marks the
+   authoritative root from the same settlement scope/revision.
+   Re-export of gesso.live.optimistic/settlement-marker."
+  optimistic/settlement-marker)
+
+(def with-settlement
+  "Render a settlement marker plus canonical authoritative content.
+
+   Re-export of gesso.live.optimistic/with-settlement."
+  optimistic/with-settlement)
 
 ;; -----------------------------------------------------------------------------
 ;; Model-backed fragment UI facade

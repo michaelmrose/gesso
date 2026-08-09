@@ -27,7 +27,8 @@
    configs with gesso.live.schema. These low-level attr builders still validate
    obvious required options so they do not silently produce broken HTMX markup."
   (:require
-   [clojure.string :as str]))
+   [clojure.string :as str]
+   [gesso.live.protocol :as protocol]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
@@ -75,7 +76,7 @@
 (def default-client-continuity-attr
   "Attribute used to mark a stable live fragment root as owning client-continuity
    capture/restore configuration."
-  :data-gesso-live-continuity)
+  protocol/continuity-attr)
 
 (def default-client-continuity-config-attr
   "Attribute used to carry normalized client-continuity config for the browser
@@ -83,12 +84,12 @@
 
    The value is JSON so the small browser runtime can parse it without an EDN
    parser."
-  :data-gesso-live-continuity-config)
+  protocol/continuity-config-attr)
 
 (def default-client-continuity-fragment-attr
   "Attribute used to record the fragment target id associated with a
    client-continuity root."
-  :data-gesso-live-continuity-fragment)
+  protocol/continuity-fragment-attr)
 
 
 ;; -----------------------------------------------------------------------------
@@ -232,7 +233,7 @@
 (defn token-header-name
   "Return the canonical request header used for propagated consistency tokens."
   []
-  "x-gesso-live-consistency-token")
+  protocol/consistency-token-header-name)
 
 (defn event-name
   "Normalize an app-facing event reference to an SSE event name.
