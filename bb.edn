@@ -2,15 +2,15 @@
  :tasks
  {
   optimistic
-  {:doc "Generate the Gesso Live runtime responsible for optimistic rendering."
-   :task
-   (shell "clojure"
-          "-M:dev"
-          "-m" "cljs.main"
-          "-O" "advanced"
-          "-co" "{:output-dir \"target/gesso-live-cljs\"}"
-          "-o" "resources/public/js/gesso-live.js"
-          "-c" "gesso.live.runtime")}
+{:doc "Generate the Gesso Live browser runtime."
+ :task
+ (shell "clojure"
+        "-M:dev"
+        "-m" "cljs.main"
+        "-O" "advanced"
+        "-co" "{:output-dir \"target/gesso-live-cljs\"}"
+        "-o" "resources/public/js/gesso-live.js"
+        "-c" "gesso.live.browser.core")}
 
   themes
   (do

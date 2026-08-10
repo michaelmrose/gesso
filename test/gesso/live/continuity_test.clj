@@ -3,7 +3,6 @@
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [gesso.live.continuity :as continuity]
-   [gesso.live.htmx :as htmx]
    [gesso.live.ui :as ui]))
 
 ;; -----------------------------------------------------------------------------
@@ -264,7 +263,7 @@
            continuity/hx-preserve-attrs))))
 
 ;; -----------------------------------------------------------------------------
-;; HTMX attr/config contract tests
+;; Continuity wire/config contract tests
 ;; -----------------------------------------------------------------------------
 
 (deftest normalize-client-continuity-test
@@ -275,14 +274,14 @@
     (is (= {:enabled true
             :preserve {:scroll true
                        :focus true}}
-           (htmx/normalize-client-continuity true))))
+           (continuity/normalize-client-continuity true))))
 
   (testing "preserve sugar normalizes into the runtime preserve map"
     (is (= {:enabled true
             :preserve {:scroll true
                        :focus true
                        :inputs {:selector "[data-input]"}}}
-           (htmx/normalize-client-continuity
+           (continuity/normalize-client-continuity
             {:preserve-scroll true
              :preserve-focus true
              :preserve-inputs {:selector "[data-input]"}}))))
@@ -291,7 +290,7 @@
     (is (= {:enabled true
             :preserve {:scroll {:selector "[data-card]"}
                        :focus true}}
-           (htmx/normalize-client-continuity
+           (continuity/normalize-client-continuity
             (continuity/preserve
              {:scroll {:selector "[data-card]"}
               :focus true}))))))
@@ -299,12 +298,12 @@
 (deftest client-continuity-attrs-test
   (testing "disabled continuity emits no attrs"
     (is (= {}
-           (htmx/client-continuity-attrs
+           (continuity/client-continuity-attrs
             {:fragment-id "request-list"
              :client-continuity false}))))
 
   (testing "raw scroll/focus config is encoded on the stable root"
-    (let [attrs (htmx/client-continuity-attrs
+    (let [attrs (continuity/client-continuity-attrs
                  {:fragment-id "request-list"
                   :client-continuity (continuity/preserve
                                       {:scroll true
@@ -318,7 +317,7 @@
       (is (str/includes? config "\"focus\":true"))))
 
   (testing "anchor selector config is encoded on the stable root"
-    (let [attrs (htmx/client-continuity-attrs
+    (let [attrs (continuity/client-continuity-attrs
                  {:fragment-id "request-list"
                   :client-continuity (continuity/preserve
                                       {:scroll {:selector "[data-card]"}
@@ -327,6 +326,63 @@
       (is (= "true" (:data-gesso-live-continuity attrs)))
       (is (= "request-list" (:data-gesso-live-continuity-fragment attrs)))
       (is (str/includes? config "\"selector\":\"[data-card]\"")))))
+
+(deftest continuity-wire-attrs-test
+  (testing "continuity owns the exact browser-runtime attribute vocabulary"
+    (is (= :data-gesso-live-continuity
+           continuity/continuity-attr))
+    (is (= :data-gesso-live-continuity-config
+           continuity/continuity-config-attr))
+    (is (= :data-gesso-live-continuity-fragment
+           continuity/continuity-fragment-attr))
+    (is (= #{:data-gesso-live-continuity
+             :data-gesso-live-continuity-config
+             :data-gesso-live-continuity-fragment}
+           continuity/continuity-attrs))))
+
+(deftest client-continuity-json-test
+  (testing "disabled continuity has no wire representation"
+    (is (nil? (continuity/client-continuity-json nil)))
+    (is (nil? (continuity/client-continuity-json false))))
+
+  (testing "JSON encoding is deterministic regardless of input map insertion order"
+    (let [a (array-map
+             :preserve-focus true
+             :preserve-scroll {:selector "[data-card]"}
+             :custom {:z 3 :a 1})
+          b (array-map
+             :custom (array-map :a 1 :z 3)
+             :preserve-scroll {:selector "[data-card]"}
+             :preserve-focus true)]
+      (is (= (continuity/client-continuity-json a)
+             (continuity/client-continuity-json b)))))
+
+  (testing "Clojure functions cannot leak into browser configuration"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"cannot contain Clojure functions"
+         (continuity/client-continuity-json
+          {:boxes [{:type :custom
+                    :capture (fn [] :nope)}]})))))
+
+(deftest client-continuity-attrs-validation-test
+  (testing "enabled continuity requires a stable fragment id"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"fragment id must be a non-blank string"
+         (continuity/client-continuity-attrs
+          {:client-continuity true})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"fragment id must be a non-blank string"
+         (continuity/client-continuity-attrs
+          {:fragment-id "   "
+           :client-continuity true}))))
+
+  (testing "disabled continuity does not require a fragment id"
+    (is (= {}
+           (continuity/client-continuity-attrs
+            {:client-continuity false})))))
 
 (deftest fragment-panel-continuity-contract-test
   (let [panel (ui/fragment-panel

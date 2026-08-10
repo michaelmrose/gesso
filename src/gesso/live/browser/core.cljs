@@ -1,18 +1,18 @@
-(ns gesso.live.runtime
-  "Generated browser entry point for Gesso Live.
+(ns gesso.live.browser.core
+  "Browser entry point for Gesso Live.
 
    The top-level runtime is intentionally an adapter. Core behavior lives in:
 
-     gesso.live.runtime.dom
+     gesso.live.browser.dom
        trusted DOM mechanics
 
-     gesso.live.runtime.continuity
+     gesso.live.browser.continuity
        the single continuity implementation used by all replacement paths
 
-     gesso.live.runtime.choreo
+     gesso.live.browser.choreo
        generic long-lived choreography execution
 
-     gesso.live.runtime.optimistic
+     gesso.live.browser.optimistic
        browser effects for the verified optimistic choreography
 
    This namespace owns only browser-framework integration:
@@ -28,11 +28,11 @@
    It contains no optimistic state machine and no independent continuity logic."
   (:require
    [clojure.string :as str]
-   [gesso.live.protocol :as protocol]
-   [gesso.live.runtime.choreo :as choreo-runtime]
-   [gesso.live.runtime.continuity :as continuity]
-   [gesso.live.runtime.dom :as dom]
-   [gesso.live.runtime.optimistic :as optimistic]))
+   [gesso.live.optimistic.protocol :as protocol]
+   [gesso.live.browser.choreo :as choreo-runtime]
+   [gesso.live.browser.continuity :as continuity]
+   [gesso.live.browser.dom :as dom]
+   [gesso.live.browser.optimistic :as optimistic]))
 
 ;; -----------------------------------------------------------------------------
 ;; Runtime identity
@@ -44,25 +44,16 @@
 (defonce initialized?
   (atom false))
 
+;; Detached-or-live optimistic source uid -> preflight request information.
+;; Entries are allocated at configRequest so the execution id can be attached
+;; before HTMX sends, then consumed when the choreography starts at beforeRequest.
 (defonce pending-requests
-  "Detached-or-live optimistic source uid -> preflight request information.
-
-   HTMX's configRequest event is the last convenient place to add a request
-   header, but optimistic projection should not remove the action source until
-   HTMX has finished preparing the request. We therefore allocate the execution
-   id at configRequest and start the verified choreography at beforeRequest.
-
-   Entries are short-lived and are removed at start, failure, afterRequest, or
-   source cleanup."
   (atom {}))
 
+;; Source uids whose current HTMX response has already been semantically
+;; consumed by optimistic choreography. This prevents the same response
+;; lifecycle from recapturing over the execution's continuity slot.
 (defonce settled-response-sources
-  "Source uids whose current HTMX response has already been semantically
-   consumed by the optimistic choreography.
-
-   This short-lived marker prevents OOB/beforeSwap events from recapturing over
-   the execution's original continuity slot before its scheduled post-layout
-   restoration runs."
   (atom #{}))
 
 ;; -----------------------------------------------------------------------------
@@ -187,8 +178,8 @@
 ;; -----------------------------------------------------------------------------
 
 (def optimistic-request-header
-  "Browser HTTP spelling for the lower-case Ring header declared by protocol."
-  "Gesso-Optimistic-Execution")
+  "Optimistic execution-correlation request header owned by the shared protocol."
+  protocol/execution-header-name)
 
 (def consistency-request-header
   "Browser HTTP spelling for Gesso's consistency token header."
@@ -288,13 +279,9 @@
   [event]
   (let [headers
         (ensure-headers! event)]
-    (or
-     (header-value
-      headers
-      consistency-request-header)
-     (header-value
-      headers
-      protocol/consistency-token-header-name))))
+    (header-value
+     headers
+     consistency-request-header)))
 
 (defn on-config-request!
   "Allocate optimistic execution identity and attach it to the request.
@@ -352,7 +339,7 @@
               (ex-info
                "Optimistic HTMX request reached beforeRequest without configRequest correlation."
                {:error/type
-                :gesso.live.runtime/missing-optimistic-preflight})]
+                :gesso.live.browser.core/missing-optimistic-preflight})]
           (optimistic/emit!
            (continuity/root source)
            "error"
@@ -659,7 +646,7 @@
   []
   {:version runtime-version
    :protocol-version
-   protocol/optimistic-protocol-version
+   protocol/version
    :pending-request-count
    (count @pending-requests)
    :settled-response-count
@@ -736,7 +723,7 @@
           runtime-version)
     (aset gesso-live
           "protocolVersion"
-          protocol/optimistic-protocol-version)
+          protocol/version)
     (aset gesso-live
           "state"
           js-runtime-state)
@@ -777,7 +764,6 @@
          initialized?
          false
          true)
-    (choreo-runtime/initialize!)
     (continuity/initialize!)
     (optimistic/initialize!)
 

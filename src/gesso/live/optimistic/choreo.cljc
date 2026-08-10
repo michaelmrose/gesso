@@ -1,4 +1,4 @@
-(ns gesso.live.optimistic-choreo
+(ns gesso.live.optimistic.choreo
   "Built-in verified optimistic-command choreography for Gesso Live.
 
    This namespace is the single semantic definition of the normal optimistic
@@ -10,9 +10,10 @@
    projected data so verifier/projector code does not become part of the
    production browser bundle."
   (:require
-   [gesso.live.choreo :as choreo]
-   #?(:clj [gesso.live.choreo.project :as project])
-   #?(:clj [gesso.live.choreo.verify :as verify])))
+   [gesso.choreo.core :as choreo]
+   [gesso.live.optimistic.protocol :as protocol]
+   #?(:clj [gesso.choreo.project :as project])
+   #?(:clj [gesso.choreo.verify :as verify])))
 
 ;; -----------------------------------------------------------------------------
 ;; Semantic identities
@@ -28,10 +29,10 @@
   :server)
 
 (def command-event
-  :optimistic/command)
+  protocol/command-event)
 
 (def settlement-event
-  :optimistic/settlement)
+  protocol/settlement-event)
 
 (def request-failed-event
   :optimistic/request-failed)
@@ -48,6 +49,11 @@
    comparison before emitting this event."
   :optimistic/canonical-superseded)
 
+(def continuity-restored-event
+  "Browser-runtime event emitted only after continuity restoration has completed
+   at its required post-layout boundary."
+  :continuity/restored)
+
 (def target-authority-resource
   :optimistic/target-authority)
 
@@ -55,7 +61,7 @@
   :optimistic/snapshot-authority)
 
 (def settlement-outcomes
-  #{:confirmed :reconciled :rejected :failed})
+  protocol/settlement-outcomes)
 
 (def recovery-dispositions
   #{:recovered :canonical-wins})
@@ -64,46 +70,46 @@
   #{:installed :canonical-wins})
 
 ;; -----------------------------------------------------------------------------
-;; Effect identities
+;; FX machine identities
 ;; -----------------------------------------------------------------------------
 
-(def acquire-target-effect
+(def browser-acquire-target-machine
   :optimistic/acquire-target)
 
-(def capture-continuity-effect
+(def browser-capture-continuity-machine
   :continuity/capture)
 
-(def capture-snapshot-effect
+(def browser-capture-snapshot-machine
   :optimistic/capture-snapshot)
 
-(def install-projection-effect
+(def browser-install-projection-machine
   :optimistic/install-projection)
 
-(def schedule-timeout-effect
+(def browser-schedule-timeout-machine
   :optimistic/schedule-timeout)
 
-(def execute-command-effect
+(def server-execute-machine
   :optimistic/execute-command)
 
-(def install-canonical-effect
+(def browser-install-canonical-machine
   :optimistic/install-canonical)
 
-(def discard-snapshot-effect
+(def browser-discard-snapshot-machine
   :optimistic/discard-snapshot)
 
-(def recover-snapshot-effect
+(def browser-recover-snapshot-machine
   :optimistic/recover)
 
-(def restore-continuity-effect
+(def browser-restore-continuity-machine
   :continuity/restore)
 
-(def cancel-timeout-effect
+(def browser-cancel-timeout-machine
   :optimistic/cancel-timeout)
 
-(def clear-pending-effect
+(def browser-clear-pending-machine
   :optimistic/clear-pending)
 
-(def release-target-effect
+(def browser-release-target-machine
   :optimistic/release-target)
 
 ;; -----------------------------------------------------------------------------
@@ -111,34 +117,34 @@
 ;; -----------------------------------------------------------------------------
 
 (def execution-id-key
-  :execution-id)
+  protocol/execution-id-key)
 
 (def transition-key
-  :transition)
+  protocol/transition-key)
 
 (def scope-key
-  :scope)
+  protocol/scope-key)
 
 (def base-revision-key
-  :base-revision)
+  protocol/base-revision-key)
 
 (def consistency-token-key
-  :consistency-token)
+  protocol/consistency-token-key)
 
 (def outcome-key
-  :outcome)
+  protocol/outcome-key)
 
 (def command-applied-key
-  :command-applied?)
+  protocol/command-applied-key)
 
 (def revision-key
-  :revision)
+  protocol/revision-key)
 
 (def canonical-key
-  :canonical)
+  protocol/canonical-key)
 
 (def reason-key
-  :reason)
+  protocol/reason-key)
 
 (def recovery-disposition-key
   :recovery-disposition)
@@ -147,33 +153,22 @@
   :canonical-disposition)
 
 (def command-required-keys
-  #{execution-id-key
-    transition-key
-    scope-key})
+  protocol/command-required-keys)
 
 (def command-optional-keys
-  #{base-revision-key
-    consistency-token-key})
+  protocol/command-optional-keys)
 
 (def command-correlation-keys
-  #{execution-id-key
-    scope-key})
+  protocol/command-correlation-keys)
 
 (def settlement-required-keys
-  #{execution-id-key
-    scope-key
-    outcome-key
-    command-applied-key
-    canonical-key})
+  protocol/settlement-required-keys)
 
 (def settlement-optional-keys
-  #{revision-key
-    reason-key
-    consistency-token-key})
+  protocol/settlement-optional-keys)
 
 (def settlement-correlation-keys
-  #{execution-id-key
-    scope-key})
+  protocol/settlement-correlation-keys)
 
 ;; -----------------------------------------------------------------------------
 ;; Choreography definition
@@ -189,7 +184,7 @@
      terminal path.
    - Semantic settlement always carries authoritative canonical content.
    - Request failure and timeout recover through the snapshot only when the DOM
-     effect confirms that canonical authority has not already superseded it.
+     FX machine confirms that canonical authority has not already superseded it.
    - A canonical-superseded event means the authoritative replacement is already
      installed; the old execution only cleans up and terminates.
    - Settlement canonical installation may itself discover that newer canonical
@@ -202,7 +197,8 @@
     :environment-events
     #{request-failed-event
       timeout-event
-      canonical-superseded-event}
+      canonical-superseded-event
+      continuity-restored-event}
     :resources
     {target-authority-resource
      (choreo/resource
@@ -224,15 +220,15 @@
       :browser/acquire-target)
 
      :browser/acquire-target
-     (choreo/effect
+     (choreo/fx
       browser-role
-      acquire-target-effect
+      browser-acquire-target-machine
       :browser/capture-continuity)
 
      :browser/capture-continuity
-     (choreo/effect
+     (choreo/fx
       browser-role
-      capture-continuity-effect
+      browser-capture-continuity-machine
       :browser/acquire-snapshot-authority)
 
      :browser/acquire-snapshot-authority
@@ -242,21 +238,21 @@
       :browser/capture-snapshot)
 
      :browser/capture-snapshot
-     (choreo/effect
+     (choreo/fx
       browser-role
-      capture-snapshot-effect
+      browser-capture-snapshot-machine
       :browser/install-projection)
 
      :browser/install-projection
-     (choreo/effect
+     (choreo/fx
       browser-role
-      install-projection-effect
+      browser-install-projection-machine
       :browser/schedule-timeout)
 
      :browser/schedule-timeout
-     (choreo/effect
+     (choreo/fx
       browser-role
-      schedule-timeout-effect
+      browser-schedule-timeout-machine
       :browser/send-command)
 
      ;; The command crosses to the server. Interrupts are terminal alternatives
@@ -286,9 +282,9 @@
        :bind :command})
 
      :server/execute-command
-     (choreo/effect
+     (choreo/fx
       server-role
-      execute-command-effect
+      server-execute-machine
       :server/validate-outcome)
 
      ;; This choice validates that application execution produced one supported
@@ -327,9 +323,9 @@
      ;; this settlement's canonical rendering or reports that already-installed
      ;; canonical state wins.
      :browser/install-canonical
-     (choreo/effect
+     (choreo/fx
       browser-role
-      install-canonical-effect
+      browser-install-canonical-machine
       :browser/canonical-disposition)
 
      :browser/canonical-disposition
@@ -343,9 +339,9 @@
      ;; longer valid, then the continuity captured for this optimistic execution
      ;; is restored across the replacement.
      :browser/discard-settled-snapshot
-     (choreo/effect
+     (choreo/fx
       browser-role
-      discard-snapshot-effect
+      browser-discard-snapshot-machine
       :browser/release-settled-snapshot-authority)
 
      :browser/release-settled-snapshot-authority
@@ -355,27 +351,32 @@
       :browser/restore-settled-continuity)
 
      :browser/restore-settled-continuity
-     (choreo/effect
+     (choreo/fx
       browser-role
-      restore-continuity-effect
-      :browser/cancel-settled-timeout)
+      browser-restore-continuity-machine
+      :browser/await-settled-continuity)
+
+     :browser/await-settled-continuity
+     (choreo/await
+      browser-role
+      {continuity-restored-event :browser/cancel-settled-timeout})
 
      :browser/cancel-settled-timeout
-     (choreo/effect
+     (choreo/fx
       browser-role
-      cancel-timeout-effect
+      browser-cancel-timeout-machine
       :browser/clear-settled-pending)
 
      :browser/clear-settled-pending
-     (choreo/effect
+     (choreo/fx
       browser-role
-      clear-pending-effect
+      browser-clear-pending-machine
       :browser/release-settled-target)
 
      :browser/release-settled-target
-     (choreo/effect
+     (choreo/fx
       browser-role
-      release-target-effect
+      browser-release-target-machine
       :browser/release-settled-target-authority)
 
      :browser/release-settled-target-authority
@@ -410,9 +411,9 @@
      ;; distinction decides whether the original optimistic continuity should be
      ;; restored.
      :browser/recover-request-failed
-     (choreo/effect
+     (choreo/fx
       browser-role
-      recover-snapshot-effect
+      browser-recover-snapshot-machine
       :browser/request-failed-recovery-disposition)
 
      :browser/request-failed-recovery-disposition
@@ -423,9 +424,9 @@
        :canonical-wins :browser/discard-superseded-snapshot})
 
      :browser/discard-request-failed-snapshot
-     (choreo/effect
+     (choreo/fx
       browser-role
-      discard-snapshot-effect
+      browser-discard-snapshot-machine
       :browser/release-request-failed-snapshot-authority)
 
      :browser/release-request-failed-snapshot-authority
@@ -435,27 +436,32 @@
       :browser/restore-request-failed-continuity)
 
      :browser/restore-request-failed-continuity
-     (choreo/effect
+     (choreo/fx
       browser-role
-      restore-continuity-effect
-      :browser/cancel-request-failed-timeout)
+      browser-restore-continuity-machine
+      :browser/await-request-failed-continuity)
+
+     :browser/await-request-failed-continuity
+     (choreo/await
+      browser-role
+      {continuity-restored-event :browser/cancel-request-failed-timeout})
 
      :browser/cancel-request-failed-timeout
-     (choreo/effect
+     (choreo/fx
       browser-role
-      cancel-timeout-effect
+      browser-cancel-timeout-machine
       :browser/clear-request-failed-pending)
 
      :browser/clear-request-failed-pending
-     (choreo/effect
+     (choreo/fx
       browser-role
-      clear-pending-effect
+      browser-clear-pending-machine
       :browser/release-request-failed-target)
 
      :browser/release-request-failed-target
-     (choreo/effect
+     (choreo/fx
       browser-role
-      release-target-effect
+      browser-release-target-machine
       :browser/release-request-failed-target-authority)
 
      :browser/release-request-failed-target-authority
@@ -468,9 +474,9 @@
      (choreo/return browser-role :request-failed)
 
      :browser/recover-timeout
-     (choreo/effect
+     (choreo/fx
       browser-role
-      recover-snapshot-effect
+      browser-recover-snapshot-machine
       :browser/timeout-recovery-disposition)
 
      :browser/timeout-recovery-disposition
@@ -481,9 +487,9 @@
        :canonical-wins :browser/discard-superseded-snapshot})
 
      :browser/discard-timeout-snapshot
-     (choreo/effect
+     (choreo/fx
       browser-role
-      discard-snapshot-effect
+      browser-discard-snapshot-machine
       :browser/release-timeout-snapshot-authority)
 
      :browser/release-timeout-snapshot-authority
@@ -493,27 +499,32 @@
       :browser/restore-timeout-continuity)
 
      :browser/restore-timeout-continuity
-     (choreo/effect
+     (choreo/fx
       browser-role
-      restore-continuity-effect
-      :browser/cancel-timeout-after-timeout)
+      browser-restore-continuity-machine
+      :browser/await-timeout-continuity)
+
+     :browser/await-timeout-continuity
+     (choreo/await
+      browser-role
+      {continuity-restored-event :browser/cancel-timeout-after-timeout})
 
      :browser/cancel-timeout-after-timeout
-     (choreo/effect
+     (choreo/fx
       browser-role
-      cancel-timeout-effect
+      browser-cancel-timeout-machine
       :browser/clear-timeout-pending)
 
      :browser/clear-timeout-pending
-     (choreo/effect
+     (choreo/fx
       browser-role
-      clear-pending-effect
+      browser-clear-pending-machine
       :browser/release-timeout-target)
 
      :browser/release-timeout-target
-     (choreo/effect
+     (choreo/fx
       browser-role
-      release-target-effect
+      browser-release-target-machine
       :browser/release-timeout-target-authority)
 
      :browser/release-timeout-target-authority
@@ -529,9 +540,9 @@
      ;; from before the optimistic projection; the canonical swap used the shared
      ;; continuity engine at the time it actually happened.
      :browser/discard-superseded-snapshot
-     (choreo/effect
+     (choreo/fx
       browser-role
-      discard-snapshot-effect
+      browser-discard-snapshot-machine
       :browser/release-superseded-snapshot-authority)
 
      :browser/release-superseded-snapshot-authority
@@ -541,21 +552,21 @@
       :browser/cancel-superseded-timeout)
 
      :browser/cancel-superseded-timeout
-     (choreo/effect
+     (choreo/fx
       browser-role
-      cancel-timeout-effect
+      browser-cancel-timeout-machine
       :browser/clear-superseded-pending)
 
      :browser/clear-superseded-pending
-     (choreo/effect
+     (choreo/fx
       browser-role
-      clear-pending-effect
+      browser-clear-pending-machine
       :browser/release-superseded-target)
 
      :browser/release-superseded-target
-     (choreo/effect
+     (choreo/fx
       browser-role
-      release-target-effect
+      browser-release-target-machine
       :browser/release-superseded-target-authority)
 
      :browser/release-superseded-target-authority

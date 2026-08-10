@@ -5,6 +5,7 @@
    [gesso.live.core :as live]
    [gesso.live.fragment :as fragment]
    [gesso.live.htmx :as htmx]
+   [gesso.live.optimistic.server :as optimistic.server]
    [gesso.live.source :as source]))
 
 ;; -----------------------------------------------------------------------------
@@ -293,6 +294,50 @@
 
   (is (identical? htmx/post-form-attrs
                   live/post-form-attrs)))
+
+;; -----------------------------------------------------------------------------
+;; Optimistic protocol-v2 facade
+;; -----------------------------------------------------------------------------
+
+(deftest optimistic-rendering-and-settlement-facades-test
+  (testing "descriptor and canonical rendering APIs come from optimistic.server"
+    (is (identical? optimistic.server/->optimistic
+                    live/->optimistic))
+    (is (identical? optimistic.server/optimistic?
+                    live/optimistic?))
+    (is (identical? optimistic.server/canonical
+                    live/canonical))
+    (is (identical? optimistic.server/canonical-attrs
+                    live/canonical-attrs)))
+
+  (testing "execution identity and semantic settlement APIs come from optimistic.server"
+    (is (identical? optimistic.server/request-execution-id
+                    live/request-execution-id))
+    (is (identical? optimistic.server/->settlement
+                    live/->settlement))
+    (is (identical? optimistic.server/settlement?
+                    live/settlement?))
+    (is (identical? optimistic.server/settlement-for-request
+                    live/settlement-for-request))
+    (is (identical? optimistic.server/settlement-marker
+                    live/settlement-marker))
+    (is (identical? optimistic.server/with-settlement
+                    live/with-settlement))))
+
+(deftest optimistic-server-command-facades-test
+  (testing "core exposes only the high-level projected server-command edge"
+    (is (identical? optimistic.server/run-command
+                    live/run-optimistic-command))
+    (is (identical? optimistic.server/prepared-response-hiccup
+                    live/optimistic-response-hiccup))
+    (is (identical? optimistic.server/complete-settlement-send
+                    live/complete-optimistic-send))))
+
+(deftest obsolete-optimistic-post-button-core-alias-is-gone-test
+  (testing "post-button with :optimistic is the public UI path; no compatibility alias remains"
+    (is (nil?
+         (ns-resolve 'gesso.live.core
+                     'optimistic-post-button)))))
 
 ;; -----------------------------------------------------------------------------
 ;; transact-and-notify!

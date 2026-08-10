@@ -1,4 +1,4 @@
-(ns gesso.live.runtime.dom
+(ns gesso.live.browser.dom
   "Small browser DOM primitives used by Gesso Live.
 
    This namespace owns mechanics, not lifecycle policy. It may locate, inspect,
@@ -11,7 +11,7 @@
    sufficient."
   (:require
    [clojure.string :as str]
-   [gesso.live.protocol :as protocol]))
+   [gesso.live.optimistic.protocol :as protocol]))
 
 ;; -----------------------------------------------------------------------------
 ;; Attribute names
@@ -26,19 +26,17 @@
     :else (str attr)))
 
 (def ^:private canonical-attr-name
-  (attr-name protocol/optimistic-canonical-attr))
+  (attr-name protocol/canonical-attr))
 
 (def ^:private scope-attr-name
-  (attr-name protocol/optimistic-scope-attr))
+  (attr-name protocol/scope-attr))
 
 (def ^:private revision-attr-name
-  (attr-name protocol/optimistic-revision-attr))
+  (attr-name protocol/revision-attr))
 
 (def ^:private template-attr-name
-  (attr-name protocol/optimistic-template-attr))
+  (attr-name protocol/template-attr))
 
-(def ^:private continuity-fragment-attr-name
-  (attr-name protocol/continuity-fragment-attr))
 
 (def transport-only-attrs
   "Attributes meaningful only while transporting markup into the document.
@@ -105,6 +103,55 @@
          []))
      [])))
 
+
+(defn require-element!
+  "Return element when it is a DOM element, otherwise throw.
+
+   Use this at trusted-runtime boundaries where absence is an error rather than
+   a recoverable protocol disposition."
+  ([element]
+   (require-element! "Expected a Gesso Live DOM element." element nil))
+  ([message element data]
+   (when-not (element? element)
+     (throw
+      (ex-info
+       message
+       (merge
+        {:error/type :gesso.live.browser.dom/missing-element
+         :element element}
+        (or data {})))))
+   element))
+
+(defn require-connected!
+  "Return element when it is still connected to the document, otherwise throw."
+  [element data]
+  (require-element! element)
+  (when-not (connected? element)
+    (throw
+     (ex-info
+      "Gesso Live DOM target is no longer connected."
+      (merge
+       {:error/type :gesso.live.browser.dom/detached-target
+        :element element}
+       (or data {})))))
+  element)
+
+(defn require-query-one!
+  "Resolve selector below root and throw when no element exists.
+
+   Invalid selectors and missing targets are both explicit runtime failures;
+   callers that need optional lookup should use query-one instead."
+  ([selector]
+   (require-query-one! js/document selector))
+  ([root selector]
+   (or (query-one root selector)
+       (throw
+        (ex-info
+         "Gesso Live DOM target could not be resolved."
+         {:error/type :gesso.live.browser.dom/missing-target
+          :selector selector
+          :root root})))))
+
 (defn matches?
   "Return true when element matches selector. Invalid selectors return false."
   [element selector]
@@ -143,13 +190,6 @@
         :else
         (recur (.-parentElement node))))))
 
-(defn continuity-root
-  "Return the nearest element carrying Gesso's stable continuity-fragment
-   identity."
-  [element]
-  (closest-with-attr
-   element
-   continuity-fragment-attr-name))
 
 ;; -----------------------------------------------------------------------------
 ;; Attribute helpers
@@ -380,14 +420,14 @@
     (throw
      (ex-info
       "Gesso Live DOM replacement requires element roots."
-      {:error/type :gesso.live.dom/invalid-root
+      {:error/type :gesso.live.browser.dom/invalid-root
        :current current
        :replacement replacement})))
   (when-not (same-root-tag? current replacement)
     (throw
      (ex-info
       "Gesso Live DOM replacement root tag changed."
-      {:error/type :gesso.live.dom/root-tag-mismatch
+      {:error/type :gesso.live.browser.dom/root-tag-mismatch
        :current-tag (tag-name current)
        :replacement-tag (tag-name replacement)})))
   replacement)
@@ -420,7 +460,7 @@
       (throw
        (ex-info
         "Gesso Live markup must contain exactly one element root."
-        {:error/type :gesso.live.dom/not-one-root
+        {:error/type :gesso.live.browser.dom/not-one-root
          :child-count (count nodes)})))
     (first nodes)))
 
@@ -431,7 +471,7 @@
     (throw
      (ex-info
       "Gesso Live optimistic source did not resolve to a template element."
-      {:error/type :gesso.live.dom/not-template
+      {:error/type :gesso.live.browser.dom/not-template
        :node template})))
   (.cloneNode
    (one-element-root (.-content template))
@@ -468,7 +508,7 @@
        (throw
         (ex-info
          "Multiple Gesso Live optimistic templates have the same template name."
-         {:error/type :gesso.live.dom/duplicate-template
+         {:error/type :gesso.live.browser.dom/duplicate-template
           :template-name template-name
           :count (count matches)}))))))
 
@@ -481,7 +521,7 @@
     (throw
      (ex-info
       "Gesso Live HTML input must be a string."
-      {:error/type :gesso.live.dom/invalid-html
+      {:error/type :gesso.live.browser.dom/invalid-html
        :value html})))
   (let [template
         (.createElement js/document
@@ -513,7 +553,7 @@
     (throw
      (ex-info
       "Gesso Live transport sanitization requires an element."
-      {:error/type :gesso.live.dom/invalid-sanitize-root
+      {:error/type :gesso.live.browser.dom/invalid-sanitize-root
        :value element})))
   (remove-attrs!
    element
@@ -534,13 +574,13 @@
 
    Snapshot data deliberately does not contain continuity state. Focus, scroll,
    inputs, details-open state, and related browser-local state belong to
-   gesso.live.runtime.continuity."
+   gesso.live.browser.continuity."
   [element]
   (when-not (element? element)
     (throw
      (ex-info
       "Gesso Live structural snapshot requires an element."
-      {:error/type :gesso.live.dom/invalid-snapshot-root
+      {:error/type :gesso.live.browser.dom/invalid-snapshot-root
        :value element})))
   {:node (.cloneNode element true)
    :tag-name (tag-name element)
@@ -559,7 +599,7 @@
     (throw
      (ex-info
       "Invalid Gesso Live structural snapshot."
-      {:error/type :gesso.live.dom/invalid-snapshot
+      {:error/type :gesso.live.browser.dom/invalid-snapshot
        :snapshot snapshot})))
   (.cloneNode (:node snapshot)
               true))
@@ -575,7 +615,7 @@
     (throw
      (ex-info
       "Gesso Live attribute capture requires an element."
-      {:error/type :gesso.live.dom/invalid-attribute-root
+      {:error/type :gesso.live.browser.dom/invalid-attribute-root
        :value element})))
   (mapv
    (fn [attribute]
@@ -591,7 +631,7 @@
     (throw
      (ex-info
       "Gesso Live attribute restoration requires an element target."
-      {:error/type :gesso.live.dom/invalid-attribute-target
+      {:error/type :gesso.live.browser.dom/invalid-attribute-target
        :value target})))
   (doseq [attribute
           (vec
@@ -616,7 +656,7 @@
     (throw
      (ex-info
       "Gesso Live child copying requires element roots."
-      {:error/type :gesso.live.dom/invalid-copy-root
+      {:error/type :gesso.live.browser.dom/invalid-copy-root
        :target target
        :source source})))
   (while (.-firstChild target)
@@ -648,7 +688,7 @@
       (throw
        (ex-info
         "Gesso Live replacement may not change target DOM identity."
-        {:error/type :gesso.live.dom/target-id-mismatch
+        {:error/type :gesso.live.browser.dom/target-id-mismatch
          :target-id target-id
          :source-id source-id})))
     true))
@@ -700,7 +740,7 @@
     (throw
      (ex-info
       "Gesso Live canonical source is not explicitly marked canonical."
-      {:error/type :gesso.live.dom/not-canonical
+      {:error/type :gesso.live.browser.dom/not-canonical
        :source source})))
   (sanitize-transport-attrs!
    source)
@@ -726,7 +766,7 @@
       (throw
        (ex-info
         "Gesso Live cannot replace a node that no longer has a parent."
-        {:error/type :gesso.live.dom/detached-target
+        {:error/type :gesso.live.browser.dom/detached-target
          :current current})))
     (.replaceChild parent
                    replacement
@@ -738,14 +778,14 @@
 
    This function validates mechanics only. It intentionally does not decide
    whether the incoming revision is authoritative enough to replace current;
-   the optimistic effect layer must make that protocol decision before calling
+   the optimistic browser layer must make that protocol decision before calling
    this primitive."
   [current replacement]
   (when-not (canonical? replacement)
     (throw
      (ex-info
       "Gesso Live canonical replacement is not explicitly marked canonical."
-      {:error/type :gesso.live.dom/not-canonical
+      {:error/type :gesso.live.browser.dom/not-canonical
        :replacement replacement})))
   (sanitize-transport-attrs!
    replacement)
@@ -755,7 +795,7 @@
   "Restore structural snapshot over current and return the installed node.
 
    This primitive does not decide whether snapshot recovery is still authorized.
-   The optimistic protocol/effect layer must first establish that no newer
+   The optimistic browser layer must first establish that no newer
    canonical state superseded the execution."
   [current snapshot]
   (let [replacement

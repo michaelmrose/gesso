@@ -1,38 +1,40 @@
 (ns gesso.live.continuity
-  "Small Clojure/data constructors for Gesso Live client continuity.
+  "JVM-side description and wire encoding for Gesso Live browser continuity.
 
-   This namespace does not own HTMX attrs, browser lifecycle handling, or
-   rendering. It only builds plain data maps suitable for :client-continuity on
-   gesso.live.ui fragments.
+   This namespace owns the server-side half of continuity: plain-data box and
+   preservation constructors, app-facing normalization, deterministic JSON wire
+   encoding, the continuity data-attribute vocabulary, and hx-preserve helpers.
 
-   The browser runtime consumes the normalized JSON emitted by gesso.live.htmx.
-
-   Typical use:
-
-     (live/->fragment
-      {:id \"request-list\"
-       :src \"/app/requests/fragment\"
-       :subscription {:topic :requests}
-       :client-continuity
-       (continuity/boxes
-        (continuity/anchor-scroll
-         {:selector \"[data-humanhelp-request-card]\"})
-        (continuity/details-open
-         {:selector \"details[data-accordion-value]\"
-          :key-attr \"data-accordion-value\"
-          :single? true})
-        (continuity/focus))})
-
-   For simpler built-in preservation, raw data also remains valid:
-
-     {:client-continuity
-      {:preserve {:scroll {:selector \"[data-humanhelp-request-card]\"}
-                  :focus true}}}
-
-   Custom boxes should normally prefer event-backed or Hyperscript-backed boxes
-   before falling back to named JavaScript functions."
+   It does not own HTMX request mechanics, DOM capture/restore, optimistic
+   lifecycle policy, or browser event listeners. gesso.live.browser.continuity
+   is the single implementation that captures and restores browser-local state."
   (:require
    [clojure.string :as str]))
+
+;; -----------------------------------------------------------------------------
+;; Wire identity
+;; -----------------------------------------------------------------------------
+
+(def continuity-attr
+  "Marker placed on the stable fragment wrapper that owns continuity."
+  :data-gesso-live-continuity)
+
+(def continuity-config-attr
+  "Attribute carrying normalized continuity configuration JSON."
+  :data-gesso-live-continuity-config)
+
+(def continuity-fragment-attr
+  "Attribute naming the replaceable fragment target owned by the stable wrapper."
+  :data-gesso-live-continuity-fragment)
+
+(def continuity-attrs
+  "Framework-owned continuity attributes.
+
+   Useful to higher-level attr-merging code that must ensure framework metadata
+   wins over conflicting caller attributes."
+  #{continuity-attr
+    continuity-config-attr
+    continuity-fragment-attr})
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -370,6 +372,301 @@
     (assoc client-continuity'
            :enabled true
            :boxes (into existing boxes))))
+
+;; -----------------------------------------------------------------------------
+;; App-facing normalization
+;; -----------------------------------------------------------------------------
+
+(defn- json-name
+  [x]
+  (cond
+    (keyword? x)
+    (if-let [ns (namespace x)]
+      (str ns "/" (name x))
+      (name x))
+
+    (symbol? x)
+    (str x)
+
+    :else
+    (str x)))
+
+(defn- box-type-name
+  "Normalize a Clojure-facing box type to the browser registry key.
+
+   Built-in box types are intentionally unqualified in the browser runtime.
+   Raw strings are preserved so applications may register custom box types."
+  [x]
+  (cond
+    (nil? x) nil
+    (keyword? x) (name x)
+    (symbol? x) (name x)
+    :else (str x)))
+
+(defn- normalize-continuity-box
+  [box]
+  (cond
+    (map? box)
+    (cond-> box
+      (contains? box :type)
+      (update :type box-type-name)
+
+      (contains? box :name)
+      (update :name json-name))
+
+    (keyword? box)
+    {:type (box-type-name box)}
+
+    (symbol? box)
+    {:type (box-type-name box)}
+
+    (string? box)
+    {:type box}
+
+    :else
+    (throw
+     (ex "gesso.live continuity :boxes entries must be maps, keywords, symbols, or strings."
+         {:box box}))))
+
+(defn- normalize-continuity-boxes
+  [boxes]
+  (cond
+    (nil? boxes)
+    nil
+
+    (sequential? boxes)
+    (mapv normalize-continuity-box boxes)
+
+    :else
+    (throw
+     (ex "gesso.live continuity :boxes must be a sequential collection."
+         {:boxes boxes}))))
+
+(defn- normalize-preserve
+  [preserve]
+  (cond
+    (nil? preserve) {}
+    (false? preserve) {}
+    (true? preserve) {:focus true}
+    (map? preserve) preserve
+    :else
+    (throw
+     (ex "gesso.live continuity :preserve must be nil, false, true, or a map."
+         {:preserve preserve}))))
+
+(def ^:private preserve-sugar
+  {:preserve-scroll :scroll
+   :preserve-focus :focus
+   :preserve-inputs :inputs})
+
+(defn- apply-preserve-sugar
+  [preserve client-continuity]
+  (reduce-kv
+   (fn [preserve' public-k preserve-k]
+     (if (contains? client-continuity public-k)
+       (let [value (get client-continuity public-k)]
+         (if (false? value)
+           (dissoc preserve' preserve-k)
+           (assoc preserve' preserve-k value)))
+       preserve'))
+   preserve
+   preserve-sugar))
+
+(defn- normalize-continuity-map
+  [client-continuity]
+  (if (false? (:enabled client-continuity))
+    nil
+    (let [preserve' (-> (:preserve client-continuity)
+                        normalize-preserve
+                        (apply-preserve-sugar client-continuity))
+          boxes' (normalize-continuity-boxes (:boxes client-continuity))
+          base (apply dissoc client-continuity (keys preserve-sugar))]
+      (cond-> (assoc base :enabled true)
+        (seq preserve') (assoc :preserve preserve')
+        (empty? preserve') (dissoc :preserve)
+        boxes' (assoc :boxes boxes')))))
+
+(defn normalize-client-continuity
+  "Normalize app-facing continuity configuration for the browser runtime.
+
+   Accepted shapes:
+
+     nil / false
+       disabled; returns nil
+
+     true
+       preserve window scroll and focus/caret
+
+     {:preserve {:scroll ... :focus ... :inputs ...}
+      :boxes [...]}
+       data-first configuration
+
+     {:preserve-scroll ...
+      :preserve-focus ...
+      :preserve-inputs ...}
+       convenience sugar folded into :preserve
+
+     [{:type :anchor-scroll ...} ...]
+       shorthand for {:boxes [...]}
+
+   A map with :enabled false is treated the same as false. Unknown map keys are
+   preserved so higher-level components can extend continuity configuration
+   without changing this low-level wire encoder."
+  [client-continuity]
+  (cond
+    (or (nil? client-continuity)
+        (false? client-continuity))
+    nil
+
+    (true? client-continuity)
+    {:enabled true
+     :preserve {:scroll true
+                :focus true}}
+
+    (map? client-continuity)
+    (normalize-continuity-map client-continuity)
+
+    (sequential? client-continuity)
+    {:enabled true
+     :boxes (normalize-continuity-boxes client-continuity)}
+
+    :else
+    (throw
+     (ex "gesso.live continuity must be nil, false, true, a map, or a sequential collection of boxes."
+         {:client-continuity client-continuity}))))
+
+;; -----------------------------------------------------------------------------
+;; Deterministic browser JSON
+;; -----------------------------------------------------------------------------
+
+(defn- json-string-escape
+  [s]
+  (let [sb (StringBuilder.)]
+    (doseq [ch (str s)]
+      (case ch
+        \\ (.append sb "\\\\")
+        \" (.append sb "\\\"")
+        \backspace (.append sb "\\b")
+        \formfeed (.append sb "\\f")
+        \newline (.append sb "\\n")
+        \return (.append sb "\\r")
+        \tab (.append sb "\\t")
+        (if (< (int ch) 32)
+          (.append sb (format "\\u%04x" (int ch)))
+          (.append sb ch))))
+    (str sb)))
+
+(declare json-value)
+
+(defn- json-array
+  [xs]
+  (str "[" (str/join "," (map json-value xs)) "]"))
+
+(defn- json-object
+  [m]
+  (str "{"
+       (str/join
+        ","
+        (map (fn [[k v]]
+               (str "\""
+                    (json-string-escape (json-name k))
+                    "\":"
+                    (json-value v)))
+             (sort-by (comp json-name key) m)))
+       "}"))
+
+(defn- finite-number?
+  [x]
+  (cond
+    (instance? Double x) (Double/isFinite ^double x)
+    (instance? Float x) (Float/isFinite ^float x)
+    :else true))
+
+(defn- json-value
+  [x]
+  (cond
+    (nil? x)
+    "null"
+
+    (string? x)
+    (str "\"" (json-string-escape x) "\"")
+
+    (keyword? x)
+    (str "\"" (json-string-escape (json-name x)) "\"")
+
+    (symbol? x)
+    (str "\"" (json-string-escape (json-name x)) "\"")
+
+    (or (true? x) (false? x))
+    (if x "true" "false")
+
+    (number? x)
+    (do
+      (when-not (finite-number? x)
+        (throw
+         (ex "gesso.live continuity JSON cannot encode non-finite numbers."
+             {:value x})))
+      (str x))
+
+    (map? x)
+    (json-object x)
+
+    (sequential? x)
+    (json-array x)
+
+    (set? x)
+    (json-array (sort-by pr-str x))
+
+    (fn? x)
+    (throw
+     (ex "gesso.live continuity config cannot contain Clojure functions. Use Clojure data, event/Hyperscript boxes, or browser function names instead."
+         {:value x}))
+
+    :else
+    (str "\"" (json-string-escape (str x)) "\"")))
+
+(defn client-continuity-json
+  "Normalize and encode continuity configuration as deterministic JSON.
+
+   Returns nil when continuity is disabled."
+  [client-continuity]
+  (some-> client-continuity
+          normalize-client-continuity
+          json-value))
+
+;; -----------------------------------------------------------------------------
+;; Browser-facing attrs
+;; -----------------------------------------------------------------------------
+
+(defn- require-fragment-id!
+  [fragment-id]
+  (when-not (and (string? fragment-id)
+                 (not (str/blank? fragment-id)))
+    (throw
+     (ex "gesso.live continuity fragment id must be a non-blank string."
+         {:fragment-id fragment-id})))
+  fragment-id)
+
+(defn client-continuity-attrs
+  "Build the continuity attrs for one stable live-fragment wrapper.
+
+   Required:
+     :fragment-id
+       DOM id of the replaceable inner target.
+
+   Optional:
+     :client-continuity
+       App-facing continuity configuration. Disabled values return {}.
+
+   These are framework wire attributes, not HTMX attributes. gesso.live.htmx may
+   merge them onto its stable fragment root, but their vocabulary and encoding
+   are owned here."
+  [{:keys [fragment-id client-continuity]}]
+  (if-some [config (normalize-client-continuity client-continuity)]
+    {continuity-attr "true"
+     continuity-fragment-attr (require-fragment-id! fragment-id)
+     continuity-config-attr (json-value config)}
+    {}))
 
 ;; -----------------------------------------------------------------------------
 ;; hx-preserve helpers

@@ -1,4 +1,4 @@
-(ns gesso.live.runtime.continuity
+(ns gesso.live.browser.continuity
   "The single browser implementation of Gesso Live continuity.
 
    Continuity is browser-owned interaction state that survives DOM replacement.
@@ -17,20 +17,31 @@
    owns how that preservation is performed in the browser."
   (:require
    [clojure.string :as str]
-   [gesso.live.protocol :as protocol]
-   [gesso.live.runtime.dom :as dom]))
+   [gesso.live.browser.dom :as dom]))
 
 ;; -----------------------------------------------------------------------------
 ;; Wire/config identity
 ;; -----------------------------------------------------------------------------
 
+(def continuity-attr
+  "Stable fragment wrapper marker emitted by the JVM Live layer."
+  :data-gesso-live-continuity)
+
+(def continuity-config-attr-key
+  "Attribute carrying normalized continuity configuration JSON."
+  :data-gesso-live-continuity-config)
+
+(def continuity-fragment-attr-key
+  "Attribute naming the stable replaceable fragment target."
+  :data-gesso-live-continuity-fragment)
+
 (def continuity-root-selector
   (str "["
-       (dom/attr-name protocol/continuity-attr)
+       (dom/attr-name continuity-attr)
        "='true']"))
 
 (def continuity-config-attr
-  (dom/attr-name protocol/continuity-config-attr))
+  (dom/attr-name continuity-config-attr-key))
 
 (def continuity-config-script-selector
   (str "script[type='application/json']["
@@ -38,7 +49,7 @@
        "]"))
 
 (def continuity-fragment-attr
-  (dom/attr-name protocol/continuity-fragment-attr))
+  (dom/attr-name continuity-fragment-attr-key))
 
 (def continuity-event-prefix
   "gesso:live-continuity:")
@@ -47,12 +58,12 @@
 ;; Runtime state
 ;; -----------------------------------------------------------------------------
 
+;; Stable continuity target id -> captured continuity slot.
 (defonce slots
-  "Stable continuity target id -> captured continuity slot."
   (atom {}))
 
+;; Continuity box type string -> {:capture fn :restore fn}.
 (defonce boxes
-  "Continuity box type string -> {:capture fn :restore fn}."
   (atom {}))
 
 ;; -----------------------------------------------------------------------------
@@ -140,8 +151,9 @@
   "Run f after two animation frames.
 
    One frame is often insufficient for HTMX/OOB replacement plus layout. The
-   second frame is the established Gesso continuity boundary for restoring
-   scroll and focus."
+   second frame is Gesso's continuity restoration boundary. Choreography must
+   not treat continuity as restored until work scheduled through this function
+   has actually run."
   [f]
   (js/requestAnimationFrame
    (fn []
@@ -1463,14 +1475,36 @@
     slot))
 
 (defn restore!
-  "Restore immediate visual state now and full continuity after layout."
-  [root]
-  (restore-immediate!
-   root)
-  (after-layout!
-   #(restore-after-layout!
-     root))
-  (captured-slot root))
+  "Restore immediate visual state now and full continuity after layout.
+
+   Optional on-restored is invoked only after the two-frame restoration boundary
+   has run. The callback is invoked even when there was no captured slot: in
+   that case there was simply no browser-local state to restore.
+
+   Optimistic choreography uses this callback to emit its modeled
+   :continuity/restored event. This prevents target authority from being released
+   merely because restoration was scheduled."
+  ([root]
+   (restore! root nil))
+  ([root on-restored]
+   (when-not (or (nil? on-restored)
+                 (ifn? on-restored))
+     (throw
+      (ex-info
+       "Gesso Live continuity completion callback must be callable or nil."
+       {:error/type :gesso.live.continuity/invalid-completion-callback
+        :callback on-restored})))
+   (let [slot (captured-slot root)]
+     (restore-immediate! root)
+     (after-layout!
+      (fn []
+        (let [restored (restore-after-layout! root)]
+          (when on-restored
+            (on-restored
+             {:root root
+              :target (target root)
+              :slot (or restored slot)})))))
+     slot)))
 
 ;; -----------------------------------------------------------------------------
 ;; Event adaptation

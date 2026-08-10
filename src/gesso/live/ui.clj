@@ -10,17 +10,21 @@
    - live-script
    - post-form
    - post-button (including built-in optimistic rendering)
-   - optimistic-post-button compatibility alias
    - anti-forgery-token
    - anti-forgery-input
+
+   Optimistic markup is delegated to gesso.live.optimistic.server. Optimistic
+   wire vocabulary is owned by gesso.live.optimistic.protocol, and continuity
+   metadata is owned by gesso.live.continuity.
 
    It intentionally does not depend on gesso.live.core. Core can safely require
    this namespace and re-export its public helpers."
   (:require
    [clojure.string :as str]
+   [gesso.live.continuity :as continuity]
    [gesso.live.htmx :as htmx]
-   [gesso.live.optimistic :as optimistic]
-   [gesso.live.protocol :as protocol]))
+   [gesso.live.optimistic.protocol :as optimistic.protocol]
+   [gesso.live.optimistic.server :as optimistic]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
@@ -238,8 +242,7 @@
    preserving browser interaction context across fragment refreshes. Examples
    include scroll anchoring, focus/caret restoration, preserved DOM islands, and
    custom capture/restore boxes. This namespace stores the config on the
-   fragment descriptor and delegates browser-facing attribute construction to
-   gesso.live.htmx.
+   fragment descriptor and delegates continuity metadata construction to gesso.live.continuity.
 
    Markup model:
      fragment-panel renders a stable outer live wrapper and a replaceable inner
@@ -335,7 +338,7 @@
      (when include
        {:hx-include include})
      (when client-continuity
-       (htmx/client-continuity-attrs
+       (continuity/client-continuity-attrs
         {:fragment-id id
          :client-continuity client-continuity}))
      attrs
@@ -500,9 +503,9 @@
 (def ^:private optimistic-protocol-attrs
   "Protocol-owned attrs must be merged after app/button attrs.
 
-   The vocabulary itself is centralized in gesso.live.protocol; UI only uses
-   the set to preserve merge precedence."
-  protocol/reserved-optimistic-attrs)
+   The vocabulary itself is centralized in gesso.live.optimistic.protocol; UI
+   only uses the set to preserve merge precedence."
+  optimistic.protocol/reserved-attrs)
 
 (defn- split-optimistic-source-attrs
   [source-attrs]
@@ -562,23 +565,36 @@
    opts
    []))
 
+(defn- strip-optimistic-protocol-attrs
+  [attrs]
+  (when attrs
+    (apply dissoc
+           attrs
+           optimistic-protocol-attrs)))
+
+(defn- normalize-optimistic-config
+  [opts]
+  (let [value (:optimistic opts)]
+    (cond
+      (optimistic/optimistic? value)
+      value
+
+      (map? value)
+      (cond-> value
+        (and (not (contains? value :target))
+             (some? (:target opts)))
+        (assoc :target (:target opts)))
+
+      :else
+      (throw
+       (ex
+        "gesso.live UI :optimistic must be a raw options map or prepared optimistic descriptor."
+        {:optimistic value})))))
+
 (defn- render-optimistic-post-button
   [ctx opts]
   (let [optimistic-config
-        (require-present!
-         :optimistic
-         (:optimistic opts))
-        optimistic-config
-        (if (optimistic/optimistic?
-             optimistic-config)
-          optimistic-config
-          (cond-> optimistic-config
-            (and (not (contains?
-                       optimistic-config
-                       :target))
-                 (some? (:target opts)))
-            (assoc :target
-                   (:target opts))))
+        (normalize-optimistic-config opts)
         {:keys [source-attrs
                 template
                 sync]}
@@ -597,6 +613,8 @@
         opts'
         (-> opts
             (dissoc :optimistic)
+            (update :button-attrs
+                    strip-optimistic-protocol-attrs)
             (assoc
              :sync effective-sync
              :request-attrs request-attrs
@@ -677,11 +695,11 @@
        Extra attrs merged into button attrs.
 
      :optimistic
-       Optional prepared gesso.live.optimistic descriptor or raw options map.
+       Optional prepared gesso.live.optimistic.server descriptor or raw options map.
        When present, post-button renders the matched hidden projection template
-       beside the button and puts protocol-v2 attrs on the actual request owner.
+       beside the button and puts optimistic protocol attrs on the actual request owner.
 
-   Gesso's protocol attrs always win over conflicting button attrs."
+   Gesso's optimistic protocol attrs always win over conflicting button attrs."
   ([ctx opts]
    (post-button
     ctx
@@ -691,44 +709,14 @@
    (let [[opts _fragment]
          (post-button-args
           fragment-or-opts
-          maybe-opts)]
-     (if (contains?
-          opts
-          :optimistic)
-       (render-optimistic-post-button
-        ctx
-        opts)
+          maybe-opts)
+         optimistic-value
+         (:optimistic opts)]
+     (if (or (nil? optimistic-value)
+             (false? optimistic-value))
        (render-ordinary-post-button
         ctx
+        opts)
+       (render-optimistic-post-button
+        ctx
         opts)))))
-
-(defn optimistic-post-button
-  "Compatibility alias for optimistic post-button rendering.
-
-   New code should call post-button with :optimistic directly. This helper
-   remains intentionally thin so there is only one rendering path."
-  ([ctx opts]
-   (optimistic-post-button
-    ctx
-    opts
-    nil))
-  ([ctx fragment-or-opts maybe-opts]
-   (let [[opts fragment]
-         (post-button-args
-          fragment-or-opts
-          maybe-opts)
-         opts'
-         (assoc
-          opts
-          :optimistic
-          (require-present!
-           :optimistic
-           (:optimistic opts)))]
-     (if fragment
-       (post-button
-        ctx
-        fragment
-        opts')
-       (post-button
-        ctx
-        opts')))))

@@ -49,8 +49,9 @@
      gesso.live.ui
        owns Hiccup convenience helpers for live fragments and POST controls
 
-     gesso.live.optimistic
-       owns the JVM-facing optimistic protocol-v2 rendering/settlement edge"
+     gesso.live.optimistic.server
+       owns the JVM-facing optimistic protocol-v2 rendering, settlement, and
+       projected server-command edge"
   (:require
    [gesso.live.consistency.xtdb :as live.xtdb]
    [gesso.live.dispatch :as dispatch]
@@ -59,7 +60,7 @@
    [gesso.live.htmx :as htmx]
    [gesso.live.invalidation :as invalidation]
    [gesso.live.model :as model]
-   [gesso.live.optimistic :as optimistic]
+   [gesso.live.optimistic.server :as optimistic.server]
    [gesso.live.source :as source]
    [gesso.live.synced :as synced]
    [gesso.live.transport.sse :as sse]
@@ -617,13 +618,6 @@
    Re-export of gesso.live.ui/post-button."
   live.ui/post-button)
 
-(def optimistic-post-button
-  "Compatibility alias for optimistic POST controls. New code should pass
-   :optimistic directly to post-button.
-
-   Re-export of gesso.live.ui/optimistic-post-button."
-  live.ui/optimistic-post-button)
-
 (def anti-forgery-token
   "Extract an anti-forgery token from ctx.
 
@@ -644,66 +638,95 @@
 (def ->optimistic
   "Prepare one optimistic rendering descriptor.
 
-   Re-export of gesso.live.optimistic/->optimistic."
-  optimistic/->optimistic)
+   Re-export of gesso.live.optimistic.server/->optimistic."
+  optimistic.server/->optimistic)
 
 (def optimistic?
   "Return true for a prepared optimistic protocol-v2 descriptor.
 
-   Re-export of gesso.live.optimistic/optimistic?."
-  optimistic/optimistic?)
+   Re-export of gesso.live.optimistic.server/optimistic?."
+  optimistic.server/optimistic?)
 
 (def canonical
   "Mark one rooted Hiccup element explicitly authoritative for a semantic scope
    and optional revision.
 
-   Re-export of gesso.live.optimistic/canonical."
-  optimistic/canonical)
+   Re-export of gesso.live.optimistic.server/canonical."
+  optimistic.server/canonical)
 
 (def canonical-attrs
   "Build explicit canonical protocol attrs for a semantic scope/revision.
 
    Prefer canonical when rendering a complete authoritative Hiccup root.
-   Re-export of gesso.live.optimistic/canonical-attrs."
-  optimistic/canonical-attrs)
+   Re-export of gesso.live.optimistic.server/canonical-attrs."
+  optimistic.server/canonical-attrs)
 
 (def request-execution-id
   "Read the browser-generated optimistic execution id from request context.
 
-   Re-export of gesso.live.optimistic/request-execution-id."
-  optimistic/request-execution-id)
+   Re-export of gesso.live.optimistic.server/request-execution-id."
+  optimistic.server/request-execution-id)
 
 (def ->settlement
   "Prepare one semantic optimistic settlement descriptor.
 
-   Re-export of gesso.live.optimistic/->settlement."
-  optimistic/->settlement)
+   Re-export of gesso.live.optimistic.server/->settlement."
+  optimistic.server/->settlement)
 
 (def settlement?
   "Return true for a prepared optimistic protocol-v2 settlement.
 
-   Re-export of gesso.live.optimistic/settlement?."
-  optimistic/settlement?)
+   Re-export of gesso.live.optimistic.server/settlement?."
+  optimistic.server/settlement?)
 
 (def settlement-for-request
   "Prepare a settlement using the optimistic execution id carried by request ctx.
 
-   Re-export of gesso.live.optimistic/settlement-for-request."
-  optimistic/settlement-for-request)
+   Re-export of gesso.live.optimistic.server/settlement-for-request."
+  optimistic.server/settlement-for-request)
 
 (def settlement-marker
   "Render the inert semantic settlement marker.
 
    Normal response code should prefer with-settlement, which also marks the
    authoritative root from the same settlement scope/revision.
-   Re-export of gesso.live.optimistic/settlement-marker."
-  optimistic/settlement-marker)
+   Re-export of gesso.live.optimistic.server/settlement-marker."
+  optimistic.server/settlement-marker)
 
 (def with-settlement
   "Render a settlement marker plus canonical authoritative content.
 
-   Re-export of gesso.live.optimistic/with-settlement."
-  optimistic/with-settlement)
+   Re-export of gesso.live.optimistic.server/with-settlement."
+  optimistic.server/with-settlement)
+
+(def run-optimistic-command
+  "Run one optimistic command through the projected server endpoint and the
+   application Biff FX machine.
+
+   Returns a prepared optimistic server send. Render it with
+   optimistic-response-hiccup, then call complete-optimistic-send when the HTTP
+   settlement response has been handed off.
+
+   Re-export of gesso.live.optimistic.server/run-command."
+  optimistic.server/run-command)
+
+(def optimistic-response-hiccup
+  "Render the settlement marker and authoritative canonical root for a prepared
+   optimistic server send. Additional nodes may be appended after the canonical
+   root.
+
+   Re-export of gesso.live.optimistic.server/prepared-response-hiccup."
+  optimistic.server/prepared-response-hiccup)
+
+(def complete-optimistic-send
+  "Mark a prepared optimistic server settlement send complete after the HTTP
+   response has been handed off.
+
+   This completes the projected choreography send boundary; it does not own the
+   broader Ring/Aleph response lifecycle.
+
+   Re-export of gesso.live.optimistic.server/complete-settlement-send."
+  optimistic.server/complete-settlement-send)
 
 ;; -----------------------------------------------------------------------------
 ;; Model-backed fragment UI facade

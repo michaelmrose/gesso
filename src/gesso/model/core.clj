@@ -55,8 +55,10 @@
   (:require
    [com.biffweb.core :as biff.core]
    [com.biffweb.xtdb :as biff.xtdb]
-   [gesso.fx :as fx]
-   [gesso.graph :as graph]
+   [com.biffweb.fx :as fx]
+   [com.biffweb.graph :as graph]
+   ;; [gesso.fx :as fx]
+   ;; [gesso.graph :as graph]
    [gesso.model.command :as command]
    [gesso.model.schema :as model.schema]
    [gesso.model.tx :as model.tx]))

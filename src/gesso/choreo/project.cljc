@@ -1,11 +1,11 @@
-(ns gesso.live.choreo.project
-  "Endpoint projection for verified Gesso Live choreographies.
+(ns gesso.choreo.project
+  "Endpoint projection for verified Gesso choreographies.
 
    Projection turns one verified global interaction into a compact role-local
    plan suitable for the generic choreography machine.
 
    The projector is deliberately mechanical:
-   - local effects remain local effects
+   - local FX machine steps remain local FX machine steps
    - local choices remain local choices
    - local sends remain sends
    - remote implementation steps disappear
@@ -23,8 +23,8 @@
   (:refer-clojure :exclude [await send])
   (:require
    [clojure.set :as set]
-   [gesso.live.choreo :as choreo]
-   [gesso.live.choreo.verify :as verify]))
+   [gesso.choreo.core :as choreo]
+   [gesso.choreo.verify :as verify]))
 
 ;; -----------------------------------------------------------------------------
 ;; Projected representation
@@ -34,14 +34,14 @@
   1)
 
 (def projected-plan-type
-  :gesso.live.choreo/projected-plan)
+  :gesso.choreo/projected-plan)
 
 (def projected-ops
   "Operations consumed by the role-local choreography machine.
 
    :await is the single suspension primitive. It may wait for participant
    messages, environment events, or both."
-  #{:effect
+  #{:fx
     :send
     :choice
     :await
@@ -52,7 +52,7 @@
 (def projected-complete-outcome
   "Terminal outcome used when the global choreography has no further observable
    work for this role."
-  :gesso.live.choreo/complete)
+  :gesso.choreo/complete)
 
 ;; -----------------------------------------------------------------------------
 ;; Errors
@@ -64,7 +64,7 @@
    (ex-info
     message
     (merge
-     {:error/type :gesso.live.choreo/projection-failed
+     {:error/type :gesso.choreo/projection-failed
       :error/kind kind}
      data))))
 
@@ -77,9 +77,9 @@
   [x]
   (and (map? x)
        (= projected-plan-type
-          (:gesso.live.choreo/type x))
+          (:gesso.choreo/type x))
        (= projected-plan-version
-          (:gesso.live.choreo/version x))
+          (:gesso.choreo/version x))
        (keyword? (:role x))
        (map? (:states x))))
 
@@ -89,7 +89,7 @@
   (when-not (projected-plan? x)
     (projection-error
      :invalid-projected-plan
-     "Expected a Gesso Live projected choreography plan."
+     "Expected a Gesso projected choreography plan."
      {:value x}))
   x)
 
@@ -332,10 +332,10 @@
                          seen'
                          frontier))
 
-                ;; Foreign receive/effect/acquire/release/goto are invisible
+                ;; Foreign receive/fx/acquire/release/goto are invisible
                 ;; local implementation steps and have one normal successor.
                 (contains?
-                 #{:receive :effect :acquire :release :goto}
+                 #{:receive :fx :acquire :release :goto}
                  op)
                 (recur (conj pending
                              {:state (:next state)
@@ -411,7 +411,7 @@
 
 (defn- synthetic-id
   [kind role source]
-  [:gesso.live.choreo.project/synthetic
+  [:gesso.choreo.project/synthetic
    kind
    role
    source])
@@ -441,13 +441,13 @@
   "Project verified choreography to one role-local executable plan.
 
    choreography-or-verified may be a plain choreography or a value returned by
-   gesso.live.choreo.verify/verify!. Plain choreography is verified first.
+   gesso.choreo.verify/verify!. Plain choreography is verified first.
 
    Projected state ids are opaque EDN values. Original locally executable states
    retain their original keyword ids; compiler-created await/completion states
    use deterministic vector ids.
 
-   The projected plan contains no foreign local effects or foreign resource
+   The projected plan contains no foreign local FX steps or foreign resource
    operations."
   [choreography-or-verified role]
   (let [verified (verify/ensure-verified choreography-or-verified)
@@ -470,7 +470,7 @@
                 (swap! projected-states
                        assoc
                        state-id
-                       {:op :gesso.live.choreo.project/building}))
+                       {:op :gesso.choreo.project/building}))
               state-id)
 
             (install-state!
@@ -719,15 +719,15 @@
                   (install-state!
                    state-id
                    (case op
-                     :effect
-                     (cond-> {:op :effect
+                     :fx
+                     (cond-> {:op :fx
                               :role role
-                              :effect (:effect state)
+                              :machine (:machine state)
                               :next
                               (ensure-continuation!
                                (:next state))}
-                       (contains? state :args)
-                       (assoc :args (:args state)))
+                       (contains? state :input)
+                       (assoc :input (:input state)))
 
                      :send
                      (let [normal
@@ -819,7 +819,7 @@
             (set
              (for [[state-id state] states
                    :when
-                   (= :gesso.live.choreo.project/building
+                   (= :gesso.choreo.project/building
                       (:op state))]
                state-id))]
         (when (seq leaked-building)
@@ -838,8 +838,8 @@
               (set/intersection
                (:environment-events choreography)
                (local-environment-events states))]
-          {:gesso.live.choreo/type projected-plan-type
-           :gesso.live.choreo/version projected-plan-version
+          {:gesso.choreo/type projected-plan-type
+           :gesso.choreo/version projected-plan-version
            :name (:name choreography)
            :role role
            :initial initial
@@ -876,7 +876,7 @@
         states (:states plan')]
     {:name (:name plan')
      :role (:role plan')
-     :version (:gesso.live.choreo/version plan')
+     :version (:gesso.choreo/version plan')
      :initial (:initial plan')
      :state-count (count states)
      :states-by-op

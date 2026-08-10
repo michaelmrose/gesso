@@ -1,21 +1,26 @@
-(ns gesso.live.choreo
-  "Plain-data choreography model for Gesso Live.
+(ns gesso.choreo.core
+  "Plain-data choreography model for Gesso.
 
-   A choreography describes one interaction globally. It names the participating
-   roles, the protocol states, communication between roles, local effects,
-   authoritative choices, resource ownership, external waits/interrupts, and
-   terminal outcomes.
+   A choreography describes one distributed interaction globally. It names the
+   participating roles, protocol states, communication between roles, local FX
+   machines, authoritative choices, resource ownership, external waits and
+   interrupts, and terminal outcomes.
+
+   Local computation is deliberately represented as an :fx state. Choreography
+   does not execute FX handlers itself. An endpoint runtime resolves the state's
+   :machine id to the local FX implementation for that endpoint.
 
    This namespace deliberately does not:
    - verify choreography correctness
    - project role-local plans
-   - execute effects
+   - execute FX machines or handlers
+   - implement transport
    - know about DOM, HTMX, SSE, Ring, XTDB, Manifold, or Missionary
-   - know optimistic-specific policy
+   - know application-specific protocol policy
 
    The representation is intentionally explicit. Verification and projection
-   should operate over ordinary inspectable Clojure data instead of reconstructing
-   control flow from an opaque DSL."
+   operate over ordinary inspectable Clojure data instead of reconstructing
+   distributed control flow from an opaque DSL."
   (:refer-clojure :exclude [await send])
   (:require
    [clojure.set :as set]))
@@ -27,17 +32,17 @@
 (def choreography-version
   "Version of the in-memory choreography representation.
 
-   This is not a browser wire-protocol version."
+   This is not an application wire-protocol version."
   1)
 
 (def choreography-type
-  :gesso.live.choreo/choreography)
+  :gesso.choreo/choreography)
 
 (def state-ops
   "Operations understood by the choreography compiler.
 
    The verifier owns the detailed semantic rules for each operation."
-  #{:effect
+  #{:fx
     :send
     :receive
     :choice
@@ -54,7 +59,7 @@
   #{:send :receive})
 
 (def role-local-ops
-  #{:effect
+  #{:fx
     :choice
     :await
     :acquire
@@ -95,9 +100,9 @@
   [state-id]
   (require-keyword! "Choreography state id" state-id))
 
-(defn- require-effect-id!
-  [effect-id]
-  (require-keyword! "Choreography effect id" effect-id))
+(defn- require-fx-machine-id!
+  [machine-id]
+  (require-keyword! "Choreography FX machine id" machine-id))
 
 (defn- require-event-id!
   [event-id]
@@ -178,12 +183,6 @@
               (require-state-id! target)]))
           (require-map! "Choreography :interrupts" interrupts))))
 
-(defn- with-optional
-  [m k value]
-  (if (some? value)
-    (assoc m k value)
-    m))
-
 ;; -----------------------------------------------------------------------------
 ;; Choreography construction
 ;; -----------------------------------------------------------------------------
@@ -192,8 +191,7 @@
   "Normalize a plain choreography map.
 
    Required semantic fields are intentionally not exhaustively validated here;
-   gesso.live.choreo.verify owns semantic verification and should produce the
-   useful graph-aware diagnostics.
+   gesso.choreo.verify owns semantic verification and graph-aware diagnostics.
 
    Recognized top-level fields:
 
@@ -213,12 +211,11 @@
        Optional map of resource id -> descriptor.
 
      :environment-events
-       Events that can arise from outside the controlled participant protocol,
-       such as timeout, disconnect, or request failure.
+       Events that can arise outside the controlled participant protocol, such
+       as timeout, disconnect, or request failure.
 
      :metadata
-       Optional compiler/development metadata. Runtime projection is free to
-       discard it."
+       Optional compiler/development metadata. Projection may discard it."
   [{:keys [name
            roles
            initial
@@ -229,8 +226,8 @@
     :as choreography}]
   (require-map! "Choreography" choreography)
   (cond-> (assoc choreography
-                 :gesso.live.choreo/type choreography-type
-                 :gesso.live.choreo/version choreography-version
+                 :gesso.choreo/type choreography-type
+                 :gesso.choreo/version choreography-version
                  :roles (normalize-role-set roles)
                  :states (normalize-state-map states)
                  :resources (normalize-resource-map resources)
@@ -244,13 +241,13 @@
     (assoc :initial initial)))
 
 (defn choreography?
-  "True when x is a normalized Gesso Live choreography."
+  "True when x is a normalized Gesso choreography."
   [x]
   (and (map? x)
        (= choreography-type
-          (:gesso.live.choreo/type x))
+          (:gesso.choreo/type x))
        (= choreography-version
-          (:gesso.live.choreo/version x))))
+          (:gesso.choreo/version x))))
 
 (defn ensure-choreography
   "Return a normalized choreography.
@@ -310,24 +307,28 @@
 ;; State constructors
 ;; -----------------------------------------------------------------------------
 
-(defn effect
-  "Construct one role-local FX effect state.
+(defn fx
+  "Construct one role-local FX-machine state.
 
-   :effect is a semantic effect id interpreted by the participant runtime.
+   :machine is a semantic FX machine id resolved by the endpoint runtime. The
+   choreography layer neither implements FX nor assumes a platform-specific FX
+   runner. A JVM endpoint may resolve the id to Biff FX while another endpoint
+   may use a compatible local implementation.
+
    :next is the following choreography state.
 
-   Optional opts are opaque effect input data under :args plus compiler/runtime
-   metadata under :metadata."
-  ([role effect-id next]
-   (effect role effect-id next nil))
-  ([role effect-id next {:keys [args metadata] :as opts}]
-   (require-map! "Choreography effect options" (or opts {}))
-   (cond-> {:op :effect
+   Optional :input is opaque data made available to the endpoint's local FX
+   adapter. Optional :metadata is compiler/development metadata."
+  ([role machine-id next]
+   (fx role machine-id next nil))
+  ([role machine-id next {:keys [input metadata] :as opts}]
+   (require-map! "Choreography FX options" (or opts {}))
+   (cond-> {:op :fx
             :role (require-role! role)
-            :effect (require-effect-id! effect-id)
+            :machine (require-fx-machine-id! machine-id)
             :next (require-state-id! next)}
-     (contains? opts :args)
-     (assoc :args args)
+     (contains? opts :input)
+     (assoc :input input)
 
      (some? metadata)
      (assoc :metadata (normalize-metadata metadata)))))
@@ -335,8 +336,8 @@
 (defn send
   "Construct one inter-role send state.
 
-   The choreography declares communication semantically; a later projection may
-   map :via to HTTP, Live/SSE, client OOB, or another framework transport.
+   The choreography declares communication semantically; endpoint integration
+   maps :via to HTTP, SSE, a queue, or another transport.
 
    Optional opts:
 
@@ -392,11 +393,11 @@
   "Construct one inter-role receive state.
 
    :from, :to, :event, and optional :via describe the communication this state
-   accepts. The verifier/projector will pair communication and enforce the
-   participant contract.
+   accepts. The verifier/projector pair communication and enforce the participant
+   contract.
 
-   Optional :bind names the context key under which the received event/message
-   value should be made available to the projected FX machine."
+   Optional :bind names the execution-context key under which the received
+   message value becomes available to later local FX and choice states."
   ([from to event next]
    (receive from to event next nil))
   ([from to event next {:keys [via bind metadata] :as opts}]
@@ -418,7 +419,7 @@
 (defn choice
   "Construct one role-owned authoritative choice.
 
-   :key identifies the value in accumulated execution context that chooses a
+   :key identifies a value in accumulated execution context that chooses a
    branch. :branches maps choice value -> next state id.
 
    The verifier/projector is responsible for ensuring that another participant
@@ -437,16 +438,16 @@
      (assoc :metadata (normalize-metadata metadata)))))
 
 (defn await
-  "Construct a role-local wait for one of several external or incoming events.
+  "Construct a role-local wait for one of several incoming/external events.
 
    :events maps event id -> next state id.
 
    This is intentionally distinct from receive:
    - receive describes a specific participant-to-participant message
-   - await describes suspension on an event set, including environmental events
+   - await describes suspension on an event set, including environment events
 
-   Optional :bind names the context key under which the selected event value is
-   made available to the projected FX machine."
+   Optional :bind names the execution-context key under which the selected event
+   value becomes available to later local FX and choice states."
   ([role events]
    (await role events nil))
   ([role events {:keys [bind metadata] :as opts}]
@@ -505,7 +506,7 @@
   "Construct a terminal state owned by role.
 
    outcome is a semantic terminal disposition. Optional :value-key identifies
-   accumulated context to expose as the machine return value."
+   accumulated execution context to expose as the endpoint return value."
   ([role outcome]
    (return role outcome nil))
   ([role outcome {:keys [value-key metadata] :as opts}]
@@ -546,8 +547,7 @@
   (contains? communication-ops (state-op state)))
 
 (defn state-role
-  "Return the participant that locally acts at state, when exactly one role owns
-   the local action.
+  "Return the participant that locally acts at state, when one role owns it.
 
    For send, the acting role is :from.
    For receive, the acting role is :to.
@@ -609,13 +609,12 @@
 (defn explain
   "Return a small, stable summary suitable for REPL inspection.
 
-   Detailed verifier/projector diagnostics belong in their respective
-   namespaces."
+   Detailed verifier/projector diagnostics belong in their namespaces."
   [choreography]
   (let [choreography' (ensure-choreography choreography)
         states (:states choreography')]
     {:name (:name choreography')
-     :version (:gesso.live.choreo/version choreography')
+     :version (:gesso.choreo/version choreography')
      :roles (:roles choreography')
      :initial (:initial choreography')
      :state-count (count states)

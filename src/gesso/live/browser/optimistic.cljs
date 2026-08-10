@@ -1,10 +1,11 @@
-(ns gesso.live.runtime.optimistic
+(ns gesso.live.browser.optimistic
   "Browser implementation of the built-in Gesso Live optimistic choreography.
 
-   This namespace is deliberately an effect/event adapter, not a second state
-   machine. The semantic lifecycle lives in gesso.live.optimistic-choreo and is
-   projected to the browser at compile time. gesso.live.choreo.machine executes
-   that plan; this namespace supplies the trusted browser effects.
+   This namespace is the browser policy adapter for the built-in optimistic
+   choreography. The semantic lifecycle lives in gesso.live.optimistic.choreo
+   and is projected at compile time. gesso.choreo.machine owns protocol position;
+   gesso.live.browser.choreo owns the long-lived browser execution process; this
+   namespace binds the optimistic protocol to trusted browser FX.
 
    Owned here:
 
@@ -20,23 +21,24 @@
 
    Not owned here:
 
-   - continuity mechanics (gesso.live.runtime.continuity)
-   - generic DOM mechanics (gesso.live.runtime.dom)
-   - generic choreography execution (gesso.live.runtime.choreo)
-   - HTMX/SSE listener registration (top-level gesso.live.runtime)
+   - continuity mechanics (gesso.live.browser.continuity)
+   - generic DOM mechanics (gesso.live.browser.dom)
+   - generic choreography execution (gesso.live.browser.choreo)
+   - HTMX/SSE listener registration (gesso.live.browser.core)
    - server/domain transition policy
 
    A projection is never canonical. A snapshot is never allowed to overwrite
    explicitly canonical state. Distinct opaque revisions are never ordered."
   (:require
    [clojure.string :as str]
-   [gesso.live.choreo.machine :as machine]
-   [gesso.live.optimistic-choreo :as optimistic
+   [gesso.choreo.machine :as machine]
+   [gesso.live.optimistic.choreo :as optimistic
     :include-macros true]
-   [gesso.live.protocol :as protocol]
-   [gesso.live.runtime.choreo :as runtime]
-   [gesso.live.runtime.continuity :as continuity]
-   [gesso.live.runtime.dom :as dom]))
+   [gesso.live.optimistic.protocol :as protocol]
+   [gesso.live.browser.choreo :as runtime]
+   [gesso.live.browser.continuity :as continuity]
+   [gesso.live.browser.fx :as fx]
+   [gesso.live.browser.dom :as dom]))
 
 ;; -----------------------------------------------------------------------------
 ;; Compiled protocol product
@@ -111,19 +113,20 @@
 ;; Runtime ownership
 ;; -----------------------------------------------------------------------------
 
+;; Opaque optimistic scope -> {:execution-id ... :target ... :target-id ...}.
+;; Scope is the logical lock key rather than DOM-node identity, so ownership
+;; survives canonical replacement of the target while the command is pending.
 (defonce target-locks
-  "Opaque optimistic scope -> {:execution-id ... :target ... :target-id ...}.
-
-   Scope is the logical lock key rather than DOM-node identity. This survives a
-   canonical outerHTML replacement of the target while the command remains
-   outstanding."
   (atom {}))
 
+;; DOM source uid -> active execution id. Used only to correlate HTMX lifecycle
+;; events that retain the source element but not our request header.
 (defonce executions-by-source
-  "DOM source uid -> active execution id.
+  (atom {}))
 
-   Kept only to correlate HTMX request lifecycle events that retain the source
-   element but do not carry our header back in detail data."
+;; Execution id -> projected optimistic command send action. The HTMX adapter
+;; consumes this exact choreography-produced action/payload.
+(defonce outgoing-actions
   (atom {}))
 
 ;; -----------------------------------------------------------------------------
@@ -210,13 +213,6 @@
   (and (string? x)
        (not (str/blank? x))))
 
-(defn- parse-bool
-  [x]
-  (= "true"
-     (some-> x
-             str
-             str/lower-case)))
-
 (defn- attr-name
   [protocol-attr]
   (dom/attr-name
@@ -229,19 +225,19 @@
 (def optimistic-source-selector
   (str "["
        (attr-name
-        protocol/optimistic-protocol-attr)
+        protocol/protocol-attr)
        "]["
        (attr-name
-        protocol/optimistic-transition-attr)
+        protocol/transition-attr)
        "]["
        (attr-name
-        protocol/optimistic-template-attr)
+        protocol/template-attr)
        "]["
        (attr-name
-        protocol/optimistic-target-attr)
+        protocol/target-attr)
        "]["
        (attr-name
-        protocol/optimistic-scope-attr)
+        protocol/scope-attr)
        "]"))
 
 (defn optimistic-source
@@ -271,38 +267,40 @@
     (let [protocol-version
           (dom/attr
            source
-           protocol/optimistic-protocol-attr)
+           protocol/protocol-attr)
           transition
           (dom/attr
            source
-           protocol/optimistic-transition-attr)
+           protocol/transition-attr)
           template-name
           (dom/attr
            source
-           protocol/optimistic-template-attr)
+           protocol/template-attr)
           target
           (dom/attr
            source
-           protocol/optimistic-target-attr)
+           protocol/target-attr)
           scope
           (dom/attr
            source
-           protocol/optimistic-scope-attr)
+           protocol/scope-attr)
           base-wire
           (dom/attr
            source
-           protocol/optimistic-base-revision-attr)
+           protocol/base-revision-attr)
           pending-label
           (dom/attr
            source
-           protocol/optimistic-pending-label-attr)
+           protocol/pending-label-attr)
+          projection-mode-wire
+          (dom/attr
+           source
+           protocol/projection-mode-attr)
           projection-mode
-          (some->
-           (dom/attr
-            source
-            protocol/optimistic-projection-mode-attr)
-           keyword)]
-      (when-not (= protocol/optimistic-protocol-version
+          (when projection-mode-wire
+            (protocol/wire->projection-mode
+             projection-mode-wire))]
+      (when-not (= protocol/version
                    protocol-version)
         (throw
          (ex-info
@@ -310,7 +308,7 @@
           {:error/type
            :gesso.live.optimistic/unsupported-protocol
            :expected
-           protocol/optimistic-protocol-version
+           protocol/version
            :actual protocol-version})))
       (doseq [[field value]
               [[:transition transition]
@@ -326,18 +324,6 @@
              :field field
              :value value
              :source source}))))
-      (when (and projection-mode
-                 (not
-                  (contains?
-                   protocol/projection-modes
-                   projection-mode)))
-        (throw
-         (ex-info
-          "Gesso Live optimistic projection mode is invalid."
-          {:error/type
-           :gesso.live.optimistic/invalid-projection-mode
-           :projection-mode projection-mode
-           :allowed protocol/projection-modes})))
       {:protocol-version protocol-version
        :transition transition
        :template-name template-name
@@ -430,7 +416,7 @@
        (when (= template-name
                 (dom/attr
                  template
-                 protocol/optimistic-template-attr))
+                 protocol/template-attr))
          template))
      (dom/templates root))))
 
@@ -637,7 +623,7 @@
              (.-textContent label)))}]
     (dom/set-attr!
      source
-     protocol/optimistic-execution-attr
+     protocol/execution-attr
      execution-id)
     (dom/set-attr!
      source
@@ -675,7 +661,7 @@
               (:source state)]
     (dom/remove-attr!
      source
-     protocol/optimistic-execution-attr)
+     protocol/execution-attr)
     (dom/remove-attr!
      source
      pending-source-attr)
@@ -714,140 +700,80 @@
   true)
 
 ;; -----------------------------------------------------------------------------
-;; Browser effects
+;; Browser FX operations
 ;; -----------------------------------------------------------------------------
 
-(defn acquire-target-effect
-  [ctx _args]
-  (let [execution-id
-        (get ctx
-             optimistic/execution-id-key)
-        scope
-        (get ctx
-             optimistic/scope-key)
-        target
-        (get ctx
-             target-key)
-        target-id
-        (get ctx
-             target-id-key)]
-    (when-not
-        (reserve-target!
-         scope
-         execution-id
-         target
-         target-id)
+(defn acquire-target!
+  [ctx]
+  (let [execution-id (get ctx optimistic/execution-id-key)
+        scope (get ctx optimistic/scope-key)
+        target (get ctx target-key)
+        target-id (get ctx target-id-key)]
+    (when-not (reserve-target! scope execution-id target target-id)
       (throw
        (ex-info
         "Gesso Live optimistic target is already owned by another execution."
-        {:error/type
-         :gesso.live.optimistic/target-busy
+        {:error/type :gesso.live.optimistic/target-busy
          :execution-id execution-id
          :scope scope
-         :owner
-         (:execution-id
-          (current-lock scope))})))
+         :owner (:execution-id (current-lock scope))})))
     {:optimistic/target-acquired? true}))
 
-(defn capture-continuity-effect
-  [ctx _args]
-  (let [root
-        (get ctx root-key)
-        source
-        (get ctx source-key)
-        slot
-        (when root
-          (continuity/capture!
-           root
-           source))]
+(defn capture-continuity!
+  [ctx]
+  (let [root (get ctx root-key)
+        source (get ctx source-key)
+        slot (when root
+               (continuity/capture! root source))]
     {continuity-slot-key slot}))
 
-(defn capture-snapshot-effect
-  [ctx _args]
-  (let [target
-        (current-target ctx)]
+(defn capture-snapshot!
+  [ctx]
+  (let [target (current-target ctx)]
     (when-not target
       (throw
        (ex-info
         "Gesso Live optimistic snapshot target disappeared before projection."
-        {:error/type
-         :gesso.live.optimistic/no-snapshot-target
-         :execution-id
-         (get ctx
-              optimistic/execution-id-key)})))
-    {snapshot-key
-     (dom/snapshot target)}))
+        {:error/type :gesso.live.optimistic/no-snapshot-target
+         :execution-id (get ctx optimistic/execution-id-key)})))
+    {snapshot-key (dom/snapshot target)}))
 
-(defn install-projection-effect
-  [ctx _args]
-  (let [target
-        (current-target ctx)
-        projection
-        (get ctx projection-key)
-        descriptor
-        (get ctx descriptor-key)
-        source
-        (get ctx source-key)
-        execution-id
-        (get ctx
-             optimistic/execution-id-key)]
+(defn install-projection!
+  [ctx]
+  (let [target (current-target ctx)
+        projection (get ctx projection-key)
+        descriptor (get ctx descriptor-key)
+        source (get ctx source-key)
+        execution-id (get ctx optimistic/execution-id-key)]
     (when-not target
       (throw
        (ex-info
         "Gesso Live optimistic target disappeared before projection installation."
-        {:error/type
-         :gesso.live.optimistic/no-projection-target
+        {:error/type :gesso.live.optimistic/no-projection-target
          :execution-id execution-id})))
-    ;; Copy into the existing target object. HTMX may already retain this exact
-    ;; object for the request being configured.
-    (dom/copy-element-into!
-     target
-     projection)
-    ;; Projection authority is explicitly negative even if an application
-    ;; accidentally put canonical markup inside the optimistic template.
-    (dom/remove-attr!
-     target
-     protocol/optimistic-canonical-attr)
-    (dom/set-attr!
-     target
-     protocol/optimistic-scope-attr
-     (:scope descriptor))
-    (dom/set-attr!
-     target
-     active-attr
-     execution-id)
-    (dom/set-attr!
-     target
-     pending-attr
-     "true")
-    (dom/set-attr!
-     target
-     locked-attr
-     "true")
-    (dom/set-attr!
-     target
-     "aria-busy"
-     "true")
-    (htmx-process!
-     target)
+    ;; Keep the existing target object alive: HTMX may already retain it for the
+    ;; request currently being configured.
+    (dom/copy-element-into! target projection)
+    ;; Projection authority is always explicitly non-canonical.
+    (dom/remove-attr! target protocol/canonical-attr)
+    (dom/set-attr! target protocol/scope-attr (:scope descriptor))
+    (dom/set-attr! target active-attr execution-id)
+    (dom/set-attr! target pending-attr "true")
+    (dom/set-attr! target locked-attr "true")
+    (dom/set-attr! target "aria-busy" "true")
+    (htmx-process! target)
     {pending-source-state-key
-     (mark-source-pending!
-      source
-      descriptor
-      execution-id)}))
+     (mark-source-pending! source descriptor execution-id)}))
 
-(defn schedule-timeout-effect
-  [ctx _args]
-  (let [execution-id
-        (get ctx
-             optimistic/execution-id-key)]
+(defn schedule-timeout!
+  [ctx]
+  (let [execution-id (get ctx optimistic/execution-id-key)]
     (runtime/schedule-event!
      execution-id
      settlement-timer-key
      default-settlement-timeout-ms
      optimistic/timeout-event
-     {optimistic/reason-key
-      :settlement-timeout})
+     {optimistic/reason-key :settlement-timeout})
     {:optimistic/timeout-scheduled? true}))
 
 (defn- canonical-scope!
@@ -856,273 +782,224 @@
     (throw
      (ex-info
       "Optimistic settlement canonical payload is not explicitly canonical."
-      {:error/type
-       :gesso.live.optimistic/noncanonical-settlement
+      {:error/type :gesso.live.optimistic/noncanonical-settlement
        :canonical canonical})))
-  (when-not (= expected-scope
-               (dom/scope canonical))
+  (when-not (= expected-scope (dom/scope canonical))
     (throw
      (ex-info
       "Optimistic settlement canonical scope does not match execution scope."
-      {:error/type
-       :gesso.live.optimistic/canonical-scope-mismatch
+      {:error/type :gesso.live.optimistic/canonical-scope-mismatch
        :expected expected-scope
-       :actual
-       (dom/scope canonical)})))
+       :actual (dom/scope canonical)})))
   canonical)
 
 (defn- installed-canonical-disposition
   "Decide whether detached settlement canonical may replace current target.
 
-   Existing explicit canonical state wins on equal or incomparable revisions.
-   That rule prevents an older correlated POST response from overwriting a
-   canonical Live refresh that reached the browser first."
+   Existing explicit canonical state wins on equal, older, or incomparable
+   incoming revisions. This prevents a correlated POST response from overwriting
+   authoritative canonical state that reached the browser first."
   [target incoming]
   (if-not (dom/canonical? target)
     :install
-    (case
-        (protocol/compare-revisions
-         (dom/revision incoming)
-         (dom/revision target))
-      :newer
-      :install
+    (case (protocol/compare-revisions
+           (dom/revision incoming)
+           (dom/revision target))
+      :newer :install
+      :same :canonical-wins
+      :older :canonical-wins
+      :incomparable :canonical-wins)))
 
-      :same
-      :canonical-wins
-
-      :older
-      :canonical-wins
-
-      :incomparable
-      :canonical-wins)))
-
-(defn install-canonical-effect
-  [ctx _args]
-  (let [execution-id
-        (get ctx
-             optimistic/execution-id-key)
-        scope
-        (get ctx
-             optimistic/scope-key)
-        canonical
-        (canonical-scope!
-         (get ctx
-              optimistic/canonical-key)
-         scope)
-        target
-        (current-target ctx)]
+(defn install-canonical!
+  [ctx]
+  (let [execution-id (get ctx optimistic/execution-id-key)
+        scope (get ctx optimistic/scope-key)
+        canonical (canonical-scope!
+                   (get ctx optimistic/canonical-key)
+                   scope)
+        target (current-target ctx)]
     (when-not target
       (throw
        (ex-info
         "Gesso Live cannot reconcile optimistic execution because its target no longer exists."
-        {:error/type
-         :gesso.live.optimistic/no-canonical-target
+        {:error/type :gesso.live.optimistic/no-canonical-target
          :execution-id execution-id
          :scope scope})))
-    (let [disposition
-          (installed-canonical-disposition
-           target
-           canonical)]
-      (case disposition
-        :install
-        (do
-          (dom/copy-canonical-into!
-           target
-           (.cloneNode
-            canonical
-            true))
-          (htmx-process!
-           target)
-          {optimistic/canonical-disposition-key
-           :installed
-           canonical-source-key
-           :settlement})
+    (case (installed-canonical-disposition target canonical)
+      :install
+      (do
+        (dom/copy-canonical-into! target (.cloneNode canonical true))
+        (htmx-process! target)
+        {optimistic/canonical-disposition-key :installed
+         canonical-source-key :settlement})
 
-        :canonical-wins
-        {optimistic/canonical-disposition-key
-         :canonical-wins
-         canonical-source-key
-         :already-installed}))))
+      :canonical-wins
+      {optimistic/canonical-disposition-key :canonical-wins
+       canonical-source-key :already-installed})))
 
-(defn discard-snapshot-effect
-  [_ctx _args]
-  ;; Machine contexts are accumulated maps; nil explicitly denotes that the
-  ;; structural snapshot is no longer authorized even though its former value
-  ;; may appear in earlier trace/diagnostic material.
+(defn discard-snapshot!
+  [_ctx]
+  ;; Explicit nil revokes recovery authority in the accumulated choreography
+  ;; context even though the former snapshot may remain in diagnostics/trace.
   {snapshot-key nil})
 
-(defn recover-snapshot-effect
-  [ctx _args]
-  (let [execution-id
-        (get ctx
-             optimistic/execution-id-key)
-        snapshot
-        (get ctx
-             snapshot-key)
-        target
-        (current-target ctx)]
+(defn recover-snapshot!
+  [ctx]
+  (let [execution-id (get ctx optimistic/execution-id-key)
+        snapshot (get ctx snapshot-key)
+        target (current-target ctx)]
     (cond
-      ;; Any explicit canonical state is authoritative. Recovery never writes an
-      ;; old structural snapshot over it, regardless of revision comparability.
-      (and target
-           (dom/canonical? target))
-      {optimistic/recovery-disposition-key
-       :canonical-wins}
-
+      ;; A missing target is not evidence that canonical won. It is a trusted
+      ;; runtime/DOM failure and must remain visible as such.
       (nil? target)
-      {optimistic/recovery-disposition-key
-       :canonical-wins}
+      (throw
+       (ex-info
+        "Gesso Live optimistic recovery target no longer exists."
+        {:error/type :gesso.live.optimistic/no-recovery-target
+         :execution-id execution-id}))
+
+      ;; Explicit canonical state always outranks the old structural snapshot.
+      (dom/canonical? target)
+      {optimistic/recovery-disposition-key :canonical-wins}
 
       (nil? snapshot)
       (throw
        (ex-info
         "Optimistic recovery has no authorized structural snapshot."
-        {:error/type
-         :gesso.live.optimistic/no-recovery-snapshot
+        {:error/type :gesso.live.optimistic/no-recovery-snapshot
          :execution-id execution-id}))
 
       ;; Only this execution's still-provisional target may be rolled back.
-      (not=
-       execution-id
-       (dom/attr
-        target
-        active-attr))
+      (not= execution-id (dom/attr target active-attr))
       (throw
        (ex-info
         "Optimistic recovery target is neither canonical nor owned by this execution."
-        {:error/type
-         :gesso.live.optimistic/recovery-authority-lost
+        {:error/type :gesso.live.optimistic/recovery-authority-lost
          :execution-id execution-id
-         :active
-         (dom/attr
-          target
-          active-attr)}))
+         :active (dom/attr target active-attr)}))
 
       :else
-      (let [source
-            (dom/snapshot-node
-             snapshot)]
-        (dom/copy-element-into!
-         target
-         source)
-        (htmx-process!
-         target)
-        {optimistic/recovery-disposition-key
-         :recovered}))))
+      (do
+        (dom/copy-element-into! target (dom/snapshot-node snapshot))
+        (htmx-process! target)
+        {optimistic/recovery-disposition-key :recovered}))))
 
-(defn restore-continuity-effect
-  [ctx _args]
-  (let [root
-        (get ctx root-key)]
-    (when root
-      ;; Use the exact same two-phase continuity path as ordinary HTMX/OOB
-      ;; replacement: details-open is restored immediately and the full
-      ;; scroll/focus/input pass runs after layout settles.
-      (continuity/restore!
-       root))
-    {:optimistic/continuity-restored? true}))
+(defn restore-continuity!
+  [ctx]
+  (let [execution-id (get ctx optimistic/execution-id-key)
+        scope (get ctx optimistic/scope-key)
+        root (get ctx root-key)
+        complete!
+        (fn [detail]
+          ;; This callback runs after the continuity two-frame layout boundary.
+          ;; Late delivery after retirement is harmless in browser.choreo.
+          (runtime/resume-event!
+           execution-id
+           optimistic/continuity-restored-event
+           {:scope scope
+            :continuity detail}))]
+    (if root
+      (continuity/restore! root complete!)
+      ;; There is no configured continuity root, but the choreography still owns
+      ;; an explicit restoration barrier. Preserve the same post-layout timing.
+      (continuity/after-layout!
+       #(complete! {:root nil
+                    :target nil
+                    :slot nil})))
+    {:optimistic/continuity-restore-scheduled? true}))
 
-(defn cancel-timeout-effect
-  [ctx _args]
+(defn cancel-timeout!
+  [ctx]
   (runtime/cancel-timer!
-   (get ctx
-        optimistic/execution-id-key)
+   (get ctx optimistic/execution-id-key)
    settlement-timer-key)
   {:optimistic/timeout-cancelled? true})
 
-(defn clear-pending-effect
-  [ctx _args]
-  (let [execution-id
-        (get ctx
-             optimistic/execution-id-key)
-        target
-        (current-target ctx)
-        source-state
-        (get ctx
-             pending-source-state-key)]
+(defn clear-pending!
+  [ctx]
+  (let [execution-id (get ctx optimistic/execution-id-key)
+        target (current-target ctx)
+        source-state (get ctx pending-source-state-key)]
     (when (and target
-               (= execution-id
-                  (dom/attr
-                   target
-                   active-attr)))
-      (dom/remove-attr!
-       target
-       active-attr)
-      (dom/remove-attr!
-       target
-       pending-attr)
-      (dom/remove-attr!
-       target
-       locked-attr)
-      (dom/remove-attr!
-       target
-       "aria-busy"))
-    (clear-source-pending!
-     source-state)
-    ;; This effect is on every normal terminal path, including timeout. Source
-    ;; correlation therefore belongs here rather than in an HTMX afterRequest
-    ;; adapter that may never run after an environmental timeout.
-    (when-some [source
-                (get ctx source-key)]
-      (swap!
-       executions-by-source
-       dissoc
-       (node-uid source)))
+               (= execution-id (dom/attr target active-attr)))
+      (dom/remove-attr! target active-attr)
+      (dom/remove-attr! target pending-attr)
+      (dom/remove-attr! target locked-attr)
+      (dom/remove-attr! target "aria-busy"))
+    (clear-source-pending! source-state)
+    (swap! outgoing-actions dissoc execution-id)
+    (when-some [source (get ctx source-key)]
+      (swap! executions-by-source dissoc (node-uid source)))
     {:optimistic/pending-cleared? true}))
 
-(defn release-target-effect
-  [ctx _args]
+(defn release-target-operation!
+  [ctx]
   (release-target!
-   (get ctx
-        optimistic/scope-key)
-   (get ctx
-        optimistic/execution-id-key))
+   (get ctx optimistic/scope-key)
+   (get ctx optimistic/execution-id-key))
   {:optimistic/target-released? true})
 
-(def browser-effect-handlers
-  {optimistic/acquire-target-effect
-   acquire-target-effect
+;; One choreography :fx state names a whole participant-local FX machine. These
+;; machines are intentionally tiny wrappers around the trusted operation
+;; handlers above; browser.fx provides the Biff-compatible local execution
+;; semantics while choreography remains responsible for async boundaries.
+(def ^:private fx-result-key
+  ::fx-result)
 
-   optimistic/capture-continuity-effect
-   capture-continuity-effect
+(defn- operation-machine
+  [machine-id]
+  (fx/machine
+   machine-id
+   :start
+   (fn [_ctx]
+     {fx-result-key [machine-id]
+      fx/next-key :return})
+   :return
+   (fn [ctx]
+     {fx/return-key (get ctx fx-result-key)})))
 
-   optimistic/capture-snapshot-effect
-   capture-snapshot-effect
+(def browser-machine-handlers
+  {optimistic/browser-acquire-target-machine acquire-target!
+   optimistic/browser-capture-continuity-machine capture-continuity!
+   optimistic/browser-capture-snapshot-machine capture-snapshot!
+   optimistic/browser-install-projection-machine install-projection!
+   optimistic/browser-schedule-timeout-machine schedule-timeout!
+   optimistic/browser-install-canonical-machine install-canonical!
+   optimistic/browser-discard-snapshot-machine discard-snapshot!
+   optimistic/browser-recover-snapshot-machine recover-snapshot!
+   optimistic/browser-restore-continuity-machine restore-continuity!
+   optimistic/browser-cancel-timeout-machine cancel-timeout!
+   optimistic/browser-clear-pending-machine clear-pending!
+   optimistic/browser-release-target-machine release-target-operation!})
 
-   optimistic/install-projection-effect
-   install-projection-effect
-
-   optimistic/schedule-timeout-effect
-   schedule-timeout-effect
-
-   optimistic/install-canonical-effect
-   install-canonical-effect
-
-   optimistic/discard-snapshot-effect
-   discard-snapshot-effect
-
-   optimistic/recover-snapshot-effect
-   recover-snapshot-effect
-
-   optimistic/restore-continuity-effect
-   restore-continuity-effect
-
-   optimistic/cancel-timeout-effect
-   cancel-timeout-effect
-
-   optimistic/clear-pending-effect
-   clear-pending-effect
-
-   optimistic/release-target-effect
-   release-target-effect})
-
-(defn install-effect-handlers!
+(defn install-fx!
+  "Register the optimistic choreography's browser-local FX machines and their
+   trusted effect handlers."
   []
-  (doseq [[effect-id handler]
-          browser-effect-handlers]
-    (runtime/register-effect!
-     effect-id
-     handler))
+  (doseq [[machine-id handler] browser-machine-handlers]
+    (runtime/register-fx-handler! machine-id handler)
+    (runtime/register-fx-machine! machine-id (operation-machine machine-id)))
+  true)
+
+(defn- record-command-send!
+  [action execution]
+  (when-not (and (= :send (:kind action))
+                 (= optimistic/browser-role (:from action))
+                 (= optimistic/server-role (:to action))
+                 (= protocol/command-event (:event action)))
+    (throw
+     (ex-info
+      "Optimistic browser choreography produced an unexpected send boundary."
+      {:error/type :gesso.live.optimistic/unexpected-send
+       :action action
+       :execution-id (:execution-id execution)})))
+  (swap! outgoing-actions assoc (:execution-id action) action)
+  true)
+
+(defn install-transport-handoff!
+  "Install the optimistic command handoff used by the surrounding HTMX adapter."
+  []
+  (runtime/set-send-handler! record-command-send!)
   true)
 
 ;; -----------------------------------------------------------------------------
@@ -1179,62 +1056,44 @@
      :consistency-token  optional DB visibility token already associated with
                          the request
 
-   Returns a map containing the execution id, suspended/completed machine
-   execution, and semantic outgoing command descriptor recorded by the generic
-   send effect. The top-level HTMX adapter uses that descriptor to attach the
-   execution id/header to the request; it does not invent command semantics."
+   Returns the execution id, suspended endpoint execution, and the exact
+   choreography-produced command send action recorded by the transport handoff."
   ([source]
    (start! source nil))
-  ([source {:keys
-            [target
-             execution-id
-             consistency-token]}]
-   (let [execution-id
-         (or execution-id
-             (gesso.live.runtime.optimistic/execution-id))
-         prepared
-         (prepare
-          source
-          target)
-         source-uid
-         (node-uid source)
+  ([source {:keys [target execution-id consistency-token]}]
+   (let [execution-id (or execution-id
+                          (gesso.live.browser.optimistic/execution-id))
+         prepared (prepare source target)
+         source-uid (node-uid source)
          execution
          (runtime/start!
           browser-plan
           {:execution-id execution-id
            :context
-           (initial-context
-            prepared
-            execution-id
-            consistency-token)
+           (initial-context prepared execution-id consistency-token)
            :metadata
            {:kind :optimistic
-            :source source-uid}})]
-     (when (machine/suspended?
-            execution)
-       (swap!
-        executions-by-source
-        assoc
-        source-uid
-        execution-id))
-     (let [ctx
-           (machine/execution-context
-            execution)]
+            :source source-uid}})
+         command (get @outgoing-actions execution-id)]
+     (when-not command
+       (throw
+        (ex-info
+         "Optimistic browser choreography reached suspension without handing off its command send."
+         {:error/type :gesso.live.optimistic/missing-command-handoff
+          :execution-id execution-id
+          :state (:state execution)})))
+     (when (machine/suspended? execution)
+       (swap! executions-by-source assoc source-uid execution-id))
+     (let [ctx (machine/execution-context execution)]
        (emit!
         (:root prepared)
         "started"
         #js {:executionId execution-id
-             :transition
-             (get ctx
-                  optimistic/transition-key)
-             :scope
-             (get ctx
-                  optimistic/scope-key)})
+             :transition (get ctx optimistic/transition-key)
+             :scope (get ctx optimistic/scope-key)})
        {:execution-id execution-id
         :execution execution
-        :command
-        (get ctx
-             runtime/outgoing-send-key)}))))
+        :command command}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Settlement response parsing
@@ -1246,70 +1105,60 @@
    (dom/template? element)
    (dom/truthy-attr?
     element
-    protocol/optimistic-settlement-attr)))
+    protocol/settlement-attr)))
 
 (defn marker->settlement
-  "Decode one inert settlement marker into the choreography payload fields that
-   are actually carried by the marker.
+  "Strictly decode one inert settlement marker.
 
-   Canonical content is attached separately after explicit authority selection."
+   Missing/malformed command-applied metadata is an error, and the flag must
+   agree with the semantic outcome. Canonical content is attached separately
+   after explicit authority selection."
   [marker]
-  (when (settlement-marker?
-         marker)
-    (let [execution-id
-          (dom/attr
-           marker
-           protocol/optimistic-execution-attr)
-          scope
-          (dom/attr
-           marker
-           protocol/optimistic-scope-attr)
+  (when (settlement-marker? marker)
+    (let [version (dom/attr marker protocol/protocol-attr)
+          execution-id (dom/attr marker protocol/execution-attr)
+          scope (dom/attr marker protocol/scope-attr)
           outcome
-          (some->
-           (dom/attr
-            marker
-            protocol/optimistic-outcome-attr)
-           keyword)
-          revision-wire
-          (dom/attr
-           marker
-           protocol/optimistic-revision-attr)]
-      (when-not
-          (contains?
-           optimistic/settlement-outcomes
-           outcome)
+          (protocol/wire->settlement-outcome
+           (dom/attr marker protocol/outcome-attr))
+          command-applied?
+          (protocol/wire->command-applied
+           (dom/attr marker protocol/command-applied-attr))
+          revision-wire (dom/attr marker protocol/revision-attr)]
+      (when-not (= protocol/version version)
         (throw
          (ex-info
-          "Gesso Live settlement marker carries an invalid outcome."
-          {:error/type
-           :gesso.live.optimistic/invalid-settlement-outcome
-           :outcome outcome})))
-      {optimistic/execution-id-key
-       execution-id
-       optimistic/scope-key
-       scope
-       optimistic/outcome-key
-       outcome
-       optimistic/command-applied-key
-       (parse-bool
-        (dom/attr
-         marker
-         protocol/optimistic-command-applied-attr))
+          "Optimistic settlement marker uses an unsupported protocol version."
+          {:error/type :gesso.live.optimistic/unsupported-settlement-protocol
+           :expected protocol/version
+           :actual version
+           :execution-id execution-id})))
+      (doseq [[field value] [[:execution-id execution-id]
+                             [:scope scope]]]
+        (when-not (non-blank? value)
+          (throw
+           (ex-info
+            "Optimistic settlement marker is missing required correlation metadata."
+            {:error/type :gesso.live.optimistic/incomplete-settlement
+             :field field
+             :value value}))))
+      (protocol/assert-settlement-consistent! outcome command-applied?)
+      {optimistic/execution-id-key execution-id
+       optimistic/scope-key scope
+       optimistic/outcome-key outcome
+       optimistic/command-applied-key command-applied?
        optimistic/revision-key
        (when revision-wire
-         (protocol/wire->revision
-          revision-wire))
+         (protocol/wire->revision revision-wire))
        optimistic/reason-key
-       (dom/attr
-        marker
-        protocol/optimistic-reason-attr)})))
+       (dom/attr marker protocol/reason-attr)})))
 
 (defn- settlement-markers
   [root]
   (let [selector
         (str "template["
              (attr-name
-              protocol/optimistic-settlement-attr)
+              protocol/settlement-attr)
              "]")]
     (cond-> (dom/query-all
              root
@@ -1327,7 +1176,7 @@
                 expected-execution-id
                 (dom/attr
                  %
-                 protocol/optimistic-execution-attr)))
+                 protocol/execution-attr)))
              vec)]
     (case (count matches)
       0
@@ -1369,36 +1218,54 @@
          (:reason selection)})))))
 
 (defn settlement-from-root
-  "Extract one complete semantic settlement payload from detached response root.
+  "Extract one complete authoritative settlement from detached response markup.
 
-   The response is valid only when both its correlated settlement marker and one
-   explicitly canonical element for the same scope are present."
+   The marker and canonical root must agree exactly on scope and revision wire
+   identity. A matching marker without authoritative canonical content is a
+   protocol error, never an implicit success/failure fallback."
   [root expected-execution-id]
-  (when-some [marker
-              (marker-for-execution
-               root
-               expected-execution-id)]
-    (let [settlement
-          (marker->settlement
-           marker)
-          canonical
-          (canonical-from-response
-           root
-           (get settlement
-                optimistic/scope-key))]
+  (when-some [marker (marker-for-execution root expected-execution-id)]
+    (let [settlement (marker->settlement marker)
+          scope (get settlement optimistic/scope-key)
+          canonical (canonical-from-response root scope)]
       (when-not canonical
         (throw
          (ex-info
           "Optimistic settlement response does not contain explicitly canonical content for its scope."
-          {:error/type
-           :gesso.live.optimistic/missing-canonical
+          {:error/type :gesso.live.optimistic/missing-canonical
            :execution-id expected-execution-id
-           :scope
-           (get settlement
-                optimistic/scope-key)})))
-      (assoc settlement
-             optimistic/canonical-key
-             canonical))))
+           :scope scope})))
+      (when-not (= protocol/version
+                   (dom/attr canonical protocol/protocol-attr))
+        (throw
+         (ex-info
+          "Optimistic canonical response root uses an unsupported protocol version."
+          {:error/type :gesso.live.optimistic/unsupported-canonical-protocol
+           :execution-id expected-execution-id
+           :expected protocol/version
+           :actual (dom/attr canonical protocol/protocol-attr)})))
+      (when-not (= scope (dom/scope canonical))
+        (throw
+         (ex-info
+          "Optimistic settlement marker scope disagrees with canonical root scope."
+          {:error/type :gesso.live.optimistic/settlement-scope-mismatch
+           :execution-id expected-execution-id
+           :marker-scope scope
+           :canonical-scope (dom/scope canonical)})))
+      (let [marker-revision-wire
+            (dom/attr marker protocol/revision-attr)
+            canonical-revision-wire
+            (dom/revision-wire canonical)]
+        (when-not (= marker-revision-wire canonical-revision-wire)
+          (throw
+           (ex-info
+            "Optimistic settlement marker revision disagrees with canonical root revision."
+            {:error/type :gesso.live.optimistic/settlement-revision-mismatch
+             :execution-id expected-execution-id
+             :scope scope
+             :marker-revision marker-revision-wire
+             :canonical-revision canonical-revision-wire}))))
+      (assoc settlement optimistic/canonical-key canonical))))
 
 (defn response-root
   "Parse an HTMX XHR response into a detached DocumentFragment."
@@ -1567,14 +1434,16 @@
   ["Gesso-Optimistic-Execution"
    execution-id])
 
-(defn command-payload
-  "Return the semantic command payload produced by the compiled choreography."
+(defn command-action
+  "Return the projected optimistic command send action for execution-id."
   [execution-id]
-  (some->
-   (runtime/execution-context
-    execution-id)
-   (get runtime/outgoing-send-key)
-   :payload))
+  (get @outgoing-actions execution-id))
+
+(defn command-payload
+  "Return the exact command payload produced by choreography projection."
+  [execution-id]
+  (some-> (command-action execution-id)
+          :payload))
 
 ;; -----------------------------------------------------------------------------
 ;; Completion/cleanup observations
@@ -1620,6 +1489,14 @@
      execution-id))
   (runtime/cancel-all-timers!
    execution-id)
+  (swap! outgoing-actions dissoc execution-id)
+  (swap!
+   executions-by-source
+   (fn [by-source]
+     (into {}
+           (remove (fn [[_source-id active-id]]
+                     (= execution-id active-id)))
+           by-source)))
   (runtime/abort!
    execution-id
    reason))
@@ -1629,11 +1506,13 @@
 ;; -----------------------------------------------------------------------------
 
 (defn initialize!
-  "Register optimistic browser effects with the generic choreography runtime.
+  "Register optimistic browser FX and the command transport handoff.
 
-   Listener registration remains in gesso.live.runtime."
+   Global HTMX/SSE listener registration belongs to gesso.live.browser.core.
+   Repeated initialization is safe."
   []
-  (install-effect-handlers!)
+  (install-fx!)
+  (install-transport-handoff!)
   true)
 
 (defn diagnostics

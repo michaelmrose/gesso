@@ -1,5 +1,5 @@
-(ns gesso.live.choreo.verify
-  "Static verification for Gesso Live choreographies.
+(ns gesso.choreo.verify
+  "Static verification for Gesso choreographies.
 
    This namespace checks the protocol graph before projection or execution. It
    is intentionally pure and platform-neutral.
@@ -16,9 +16,9 @@
 
    It deliberately does not:
    - project endpoint plans
-   - execute effects
+   - execute local FX machines
    - know DOM, HTMX, SSE, Ring, XTDB, Manifold, or Missionary
-   - prove arbitrary application effects correct
+   - prove arbitrary local FX machines correct
    - promise unconditional distributed liveness
 
    A verified choreography establishes protocol safety under the events and
@@ -26,17 +26,17 @@
    execution must be modeled explicitly."
   (:require
    [clojure.set :as set]
-   [gesso.live.choreo :as choreo]))
+   [gesso.choreo.core :as choreo]))
 
 ;; -----------------------------------------------------------------------------
 ;; Result identity
 ;; -----------------------------------------------------------------------------
 
 (def verification-type
-  :gesso.live.choreo/verification)
+  :gesso.choreo/verification)
 
 (def verified-type
-  :gesso.live.choreo/verified)
+  :gesso.choreo/verified)
 
 (def ^:private terminal-frontier
   ::terminal)
@@ -463,17 +463,17 @@
    (next-errors state-id state)
    (metadata-errors state-id state)))
 
-(defn- effect-shape-errors
+(defn- fx-shape-errors
   [roles state-id state]
   (concat
    (role-errors roles state-id :role (:role state))
-   (when-not (keyword? (:effect state))
+   (when-not (keyword? (:machine state))
      [(problem
-       :invalid-effect
-       (state-path state-id :effect)
-       "Effect id must be a keyword."
+       :invalid-fx-machine
+       (state-path state-id :machine)
+       "FX :machine must be a keyword."
        {:state state-id
-        :effect (:effect state)})])
+        :machine (:machine state)})])
    (next-errors state-id state)
    (metadata-errors state-id state)))
 
@@ -622,8 +622,8 @@
     (state-base-errors state-id state)
     (when (map? state)
       (case (:op state)
-        :effect
-        (effect-shape-errors roles state-id state)
+        :fx
+        (fx-shape-errors roles state-id state)
 
         :send
         (send-shape-errors roles state-id state)
@@ -1320,7 +1320,7 @@
 
    Result shape:
 
-     {:gesso.live.choreo/type :gesso.live.choreo/verification
+     {:gesso.choreo/type :gesso.choreo/verification
       :valid? ...
       :choreography ...
       :errors [...]
@@ -1422,7 +1422,7 @@
         (if (map? states)
           (terminal-state-ids states reachable)
           #{})]
-    {:gesso.live.choreo/type verification-type
+    {:gesso.choreo/type verification-type
      :valid? (empty? errors)
      :choreography choreography'
      :errors errors
@@ -1452,13 +1452,13 @@
   (let [result (verify choreography)]
     (when-not (:valid? result)
       (throw
-       (ex "Gesso Live choreography failed verification."
-           {:error/type :gesso.live.choreo/verification-failed
+       (ex "Gesso choreography failed verification."
+           {:error/type :gesso.choreo/verification-failed
             :errors (:errors result)
             :warnings (:warnings result)
             :analysis (:analysis result)
             :choreography (:choreography result)})))
-    {:gesso.live.choreo/type verified-type
+    {:gesso.choreo/type verified-type
      :verified? true
      :choreography (:choreography result)
      :warnings (:warnings result)
@@ -1469,7 +1469,7 @@
   [x]
   (and (map? x)
        (= verified-type
-          (:gesso.live.choreo/type x))
+          (:gesso.choreo/type x))
        (true? (:verified? x))))
 
 (defn ensure-verified
@@ -1489,7 +1489,7 @@
 
           (and (map? verification-or-choreography)
                (= verification-type
-                  (:gesso.live.choreo/type verification-or-choreography)))
+                  (:gesso.choreo/type verification-or-choreography)))
           verification-or-choreography
 
           :else
