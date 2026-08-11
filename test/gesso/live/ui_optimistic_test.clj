@@ -34,28 +34,56 @@
    :pending-label "Claiming…"
    :content pending-card})
 
-(defn- form-attrs
-  [hiccup]
-  (second hiccup))
+(def pending-card-with-form
+  [:details
+   {:data-request-card "request-1"
+    :open true}
+   [:summary "Claimed"]
+   [:div
+    [:form {:data-projected-form true}
+     [:input {:name "note"}]
+     [:button {:type "submit"} "Save"]]]])
 
-(defn- form-children
-  [hiccup]
-  (drop 2 hiccup))
+(def optimistic-config-with-form
+  (assoc optimistic-config
+         :template-name "request-1-claim-with-form"
+         :content pending-card-with-form))
 
-(defn- child-by-tag
+(defn- element-children
+  [hiccup]
+  (let [xs (rest hiccup)]
+    (if (map? (first xs))
+      (rest xs)
+      xs)))
+
+(defn- direct-child-by-tag
   [hiccup tag]
   (some #(when (and (vector? %)
                     (= tag (first %)))
            %)
-        (form-children hiccup)))
+        (element-children hiccup)))
+
+(defn- post-form
+  [hiccup]
+  (if (= :form (first hiccup))
+    hiccup
+    (direct-child-by-tag hiccup :form)))
+
+(defn- form-attrs
+  [hiccup]
+  (second (post-form hiccup)))
+
+(defn- form-children
+  [hiccup]
+  (element-children (post-form hiccup)))
 
 (defn- button
   [hiccup]
-  (child-by-tag hiccup :button))
+  (direct-child-by-tag (post-form hiccup) :button))
 
 (defn- template
   [hiccup]
-  (child-by-tag hiccup :template))
+  (direct-child-by-tag hiccup :template))
 
 (defn- anti-forgery-input
   [hiccup]
@@ -223,8 +251,16 @@
              (get button-attrs
                   protocol/projection-mode-attr))))
 
-    (testing "the matching projection template is a sibling in the same wrapper form"
+    (testing "the request form and matching projection template are siblings"
+      ;; The projection template must never be nested inside the request form.
+      ;; Projection content is arbitrary one-rooted application Hiccup and may
+      ;; itself contain forms; nesting the template under this form allows the
+      ;; HTML parser to repair/corrupt that projection before the browser runtime
+      ;; validates its root.
+      (is (not= :form (first markup)))
+      (is (= :form (first (post-form markup))))
       (is (= :template (first template')))
+      (is (nil? (direct-child-by-tag (post-form markup) :template)))
       (is (= pending-card (nth template' 2)))
       (is (= {:data-gesso-optimistic-protocol "2"
               :data-gesso-optimistic-transition "request/claim"
@@ -232,6 +268,26 @@
               :data-gesso-optimistic-scope request-wire-scope
               :data-gesso-optimistic-mode "provisional"}
              (second template'))))))
+
+(deftest post-button-projection-may-contain-forms-test
+  (let [markup
+        (ui/post-button
+         ctx
+         {:to "/app/requests/request-1/claim"
+          :swap "none"
+          :label "Claim"
+          :optimistic optimistic-config-with-form})
+        request-form (post-form markup)
+        template' (template markup)]
+    (testing "Gesso's anti-forgery form does not become an ancestor of projection markup"
+      (is (some? request-form))
+      (is (some? template'))
+      (is (not= request-form markup))
+      (is (nil? (direct-child-by-tag request-form :template))))
+
+    (testing "form-containing application projection is preserved exactly"
+      (is (= pending-card-with-form
+             (nth template' 2))))))
 
 (deftest post-button-wrapper-does-not-own-request-or-optimistic-protocol-test
   (let [markup
@@ -355,35 +411,38 @@
 (deftest post-button-optimistic-sync-override-test
   (testing "explicit UI sync overrides the descriptor recommendation"
     (is (= "closest form:abort"
-           (get-in
+           (:hx-sync
+            (second
+             (button
+              (ui/post-button
+               ctx
+               {:to "/claim"
+                :label "Claim"
+                :sync "closest form:abort"
+                :optimistic optimistic-config})))))))
+
+  (testing "explicit nil or false disables hx-sync"
+    (is (nil?
+         (:hx-sync
+          (second
+           (button
             (ui/post-button
              ctx
              {:to "/claim"
               :label "Claim"
-              :sync "closest form:abort"
-              :optimistic optimistic-config})
-            [3 1 :hx-sync]))))
-
-  (testing "explicit nil or false disables hx-sync"
-    (is (nil?
-         (get-in
-          (ui/post-button
-           ctx
-           {:to "/claim"
-            :label "Claim"
-            :sync nil
-            :optimistic optimistic-config})
-          [3 1 :hx-sync])))
+              :sync nil
+              :optimistic optimistic-config}))))))
 
     (is (nil?
-         (get-in
-          (ui/post-button
-           ctx
-           {:to "/claim"
-            :label "Claim"
-            :sync false
-            :optimistic optimistic-config})
-          [3 1 :hx-sync])))))
+         (:hx-sync
+          (second
+           (button
+            (ui/post-button
+             ctx
+             {:to "/claim"
+              :label "Claim"
+              :sync false
+              :optimistic optimistic-config}))))))))
 
 (deftest post-button-optimistic-fragment-call-shape-test
   (let [fragment
