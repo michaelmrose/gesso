@@ -1051,7 +1051,6 @@
      source - actual HTMX request owner
 
    Options:
-     :target             already-resolved HTMX target, when available
      :execution-id       caller-provided id; otherwise generated
      :consistency-token  optional DB visibility token already associated with
                          the request
@@ -1060,10 +1059,10 @@
    choreography-produced command send action recorded by the transport handoff."
   ([source]
    (start! source nil))
-  ([source {:keys [target execution-id consistency-token]}]
+  ([source {:keys [execution-id consistency-token]}]
    (let [execution-id (or execution-id
                           (gesso.live.browser.optimistic/execution-id))
-         prepared (prepare source target)
+         prepared (prepare source nil)
          source-uid (node-uid source)
          execution
          (runtime/start!

@@ -314,13 +314,6 @@
        execution-id)))
   true)
 
-(defn- optimistic-target-from-event
-  [event]
-  (let [candidate
-        (detail-field event "target")]
-    (when (dom/element? candidate)
-      candidate)))
-
 (defn on-before-request!
   "Start the verified browser choreography immediately before network send.
 
@@ -352,10 +345,7 @@
         (try
           (optimistic/start!
          source
-         {:target
-          (optimistic-target-from-event
-           event)
-          :execution-id execution-id
+         {:execution-id execution-id
           :consistency-token
           (:consistency-token preflight)})
         (remove-pending-request!

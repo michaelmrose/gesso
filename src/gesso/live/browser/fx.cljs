@@ -175,10 +175,13 @@
    default handlers."
   [ctx]
   (require-map! "FX context" ctx)
-  (-> (merge {}
-             (get ctx handlers-key)
-             (dynamic-handlers ctx))
-      require-handlers!))
+  (let [explicit-handlers (get ctx handlers-key)]
+    (when (some? explicit-handlers)
+      (require-map! "FX handlers" explicit-handlers))
+    (-> (merge {}
+               explicit-handlers
+               (dynamic-handlers ctx))
+        require-handlers!)))
 
 ;; -----------------------------------------------------------------------------
 ;; One Biff-style state step
@@ -354,7 +357,7 @@
                        machine-name-key machine-name
                        :biff.fx/output output})))
                (recur (get output next-key)
-                      output
+                      (merge input output)
                       (conj trace output)))
 
              (contains? output return-key)

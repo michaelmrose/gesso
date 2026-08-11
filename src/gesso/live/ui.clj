@@ -548,22 +548,20 @@
    {:data-gesso-live-post true}))
 
 (defn- render-post-button
-  [ctx opts siblings]
+  [ctx opts]
   (into
    [:form (post-button-form-attrs (:form-attrs opts))]
    (concat
     (keep identity [(anti-forgery-input ctx)])
     [(into
       [:button (post-button-attrs opts)]
-      (button-children opts))]
-    siblings)))
+      (button-children opts))])))
 
 (defn- render-ordinary-post-button
   [ctx opts]
   (render-post-button
    ctx
-   opts
-   []))
+   opts))
 
 (defn- strip-optimistic-protocol-attrs
   [attrs]
@@ -619,10 +617,11 @@
              :sync effective-sync
              :request-attrs request-attrs
              :protocol-attrs protocol-attrs))]
-    (render-post-button
-     ctx
-     opts'
-     [template])))
+    [:<>
+     (render-post-button
+      ctx
+      opts')
+     template]))
 
 (defn post-button
   "Render a tiny HTMX POST button, optionally with built-in optimistic rendering.

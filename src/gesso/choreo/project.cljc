@@ -111,22 +111,15 @@
 (defn- projected-message-contract
   [send-state receive-state guards]
   (let [required (:required send-state #{})
-        match-keys (set (keys guards))]
-    (when-not (set/subset? match-keys required)
-      (projection-error
-       :uncommunicated-choice
-       "Projected receive requires remote choice values that are not required by the sending message."
-       {:send (communication-key send-state)
-        :required required
-        :choice-keys match-keys
-        :missing (set/difference match-keys required)}))
+        payload-guards
+        (select-keys guards required)]
     (cond-> {:from (:from send-state)
              :to (:to send-state)
              :event (:event send-state)
              :required required
              :optional (:optional send-state #{})
              :correlation (:correlation send-state #{})
-             :match guards}
+             :match payload-guards}
       (contains? send-state :via)
       (assoc :via (:via send-state))
 

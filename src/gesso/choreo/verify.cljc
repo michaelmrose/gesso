@@ -1019,12 +1019,16 @@
                   owner-errors
                   (when (contains? #{:acquire :release} (:op state))
                     (resource-owner-errors resources state-id state))
-                  {:keys [held errors] :as transfer}
+                  transfer
                   (transfer-linear-resources
                    resources
                    state-id
                    state
                    held-before)
+                  held
+                  (:held transfer)
+                  transfer-errors
+                  (:errors transfer)
                   terminal-errors
                   (when (choreo/terminal-state? state)
                     (terminal-resource-errors resources state-id held))
@@ -1037,7 +1041,7 @@
                   errors'
                   (into errors
                         (concat owner-errors
-                                (:errors transfer)
+                                transfer-errors
                                 terminal-errors))]
               (recur (into pending targets)
                      (inc index)
@@ -1413,7 +1417,7 @@
             (unreachable-state-warnings states reachable)
             [])
           (if (and (map? states)
-                   (set? (:environment-events choreography')))
+                   (keyword-set? (:environment-events choreography')))
             (unused-environment-event-warnings
              choreography'
              reachable)
