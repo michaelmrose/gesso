@@ -1,33 +1,81 @@
 (ns gesso.choreo.project
-  "Endpoint projection for verified Gesso choreographies.
+  "Projection for the first v4.5 Gesso Choreo semantic core.
 
-   Projection turns one verified global interaction into a compact role-local
-   plan suitable for the generic choreography machine.
+   Projection turns one verified global choreography into one role-local plan.
 
-   The projector is deliberately mechanical:
-   - local FX machine steps remain local FX machine steps
-   - local choices remain local choices
-   - local sends remain sends
-   - remote implementation steps disappear
-   - communication arriving at the role becomes an await gate
-   - remote choice guards become message-match requirements when needed
-   - foreign completion becomes local completion when no further local action
-     is required
+   The current global language is deliberately small:
 
-   Projection does not re-run the choreography verifier and does not know about
-   DOM, HTMX, Ring, XTDB, SSE implementation, or optimistic policy.
+     :local
+     :authoritative
+     :branch
+     :communicate
+     :await
+     :return
 
-   A projected plan contains only behavior observable or executable by one role.
-   Compiler/verifier machinery should not be required by the production browser
-   runtime once the projected plan has been emitted as data."
-  (:refer-clojure :exclude [await send])
+   The current projected language is likewise small:
+
+     :local
+       semantically local work owned by this role, including declared value
+       inputs and outputs
+
+     :authoritative
+       this role realizes one public authoritative semantic operation, with
+       explicit declared inputs and closed outputs
+
+     :branch
+       deterministic role-local branching on one established semantic value
+
+     :send
+       this role realizes the sending side of a global :communicate
+
+     :receive
+       this role waits for one of one-or-more participant communications
+
+     :await
+       this role waits for one of its own environment events
+
+     :return
+       this role has no further work in this choreography
+
+   Projection deliberately distinguishes participant communication from
+   environment events. A projected :receive is never satisfied by an
+   environment event, and a projected :await is never satisfied by a participant
+   message merely because the event keyword is the same.
+
+   Foreign local actions disappear from a role projection because :local is,
+   by definition, distributed-unobservable. Foreign :branch and foreign
+   environment waits are traversed through every possible continuation.
+
+   Foreign :authoritative is different. An authoritative operation is a global
+   observable semantic step. Another role may not simply run later local work as
+   though that authoritative predecessor had already occurred. Projection tracks
+   such a causal barrier until this role receives a participant communication
+   that occurs after the authority step. If direct local work would otherwise be
+   reached first, projection rejects the choreography as unrealizable for that
+   role. A role with no remaining work may still complete locally; local
+   completion does not claim the global choreography has terminated.
+
+   Projection also rejects remote control flow that reaches different direct
+   local actions before this role can distinguish which continuation occurred.
+   Multiple remote branches may instead converge on distinct incoming
+   participant communications; those communications become alternatives of one
+   projected :receive gate.
+
+   This is intentionally only a first projection semantics. It does not yet
+   claim a refinement proof. The later local-machine semantics and independent
+   execution work must establish what a projected :send/:receive pair means
+   operationally and whether this projection actually realizes the global
+   transition semantics.
+
+   This namespace contains no browser, HTMX, transport, XTDB implementation,
+   authentication, knowledge/provenance proof, optimism, or model-specific
+   behavior."
   (:require
-   [clojure.set :as set]
    [gesso.choreo.core :as choreo]
    [gesso.choreo.verify :as verify]))
 
 ;; -----------------------------------------------------------------------------
-;; Projected representation
+;; Identity
 ;; -----------------------------------------------------------------------------
 
 (def projected-plan-version
@@ -37,21 +85,15 @@
   :gesso.choreo/projected-plan)
 
 (def projected-ops
-  "Operations consumed by the role-local choreography machine.
-
-   :await is the single suspension primitive. It may wait for participant
-   messages, environment events, or both."
-  #{:fx
+  #{:local
+    :authoritative
+    :branch
     :send
-    :choice
+    :receive
     :await
-    :acquire
-    :release
     :return})
 
-(def projected-complete-outcome
-  "Terminal outcome used when the global choreography has no further observable
-   work for this role."
+(def complete-outcome
   :gesso.choreo/complete)
 
 ;; -----------------------------------------------------------------------------
@@ -69,11 +111,14 @@
      data))))
 
 ;; -----------------------------------------------------------------------------
-;; Projected plan predicates
+;; Projected-plan predicates
 ;; -----------------------------------------------------------------------------
 
 (defn projected-plan?
-  "True when x is a role-local projected plan."
+  "True when x has the shallow identity/shape of a projected plan.
+
+   Full correctness of a plan is a compiler/local-machine concern. This
+   predicate intentionally does not duplicate the projector."
   [x]
   (and (map? x)
        (= projected-plan-type
@@ -81,10 +126,12 @@
        (= projected-plan-version
           (:gesso.choreo/version x))
        (keyword? (:role x))
-       (map? (:states x))))
+       (map? (:states x))
+       (contains? (:states x)
+                  (:initial x))))
 
 (defn ensure-projected-plan
-  "Return x when it is a projected plan, otherwise throw."
+  "Return x when it is a projected plan; otherwise throw."
   [x]
   (when-not (projected-plan? x)
     (projection-error
@@ -94,57 +141,24 @@
   x)
 
 ;; -----------------------------------------------------------------------------
-;; Global communication helpers
+;; Global observable frontier
 ;; -----------------------------------------------------------------------------
-
-(defn- communication-key
-  [state]
-  (select-keys state [:from :to :event :via]))
-
-(defn- matching-communication?
-  [send-state receive-state]
-  (and (= :send (:op send-state))
-       (= :receive (:op receive-state))
-       (= (communication-key send-state)
-          (communication-key receive-state))))
-
-(defn- projected-message-contract
-  [send-state receive-state guards]
-  (let [required (:required send-state #{})
-        payload-guards
-        (select-keys guards required)]
-    (cond-> {:from (:from send-state)
-             :to (:to send-state)
-             :event (:event send-state)
-             :required required
-             :optional (:optional send-state #{})
-             :correlation (:correlation send-state #{})
-             :match payload-guards}
-      (contains? send-state :via)
-      (assoc :via (:via send-state))
-
-      (contains? receive-state :bind)
-      (assoc :bind (:bind receive-state)))))
-
-;; -----------------------------------------------------------------------------
-;; Observable frontier
-;; -----------------------------------------------------------------------------
-
-(defn- local-state?
-  [state role]
-  (= role (choreo/state-role state)))
 
 (defn- frontier-entry-key
   [entry]
   (case (:kind entry)
     :state
-    [:state (:state entry)]
+    [:state
+     (:state entry)]
 
     :receive
     [:receive
-     (:receive-state entry)
-     (:send-state entry)
-     (:guards entry)]
+     (:state entry)]
+
+    :blocked
+    [:blocked
+     (:state entry)
+     (:authority-state entry)]
 
     :done
     [:done]
@@ -155,248 +169,341 @@
   [entries]
   (->> entries
        (reduce
-        (fn [acc entry]
-          (assoc acc (frontier-entry-key entry) entry))
+        (fn [by-key entry]
+          (assoc by-key
+                 (frontier-entry-key entry)
+                 entry))
         {})
        vals
        vec))
 
+(defn- role-direct-state?
+  [state role]
+  (case (:op state)
+    :local
+    (= role
+       (:role state))
+
+    :authoritative
+    (= role
+       (:role state))
+
+    :branch
+    (= role
+       (:role state))
+
+    :await
+    (= role
+       (:role state))
+
+    :communicate
+    (= role
+       (:from state))
+
+    false))
+
+(defn- incoming-communication?
+  [state role]
+  (and (= :communicate
+          (:op state))
+       (= role
+          (:to state))))
+
 (defn- observable-frontier
-  "Find the first behavior observable by role from global start-state.
+  "Return the first global states that are locally relevant to role.
 
-   Foreign implementation states are traversed without being copied into the
-   endpoint plan.
+   Traversal carries a causal-barrier marker after a foreign :authoritative
+   state. While that barrier is present, direct work by role is not projectable:
+   the role has no observation establishing that the authoritative predecessor
+   occurred. An incoming participant communication clears the barrier because
+   receiving that message is an observable causal successor.
 
-   Foreign authoritative choices contribute guards. When different branches
-   later communicate through the same message identity, those guards become
-   payload match requirements in the local await gate.
+   Frontier entries:
 
-   A foreign send directly to role is remembered until its matching local
-   receive is reached. This preserves the exact message contract for that
-   receive rather than guessing from all graph predecessors."
+     {:kind :state :state id}
+       Direct work role may perform now.
+
+     {:kind :receive :state id}
+       Incoming participant communication role may receive now.
+
+     {:kind :blocked :state id :authority-state id}
+       Direct role work is causally after a foreign authoritative operation but
+       no communication has yet made that predecessor observable to role.
+
+     {:kind :done}
+       This branch has no further local work for role.
+
+   Foreign :local, :branch, :communicate between other roles, and :await remain
+   unobservable to role and are traversed. Foreign :authoritative is traversed
+   while setting the causal barrier."
   [choreography role start-state]
-  (let [states (:states choreography)]
-    (loop [pending [{:state start-state
-                     :guards {}
-                     :pending-send nil}]
-           index 0
-           seen #{}
-           frontier []]
-      (if (= index (count pending))
+  (let [states
+        (:states choreography)]
+
+    (loop [pending
+           [{:state start-state
+             :authority-state nil}]
+
+           index
+           0
+
+           seen
+           #{}
+
+           frontier
+           []]
+
+      (if (= index
+             (count pending))
         (distinct-frontier frontier)
+
         (let [{state-id :state
-               guards :guards
-               pending-send :pending-send
-               :as cursor}
+               authority-state :authority-state}
               (nth pending index)
-              visit-key [state-id guards pending-send]]
-          (cond
-            (contains? seen visit-key)
+
+              seen-key
+              [state-id authority-state]]
+
+          (if (contains? seen seen-key)
             (recur pending
                    (inc index)
                    seen
                    frontier)
 
-            (not (contains? states state-id))
-            (projection-error
-             :unknown-state
-             "Verified choreography projection encountered an unknown state."
-             {:role role
-              :state state-id})
+            (let [state
+                  (get states state-id)
 
-            :else
-            (let [state (get states state-id)
-                  op (:op state)
-                  local? (local-state? state role)
-                  seen' (conj seen visit-key)]
+                  seen'
+                  (conj seen seen-key)
+
+                  enqueue
+                  (fn [pending target authority-state']
+                    (conj pending
+                          {:state target
+                           :authority-state authority-state'}))]
+
+              (when-not state
+                (projection-error
+                 :unknown-state
+                 "Projection encountered an unknown global state."
+                 {:role role
+                  :state state-id}))
+
               (cond
-                ;; Local receive is not emitted as an executable state. It is
-                ;; folded into an await gate carrying the exact remote send
-                ;; contract that made this state reachable.
-                (and local?
-                     (= :receive op))
-                (let [send-state
-                      (when pending-send
-                        (get states pending-send))]
-                  (when-not (and send-state
-                                 (matching-communication?
-                                  send-state
-                                  state))
-                    (projection-error
-                     :unmatched-projected-receive
-                     "Local receive was reached without its matching remote send."
-                     {:role role
-                      :receive-state state-id
-                      :pending-send pending-send
-                      :receive (communication-key state)
-                      :send (when send-state
-                              (communication-key send-state))}))
-                  (recur pending
-                         (inc index)
-                         seen'
-                         (conj frontier
-                               {:kind :receive
-                                :receive-state state-id
-                                :send-state pending-send
-                                :guards guards})))
-
-                ;; Any other local state is directly executable/observable.
-                local?
-                (do
-                  (when pending-send
-                    (projection-error
-                     :invalid-communication-frontier
-                     "Remote send reached a local state other than its matching receive."
-                     {:role role
-                      :send-state pending-send
-                      :state state-id
-                      :op op}))
-                  (recur pending
-                         (inc index)
-                         seen'
-                         (conj frontier
-                               {:kind :state
-                                :state state-id})))
-
-                ;; Global completion by another role means this endpoint has no
-                ;; further work. The remote terminal outcome is intentionally
-                ;; not revealed to a role that was not told that outcome.
-                (= :return op)
+                (role-direct-state?
+                 state
+                 role)
                 (recur pending
                        (inc index)
                        seen'
-                       (conj frontier {:kind :done}))
+                       (conj frontier
+                             (if authority-state
+                               {:kind :blocked
+                                :state state-id
+                                :authority-state authority-state}
+                               {:kind :state
+                                :state state-id})))
 
-                ;; A foreign choice is traversed branch-by-branch. Its semantic
-                ;; value is remembered as a guard so the local endpoint can
-                ;; select correctly if branch identity must later be learned
-                ;; from a message payload.
-                (= :choice op)
-                (let [choice-key (:key state)
-                      cursors
-                      (mapv
-                       (fn [[branch target]]
-                         {:state target
-                          :guards (assoc guards choice-key branch)
-                          :pending-send nil})
-                       (:branches state))]
-                  (recur (into pending cursors)
-                         (inc index)
-                         seen'
-                         frontier))
-
-                ;; A foreign send to this role must flow immediately into the
-                ;; matching local receive. Interrupt paths do not produce that
-                ;; message and therefore clear pending-send.
-                (= :send op)
-                (let [normal
-                      {:state (:next state)
-                       :guards guards
-                       :pending-send
-                       (when (= role (:to state))
-                         state-id)}
-                      interrupts
-                      (mapv
-                       (fn [[_event target]]
-                         {:state target
-                          :guards guards
-                          :pending-send nil})
-                       (:interrupts state))]
-                  (recur (into pending
-                               (cons normal interrupts))
-                         (inc index)
-                         seen'
-                         frontier))
-
-                ;; Foreign await branches represent remote/environmental
-                ;; nondeterminism. The local endpoint does not know which event
-                ;; occurred; only later communication may make that distinction
-                ;; observable.
-                (= :await op)
-                (let [cursors
-                      (mapv
-                       (fn [[_event target]]
-                         {:state target
-                          :guards guards
-                          :pending-send nil})
-                       (:events state))]
-                  (recur (into pending cursors)
-                         (inc index)
-                         seen'
-                         frontier))
-
-                ;; Foreign receive/fx/acquire/release/goto are invisible
-                ;; local implementation steps and have one normal successor.
-                (contains?
-                 #{:receive :fx :acquire :release :goto}
-                 op)
-                (recur (conj pending
-                             {:state (:next state)
-                              :guards guards
-                              :pending-send nil})
+                (incoming-communication?
+                 state
+                 role)
+                ;; The communication is causally after everything traversed to
+                ;; reach it. Receiving it therefore gives this role the first
+                ;; observable synchronization point after a foreign authority
+                ;; barrier.
+                (recur pending
                        (inc index)
                        seen'
-                       frontier)
+                       (conj frontier
+                             {:kind :receive
+                              :state state-id}))
+
+                (= :return
+                   (:op state))
+                (recur pending
+                       (inc index)
+                       seen'
+                       (conj frontier
+                             {:kind :done}))
+
+                (= :local
+                   (:op state))
+                (recur
+                 (enqueue pending
+                          (:next state)
+                          authority-state)
+                 (inc index)
+                 seen'
+                 frontier)
+
+                (= :authoritative
+                   (:op state))
+                ;; A foreign authority transition is globally observable and
+                ;; cannot be silently reordered before this role's later work.
+                ;; Remember the nearest such predecessor until an incoming
+                ;; communication to role synchronizes it.
+                (recur
+                 (enqueue pending
+                          (:next state)
+                          (or authority-state
+                              state-id))
+                 (inc index)
+                 seen'
+                 frontier)
+
+                (= :branch
+                   (:op state))
+                (recur
+                 (into pending
+                       (map
+                        (fn [target]
+                          {:state target
+                           :authority-state authority-state})
+                        (vals
+                         (:cases state))))
+                 (inc index)
+                 seen'
+                 frontier)
+
+                (= :communicate
+                   (:op state))
+                ;; Communication between other roles does not synchronize this
+                ;; role, so any foreign-authority barrier remains outstanding.
+                (recur
+                 (enqueue pending
+                          (:next state)
+                          authority-state)
+                 (inc index)
+                 seen'
+                 frontier)
+
+                (= :await
+                   (:op state))
+                (recur
+                 (into pending
+                       (map
+                        (fn [target]
+                          {:state target
+                           :authority-state authority-state})
+                        (vals
+                         (:events state))))
+                 (inc index)
+                 seen'
+                 frontier)
 
                 :else
                 (projection-error
                  :unsupported-op
-                 "Projection encountered an unsupported choreography operation."
+                 "Projection encountered an unsupported global operation."
                  {:role role
                   :state state-id
-                  :op op})))))))))
+                  :op (:op state)})))))))))
+;; -----------------------------------------------------------------------------
+;; Frontier classification
+;; -----------------------------------------------------------------------------
+
+(defn- classify-frontier
+  [role source frontier]
+  (let [kinds
+        (set
+         (map :kind frontier))]
+
+    (cond
+      (empty? frontier)
+      (projection-error
+       :empty-frontier
+       "Projection found no locally meaningful continuation."
+       {:role role
+        :state source})
+
+      (contains? kinds :blocked)
+      (projection-error
+       :unobserved-authoritative-predecessor
+       "Role-local behavior is causally after a foreign authoritative operation, but no incoming communication establishes that the authoritative predecessor occurred."
+       {:role role
+        :state source
+        :frontier frontier
+        :authority-states
+        (set
+         (keep :authority-state frontier))})
+
+      (= kinds
+         #{:done})
+      {:kind :done}
+
+      (= kinds
+         #{:receive})
+      {:kind :receive
+       :entries frontier}
+
+      (= kinds
+         #{:state})
+      (let [state-ids
+            (set
+             (map :state frontier))]
+
+        (if (= 1
+               (count state-ids))
+          {:kind :state
+           :state
+           (first state-ids)}
+
+          (projection-error
+           :uncommunicated-control-flow
+           "Remote control flow reaches different direct local states before this role can distinguish which continuation occurred."
+           {:role role
+            :state source
+            :local-frontier state-ids})))
+
+      :else
+      (projection-error
+       :mixed-observable-frontier
+       "Remote control flow mixes completion, incoming communication, and/or direct local execution in a way this role cannot distinguish."
+       {:role role
+        :state source
+        :frontier frontier}))))
 
 ;; -----------------------------------------------------------------------------
-;; Await alternative ambiguity
+;; Receive alternatives
 ;; -----------------------------------------------------------------------------
 
-(defn- message-identity
+(defn- receive-identity
   [alternative]
-  (select-keys alternative [:from :to :event :via]))
+  (select-keys
+   alternative
+   [:from
+    :event
+    :via]))
 
-(defn- mutually-exclusive-match?
-  [left right]
-  (let [left-match (:match left {})
-        right-match (:match right {})
-        shared (set/intersection
-                (set (keys left-match))
-                (set (keys right-match)))]
-    (boolean
-     (some
-      (fn [k]
-        (not= (get left-match k)
-              (get right-match k)))
-      shared))))
+(defn- normalize-receive-alternatives
+  [role source alternatives]
+  (let [by-identity
+        (group-by
+         receive-identity
+         alternatives)]
 
-(defn- same-continuation?
-  [left right]
-  (and (= (:next left)
-          (:next right))
-       (= (:bind left)
-          (:bind right))))
+    (->> by-identity
+         (map
+          (fn [[identity same-identity]]
+            (let [continuations
+                  (set
+                   (map :next
+                        same-identity))]
 
-(defn- ambiguous-pair?
-  [left right]
-  (and (= (message-identity left)
-          (message-identity right))
-       (not (same-continuation? left right))
-       (not (mutually-exclusive-match?
-             left
-             right))))
+              (when (> (count continuations)
+                       1)
+                (projection-error
+                 :ambiguous-receive
+                 "The same incoming participant communication can lead to different local continuations."
+                 {:role role
+                  :state source
+                  :identity identity
+                  :alternatives same-identity}))
 
-(defn- assert-unambiguous-receives!
-  [role alternatives]
-  (doseq [i (range (count alternatives))
-          j (range (inc i) (count alternatives))
-          :let [left (nth alternatives i)
-                right (nth alternatives j)]
-          :when (ambiguous-pair? left right)]
-    (projection-error
-     :ambiguous-receive
-     "Two projected incoming-message alternatives can match the same message but continue differently."
-     {:role role
-      :left left
-      :right right})))
+              (first same-identity))))
+         (sort-by
+          (comp pr-str receive-identity))
+         vec)))
 
 ;; -----------------------------------------------------------------------------
 ;; Projection builder
@@ -409,472 +516,494 @@
    role
    source])
 
-(defn- local-resource-ids
-  [states]
-  (set
-   (keep
-    (fn [[_state-id state]]
-      (when (contains? #{:acquire :release}
-                       (:op state))
-        (:resource state)))
-    states)))
-
-(defn- local-environment-events
-  [states]
-  (reduce
-   (fn [events [_state-id state]]
-     (if (= :await (:op state))
-       (into events
-             (keys (:events state)))
-       events))
-   #{}
-   states))
-
 (defn project
-  "Project verified choreography to one role-local executable plan.
+  "Project one choreography to one role-local plan.
 
-   choreography-or-verified may be a plain choreography or a value returned by
-   gesso.choreo.verify/verify!. Plain choreography is verified first.
+   choreography-or-verified may be:
 
-   Projected state ids are opaque EDN values. Original locally executable states
-   retain their original keyword ids; compiler-created await/completion states
-   use deterministic vector ids.
+   - a plain/normalized choreography;
+   - a successful verification result;
+   - a successful verified wrapper.
 
-   The projected plan contains no foreign local FX steps or foreign resource
-   operations."
+   Projection currently accepts only roles inferred from the choreography.
+
+   The returned plan is compiler output, not yet a final v4.5 ExecutablePlan
+   format."
   [choreography-or-verified role]
-  (let [verified (verify/ensure-verified choreography-or-verified)
-        choreography (:choreography verified)
-        roles (:roles choreography)
-        global-states (:states choreography)
-        global-resources (:resources choreography)
-        projected-states (atom {})
-        continuation-cache (atom {})]
+  (let [verified
+        (verify/ensure-verified
+         choreography-or-verified)
+
+        choreography
+        (:choreography verified)
+
+        roles
+        (choreo/roles choreography)
+
+        global-states
+        (:states choreography)
+
+        projected-states
+        (atom {})
+
+        continuation-cache
+        (atom {})]
+
     (when-not (contains? roles role)
       (projection-error
        :unknown-role
-       "Cannot project choreography to an undeclared role."
+       "Cannot project choreography to a role not present in the choreography."
        {:role role
         :roles roles}))
 
-    (letfn [(reserve-state!
-              [state-id]
-              (when-not (contains? @projected-states state-id)
-                (swap! projected-states
-                       assoc
-                       state-id
-                       {:op :gesso.choreo.project/building}))
-              state-id)
+    (letfn
+        [(reserve-state!
+           [state-id]
+           (when-not (contains?
+                      @projected-states
+                      state-id)
+             (swap! projected-states
+                    assoc
+                    state-id
+                    {:op
+                     :gesso.choreo.project/building}))
+           state-id)
 
-            (install-state!
-              [state-id state]
-              (swap! projected-states assoc state-id state)
-              state-id)
-
-            (ensure-done!
-              [source]
-              (let [state-id
-                    (synthetic-id :complete role source)]
-                (when-not (contains? @projected-states state-id)
-                  (install-state!
-                   state-id
-                   {:op :return
-                    :role role
-                    :outcome projected-complete-outcome}))
-                state-id))
-
-            (ensure-receive-await!
-              [source entries]
-              (let [state-id
-                    (synthetic-id :receive role source)]
-                (if (contains? @projected-states state-id)
+         (install-state!
+           [state-id state]
+           (swap! projected-states
+                  assoc
                   state-id
-                  (do
-                    ;; Reserve before recursively compiling post-receive
-                    ;; continuations so cycles can point back to this gate.
-                    (reserve-state! state-id)
-                    (let [alternatives
-                          (mapv
-                           (fn [{:keys
-                                 [receive-state
-                                  send-state
-                                  guards]}]
-                             (let [send (get global-states send-state)
-                                   receive (get global-states
-                                                receive-state)
-                                   next-id
-                                   (ensure-continuation!
-                                    (:next receive))]
-                               (assoc
-                                (projected-message-contract
-                                 send
-                                 receive
-                                 guards)
-                                :next next-id)))
-                           entries)]
-                      (assert-unambiguous-receives!
-                       role
-                       alternatives)
-                      (install-state!
-                       state-id
-                       {:op :await
-                        :role role
-                        :receives alternatives})
-                      state-id)))))
+                  state)
+           state-id)
 
-            (classify-frontier
-              [source frontier]
-              (let [kinds (set (map :kind frontier))]
-                (cond
-                  (empty? frontier)
-                  (projection-error
-                   :empty-frontier
-                   "Projection found no observable continuation for a verified reachable state."
-                   {:role role
-                    :state source})
+         (ensure-complete!
+           [source]
+           (let [state-id
+                 (synthetic-id
+                  :complete
+                  role
+                  source)]
 
-                  (= kinds #{:done})
-                  [:done nil]
-
-                  (= kinds #{:receive})
-                  [:receive frontier]
-
-                  ;; A role may have no endpoint execution at all when the
-                  ;; choreography terminates before its first incoming message.
-                  ;; This is safe only at the global entry frontier: if the
-                  ;; message arrives, the endpoint starts at the receive gate;
-                  ;; if the remote side terminates first, this endpoint was
-                  ;; never activated. Once a role has begun executing, silently
-                  ;; dropping a completion branch would turn a protocol error
-                  ;; into an unbounded wait.
-                  (and (= source (:initial choreography))
-                       (= kinds #{:receive :done}))
-                  [:receive
-                   (vec (filter #(= :receive (:kind %)) frontier))]
-
-                  (= kinds #{:state})
-                  (let [state-ids
-                        (set (map :state frontier))]
-                    (if (= 1 (count state-ids))
-                      [:state (first state-ids)]
-                      (projection-error
-                       :uncommunicated-control-flow
-                       "Remote control flow reaches different local states without first communicating which continuation was chosen."
-                       {:role role
-                        :state source
-                        :local-frontier state-ids})))
-
-                  :else
-                  (projection-error
-                   :mixed-observable-frontier
-                   "Remote control flow mixes completion, incoming communication, and/or direct local execution in a way the endpoint cannot observe safely."
-                   {:role role
-                    :state source
-                    :frontier frontier}))))
-
-            (ensure-continuation!
-              [start-state]
-              (if-some [cached
-                        (get @continuation-cache start-state)]
-                cached
-                (let [frontier
-                      (observable-frontier
-                       choreography
-                       role
-                       start-state)
-                      [kind value]
-                      (classify-frontier
-                       start-state
-                       frontier)
-                      target-id
-                      (case kind
-                        :done
-                        (ensure-done! start-state)
-
-                        :receive
-                        (do
-                          ;; Install cache before the await body recursively
-                          ;; compiles post-receive continuations.
-                          (let [await-id
-                                (synthetic-id
-                                 :receive
-                                 role
-                                 start-state)]
-                            (swap! continuation-cache
-                                   assoc
-                                   start-state
-                                   await-id)
-                            (ensure-receive-await!
-                             start-state
-                             value)))
-
-                        :state
-                        (do
-                          (swap! continuation-cache
-                                 assoc
-                                 start-state
-                                 value)
-                          (ensure-local-state! value))
-
-                        (projection-error
-                         :internal-frontier-kind
-                         "Projection produced an unknown frontier classification."
-                         {:role role
-                          :state start-state
-                          :kind kind}))]
-                  (swap! continuation-cache
-                         assoc
-                         start-state
-                         target-id)
-                  target-id)))
-
-            (merge-send-interrupts!
-              [send-id normal-target interrupts]
-              (if (empty? interrupts)
-                normal-target
-                (let [normal-state
-                      (get @projected-states normal-target)]
-                  (if (= :await (:op normal-state))
-                    (let [wait-id
-                          (synthetic-id
-                           :send-wait
-                           role
-                           send-id)
-                          event-targets
-                          (into {}
-                                (map
-                                 (fn [[event target]]
-                                   [event
-                                    (ensure-continuation!
-                                     target)]))
-                                interrupts)
-                          existing-events
-                          (:events normal-state {})]
-                      (when (seq
-                             (set/intersection
-                              (set (keys existing-events))
-                              (set (keys event-targets))))
-                        (projection-error
-                         :duplicate-await-event
-                         "Send interrupt event collides with an event already present in the projected await gate."
-                         {:role role
-                          :state send-id
-                          :events
-                          (set/intersection
-                           (set (keys existing-events))
-                           (set (keys event-targets)))}))
-                      (install-state!
-                       wait-id
-                       (cond-> {:op :await
-                                :role role}
-                         (seq (:receives normal-state))
-                         (assoc
-                          :receives
-                          (:receives normal-state))
-
-                         (or (seq existing-events)
-                             (seq event-targets))
-                         (assoc
-                          :events
-                          (merge
-                           existing-events
-                           event-targets))))
-                      wait-id)
-                    ;; No incoming wait follows this send. The local endpoint
-                    ;; has no reason to stay alive merely to observe a failure
-                    ;; after it has already become protocol-independent.
-                    normal-target))))
-
-            (ensure-local-state!
-              [state-id]
-              (if (contains? @projected-states state-id)
+             (when-not
+                 (contains?
+                  @projected-states
+                  state-id)
+               (install-state!
                 state-id
-                (let [state (get global-states state-id)
-                      op (:op state)]
-                  (when-not (= role
-                               (choreo/state-role state))
-                    (projection-error
-                     :foreign-local-state
-                     "Projection attempted to install a state owned by another role."
-                     {:role role
-                      :state state-id
-                      :state-role
-                      (choreo/state-role state)}))
-                  (when (= :receive op)
-                    (projection-error
-                     :raw-receive-state
-                     "Global receive states must be folded into projected await gates."
-                     {:role role
-                      :state state-id}))
-                  ;; Reserve before compiling outgoing edges so local cycles are
-                  ;; represented by ordinary state-id references.
-                  (reserve-state! state-id)
-                  (install-state!
-                   state-id
-                   (case op
-                     :fx
-                     (cond-> {:op :fx
-                              :role role
-                              :machine (:machine state)
-                              :next
-                              (ensure-continuation!
-                               (:next state))}
-                       (contains? state :input)
-                       (assoc :input (:input state)))
+                {:op :return
+                 :outcome complete-outcome}))
 
-                     :send
-                     (let [normal
-                           (ensure-continuation!
-                            (:next state))
-                           next-id
-                           (merge-send-interrupts!
-                            state-id
-                            normal
-                            (:interrupts state))]
-                       (cond-> {:op :send
-                                :role role
-                                :to (:to state)
-                                :event (:event state)
-                                :required
-                                (:required state #{})
-                                :optional
-                                (:optional state #{})
-                                :correlation
-                                (:correlation state #{})
-                                :next next-id}
-                         (contains? state :via)
-                         (assoc :via (:via state))))
+             state-id))
 
-                     :choice
-                     {:op :choice
-                      :role role
-                      :key (:key state)
-                      :branches
-                      (into {}
-                            (map
-                             (fn [[branch target]]
-                               [branch
-                                (ensure-continuation!
-                                 target)]))
-                            (:branches state))}
+         (ensure-receive-gate!
+           [source entries]
+           (let [state-id
+                 (synthetic-id
+                  :receive
+                  role
+                  source)]
 
-                     :await
-                     (cond-> {:op :await
-                              :role role
-                              :events
-                              (into {}
-                                    (map
-                                     (fn [[event target]]
-                                       [event
-                                        (ensure-continuation!
-                                         target)]))
-                                    (:events state))}
-                       (contains? state :bind)
-                       (assoc :bind (:bind state)))
+             (if (contains?
+                  @projected-states
+                  state-id)
+               state-id
 
-                     :acquire
-                     {:op :acquire
-                      :role role
-                      :resource (:resource state)
-                      :next
-                      (ensure-continuation!
-                       (:next state))}
+               (do
+                 ;; Reserve before compiling post-receive continuations so a
+                 ;; cycle may point back to this gate.
+                 (reserve-state!
+                  state-id)
 
-                     :release
-                     {:op :release
-                      :role role
-                      :resource (:resource state)
-                      :next
-                      (ensure-continuation!
-                       (:next state))}
+                 (let [alternatives
+                       (->> entries
+                            (mapv
+                             (fn [{global-state-id
+                                   :state}]
+                               (let [global-state
+                                     (get global-states
+                                          global-state-id)]
 
-                     :return
-                     (cond-> {:op :return
-                              :role role
-                              :outcome (:outcome state)}
-                       (contains? state :value-key)
-                       (assoc
-                        :value-key
-                        (:value-key state)))
+                                 (cond->
+                                  {:from
+                                   (:from global-state)
 
+                                   :event
+                                   (:event global-state)
+
+                                   :next
+                                   (ensure-continuation!
+                                    (:next global-state))}
+                                   (contains?
+                                    global-state
+                                    :via)
+                                   (assoc
+                                    :via
+                                    (:via global-state))))))
+                            (normalize-receive-alternatives
+                             role
+                             source))]
+
+                   (install-state!
+                    state-id
+                    {:op :receive
+                     :alternatives alternatives})
+
+                   state-id)))))
+
+         (ensure-continuation!
+           [start-state]
+           (if-some [cached
+                     (get
+                      @continuation-cache
+                      start-state)]
+
+             cached
+
+             (let [frontier
+                   (observable-frontier
+                    choreography
+                    role
+                    start-state)
+
+                   classification
+                   (classify-frontier
+                    role
+                    start-state
+                    frontier)]
+
+               (case (:kind classification)
+                 :done
+                 (let [state-id
+                       (ensure-complete!
+                        start-state)]
+                   (swap! continuation-cache
+                          assoc
+                          start-state
+                          state-id)
+                   state-id)
+
+                 :receive
+                 (let [state-id
+                       (synthetic-id
+                        :receive
+                        role
+                        start-state)]
+
+                   ;; Publish the continuation identity before recursively
+                   ;; compiling alternatives so cycles can return here.
+                   (swap! continuation-cache
+                          assoc
+                          start-state
+                          state-id)
+
+                   (ensure-receive-gate!
+                    start-state
+                    (:entries
+                     classification)))
+
+                 :state
+                 (let [state-id
+                       (:state
+                        classification)]
+
+                   ;; Publish before recursively compiling this local state.
+                   (swap! continuation-cache
+                          assoc
+                          start-state
+                          state-id)
+
+                   (ensure-local-state!
+                    state-id))
+
+                 (projection-error
+                  :internal-frontier-kind
+                  "Projection produced an unknown frontier classification."
+                  {:role role
+                   :state start-state
+                   :classification
+                   classification})))))
+
+         (ensure-local-state!
+           [state-id]
+           (if (contains?
+                @projected-states
+                state-id)
+
+             state-id
+
+             (let [state
+                   (get global-states
+                        state-id)]
+
+               (when-not state
+                 (projection-error
+                  :unknown-state
+                  "Projection attempted to compile an unknown global state."
+                  {:role role
+                   :state state-id}))
+
+               (reserve-state!
+                state-id)
+
+               (case (:op state)
+                 :local
+                 (do
+                   (when-not (= role
+                                (:role state))
                      (projection-error
-                      :unsupported-local-op
-                      "Projection encountered a local operation that cannot appear in a role-local plan."
+                      :foreign-local-state
+                      "Projection attempted to install another role's local action."
                       {:role role
                        :state state-id
-                       :op op})))
-                  state-id)))]
+                       :state-role
+                       (:role state)}))
+
+                   (install-state!
+                    state-id
+                    (cond->
+                     {:op :local
+                      :action (:action state)
+                      :next
+                      (ensure-continuation!
+                       (:next state))}
+
+                      (seq (choreo/local-requires state))
+                      (assoc
+                       :requires
+                       (choreo/local-requires state))
+
+                      (seq (choreo/local-outputs state))
+                      (assoc
+                       :outputs
+                       (choreo/local-outputs state)))))
+
+                 :authoritative
+                 (do
+                   (when-not (= role
+                                (:role state))
+                     (projection-error
+                      :foreign-authoritative-state
+                      "Projection attempted to install another role's authoritative operation."
+                      {:role role
+                       :state state-id
+                       :state-role
+                       (:role state)
+                       :operation
+                       (:operation state)}))
+
+                   (install-state!
+                    state-id
+                    (cond->
+                     {:op :authoritative
+                      :operation
+                      (choreo/authoritative-operation state)
+                      :next
+                      (ensure-continuation!
+                       (:next state))}
+
+                      (seq (choreo/authoritative-requires state))
+                      (assoc
+                       :requires
+                       (choreo/authoritative-requires state))
+
+                      (seq (choreo/authoritative-outputs state))
+                      (assoc
+                       :outputs
+                       (choreo/authoritative-outputs state)))))
+
+                 :branch
+                 (do
+                   (when-not (= role
+                                (:role state))
+                     (projection-error
+                      :foreign-branch-state
+                      "Projection attempted to install another role's branch."
+                      {:role role
+                       :state state-id
+                       :state-role
+                       (:role state)}))
+
+                   (install-state!
+                    state-id
+                    {:op :branch
+                     :on (:on state)
+                     :cases
+                     (into {}
+                           (map
+                            (fn [[value target]]
+                              [value
+                               (ensure-continuation!
+                                target)]))
+                           (:cases state))}))
+
+                 :communicate
+                 (do
+                   (when-not (= role
+                                (:from state))
+                     (projection-error
+                      :foreign-send
+                      "Only the sender side of a global communication is installed as a projected :send state."
+                      {:role role
+                       :state state-id
+                       :from (:from state)
+                       :to (:to state)}))
+
+                   (install-state!
+                    state-id
+                    (cond->
+                     {:op :send
+                      :to (:to state)
+                      :event (:event state)
+                      :next
+                      (ensure-continuation!
+                       (:next state))}
+                      (contains?
+                       state
+                       :via)
+                      (assoc
+                       :via
+                       (:via state)))))
+
+                 :await
+                 (do
+                   (when-not (= role
+                                (:role state))
+                     (projection-error
+                      :foreign-await
+                      "Projection attempted to install another role's environment wait."
+                      {:role role
+                       :state state-id
+                       :state-role
+                       (:role state)}))
+
+                   (install-state!
+                    state-id
+                    {:op :await
+                     :events
+                     (into {}
+                           (map
+                            (fn [[event target]]
+                              [event
+                               (ensure-continuation!
+                                target)]))
+                           (:events state))}))
+
+                 :return
+                 (projection-error
+                  :raw-global-return
+                  "Global return states are compiled to local completion states."
+                  {:role role
+                   :state state-id})
+
+                 (projection-error
+                  :unsupported-local-op
+                  "Projection cannot install this global operation as a local state."
+                  {:role role
+                   :state state-id
+                   :op (:op state)})))))]
+
       (let [initial
             (ensure-continuation!
              (:initial choreography))
-            states @projected-states
+
+            states
+            @projected-states
+
             leaked-building
             (set
-             (for [[state-id state] states
+             (for [[state-id state]
+                   states
                    :when
                    (= :gesso.choreo.project/building
                       (:op state))]
                state-id))]
+
         (when (seq leaked-building)
           (projection-error
            :incomplete-projection
            "Projection left compiler placeholder states in the emitted plan."
            {:role role
             :states leaked-building}))
-        (let [resource-ids
-              (local-resource-ids states)
-              resources
-              (select-keys
-               global-resources
-               resource-ids)
-              environment-events
-              (set/intersection
-               (:environment-events choreography)
-               (local-environment-events states))]
-          {:gesso.choreo/type projected-plan-type
-           :gesso.choreo/version projected-plan-version
-           :name (:name choreography)
-           :role role
-           :initial initial
-           :states states
-           :resources resources
-           :environment-events environment-events})))))
+
+        {:gesso.choreo/type
+         projected-plan-type
+
+         :gesso.choreo/version
+         projected-plan-version
+
+         :name
+         (:name choreography)
+
+         :role
+         role
+
+         :initial
+         initial
+
+         :states
+         states}))))
 
 (defn project-all
-  "Project choreography once for every declared role.
+  "Project choreography once for every inferred role.
 
    Returns role -> projected plan."
   [choreography-or-verified]
   (let [verified
-        (verify/ensure-verified choreography-or-verified)
-        roles
-        (get-in verified [:choreography :roles])]
+        (verify/ensure-verified
+         choreography-or-verified)
+
+        choreography
+        (:choreography verified)]
+
     (into {}
           (map
            (fn [role]
              [role
-              (project verified role)]))
-          roles)))
+              (project
+               verified
+               role)]))
+          (sort-by pr-str
+                   (choreo/roles
+                    choreography)))))
+
+;; -----------------------------------------------------------------------------
+;; Inspection
+;; -----------------------------------------------------------------------------
 
 (defn state
-  "Return projected state by id."
+  "Return one projected state by id."
   [plan state-id]
-  (get (:states (ensure-projected-plan plan))
+  (get (:states
+        (ensure-projected-plan plan))
        state-id))
 
 (defn explain
-  "Return a compact, stable summary of one projected plan."
+  "Return a compact stable projected-plan summary."
   [plan]
-  (let [plan' (ensure-projected-plan plan)
-        states (:states plan')]
-    {:name (:name plan')
-     :role (:role plan')
-     :version (:gesso.choreo/version plan')
-     :initial (:initial plan')
-     :state-count (count states)
+  (let [plan'
+        (ensure-projected-plan plan)
+
+        states
+        (:states plan')]
+
+    {:name
+     (:name plan')
+
+     :role
+     (:role plan')
+
+     :version
+     (:gesso.choreo/version plan')
+
+     :initial
+     (:initial plan')
+
+     :state-count
+     (count states)
+
      :states-by-op
      (frequencies
-      (map (comp :op val) states))
-     :resources (set (keys (:resources plan')))
-     :environment-events
-     (:environment-events plan')}))
+      (map
+       (comp :op val)
+       states))}))
