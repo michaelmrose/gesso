@@ -790,3 +790,901 @@
 
     (is (= :options-with-verification-artifact
            (:error/kind error)))))
+
+(deftest authoritative-operation-consumes-and-produces-definite-values
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :branch
+            {:requires #{:request-id :principal}
+             :outputs #{:outcome :revision}})
+
+           :branch
+           (choreo/branch
+            :server
+            :outcome
+            {:confirmed :done
+             :rejected :done})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify
+         choreography
+         {:entry-value-keys
+          #{:request-id :principal}})
+
+        analysis
+        (:analysis result)]
+
+    (is (:valid? result))
+
+    (is (= #{:claim}
+           (:authoritative-state-ids analysis)))
+
+    (is (= {:claim :request/claim}
+           (:authoritative-operations-by-state analysis)))
+
+    (is (= #{:request-id :principal}
+           (get-in analysis
+                   [:definitely-established-before-state
+                    :claim])))
+
+    (is (= #{:request-id :principal :outcome :revision}
+           (get-in analysis
+                   [:definitely-established-after-state
+                    :claim])))
+
+    (is (= #{:request-id :principal :outcome :revision}
+           (get-in analysis
+                   [:definitely-established-before-state
+                    :branch])))
+
+    (is (= #{:outcome :revision}
+           (:produced-value-keys analysis)))
+
+    (is (= #{:request-id :principal :outcome}
+           (:required-value-keys analysis)))
+
+    (is (= #{:claim}
+           (get-in analysis
+                   [:value-producers
+                    :outcome])))
+
+    (is (= #{:claim}
+           (get-in analysis
+                   [:value-producers
+                    :revision])))
+
+    (is (= #{:branch}
+           (get-in analysis
+                   [:value-consumers
+                    :outcome])))))
+
+(deftest missing-authoritative-input-is-a-verification-error
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:requires #{:request-id :principal}
+             :outputs #{:outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify
+         choreography
+         {:entry-value-keys
+          #{:request-id}})
+
+        missing
+        (filter
+         #(and (= :value-not-definitely-established
+                  (:kind %))
+               (= :principal
+                  (get-in % [:data :value-key])))
+         (:errors result))]
+
+    (is (false? (:valid? result)))
+    (is (= 1 (count missing)))
+    (is (= :claim
+           (get-in (first missing)
+                   [:data :state])))
+    (is (= :principal
+           (get-in (first missing)
+                   [:data :value-key])))
+    (is (= :authoritative
+           (get-in (first missing)
+                   [:data :op])))))
+
+(deftest authoritative-output-satisfies-later-local-requirement
+  (let [choreography
+        (choreo/->choreography
+         {:initial :load
+          :states
+          {:load
+           (choreo/authoritative
+            :server
+            :request/read
+            :render
+            {:requires #{:request-id}
+             :outputs #{:request}})
+
+           :render
+           (choreo/local
+            :server
+            :render-request
+            :done
+            {:requires #{:request}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify
+         choreography
+         {:entry-value-keys
+          #{:request-id}})]
+
+    (is (:valid? result))
+    (is (= #{:request-id :request}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :render])))))
+
+(deftest authoritative-output-must-exist-on-every-path-before-a-join-consumer
+  (let [choreography
+        (choreo/->choreography
+         {:initial :choice
+          :states
+          {:choice
+           (choreo/await
+            :server
+            {:environment/authoritative :claim
+             :environment/skip :join})
+
+           :claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :join
+            {:outputs #{:outcome}})
+
+           :join
+           (choreo/local
+            :server
+            :render
+            :done
+            {:requires #{:outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (false? (:valid? result)))
+    (is (= #{:value-not-definitely-established}
+           (problem-kinds (:errors result))))
+    (is (= #{}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :join])))))
+
+(deftest authoritative-output-on-every-path-is-definite-at-the-join
+  (let [choreography
+        (choreo/->choreography
+         {:initial :choice
+          :states
+          {:choice
+           (choreo/await
+            :server
+            {:environment/first :first
+             :environment/second :second})
+
+           :first
+           (choreo/authoritative
+            :server
+            :request/first
+            :join
+            {:outputs #{:outcome}})
+
+           :second
+           (choreo/authoritative
+            :server
+            :request/second
+            :join
+            {:outputs #{:outcome}})
+
+           :join
+           (choreo/local
+            :server
+            :render
+            :done
+            {:requires #{:outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (:valid? result))
+    (is (= #{:outcome}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :join])))
+    (is (= #{:first :second}
+           (:authoritative-state-ids
+            (:analysis result))))
+    (is (= {:first :request/first
+            :second :request/second}
+           (:authoritative-operations-by-state
+            (:analysis result))))))
+
+(deftest verifier-identifies-authoritative-operation-without-claiming-authority-proof
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)
+        explanation
+        (verify/explain result)]
+
+    (is (:valid? result))
+    (is (= #{:claim}
+           (get-in result
+                   [:analysis
+                    :authoritative-state-ids])))
+    (is (= {:claim :request/claim}
+           (get-in result
+                   [:analysis
+                    :authoritative-operations-by-state])))
+    (is (= 1
+           (get-in explanation
+                   [:states-by-op
+                    :authoritative])))))
+
+(deftest required-communicated-field-must-be-definitely-known-by-sender
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :done
+            {:required #{:outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)
+
+        sender-errors
+        (filter
+         #(and (= :value-not-definitely-established
+                  (:kind %))
+               (= :send
+                  (get-in % [:data :state]))
+               (= :outcome
+                  (get-in % [:data :value-key])))
+         (:errors result))]
+
+    (is (false? (:valid? result)))
+
+    (is (= 1
+           (count sender-errors)))
+
+    (is (= :communicate
+           (get-in
+            (first sender-errors)
+            [:data :op])))))
+
+(deftest authoritative-output-may-be-communicated-and-then-consumed-by-receiver
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :settle
+            {:outputs #{:outcome}})
+
+           :settle
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :branch
+            {:required #{:outcome}})
+
+           :branch
+           (choreo/branch
+            :browser
+            :outcome
+            {:confirmed :confirmed
+             :rejected :rejected})
+
+           :confirmed
+           (choreo/local
+            :browser
+            :install-canonical
+            :done)
+
+           :rejected
+           (choreo/local
+            :browser
+            :restore-snapshot
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (:valid? result))
+
+    (is
+     (= #{:outcome}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :settle
+                 :server])))
+
+    (is
+     (= #{:outcome}
+        (get-in result
+                [:analysis
+                 :definitely-known-after-state
+                 :settle
+                 :browser])))
+
+    (is
+     (= #{:outcome}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :branch
+                 :browser])))
+
+    (is
+     (= #{:settle}
+        (get-in result
+                [:analysis
+                 :knowledge-producers-by-role
+                 :browser
+                 :outcome])))
+
+    (is
+     (= #{:branch}
+        (get-in result
+                [:analysis
+                 :knowledge-consumers-by-role
+                 :browser
+                 :outcome])))))
+
+(deftest protocol-value-existing-globally-does-not-let-unrelated-role-consume-it
+  (let [choreography
+        (choreo/->choreography
+         {:initial :load
+          :states
+          {:load
+           (choreo/authoritative
+            :server
+            :request/read
+            :browser-render
+            {:outputs #{:request}})
+
+           :browser-render
+           (choreo/local
+            :browser
+            :render-request
+            :done
+            {:requires #{:request}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)
+
+        problems
+        (filter
+         #(= :knowledge-not-definitely-established
+             (:kind %))
+         (:errors result))]
+
+    (is (false? (:valid? result)))
+
+    (is (= 1
+           (count problems)))
+
+    (is (= :browser-render
+           (get-in
+            (first problems)
+            [:data :state])))
+
+    (is (= :browser
+           (get-in
+            (first problems)
+            [:data :role])))
+
+    (is (= :request
+           (get-in
+            (first problems)
+            [:data :value-key])))
+
+    (testing "the problem is distributed knowledge, not global value production"
+      (is
+       (= #{:request}
+          (get-in result
+                  [:analysis
+                   :definitely-established-before-state
+                   :browser-render]))))))
+
+(deftest required-communication-establishes-definite-receiver-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :produce
+          :states
+          {:produce
+           (choreo/local
+            :server
+            :produce-result
+            :send
+            {:outputs #{:outcome :revision}})
+
+           :send
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :render
+            {:required #{:outcome :revision}})
+
+           :render
+           (choreo/local
+            :browser
+            :render-result
+            :done
+            {:requires #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (:valid? result))
+
+    (is
+     (= #{:outcome :revision}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :render
+                 :browser])))
+
+    (is
+     (= #{:outcome :revision}
+        (get-in result
+                [:analysis
+                 :communicated-required-keys-by-state
+                 :send])))))
+
+(deftest optional-communicated-field-is-not-definite-receiver-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :produce
+          :states
+          {:produce
+           (choreo/local
+            :server
+            :produce-result
+            :send
+            {:outputs #{:outcome :revision}})
+
+           :send
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :render
+            {:required #{:outcome}
+             :optional #{:revision}})
+
+           :render
+           (choreo/local
+            :browser
+            :render-result
+            :done
+            {:requires #{:revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)
+
+        knowledge-errors
+        (filter
+         #(and (= :knowledge-not-definitely-established
+                  (:kind %))
+               (= :render
+                  (get-in % [:data :state]))
+               (= :browser
+                  (get-in % [:data :role]))
+               (= :revision
+                  (get-in % [:data :value-key])))
+         (:errors result))]
+
+    (is (false? (:valid? result)))
+
+    (is (= 1
+           (count knowledge-errors)))
+
+    (is
+     (= #{:revision}
+        (get-in result
+                [:analysis
+                 :communicated-optional-keys-by-state
+                 :send])))
+
+    (is
+     (= #{:outcome}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :render
+                 :browser])))))
+
+(deftest precise-entry-knowledge-is-role-local
+  (let [choreography
+        (choreo/->choreography
+         {:initial :server-use
+          :states
+          {:server-use
+           (choreo/local
+            :server
+            :prepare
+            :browser-use
+            {:requires #{:request-id}})
+
+           :browser-use
+           (choreo/local
+            :browser
+            :render
+            :done
+            {:requires #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify
+         choreography
+         {:entry-knowledge
+          {:server #{:request-id}}})
+
+        knowledge-errors
+        (filter
+         #(= :knowledge-not-definitely-established
+             (:kind %))
+         (:errors result))]
+
+    (is (false? (:valid? result)))
+
+    (is
+     (= #{:request-id}
+        (get-in result
+                [:analysis
+                 :entry-knowledge
+                 :server])))
+
+    (is
+     (= #{}
+        (get-in result
+                [:analysis
+                 :entry-knowledge
+                 :browser])))
+
+    (is (= 1
+           (count knowledge-errors)))
+
+    (is (= :browser-use
+           (get-in
+            (first knowledge-errors)
+            [:data :state])))))
+
+(deftest broad-entry-value-keys-remain-known-to-every-role
+  (let [choreography
+        (choreo/->choreography
+         {:initial :server-use
+          :states
+          {:server-use
+           (choreo/local
+            :server
+            :prepare
+            :browser-use
+            {:requires #{:request-id}})
+
+           :browser-use
+           (choreo/local
+            :browser
+            :render
+            :done
+            {:requires #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify
+         choreography
+         {:entry-value-keys
+          #{:request-id}})]
+
+    (is (:valid? result))
+
+    (is
+     (= #{:request-id}
+        (get-in result
+                [:analysis
+                 :entry-knowledge
+                 :server])))
+
+    (is
+     (= #{:request-id}
+        (get-in result
+                [:analysis
+                 :entry-knowledge
+                 :browser])))))
+
+(deftest precise-entry-knowledge-can-authorize-sender-dataflow-without-global-entry-option
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :server
+            :browser
+            :request/selected
+            :render
+            {:required #{:request-id}})
+
+           :render
+           (choreo/local
+            :browser
+            :render-request
+            :done
+            {:requires #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify
+         choreography
+         {:entry-knowledge
+          {:server #{:request-id}}})]
+
+    (is (:valid? result))
+
+    (is
+     (= #{:request-id}
+        (get-in result
+                [:analysis
+                 :protocol-entry-value-keys])))
+
+    (is
+     (= #{:request-id}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :send
+                 :server])))
+
+    (is
+     (= #{:request-id}
+        (get-in result
+                [:analysis
+                 :definitely-known-after-state
+                 :send
+                 :browser])))))
+
+(deftest required-field-produced-on-only-one-path-is-not-safe-to-send-after-join
+  (let [choreography
+        (choreo/->choreography
+         {:initial :choose
+          :states
+          {:choose
+           (choreo/await
+            :server
+            {:environment/produce :produce
+             :environment/skip :join})
+
+           :produce
+           (choreo/local
+            :server
+            :produce-result
+            :join
+            {:outputs #{:outcome}})
+
+           :join
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :done
+            {:required #{:outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (false? (:valid? result)))
+
+    (is
+     (= #{:value-not-definitely-established}
+        (problem-kinds
+         (:errors result))))
+
+    (is
+     (= #{}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :join
+                 :server])))))
+
+(deftest required-field-produced-on-every-path-is-safe-to-send-after-join
+  (let [choreography
+        (choreo/->choreography
+         {:initial :choose
+          :states
+          {:choose
+           (choreo/await
+            :server
+            {:environment/first :first
+             :environment/second :second})
+
+           :first
+           (choreo/local
+            :server
+            :produce-first
+            :join
+            {:outputs #{:outcome}})
+
+           :second
+           (choreo/local
+            :server
+            :produce-second
+            :join
+            {:outputs #{:outcome}})
+
+           :join
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :done
+            {:required #{:outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (:valid? result))
+
+    (is
+     (= #{:outcome}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :join
+                 :server])))))
+
+(deftest verifier-does-not-pretend-optional-sender-knowledge-is-proved
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :server
+            :browser
+            :example/open-result
+            :done
+            {:optional #{:debug-detail}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    ;; This verifier proves required-field flow only. If the concrete sender
+    ;; chooses to include :debug-detail, a later runtime/proof obligation must
+    ;; establish that the sender is entitled to transmit that actual value.
+    (is (:valid? result))
+
+    (is
+     (= #{}
+        (get-in result
+                [:analysis
+                 :definitely-known-before-state
+                 :send
+                 :server])))
+
+    (is
+     (= #{:debug-detail}
+        (get-in result
+                [:analysis
+                 :communicated-optional-keys-by-state
+                 :send])))))
+
+(deftest invalid-entry-knowledge-shape-is-rejected
+  (is
+   (= :invalid-entry-knowledge
+      (:error/kind
+       (verification-error
+        #(verify/verify
+          (choreo/->choreography
+           {:initial :done
+            :states
+            {:done
+             (choreo/return :done)}})
+          {:entry-knowledge
+           [:server #{:request-id}]})))))
+
+  (is
+   (= :invalid-entry-knowledge
+      (:error/kind
+       (verification-error
+        #(verify/verify
+          (choreo/->choreography
+           {:initial :done
+            :states
+            {:done
+             (choreo/return :done)}})
+          {:entry-knowledge
+           {"server" #{:request-id}}}))))))

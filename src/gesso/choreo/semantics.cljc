@@ -28,6 +28,11 @@
      choreography does not model separate send and receive states; those are
      projected realization concerns.
 
+     Message payloads are closed by default. A communication may declare
+     :required, :optional, and :correlation payload keys. Undeclared keys are
+     rejected unless :open-payload? is explicitly true. Correlation keys must
+     also be required keys.
+
    :await
      A role-local event supplied by the environment. Environment events are not
      participant messages.
@@ -42,9 +47,14 @@
    why.
 
    Local and authoritative outputs are closed by default: their completion
-   events must return exactly the keys declared by the state. This is the first
-   concrete step toward the v4.5 rule that important action and authoritative
-   operation boundaries are explicit.
+   events must return exactly the keys declared by the state.
+
+   Participant messages are also closed by default. A communication event must
+   contain every declared required key and, unless explicitly open, may contain
+   only declared required/optional keys. This enforces the boundary shape only.
+   It does NOT yet prove that the sender knows the facts it transmits or that
+   receiving them establishes justified role-local knowledge; those are later
+   knowledge/provenance obligations.
 
    Execution records both full semantic history and a semantic observable
    trace. Local actions, branch decisions, and environment events appear in
@@ -59,13 +69,15 @@
    public operation's contract. Once such a contract says commit succeeded, later
    rendering, publication, SSE, or browser failure cannot retroactively turn it
    into an uncommitted operation."
-  (:refer-clojure :exclude [await]))
+  (:refer-clojure :exclude [await])
+  (:require
+   [clojure.set :as set]))
 
 ;; -----------------------------------------------------------------------------
 ;; Identity
 ;; -----------------------------------------------------------------------------
 
-(def semantics-version 3)
+(def semantics-version 4)
 
 (def program-type
   :gesso.choreo.semantics/program)
@@ -163,6 +175,25 @@
   [state]
   (or (:outputs state)
       #{}))
+
+(defn- declared-required
+  [state]
+  (or (:required state)
+      #{}))
+
+(defn- declared-optional
+  [state]
+  (or (:optional state)
+      #{}))
+
+(defn- declared-correlation
+  [state]
+  (or (:correlation state)
+      #{}))
+
+(defn- open-payload?
+  [state]
+  (true? (:open-payload? state)))
 
 ;; -----------------------------------------------------------------------------
 ;; Program validation
@@ -263,7 +294,22 @@
         to
         (require-keyword!
          "Communication :to"
-         (:to state))]
+         (:to state))
+
+        required
+        (require-keyword-set!
+         "Communication :required"
+         (declared-required state))
+
+        optional
+        (require-keyword-set!
+         "Communication :optional"
+         (declared-optional state))
+
+        correlation
+        (require-keyword-set!
+         "Communication :correlation"
+         (declared-correlation state))]
 
     (when (= from to)
       (fail!
@@ -280,6 +326,37 @@
       (require-keyword!
        "Communication :via"
        (:via state)))
+
+    (when (and (contains? state :open-payload?)
+               (not (boolean? (:open-payload? state))))
+      (fail!
+       :invalid-open-payload
+       "Communication :open-payload? must be boolean when present."
+       {:state state-id
+        :open-payload?
+        (:open-payload? state)}))
+
+    (let [overlap
+          (set/intersection
+           required
+           optional)]
+
+      (when (seq overlap)
+        (fail!
+         :ambiguous-message-key
+         "A communication key may not be both required and optional."
+         {:state state-id
+          :overlap overlap})))
+
+    (when-not (set/subset?
+               correlation
+               required)
+      (fail!
+       :optional-correlation-key
+       "Communication correlation keys must be required payload keys."
+       {:state state-id
+        :correlation correlation
+        :required required}))
 
     (require-successor!
      states
@@ -521,8 +598,9 @@
 (defn communication-event
   "Construct one semantic participant communication.
 
-   Payload remains uninterpreted in this slice. Closed message contracts and
-   communication-derived knowledge are the next separate concern."
+   Payload is validated against the current communication state's closed
+   contract by enabled?/transition. Constructing an envelope alone does not
+   confer knowledge or authority."
   ([from to event payload]
    (communication-event
     from
@@ -848,7 +926,15 @@
            {:kind :communication
             :from (:from state)
             :to (:to state)
-            :event (:event state)}
+            :event (:event state)
+            :required
+            (declared-required state)
+            :optional
+            (declared-optional state)
+            :correlation
+            (declared-correlation state)
+            :open-payload?
+            (open-payload? state)}
             (contains? state :via)
             (assoc
              :via
@@ -917,6 +1003,35 @@
           (:cases state)
           (:value event)))))
 
+(defn- communication-payload-valid?
+  [state payload]
+  (let [payload-keys
+        (set
+         (keys payload))
+
+        required
+        (declared-required state)
+
+        optional
+        (declared-optional state)
+
+        allowed
+        (set/union
+         required
+         optional)]
+
+    (and
+     (set/subset?
+      required
+      payload-keys)
+
+     (or
+      (open-payload? state)
+
+      (set/subset?
+       payload-keys
+       allowed)))))
+
 (defn- communication-enabled?
   [state event]
   (and (= :communication
@@ -930,6 +1045,9 @@
        (= (:via state)
           (:via event))
        (map?
+        (:payload event))
+       (communication-payload-valid?
+        state
         (:payload event))))
 
 (defn enabled?
@@ -946,7 +1064,12 @@
    :branch additionally requires:
    - the selected value already exists under :on;
    - the event value exactly matches that stored value;
-   - the value names a declared case."
+   - the value names a declared case.
+
+   :communicate additionally requires:
+   - every declared :required payload key is present;
+   - undeclared keys are absent unless :open-payload? is true;
+   - :optional keys may be omitted."
   [configuration event]
   (let [configuration'
         (require-configuration!

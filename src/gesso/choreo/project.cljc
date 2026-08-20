@@ -26,10 +26,12 @@
        deterministic role-local branching on one established semantic value
 
      :send
-       this role realizes the sending side of a global :communicate
+       this role realizes the sending side of a global :communicate, including
+       the declared closed payload contract
 
      :receive
-       this role waits for one of one-or-more participant communications
+       this role waits for one of one-or-more participant communications, each
+       retaining its declared closed payload contract
 
      :await
        this role waits for one of its own environment events
@@ -41,6 +43,11 @@
    environment events. A projected :receive is never satisfied by an
    environment event, and a projected :await is never satisfied by a participant
    message merely because the event keyword is the same.
+
+   Communication contracts are compiler data that survive projection. Required,
+   optional, correlation, and explicit open-payload declarations are copied to
+   the projected sender and receiver sides. Projection does not reinterpret those
+   declarations as knowledge or authority.
 
    Foreign local actions disappear from a role projection because :local is,
    by definition, distributed-unobservable. Foreign :branch and foreign
@@ -473,7 +480,11 @@
    alternative
    [:from
     :event
-    :via]))
+    :via
+    :required
+    :optional
+    :correlation
+    :open-payload?]))
 
 (defn- normalize-receive-alternatives
   [role source alternatives]
@@ -639,7 +650,31 @@
                                     :via)
                                    (assoc
                                     :via
-                                    (:via global-state))))))
+                                    (:via global-state))
+
+                                   (seq
+                                    (:required global-state))
+                                   (assoc
+                                    :required
+                                    (:required global-state))
+
+                                   (seq
+                                    (:optional global-state))
+                                   (assoc
+                                    :optional
+                                    (:optional global-state))
+
+                                   (seq
+                                    (:correlation global-state))
+                                   (assoc
+                                    :correlation
+                                    (:correlation global-state))
+
+                                   (true?
+                                    (:open-payload? global-state))
+                                   (assoc
+                                    :open-payload?
+                                    true)))))
                             (normalize-receive-alternatives
                              role
                              source))]
@@ -863,7 +898,31 @@
                        :via)
                       (assoc
                        :via
-                       (:via state)))))
+                       (:via state))
+
+                      (seq
+                       (:required state))
+                      (assoc
+                       :required
+                       (:required state))
+
+                      (seq
+                       (:optional state))
+                      (assoc
+                       :optional
+                       (:optional state))
+
+                      (seq
+                       (:correlation state))
+                      (assoc
+                       :correlation
+                       (:correlation state))
+
+                      (true?
+                       (:open-payload? state))
+                      (assoc
+                       :open-payload?
+                       true))))
 
                  :await
                  (do

@@ -656,3 +656,556 @@
                :server
                :outcome
                {:confirmed :missing})}})))))
+
+(deftest authoritative-constructor
+  (is (= {:op :authoritative
+          :role :server
+          :operation :request/claim
+          :next :done}
+         (choreo/authoritative
+          :server
+          :request/claim
+          :done)))
+
+  (is (= {:op :authoritative
+          :role :server
+          :operation :request/claim
+          :next :done
+          :requires #{:request-id :principal}
+          :outputs #{:outcome :revision}
+          :metadata {:source :test}}
+         (choreo/authoritative
+          :server
+          :request/claim
+          :done
+          {:requires #{:request-id :principal}
+           :outputs #{:outcome :revision}
+           :metadata {:source :test}}))))
+
+(deftest authoritative-constructor-requires-keyword-role-and-operation
+  (is (= :invalid-value
+         (error-kind
+          #(choreo/authoritative
+            "server"
+            :request/claim
+            :done))))
+
+  (is (= :invalid-value
+         (error-kind
+          #(choreo/authoritative
+            :server
+            "request/claim"
+            :done)))))
+
+(deftest authoritative-contract-keys-must-be-keyword-sets
+  (is (= :invalid-value-set
+         (error-kind
+          #(choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:requires [:request-id]}))))
+
+  (is (= :invalid-value-set
+         (error-kind
+          #(choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:outputs #{:outcome "revision"}})))))
+
+(deftest authoritative-state-inspection
+  (let [state
+        (choreo/authoritative
+         :server
+         :request/claim
+         :next
+         {:requires #{:request-id}
+          :outputs #{:outcome :revision}})]
+
+    (is (choreo/authoritative-state?
+         state))
+
+    (is (false?
+         (choreo/local-state?
+          state)))
+
+    (is (false?
+         (choreo/branch-state?
+          state)))
+
+    (is (= #{:server}
+           (choreo/state-roles
+            state)))
+
+    (is (= :server
+           (choreo/state-owner
+            state)))
+
+    (is (= #{:next}
+           (choreo/successors
+            state)))
+
+    (is (= :request/claim
+           (choreo/authoritative-operation
+            state)))
+
+    (is (= #{:request-id}
+           (choreo/authoritative-requires
+            state)))
+
+    (is (= #{:outcome :revision}
+           (choreo/authoritative-outputs
+            state)))
+
+    (is (= #{:request-id}
+           (choreo/action-requires
+            state)))
+
+    (is (= #{:outcome :revision}
+           (choreo/action-outputs
+            state)))))
+
+(deftest local-and-authoritative-action-contracts-share-inspection-without-sharing-semantics
+  (let [local
+        (choreo/local
+         :browser
+         :prepare
+         :done
+         {:requires #{:request-id}
+          :outputs #{:projection}})
+
+        authoritative
+        (choreo/authoritative
+         :server
+         :request/claim
+         :done
+         {:requires #{:request-id}
+          :outputs #{:outcome}})]
+
+    (is (= #{:request-id}
+           (choreo/action-requires
+            local)))
+
+    (is (= #{:projection}
+           (choreo/action-outputs
+            local)))
+
+    (is (= #{:request-id}
+           (choreo/action-requires
+            authoritative)))
+
+    (is (= #{:outcome}
+           (choreo/action-outputs
+            authoritative)))
+
+    (is (choreo/local-state?
+         local))
+
+    (is (false?
+         (choreo/authoritative-state?
+          local)))
+
+    (is (choreo/authoritative-state?
+         authoritative))
+
+    (is (false?
+         (choreo/local-state?
+          authoritative)))))
+
+(deftest authority-specific-inspection-helpers-are-total
+  (let [local
+        (choreo/local
+         :browser
+         :prepare
+         :done
+         {:requires #{:request-id}
+          :outputs #{:projection}})
+
+        communication
+        (choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done)
+
+        terminal
+        (choreo/return
+         :done)]
+
+    (doseq [state [local communication terminal]]
+      (is (= #{}
+             (choreo/authoritative-requires
+              state)))
+
+      (is (= #{}
+             (choreo/authoritative-outputs
+              state)))
+
+      (is (nil?
+           (choreo/authoritative-operation
+            state))))))
+
+(deftest choreography-with-authoritative-operation-is-valid-authoring-data
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/claim
+          :initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :branch
+            {:requires #{:request-id}
+             :outputs #{:outcome :revision}})
+
+           :branch
+           (choreo/branch
+            :server
+            :outcome
+            {:confirmed :confirmed
+             :rejected :rejected})
+
+           :confirmed
+           (choreo/return
+            :confirmed)
+
+           :rejected
+           (choreo/return
+            :rejected)}})]
+
+    (is (choreo/choreography?
+         choreography))
+
+    (is (= #{:server}
+           (choreo/roles
+            choreography)))
+
+    (is (= {:authoritative 1
+            :branch 1
+            :return 2}
+           (:states-by-op
+            (choreo/explain
+             choreography))))
+
+    (is (= :request/claim
+           (-> choreography
+               (choreo/state :claim)
+               choreo/authoritative-operation)))))
+
+(deftest authoritative-successor-is-validated-by-semantic-normalization
+  (is (= :unknown-successor
+         (error-kind
+          #(choreo/->choreography
+            {:initial :claim
+             :states
+             {:claim
+              (choreo/authoritative
+               :server
+               :request/claim
+               :missing)}})))))
+
+(deftest communicate-constructor-is-closed-by-default
+  (is
+   (= {:op :communicate
+       :from :browser
+       :to :server
+       :event :example/command
+       :next :done}
+      (choreo/communicate
+       :browser
+       :server
+       :example/command
+       :done))))
+
+(deftest communicate-constructor-retains-the-declared-payload-contract
+  (is
+   (= {:op :communicate
+       :from :browser
+       :to :server
+       :event :example/command
+       :next :done
+       :via :http
+       :required #{:execution-id :scope}
+       :optional #{:base-revision :consistency-token}
+       :correlation #{:execution-id :scope}
+       :open-payload? true
+       :metadata {:source :test}}
+      (choreo/communicate
+       :browser
+       :server
+       :example/command
+       :done
+       {:via :http
+        :required #{:execution-id :scope}
+        :optional #{:base-revision :consistency-token}
+        :correlation #{:execution-id :scope}
+        :open-payload? true
+        :metadata {:source :test}}))))
+
+(deftest communicate-omits-empty-contract-fields-and-false-open-marker
+  (let [state
+        (choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:required #{}
+          :optional #{}
+          :correlation #{}
+          :open-payload? false})]
+
+    (is
+     (= {:op :communicate
+         :from :browser
+         :to :server
+         :event :example/command
+         :next :done}
+        state))
+
+    (is
+     (false?
+      (contains? state :required)))
+
+    (is
+     (false?
+      (contains? state :optional)))
+
+    (is
+     (false?
+      (contains? state :correlation)))
+
+    (is
+     (false?
+      (contains? state :open-payload?)))))
+
+(deftest communication-contract-keys-must-be-keyword-sets
+  (is
+   (= :invalid-value-set
+      (error-kind
+       #(choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:required [:execution-id]}))))
+
+  (is
+   (= :invalid-value-set
+      (error-kind
+       #(choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:optional #{:base-revision "reason"}}))))
+
+  (is
+   (= :invalid-value-set
+      (error-kind
+       #(choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:correlation #{:execution-id 42}})))))
+
+(deftest communication-required-and-optional-contracts-may-not-overlap
+  (is
+   (= :ambiguous-message-key
+      (error-kind
+       #(choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:required #{:execution-id :scope}
+          :optional #{:scope :base-revision}})))))
+
+(deftest communication-correlation-keys-must-be-required
+  (is
+   (= :optional-correlation-key
+      (error-kind
+       #(choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:required #{:execution-id}
+          :optional #{:scope}
+          :correlation #{:execution-id :scope}}))))
+
+  (testing "a required correlation subset is valid"
+    (is
+     (= #{:execution-id :scope}
+        (:correlation
+         (choreo/communicate
+          :browser
+          :server
+          :example/command
+          :done
+          {:required #{:execution-id :scope :transition}
+           :correlation #{:execution-id :scope}}))))))
+
+(deftest communication-open-payload-marker-must-be-boolean
+  (is
+   (= :invalid-open-payload
+      (error-kind
+       #(choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:open-payload? :yes}))))
+
+  (is
+   (true?
+    (:open-payload?
+     (choreo/communicate
+      :browser
+      :server
+      :example/command
+      :done
+      {:open-payload? true})))))
+
+(deftest communication-contract-inspection
+  (let [state
+        (choreo/communicate
+         :browser
+         :server
+         :example/command
+         :done
+         {:required #{:execution-id :scope}
+          :optional #{:base-revision :consistency-token}
+          :correlation #{:execution-id :scope}})]
+
+    (is
+     (= #{:execution-id :scope}
+        (choreo/communication-required state)))
+
+    (is
+     (= #{:base-revision :consistency-token}
+        (choreo/communication-optional state)))
+
+    (is
+     (= #{:execution-id :scope}
+        (choreo/communication-correlation state)))
+
+    (is
+     (= #{:execution-id
+          :scope
+          :base-revision
+          :consistency-token}
+        (choreo/communication-allowed state)))
+
+    (is
+     (false?
+      (choreo/communication-open-payload?
+       state)))))
+
+(deftest communication-open-payload-inspection-remains-explicit
+  (let [state
+        (choreo/communicate
+         :browser
+         :server
+         :example/open-command
+         :done
+         {:required #{:execution-id}
+          :optional #{:known}
+          :open-payload? true})]
+
+    (is
+     (choreo/communication-open-payload?
+      state))
+
+    (testing "allowed means the declared known contract, not every possible open key"
+      (is
+       (= #{:execution-id :known}
+          (choreo/communication-allowed
+           state))))))
+
+(deftest communication-contract-inspection-is-total-on-noncommunications
+  (doseq [state
+          [(choreo/local
+            :browser
+            :prepare
+            :done)
+
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done)
+
+           (choreo/return
+            :done)]]
+
+    (is
+     (= #{}
+        (choreo/communication-required
+         state)))
+
+    (is
+     (= #{}
+        (choreo/communication-optional
+         state)))
+
+    (is
+     (= #{}
+        (choreo/communication-correlation
+         state)))
+
+    (is
+     (= #{}
+        (choreo/communication-allowed
+         state)))
+
+    (is
+     (false?
+      (choreo/communication-open-payload?
+       state)))))
+
+(deftest full-closed-message-contract-survives-choreography-normalization
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:via :http
+             :required #{:execution-id :scope}
+             :optional #{:base-revision}
+             :correlation #{:execution-id :scope}})
+
+           :done
+           (choreo/return :done)}})
+
+        state
+        (choreo/state
+         choreography
+         :send)]
+
+    (is
+     (= #{:execution-id :scope}
+        (:required state)))
+
+    (is
+     (= #{:base-revision}
+        (:optional state)))
+
+    (is
+     (= #{:execution-id :scope}
+        (:correlation state)))
+
+    (is
+     (= :http
+        (:via state)))
+
+    (is
+     (false?
+      (choreo/communication-open-payload?
+       state)))))

@@ -135,7 +135,8 @@
             :authority
             :request/claim
             :done
-            {:via :http})
+            {:via :http
+             :required #{:request-id}})
 
            :done
            (choreo/return :submitted)}})
@@ -795,7 +796,8 @@
             :browser
             :server
             :example/command
-            :done)
+            :done
+            {:required #{:outcome :revision}})
 
            :done
            (choreo/return :done)}})
@@ -881,3 +883,692 @@
            (:value-keys
             (semantics/explain
              configuration))))))
+
+(deftest authoritative-operation-is-an-observable-semantic-transition
+  (let [program
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:requires #{:request-id}
+             :outputs #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start
+         program
+         {:values
+          {:request-id 17}})
+
+        event
+        (semantics/authoritative-event
+         :server
+         :request/claim
+         {:outcome :confirmed
+          :revision 42})
+
+        result
+        (semantics/transition
+         initial
+         event)
+
+        completed
+        (:configuration result)
+
+        authority-entry
+        {:kind :authoritative
+         :state :claim
+         :role :server
+         :operation :request/claim
+         :outputs
+         {:outcome :confirmed
+          :revision 42}}
+
+        terminal-entry
+        {:kind :terminal
+         :state :done
+         :outcome :done}]
+
+    (is (= {:kind :authoritative
+            :role :server
+            :operation :request/claim
+            :requires #{:request-id}
+            :outputs #{:outcome :revision}}
+           (semantics/expected-event
+            initial)))
+
+    (is (semantics/enabled?
+         initial
+         event))
+
+    (is (= {:request-id 17
+            :outcome :confirmed
+            :revision 42}
+           (semantics/values
+            completed)))
+
+    (is (= [authority-entry
+            terminal-entry]
+           (semantics/history
+            completed)))
+
+    (is (= [authority-entry
+            terminal-entry]
+           (semantics/observable-trace
+            completed)))
+
+    (is (= [authority-entry
+            terminal-entry]
+           (:observations result)))
+
+    (is (= []
+           (:effects result)))))
+
+(deftest authoritative-operation-requires-established-semantic-inputs
+  (let [program
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:requires #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        event
+        (semantics/authoritative-event
+         :server
+         :request/claim)
+
+        missing
+        (semantics/start
+         program)
+
+        supplied
+        (semantics/start
+         program
+         {:values
+          {:request-id 17}})]
+
+    (testing "missing required semantic value disables the authority boundary"
+      (is (false?
+           (semantics/enabled?
+            missing
+            event)))
+
+      (is (= :event-not-enabled
+             (error-kind
+              #(semantics/step
+                missing
+                event)))))
+
+    (testing "established input enables the authority boundary"
+      (is (semantics/enabled?
+           supplied
+           event))
+
+      (is (semantics/completed?
+           (semantics/step
+            supplied
+            event))))))
+
+(deftest authoritative-output-contract-is-closed
+  (let [program
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:outputs #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start
+         program)
+
+        missing-output
+        (semantics/authoritative-event
+         :server
+         :request/claim
+         {:outcome :confirmed})
+
+        extra-output
+        (semantics/authoritative-event
+         :server
+         :request/claim
+         {:outcome :confirmed
+          :revision 42
+          :unexpected true})]
+
+    (testing "missing declared output is rejected"
+      (is (false?
+           (semantics/enabled?
+            initial
+            missing-output)))
+
+      (is (= :event-not-enabled
+             (error-kind
+              #(semantics/step
+                initial
+                missing-output)))))
+
+    (testing "undeclared authoritative output is rejected"
+      (is (false?
+           (semantics/enabled?
+            initial
+            extra-output)))
+
+      (is (= :event-not-enabled
+             (error-kind
+              #(semantics/step
+                initial
+                extra-output)))))))
+
+(deftest authoritative-operation-identity-and-role-must-match
+  (let [program
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start
+         program)]
+
+    (doseq [event
+            [(semantics/authoritative-event
+              :server
+              :request/cancel)
+
+             (semantics/authoritative-event
+              :browser
+              :request/claim)]]
+
+      (is (false?
+           (semantics/enabled?
+            initial
+            event)))
+
+      (is (= :event-not-enabled
+             (error-kind
+              #(semantics/step
+                initial
+                event)))))))
+
+(deftest authoritative-output-may-drive-later-deterministic-control-flow
+  (let [program
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :branch
+            {:outputs #{:outcome}})
+
+           :branch
+           (choreo/branch
+            :server
+            :outcome
+            {:confirmed :confirmed
+             :rejected :rejected})
+
+           :confirmed
+           (choreo/return :confirmed)
+
+           :rejected
+           (choreo/return :rejected)}})
+
+        after-authority
+        (-> program
+            semantics/start
+            (semantics/step
+             (semantics/authoritative-event
+              :server
+              :request/claim
+              {:outcome :confirmed})))
+
+        completed
+        (semantics/step
+         after-authority
+         (semantics/branch-event
+          :server
+          :outcome
+          :confirmed))]
+
+    (is (= :confirmed
+           (semantics/value
+            after-authority
+            :outcome)))
+
+    (is (= :branch
+           (:op
+            (semantics/current-state
+             after-authority))))
+
+    (is (= :confirmed
+           (semantics/outcome
+            completed)))
+
+    (is (= [:authoritative
+            :branch
+            :terminal]
+           (mapv :kind
+                 (semantics/history
+                  completed))))
+
+    (is (= [:authoritative
+            :terminal]
+           (mapv :kind
+                 (semantics/observable-trace
+                  completed))))))
+
+(deftest local-and-authoritative-events-remain-semantically-distinct
+  (let [authoritative-program
+        (choreo/->choreography
+         {:initial :work
+          :states
+          {:work
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        local-program
+        (choreo/->choreography
+         {:initial :work
+          :states
+          {:work
+           (choreo/local
+            :server
+            :request/claim
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        authoritative-initial
+        (semantics/start
+         authoritative-program)
+
+        local-initial
+        (semantics/start
+         local-program)]
+
+    (is (false?
+         (semantics/enabled?
+          authoritative-initial
+          (semantics/local-event
+           :server
+           :request/claim))))
+
+    (is (false?
+         (semantics/enabled?
+          local-initial
+          (semantics/authoritative-event
+           :server
+           :request/claim))))))
+
+(deftest authoritative-result-does-not-imply-a-particular-commit-convention
+  (let [program
+        (choreo/->choreography
+         {:initial :execute
+          :states
+          {:execute
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:outputs #{:outcome :command-applied?}})
+
+           :done
+           (choreo/return :done)}})
+
+        completed
+        (-> program
+            semantics/start
+            (semantics/step
+             (semantics/authoritative-event
+              :server
+              :request/claim
+              {:outcome :rejected
+               :command-applied? false})))]
+
+    (is (= :rejected
+           (semantics/value
+            completed
+            :outcome)))
+
+    (is (false?
+         (semantics/value
+          completed
+          :command-applied?)))
+
+    (is (semantics/completed?
+         completed))))
+
+(deftest communication-payload-is-closed-by-default
+  (let [program
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id}
+             :optional #{:base-revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start program)]
+
+    (testing "all required keys must be present"
+      (let [event
+            (semantics/communication-event
+             :browser
+             :server
+             :example/command
+             {})]
+
+        (is (false?
+             (semantics/enabled?
+              initial
+              event)))
+
+        (is (= :event-not-enabled
+               (error-kind
+                #(semantics/step
+                  initial
+                  event))))))
+
+    (testing "required keys alone are sufficient"
+      (is
+       (semantics/enabled?
+        initial
+        (semantics/communication-event
+         :browser
+         :server
+         :example/command
+         {:execution-id "execution-1"}))))
+
+    (testing "declared optional keys may be present"
+      (is
+       (semantics/enabled?
+        initial
+        (semantics/communication-event
+         :browser
+         :server
+         :example/command
+         {:execution-id "execution-1"
+          :base-revision 42}))))
+
+    (testing "undeclared keys are rejected"
+      (let [event
+            (semantics/communication-event
+             :browser
+             :server
+             :example/command
+             {:execution-id "execution-1"
+              :base-revision 42
+              :surprise true})]
+
+        (is (false?
+             (semantics/enabled?
+              initial
+              event)))
+
+        (is (= :event-not-enabled
+               (error-kind
+                #(semantics/step
+                  initial
+                  event))))))))
+
+(deftest empty-communication-contract-allows-only-empty-payload
+  (let [program
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :alice
+            :bob
+            :example/ping
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start program)]
+
+    (is
+     (semantics/enabled?
+      initial
+      (semantics/communication-event
+       :alice
+       :bob
+       :example/ping
+       {})))
+
+    (is
+     (false?
+      (semantics/enabled?
+       initial
+       (semantics/communication-event
+        :alice
+        :bob
+        :example/ping
+        {:undeclared true}))))))
+
+(deftest explicitly-open-communication-allows-undeclared-payload-keys
+  (let [program
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/open-command
+            :done
+            {:required #{:execution-id}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start program)]
+
+    (testing "declared required keys remain required even for open payloads"
+      (is
+       (false?
+        (semantics/enabled?
+         initial
+         (semantics/communication-event
+          :browser
+          :server
+          :example/open-command
+          {:extra true})))))
+
+    (testing "additional keys may cross once required keys are present"
+      (is
+       (semantics/enabled?
+        initial
+        (semantics/communication-event
+         :browser
+         :server
+         :example/open-command
+         {:execution-id "execution-1"
+          :extra true
+          :another 42}))))))
+
+(deftest communication-contract-is-visible-in-the-expected-event
+  (let [program
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:via :http
+             :required #{:execution-id :scope}
+             :optional #{:base-revision}
+             :correlation #{:execution-id :scope}})
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start program)]
+
+    (is
+     (= {:kind :communication
+         :from :browser
+         :to :server
+         :event :example/command
+         :required #{:execution-id :scope}
+         :optional #{:base-revision}
+         :correlation #{:execution-id :scope}
+         :open-payload? false
+         :via :http}
+        (semantics/expected-event
+         initial)))))
+
+(deftest semantic-program-rejects-required-optional-overlap
+  (is
+   (= :ambiguous-message-key
+      (error-kind
+       #(semantics/->program
+         {:initial :send
+          :states
+          {:send
+           {:op :communicate
+            :from :browser
+            :to :server
+            :event :example/command
+            :required #{:execution-id}
+            :optional #{:execution-id}
+            :next :done}
+
+           :done
+           {:op :return
+            :outcome :done}}})))))
+
+(deftest semantic-program-rejects-correlation-that-is-not-required
+  (is
+   (= :optional-correlation-key
+      (error-kind
+       #(semantics/->program
+         {:initial :send
+          :states
+          {:send
+           {:op :communicate
+            :from :browser
+            :to :server
+            :event :example/command
+            :required #{:execution-id}
+            :optional #{:scope}
+            :correlation #{:execution-id :scope}
+            :next :done}
+
+           :done
+           {:op :return
+            :outcome :done}}})))))
+
+(deftest semantic-program-rejects-nonboolean-open-payload-marker
+  (is
+   (= :invalid-open-payload
+      (error-kind
+       #(semantics/->program
+         {:initial :send
+          :states
+          {:send
+           {:op :communicate
+            :from :browser
+            :to :server
+            :event :example/command
+            :open-payload? :yes
+            :next :done}
+
+           :done
+           {:op :return
+            :outcome :done}}})))))
+
+(deftest closed-message-contract-does-not-imply-semantic-knowledge
+  (let [program
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:outcome}
+             :optional #{:revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        completed
+        (-> program
+            semantics/start
+            (semantics/step
+             (semantics/communication-event
+              :browser
+              :server
+              :example/command
+              {:outcome :confirmed
+               :revision 42})))]
+
+    (is (= {}
+           (semantics/values
+            completed)))
+
+    (is
+     (false?
+      (semantics/knows-value?
+       completed
+       :outcome)))
+
+    (is
+     (false?
+      (semantics/knows-value?
+       completed
+       :revision)))))

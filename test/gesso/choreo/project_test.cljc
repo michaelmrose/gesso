@@ -2,7 +2,8 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.core :as choreo]
-   [gesso.choreo.project :as project]))
+   [gesso.choreo.project :as project]
+   [gesso.choreo.verify :as verify]))
 
 (defn- error-kind
   [f]
@@ -31,6 +32,14 @@
   (projected-state
    plan
    (:next state)))
+
+
+(defn- verified-with-entry-knowledge
+  [choreography entry-knowledge]
+  (verify/verify!
+   choreography
+   {:entry-knowledge
+    entry-knowledge}))
 
 (deftest communication-projects-to-send-and-receive
   (let [choreography
@@ -855,3 +864,724 @@
            (get-in explanation
                    [:states-by-op
                     :return])))))
+
+(deftest authoritative-operation-is-preserved-in-owner-projection
+  (let [choreography
+        (choreo/->choreography
+         {:initial :seed
+          :states
+          {:seed
+           (choreo/local
+            :server
+            :seed-authoritative-inputs
+            :claim
+            {:outputs #{:request-id :principal}})
+
+           :claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:requires #{:request-id :principal}
+             :outputs #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        server
+        (project/project
+         choreography
+         :server)
+
+        seed
+        (initial-state server)
+
+        claim
+        (successor-state server seed)]
+
+    (is (= :authoritative
+           (:op claim)))
+
+    (is (= :request/claim
+           (:operation claim)))
+
+    (is (= #{:request-id :principal}
+           (:requires claim)))
+
+    (is (= #{:outcome :revision}
+           (:outputs claim)))
+
+    (is (= :return
+           (:op
+            (successor-state
+             server
+             claim))))))
+
+(deftest authoritative-operation-remains-distinct-from-local-work-in-projection
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :server
+            :prepare
+            :claim)
+
+           :claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        server
+        (project/project
+         choreography
+         :server)
+
+        local
+        (initial-state server)
+
+        authority
+        (successor-state
+         server
+         local)]
+
+    (is (= :local
+           (:op local)))
+
+    (is (= :authoritative
+           (:op authority)))
+
+    (is (= :request/claim
+           (:operation authority)))))
+
+(deftest foreign-authoritative-predecessor-blocks-unsynchronized-local-work
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :browser-local)
+
+           :browser-local
+           (choreo/local
+            :browser
+            :render-result
+            :done)
+
+           :done
+           (choreo/return :done)}})]
+
+    (is (= :unobserved-authoritative-predecessor
+           (error-kind
+            #(project/project
+              choreography
+              :browser))))))
+
+(deftest incoming-communication-clears-foreign-authoritative-causal-barrier
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :notify)
+
+           :notify
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :browser-local)
+
+           :browser-local
+           (choreo/local
+            :browser
+            :install-result
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        browser
+        (project/project
+         choreography
+         :browser)
+
+        receive
+        (initial-state browser)
+
+        alternative
+        (first
+         (:alternatives receive))
+
+        local
+        (projected-state
+         browser
+         (:next alternative))]
+
+    (is (= :receive
+           (:op receive)))
+
+    (is (= {:from :server
+            :event :request/settled}
+           (select-keys
+            alternative
+            [:from :event])))
+
+    (is (= :local
+           (:op local)))
+
+    (is (= :install-result
+           (:action local)))))
+
+(deftest unrelated-communication-does-not-clear-authoritative-causal-barrier
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :audit)
+
+           :audit
+           (choreo/communicate
+            :server
+            :auditor
+            :request/audited
+            :browser-local)
+
+           :browser-local
+           (choreo/local
+            :browser
+            :install-result
+            :done)
+
+           :done
+           (choreo/return :done)}})]
+
+    (is (= :unobserved-authoritative-predecessor
+           (error-kind
+            #(project/project
+              choreography
+              :browser))))))
+
+(deftest foreign-authoritative-predecessor-also-blocks-unsynchronized-send
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :browser-send)
+
+           :browser-send
+           (choreo/communicate
+            :browser
+            :auditor
+            :browser/observed-result
+            :done)
+
+           :done
+           (choreo/return :done)}})]
+
+    (is (= :unobserved-authoritative-predecessor
+           (error-kind
+            #(project/project
+              choreography
+              :browser))))))
+
+(deftest foreign-authoritative-predecessor-does-not-force-a-role-to-wait-when-it-has-no-more-work
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done)
+
+           :unused-browser
+           (choreo/local
+            :browser
+            :unused
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        browser
+        (project/project
+         choreography
+         :browser)]
+
+    (is (= :return
+           (:op
+            (initial-state browser))))
+
+    (is (= :gesso.choreo/complete
+           (:outcome
+            (initial-state browser))))))
+
+(deftest authoritative-output-can-drive-owner-branch-after-projection
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :branch
+            {:outputs #{:outcome}})
+
+           :branch
+           (choreo/branch
+            :server
+            :outcome
+            {:confirmed :confirmed
+             :rejected :rejected})
+
+           :confirmed
+           (choreo/communicate
+            :server
+            :browser
+            :settlement/confirmed
+            :done)
+
+           :rejected
+           (choreo/communicate
+            :server
+            :browser
+            :settlement/rejected
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        server
+        (project/project
+         choreography
+         :server)
+
+        authority
+        (initial-state server)
+
+        branch
+        (successor-state
+         server
+         authority)]
+
+    (is (= :authoritative
+           (:op authority)))
+
+    (is (= #{:outcome}
+           (:outputs authority)))
+
+    (is (= :branch
+           (:op branch)))
+
+    (is (= :outcome
+           (:on branch)))
+
+    (is (= #{:confirmed :rejected}
+           (set
+            (keys
+             (:cases branch)))))))
+
+(deftest projected-explain-counts-authoritative-states
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        server
+        (project/project
+         choreography
+         :server)
+
+        explanation
+        (project/explain
+         server)]
+
+    (is (= 1
+           (get-in explanation
+                   [:states-by-op
+                    :authoritative])))
+
+    (is (= 1
+           (get-in explanation
+                   [:states-by-op
+                    :return])))))
+
+(deftest closed-message-contract-is-preserved-on-both-projected-sides
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:via :http
+             :required #{:execution-id :scope}
+             :optional #{:base-revision :consistency-token}
+             :correlation #{:execution-id :scope}})
+
+           :done
+           (choreo/return :done)}})
+
+        plans
+        (project/project-all
+         (verified-with-entry-knowledge
+          choreography
+          {:browser
+           #{:execution-id :scope}}))
+
+        browser
+        (:browser plans)
+
+        server
+        (:server plans)
+
+        send
+        (initial-state browser)
+
+        receive
+        (initial-state server)
+
+        alternative
+        (first
+         (:alternatives receive))]
+
+    (testing "the sender retains the exact declared contract"
+      (is (= :send
+             (:op send)))
+
+      (is (= #{:execution-id :scope}
+             (:required send)))
+
+      (is (= #{:base-revision :consistency-token}
+             (:optional send)))
+
+      (is (= #{:execution-id :scope}
+             (:correlation send)))
+
+      (is (false?
+           (contains?
+            send
+            :open-payload?))))
+
+    (testing "the receiver retains the same declared contract"
+      (is (= :receive
+             (:op receive)))
+
+      (is (= #{:execution-id :scope}
+             (:required alternative)))
+
+      (is (= #{:base-revision :consistency-token}
+             (:optional alternative)))
+
+      (is (= #{:execution-id :scope}
+             (:correlation alternative)))
+
+      (is (false?
+           (contains?
+            alternative
+            :open-payload?))))))
+
+(deftest explicitly-open-message-contract-is-preserved-on-both-projected-sides
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/open-command
+            :done
+            {:required #{:execution-id}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        plans
+        (project/project-all
+         (verified-with-entry-knowledge
+          choreography
+          {:browser
+           #{:execution-id}}))
+
+        send
+        (initial-state
+         (:browser plans))
+
+        alternative
+        (-> plans
+            :server
+            initial-state
+            :alternatives
+            first)]
+
+    (is (= true
+           (:open-payload? send)))
+
+    (is (= true
+           (:open-payload? alternative)))
+
+    (is (= #{:execution-id}
+           (:required send)))
+
+    (is (= #{:execution-id}
+           (:required alternative)))))
+
+(deftest empty-message-contract-remains-implicit-after-projection
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :alice
+            :bob
+            :example/ping
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        plans
+        (project/project-all choreography)
+
+        send
+        (initial-state
+         (:alice plans))
+
+        alternative
+        (-> plans
+            :bob
+            initial-state
+            :alternatives
+            first)]
+
+    (doseq [projected
+            [send alternative]]
+
+      (is
+       (false?
+        (contains?
+         projected
+         :required)))
+
+      (is
+       (false?
+        (contains?
+         projected
+         :optional)))
+
+      (is
+       (false?
+        (contains?
+         projected
+         :correlation)))
+
+      (is
+       (false?
+        (contains?
+         projected
+         :open-payload?))))))
+
+(deftest same-message-name-with-different-contracts-remains-distinct-at-receive-frontier
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/one :one
+             :environment/two :two})
+
+           :one
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id :confirmed}})
+
+           :two
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id :rejected}})
+
+           :done
+           (choreo/return :done)}})
+
+        browser
+        (project/project
+         (verified-with-entry-knowledge
+          choreography
+          {:server
+           #{:execution-id :confirmed :rejected}})
+         :browser)
+
+        receive
+        (initial-state browser)
+
+        alternatives
+        (:alternatives receive)]
+
+    (is (= :receive
+           (:op receive)))
+
+    (is (= 2
+           (count alternatives)))
+
+    (is (= #{#{:execution-id :confirmed}
+             #{:execution-id :rejected}}
+           (set
+            (map
+             :required
+             alternatives))))
+
+    (is (= #{:example/result}
+           (set
+            (map
+             :event
+             alternatives))))))
+
+(deftest same-message-name-and-contract-still-coalesces-when-continuation-is-the-same
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/one :one
+             :environment/two :two})
+
+           :one
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id :outcome}})
+
+           :two
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id :outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        browser
+        (project/project
+         (verified-with-entry-knowledge
+          choreography
+          {:server
+           #{:execution-id :outcome}})
+         :browser)
+
+        alternatives
+        (:alternatives
+         (initial-state browser))]
+
+    (is (= 1
+           (count alternatives)))
+
+    (is (= #{:execution-id :outcome}
+           (:required
+            (first alternatives))))))
+
+(deftest contract-distinct-receives-do-not-claim-runtime-disambiguation
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/one :one
+             :environment/two :two})
+
+           :one
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id}
+             :optional #{:confirmed}})
+
+           :two
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id}
+             :optional #{:rejected}})
+
+           :done
+           (choreo/return :done)}})
+
+        browser
+        (project/project
+         (verified-with-entry-knowledge
+          choreography
+          {:server
+           #{:execution-id}})
+         :browser)
+
+        alternatives
+        (:alternatives
+         (initial-state browser))]
+
+    ;; Projection preserves both semantic contracts rather than silently
+    ;; collapsing them. Whether a concrete payload matches exactly one of these
+    ;; alternatives is a runtime-machine obligation, not a projection claim.
+    (is (= 2
+           (count alternatives)))
+
+    (is (= #{#{:confirmed}
+             #{:rejected}}
+           (set
+            (map
+             :optional
+             alternatives))))))

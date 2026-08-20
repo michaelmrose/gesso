@@ -51,11 +51,11 @@
      :completed
        endpoint has no further protocol work
 
-   The machine has a small explicit semantic value store rather than the old
-   arbitrary execution-context merge. Local and authoritative actions declare
-   required inputs and closed output key sets; deterministic :branch states
-   consume established values. This is dataflow only, not yet
-   knowledge/provenance.
+   The machine owns one explicit role-local knowledge state rather than an
+   unqualified value bag. Local and authoritative actions declare required
+   inputs and closed output key sets; deterministic :branch states consume
+   values that the role currently knows. execution-values remains a plain-map
+   projection of this richer state for callers that only need values.
 
    An :authoritative boundary is intentionally not executable inside this
    machine. The trusted adapter must realize the public semantic operation. The
@@ -63,12 +63,48 @@
    obligations of the authoritative realization and later proof/runtime
    contracts.
 
-   Payload is currently opaque map data carried by participant messages. Later
-   message/type work must close and validate that boundary before payload fields
-   become semantic knowledge."
+   Participant-message payload shape is enforced from the projected message
+   contract. Required keys must be present; undeclared keys are rejected unless
+   :open-payload? is explicitly true; optional keys may be omitted. Correlation
+   keys are part of the required contract.
+
+   Receiving a valid participant message establishes only its declared
+   required/optional fields as :communicated role-local knowledge. Undeclared
+   fields in an explicitly open payload remain transport data and do not enter
+   knowledge.
+
+   Entry values are :input knowledge. Trusted authoritative outputs become
+   :authoritative knowledge. Local outputs are conservatively recorded as
+   :asserted by the named local action; that records origin without silently
+   upgrading local computation to authoritative truth.
+
+   Outbound semantic payload fields are checked against sender knowledge.
+   Every declared required field, and every declared optional field that is
+   actually present, must have the exact value currently known by the sending
+   role. Explicitly open undeclared fields remain transport-only and are not
+   subject to this semantic knowledge check.
+
+   Machine execution identity is explicit and separate from semantic values.
+   A machine may carry sparse identity bindings for principal, actor, authority,
+   host, command-id, and execution-id. Bound command-id and execution-id are
+   distinct tagged identity references; a raw scalar cannot stand in for either.
+
+   The bound role must equal the projected plan role. Other relationships are
+   not inferred: principal does not imply actor, host does not imply authority,
+   and constructing a binding does not authenticate or authorize anyone.
+
+   Machine identity metadata is local execution context. It is never silently
+   injected into participant-message payloads. If command or execution identity
+   must cross a protocol boundary, the choreography must declare that semantic
+   message field explicitly.
+
+   This machine still does not prove authentication, authorization, provenance
+   quality, or purity of local computation."
 
   (:require
-   [clojure.set :as set])
+   [clojure.set :as set]
+   [gesso.choreo.identity :as identity]
+   [gesso.choreo.knowledge :as knowledge])
   (:refer-clojure :exclude [await]))
 
 ;; -----------------------------------------------------------------------------
@@ -157,6 +193,164 @@
       :value value}))
   value)
 
+(defn- contract-required
+  [contract]
+  (or (:required contract)
+      #{}))
+
+(defn- contract-optional
+  [contract]
+  (or (:optional contract)
+      #{}))
+
+(defn- contract-correlation
+  [contract]
+  (or (:correlation contract)
+      #{}))
+
+(defn- contract-open-payload?
+  [contract]
+  (true?
+   (:open-payload? contract)))
+
+(defn- contract-allowed
+  [contract]
+  (set/union
+   (contract-required contract)
+   (contract-optional contract)))
+
+(defn- validate-message-contract!
+  [label contract context]
+  (let [required
+        (require-keyword-set!
+         (str label " :required")
+         (contract-required contract))
+
+        optional
+        (require-keyword-set!
+         (str label " :optional")
+         (contract-optional contract))
+
+        correlation
+        (require-keyword-set!
+         (str label " :correlation")
+         (contract-correlation contract))
+
+        overlap
+        (set/intersection
+         required
+         optional)]
+
+    (when (and (contains? contract :open-payload?)
+               (not (boolean?
+                     (:open-payload? contract))))
+      (machine-error
+       :invalid-open-payload
+       (str label " :open-payload? must be boolean when present.")
+       (assoc context
+              :open-payload?
+              (:open-payload? contract))))
+
+    (when (seq overlap)
+      (machine-error
+       :ambiguous-message-key
+       (str label " may not declare a payload key as both required and optional.")
+       (assoc context
+              :overlap overlap
+              :required required
+              :optional optional)))
+
+    (when-not (set/subset?
+               correlation
+               required)
+      (machine-error
+       :optional-correlation-key
+       (str label " correlation keys must also be required payload keys.")
+       (assoc context
+              :correlation correlation
+              :required required)))
+
+    contract))
+
+(defn- payload-contract-result
+  [contract payload]
+  (let [payload-keys
+        (set
+         (keys payload))
+
+        required
+        (contract-required contract)
+
+        allowed
+        (contract-allowed contract)
+
+        missing
+        (set/difference
+         required
+         payload-keys)
+
+        undeclared
+        (if (contract-open-payload? contract)
+          #{}
+          (set/difference
+           payload-keys
+           allowed))]
+
+    {:valid?
+     (and
+      (empty? missing)
+      (empty? undeclared))
+
+     :missing
+     missing
+
+     :undeclared
+     undeclared}))
+
+(defn- payload-matches-contract?
+  [contract payload]
+  (and
+   (map? payload)
+   (:valid?
+    (payload-contract-result
+     contract
+     payload))))
+
+(defn- require-payload-contract!
+  [contract payload context]
+  (require-map!
+   "Message payload"
+   payload)
+
+  (let [{:keys [valid?
+                missing
+                undeclared]}
+        (payload-contract-result
+         contract
+         payload)]
+
+    (when-not valid?
+      (machine-error
+       :invalid-message-payload
+       "Participant-message payload violates the projected message contract."
+       (merge
+        context
+        {:missing missing
+         :undeclared undeclared
+         :required
+         (contract-required contract)
+         :optional
+         (contract-optional contract)
+         :correlation
+         (contract-correlation contract)
+         :open-payload?
+         (contract-open-payload? contract)
+         :payload-keys
+         (set
+          (keys payload))}))))
+
+  payload)
+
 (defn- require-positive-integer!
   [label value]
   (when-not (and (integer? value)
@@ -236,6 +430,13 @@
      {:role (:role plan)
       :state state-id
       :alternative alternative}))
+
+  (validate-message-contract!
+   "Projected receive"
+   alternative
+   {:role (:role plan)
+    :state state-id
+    :alternative alternative})
 
   (require-successor!
    plan
@@ -348,6 +549,11 @@
          {:role (:role plan)
           :state state-id
           :via (:via state)}))
+      (validate-message-contract!
+       "Projected send"
+       state
+       {:role (:role plan)
+        :state state-id})
       (require-successor!
        plan
        state-id
@@ -423,9 +629,9 @@
 (defn message
   "Construct one participant-message envelope.
 
-   Payload is an opaque map in this first local machine. The machine matches only
-   communication identity; later type/knowledge work will define which payload
-   values may cross and what receiving them establishes."
+   This constructor validates only envelope shape because it is not tied to a
+   projected state. The active :send or :receive contract is enforced when the
+   envelope crosses that machine boundary."
   ([from to event payload]
    (message from to event payload nil))
   ([from to event payload {:keys [via]}]
@@ -497,6 +703,133 @@
                   (:kind x))))
 
 ;; -----------------------------------------------------------------------------
+;; Machine identity bindings
+;; -----------------------------------------------------------------------------
+
+(defn- require-command-id!
+  [value]
+  (when-not (identity/command-id? value)
+    (machine-error
+     :invalid-command-id
+     "Machine :command-id must be a tagged Choreo command identity."
+     {:command-id value}))
+  value)
+
+(defn- require-execution-id!
+  [value]
+  (when-not (identity/execution-id? value)
+    (machine-error
+     :invalid-execution-id
+     "Machine :execution-id must be a tagged Choreo execution identity."
+     {:execution-id value}))
+  value)
+
+(defn- merge-explicit-binding
+  [bindings key value]
+  (if (nil? value)
+    bindings
+    (let [existing
+          (get bindings key ::absent)]
+      (when (and (not= ::absent existing)
+                 (not= existing value))
+        (machine-error
+         :identity-binding-conflict
+         "Machine identity option conflicts with the same explicit identity binding."
+         {:binding key
+          :binding-value existing
+          :option-value value}))
+
+      (assoc bindings key value))))
+
+(defn- normalize-machine-bindings
+  [plan
+   bindings
+   command-id
+   execution-id]
+  (let [bindings'
+        (try
+          (identity/bindings
+           (or bindings {}))
+          (catch #?(:clj Throwable
+                    :cljs :default) ex
+            (machine-error
+             :invalid-identity-bindings
+             "Machine :identity-bindings are malformed."
+             {:identity-bindings bindings
+              :cause
+              (ex-data ex)})))
+
+        command-id'
+        (when (some? command-id)
+          (require-command-id!
+           command-id))
+
+        execution-id'
+        (when (some? execution-id)
+          (require-execution-id!
+           execution-id))
+
+        with-explicit
+        (-> bindings'
+            (merge-explicit-binding
+             :command-id
+             command-id')
+            (merge-explicit-binding
+             :execution-id
+             execution-id'))
+
+        bound-role
+        (:role with-explicit)
+
+        plan-role
+        (:role plan)]
+
+    (when (and (some? bound-role)
+               (not= bound-role
+                     plan-role))
+      (machine-error
+       :identity-role-mismatch
+       "Machine identity binding :role must equal the projected plan role."
+       {:plan-role plan-role
+        :bound-role bound-role}))
+
+    ;; Every execution has an explicit role binding even when all runtime
+    ;; identities remain otherwise anonymous.
+    (identity/bindings
+     (assoc with-explicit
+            :role
+            plan-role))))
+
+(defn- non-role-bindings
+  [bindings]
+  (dissoc bindings :role))
+
+(defn- descriptor-identities
+  [descriptor bindings]
+  (let [runtime-identities
+        (non-role-bindings bindings)
+
+        command-id
+        (:command-id bindings)
+
+        execution-id
+        (:execution-id bindings)]
+
+    (cond->
+     (assoc descriptor
+            :execution-id execution-id)
+
+      (some? command-id)
+      (assoc
+       :command-id
+       command-id)
+
+      (seq runtime-identities)
+      (assoc
+       :identity-bindings
+       bindings))))
+
+;; -----------------------------------------------------------------------------
 ;; Execution records
 ;; -----------------------------------------------------------------------------
 
@@ -510,8 +843,25 @@
                   (:status x))
        (plan?
         (:plan x))
-       (map?
-        (:values x))
+       (identity/bindings?
+        (:identity-bindings x))
+       (= (:role x)
+          (:role
+           (:identity-bindings x)))
+       (= (:role x)
+          (:role
+           (:plan x)))
+       (= (:execution-id x)
+          (:execution-id
+           (:identity-bindings x)))
+       (= (:command-id x)
+          (:command-id
+           (:identity-bindings x)))
+       (knowledge/knowledge?
+        (:knowledge x))
+       (= (:role x)
+          (knowledge/role
+           (:knowledge x)))
        (vector?
         (:history x))))
 
@@ -609,26 +959,72 @@
    (require-execution!
     execution)))
 
-(defn execution-values
-  "Return the role-local semantic value store.
-
-   These values are execution data, not yet a proof of knowledge provenance."
+(defn identity-bindings
+  "Return the validated explicit identity bindings for this execution."
   [execution]
-  (:values
+  (:identity-bindings
    (require-execution!
     execution)))
 
+(defn command-id
+  "Return the bound tagged command identity, or nil when none is bound."
+  [execution]
+  (:command-id
+   (require-execution!
+    execution)))
+
+(defn execution-id
+  "Return the bound tagged execution identity, or nil when none is bound."
+  [execution]
+  (:execution-id
+   (require-execution!
+    execution)))
+
+(defn execution-knowledge
+  "Return the role-local knowledge/provenance state owned by this execution."
+  [execution]
+  (:knowledge
+   (require-execution!
+    execution)))
+
+(defn execution-values
+  "Return current role-local semantic values as a plain key->value map.
+
+   This is a projection of execution-knowledge, not a separately maintained
+   source of truth."
+  [execution]
+  (knowledge/values
+   (execution-knowledge
+    execution)))
+
 (defn execution-value
-  "Return one role-local semantic value by key, or nil when absent."
+  "Return one current role-local semantic value by key, or nil when absent."
   [execution k]
-  (get (execution-values execution)
-       k))
+  (knowledge/value
+   (execution-knowledge execution)
+   k))
 
 (defn has-execution-value?
-  "True when k is present in the role-local semantic value store."
+  "True when k is currently known by this role-local execution."
   [execution k]
-  (contains? (execution-values execution)
-             k))
+  (knowledge/known?
+   (execution-knowledge execution)
+   k))
+
+(defn execution-provenance
+  "Return provenance records for one current role-local value, or nil when the
+   key is unknown."
+  [execution k]
+  (knowledge/provenance
+   (execution-knowledge execution)
+   k))
+
+(defn execution-provenance-kinds
+  "Return provenance kinds justifying one current role-local value."
+  [execution k]
+  (knowledge/provenance-kinds-for
+   (execution-knowledge execution)
+   k))
 
 (defn execution-history
   "Return deterministic local semantic history.
@@ -647,36 +1043,48 @@
 
 (defn- execution-record
   [{:keys [plan
-           execution-id
+           identity-bindings
            status
            state
            action
            awaiting
-           values
+           knowledge
            history
            max-immediate-steps
            result]}]
-  (cond->
-   {:gesso.choreo.machine/type
-    execution-type
+  (let [command-id
+        (:command-id identity-bindings)
 
-    :plan
-    plan
+        execution-id
+        (:execution-id identity-bindings)]
 
-    :role
-    (:role plan)
+    (cond->
+     {:gesso.choreo.machine/type
+      execution-type
 
-    :execution-id
-    execution-id
+      :plan
+      plan
 
-    :status
-    status
+      :role
+      (:role plan)
+
+      :identity-bindings
+      identity-bindings
+
+      :command-id
+      command-id
+
+      :execution-id
+      execution-id
+
+      :status
+      status
 
     :state
     state
 
-    :values
-    (or values {})
+    :knowledge
+    knowledge
 
     :history
     (vec history)
@@ -690,23 +1098,24 @@
     awaiting
     (assoc :awaiting awaiting)
 
-    (= :completed status)
-    (assoc :result result)))
+      (= :completed status)
+      (assoc :result result))))
 
 ;; -----------------------------------------------------------------------------
 ;; Boundary descriptors
 ;; -----------------------------------------------------------------------------
 
 (defn- local-action
-  [plan execution-id state-id state values]
+  [plan identity-bindings state-id state values]
   (let [requires (or (:requires state) #{})
         outputs (or (:outputs state) #{})]
     (cond->
-     {:kind :local
-      :execution-id execution-id
-      :state state-id
-      :role (:role plan)
-      :action (:action state)}
+     (descriptor-identities
+      {:kind :local
+       :state state-id
+       :role (:role plan)
+       :action (:action state)}
+      identity-bindings)
       (seq requires)
       (assoc :inputs
              (select-keys values requires))
@@ -715,15 +1124,16 @@
       (assoc :outputs outputs))))
 
 (defn- authoritative-action
-  [plan execution-id state-id state values]
+  [plan identity-bindings state-id state values]
   (let [requires (or (:requires state) #{})
         outputs (or (:outputs state) #{})]
     (cond->
-     {:kind :authoritative
-      :execution-id execution-id
-      :state state-id
-      :role (:role plan)
-      :operation (:operation state)}
+     (descriptor-identities
+      {:kind :authoritative
+       :state state-id
+       :role (:role plan)
+       :operation (:operation state)}
+      identity-bindings)
       (seq requires)
       (assoc :inputs
              (select-keys values requires))
@@ -732,39 +1142,74 @@
       (assoc :outputs outputs))))
 
 (defn- send-action
-  [plan execution-id state-id state]
+  [plan identity-bindings state-id state]
   (cond->
-   {:kind :send
-    :execution-id execution-id
-    :state state-id
-    :from (:role plan)
-    :to (:to state)
-    :event (:event state)}
+   (descriptor-identities
+    {:kind :send
+     :state state-id
+     :from (:role plan)
+     :to (:to state)
+     :event (:event state)}
+    identity-bindings)
     (contains? state :via)
     (assoc :via
-           (:via state))))
+           (:via state))
+
+    (seq (contract-required state))
+    (assoc :required
+           (contract-required state))
+
+    (seq (contract-optional state))
+    (assoc :optional
+           (contract-optional state))
+
+    (seq (contract-correlation state))
+    (assoc :correlation
+           (contract-correlation state))
+
+    (contract-open-payload? state)
+    (assoc :open-payload?
+           true)))
 
 (defn- receive-awaiting
-  [plan state]
-  {:kind :receive
-   :role (:role plan)
-   :alternatives
-   (mapv
+  [plan identity-bindings state]
+  (cond->
+   {:kind :receive
+    :role (:role plan)
+    :alternatives
+    (mapv
     #(select-keys
       %
       [:from
        :event
-       :via])
-    (:alternatives state))})
+       :via
+       :required
+       :optional
+       :correlation
+       :open-payload?])
+     (:alternatives state))}
+    (seq
+     (non-role-bindings
+      identity-bindings))
+    (assoc
+     :identity-bindings
+     identity-bindings)))
 
 (defn- environment-awaiting
-  [plan state]
-  {:kind :environment
-   :role (:role plan)
-   :events
-   (set
-    (keys
-     (:events state)))})
+  [plan identity-bindings state]
+  (cond->
+   {:kind :environment
+    :role (:role plan)
+    :events
+    (set
+     (keys
+      (:events state)))}
+    (seq
+     (non-role-bindings
+      identity-bindings))
+    (assoc
+     :identity-bindings
+     identity-bindings)))
 
 ;; -----------------------------------------------------------------------------
 ;; Advancement
@@ -772,15 +1217,18 @@
 
 (defn- enter
   [plan
-   {:keys [execution-id
+   {:keys [identity-bindings
            state
-           values
+           knowledge
            history
            max-immediate-steps]}]
   (require-plan! plan)
 
-  (loop [state-id state
-         values' (or values {})
+  (let [execution-id
+        (:execution-id identity-bindings)]
+
+    (loop [state-id state
+         knowledge' knowledge
          history' (vec history)
          immediate-steps 0]
 
@@ -797,7 +1245,11 @@
     (let [state'
           (require-state!
            plan
-           state-id)]
+           state-id)
+
+          values'
+          (knowledge/values
+           knowledge')]
 
       (case (:op state')
         :local
@@ -823,17 +1275,17 @@
 
           (execution-record
            {:plan plan
-            :execution-id execution-id
+            :identity-bindings identity-bindings
             :status :waiting-local
             :state state-id
             :action
             (local-action
              plan
-             execution-id
+             identity-bindings
              state-id
              state'
              values')
-            :values values'
+            :knowledge knowledge'
             :history history'
             :max-immediate-steps max-immediate-steps}))
 
@@ -860,17 +1312,17 @@
 
           (execution-record
            {:plan plan
-            :execution-id execution-id
+            :identity-bindings identity-bindings
             :status :waiting-authoritative
             :state state-id
             :action
             (authoritative-action
              plan
-             execution-id
+             identity-bindings
              state-id
              state'
              values')
-            :values values'
+            :knowledge knowledge'
             :history history'
             :max-immediate-steps max-immediate-steps}))
 
@@ -906,7 +1358,7 @@
 
             (recur
              next-state
-             values'
+             knowledge'
              (conj
               history'
               {:kind :branch
@@ -919,54 +1371,56 @@
         :send
         (execution-record
          {:plan plan
-          :execution-id execution-id
+          :identity-bindings identity-bindings
           :status :waiting-send
           :state state-id
           :action
           (send-action
            plan
-           execution-id
+           identity-bindings
            state-id
            state')
-          :values values'
+          :knowledge knowledge'
           :history history'
           :max-immediate-steps max-immediate-steps})
 
         :receive
         (execution-record
          {:plan plan
-          :execution-id execution-id
+          :identity-bindings identity-bindings
           :status :waiting-receive
           :state state-id
           :awaiting
           (receive-awaiting
            plan
+           identity-bindings
            state')
-          :values values'
+          :knowledge knowledge'
           :history history'
           :max-immediate-steps max-immediate-steps})
 
         :await
         (execution-record
          {:plan plan
-          :execution-id execution-id
+          :identity-bindings identity-bindings
           :status :waiting-environment
           :state state-id
           :awaiting
           (environment-awaiting
            plan
+           identity-bindings
            state')
-          :values values'
+          :knowledge knowledge'
           :history history'
           :max-immediate-steps max-immediate-steps})
 
         :return
         (execution-record
          {:plan plan
-          :execution-id execution-id
+          :identity-bindings identity-bindings
           :status :completed
           :state state-id
-          :values values'
+          :knowledge knowledge'
           :history
           (conj
            history'
@@ -983,7 +1437,7 @@
          {:role (:role plan)
           :execution-id execution-id
           :state state-id
-          :op (:op state')})))))
+          :op (:op state')}))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Start
@@ -994,25 +1448,51 @@
 
    Options:
 
+     :identity-bindings
+       Sparse explicit identity bindings. Supported keys are defined by
+       gesso.choreo.identity. A supplied :role must equal the projected plan
+       role. The resulting execution always contains its role binding.
+
+     :command-id
+       Optional convenience binding. When present it must already be a tagged
+       identity/command-id. It must agree with :identity-bindings when both
+       provide :command-id.
+
      :execution-id
-       Opaque execution identity. Nil remains permitted while command/execution
-       identity semantics are still being completed.
+       Optional convenience binding. When present it must already be a tagged
+       identity/execution-id. It must agree with :identity-bindings when both
+       provide :execution-id.
+
+       Raw strings, UUIDs, and keywords are intentionally rejected here; callers
+       must choose whether a raw identifier is a command or an execution.
 
      :values
-       Initial role-local semantic values. This is execution data only; later
-       knowledge/provenance verification must establish why this role may know
-       each value.
+       Initial role-local semantic values. Each supplied key/value is
+       established as :input knowledge for this role. Semantic values remain
+       separate from machine identity bindings.
 
      :max-immediate-steps
-       Guard against accidental immediate branch loops. Defaults to 1024."
+       Guard against accidental immediate branch loops. Defaults to 1024.
+
+   Anonymous portable executions remain valid: command-id, execution-id,
+   principal, actor, authority, and host are all optional at this layer."
   ([plan]
    (start plan nil))
-  ([plan {:keys [execution-id
+  ([plan {:keys [identity-bindings
+                 command-id
+                 execution-id
                  values
                  max-immediate-steps]
           :or {values {}}}]
    (let [plan'
          (require-plan! plan)
+
+         bindings'
+         (normalize-machine-bindings
+          plan'
+          identity-bindings
+          command-id
+          execution-id)
 
          values'
          (require-map!
@@ -1023,13 +1503,19 @@
          (require-positive-integer!
           "Machine :max-immediate-steps"
           (or max-immediate-steps
-              default-max-immediate-steps))]
+              default-max-immediate-steps))
+
+         initial-knowledge
+         (knowledge/establish-inputs
+          (knowledge/empty-knowledge
+           (:role plan'))
+          values')]
 
      (enter
       plan'
-      {:execution-id execution-id
+      {:identity-bindings bindings'
        :state (:initial plan')
-       :values values'
+       :knowledge initial-knowledge
        :history []
        :max-immediate-steps max-immediate-steps'}))))
 
@@ -1041,8 +1527,8 @@
   "Continue after the endpoint successfully performs the pending local action.
 
    outputs must contain exactly the keys declared by the projected local state.
-   The values are merged into the role-local semantic value store. No undeclared
-   value may leak into later control flow.
+   The values become role-local :asserted knowledge attributed to the named
+   local action. No undeclared value may leak into later control flow.
 
    The one-argument form is retained for local actions that declare no outputs."
   ([execution]
@@ -1100,10 +1586,18 @@
 
          (enter
           (:plan execution')
-          {:execution-id (:execution-id execution')
+          {:identity-bindings
+           (identity-bindings execution')
            :state (:next state)
-           :values (merge (:values execution')
-                          outputs)
+           :knowledge
+           (knowledge/establish-many
+            (execution-knowledge execution')
+            outputs
+            (knowledge/asserted-provenance
+             (:action state)
+             {:metadata
+              {:state state-id}})
+            {:replace? true})
            :history (conj (:history execution')
                           history-entry)
            :max-immediate-steps
@@ -1118,8 +1612,8 @@
    authoritative semantic operation.
 
    outputs must contain exactly the keys declared by the projected
-   :authoritative state. Only those declared outputs enter the role-local
-   semantic value store.
+   :authoritative state. Only those declared outputs enter role-local
+   knowledge, with :authoritative provenance naming the public operation.
 
    This function records semantic completion of the authoritative operation; it
    does not itself authenticate a principal, authorize the operation, reread
@@ -1208,14 +1702,18 @@
 
          (enter
           (:plan execution')
-          {:execution-id
-           (:execution-id execution')
+          {:identity-bindings
+           (identity-bindings execution')
            :state
            (:next state)
-           :values
-           (merge
-            (:values execution')
-            outputs)
+           :knowledge
+           (knowledge/establish-many
+            (execution-knowledge execution')
+            outputs
+            (knowledge/authoritative-provenance
+             (:operation state)
+             {:state state-id})
+            {:replace? true})
            :history
            (conj
             (:history execution')
@@ -1228,14 +1726,110 @@
 ;; Send completion
 ;; -----------------------------------------------------------------------------
 
+(defn- semantic-payload-keys
+  [contract payload]
+  (set/intersection
+   (set
+    (keys payload))
+   (contract-allowed contract)))
+
+(defn- sender-payload-knowledge-result
+  [execution contract payload]
+  (let [semantic-keys
+        (semantic-payload-keys
+         contract
+         payload)
+
+        unknown
+        (set
+         (remove
+          #(has-execution-value?
+            execution
+            %)
+          semantic-keys))
+
+        mismatched
+        (into
+         {}
+         (keep
+          (fn [key]
+            (when (and
+                   (has-execution-value?
+                    execution
+                    key)
+                   (not=
+                    (execution-value
+                     execution
+                     key)
+                    (get payload key)))
+              [key
+               {:known
+                (execution-value
+                 execution
+                 key)
+                :payload
+                (get payload key)}])))
+         semantic-keys)]
+
+    {:valid?
+     (and
+      (empty? unknown)
+      (empty? mismatched))
+
+     :semantic-keys
+     semantic-keys
+
+     :unknown
+     unknown
+
+     :mismatched
+     mismatched}))
+
+(defn- require-sender-payload-knowledge!
+  [execution contract payload context]
+  (let [{:keys [valid?
+                semantic-keys
+                unknown
+                mismatched]}
+        (sender-payload-knowledge-result
+         execution
+         contract
+         payload)]
+
+    (when-not valid?
+      (machine-error
+       :invalid-message-knowledge
+       "Participant-message semantic payload does not match the sender's role-local knowledge."
+       (merge
+        context
+        {:semantic-payload-keys
+         semantic-keys
+
+         :unknown
+         unknown
+
+         :mismatched
+         mismatched
+
+         :known-value-keys
+         (set
+          (keys
+           (execution-values
+            execution)))})))))
+
 (defn pending-message
   "Construct the participant message represented by the current :send boundary.
 
    This does not advance execution. The endpoint may inspect/transport this
    envelope and call complete-send only after the send boundary has succeeded.
 
-   Payload is supplied by the endpoint because value/dataflow semantics have not
-   yet been introduced into the projected language."
+   Payload is supplied by the endpoint and must satisfy the projected send
+   contract before an envelope can be returned.
+
+   Every declared semantic field that is actually present must also equal the
+   sender's current role-local knowledge. Required fields therefore must be both
+   present and known. Optional declared fields are checked when supplied.
+   Undeclared fields admitted by :open-payload? remain transport-only."
   [execution payload]
   (let [execution'
         (require-execution!
@@ -1255,7 +1849,33 @@
         (:status execution')}))
 
     (let [action
-          (:action execution')]
+          (:action execution')
+
+          state
+          (current-state execution')]
+
+      (let [context
+            {:execution-id
+             (:execution-id execution')
+             :role
+             (:role execution')
+             :state
+             (:state execution')
+             :direction
+             :send
+             :event
+             (:event action)}]
+
+        (require-payload-contract!
+         state
+         payload
+         context)
+
+        (require-sender-payload-knowledge!
+         execution'
+         state
+         payload
+         context))
 
       (message
        (:from action)
@@ -1321,14 +1941,14 @@
           next-execution
           (enter
            (:plan execution')
-           {:execution-id
-            (:execution-id execution')
+           {:identity-bindings
+            (identity-bindings execution')
 
             :state
             (:next state)
 
-            :values
-            (:values execution')
+            :knowledge
+            (execution-knowledge execution')
 
             :history
             (conj
@@ -1372,10 +1992,15 @@
 
     (vec
      (filter
-      #(receive-identity-matches?
-        plan
-        %
-        envelope)
+      #(and
+        (receive-identity-matches?
+         plan
+         %
+         envelope)
+
+        (payload-matches-contract?
+         %
+         (:payload envelope)))
       (:alternatives state)))))
 
 (defn accepts-message?
@@ -1407,8 +2032,9 @@
 (defn receive
   "Consume one participant message at a projected :receive gate.
 
-   Unexpected messages are rejected. A participant message can never satisfy a
-   projected environment :await."
+   Identity and payload contract must select exactly one receive alternative.
+   Unexpected, contract-invalid, or ambiguous messages are rejected. A
+   participant message can never satisfy a projected environment :await."
   [execution envelope]
   (let [execution'
         (require-execution!
@@ -1431,10 +2057,12 @@
 
     (when-not (and (envelope? envelope)
                    (= :message
-                      (:kind envelope)))
+                      (:kind envelope))
+                   (map?
+                    (:payload envelope)))
       (machine-error
        :invalid-message
-       "Projected receive requires a participant-message envelope."
+       "Projected receive requires a participant-message envelope with a map payload."
        {:execution-id
         (:execution-id execution')
         :role
@@ -1446,7 +2074,22 @@
     (let [matches
           (matching-receive-alternatives
            execution'
-           envelope)]
+           envelope)
+
+          plan
+          (:plan execution')
+
+          state
+          (current-state execution')
+
+          identity-matches
+          (vec
+           (filter
+            #(receive-identity-matches?
+              plan
+              %
+              envelope)
+            (:alternatives state)))]
 
       (cond
         (empty? matches)
@@ -1463,7 +2106,23 @@
           (:awaiting execution')
           :message
           (dissoc envelope
-                  :payload)})
+                  :payload)
+          :payload-keys
+          (set
+           (keys
+            (:payload envelope)))
+          :identity-matches
+          (mapv
+           #(select-keys
+             %
+             [:from
+              :event
+              :via
+              :required
+              :optional
+              :correlation
+              :open-payload?])
+           identity-matches)})
 
         (> (count matches)
            1)
@@ -1502,14 +2161,28 @@
 
           (enter
            (:plan execution')
-           {:execution-id
-            (:execution-id execution')
+           {:identity-bindings
+            (identity-bindings execution')
 
             :state
             (:next alternative)
 
-            :values
-            (:values execution')
+            :knowledge
+            (knowledge/establish-communicated
+             (execution-knowledge execution')
+             (:from envelope)
+             (:event envelope)
+             (set/union
+              (contract-required alternative)
+              (contract-optional alternative))
+             (:payload envelope)
+             (cond->
+              {:state state-id
+               :replace? true}
+               (contains? envelope :via)
+               (assoc
+                :via
+                (:via envelope))))
 
             :history
             (conj
@@ -1616,14 +2289,14 @@
 
       (enter
        (:plan execution')
-       {:execution-id
-        (:execution-id execution')
+       {:identity-bindings
+        (identity-bindings execution')
 
         :state
         next-state
 
-        :values
-        (:values execution')
+        :knowledge
+        (execution-knowledge execution')
 
         :history
         (conj
@@ -1713,8 +2386,14 @@
     {:role
      (:role execution')
 
+     :identity-bindings
+     (identity-bindings execution')
+
+     :command-id
+     (command-id execution')
+
      :execution-id
-     (:execution-id execution')
+     (execution-id execution')
 
      :status
      (:status execution')
@@ -1738,7 +2417,19 @@
      :value-keys
      (set
       (keys
-       (:values execution')))
+       (execution-values execution')))
+
+     :provenance-kinds-by-key
+     (into
+      {}
+      (map
+       (fn [key]
+         [key
+          (execution-provenance-kinds
+           execution'
+           key)]))
+      (keys
+       (execution-values execution')))
 
      :history-count
      (count

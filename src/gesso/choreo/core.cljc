@@ -26,6 +26,10 @@
      send and receive states are projected realization details, not global
      choreography operations.
 
+     Message payloads are closed by default. Communications declare required,
+     optional, and correlation keys, with an explicit :open-payload? escape
+     hatch when a genuinely open payload is required.
+
    :await
      A role-local event produced by that role's environment. Participant
      messages do not satisfy :await.
@@ -42,6 +46,11 @@
    authenticate a principal, grant permission, or prescribe persistence. Its
    trusted realization must invoke the public model boundary and return only the
    declared semantic outputs.
+
+   Communication contracts constrain payload shape only. They do not yet prove
+   that the sender knows each transmitted fact or that receiving a field gives
+   the receiver justified knowledge. Those are knowledge/provenance obligations
+   layered on top of this authoring vocabulary.
 
    This file intentionally does not preserve the old Choreo API. In particular
    it does not define the old :fx, paired :send/:receive, :choice,
@@ -335,16 +344,35 @@
    does not split that occurrence into separate sender and receiver states.
    Projection determines what each endpoint must do locally to realize it.
 
-   Payload remains uninterpreted at this stage. Closed payload contracts and
-   communication-derived knowledge are intentionally separate later work.
+   Message payloads are closed by default.
 
    Options:
 
      :via
        Optional semantic channel identifier.
 
+     :required
+       Set of payload keys that must be present.
+
+     :optional
+       Set of payload keys that may be present.
+
+     :correlation
+       Set of payload keys used to correlate the communication with an
+       execution/command/scope. Every correlation key must also be required.
+
+     :open-payload?
+       When true, undeclared payload keys are allowed. Defaults to false.
+       Required keys are still required. This is an explicit escape hatch, not
+       the default message model.
+
      :metadata
-       Compiler/development metadata with no semantic effect."
+       Compiler/development metadata with no semantic effect.
+
+   Required and optional key sets may not overlap.
+
+   This contract constrains message shape only. It does not yet establish
+   sender knowledge, receiver knowledge, trust, or authority."
   ([from-role to-role event next]
    (communicate
     from-role
@@ -352,7 +380,21 @@
     event
     next
     nil))
-  ([from-role to-role event next {:keys [via metadata] :as options}]
+  ([from-role
+    to-role
+    event
+    next
+    {:keys [via
+            required
+            optional
+            correlation
+            open-payload?
+            metadata]
+     :or {required #{}
+          optional #{}
+          correlation #{}
+          open-payload? false}
+     :as options}]
    (require-map!
     "Communication options"
     (or options {}))
@@ -365,7 +407,27 @@
          to-role'
          (require-keyword!
           "Communication to-role"
-          to-role)]
+          to-role)
+
+         required'
+         (require-keyword-set!
+          "Communication :required"
+          required)
+
+         optional'
+         (require-keyword-set!
+          "Communication :optional"
+          optional)
+
+         correlation'
+         (require-keyword-set!
+          "Communication :correlation"
+          correlation)
+
+         overlap
+         (set/intersection
+          required'
+          optional')]
 
      (when (= from-role'
               to-role')
@@ -373,6 +435,31 @@
         :same-role-communication
         "Communication must cross roles."
         {:role from-role'}))
+
+     (when (seq overlap)
+       (fail!
+        :ambiguous-message-key
+        "A communication key may not be both required and optional."
+        {:overlap overlap
+         :required required'
+         :optional optional'}))
+
+     (when-not (set/subset?
+                correlation'
+                required')
+       (fail!
+        :optional-correlation-key
+        "Communication correlation keys must also be required payload keys."
+        {:correlation correlation'
+         :required required'}))
+
+     (when-not (boolean?
+                open-payload?)
+       (fail!
+        :invalid-open-payload
+        "Communication :open-payload? must be boolean."
+        {:open-payload?
+         open-payload?}))
 
      (cond->
       {:op :communicate
@@ -390,6 +477,26 @@
         (require-keyword!
          "Communication via"
          via))
+
+       (seq required')
+       (assoc
+        :required
+        required')
+
+       (seq optional')
+       (assoc
+        :optional
+        optional')
+
+       (seq correlation')
+       (assoc
+        :correlation
+        correlation')
+
+       open-payload?
+       (assoc
+        :open-payload?
+        true)
 
        (some? metadata)
        (assoc
@@ -547,6 +654,49 @@
   [state]
   (= :communicate
      (state-op state)))
+
+(defn communication-required
+  "Return the declared required payload keys of a communication state."
+  [state]
+  (if (communication-state? state)
+    (or (:required state)
+        #{})
+    #{}))
+
+(defn communication-optional
+  "Return the declared optional payload keys of a communication state."
+  [state]
+  (if (communication-state? state)
+    (or (:optional state)
+        #{})
+    #{}))
+
+(defn communication-correlation
+  "Return the declared required correlation keys of a communication state."
+  [state]
+  (if (communication-state? state)
+    (or (:correlation state)
+        #{})
+    #{}))
+
+(defn communication-open-payload?
+  "True exactly when a communication explicitly allows undeclared payload keys."
+  [state]
+  (and (communication-state? state)
+       (true?
+        (:open-payload? state))))
+
+(defn communication-allowed
+  "Return the declared closed payload key set.
+
+   For an explicitly open communication this is still the declared known set;
+   additional keys may cross, but they are not part of the declared contract."
+  [state]
+  (if (communication-state? state)
+    (set/union
+     (communication-required state)
+     (communication-optional state))
+    #{}))
 
 (defn local-state?
   "True when state is a genuinely local semantic action."

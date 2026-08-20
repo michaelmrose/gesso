@@ -6,28 +6,41 @@
 
    - structural validity through gesso.choreo.core/semantics;
    - graph reachability and terminal-path structure;
-   - definite semantic-value availability for local/authoritative :requires and
-     :branch selectors;
-   - basic value producer/use analysis useful to later knowledge/type work;
+   - definite protocol-value availability for local/authoritative :requires,
+     branch selectors, and required communicated fields;
+   - role-local definite-knowledge availability;
+   - sender knowledge for required communicated fields;
+   - receiver knowledge established by required communicated fields;
+   - basic value producer/use analysis;
    - explicit identification of authoritative semantic operations in analysis.
 
-   Definite value availability is a small forward must-analysis. A value is
-   considered established at a state only when it is available on every graph
-   path reaching that state. Local and authoritative outputs monotonically add
-   established value keys; this semantic slice has no value deletion.
+   Definite protocol-value availability is a small forward must-analysis. A
+   value is considered established at a state only when it is available on every
+   graph path reaching that state. Local and authoritative outputs establish
+   values, and required communicated fields establish values at the communication
+   boundary. Optional communicated fields are not definite because they may be
+   omitted.
 
-   Entry values are supplied explicitly to verification with
+   A second must-analysis tracks role-local knowledge. Local/authoritative outputs
+   become known to their owner. Required communicated fields must already be
+   known by the sender and become known by the receiver. This is the first static
+   sender/receiver knowledge check; it does not yet prove provenance quality,
+   authentication, authorization, or optional-field sender knowledge.
+
+   Entry assumptions may be supplied in two forms:
 
      {:entry-value-keys #{...}}
 
-   rather than inferred from arbitrary runtime context. This is intentionally a
-   temporary low-level contract until the richer choreography type vocabulary
-   gives operation inputs schemas, provenance, and role knowledge.
+   means low-level protocol values available to every role. It is intentionally
+   broad and remains useful for tiny tests and compiler internals.
 
-   Importantly, this is still GLOBAL value availability, not actor knowledge.
-   Passing this verifier does not prove that the role owning a local action or
-   branch justifiably knows the values it consumes. Knowledge/provenance remains
-   a later and separate proof obligation.
+     {:entry-knowledge
+      {:server #{:principal :request-id}
+       :browser #{:request-id}}}
+
+   is the precise role-local form and should be preferred when role knowledge
+   matters. Keys appearing in :entry-knowledge also count as globally available
+   protocol values, but only the named role knows them.
 
    Likewise, a graph path to a terminal is not a liveness proof. Environment
    events may never occur and a cycle may be taken forever.
@@ -35,10 +48,10 @@
    This namespace does NOT yet claim to verify:
 
    - projection/refinement correctness;
-   - role-local knowledge or provenance;
+   - provenance quality beyond static role/key flow;
    - authentication, authorization, or correctness of authoritative realization;
-   - closed message payload contracts;
-   - communication value transfer;
+   - optional communicated fields are known by the sender when actually sent;
+   - open-payload extras as semantic knowledge;
    - resource ownership;
    - browser execution;
    - arbitrary liveness.
@@ -54,7 +67,7 @@
 ;; -----------------------------------------------------------------------------
 
 (def verification-version
-  3)
+  4)
 
 (def verification-type
   :gesso.choreo/verification)
@@ -114,6 +127,30 @@
        {:entry-value-keys value}))
     value'))
 
+(defn- normalize-entry-knowledge
+  [value]
+  (let [value'
+        (or value {})]
+    (when-not (map? value')
+      (fail!
+       :invalid-entry-knowledge
+       "Verifier :entry-knowledge must be a map of role keyword to keyword set."
+       {:entry-knowledge value}))
+
+    (into {}
+          (map
+           (fn [[role value-keys]]
+             (when-not (keyword? role)
+               (fail!
+                :invalid-entry-knowledge
+                "Verifier :entry-knowledge role keys must be keywords."
+                {:entry-knowledge value
+                 :role role}))
+             [role
+              (normalize-entry-value-keys
+               value-keys)]))
+          value')))
+
 (defn- normalize-options
   [options]
   (let [options'
@@ -126,7 +163,11 @@
 
     {:entry-value-keys
      (normalize-entry-value-keys
-      (:entry-value-keys options'))}))
+      (:entry-value-keys options'))
+
+     :entry-knowledge
+     (normalize-entry-knowledge
+      (:entry-knowledge options'))}))
 
 ;; -----------------------------------------------------------------------------
 ;; Graph
@@ -271,6 +312,11 @@
     (choreo/authoritative-state? state)
     (choreo/authoritative-outputs state)
 
+    (choreo/communication-state? state)
+    ;; Required fields are present on every successful communication and become
+    ;; definite receiver knowledge. Optional fields may be omitted.
+    (choreo/communication-required state)
+
     :else
     #{}))
 
@@ -285,6 +331,10 @@
 
     (choreo/branch-state? state)
     #{(choreo/branch-key state)}
+
+    (choreo/communication-state? state)
+    ;; A sender cannot construct a required semantic field out of nothing.
+    (choreo/communication-required state)
 
     :else
     #{}))
@@ -500,6 +550,334 @@
     (sort-by pr-str reachable))))
 
 ;; -----------------------------------------------------------------------------
+;; Role-local definite knowledge
+;; -----------------------------------------------------------------------------
+
+(defn- empty-role-knowledge
+  [roles]
+  (zipmap
+   roles
+   (repeat #{})))
+
+(defn- normalize-role-knowledge
+  [roles knowledge-by-role]
+  (merge
+   (empty-role-knowledge roles)
+   knowledge-by-role))
+
+(defn- entry-knowledge-by-role
+  [roles entry-value-keys entry-knowledge]
+  (into {}
+        (map
+         (fn [role]
+           [role
+            (set/union
+             entry-value-keys
+             (get entry-knowledge role #{}))]))
+        roles))
+
+(defn- state-required-knowledge
+  [state]
+  (cond
+    (choreo/local-state? state)
+    {(choreo/state-owner state)
+     (choreo/local-requires state)}
+
+    (choreo/authoritative-state? state)
+    {(choreo/state-owner state)
+     (choreo/authoritative-requires state)}
+
+    (choreo/branch-state? state)
+    {(choreo/state-owner state)
+     #{(choreo/branch-key state)}}
+
+    (choreo/communication-state? state)
+    {(:from state)
+     (choreo/communication-required state)}
+
+    :else
+    {}))
+
+(defn- transfer-knowledge
+  [state incoming]
+  (cond
+    (choreo/local-state? state)
+    (update incoming
+            (choreo/state-owner state)
+            set/union
+            (choreo/local-outputs state))
+
+    (choreo/authoritative-state? state)
+    (update incoming
+            (choreo/state-owner state)
+            set/union
+            (choreo/authoritative-outputs state))
+
+    (choreo/communication-state? state)
+    (update incoming
+            (:to state)
+            set/union
+            (choreo/communication-required state))
+
+    :else
+    incoming))
+
+(defn- intersect-role-knowledge
+  [roles maps universe-by-role]
+  (if (seq maps)
+    (into {}
+          (map
+           (fn [role]
+             [role
+              (reduce
+               set/intersection
+               (get universe-by-role role #{})
+               (map
+                #(get % role #{})
+                maps))]))
+          roles)
+    universe-by-role))
+
+(defn- incoming-knowledge-for-state
+  [state-id
+   initial
+   roles
+   entry-by-role
+   predecessors
+   out-knowledge
+   universe-by-role]
+  (let [predecessor-knowledge
+        (map
+         #(get out-knowledge
+               %
+               universe-by-role)
+         (get predecessors state-id #{}))
+
+        incoming-from-predecessors
+        (intersect-role-knowledge
+         roles
+         predecessor-knowledge
+         universe-by-role)]
+
+    (if (= state-id initial)
+      ;; As with global value flow, a back-edge into initial cannot establish a
+      ;; fact before the first execution.
+      (into {}
+            (map
+             (fn [role]
+               [role
+                (set/intersection
+                 (get entry-by-role role #{})
+                 (get incoming-from-predecessors role #{}))]))
+            roles)
+
+      incoming-from-predecessors)))
+
+(defn- definite-knowledge-analysis
+  [states
+   initial
+   reachable
+   predecessors
+   roles
+   entry-value-keys
+   entry-knowledge]
+  (let [entry-by-role
+        (entry-knowledge-by-role
+         roles
+         entry-value-keys
+         entry-knowledge)
+
+        all-protocol-values
+        (set/union
+         entry-value-keys
+         (reduce
+          set/union
+          #{}
+          (vals entry-knowledge))
+         (produced-value-keys
+          states
+          reachable))
+
+        universe-by-role
+        (zipmap
+         roles
+         (repeat all-protocol-values))
+
+        initial-in
+        (into {}
+              (map
+               (fn [state-id]
+                 [state-id
+                  (if (= state-id initial)
+                    entry-by-role
+                    universe-by-role)]))
+              reachable)
+
+        initial-out
+        (into {}
+              (map
+               (fn [[state-id incoming]]
+                 [state-id
+                  (transfer-knowledge
+                   (get states state-id)
+                   incoming)]))
+              initial-in)]
+
+    (loop [in-knowledge initial-in
+           out-knowledge initial-out]
+      (let [next-in
+            (into {}
+                  (map
+                   (fn [state-id]
+                     [state-id
+                      (incoming-knowledge-for-state
+                       state-id
+                       initial
+                       roles
+                       entry-by-role
+                       predecessors
+                       out-knowledge
+                       universe-by-role)]))
+                  reachable)
+
+            next-out
+            (into {}
+                  (map
+                   (fn [[state-id incoming]]
+                     [state-id
+                      (transfer-knowledge
+                       (get states state-id)
+                       incoming)]))
+                  next-in)]
+
+        (if (and (= in-knowledge next-in)
+                 (= out-knowledge next-out))
+          {:entry
+           entry-by-role
+
+           :universe
+           universe-by-role
+
+           :in
+           next-in
+
+           :out
+           next-out}
+
+          (recur
+           next-in
+           next-out))))))
+
+(defn- definite-knowledge-errors
+  [states reachable global-in role-in]
+  (vec
+   (mapcat
+    (fn [state-id]
+      (let [state
+            (get states state-id)
+
+            globally-established
+            (get global-in state-id #{})
+
+            required-by-role
+            (state-required-knowledge state)]
+
+        (mapcat
+         (fn [[role required]]
+           (let [known
+                 (get-in role-in
+                         [state-id role]
+                         #{})
+
+                 ;; When a value is missing globally, the existing global
+                 ;; diagnostic is the clearer root cause. Emit a knowledge error
+                 ;; only for the genuinely distributed case: the protocol has
+                 ;; the value, but this role does not.
+                 missing
+                 (set/difference
+                  required
+                  known
+                  (set/difference
+                   required
+                   globally-established))]
+
+             (for [value-key
+                   (sort-by pr-str missing)]
+               (problem
+                :knowledge-not-definitely-established
+                [:states state-id]
+                "Role consumes or transmits a semantic value that the protocol may have, but this role does not definitely know on every path reaching the state."
+                {:state state-id
+                 :op (:op state)
+                 :role role
+                 :value-key value-key
+                 :required required
+                 :definitely-known known
+                 :globally-established
+                 globally-established}))))
+         required-by-role)))
+    (sort-by pr-str reachable))))
+
+(defn- knowledge-producers-by-role
+  [states state-ids]
+  (reduce
+   (fn [result state-id]
+     (let [state
+           (get states state-id)
+
+           additions
+           (cond
+             (choreo/local-state? state)
+             {(choreo/state-owner state)
+              (choreo/local-outputs state)}
+
+             (choreo/authoritative-state? state)
+             {(choreo/state-owner state)
+              (choreo/authoritative-outputs state)}
+
+             (choreo/communication-state? state)
+             {(:to state)
+              (choreo/communication-required state)}
+
+             :else
+             {})]
+
+       (reduce-kv
+        (fn [result role keys]
+          (reduce
+           (fn [result key]
+             (update-in result
+                        [role key]
+                        (fnil conj #{})
+                        state-id))
+           result
+           keys))
+        result
+        additions)))
+   {}
+   state-ids))
+
+(defn- knowledge-consumers-by-role
+  [states state-ids]
+  (reduce
+   (fn [result state-id]
+     (reduce-kv
+      (fn [result role keys]
+        (reduce
+         (fn [result key]
+           (update-in result
+                      [role key]
+                      (fnil conj #{})
+                      state-id))
+         result
+         keys))
+      result
+      (state-required-knowledge
+       (get states state-id))))
+   {}
+   state-ids))
+
+;; -----------------------------------------------------------------------------
 ;; Semantic summaries
 ;; -----------------------------------------------------------------------------
 
@@ -543,16 +921,19 @@
    Options:
 
      :entry-value-keys
-       Set of semantic value keys established at operation entry for purposes of
-       this low-level definite-value analysis. Defaults to #{}.
+       Broad low-level entry assumptions treated as known by every role.
+
+     :entry-knowledge
+       Precise map of role -> set of keys known by that role at entry.
 
    A valid result means only that the checks named by this namespace passed. It
-   is not a proof of projection, role knowledge, authoritative realization, or
-   liveness."
+   is not a proof of projection/refinement, provenance truth, authoritative
+   realization, authorization, or liveness."
   ([choreography]
    (verify choreography nil))
   ([choreography options]
-   (let [{:keys [entry-value-keys]}
+   (let [{:keys [entry-value-keys
+                   entry-knowledge]}
          (normalize-options options)
 
          choreography'
@@ -593,13 +974,32 @@
           predecessors
           reachable)
 
+         roles
+         (choreo/roles choreography')
+
+         protocol-entry-value-keys
+         (reduce
+          set/union
+          entry-value-keys
+          (vals entry-knowledge))
+
          value-analysis
          (definite-value-analysis
           states
           initial
           reachable
           predecessors
-          entry-value-keys)
+          protocol-entry-value-keys)
+
+         knowledge-analysis
+         (definite-knowledge-analysis
+          states
+          initial
+          reachable
+          predecessors
+          roles
+          entry-value-keys
+          entry-knowledge)
 
          graph-errors
          (concat
@@ -617,11 +1017,19 @@
           reachable
           (:in value-analysis))
 
+         knowledge-errors
+         (definite-knowledge-errors
+          states
+          reachable
+          (:in value-analysis)
+          (:in knowledge-analysis))
+
          errors
          (vec
           (concat
            graph-errors
-           dataflow-errors))
+           dataflow-errors
+           knowledge-errors))
 
          warnings
          (unreachable-state-warnings
@@ -652,7 +1060,10 @@
 
       :options
       {:entry-value-keys
-       entry-value-keys}
+       entry-value-keys
+
+       :entry-knowledge
+       entry-knowledge}
 
       :errors
       errors
@@ -665,7 +1076,7 @@
        initial
 
        :roles
-       (choreo/roles choreography')
+       roles
 
        :reachable-state-ids
        reachable
@@ -739,6 +1150,12 @@
        :entry-value-keys
        entry-value-keys
 
+       :entry-knowledge
+       (:entry knowledge-analysis)
+
+       :protocol-entry-value-keys
+       protocol-entry-value-keys
+
        :produced-value-keys
        reachable-produced
 
@@ -759,7 +1176,45 @@
        (:in value-analysis)
 
        :definitely-established-after-state
-       (:out value-analysis)}})))
+       (:out value-analysis)
+
+       :definitely-known-before-state
+       (:in knowledge-analysis)
+
+       :definitely-known-after-state
+       (:out knowledge-analysis)
+
+       :knowledge-producers-by-role
+       (knowledge-producers-by-role
+        states
+        reachable)
+
+       :knowledge-consumers-by-role
+       (knowledge-consumers-by-role
+        states
+        reachable)
+
+       :communicated-required-keys-by-state
+       (into {}
+             (keep
+              (fn [state-id]
+                (let [state
+                      (get states state-id)]
+                  (when (choreo/communication-state? state)
+                    [state-id
+                     (choreo/communication-required state)]))))
+             reachable)
+
+       :communicated-optional-keys-by-state
+       (into {}
+             (keep
+              (fn [state-id]
+                (let [state
+                      (get states state-id)]
+                  (when (choreo/communication-state? state)
+                    [state-id
+                     (choreo/communication-optional state)]))))
+             reachable)}})))
 
 (defn verification?
   "True when x is a verifier result emitted by this verifier version."

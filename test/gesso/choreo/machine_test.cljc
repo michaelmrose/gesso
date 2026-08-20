@@ -2,6 +2,7 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.core :as choreo]
+   [gesso.choreo.identity :as identity]
    [gesso.choreo.machine :as machine]
    [gesso.choreo.project :as project]
    [gesso.choreo.verify :as verify]))
@@ -34,6 +35,29 @@
     choreography
     {:entry-value-keys entry-value-keys})
    role))
+
+(defn- projected-with-entry-knowledge
+  [choreography role entry-knowledge]
+  (project/project
+   (verify/verify!
+    choreography
+    {:entry-knowledge entry-knowledge})
+   role))
+
+(defn- start-role-with-entry-knowledge
+  ([choreography role entry-knowledge]
+   (machine/start
+    (projected-with-entry-knowledge
+     choreography
+     role
+     entry-knowledge)))
+  ([choreography role entry-knowledge values]
+   (machine/start
+    (projected-with-entry-knowledge
+     choreography
+     role
+     entry-knowledge)
+    {:values values})))
 
 (deftest local-action-is-an-explicit-endpoint-boundary
   (let [choreography
@@ -96,15 +120,18 @@
             :authority
             :request/claim
             :done
-            {:via :http})
+            {:via :http
+             :required #{:request-id}})
 
            :done
            (choreo/return :done)}})
 
         execution
-        (start-role
+        (start-role-with-entry-knowledge
          choreography
-         :browser)]
+         :browser
+         {:browser #{:request-id}}
+         {:request-id 17})]
 
     (is (machine/waiting-send?
          execution))
@@ -115,7 +142,8 @@
             :from :browser
             :to :authority
             :event :request/claim
-            :via :http}
+            :via :http
+            :required #{:request-id}}
            (machine/pending-action
             execution)))
 
@@ -170,15 +198,17 @@
             :browser
             :authority
             :request/claim
-            :done)
+            :done
+            {:required #{:request-id}})
 
            :done
            (choreo/return :done)}})
 
         execution
-        (start-role
+        (start-role-with-entry-knowledge
          choreography
-         :authority)]
+         :authority
+         {:browser #{:request-id}})]
 
     (is (machine/waiting-receive?
          execution))
@@ -187,7 +217,8 @@
             :role :authority
             :alternatives
             [{:from :browser
-              :event :request/claim}]}
+              :event :request/claim
+              :required #{:request-id}}]}
            (machine/awaiting
             execution)))
 
@@ -402,22 +433,25 @@
             :alice
             :bob
             :example/one
-            :done)
+            :done
+            {:required #{:branch}})
 
            :two
            (choreo/communicate
             :alice
             :bob
             :example/two
-            :done)
+            :done
+            {:required #{:branch}})
 
            :done
            (choreo/return :done)}})
 
         execution
-        (start-role
+        (start-role-with-entry-knowledge
          choreography
-         :bob)
+         :bob
+         {:alice #{:branch}})
 
         one
         (machine/message
@@ -652,24 +686,29 @@
             :browser
             :authority
             :example/send
-            :done)
+            :done
+            {:required #{:x}})
 
            :done
            (choreo/return :done)}})
 
         first-run
-        (-> (start-role
+        (-> (start-role-with-entry-knowledge
              choreography
-             :browser)
+             :browser
+             {:browser #{:x}}
+             {:x 1})
             machine/complete-local
             (machine/complete-send
              {:x 1})
             :execution)
 
         second-run
-        (-> (start-role
+        (-> (start-role-with-entry-knowledge
              choreography
-             :browser)
+             :browser
+             {:browser #{:x}}
+             {:x 1})
             machine/complete-local
             (machine/complete-send
              {:x 1})
@@ -705,16 +744,20 @@
          choreography
          :browser)
 
+        execution-id
+        (identity/execution-id
+         :execution/example)
+
         execution
         (machine/start
          plan
          {:execution-id
-          :execution/example})]
+          execution-id})]
 
-    (is (= :execution/example
+    (is (= execution-id
            (:execution-id execution)))
 
-    (is (= :execution/example
+    (is (= execution-id
            (:execution-id
             (machine/pending-action
              execution))))
@@ -1165,3 +1208,2216 @@
               {:values {:again? true}
                :max-immediate-steps 8}))))))
 
+
+(deftest authoritative-operation-is-an-explicit-trusted-endpoint-boundary
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :authority
+            :request/claim
+            :done
+            {:requires #{:request-id :actor-id}
+             :outputs #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected-with-entry-values
+         choreography
+         :authority
+         #{:request-id :actor-id})
+
+        execution-id
+        (identity/execution-id
+         :execution/claim-1)
+
+        execution
+        (machine/start
+         plan
+         {:execution-id execution-id
+          :values {:request-id 17
+                   :actor-id 9}})]
+
+    (is (machine/waiting-authoritative?
+         execution))
+
+    (is (= {:kind :authoritative
+            :execution-id execution-id
+            :identity-bindings
+            {:role :authority
+             :execution-id execution-id}
+            :state :claim
+            :role :authority
+            :operation :request/claim
+            :inputs {:request-id 17
+                     :actor-id 9}
+            :outputs #{:outcome :revision}}
+           (machine/pending-action
+            execution)))
+
+    (is (= {:request-id 17
+            :actor-id 9}
+           (machine/execution-values
+            execution)))))
+
+(deftest authoritative-completion-establishes-only-declared-values
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :authority
+            :request/claim
+            :branch
+            {:requires #{:request-id}
+             :outputs #{:outcome :revision}})
+
+           :branch
+           (choreo/branch
+            :authority
+            :outcome
+            {:confirmed :confirmed
+             :rejected :rejected})
+
+           :confirmed
+           (choreo/return :confirmed)
+
+           :rejected
+           (choreo/return :rejected)}})
+
+        plan
+        (projected-with-entry-values
+         choreography
+         :authority
+         #{:request-id})
+
+        execution
+        (machine/start
+         plan
+         {:values {:request-id 17}})
+
+        completed
+        (machine/complete-authoritative
+         execution
+         {:outcome :confirmed
+          :revision 42})]
+
+    (is (machine/completed?
+         completed))
+
+    (is (= {:request-id 17
+            :outcome :confirmed
+            :revision 42}
+           (machine/execution-values
+            completed)))
+
+    (is (= [{:kind :authoritative
+             :state :claim
+             :role :authority
+             :operation :request/claim
+             :outputs {:outcome :confirmed
+                       :revision 42}}
+
+            {:kind :branch
+             :state :branch
+             :role :authority
+             :on :outcome
+             :value :confirmed}
+
+            {:kind :terminal
+             :state [:gesso.choreo.project/synthetic :complete :authority :confirmed]
+             :outcome :gesso.choreo/complete}]
+           (machine/execution-history
+            completed)))))
+
+(deftest authoritative-boundary-rejects-missing-runtime-inputs
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :authority
+            :request/claim
+            :done
+            {:requires #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected-with-entry-values
+         choreography
+         :authority
+         #{:request-id})]
+
+    (is (= :missing-authoritative-inputs
+           (error-kind
+            #(machine/start
+              plan))))))
+
+(deftest authoritative-output-contract-is-closed
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :authority
+            :request/claim
+            :done
+            {:outputs #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role
+         choreography
+         :authority)]
+
+    (testing "missing declared output is rejected"
+      (is (= :authoritative-output-mismatch
+             (error-kind
+              #(machine/complete-authoritative
+                execution
+                {:outcome :confirmed})))))
+
+    (testing "undeclared extra output is rejected"
+      (is (= :authoritative-output-mismatch
+             (error-kind
+              #(machine/complete-authoritative
+                execution
+                {:outcome :confirmed
+                 :revision 42
+                 :canonical :unexpected})))))
+
+    (testing "the exact declared output set succeeds"
+      (is (machine/completed?
+           (machine/complete-authoritative
+            execution
+            {:outcome :confirmed
+             :revision 42}))))))
+
+(deftest authoritative-operation-with-no-outputs-has-a-zero-argument-completion-boundary
+  (let [choreography
+        (choreo/->choreography
+         {:initial :touch
+          :states
+          {:touch
+           (choreo/authoritative
+            :authority
+            :request/touch
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role
+         choreography
+         :authority)
+
+        completed
+        (machine/complete-authoritative
+         execution)]
+
+    (is (machine/completed?
+         completed))
+
+    (is (= [{:kind :authoritative
+             :state :touch
+             :role :authority
+             :operation :request/touch}
+
+            {:kind :terminal
+             :state [:gesso.choreo.project/synthetic :complete :authority :done]
+             :outcome :gesso.choreo/complete}]
+           (machine/execution-history
+            completed)))))
+
+(deftest authoritative-completion-is-specific-to-authoritative-boundaries
+  (let [local-choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :authority
+            :prepare
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        local-execution
+        (start-role
+         local-choreography
+         :authority)
+
+        authoritative-choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :authority
+            :request/claim
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        authoritative-execution
+        (start-role
+         authoritative-choreography
+         :authority)]
+
+    (is (= :not-waiting-authoritative
+           (error-kind
+            #(machine/complete-authoritative
+              local-execution))))
+
+    (is (= :not-waiting-local
+           (error-kind
+            #(machine/complete-local
+              authoritative-execution))))))
+
+(deftest outbound-send-enforces-closed-payload-contract
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id}
+             :optional #{:base-revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id :base-revision}}
+         {:execution-id "execution-1"
+          :base-revision 42})]
+
+    (testing "missing required fields are rejected before an envelope exists"
+      (is
+       (= :invalid-message-payload
+          (error-kind
+           #(machine/pending-message
+             execution
+             {}))))
+
+      (is
+       (= :invalid-message-payload
+          (error-kind
+           #(machine/complete-send
+             execution
+             {})))))
+
+    (testing "undeclared fields are rejected"
+      (is
+       (= :invalid-message-payload
+          (error-kind
+           #(machine/pending-message
+             execution
+             {:execution-id "execution-1"
+              :surprise true})))))
+
+    (testing "required plus declared optional fields are accepted"
+      (is
+       (= {:kind :message
+           :from :browser
+           :to :server
+           :event :example/command
+           :payload {:execution-id "execution-1"
+                     :base-revision 42}}
+          (machine/pending-message
+           execution
+           {:execution-id "execution-1"
+            :base-revision 42}))))))
+
+(deftest explicitly-open-send-still-requires-required-fields
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/open-command
+            :done
+            {:required #{:execution-id}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id}}
+         {:execution-id "execution-1"})]
+
+    (is
+     (= :invalid-message-payload
+        (error-kind
+         #(machine/pending-message
+           execution
+           {:extra true}))))
+
+    (is
+     (= {:kind :message
+         :from :browser
+         :to :server
+         :event :example/open-command
+         :payload {:execution-id "execution-1"
+                   :extra true}}
+        (machine/pending-message
+         execution
+         {:execution-id "execution-1"
+          :extra true})))))
+
+(deftest receive-rejects-identity-match-with-invalid-payload
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id :outcome}
+             :optional #{:revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:server #{:execution-id :outcome}})
+
+        missing-required
+        (machine/message
+         :server
+         :browser
+         :example/result
+         {:execution-id "execution-1"})
+
+        undeclared
+        (machine/message
+         :server
+         :browser
+         :example/result
+         {:execution-id "execution-1"
+          :outcome :confirmed
+          :surprise true})]
+
+    (doseq [envelope
+            [missing-required
+             undeclared]]
+
+      (is
+       (false?
+        (machine/accepts-message?
+         execution
+         envelope)))
+
+      (is
+       (= :message-not-enabled
+          (error-kind
+           #(machine/receive
+             execution
+             envelope)))))))
+
+(deftest receive-contract-disambiguates-same-sender-and-event
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/confirmed :confirmed
+             :environment/rejected :rejected})
+
+           :confirmed
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id :confirmed}})
+
+           :rejected
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id :rejected}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:server #{:execution-id :confirmed :rejected}})
+
+        confirmed
+        (machine/message
+         :server
+         :browser
+         :example/result
+         {:execution-id "execution-1"
+          :confirmed true})
+
+        rejected
+        (machine/message
+         :server
+         :browser
+         :example/result
+         {:execution-id "execution-1"
+          :rejected true})]
+
+    (is
+     (machine/accepts-message?
+      execution
+      confirmed))
+
+    (is
+     (machine/accepts-message?
+      execution
+      rejected))
+
+    (let [confirmed-execution
+          (machine/receive
+           execution
+           confirmed)
+
+          rejected-execution
+          (machine/receive
+           execution
+           rejected)]
+
+      (is
+       (machine/completed?
+        confirmed-execution))
+
+      (is
+       (machine/completed?
+        rejected-execution))
+
+      (is
+       (= {:execution-id "execution-1"
+           :confirmed true}
+          (:payload
+           (first
+            (machine/execution-history
+             confirmed-execution)))))
+
+      (is
+       (= {:execution-id "execution-1"
+           :rejected true}
+          (:payload
+           (first
+            (machine/execution-history
+             rejected-execution))))))))
+
+(deftest overlapping-receive-contracts-are-rejected-as-ambiguous
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/one :one
+             :environment/two :two})
+
+           :one
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id}
+             :optional #{:detail}})
+
+           :two
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:execution-id}
+             :optional #{:other}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:server #{:execution-id}})
+
+        envelope
+        (machine/message
+         :server
+         :browser
+         :example/result
+         {:execution-id "execution-1"})]
+
+    (is
+     (false?
+      (machine/accepts-message?
+       execution
+       envelope)))
+
+    (is
+     (= :ambiguous-message
+        (error-kind
+         #(machine/receive
+           execution
+           envelope))))))
+
+(deftest receive-rejects-non-map-message-payload-even-for-adversarial-envelope
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role
+         choreography
+         :browser)
+
+        adversarial-envelope
+        {:kind :message
+         :from :server
+         :to :browser
+         :event :example/result
+         :payload [:not-a-map]}]
+
+    (is
+     (false?
+      (machine/accepts-message?
+       execution
+       adversarial-envelope)))
+
+    (is
+     (= :invalid-message
+        (error-kind
+         #(machine/receive
+           execution
+           adversarial-envelope))))))
+
+(deftest pending-send-and-receive-descriptors-expose-message-contracts
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:via :http
+             :required #{:execution-id :scope}
+             :optional #{:base-revision}
+             :correlation #{:execution-id :scope}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        sender
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id :scope}}
+         {:execution-id "execution-1"
+          :scope :request/example})
+
+        receiver
+        (start-role-with-entry-knowledge
+         choreography
+         :server
+         {:browser #{:execution-id :scope}})]
+
+    (is
+     (= {:kind :send
+         :execution-id nil
+         :state :send
+         :from :browser
+         :to :server
+         :event :example/command
+         :via :http
+         :required #{:execution-id :scope}
+         :optional #{:base-revision}
+         :correlation #{:execution-id :scope}
+         :open-payload? true}
+        (machine/pending-action
+         sender)))
+
+    (is
+     (= {:kind :receive
+         :role :server
+         :alternatives
+         [{:from :browser
+           :event :example/command
+           :via :http
+           :required #{:execution-id :scope}
+           :optional #{:base-revision}
+           :correlation #{:execution-id :scope}
+           :open-payload? true}]}
+        (machine/awaiting
+         receiver)))))
+
+(deftest machine-start-defensively-rejects-malformed-projected-send-contract
+  (let [plan
+        {:gesso.choreo/type
+         :gesso.choreo/projected-plan
+
+         :gesso.choreo/version
+         1
+
+         :role
+         :browser
+
+         :initial
+         :send
+
+         :states
+         {:send
+          {:op :send
+           :to :server
+           :event :example/command
+           :required #{:execution-id}
+           :optional #{:execution-id}
+           :next :done}
+
+          :done
+          {:op :return
+           :outcome :gesso.choreo/complete}}}]
+
+    (is
+     (= :ambiguous-message-key
+        (error-kind
+         #(machine/start
+           plan))))))
+
+(deftest machine-start-defensively-rejects-malformed-projected-receive-contract
+  (let [plan
+        {:gesso.choreo/type
+         :gesso.choreo/projected-plan
+
+         :gesso.choreo/version
+         1
+
+         :role
+         :browser
+
+         :initial
+         :receive
+
+         :states
+         {:receive
+          {:op :receive
+           :alternatives
+           [{:from :server
+             :event :example/result
+             :required #{:execution-id}
+             :optional #{:scope}
+             :correlation #{:execution-id :scope}
+             :next :done}]}
+
+          :done
+          {:op :return
+           :outcome :gesso.choreo/complete}}}]
+
+    (is
+     (= :optional-correlation-key
+        (error-kind
+         #(machine/start
+           plan))))))
+
+(deftest receiving-valid-declared-payload-establishes-communicated-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        waiting
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:server #{:outcome :revision}})
+
+        receive-state-id
+        (machine/current-state-id
+         waiting)
+
+        completed
+        (machine/receive
+         waiting
+         (machine/message
+          :server
+          :browser
+          :example/result
+          {:outcome :confirmed
+           :revision 42}))]
+
+    (is
+     (= {:outcome :confirmed
+         :revision 42}
+        (machine/execution-values
+         completed)))
+
+    (is
+     (machine/has-execution-value?
+      completed
+      :outcome))
+
+    (is
+     (machine/has-execution-value?
+      completed
+      :revision))
+
+    (is
+     (= #{:communicated}
+        (machine/execution-provenance-kinds
+         completed
+         :outcome)))
+
+    (is
+     (= [{:kind :communicated
+          :from :server
+          :event :example/result
+          :state receive-state-id}]
+        (machine/execution-provenance
+         completed
+         :revision)))))
+
+(deftest start-values-become-input-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :prepare
+            :done
+            {:requires #{:request-id :base-revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (machine/start
+         (projected-with-entry-values
+          choreography
+          :browser
+          #{:request-id :base-revision})
+         {:values
+          {:request-id "request-1"
+           :base-revision 41}})]
+
+    (is
+     (= {:request-id "request-1"
+         :base-revision 41}
+        (machine/execution-values
+         execution)))
+
+    (is
+     (= #{:input}
+        (machine/execution-provenance-kinds
+         execution
+         :request-id)))
+
+    (is
+     (= [{:kind :input}]
+        (machine/execution-provenance
+         execution
+         :base-revision)))))
+
+(deftest local-outputs-become-asserted-knowledge-not-authoritative-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :prepare-command
+            :done
+            {:outputs #{:prepared?}})
+
+           :done
+           (choreo/return :done)}})
+
+        completed
+        (machine/complete-local
+         (start-role
+          choreography
+          :browser)
+         {:prepared? true})]
+
+    (is
+     (= true
+        (machine/execution-value
+         completed
+         :prepared?)))
+
+    (is
+     (= #{:asserted}
+        (machine/execution-provenance-kinds
+         completed
+         :prepared?)))
+
+    (is
+     (= [{:kind :asserted
+          :source :prepare-command
+          :metadata {:state :prepare}}]
+        (machine/execution-provenance
+         completed
+         :prepared?)))
+
+    (is
+     (not
+      (contains?
+       (machine/execution-provenance-kinds
+        completed
+        :prepared?)
+       :authoritative)))))
+
+(deftest authoritative-outputs-become-authoritative-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:outputs #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        completed
+        (machine/complete-authoritative
+         (start-role
+          choreography
+          :server)
+         {:outcome :confirmed
+          :revision 42})]
+
+    (is
+     (= :confirmed
+        (machine/execution-value
+         completed
+         :outcome)))
+
+    (is
+     (= #{:authoritative}
+        (machine/execution-provenance-kinds
+         completed
+         :outcome)))
+
+    (is
+     (= [{:kind :authoritative
+          :operation :request/claim
+          :state :claim}]
+        (machine/execution-provenance
+         completed
+         :revision)))))
+
+(deftest open-message-extra-fields-remain-transport-only
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :done
+            {:required #{:outcome}
+             :optional #{:revision}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        completed
+        (machine/receive
+         (start-role-with-entry-knowledge
+          choreography
+          :browser
+          {:server #{:outcome :revision}})
+         (machine/message
+          :server
+          :browser
+          :example/result
+          {:outcome :confirmed
+           :revision 42
+           :transport-debug "debug"
+           :future-field :opaque}))]
+
+    (is
+     (= {:outcome :confirmed
+         :revision 42}
+        (machine/execution-values
+         completed)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       completed
+       :transport-debug)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       completed
+       :future-field)))
+
+    (is
+     (nil?
+      (machine/execution-provenance
+       completed
+       :transport-debug)))))
+
+(deftest communicated-value-can-drive-a-local-branch
+  (let [plan
+        {:gesso.choreo/type :gesso.choreo/projected-plan
+         :gesso.choreo/version 1
+         :role :browser
+         :initial :receive
+         :states
+         {:receive
+          {:op :receive
+           :alternatives
+           [{:from :server
+             :event :request/settled
+             :required #{:outcome}
+             :next :branch}]}
+
+          :branch
+          {:op :branch
+           :on :outcome
+           :cases
+           {:confirmed :install
+            :rejected :restore}}
+
+          :install
+          {:op :local
+           :action :install-canonical
+           :next :done}
+
+          :restore
+          {:op :local
+           :action :restore-snapshot
+           :next :done}
+
+          :done
+          {:op :return
+           :outcome :gesso.choreo/complete}}}
+
+        waiting
+        (machine/start plan)
+
+        after-receive
+        (machine/receive
+         waiting
+         (machine/message
+          :server
+          :browser
+          :request/settled
+          {:outcome :confirmed}))]
+
+    ;; This is intentionally a projected-plan-level machine test. The current
+    ;; verifier still treats communication as producing no semantic values, so
+    ;; choreography-level receive->branch is the next verifier/knowledge step.
+    (is
+     (machine/waiting-local?
+      after-receive))
+
+    (is
+     (= :install-canonical
+        (:action
+         (machine/pending-action
+          after-receive))))
+
+    (is
+     (= :confirmed
+        (machine/execution-value
+         after-receive
+         :outcome)))
+
+    (is
+     (= #{:communicated}
+        (machine/execution-provenance-kinds
+         after-receive
+         :outcome)))))
+
+(deftest authoritative-value-can-drive-a-local-branch-with-authoritative-provenance
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :branch
+            {:outputs #{:outcome}})
+
+           :branch
+           (choreo/branch
+            :server
+            :outcome
+            {:confirmed :confirmed
+             :rejected :rejected})
+
+           :confirmed
+           (choreo/local
+            :server
+            :record-confirmed
+            :done)
+
+           :rejected
+           (choreo/local
+            :server
+            :record-rejected
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        after-authority
+        (machine/complete-authoritative
+         (start-role
+          choreography
+          :server)
+         {:outcome :rejected})]
+
+    (is
+     (machine/waiting-local?
+      after-authority))
+
+    (is
+     (= :record-rejected
+        (:action
+         (machine/pending-action
+          after-authority))))
+
+    (is
+     (= #{:authoritative}
+        (machine/execution-provenance-kinds
+         after-authority
+         :outcome)))))
+
+(deftest later-boundary-assignment-explicitly-replaces-current-value-and-provenance
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :done
+            {:requires #{:revision}
+             :outputs #{:revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        started
+        (machine/start
+         (projected-with-entry-values
+          choreography
+          :server
+          #{:revision})
+         {:values {:revision 41}})
+
+        completed
+        (machine/complete-authoritative
+         started
+         {:revision 42})]
+
+    (is
+     (= 42
+        (machine/execution-value
+         completed
+         :revision)))
+
+    (is
+     (= #{:authoritative}
+        (machine/execution-provenance-kinds
+         completed
+         :revision)))
+
+    (is
+     (= [{:kind :authoritative
+          :operation :request/claim
+          :state :claim}]
+        (machine/execution-provenance
+         completed
+         :revision)))))
+
+(deftest explain-surfaces-provenance-kinds-without-exposing-a-second-value-store
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :prepare
+            :done
+            {:requires #{:request-id}
+             :outputs #{:prepared?}})
+
+           :done
+           (choreo/return :done)}})
+
+        started
+        (machine/start
+         (projected-with-entry-values
+          choreography
+          :browser
+          #{:request-id})
+         {:values {:request-id "request-1"}})
+
+        completed
+        (machine/complete-local
+         started
+         {:prepared? true})
+
+        explanation
+        (machine/explain
+         completed)]
+
+    (is
+     (= #{:request-id :prepared?}
+        (:value-keys explanation)))
+
+    (is
+     (= {:request-id #{:input}
+         :prepared? #{:asserted}}
+        (:provenance-kinds-by-key
+         explanation)))
+
+    (is
+     (= {:request-id "request-1"
+         :prepared? true}
+        (machine/execution-values
+         completed)))))
+
+(deftest runtime-send-rejects-required-field-that-plan-assumed-but-execution-does-not-know
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id}})
+
+        ;; The plan was verified under an entry-knowledge assumption, but this
+        ;; concrete execution deliberately violates that assumption.
+        execution
+        (machine/start plan)]
+
+    (is
+     (= :invalid-message-knowledge
+        (error-kind
+         #(machine/pending-message
+           execution
+           {:execution-id "execution-1"}))))
+
+    (is
+     (= :invalid-message-knowledge
+        (error-kind
+         #(machine/complete-send
+           execution
+           {:execution-id "execution-1"}))))
+
+    (is
+     (machine/waiting-send?
+      execution))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       execution
+       :execution-id)))))
+
+(deftest runtime-send-rejects-required-field-whose-value-disagrees-with-sender-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id}}
+         {:execution-id "execution-1"})]
+
+    (is
+     (= :invalid-message-knowledge
+        (error-kind
+         #(machine/pending-message
+           execution
+           {:execution-id "execution-2"}))))
+
+    (is
+     (= "execution-1"
+        (machine/execution-value
+         execution
+         :execution-id)))
+
+    (is
+     (= #{:input}
+        (machine/execution-provenance-kinds
+         execution
+         :execution-id)))))
+
+(deftest runtime-send-accepts-required-field-that-exactly-matches-sender-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id}}
+         {:execution-id "execution-1"})]
+
+    (is
+     (= {:kind :message
+         :from :browser
+         :to :server
+         :event :example/command
+         :payload {:execution-id "execution-1"}}
+        (machine/pending-message
+         execution
+         {:execution-id "execution-1"})))))
+
+(deftest runtime-send-checks-optional-semantic-field-when-it-is-actually-present
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id}
+             :optional #{:base-revision}})
+
+           :done
+           (choreo/return :done)}})]
+
+    (testing "an omitted optional field needs no sender knowledge"
+      (let [execution
+            (start-role-with-entry-knowledge
+             choreography
+             :browser
+             {:browser #{:execution-id}}
+             {:execution-id "execution-1"})]
+
+        (is
+         (= {:kind :message
+             :from :browser
+             :to :server
+             :event :example/command
+             :payload {:execution-id "execution-1"}}
+            (machine/pending-message
+             execution
+             {:execution-id "execution-1"})))))
+
+    (testing "a present optional field may not be invented"
+      (let [execution
+            (start-role-with-entry-knowledge
+             choreography
+             :browser
+             {:browser #{:execution-id}}
+             {:execution-id "execution-1"})]
+
+        (is
+         (= :invalid-message-knowledge
+            (error-kind
+             #(machine/pending-message
+               execution
+               {:execution-id "execution-1"
+                :base-revision 42}))))))
+
+    (testing "a present optional field must equal the sender's known value"
+      (let [execution
+            (start-role-with-entry-knowledge
+             choreography
+             :browser
+             {:browser #{:execution-id
+                         :base-revision}}
+             {:execution-id "execution-1"
+              :base-revision 41})]
+
+        (is
+         (= :invalid-message-knowledge
+            (error-kind
+             #(machine/pending-message
+               execution
+               {:execution-id "execution-1"
+                :base-revision 42}))))
+
+        (is
+         (= {:kind :message
+             :from :browser
+             :to :server
+             :event :example/command
+             :payload {:execution-id "execution-1"
+                       :base-revision 41}}
+            (machine/pending-message
+             execution
+             {:execution-id "execution-1"
+              :base-revision 41})))))))
+
+(deftest runtime-send-does-not-promote-open-undeclared-fields-into-semantic-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/open-command
+            :done
+            {:required #{:execution-id}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id}}
+         {:execution-id "execution-1"})
+
+        envelope
+        (machine/pending-message
+         execution
+         {:execution-id "execution-1"
+          :transport-debug "debug-only"
+          :future-field {:opaque true}})]
+
+    (is
+     (= {:kind :message
+         :from :browser
+         :to :server
+         :event :example/open-command
+         :payload {:execution-id "execution-1"
+                   :transport-debug "debug-only"
+                   :future-field {:opaque true}}}
+        envelope))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       execution
+       :transport-debug)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       execution
+       :future-field)))
+
+    (is
+     (nil?
+      (machine/execution-provenance
+       execution
+       :transport-debug)))))
+
+(deftest complete-send-enforces-sender-knowledge-before-advancing
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:execution-id}}
+         {:execution-id "execution-1"})]
+
+    (is
+     (= :invalid-message-knowledge
+        (error-kind
+         #(machine/complete-send
+           execution
+           {:execution-id "execution-2"}))))
+
+    (is
+     (machine/waiting-send?
+      execution))
+
+    (let [{completed :execution
+           envelope :message}
+          (machine/complete-send
+           execution
+           {:execution-id "execution-1"})]
+
+      (is
+       (= {:kind :message
+           :from :browser
+           :to :server
+           :event :example/command
+           :payload {:execution-id "execution-1"}}
+          envelope))
+
+      (is
+       (machine/completed?
+        completed))
+
+      (is
+       (= "execution-1"
+          (machine/execution-value
+           completed
+           :execution-id)))
+
+      (is
+       (= #{:input}
+          (machine/execution-provenance-kinds
+           completed
+           :execution-id))))))
+
+(deftest machine-start-keeps-command-and-execution-identities-distinct
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :prepare
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        raw
+        "same-raw-id"
+
+        command-id
+        (identity/command-id raw)
+
+        execution-id
+        (identity/execution-id raw)
+
+        execution
+        (machine/start
+         (projected
+          choreography
+          :browser)
+         {:command-id command-id
+          :execution-id execution-id})]
+
+    (is
+     (= command-id
+        (machine/command-id
+         execution)))
+
+    (is
+     (= execution-id
+        (machine/execution-id
+         execution)))
+
+    (is
+     (not=
+      (machine/command-id execution)
+      (machine/execution-id execution)))
+
+    (is
+     (= {:role :browser
+         :command-id command-id
+         :execution-id execution-id}
+        (machine/identity-bindings
+         execution)))))
+
+(deftest machine-rejects-raw-command-and-execution-identifiers
+  (let [choreography
+        (choreo/->choreography
+         {:initial :present
+          :states
+          {:present
+           (choreo/local
+            :browser
+            :present-role
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected
+         choreography
+         :browser)]
+
+    (is
+     (= :invalid-command-id
+        (error-kind
+         #(machine/start
+           plan
+           {:command-id
+            "command-1"}))))
+
+    (is
+     (= :invalid-execution-id
+        (error-kind
+         #(machine/start
+           plan
+           {:execution-id
+            "execution-1"}))))))
+
+(deftest machine-rejects-cross-kind-command-and-execution-identifiers
+  (let [choreography
+        (choreo/->choreography
+         {:initial :present
+          :states
+          {:present
+           (choreo/local
+            :browser
+            :present-role
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected
+         choreography
+         :browser)
+
+        command-id
+        (identity/command-id
+         "id-1")
+
+        execution-id
+        (identity/execution-id
+         "id-1")]
+
+    (is
+     (= :invalid-command-id
+        (error-kind
+         #(machine/start
+           plan
+           {:command-id
+            execution-id}))))
+
+    (is
+     (= :invalid-execution-id
+        (error-kind
+         #(machine/start
+           plan
+           {:execution-id
+            command-id}))))))
+
+(deftest explicit-identity-binding-role-must-match-projected-role
+  (let [choreography
+        (choreo/->choreography
+         {:initial :present
+          :states
+          {:present
+           (choreo/local
+            :browser
+            :present-role
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected
+         choreography
+         :browser)]
+
+    (is
+     (= :identity-role-mismatch
+        (error-kind
+         #(machine/start
+           plan
+           {:identity-bindings
+            {:role :server}}))))))
+
+(deftest machine-identity-bindings-are-sparse-and-kind-checked
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :server
+            :prepare
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        principal
+        (identity/principal
+         "user-1")
+
+        actor
+        (identity/actor
+         "helper-9")
+
+        authority
+        (identity/authority
+         :request-model)
+
+        host
+        (identity/host
+         "aleph-node-2")
+
+        command-id
+        (identity/command-id
+         "command-1")
+
+        execution-id
+        (identity/execution-id
+         "execution-1")
+
+        execution
+        (machine/start
+         (projected
+          choreography
+          :server)
+         {:identity-bindings
+          {:principal principal
+           :actor actor
+           :authority authority
+           :host host
+           :command-id command-id
+           :execution-id execution-id}})]
+
+    (is
+     (= {:role :server
+         :principal principal
+         :actor actor
+         :authority authority
+         :host host
+         :command-id command-id
+         :execution-id execution-id}
+        (machine/identity-bindings
+         execution)))
+
+    (is
+     (= command-id
+        (machine/command-id
+         execution)))
+
+    (is
+     (= execution-id
+        (machine/execution-id
+         execution)))))
+
+(deftest explicit-identity-options-must-agree-with-binding-map
+  (let [choreography
+        (choreo/->choreography
+         {:initial :present
+          :states
+          {:present
+           (choreo/local
+            :server
+            :present-role
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected
+         choreography
+         :server)
+
+        command-1
+        (identity/command-id
+         "command-1")
+
+        command-2
+        (identity/command-id
+         "command-2")
+
+        execution-1
+        (identity/execution-id
+         "execution-1")
+
+        execution-2
+        (identity/execution-id
+         "execution-2")]
+
+    (is
+     (= :identity-binding-conflict
+        (error-kind
+         #(machine/start
+           plan
+           {:identity-bindings
+            {:command-id command-1}
+            :command-id command-2}))))
+
+    (is
+     (= :identity-binding-conflict
+        (error-kind
+         #(machine/start
+           plan
+           {:identity-bindings
+            {:execution-id execution-1}
+            :execution-id execution-2}))))))
+
+(deftest identity-bindings-survive-machine-transitions
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :prepare
+            :send
+            {:outputs #{:request-id}})
+
+           :send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        command-id
+        (identity/command-id
+         "command-1")
+
+        execution-id
+        (identity/execution-id
+         "execution-1")
+
+        host
+        (identity/host
+         "browser-context-3")
+
+        started
+        (machine/start
+         (projected
+          choreography
+          :browser)
+         {:identity-bindings
+          {:host host}
+          :command-id command-id
+          :execution-id execution-id})
+
+        after-local
+        (machine/complete-local
+         started
+         {:request-id "request-1"})
+
+        {completed :execution
+         envelope :message}
+        (machine/complete-send
+         after-local
+         {:request-id "request-1"})]
+
+    (doseq [execution
+            [started
+             after-local
+             completed]]
+
+      (is
+       (= {:role :browser
+           :host host
+           :command-id command-id
+           :execution-id execution-id}
+          (machine/identity-bindings
+           execution))))
+
+    (is
+     (= command-id
+        (:command-id
+         (machine/pending-action
+          started))))
+
+    (is
+     (= execution-id
+        (:execution-id
+         (machine/pending-action
+          started))))
+
+    (is
+     (= command-id
+        (:command-id
+         (machine/pending-action
+          after-local))))
+
+    (is
+     (= execution-id
+        (:execution-id
+         (machine/pending-action
+          after-local))))
+
+    (is
+     (= {:kind :message
+         :from :browser
+         :to :server
+         :event :example/command
+         :payload {:request-id "request-1"}}
+        envelope))))
+
+(deftest machine-identity-is-not-silently-injected-into-participant-message
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        command-id
+        (identity/command-id
+         "command-1")
+
+        execution-id
+        (identity/execution-id
+         "execution-1")
+
+        execution
+        (machine/start
+         (projected-with-entry-knowledge
+          choreography
+          :browser
+          {:browser #{:request-id}})
+         {:command-id command-id
+          :execution-id execution-id
+          :values
+          {:request-id "request-1"}})
+
+        envelope
+        (machine/pending-message
+         execution
+         {:request-id "request-1"})]
+
+    (is
+     (= {:kind :message
+         :from :browser
+         :to :server
+         :event :example/command
+         :payload
+         {:request-id "request-1"}}
+        envelope))
+
+    (is
+     (false?
+      (contains?
+       (:payload envelope)
+       :command-id)))
+
+    (is
+     (false?
+      (contains?
+       (:payload envelope)
+       :execution-id)))))
+
+(deftest protocol-must-declare-command-or-execution-identity-before-it-crosses-wire
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required
+             #{:request-id
+               :command-id
+               :execution-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        command-id
+        (identity/command-id
+         "command-1")
+
+        execution-id
+        (identity/execution-id
+         "execution-1")
+
+        execution
+        (machine/start
+         (projected-with-entry-knowledge
+          choreography
+          :browser
+          {:browser
+           #{:request-id
+             :command-id
+             :execution-id}})
+         {:command-id command-id
+          :execution-id execution-id
+          :values
+          {:request-id "request-1"
+           :command-id command-id
+           :execution-id execution-id}})
+
+        envelope
+        (machine/pending-message
+         execution
+         {:request-id "request-1"
+          :command-id command-id
+          :execution-id execution-id})]
+
+    (is
+     (= {:request-id "request-1"
+         :command-id command-id
+         :execution-id execution-id}
+        (:payload envelope)))
+
+    (is
+     (= command-id
+        (machine/execution-value
+         execution
+         :command-id)))
+
+    (is
+     (= execution-id
+        (machine/execution-value
+         execution
+         :execution-id)))))
+
+(deftest identity-bindings-do-not-become-semantic-values
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :server
+            :prepare
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        principal
+        (identity/principal
+         "user-1")
+
+        actor
+        (identity/actor
+         "helper-1")
+
+        execution
+        (machine/start
+         (projected
+          choreography
+          :server)
+         {:identity-bindings
+          {:principal principal
+           :actor actor}})]
+
+    (is
+     (= {}
+        (machine/execution-values
+         execution)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       execution
+       :principal)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       execution
+       :actor)))))
+
+(deftest explain-keeps-runtime-identity-explicitly-separate-from-semantic-values
+  (let [choreography
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :prepare
+            :done
+            {:requires #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        command-id
+        (identity/command-id
+         "command-1")
+
+        execution-id
+        (identity/execution-id
+         "execution-1")
+
+        execution
+        (machine/start
+         (projected-with-entry-knowledge
+          choreography
+          :browser
+          {:browser #{:request-id}})
+         {:command-id command-id
+          :execution-id execution-id
+          :values
+          {:request-id "request-1"}})
+
+        explanation
+        (machine/explain
+         execution)]
+
+    (is
+     (= command-id
+        (:command-id explanation)))
+
+    (is
+     (= execution-id
+        (:execution-id explanation)))
+
+    (is
+     (= {:role :browser
+         :command-id command-id
+         :execution-id execution-id}
+        (:identity-bindings explanation)))
+
+    (is
+     (= #{:request-id}
+        (:value-keys explanation)))
+
+    (is
+     (not
+      (contains?
+       (:value-keys explanation)
+       :command-id)))
+
+    (is
+     (not
+      (contains?
+       (:value-keys explanation)
+       :execution-id)))))
