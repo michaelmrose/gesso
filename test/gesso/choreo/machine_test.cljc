@@ -1746,42 +1746,36 @@
              rejected-execution))))))))
 
 (deftest overlapping-receive-contracts-are-rejected-as-ambiguous
-  (let [choreography
-        (choreo/->choreography
-         {:initial :wait
-          :states
-          {:wait
-           (choreo/await
-            :server
-            {:environment/one :one
-             :environment/two :two})
+  ;; The projector now rejects statically overlapping receive alternatives.
+  ;; This hand-constructed malformed projected plan keeps the machine's
+  ;; ambiguity check as defense in depth for invalid/untrusted plan data.
+  (let [plan
+        {:gesso.choreo/type project/projected-plan-type
+         :gesso.choreo/version project/projected-plan-version
+         :role :browser
+         :initial :wait
+         :states
+         {:wait
+          {:op :receive
+           :alternatives
+           [{:from :server
+             :event :example/result
+             :required #{:execution-id}
+             :optional #{:detail}
+             :next :done}
 
-           :one
-           (choreo/communicate
-            :server
-            :browser
-            :example/result
-            :done
-            {:required #{:execution-id}
-             :optional #{:detail}})
+            {:from :server
+             :event :example/result
+             :required #{:execution-id}
+             :optional #{:other}
+             :next :done}]}
 
-           :two
-           (choreo/communicate
-            :server
-            :browser
-            :example/result
-            :done
-            {:required #{:execution-id}
-             :optional #{:other}})
-
-           :done
-           (choreo/return :done)}})
+          :done
+          {:op :return
+           :outcome :gesso.choreo/complete}}}
 
         execution
-        (start-role-with-entry-knowledge
-         choreography
-         :browser
-         {:server #{:execution-id}})
+        (machine/start plan)
 
         envelope
         (machine/message

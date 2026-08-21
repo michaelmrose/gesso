@@ -1529,7 +1529,53 @@
            (:required
             (first alternatives))))))
 
-(deftest contract-distinct-receives-do-not-claim-runtime-disambiguation
+(deftest overlapping-closed-receive-contracts-are-rejected-statically
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/one :one
+             :environment/two :two})
+
+           :one
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :one-done
+            {:required #{:execution-id}
+             :optional #{:detail}})
+
+           :two
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :two-done
+            {:required #{:execution-id}
+             :optional #{:other}})
+
+           :one-done
+           (choreo/return :one)
+
+           :two-done
+           (choreo/return :two)}})]
+
+    ;; {:execution-id ...} satisfies both contracts. A compiler-generated
+    ;; receive gate must never defer this known ambiguity to the runtime
+    ;; machine merely because the continuations are different.
+    (is (= :ambiguous-receive
+           (error-kind
+            #(project/project
+              (verified-with-entry-knowledge
+               choreography
+               {:server #{:execution-id}})
+              :browser))))))
+
+(deftest overlapping-receive-contracts-are-rejected-even-when-continuation-is-the-same
   (let [choreography
         (choreo/->choreography
          {:initial :wait
@@ -1547,7 +1593,7 @@
             :example/result
             :done
             {:required #{:execution-id}
-             :optional #{:confirmed}})
+             :optional #{:detail}})
 
            :two
            (choreo/communicate
@@ -1556,32 +1602,106 @@
             :example/result
             :done
             {:required #{:execution-id}
-             :optional #{:rejected}})
+             :optional #{:other}})
 
            :done
-           (choreo/return :done)}})
+           (choreo/return :done)}})]
 
-        browser
-        (project/project
-         (verified-with-entry-knowledge
-          choreography
-          {:server
-           #{:execution-id}})
-         :browser)
+    ;; Coalescing these would silently invent a third payload/knowledge contract;
+    ;; retaining both would produce a runtime-ambiguous receive. Neither is a
+    ;; faithful projection of the authored alternatives.
+    (is (= :ambiguous-receive
+           (error-kind
+            #(project/project
+              (verified-with-entry-knowledge
+               choreography
+               {:server #{:execution-id}})
+              :browser))))))
 
-        alternatives
-        (:alternatives
-         (initial-state browser))]
+(deftest open-and-closed-overlapping-receive-contracts-are-rejected-statically
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/open :open
+             :environment/closed :closed})
 
-    ;; Projection preserves both semantic contracts rather than silently
-    ;; collapsing them. Whether a concrete payload matches exactly one of these
-    ;; alternatives is a runtime-machine obligation, not a projection claim.
-    (is (= 2
-           (count alternatives)))
+           :open
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :open-done
+            {:required #{:execution-id}
+             :open-payload? true})
 
-    (is (= #{#{:confirmed}
-             #{:rejected}}
-           (set
-            (map
-             :optional
-             alternatives))))))
+           :closed
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :closed-done
+            {:required #{:execution-id :outcome}})
+
+           :open-done
+           (choreo/return :open)
+
+           :closed-done
+           (choreo/return :closed)}})]
+
+    ;; {:execution-id ... :outcome ...} satisfies both alternatives.
+    (is (= :ambiguous-receive
+           (error-kind
+            #(project/project
+              (verified-with-entry-knowledge
+               choreography
+               {:server #{:execution-id :outcome}})
+              :browser))))))
+
+(deftest two-open-receive-contracts-with-the-same-message-identity-are-rejected-statically
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :server
+            {:environment/one :one
+             :environment/two :two})
+
+           :one
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :one-done
+            {:required #{:execution-id}
+             :open-payload? true})
+
+           :two
+           (choreo/communicate
+            :server
+            :browser
+            :example/result
+            :two-done
+            {:required #{:execution-id :outcome}
+             :open-payload? true})
+
+           :one-done
+           (choreo/return :one)
+
+           :two-done
+           (choreo/return :two)}})]
+
+    ;; For the same from/event/via identity, two open contracts always have a
+    ;; non-empty intersection: a payload containing the union of required keys.
+    (is (= :ambiguous-receive
+           (error-kind
+            #(project/project
+              (verified-with-entry-knowledge
+               choreography
+               {:server #{:execution-id :outcome}})
+              :browser))))))

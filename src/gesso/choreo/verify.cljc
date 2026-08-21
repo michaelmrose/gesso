@@ -11,20 +11,24 @@
    - role-local definite-knowledge availability;
    - sender knowledge for required communicated fields;
    - receiver knowledge established by required communicated fields;
+   - awaiting-role knowledge established by required environment-event fields;
+   - edge-sensitive definite-value/knowledge transfer for :await alternatives;
    - basic value producer/use analysis;
    - explicit identification of authoritative semantic operations in analysis.
 
    Definite protocol-value availability is a small forward must-analysis. A
    value is considered established at a state only when it is available on every
    graph path reaching that state. Local and authoritative outputs establish
-   values, and required communicated fields establish values at the communication
-   boundary. Optional communicated fields are not definite because they may be
-   omitted.
+   values, required communicated fields establish values at the communication
+   boundary, and required environment-event fields establish values on the
+   specific event edge that was taken. Optional communicated/environment fields
+   are not definite because they may be omitted.
 
    A second must-analysis tracks role-local knowledge. Local/authoritative outputs
    become known to their owner. Required communicated fields must already be
-   known by the sender and become known by the receiver. This is the first static
-   sender/receiver knowledge check; it does not yet prove provenance quality,
+   known by the sender and become known by the receiver. Required environment
+   fields become known only to the role awaiting that event. This is a static
+   role-local knowledge check; it does not yet prove provenance quality,
    authentication, authorization, or optional-field sender knowledge.
 
    Entry assumptions may be supplied in two forms:
@@ -51,7 +55,8 @@
    - provenance quality beyond static role/key flow;
    - authentication, authorization, or correctness of authoritative realization;
    - optional communicated fields are known by the sender when actually sent;
-   - open-payload extras as semantic knowledge;
+   - optional environment fields as definite knowledge;
+   - open-payload/open-event extras as semantic knowledge;
    - resource ownership;
    - browser execution;
    - arbitrary liveness.
@@ -67,7 +72,7 @@
 ;; -----------------------------------------------------------------------------
 
 (def verification-version
-  4)
+  5)
 
 (def verification-type
   :gesso.choreo/verification)
@@ -303,6 +308,81 @@
 ;; Semantic-value use / production
 ;; -----------------------------------------------------------------------------
 
+(defn- await-state?
+  [state]
+  (= :await
+     (:op state)))
+
+(defn- await-event-contract
+  [state event]
+  (get-in state
+          [:event-contracts event]
+          {}))
+
+(defn- await-event-required
+  [state event]
+  (or (:required
+       (await-event-contract
+        state
+        event))
+      #{}))
+
+(defn- await-event-optional
+  [state event]
+  (or (:optional
+       (await-event-contract
+        state
+        event))
+      #{}))
+
+(defn- await-events-for-target
+  [state target]
+  (keep
+   (fn [[event successor]]
+     (when (= target successor)
+       event))
+   (:events state)))
+
+(defn- await-produced-value-keys
+  "Return values that this await may establish on at least one event edge.
+
+   This is a may-produce summary used for universe/diagnostic construction. The
+   definite analysis below is edge-sensitive and therefore does not treat this
+   union as established on every outgoing path."
+  [state]
+  (reduce
+   set/union
+   #{}
+   (map
+    #(await-event-required
+      state
+      %)
+    (keys (:events state)))))
+
+(defn- await-definite-value-keys-for-target
+  "Return values established on every environment event from state to target.
+
+   Multiple event labels may converge directly on the same successor. A fact is
+   definite at that successor only when every such event contract requires it."
+  [state target]
+  (let [events
+        (vec
+         (await-events-for-target
+          state
+          target))]
+    (if (seq events)
+      (reduce
+       set/intersection
+       (await-event-required
+        state
+        (first events))
+       (map
+        #(await-event-required
+          state
+          %)
+        (rest events)))
+      #{})))
+
 (defn- state-produced-value-keys
   [state]
   (cond
@@ -317,8 +397,24 @@
     ;; definite receiver knowledge. Optional fields may be omitted.
     (choreo/communication-required state)
 
+    (await-state? state)
+    (await-produced-value-keys state)
+
     :else
     #{}))
+
+(defn- edge-produced-value-keys
+  "Return values definitely produced by taking state -> target.
+
+   Most states have path-independent production. :await is different: each
+   environment event may establish a different required field set, so its
+   transfer is computed per successor edge."
+  [state target]
+  (if (await-state? state)
+    (await-definite-value-keys-for-target
+     state
+     target)
+    (state-produced-value-keys state)))
 
 (defn- state-required-value-keys
   [state]
@@ -395,11 +491,13 @@
 ;; Definite-value dataflow
 ;; -----------------------------------------------------------------------------
 
-(defn- transfer-values
-  [state incoming]
+(defn- transfer-values-to-target
+  [state target incoming]
   (set/union
    incoming
-   (state-produced-value-keys state)))
+   (edge-produced-value-keys
+    state
+    target)))
 
 (defn- intersect-all
   [sets universe]
@@ -409,16 +507,35 @@
             sets)
     universe))
 
+(defn- predecessor-value-contribution
+  [states
+   predecessor-id
+   target-id
+   in-values
+   universe]
+  (transfer-values-to-target
+   (get states predecessor-id)
+   target-id
+   (get in-values
+        predecessor-id
+        universe)))
+
 (defn- incoming-values-for-state
-  [state-id
+  [states
+   state-id
    initial
    entry-value-keys
    predecessors
-   out-values
+   in-values
    universe]
   (let [predecessor-values
         (map
-         #(get out-values % universe)
+         #(predecessor-value-contribution
+           states
+           %
+           state-id
+           in-values
+           universe)
          (get predecessors state-id #{}))
 
         incoming-from-predecessors
@@ -436,6 +553,23 @@
        incoming-from-predecessors)
 
       incoming-from-predecessors)))
+
+(defn- values-after-state
+  [state incoming]
+  (let [targets
+        (choreo/successors state)]
+    (if (seq targets)
+      (intersect-all
+       (map
+        #(transfer-values-to-target
+          state
+          %
+          incoming)
+        targets)
+       (set/union
+        incoming
+        (state-produced-value-keys state)))
+      incoming)))
 
 (defn- definite-value-analysis
   [states
@@ -461,46 +595,25 @@
                   (if (= state-id initial)
                     entry-value-keys
                     universe)]))
-              reachable)
+              reachable)]
 
-        initial-out
-        (into {}
-              (map
-               (fn [[state-id incoming]]
-                 [state-id
-                  (transfer-values
-                   (get states state-id)
-                   incoming)]))
-              initial-in)]
-
-    (loop [in-values initial-in
-           out-values initial-out]
+    (loop [in-values initial-in]
       (let [next-in
             (into {}
                   (map
                    (fn [state-id]
                      [state-id
                       (incoming-values-for-state
+                       states
                        state-id
                        initial
                        entry-value-keys
                        predecessors
-                       out-values
+                       in-values
                        universe)]))
-                  reachable)
+                  reachable)]
 
-            next-out
-            (into {}
-                  (map
-                   (fn [[state-id incoming]]
-                     [state-id
-                      (transfer-values
-                       (get states state-id)
-                       incoming)]))
-                  next-in)]
-
-        (if (and (= in-values next-in)
-                 (= out-values next-out))
+        (if (= in-values next-in)
           {:entry-value-keys
            entry-value-keys
 
@@ -511,10 +624,16 @@
            next-in
 
            :out
-           next-out}
+           (into {}
+                 (map
+                  (fn [[state-id incoming]]
+                    [state-id
+                     (values-after-state
+                      (get states state-id)
+                      incoming)]))
+                 next-in)}
 
-          (recur next-in
-                 next-out))))))
+          (recur next-in))))))
 
 (defn- definite-value-errors
   [states reachable in-values]
@@ -598,29 +717,53 @@
     :else
     {}))
 
-(defn- transfer-knowledge
-  [state incoming]
+(defn- await-produced-knowledge
+  [state]
+  {(choreo/state-owner state)
+   (await-produced-value-keys state)})
+
+(defn- state-produced-knowledge
+  [state]
   (cond
     (choreo/local-state? state)
-    (update incoming
-            (choreo/state-owner state)
-            set/union
-            (choreo/local-outputs state))
+    {(choreo/state-owner state)
+     (choreo/local-outputs state)}
 
     (choreo/authoritative-state? state)
-    (update incoming
-            (choreo/state-owner state)
-            set/union
-            (choreo/authoritative-outputs state))
+    {(choreo/state-owner state)
+     (choreo/authoritative-outputs state)}
 
     (choreo/communication-state? state)
-    (update incoming
-            (:to state)
-            set/union
-            (choreo/communication-required state))
+    {(:to state)
+     (choreo/communication-required state)}
+
+    (await-state? state)
+    (await-produced-knowledge state)
 
     :else
-    incoming))
+    {}))
+
+(defn- edge-produced-knowledge
+  [state target]
+  (if (await-state? state)
+    {(choreo/state-owner state)
+     (await-definite-value-keys-for-target
+      state
+      target)}
+    (state-produced-knowledge state)))
+
+(defn- transfer-knowledge-to-target
+  [state target incoming]
+  (reduce-kv
+   (fn [knowledge role keys]
+     (update knowledge
+             role
+             (fnil set/union #{})
+             keys))
+   incoming
+   (edge-produced-knowledge
+    state
+    target)))
 
 (defn- intersect-role-knowledge
   [roles maps universe-by-role]
@@ -638,19 +781,36 @@
           roles)
     universe-by-role))
 
+(defn- predecessor-knowledge-contribution
+  [states
+   predecessor-id
+   target-id
+   in-knowledge
+   universe-by-role]
+  (transfer-knowledge-to-target
+   (get states predecessor-id)
+   target-id
+   (get in-knowledge
+        predecessor-id
+        universe-by-role)))
+
 (defn- incoming-knowledge-for-state
-  [state-id
+  [states
+   state-id
    initial
    roles
    entry-by-role
    predecessors
-   out-knowledge
+   in-knowledge
    universe-by-role]
   (let [predecessor-knowledge
         (map
-         #(get out-knowledge
-               %
-               universe-by-role)
+         #(predecessor-knowledge-contribution
+           states
+           %
+           state-id
+           in-knowledge
+           universe-by-role)
          (get predecessors state-id #{}))
 
         incoming-from-predecessors
@@ -672,6 +832,22 @@
             roles)
 
       incoming-from-predecessors)))
+
+(defn- knowledge-after-state
+  [roles state incoming universe-by-role]
+  (let [targets
+        (choreo/successors state)]
+    (if (seq targets)
+      (intersect-role-knowledge
+       roles
+       (map
+        #(transfer-knowledge-to-target
+          state
+          %
+          incoming)
+        targets)
+       universe-by-role)
+      incoming)))
 
 (defn- definite-knowledge-analysis
   [states
@@ -711,47 +887,26 @@
                   (if (= state-id initial)
                     entry-by-role
                     universe-by-role)]))
-              reachable)
+              reachable)]
 
-        initial-out
-        (into {}
-              (map
-               (fn [[state-id incoming]]
-                 [state-id
-                  (transfer-knowledge
-                   (get states state-id)
-                   incoming)]))
-              initial-in)]
-
-    (loop [in-knowledge initial-in
-           out-knowledge initial-out]
+    (loop [in-knowledge initial-in]
       (let [next-in
             (into {}
                   (map
                    (fn [state-id]
                      [state-id
                       (incoming-knowledge-for-state
+                       states
                        state-id
                        initial
                        roles
                        entry-by-role
                        predecessors
-                       out-knowledge
+                       in-knowledge
                        universe-by-role)]))
-                  reachable)
+                  reachable)]
 
-            next-out
-            (into {}
-                  (map
-                   (fn [[state-id incoming]]
-                     [state-id
-                      (transfer-knowledge
-                       (get states state-id)
-                       incoming)]))
-                  next-in)]
-
-        (if (and (= in-knowledge next-in)
-                 (= out-knowledge next-out))
+        (if (= in-knowledge next-in)
           {:entry
            entry-by-role
 
@@ -762,11 +917,18 @@
            next-in
 
            :out
-           next-out}
+           (into {}
+                 (map
+                  (fn [[state-id incoming]]
+                    [state-id
+                     (knowledge-after-state
+                      roles
+                      (get states state-id)
+                      incoming
+                      universe-by-role)]))
+                 next-in)}
 
-          (recur
-           next-in
-           next-out))))))
+          (recur next-in))))))
 
 (defn- definite-knowledge-errors
   [states reachable global-in role-in]
@@ -822,25 +984,9 @@
   [states state-ids]
   (reduce
    (fn [result state-id]
-     (let [state
-           (get states state-id)
-
-           additions
-           (cond
-             (choreo/local-state? state)
-             {(choreo/state-owner state)
-              (choreo/local-outputs state)}
-
-             (choreo/authoritative-state? state)
-             {(choreo/state-owner state)
-              (choreo/authoritative-outputs state)}
-
-             (choreo/communication-state? state)
-             {(:to state)
-              (choreo/communication-required state)}
-
-             :else
-             {})]
+     (let [additions
+           (state-produced-knowledge
+            (get states state-id))]
 
        (reduce-kv
         (fn [result role keys]
@@ -1214,6 +1360,42 @@
                   (when (choreo/communication-state? state)
                     [state-id
                      (choreo/communication-optional state)]))))
+             reachable)
+
+       :environment-required-keys-by-state
+       (into {}
+             (keep
+              (fn [state-id]
+                (let [state
+                      (get states state-id)]
+                  (when (await-state? state)
+                    [state-id
+                     (into {}
+                           (map
+                            (fn [event]
+                              [event
+                               (await-event-required
+                                state
+                                event)]))
+                           (keys (:events state)))]))))
+             reachable)
+
+       :environment-optional-keys-by-state
+       (into {}
+             (keep
+              (fn [state-id]
+                (let [state
+                      (get states state-id)]
+                  (when (await-state? state)
+                    [state-id
+                     (into {}
+                           (map
+                            (fn [event]
+                              [event
+                               (await-event-optional
+                                state
+                                event)]))
+                           (keys (:events state)))]))))
              reachable)}})))
 
 (defn verification?

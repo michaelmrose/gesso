@@ -211,8 +211,7 @@
         initial
         (semantics/environment-event
          :browser
-         :request/completed
-         {:status 200}))))
+         :request/completed))))
 
     (testing "the same event keyword in a participant message is not enabled"
       (is
@@ -232,16 +231,14 @@
          initial
          (semantics/environment-event
           :authority
-          :request/completed
-          {:status 200})))))
+          :request/completed)))))
 
     (let [result
           (semantics/transition
            initial
            (semantics/environment-event
             :browser
-            :request/completed
-            {:status 200}))
+            :request/completed))
 
           completed
           (:configuration result)]
@@ -252,7 +249,7 @@
                :state :waiting
                :role :browser
                :event :request/completed
-               :data {:status 200}}
+               :data nil}
 
               {:kind :terminal
                :state :done
@@ -263,6 +260,221 @@
                :state :done
                :outcome :done}]
              (semantics/observable-trace completed))))))
+
+(deftest await-event-contract-controls-semantic-data-shape
+  (let [program
+        (choreo/->choreography
+         {:initial :waiting
+          :states
+          {:waiting
+           (choreo/await
+            :browser
+            {:request/failed :failed
+             :request/completed :done}
+            {:event-contracts
+             {:request/failed
+              {:required #{:reason}
+               :optional #{:status}}}})
+
+           :failed
+           (choreo/return :failed)
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start program)]
+
+    (testing "required semantic event data is required"
+      (is
+       (false?
+        (semantics/enabled?
+         initial
+         (semantics/environment-event
+          :browser
+          :request/failed
+          {})))))
+
+    (testing "required-only data is accepted"
+      (is
+       (semantics/enabled?
+        initial
+        (semantics/environment-event
+         :browser
+         :request/failed
+         {:reason :network}))))
+
+    (testing "declared optional data may also be present"
+      (is
+       (semantics/enabled?
+        initial
+        (semantics/environment-event
+         :browser
+         :request/failed
+         {:reason :http
+          :status 503}))))
+
+    (testing "closed event data rejects undeclared keys"
+      (is
+       (false?
+        (semantics/enabled?
+         initial
+         (semantics/environment-event
+          :browser
+          :request/failed
+          {:reason :http
+           :status 503
+           :xhr :host-object})))))
+
+    (testing "an event without an explicit contract declares no semantic data"
+      (is
+       (semantics/enabled?
+        initial
+        (semantics/environment-event
+         :browser
+         :request/completed)))
+
+      (is
+       (false?
+        (semantics/enabled?
+         initial
+         (semantics/environment-event
+          :browser
+          :request/completed
+          {:status 200})))))))
+
+(deftest declared-await-event-data-enters-global-semantic-value-flow
+  (let [program
+        (choreo/->choreography
+         {:initial :waiting
+          :states
+          {:waiting
+           (choreo/await
+            :browser
+            {:request/completed :branch}
+            {:event-contracts
+             {:request/completed
+              {:required #{:outcome}
+               :optional #{:revision}}}})
+
+           :branch
+           (choreo/branch
+            :browser
+            :outcome
+            {:confirmed :done
+             :rejected :failed})
+
+           :done
+           (choreo/return :done)
+
+           :failed
+           (choreo/return :failed)}})
+
+        after-event
+        (-> program
+            semantics/start
+            (semantics/step
+             (semantics/environment-event
+              :browser
+              :request/completed
+              {:outcome :confirmed
+               :revision 42})))]
+
+    (is (= {:outcome :confirmed
+            :revision 42}
+           (semantics/values after-event)))
+
+    (is (semantics/enabled?
+         after-event
+         (semantics/branch-event
+          :browser
+          :outcome
+          :confirmed)))))
+
+(deftest open-await-event-data-keeps-undeclared-extras-out-of-semantic-state
+  (let [program
+        (choreo/->choreography
+         {:initial :waiting
+          :states
+          {:waiting
+           (choreo/await
+            :browser
+            {:browser/observed :done}
+            {:event-contracts
+             {:browser/observed
+              {:required #{:basis}
+               :optional #{:reason}
+               :open-data? true}}})
+
+           :done
+           (choreo/return :done)}})
+
+        event
+        (semantics/environment-event
+         :browser
+         :browser/observed
+         {:basis 24
+          :reason :canonical-refresh
+          :xhr :host-object
+          :dom-node :host-object})
+
+        initial
+        (semantics/start program)
+
+        completed
+        (semantics/step initial event)]
+
+    (is (semantics/enabled? initial event))
+
+    (is (= {:basis 24
+            :reason :canonical-refresh}
+           (semantics/values completed)))
+
+    (is (= [{:kind :environment
+             :state :waiting
+             :role :browser
+             :event :browser/observed
+             :data {:basis 24
+                    :reason :canonical-refresh}}
+
+            {:kind :terminal
+             :state :done
+             :outcome :done}]
+           (semantics/history completed)))))
+
+(deftest await-event-contract-is-visible-in-the-expected-event
+  (let [program
+        (choreo/->choreography
+         {:initial :waiting
+          :states
+          {:waiting
+           (choreo/await
+            :browser
+            {:request/completed :done
+             :request/failed :failed}
+            {:event-contracts
+             {:request/failed
+              {:required #{:reason}
+               :optional #{:status}
+               :open-data? true}}})
+
+           :failed
+           (choreo/return :failed)
+
+           :done
+           (choreo/return :done)}})]
+
+    (is (= {:kind :environment
+            :role :browser
+            :events #{:request/completed
+                      :request/failed}
+            :event-contracts
+            {:request/failed
+             {:required #{:reason}
+              :optional #{:status}
+              :open-data? true}}}
+           (semantics/expected-event
+            (semantics/start program))))))
 
 (deftest communication-and-environment-events-do-not-cross-satisfy
   (let [program
@@ -827,7 +1039,7 @@
           completed
           :outcome)))))
 
-(deftest environment-event-data-does-not-magically-enter-the-global-value-store
+(deftest undeclared-environment-data-is-not-a-semantic-backdoor
   (let [program
         (choreo/->choreography
          {:initial :wait
@@ -840,23 +1052,28 @@
            :done
            (choreo/return :done)}})
 
-        completed
-        (-> program
-            semantics/start
-            (semantics/step
-             (semantics/environment-event
-              :browser
-              :browser/ready
-              {:revision 42})))]
+        initial
+        (semantics/start program)
 
-    (is (= {}
-           (semantics/values
-            completed)))
+        event
+        (semantics/environment-event
+         :browser
+         :browser/ready
+         {:revision 42})]
 
     (is (false?
-         (semantics/knows-value?
-          completed
-          :revision)))))
+         (semantics/enabled?
+          initial
+          event)))
+
+    (is (= :event-not-enabled
+           (error-kind
+            #(semantics/step
+              initial
+              event))))
+
+    (is (= {}
+           (semantics/values initial)))))
 
 (deftest semantic-explain-shows-value-keys-without-pretending-they-are-role-knowledge
   (let [program
@@ -1524,6 +1741,83 @@
             :event :example/command
             :open-payload? :yes
             :next :done}
+
+           :done
+           {:op :return
+            :outcome :done}}})))))
+
+(deftest semantic-program-rejects-await-contract-for-unknown-event
+  (is
+   (= :unknown-await-event-contract
+      (error-kind
+       #(semantics/->program
+         {:initial :wait
+          :states
+          {:wait
+           {:op :await
+            :role :browser
+            :events {:browser/ready :done}
+            :event-contracts
+            {:browser/missing
+             {:required #{:revision}}}}
+
+           :done
+           {:op :return
+            :outcome :done}}})))))
+
+(deftest semantic-program-rejects-invalid-await-event-value-set
+  (is
+   (= :invalid-value-set
+      (error-kind
+       #(semantics/->program
+         {:initial :wait
+          :states
+          {:wait
+           {:op :await
+            :role :browser
+            :events {:browser/ready :done}
+            :event-contracts
+            {:browser/ready
+             {:required [:revision]}}}
+
+           :done
+           {:op :return
+            :outcome :done}}})))))
+
+(deftest semantic-program-rejects-await-required-optional-overlap
+  (is
+   (= :ambiguous-event-data-key
+      (error-kind
+       #(semantics/->program
+         {:initial :wait
+          :states
+          {:wait
+           {:op :await
+            :role :browser
+            :events {:browser/ready :done}
+            :event-contracts
+            {:browser/ready
+             {:required #{:revision}
+              :optional #{:revision}}}}
+
+           :done
+           {:op :return
+            :outcome :done}}})))))
+
+(deftest semantic-program-rejects-nonboolean-open-event-data-marker
+  (is
+   (= :invalid-open-data
+      (error-kind
+       #(semantics/->program
+         {:initial :wait
+          :states
+          {:wait
+           {:op :await
+            :role :browser
+            :events {:browser/ready :done}
+            :event-contracts
+            {:browser/ready
+             {:open-data? :yes}}}
 
            :done
            {:op :return

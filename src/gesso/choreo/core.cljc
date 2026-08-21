@@ -503,6 +503,86 @@
         :metadata
         (normalize-metadata metadata))))))
 
+(defn- normalize-await-event-contract
+  [event contract]
+  (require-map!
+   "Await event contract"
+   contract)
+
+  (let [{:keys [required optional open-data?]
+         :or {required #{}
+              optional #{}
+              open-data? false}}
+        contract
+
+        required'
+        (require-keyword-set!
+         "Await event contract :required"
+         required)
+
+        optional'
+        (require-keyword-set!
+         "Await event contract :optional"
+         optional)
+
+        overlap
+        (set/intersection
+         required'
+         optional')]
+
+    (when (seq overlap)
+      (fail!
+       :ambiguous-event-data-key
+       "An await event data key may not be both required and optional."
+       {:event event
+        :overlap overlap
+        :required required'
+        :optional optional'}))
+
+    (when-not (boolean? open-data?)
+      (fail!
+       :invalid-open-data
+       "Await event contract :open-data? must be boolean."
+       {:event event
+        :open-data? open-data?}))
+
+    (cond-> {}
+      (seq required')
+      (assoc :required required')
+
+      (seq optional')
+      (assoc :optional optional')
+
+      open-data?
+      (assoc :open-data? true))))
+
+(defn- normalize-await-event-contracts
+  [events event-contracts]
+  (let [event-contracts'
+        (require-map!
+         "Await :event-contracts"
+         (or event-contracts {}))
+
+        unknown-events
+        (set/difference
+         (set (keys event-contracts'))
+         (set (keys events)))]
+
+    (when (seq unknown-events)
+      (fail!
+       :unknown-await-event-contract
+       "Await event contracts may name only declared environment events."
+       {:unknown-events unknown-events
+        :events (set (keys events))}))
+
+    (into {}
+          (map (fn [[event contract]]
+                 [event
+                  (normalize-await-event-contract
+                   event
+                   contract)]))
+          event-contracts')))
+
 (defn await
   "Construct a role-local wait for one of several environment events.
 
@@ -512,10 +592,36 @@
    from another role cannot satisfy this state merely because it uses the same
    event keyword.
 
-   Optional :metadata is compiler/development metadata only."
+   Options:
+
+     :event-contracts
+       Optional map from a declared environment-event keyword to the semantic
+       data contract for that event. Event data is closed by default. A contract
+       may declare:
+
+         :required
+           Semantic data keys that must be present.
+
+         :optional
+           Semantic data keys that may be present.
+
+         :open-data?
+           When true, undeclared event-data keys may also be present. Defaults
+           to false. This is an explicit escape hatch rather than the default.
+
+       Required and optional keys must be disjoint sets of keywords. Contracts
+       may name only events declared by this await state. An event with no
+       contract declares no semantic event data.
+
+     :metadata
+       Compiler/development metadata with no semantic effect.
+
+   Event contracts describe semantic data only. Browser/host attachments remain
+   outside portable choreography state unless a later realization layer maps
+   them deliberately into declared portable values."
   ([role events]
    (await role events nil))
-  ([role events {:keys [metadata] :as options}]
+  ([role events {:keys [event-contracts metadata] :as options}]
    (require-map!
     "Await options"
     (or options {}))
@@ -535,18 +641,27 @@
       "Await event"
       event))
 
-   (cond->
-    {:op :await
-     :role
-     (require-keyword!
-      "Await role"
-      role)
-     :events events}
+   (let [event-contracts'
+         (normalize-await-event-contracts
+          events
+          event-contracts)]
 
-     (some? metadata)
-     (assoc
-      :metadata
-      (normalize-metadata metadata)))))
+     (cond->
+      {:op :await
+       :role
+       (require-keyword!
+        "Await role"
+        role)
+       :events events}
+
+       (seq event-contracts')
+       (assoc :event-contracts
+              event-contracts')
+
+       (some? metadata)
+       (assoc
+        :metadata
+        (normalize-metadata metadata))))))
 
 (defn return
   "Construct one global terminal outcome.

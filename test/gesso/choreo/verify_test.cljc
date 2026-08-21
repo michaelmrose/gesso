@@ -1371,6 +1371,302 @@
                  :render
                  :browser])))))
 
+
+(deftest required-environment-field-establishes-definite-value-and-role-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:canonical/observed :render}
+            {:event-contracts
+             {:canonical/observed
+              {:required #{:basis :outcome}}}})
+
+           :render
+           (choreo/local
+            :browser
+            :render-canonical
+            :done
+            {:requires #{:basis :outcome}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (:valid? result))
+
+    (is (= #{:basis :outcome}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :render])))
+
+    (is (= #{:basis :outcome}
+           (get-in result
+                   [:analysis
+                    :definitely-known-before-state
+                    :render
+                    :browser])))))
+
+(deftest await-event-contracts-produce-edge-specific-definite-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:canonical/observed :canonical
+             :request/failed :failed}
+            {:event-contracts
+             {:canonical/observed
+              {:required #{:basis}}
+
+              :request/failed
+              {:required #{:reason}}}})
+
+           :canonical
+           (choreo/local
+            :browser
+            :install-canonical
+            :done
+            {:requires #{:basis}})
+
+           :failed
+           (choreo/local
+            :browser
+            :recover
+            :done
+            {:requires #{:reason}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (:valid? result))
+
+    (is (= #{:basis}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :canonical])))
+
+    (is (= #{:reason}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :failed])))
+
+    (is (= #{:basis}
+           (get-in result
+                   [:analysis
+                    :definitely-known-before-state
+                    :canonical
+                    :browser])))
+
+    (is (= #{:reason}
+           (get-in result
+                   [:analysis
+                    :definitely-known-before-state
+                    :failed
+                    :browser])))))
+
+(deftest optional-environment-field-is-not-definite-after-event
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:canonical/observed :render}
+            {:event-contracts
+             {:canonical/observed
+              {:required #{:basis}
+               :optional #{:revision}}}})
+
+           :render
+           (choreo/local
+            :browser
+            :render-canonical
+            :done
+            {:requires #{:revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (false? (:valid? result)))
+
+    (is (contains?
+         (problem-kinds (:errors result))
+         :value-not-definitely-established))
+
+    (testing "global absence is the root cause, so the verifier does not emit a
+              redundant role-local knowledge error for the same missing value"
+      (is (not
+           (contains?
+            (problem-kinds (:errors result))
+            :knowledge-not-definitely-established))))
+
+    (is (= #{:basis}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :render])))
+
+    (is (= #{:basis}
+           (get-in result
+                   [:analysis
+                    :definitely-known-before-state
+                    :render
+                    :browser])))))
+
+(deftest environment-observation-establishes-knowledge-only-for-awaiting-role
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:canonical/observed :server-use}
+            {:event-contracts
+             {:canonical/observed
+              {:required #{:basis}}}})
+
+           :server-use
+           (choreo/local
+            :server
+            :use-browser-observation
+            :done
+            {:requires #{:basis}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)
+
+        knowledge-errors
+        (filter
+         #(= :knowledge-not-definitely-established
+             (:kind %))
+         (:errors result))]
+
+    (is (false? (:valid? result)))
+
+    (testing "the event did establish the protocol value globally"
+      (is (= #{:basis}
+             (get-in result
+                     [:analysis
+                      :definitely-established-before-state
+                      :server-use]))))
+
+    (testing "but it did not teach an unrelated role"
+      (is (= 1 (count knowledge-errors)))
+      (is (= :server-use
+             (get-in (first knowledge-errors)
+                     [:data :state])))
+      (is (= :server
+             (get-in (first knowledge-errors)
+                     [:data :role])))
+      (is (= :basis
+             (get-in (first knowledge-errors)
+                     [:data :value-key]))))))
+
+(deftest await-path-that-does-not-establish-field-prevents-definite-join-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:canonical/observed :join
+             :request/failed :join}
+            {:event-contracts
+             {:canonical/observed
+              {:required #{:basis}}
+
+              :request/failed
+              {:required #{:reason}}}})
+
+           :join
+           (choreo/local
+            :browser
+            :after-either
+            :done
+            {:requires #{:basis}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)]
+
+    (is (false? (:valid? result)))
+
+    (is (= #{}
+           (get-in result
+                   [:analysis
+                    :definitely-established-before-state
+                    :join])))
+
+    (is (= #{}
+           (get-in result
+                   [:analysis
+                    :definitely-known-before-state
+                    :join
+                    :browser])))))
+
+(deftest verifier-reports-environment-event-contract-analysis
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:canonical/observed :done
+             :request/failed :done}
+            {:event-contracts
+             {:canonical/observed
+              {:required #{:basis}
+               :optional #{:revision}}
+
+              :request/failed
+              {:required #{:reason}
+               :open-data? true}}})
+
+           :done
+           (choreo/return :done)}})
+
+        analysis
+        (:analysis
+         (verify/verify choreography))]
+
+    (is (= {:canonical/observed #{:basis}
+            :request/failed #{:reason}}
+           (get-in analysis
+                   [:environment-required-keys-by-state
+                    :wait])))
+
+    (is (= {:canonical/observed #{:revision}
+            :request/failed #{}}
+           (get-in analysis
+                   [:environment-optional-keys-by-state
+                    :wait])))))
+
 (deftest precise-entry-knowledge-is-role-local
   (let [choreography
         (choreo/->choreography

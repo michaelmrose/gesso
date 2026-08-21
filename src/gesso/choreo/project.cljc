@@ -46,8 +46,11 @@
 
    Communication contracts are compiler data that survive projection. Required,
    optional, correlation, and explicit open-payload declarations are copied to
-   the projected sender and receiver sides. Projection does not reinterpret those
-   declarations as knowledge or authority.
+   the projected sender and receiver sides. Receive alternatives sharing one
+   sender/event/channel must accept disjoint payload shapes; statically knowable
+   overlap is rejected during projection rather than deferred to the runtime
+   machine. Projection does not reinterpret those declarations as knowledge or
+   authority.
 
    Foreign local actions disappear from a role projection because :local is,
    by definition, distributed-unobservable. Foreign :branch and foreign
@@ -474,46 +477,124 @@
 ;; Receive alternatives
 ;; -----------------------------------------------------------------------------
 
-(defn- receive-identity
+(defn- receive-route-identity
+  "Return the transport-visible identity used to choose candidate receives.
+
+   Payload contracts are intentionally excluded. Two alternatives with the same
+   sender/event/channel therefore compete at one receive gate and must have
+   disjoint accepted payload languages unless they are literally the same
+   projected alternative."
   [alternative]
   (select-keys
    alternative
    [:from
     :event
-    :via
-    :required
+    :via]))
+
+(defn- receive-contract-identity
+  [alternative]
+  (select-keys
+   alternative
+   [:required
     :optional
     :correlation
     :open-payload?]))
 
+(defn- contract-required
+  [alternative]
+  (or (:required alternative)
+      #{}))
+
+(defn- contract-allowed
+  [alternative]
+  (into (contract-required alternative)
+        (or (:optional alternative)
+            #{})))
+
+(defn- contract-open?
+  [alternative]
+  (true?
+   (:open-payload? alternative)))
+
+(defn- contracts-overlap?
+  "True when at least one payload key-set is accepted by both alternatives.
+
+   Message contracts currently constrain key presence only. For a closed
+   contract, accepted key sets satisfy:
+
+     required <= payload-keys <= required U optional
+
+   For an open contract there is no upper bound. Correlation keys do not add an
+   independent matching predicate because the authoring layer already requires
+   them to be required payload keys."
+  [left right]
+  (let [required
+        (into (contract-required left)
+              (contract-required right))
+
+        left-open?
+        (contract-open? left)
+
+        right-open?
+        (contract-open? right)]
+
+    (and
+     (or left-open?
+         (every? (contract-allowed left)
+                 required))
+     (or right-open?
+         (every? (contract-allowed right)
+                 required)))))
+
+(defn- overlapping-alternatives
+  [alternatives]
+  (first
+   (for [left-index (range (count alternatives))
+         right-index (range (inc left-index)
+                            (count alternatives))
+         :let [left (nth alternatives left-index)
+               right (nth alternatives right-index)]
+         :when (contracts-overlap? left right)]
+     [left right])))
+
 (defn- normalize-receive-alternatives
   [role source alternatives]
-  (let [by-identity
+  (let [alternatives'
+        ;; The same global continuation can be discovered more than once while
+        ;; traversing converged remote control flow. Exact projected duplicates
+        ;; are one alternative, not an ambiguity.
+        (vec
+         (distinct alternatives))
+
+        by-route
         (group-by
-         receive-identity
-         alternatives)]
+         receive-route-identity
+         alternatives')]
 
-    (->> by-identity
-         (map
-          (fn [[identity same-identity]]
-            (let [continuations
-                  (set
-                   (map :next
-                        same-identity))]
+    (doseq [[route same-route] by-route]
+      (when-some [[left right]
+                  (overlapping-alternatives
+                   (vec same-route))]
+        (projection-error
+         :ambiguous-receive
+         "Projected receive alternatives with the same sender/event/channel accept an overlapping payload shape."
+         {:role role
+          :state source
+          :route route
+          :left left
+          :right right
+          :left-contract
+          (receive-contract-identity left)
+          :right-contract
+          (receive-contract-identity right)})))
 
-              (when (> (count continuations)
-                       1)
-                (projection-error
-                 :ambiguous-receive
-                 "The same incoming participant communication can lead to different local continuations."
-                 {:role role
-                  :state source
-                  :identity identity
-                  :alternatives same-identity}))
-
-              (first same-identity))))
+    (->> alternatives'
          (sort-by
-          (comp pr-str receive-identity))
+          (fn [alternative]
+            (pr-str
+             [(receive-route-identity alternative)
+              (receive-contract-identity alternative)
+              (:next alternative)])))
          vec)))
 
 ;; -----------------------------------------------------------------------------

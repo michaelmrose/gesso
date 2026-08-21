@@ -83,6 +83,105 @@
           {:request/completed :done
            :request/failed :failed}))))
 
+(deftest await-may-declare-closed-semantic-event-data-contracts
+  (let [state
+        (choreo/await
+         :browser
+         {:request/completed :done
+          :request/failed :failed}
+         {:event-contracts
+          {:request/failed
+           {:required #{:reason}
+            :optional #{:status :retryable?}}}})]
+
+    (is (= {:op :await
+            :role :browser
+            :events
+            {:request/completed :done
+             :request/failed :failed}
+            :event-contracts
+            {:request/failed
+             {:required #{:reason}
+              :optional #{:status :retryable?}}}}
+           state))
+
+    (testing "an event with no explicit contract has no contract entry"
+      (is (nil?
+           (get-in state
+                   [:event-contracts
+                    :request/completed]))))))
+
+(deftest await-event-data-may-be-explicitly-open
+  (let [state
+        (choreo/await
+         :browser
+         {:browser/observed :done}
+         {:event-contracts
+          {:browser/observed
+           {:required #{:basis}
+            :open-data? true}}})]
+
+    (is (= {:required #{:basis}
+            :open-data? true}
+           (get-in state
+                   [:event-contracts
+                    :browser/observed])))
+
+    (is (= true
+           (get-in state
+                   [:event-contracts
+                    :browser/observed
+                    :open-data?])))))
+
+(deftest await-event-contracts-must-name-declared-events
+  (is (= :unknown-await-event-contract
+         (error-kind
+          #(choreo/await
+            :browser
+            {:request/completed :done}
+            {:event-contracts
+             {:request/failed
+              {:required #{:reason}}}})))))
+
+(deftest await-event-contract-key-sets-must-be-valid-and-disjoint
+  (is (= :invalid-value-set
+         (error-kind
+          #(choreo/await
+            :browser
+            {:request/failed :failed}
+            {:event-contracts
+             {:request/failed
+              {:required [:reason]}}}))))
+
+  (is (= :invalid-value-set
+         (error-kind
+          #(choreo/await
+            :browser
+            {:request/failed :failed}
+            {:event-contracts
+             {:request/failed
+              {:optional #{"status"}}}}))))
+
+  (is (= :ambiguous-event-data-key
+         (error-kind
+          #(choreo/await
+            :browser
+            {:request/failed :failed}
+            {:event-contracts
+             {:request/failed
+              {:required #{:reason}
+               :optional #{:reason}}}})))))
+
+(deftest await-event-open-data-must-be-boolean
+  (is (= :invalid-open-data
+         (error-kind
+          #(choreo/await
+            :browser
+            {:browser/observed :done}
+            {:event-contracts
+             {:browser/observed
+              {:open-data? :yes}}})))))
+
 (deftest await-requires-at-least-one-environment-event
   (is (= :empty-await
          (error-kind

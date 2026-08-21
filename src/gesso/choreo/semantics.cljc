@@ -35,7 +35,9 @@
 
    :await
      A role-local event supplied by the environment. Environment events are not
-     participant messages.
+     participant messages. Await states may declare closed semantic-data
+     contracts. Declared event fields enter abstract semantic value flow; open
+     undeclared extras remain adapter data and never enter semantic history.
 
    :return
      A global terminal outcome.
@@ -77,7 +79,7 @@
 ;; Identity
 ;; -----------------------------------------------------------------------------
 
-(def semantics-version 4)
+(def semantics-version 5)
 
 (def program-type
   :gesso.choreo.semantics/program)
@@ -194,6 +196,29 @@
 (defn- open-payload?
   [state]
   (true? (:open-payload? state)))
+
+(defn- declared-event-contract
+  [state event]
+  (get (:event-contracts state)
+       event))
+
+(defn- declared-event-required
+  [state event]
+  (or (:required
+       (declared-event-contract state event))
+      #{}))
+
+(defn- declared-event-optional
+  [state event]
+  (or (:optional
+       (declared-event-contract state event))
+      #{}))
+
+(defn- open-event-data?
+  [state event]
+  (true?
+   (:open-data?
+    (declared-event-contract state event))))
 
 ;; -----------------------------------------------------------------------------
 ;; Program validation
@@ -365,6 +390,48 @@
 
     state))
 
+(defn- validate-await-event-contract!
+  [state-id event contract]
+  (require-map!
+   "Await event contract"
+   contract)
+
+  (let [required
+        (require-keyword-set!
+         "Await event contract :required"
+         (or (:required contract) #{}))
+
+        optional
+        (require-keyword-set!
+         "Await event contract :optional"
+         (or (:optional contract) #{}))
+
+        overlap
+        (set/intersection
+         required
+         optional)]
+
+    (when (seq overlap)
+      (fail!
+       :ambiguous-event-data-key
+       "An await event data key may not be both required and optional."
+       {:state state-id
+        :event event
+        :overlap overlap
+        :required required
+        :optional optional}))
+
+    (when (and (contains? contract :open-data?)
+               (not (boolean? (:open-data? contract))))
+      (fail!
+       :invalid-open-data
+       "Await event contract :open-data? must be boolean when present."
+       {:state state-id
+        :event event
+        :open-data? (:open-data? contract)})))
+
+  contract)
+
 (defn- validate-await-state!
   [states state-id state]
   (require-keyword!
@@ -389,7 +456,31 @@
       (require-successor!
        states
        state-id
-       target)))
+       target))
+
+    (let [event-contracts
+          (or (:event-contracts state) {})]
+      (require-map!
+       "Await :event-contracts"
+       event-contracts)
+
+      (let [unknown-events
+            (set/difference
+             (set (keys event-contracts))
+             (set (keys events)))]
+        (when (seq unknown-events)
+          (fail!
+           :unknown-await-event-contract
+           "Await event contracts may name only declared environment events."
+           {:state state-id
+            :unknown-events unknown-events
+            :events (set (keys events))})))
+
+      (doseq [[event contract] event-contracts]
+        (validate-await-event-contract!
+         state-id
+         event
+         contract))))
 
   state)
 
@@ -941,12 +1032,17 @@
              (:via state)))
 
           :await
-          {:kind :environment
-           :role (:role state)
-           :events
-           (set
-            (keys
-             (:events state)))}
+          (cond->
+           {:kind :environment
+            :role (:role state)
+            :events
+            (set
+             (keys
+              (:events state)))}
+            (seq (:event-contracts state))
+            (assoc
+             :event-contracts
+             (:event-contracts state)))
 
           :return
           nil)))))
@@ -1050,6 +1146,75 @@
         state
         (:payload event))))
 
+(defn- normalized-environment-data
+  [event]
+  (let [data (:data event)]
+    (cond
+      (nil? data)
+      {}
+
+      (map? data)
+      data
+
+      :else
+      nil)))
+
+(defn- environment-data-valid?
+  [state event]
+  (when-some [data
+              (normalized-environment-data event)]
+    (let [event-id
+          (:event event)
+
+          data-keys
+          (set (keys data))
+
+          required
+          (declared-event-required
+           state
+           event-id)
+
+          optional
+          (declared-event-optional
+           state
+           event-id)
+
+          allowed
+          (set/union
+           required
+           optional)]
+
+      (and
+       (set/subset?
+        required
+        data-keys)
+
+       (or
+        (open-event-data?
+         state
+         event-id)
+
+        (set/subset?
+         data-keys
+         allowed))))))
+
+(defn- semantic-environment-data
+  [state event]
+  (let [event-id
+        (:event event)
+
+        declared
+        (set/union
+         (declared-event-required state event-id)
+         (declared-event-optional state event-id))
+
+        data
+        (or (normalized-environment-data event) {})]
+
+    (select-keys
+     data
+     declared)))
+
 (defn enabled?
   "True when event is admitted by the current global state.
 
@@ -1069,7 +1234,16 @@
    :communicate additionally requires:
    - every declared :required payload key is present;
    - undeclared keys are absent unless :open-payload? is true;
-   - :optional keys may be omitted."
+   - :optional keys may be omitted.
+
+   :await additionally requires:
+   - data is nil or a map;
+   - every declared event :required key is present;
+   - undeclared data keys are absent unless :open-data? is true.
+
+   Only declared required/optional await data becomes semantic global values.
+   Open undeclared extras are accepted as adapter data but are excluded from
+   semantic history and value flow."
   [configuration event]
   (let [configuration'
         (require-configuration!
@@ -1117,7 +1291,10 @@
                   (:role event))
                (contains?
                 (:events state)
-                (:event event)))
+                (:event event))
+               (environment-data-valid?
+                state
+                event))
 
           :return
           false))))))
@@ -1192,11 +1369,19 @@
        (:via state)))
 
     :await
-    {:kind :environment
-     :state state-id
-     :role (:role state)
-     :event (:event event)
-     :data (:data event)}))
+    (let [semantic-data
+          (semantic-environment-data
+           state
+           event)]
+      {:kind :environment
+       :state state-id
+       :role (:role state)
+       :event (:event event)
+       :data
+       (if (and (nil? (:data event))
+                (empty? semantic-data))
+         nil
+         semantic-data)})))
 
 (defn- apply-event-values
   [configuration state event]
@@ -1214,6 +1399,15 @@
      :values
      merge
      (:outputs event))
+
+    :await
+    (update
+     configuration
+     :values
+     merge
+     (semantic-environment-data
+      state
+      event))
 
     configuration))
 
