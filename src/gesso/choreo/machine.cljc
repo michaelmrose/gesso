@@ -73,6 +73,14 @@
    fields in an explicitly open payload remain transport data and do not enter
    knowledge.
 
+   Environment-event data is likewise closed by default. Projected :await states
+   retain per-event required/optional/open-data contracts. Only declared fields
+   enter role-local knowledge or deterministic history; undeclared fields admitted
+   by an explicitly open event contract remain adapter data. Environment fields
+   are conservatively recorded as :asserted by the named environment event; this
+   records their origin without upgrading an arbitrary environment observation to
+   authoritative truth.
+
    Entry values are :input knowledge. Trusted authoritative outputs become
    :authoritative knowledge. Local outputs are conservatively recorded as
    :asserted by the named local action; that records origin without silently
@@ -218,6 +226,192 @@
   (set/union
    (contract-required contract)
    (contract-optional contract)))
+
+(defn- event-contract
+  [state event]
+  (get-in state
+          [:event-contracts event]
+          {}))
+
+(defn- event-required
+  [state event]
+  (or (:required
+       (event-contract state event))
+      #{}))
+
+(defn- event-optional
+  [state event]
+  (or (:optional
+       (event-contract state event))
+      #{}))
+
+(defn- event-open-data?
+  [state event]
+  (true?
+   (:open-data?
+    (event-contract state event))))
+
+(defn- event-allowed
+  [state event]
+  (set/union
+   (event-required state event)
+   (event-optional state event)))
+
+(defn- validate-environment-event-contract!
+  [event contract context]
+  (require-map!
+   "Projected await event contract"
+   contract)
+
+  (let [required
+        (require-keyword-set!
+         "Projected await event contract :required"
+         (or (:required contract) #{}))
+
+        optional
+        (require-keyword-set!
+         "Projected await event contract :optional"
+         (or (:optional contract) #{}))
+
+        overlap
+        (set/intersection
+         required
+         optional)]
+
+    (when (and (contains? contract :open-data?)
+               (not (boolean?
+                     (:open-data? contract))))
+      (machine-error
+       :invalid-open-data
+       "Projected await event contract :open-data? must be boolean when present."
+       (assoc context
+              :event event
+              :open-data?
+              (:open-data? contract))))
+
+    (when (seq overlap)
+      (machine-error
+       :ambiguous-event-data-key
+       "Projected await event contract may not declare a data key as both required and optional."
+       (assoc context
+              :event event
+              :overlap overlap
+              :required required
+              :optional optional)))
+
+    contract))
+
+(def ^:private invalid-environment-data
+  ::invalid-environment-data)
+
+(defn- normalize-environment-data
+  [data]
+  (cond
+    (nil? data)
+    {}
+
+    (map? data)
+    data
+
+    :else
+    invalid-environment-data))
+
+(defn- environment-data-contract-result
+  [state event data]
+  (let [data'
+        (normalize-environment-data data)]
+
+    (if (= invalid-environment-data
+           data')
+      {:valid? false
+       :invalid-shape? true
+       :missing #{}
+       :undeclared #{}}
+
+      (let [data-keys
+            (set (keys data'))
+
+            required
+            (event-required state event)
+
+            allowed
+            (event-allowed state event)
+
+            missing
+            (set/difference
+             required
+             data-keys)
+
+            undeclared
+            (if (event-open-data? state event)
+              #{}
+              (set/difference
+               data-keys
+               allowed))]
+
+        {:valid?
+         (and
+          (empty? missing)
+          (empty? undeclared))
+
+         :invalid-shape? false
+         :missing missing
+         :undeclared undeclared
+         :data data'}))))
+
+(defn- environment-data-matches-contract?
+  [state event data]
+  (:valid?
+   (environment-data-contract-result
+    state
+    event
+    data)))
+
+(defn- require-environment-data-contract!
+  [state event data context]
+  (let [{:keys [valid?
+                invalid-shape?
+                missing
+                undeclared
+                data]}
+        (environment-data-contract-result
+         state
+         event
+         data)]
+
+    (when-not valid?
+      (machine-error
+       :invalid-environment-data
+       "Environment-event data violates the projected await event contract."
+       (merge
+        context
+        {:event event
+         :invalid-shape? invalid-shape?
+         :missing missing
+         :undeclared undeclared
+         :required
+         (event-required state event)
+         :optional
+         (event-optional state event)
+         :open-data?
+         (event-open-data? state event)
+         :data-keys
+         (if invalid-shape?
+           #{}
+           (set (keys data)))})))
+
+    data))
+
+(defn- semantic-environment-data
+  [state event data]
+  (let [data'
+        (or (normalize-environment-data data)
+            {})]
+    (select-keys
+     (if (= invalid-environment-data data')
+       {}
+       data')
+     (event-allowed state event))))
 
 (defn- validate-message-contract!
   [label contract context]
@@ -579,7 +773,11 @@
 
     :await
     (let [events
-          (:events state)]
+          (:events state)
+
+          event-contracts
+          (or (:event-contracts state)
+              {})]
       (when-not (and (map? events)
                      (seq events))
         (machine-error
@@ -588,6 +786,24 @@
          {:role (:role plan)
           :state state-id
           :events events}))
+
+      (require-map!
+       "Projected await :event-contracts"
+       event-contracts)
+
+      (let [unknown-events
+            (set/difference
+             (set (keys event-contracts))
+             (set (keys events)))]
+        (when (seq unknown-events)
+          (machine-error
+           :unknown-await-event-contract
+           "Projected await event contracts may name only declared environment events."
+           {:role (:role plan)
+            :state state-id
+            :unknown-events unknown-events
+            :events (set (keys events))})))
+
       (doseq [[event next-state] events]
         (require-keyword!
          "Projected await event"
@@ -596,7 +812,15 @@
          plan
          state-id
          state
-         next-state)))
+         next-state))
+
+      (doseq [[event contract]
+              event-contracts]
+        (validate-environment-event-contract!
+         event
+         contract
+         {:role (:role plan)
+          :state state-id})))
 
     :return
     (require-keyword!
@@ -677,7 +901,9 @@
   "Construct one role-local environment-event envelope.
 
    Participant messages and environment events are different envelope kinds and
-   cannot cross-satisfy one another."
+   cannot cross-satisfy one another. Data is intentionally not interpreted by
+   this constructor; the active projected :await event contract validates it at
+   accepts/resume time."
   ([role event]
    (environment-event
     role
@@ -1204,6 +1430,12 @@
     (set
      (keys
       (:events state)))}
+
+    (seq (:event-contracts state))
+    (assoc
+     :event-contracts
+     (:event-contracts state))
+
     (seq
      (non-role-bindings
       identity-bindings))
@@ -2200,16 +2432,22 @@
 (defn accepts-environment-event?
   "True when a suspended :await execution can consume envelope.
 
-   Participant messages are never accepted here."
+   Participant messages are never accepted here. The environment event must
+   select a declared event edge and its data must satisfy that event's projected
+   closed/open data contract."
   [execution envelope]
   (let [execution'
         (require-execution!
-         execution)]
+         execution)
+
+        state
+        (when (waiting-environment?
+               execution')
+          (current-state execution'))]
 
     (boolean
      (and
-      (waiting-environment?
-       execution')
+      state
 
       (envelope?
        envelope)
@@ -2221,12 +2459,25 @@
          (:role envelope))
 
       (contains?
-       (:events
-        (current-state execution'))
-       (:event envelope))))))
+       (:events state)
+       (:event envelope))
+
+      (environment-data-matches-contract?
+       state
+       (:event envelope)
+       (:data envelope))))))
 
 (defn resume-environment
-  "Resume one projected :await from a role-local environment event."
+  "Resume one projected :await from a role-local environment event.
+
+   Event data is validated against the projected per-event contract. Only
+   declared required/optional fields enter portable role-local knowledge and
+   deterministic history. Undeclared fields admitted by :open-data? remain
+   adapter data and are discarded at this semantic boundary.
+
+   Declared environment fields are recorded as :asserted knowledge attributed
+   to the environment event keyword. Assertion records origin; it does not make
+   an arbitrary browser/host observation authoritative."
   [execution envelope]
   (let [execution'
         (require-execution!
@@ -2287,29 +2538,68 @@
           (:awaiting execution')
           :event envelope}))
 
-      (enter
-       (:plan execution')
-       {:identity-bindings
-        (identity-bindings execution')
+      (let [event
+            (:event envelope)
 
-        :state
-        next-state
+            normalized-data
+            (require-environment-data-contract!
+             state
+             event
+             (:data envelope)
+             {:execution-id
+              (:execution-id execution')
+              :role
+              (:role execution')
+              :state
+              state-id})
 
-        :knowledge
-        (execution-knowledge execution')
+            semantic-data
+            (select-keys
+             normalized-data
+             (event-allowed state event))
 
-        :history
-        (conj
-         (:history execution')
-         {:kind :environment
-          :state state-id
-          :role (:role execution')
-          :event (:event envelope)
-          :data (:data envelope)})
+            next-knowledge
+            (if (seq semantic-data)
+              (knowledge/establish-many
+               (execution-knowledge execution')
+               semantic-data
+               (knowledge/asserted-provenance
+                event
+                {:metadata
+                 {:origin :environment
+                  :state state-id}})
+               {:replace? true})
+              (execution-knowledge execution'))
 
-        :max-immediate-steps
-        (:max-immediate-steps
-         execution')}))))
+            history-data
+            (if (and (nil? (:data envelope))
+                     (empty? semantic-data))
+              nil
+              semantic-data)]
+
+        (enter
+         (:plan execution')
+         {:identity-bindings
+          (identity-bindings execution')
+
+          :state
+          next-state
+
+          :knowledge
+          next-knowledge
+
+          :history
+          (conj
+           (:history execution')
+           {:kind :environment
+            :state state-id
+            :role (:role execution')
+            :event event
+            :data history-data})
+
+          :max-immediate-steps
+          (:max-immediate-steps
+           execution')})))))
 
 ;; -----------------------------------------------------------------------------
 ;; Generic external-event API

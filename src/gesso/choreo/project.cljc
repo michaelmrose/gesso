@@ -34,7 +34,8 @@
        retaining its declared closed payload contract
 
      :await
-       this role waits for one of its own environment events
+       this role waits for one of its own environment events, retaining any
+       declared closed semantic event-data contracts
 
      :return
        this role has no further work in this choreography
@@ -42,7 +43,9 @@
    Projection deliberately distinguishes participant communication from
    environment events. A projected :receive is never satisfied by an
    environment event, and a projected :await is never satisfied by a participant
-   message merely because the event keyword is the same.
+   message merely because the event keyword is the same. Declared environment
+   event-data contracts survive projection so the role-local machine can enforce
+   the same semantic boundary and establish only declared event data.
 
    Communication contracts are compiler data that survive projection. Required,
    optional, correlation, and explicit open-payload declarations are copied to
@@ -1019,15 +1022,21 @@
 
                    (install-state!
                     state-id
-                    {:op :await
-                     :events
-                     (into {}
-                           (map
-                            (fn [[event target]]
-                              [event
-                               (ensure-continuation!
-                                target)]))
-                           (:events state))}))
+                    (cond->
+                     {:op :await
+                      :events
+                      (into {}
+                            (map
+                             (fn [[event target]]
+                               [event
+                                (ensure-continuation!
+                                 target)]))
+                            (:events state))}
+
+                      (seq (:event-contracts state))
+                      (assoc
+                       :event-contracts
+                       (:event-contracts state)))))
 
                  :return
                  (projection-error

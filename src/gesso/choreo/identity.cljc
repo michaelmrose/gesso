@@ -422,10 +422,11 @@
               :cljs :default) _
       false)))
 
-(defn binding
+(defn binding-value
   "Return one explicit binding value, or nil when absent.
 
-   key must be one of binding-keys."
+   key must be one of binding-keys. The name deliberately avoids shadowing
+   clojure.core/binding."
   [identity-bindings key]
   (when-not
    (contains?

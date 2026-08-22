@@ -589,7 +589,10 @@
           {:wait
            (choreo/await
             :browser
-            {:browser/ready :send})
+            {:browser/ready :send}
+            {:event-contracts
+             {:browser/ready
+              {:open-data? true}}})
 
            :send
            (choreo/communicate
@@ -624,7 +627,7 @@
            started
            :browser
            :browser/ready
-           {:diagnostic "host-only-for-now"})]
+           {:diagnostic "host-only"})]
 
       (is
        (= #{:browser}
@@ -638,12 +641,12 @@
            :role :browser
            :state :wait
            :event :browser/ready
-           :data {:diagnostic "host-only-for-now"}}
+           :data {}}
           (last
            (realization/history
             after-environment))))
 
-      (testing "current await data is not promoted into semantic knowledge"
+      (testing "open undeclared environment data remains host-only"
         (is
          (false?
           (machine/has-execution-value?
@@ -651,6 +654,164 @@
             after-environment
             :browser)
            :diagnostic)))))))
+
+(deftest declared-environment-data-survives-independent-realization-and-drives-local-branch
+  (let [program
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:browser/observed :decide}
+            {:event-contracts
+             {:browser/observed
+              {:required #{:outcome}
+               :optional #{:revision}
+               :open-data? true}}})
+
+           :decide
+           (choreo/branch
+            :browser
+            :outcome
+            {:confirmed :show-confirmed
+             :rejected :show-rejected})
+
+           :show-confirmed
+           (choreo/local
+            :browser
+            :show-confirmed
+            :done)
+
+           :show-rejected
+           (choreo/local
+            :browser
+            :show-rejected
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        global0
+        (semantics/start
+         program)
+
+        global1
+        (semantics/step
+         global0
+         (semantics/environment-event
+          :browser
+          :browser/observed
+          {:outcome :confirmed
+           :revision 42
+           :host-object :must-not-be-semantic}))
+
+        global2
+        (semantics/step
+         global1
+         (semantics/branch-event
+          :browser
+          :outcome
+          :confirmed))
+
+        started
+        (realization/start
+         program)
+
+        after-environment
+        (realization/environment
+         started
+         :browser
+         :browser/observed
+         {:outcome :confirmed
+          :revision 42
+          :host-object :must-not-be-semantic})
+
+        browser
+        (realization/execution
+         after-environment
+         :browser)
+
+        global-environment
+        (last
+         (filter
+          #(= :environment
+              (:kind %))
+          (semantics/history
+           global2)))
+
+        realized-environment
+        (last
+         (filter
+          #(= :environment
+              (:kind %))
+          (realization/history
+           after-environment)))]
+
+    (testing "declared environment fields become role-local semantic knowledge"
+      (is
+       (= :confirmed
+          (machine/execution-value
+           browser
+           :outcome)))
+
+      (is
+       (= 42
+          (machine/execution-value
+           browser
+           :revision)))
+
+      (is
+       (= #{:asserted}
+          (machine/execution-provenance-kinds
+           browser
+           :outcome))))
+
+    (testing "open host-only fields do not enter the portable execution"
+      (is
+       (false?
+        (machine/has-execution-value?
+         browser
+         :host-object)))
+
+      (is
+       (false?
+        (contains?
+         (:data realized-environment)
+         :host-object))))
+
+    (testing "the environment value selects the same semantic branch globally and locally"
+      (is
+       (= :show-confirmed
+          (:action
+           (machine/pending-action
+            browser))))
+
+      (is
+       (= :show-confirmed
+          (:action
+           (get
+            (realization/boundaries
+             after-environment)
+            :browser))))
+
+      (is
+       (= :show-confirmed
+          (get-in global2
+                  [:program
+                   :states
+                   (:state global2)
+                   :action]))))
+
+    (testing "global semantics and independent realization retain the same semantic event data"
+      (is
+       (= {:outcome :confirmed
+           :revision 42}
+          (:data global-environment)))
+
+      (is
+       (= (:data global-environment)
+          (:data realized-environment))))))
 
 (deftest concrete-entry-values-become-precise-role-local-verifier-assumptions
   (let [program
@@ -1074,3 +1235,395 @@
         (set
          (vals
           (:role-status explanation)))))))
+
+;; -----------------------------------------------------------------------------
+;; Explicit transport fault semantics
+;; -----------------------------------------------------------------------------
+
+(defn- one-message-program
+  []
+  (choreo/->choreography
+   {:name :example/one-message
+    :initial :send
+    :states
+    {:send
+     (choreo/communicate
+      :alice
+      :bob
+      :example/value
+      :done
+      {:required #{:x}})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- queued-one-message
+  []
+  (let [started
+        (realization/start
+         (one-message-program)
+         {:entry-values-by-role
+          {:alice {:x 1}}})
+
+        {queued :realization
+         message-id :message-id
+         message :message}
+        (realization/complete-send
+         started
+         :alice
+         {:x 1})]
+    {:realization queued
+     :message-id message-id
+     :message message}))
+
+(deftest dropped-message-does-not-rewind-sender-or-teach-receiver
+  (let [{queued :realization
+         message-id :message-id
+         message :message}
+        (queued-one-message)
+
+        dropped
+        (realization/drop-message
+         queued
+         message-id)
+
+        alice
+        (realization/execution
+         dropped
+         :alice)
+
+        bob
+        (realization/execution
+         dropped
+         :bob)]
+
+    (is
+     (machine/completed?
+      alice))
+
+    (is
+     (machine/waiting-receive?
+      bob))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       bob
+       :x)))
+
+    (is
+     (= []
+        (realization/messages
+         dropped)))
+
+    (is
+     (= [:send :drop]
+        (mapv
+         :kind
+         (realization/history
+          dropped))))
+
+    (is
+     (= {:kind :drop
+         :message-id message-id
+         :message message}
+        (last
+         (realization/history
+          dropped))))
+
+    (is
+     (false?
+      (realization/completed?
+       dropped)))))
+
+(deftest duplicate-message-copies-the-exact-emitted-envelope-with-a-fresh-id
+  (let [{queued :realization
+         original-id :message-id
+         message :message}
+        (queued-one-message)
+
+        {duplicated :realization
+         duplicate-id :message-id
+         duplicate-message :message}
+        (realization/duplicate-message
+         queued
+         original-id)
+
+        original-entry
+        (realization/queued-message
+         duplicated
+         original-id)
+
+        duplicate-entry
+        (realization/queued-message
+         duplicated
+         duplicate-id)]
+
+    (is
+     (not=
+      original-id
+      duplicate-id))
+
+    (is
+     (= message
+        duplicate-message))
+
+    (is
+     (= message
+        (:message original-entry)))
+
+    (is
+     (= message
+        (:message duplicate-entry)))
+
+    (is
+     (false?
+      (contains?
+       original-entry
+       :origin-message-id)))
+
+    (is
+     (= original-id
+        (:origin-message-id
+         duplicate-entry)))
+
+    (is
+     (= [original-id duplicate-id]
+        (mapv
+         :message-id
+         (realization/messages
+          duplicated))))
+
+    (is
+     (= {:kind :duplicate
+         :source-message-id original-id
+         :message-id duplicate-id
+         :origin-message-id original-id
+         :message message}
+        (last
+         (realization/history
+          duplicated))))))
+
+(deftest duplicate-of-duplicate-preserves-the-root-emitted-message-lineage
+  (let [{queued :realization
+         original-id :message-id
+         message :message}
+        (queued-one-message)
+
+        {once :realization
+         first-copy-id :message-id}
+        (realization/duplicate-message
+         queued
+         original-id)
+
+        {twice :realization
+         second-copy-id :message-id
+         second-copy-message :message}
+        (realization/duplicate-message
+         once
+         first-copy-id)
+
+        first-copy
+        (realization/queued-message
+         twice
+         first-copy-id)
+
+        second-copy
+        (realization/queued-message
+         twice
+         second-copy-id)]
+
+    (is
+     (= original-id
+        (:origin-message-id
+         first-copy)))
+
+    (is
+     (= original-id
+        (:origin-message-id
+         second-copy)))
+
+    (is
+     (= message
+        second-copy-message))
+
+    (is
+     (= {:kind :duplicate
+         :source-message-id first-copy-id
+         :message-id second-copy-id
+         :origin-message-id original-id
+         :message message}
+        (last
+         (realization/history
+          twice))))))
+
+(deftest surviving-duplicate-can-be-delivered-after-the-original-is-dropped
+  (let [{queued :realization
+         original-id :message-id}
+        (queued-one-message)
+
+        {duplicated :realization
+         duplicate-id :message-id
+         duplicate-message :message}
+        (realization/duplicate-message
+         queued
+         original-id)
+
+        after-drop
+        (realization/drop-message
+         duplicated
+         original-id)
+
+        completed
+        (realization/deliver-message
+         after-drop
+         duplicate-id)
+
+        bob
+        (realization/execution
+         completed
+         :bob)
+
+        delivery
+        (last
+         (realization/history
+          completed))]
+
+    (is
+     (= [duplicate-id]
+        (realization/deliverable-message-ids
+         after-drop)))
+
+    (is
+     (= []
+        (realization/messages
+         completed)))
+
+    (is
+     (machine/completed?
+      bob))
+
+    (is
+     (= 1
+        (machine/execution-value
+         bob
+         :x)))
+
+    (is
+     (= #{:communicated}
+        (machine/execution-provenance-kinds
+         bob
+         :x)))
+
+    (is
+     (= :deliver
+        (:kind delivery)))
+
+    (is
+     (= duplicate-id
+        (:message-id delivery)))
+
+    (is
+     (= original-id
+        (:origin-message-id delivery)))
+
+    (is
+     (= duplicate-message
+        (:message delivery)))
+
+    (is
+     (realization/completed?
+      completed))))
+
+(deftest duplicate-that-arrives-after-receiver-completion-is-stale-not-a-second-semantic-receive
+  (let [{queued :realization
+         original-id :message-id}
+        (queued-one-message)
+
+        {duplicated :realization
+         duplicate-id :message-id}
+        (realization/duplicate-message
+         queued
+         original-id)
+
+        after-original
+        (realization/deliver-message
+         duplicated
+         original-id)]
+
+    (is
+     (machine/completed?
+      (realization/execution
+       after-original
+       :bob)))
+
+    (is
+     (= []
+        (realization/deliverable-message-ids
+         after-original)))
+
+    (is
+     (= [duplicate-id]
+        (mapv
+         :message-id
+         (realization/messages
+          after-original))))
+
+    (is
+     (= :not-waiting-receive
+        (error-kind
+         #(realization/deliver-message
+           after-original
+           duplicate-id))))
+
+    (testing "failed stale delivery leaves the queued duplicate intact for diagnosis or explicit drop"
+      (is
+       (= [duplicate-id]
+          (mapv
+           :message-id
+           (realization/messages
+            after-original))))
+
+      (let [drained
+            (realization/drop-message
+             after-original
+             duplicate-id)]
+        (is
+         (realization/completed?
+          drained))))))
+
+(deftest fault-operations-reject-unknown-message-ids-without-changing-the-prior-value
+  (let [{queued :realization
+         message-id :message-id}
+        (queued-one-message)
+
+        missing-id
+        (inc message-id)]
+
+    (is
+     (= :unknown-message
+        (error-kind
+         #(realization/drop-message
+           queued
+           missing-id))))
+
+    (is
+     (= :unknown-message
+        (error-kind
+         #(realization/duplicate-message
+           queued
+           missing-id))))
+
+    (is
+     (= [message-id]
+        (mapv
+         :message-id
+         (realization/messages
+          queued))))
+
+    (is
+     (= [:send]
+        (mapv
+         :kind
+         (realization/history
+          queued))))))

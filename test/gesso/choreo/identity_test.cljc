@@ -491,33 +491,33 @@
 
     (is
      (= :server
-        (identity/binding
+        (identity/binding-value
          bindings
          :role)))
 
     (is
      (= principal
-        (identity/binding
+        (identity/binding-value
          bindings
          :principal)))
 
     (is
      (nil?
-      (identity/binding
+      (identity/binding-value
        bindings
        :actor)))
 
     (is
      (= :unknown-binding
         (error-kind
-         #(identity/binding
+         #(identity/binding-value
            bindings
            :session-id))))
 
     (is
      (= :invalid-binding
         (error-kind
-         #(identity/binding
+         #(identity/binding-value
            {:principal
             (identity/actor "wrong-kind")}
            :principal))))))

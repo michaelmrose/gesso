@@ -240,7 +240,7 @@
            (knowledge/authoritative-provenance
             :request/claim)))))))
 
-(deftest explicit-replacement-starts-new-current-provenance
+(deftest generic-replacement-cannot-stand-in-for-authoritative-progression
   (let [before
         (knowledge/establish
          (knowledge/empty-knowledge
@@ -248,41 +248,38 @@
          :revision
          41
          (knowledge/input-provenance
-          :entry))
+          :entry))]
 
-        after
-        (knowledge/establish
-         before
-         :revision
-         42
-         (knowledge/authoritative-provenance
-          :request/claim)
-         {:replace? true})]
+    (testing "an authoritative observation may not overwrite a different known value merely because arrival was later"
+      (is
+       (= :authoritative-progression-required
+          (error-kind
+           #(knowledge/establish
+             before
+             :revision
+             42
+             (knowledge/authoritative-provenance
+              :request/claim)
+             {:replace? true})))))
 
-    (is
-     (= 42
-        (knowledge/value
-         after
-         :revision)))
+    (testing "rejecting the unsupported overwrite leaves the prior knowledge value authoritative-neutral and unchanged"
+      (is
+       (= 41
+          (knowledge/value
+           before
+           :revision)))
 
-    (is
-     (= [{:kind :authoritative
-          :operation :request/claim}]
-        (knowledge/provenance
-         after
-         :revision)))
+      (is
+       (= #{:input}
+          (knowledge/provenance-kinds-for
+           before
+           :revision)))
 
-    (is
-     (= {:kind :replace
-         :key :revision
-         :old-value 41
-         :value 42
-         :provenance
-         {:kind :authoritative
-          :operation :request/claim}}
-        (last
-         (knowledge/history
-          after))))))
+      (is
+       (= 1
+          (count
+           (knowledge/history
+            before)))))))
 
 (deftest communicated-establishment-only-admits-declared-fields
   (let [state

@@ -42,9 +42,11 @@
    that is not part of the semantic knowledge contract.
 
    Knowledge updates are immutable and deterministic. Re-establishing the same
-   value may add another provenance justification. Replacing a known key with a
-   different value is rejected unless the caller explicitly requests
-   replacement. History contains no wall-clock timestamps.
+   value may add another provenance justification. Generic replacement remains
+   available for non-authoritative bookkeeping, but it may not stand in for
+   authoritative progression: an authoritative observation that conflicts with
+   the current value requires an explicit basis/progression contract in the
+   layer that owns such ordering. History contains no wall-clock timestamps.
 
    Choreography state ids are opaque EDN values. Provenance therefore preserves
    a supplied :state exactly as given instead of incorrectly constraining state
@@ -475,10 +477,18 @@
    Re-establishing the same key/value may add another provenance justification.
    Duplicate identical provenance is not repeated.
 
-   A different value for an already-known key is rejected by default. Callers
-   that represent a deliberate new observation/revision must pass
-   {:replace? true}. Replacement is recorded in history and starts a new
-   provenance vector for the new current value."
+   A different value for an already-known key is rejected by default. Generic
+   non-authoritative replacement may be requested with {:replace? true}; the
+   replacement is recorded in history and starts a new provenance vector for the
+   new current value.
+
+   Authoritative provenance is deliberately stricter. A conflicting
+   authoritative observation may not overwrite current knowledge merely because
+   it arrived later or because a caller passed {:replace? true}. Choreo's
+   knowledge layer does not know whether opaque authoritative basis B advances,
+   equals, precedes, or is incomparable with basis A. Such an overwrite therefore
+   fails with :authoritative-progression-required until a basis/progression layer
+   has established that the observation is admissible."
   ([knowledge key new-value provenance]
    (establish
     knowledge
@@ -548,6 +558,20 @@
                :key key
                :value new-value
                :provenance provenance})))
+
+       (and replace?
+            (= :authoritative
+               (:kind provenance)))
+       (knowledge-error
+        :authoritative-progression-required
+        "A conflicting authoritative observation requires an explicit authoritative basis/progression decision before it may replace current knowledge."
+        {:role
+         (:role knowledge)
+         :key key
+         :known-value
+         (:value existing)
+         :new-value new-value
+         :provenance provenance})
 
        replace?
        (-> knowledge

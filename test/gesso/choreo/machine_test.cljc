@@ -373,8 +373,7 @@
       (let [wrong-role
             (machine/environment-event
              :authority
-             :request/completed
-             {:status 200})]
+             :request/completed)]
 
         (is (false?
              (machine/accepts-environment-event?
@@ -391,8 +390,7 @@
       (let [event
             (machine/environment-event
              :browser
-             :request/completed
-             {:status 200})
+             :request/completed)
 
             completed
             (machine/resume-environment
@@ -409,7 +407,7 @@
                  :state :wait
                  :role :browser
                  :event :request/completed
-                 :data {:status 200}}
+                 :data nil}
 
                 {:kind :terminal
                  :state (machine/current-state-id completed)
@@ -2359,7 +2357,7 @@
          after-authority
          :outcome)))))
 
-(deftest later-boundary-assignment-explicitly-replaces-current-value-and-provenance
+(deftest conflicting-authoritative-assignment-requires-progression
   (let [choreography
         (choreo/->choreography
          {:initial :claim
@@ -2381,32 +2379,46 @@
           choreography
           :server
           #{:revision})
-         {:values {:revision 41}})
+         {:values {:revision 41}})]
 
-        completed
-        (machine/complete-authoritative
-         started
-         {:revision 42})]
+    (testing "the same authoritative value may add justification without progression"
+      (let [completed
+            (machine/complete-authoritative
+             started
+             {:revision 41})]
 
-    (is
-     (= 42
-        (machine/execution-value
-         completed
-         :revision)))
+        (is
+         (= 41
+            (machine/execution-value
+             completed
+             :revision)))
 
-    (is
-     (= #{:authoritative}
-        (machine/execution-provenance-kinds
-         completed
-         :revision)))
+        (is
+         (= #{:input
+              :authoritative}
+            (machine/execution-provenance-kinds
+             completed
+             :revision)))))
 
-    (is
-     (= [{:kind :authoritative
-          :operation :request/claim
-          :state :claim}]
-        (machine/execution-provenance
-         completed
-         :revision)))))
+    (testing "arrival order alone cannot authorize a conflicting authoritative overwrite"
+      (is
+       (= :authoritative-progression-required
+          (error-kind
+           #(machine/complete-authoritative
+             started
+             {:revision 42}))))
+
+      (is
+       (= 41
+          (machine/execution-value
+           started
+           :revision)))
+
+      (is
+       (= #{:input}
+          (machine/execution-provenance-kinds
+           started
+           :revision))))))
 
 (deftest explain-surfaces-provenance-kinds-without-exposing-a-second-value-store
   (let [choreography
@@ -3415,3 +3427,471 @@
       (contains?
        (:value-keys explanation)
        :execution-id)))))
+
+(deftest projected-await-descriptor-retains-environment-event-contracts
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:request/completed :done
+             :request/failed :failed}
+            {:event-contracts
+             {:request/completed
+              {:required #{:outcome}
+               :optional #{:revision}}
+
+              :request/failed
+              {:required #{:reason}
+               :open-data? true}}})
+
+           :done
+           (choreo/return :done)
+
+           :failed
+           (choreo/return :failed)}})
+
+        execution
+        (start-role
+         choreography
+         :browser)]
+
+    (is
+     (= {:kind :environment
+         :role :browser
+         :events #{:request/completed
+                   :request/failed}
+         :event-contracts
+         {:request/completed
+          {:required #{:outcome}
+           :optional #{:revision}}
+          :request/failed
+          {:required #{:reason}
+           :open-data? true}}}
+        (machine/awaiting
+         execution)))))
+
+(deftest environment-event-data-contract-is-enforced-before-resume
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:request/completed :done}
+            {:event-contracts
+             {:request/completed
+              {:required #{:outcome}
+               :optional #{:revision}}}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution
+        (start-role
+         choreography
+         :browser)
+
+        missing-required
+        (machine/environment-event
+         :browser
+         :request/completed
+         {:revision 42})
+
+        undeclared
+        (machine/environment-event
+         :browser
+         :request/completed
+         {:outcome :confirmed
+          :transport-debug true})
+
+        malformed
+        (machine/environment-event
+         :browser
+         :request/completed
+         [:not-a-map])
+
+        valid
+        (machine/environment-event
+         :browser
+         :request/completed
+         {:outcome :confirmed
+          :revision 42})]
+
+    (doseq [event
+            [missing-required
+             undeclared
+             malformed]]
+      (is
+       (false?
+        (machine/accepts-environment-event?
+         execution
+         event)))
+
+      (is
+       (= :invalid-environment-data
+          (error-kind
+           #(machine/resume-environment
+             execution
+             event)))))
+
+    (is
+     (machine/accepts-environment-event?
+      execution
+      valid))
+
+    (is
+     (machine/accepts?
+      execution
+      valid))))
+
+(deftest declared-environment-data-becomes-role-local-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:request/completed :done}
+            {:event-contracts
+             {:request/completed
+              {:required #{:outcome}
+               :optional #{:revision}}}})
+
+           :done
+           (choreo/return :done)}})
+
+        waiting
+        (start-role
+         choreography
+         :browser)
+
+        completed
+        (machine/resume-environment
+         waiting
+         (machine/environment-event
+          :browser
+          :request/completed
+          {:outcome :confirmed
+           :revision 42}))]
+
+    (is
+     (machine/completed?
+      completed))
+
+    (is
+     (= {:outcome :confirmed
+         :revision 42}
+        (machine/execution-values
+         completed)))
+
+    (is
+     (= #{:asserted}
+        (machine/execution-provenance-kinds
+         completed
+         :outcome)))
+
+    (is
+     (= [{:kind :asserted
+          :source :request/completed
+          :metadata
+          {:origin :environment
+           :state :wait}}]
+        (machine/execution-provenance
+         completed
+         :outcome)))
+
+    (is
+     (= {:kind :environment
+         :state :wait
+         :role :browser
+         :event :request/completed
+         :data {:outcome :confirmed
+                :revision 42}}
+        (first
+         (machine/execution-history
+          completed))))))
+
+(deftest absent-optional-environment-field-does-not-become-known
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:request/completed :done}
+            {:event-contracts
+             {:request/completed
+              {:required #{:outcome}
+               :optional #{:revision}}}})
+
+           :done
+           (choreo/return :done)}})
+
+        completed
+        (machine/resume-environment
+         (start-role
+          choreography
+          :browser)
+         (machine/environment-event
+          :browser
+          :request/completed
+          {:outcome :confirmed}))]
+
+    (is
+     (= :confirmed
+        (machine/execution-value
+         completed
+         :outcome)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       completed
+       :revision)))))
+
+(deftest open-environment-data-does-not-leak-undeclared-host-data-into-portable-state
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:browser/observed :done}
+            {:event-contracts
+             {:browser/observed
+              {:required #{:basis}
+               :optional #{:visible?}
+               :open-data? true}}})
+
+           :done
+           (choreo/return :done)}})
+
+        waiting
+        (start-role
+         choreography
+         :browser)
+
+        event
+        (machine/environment-event
+         :browser
+         :browser/observed
+         {:basis :x24
+          :visible? true
+          :dom-node :host-object-placeholder
+          :transport-debug "not semantic"})
+
+        completed
+        (machine/resume-environment
+         waiting
+         event)]
+
+    (is
+     (machine/accepts-environment-event?
+      waiting
+      event))
+
+    (is
+     (= {:basis :x24
+         :visible? true}
+        (machine/execution-values
+         completed)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       completed
+       :dom-node)))
+
+    (is
+     (false?
+      (machine/has-execution-value?
+       completed
+       :transport-debug)))
+
+    (is
+     (= {:kind :environment
+         :state :wait
+         :role :browser
+         :event :browser/observed
+         :data {:basis :x24
+                :visible? true}}
+        (first
+         (machine/execution-history
+          completed))))))
+
+(deftest environment-event-data-can-drive-a-subsequent-local-branch
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:request/settled :decide}
+            {:event-contracts
+             {:request/settled
+              {:required #{:outcome}}}})
+
+           :decide
+           (choreo/branch
+            :browser
+            :outcome
+            {:confirmed :show-confirmed
+             :rejected :show-rejected})
+
+           :show-confirmed
+           (choreo/local
+            :browser
+            :show-confirmed
+            :done)
+
+           :show-rejected
+           (choreo/local
+            :browser
+            :show-rejected
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        waiting
+        (start-role
+         choreography
+         :browser)
+
+        confirmed
+        (machine/resume-environment
+         waiting
+         (machine/environment-event
+          :browser
+          :request/settled
+          {:outcome :confirmed}))]
+
+    (is
+     (machine/waiting-local?
+      confirmed))
+
+    (is
+     (= :show-confirmed
+        (:action
+         (machine/pending-action
+          confirmed))))
+
+    (is
+     (= :confirmed
+        (machine/execution-value
+         confirmed
+         :outcome)))
+
+    (is
+     (= [:environment :branch]
+        (mapv
+         :kind
+         (machine/execution-history
+          confirmed))))))
+
+(deftest machine-start-defensively-validates-projected-environment-contracts
+  (testing "event contracts may name only declared await events"
+    (let [plan
+          {:gesso.choreo/type
+           :gesso.choreo/projected-plan
+
+           :gesso.choreo/version
+           1
+
+           :role
+           :browser
+
+           :initial
+           :wait
+
+           :states
+           {:wait
+            {:op :await
+             :events {:request/completed :done}
+             :event-contracts
+             {:request/failed
+              {:required #{:reason}}}}
+
+            :done
+            {:op :return
+             :outcome :gesso.choreo/complete}}}]
+
+      (is
+       (= :unknown-await-event-contract
+          (error-kind
+           #(machine/start
+             plan))))))
+
+  (testing "required and optional environment data keys must be disjoint"
+    (let [plan
+          {:gesso.choreo/type
+           :gesso.choreo/projected-plan
+
+           :gesso.choreo/version
+           1
+
+           :role
+           :browser
+
+           :initial
+           :wait
+
+           :states
+           {:wait
+            {:op :await
+             :events {:request/completed :done}
+             :event-contracts
+             {:request/completed
+              {:required #{:outcome}
+               :optional #{:outcome}}}}
+
+            :done
+            {:op :return
+             :outcome :gesso.choreo/complete}}}]
+
+      (is
+       (= :ambiguous-event-data-key
+          (error-kind
+           #(machine/start
+             plan))))))
+
+  (testing "open-data marker must be boolean"
+    (let [plan
+          {:gesso.choreo/type
+           :gesso.choreo/projected-plan
+
+           :gesso.choreo/version
+           1
+
+           :role
+           :browser
+
+           :initial
+           :wait
+
+           :states
+           {:wait
+            {:op :await
+             :events {:request/completed :done}
+             :event-contracts
+             {:request/completed
+              {:open-data? :yes}}}
+
+            :done
+            {:op :return
+             :outcome :gesso.choreo/complete}}}]
+
+      (is
+       (= :invalid-open-data
+          (error-kind
+           #(machine/start
+             plan)))))))
+

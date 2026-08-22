@@ -38,7 +38,9 @@
        messages without modifying them.
 
      environment
-       Supply one role-local environment event.
+       Supply one role-local environment event. The projected machine validates
+       declared semantic event data; undeclared data admitted by an explicitly
+       open event contract remains nonsemantic adapter data.
 
    Transport fault experiments are explicit too: queued messages may be dropped
    or duplicated. Duplication copies an envelope that was genuinely emitted by
@@ -822,22 +824,175 @@
         (update
          :history
          conj
-         {:kind :deliver
-          :role receiver-role
-          :state receiver-state
+         (cond->
+          {:kind :deliver
+           :role receiver-role
+           :state receiver-state
+           :message-id message-id'
+           :message message}
+           (contains? entry :origin-message-id)
+           (assoc
+            :origin-message-id
+            (:origin-message-id entry)))))))
+
+;; -----------------------------------------------------------------------------
+;; Transport fault scheduling
+;; -----------------------------------------------------------------------------
+
+(defn drop-message
+  "Drop one queued transport message without delivering it.
+
+   Dropping models transport loss after a sender successfully emitted the
+   participant message. The sender execution is not rewound and the receiver
+   learns nothing. The removed envelope remains present in deterministic
+   realization history for correspondence/fault diagnostics.
+
+   Returns the next realization state."
+  [realization message-id]
+  (let [realization'
+        (require-realization!
+         realization)
+
+        message-id'
+        (require-nonnegative-integer!
+         "Realization message id"
+         message-id)
+
+        entry
+        (or
+         (queued-message
+          realization'
+          message-id')
+         (realization-error
+          :unknown-message
+          "Realization transport queue does not contain this message id."
+          {:message-id message-id'
+           :queued-message-ids
+           (set
+            (map :message-id
+                 (:messages realization'))) }))
+
+        history-entry
+        (cond->
+         {:kind :drop
           :message-id message-id'
-          :message message}))))
+          :message (:message entry)}
+          (contains? entry :origin-message-id)
+          (assoc
+           :origin-message-id
+           (:origin-message-id entry)))]
+
+    (-> realization'
+        (remove-queued-message
+         message-id')
+        (update
+         :history
+         conj
+         history-entry))))
+
+(defn duplicate-message
+  "Duplicate one queued transport message without modifying its envelope.
+
+   Duplication is allowed only for a message that was genuinely emitted and is
+   still present in this realization's transport queue. The duplicate receives
+   a fresh deterministic message id and records the root emitted message id as
+   :origin-message-id. Re-duplicating a duplicate preserves that root origin.
+
+   The semantic participant-message bytes are copied exactly; callers cannot use
+   this operation to forge or modify a payload.
+
+   Returns {:realization next-state :message-id duplicate-id :message envelope}."
+  [realization message-id]
+  (let [realization'
+        (require-realization!
+         realization)
+
+        source-id
+        (require-nonnegative-integer!
+         "Realization message id"
+         message-id)
+
+        source-entry
+        (or
+         (queued-message
+          realization'
+          source-id)
+         (realization-error
+          :unknown-message
+          "Realization transport queue does not contain this message id."
+          {:message-id source-id
+           :queued-message-ids
+           (set
+            (map :message-id
+                 (:messages realization'))) }))
+
+        message
+        (:message source-entry)
+
+        origin-id
+        (or (:origin-message-id source-entry)
+            source-id)
+
+        [with-duplicate duplicate-entry]
+        (enqueue
+         realization'
+         message
+         {:origin-message-id origin-id})
+
+        duplicate-id
+        (:message-id duplicate-entry)
+
+        next-realization
+        (update
+         with-duplicate
+         :history
+         conj
+         {:kind :duplicate
+          :source-message-id source-id
+          :message-id duplicate-id
+          :origin-message-id origin-id
+          :message message})]
+
+    {:realization next-realization
+     :message-id duplicate-id
+     :message message}))
 
 ;; -----------------------------------------------------------------------------
 ;; Environment scheduling
 ;; -----------------------------------------------------------------------------
 
+(defn- realization-semantic-environment-data
+  [execution event data]
+  (let [awaiting
+        (machine/awaiting execution)
+
+        contract
+        (get (:event-contracts awaiting)
+             event
+             {})
+
+        allowed
+        (set/union
+         (or (:required contract) #{})
+         (or (:optional contract) #{}))]
+
+    (select-keys
+     (or data {})
+     allowed)))
+
 (defn environment
   "Deliver one explicit role-local environment event.
 
-   Environment data is passed to the current machine unchanged. Current Choreo
-   await states do not yet declare semantic data contracts, so this harness does
-   not reinterpret the data as role-local knowledge."
+   The projected machine owns event-contract validation and role-local knowledge
+   establishment. This harness passes the supplied event through that boundary
+   unchanged, then records only the event's declared semantic data in its own
+   deterministic history.
+
+   Undeclared fields admitted by :open-data? are adapter/test-harness data. They
+   may influence the surrounding host fixture, but they do not become portable
+   Choreo knowledge or deterministic realization history. A browser adapter must
+   likewise keep DOM nodes, XHR objects, timer handles, and other host attachments
+   outside the portable event data contract."
   ([realization role event]
    (environment
     realization
@@ -870,7 +1025,19 @@
          next-execution
          (machine/resume-environment
           current
-          envelope)]
+          envelope)
+
+         semantic-data
+         (realization-semantic-environment-data
+          current
+          event
+          data)
+
+         history-data
+         (if (and (nil? data)
+                  (empty? semantic-data))
+           nil
+           semantic-data)]
 
      (update-execution
       realization'
@@ -880,7 +1047,7 @@
        :role role'
        :state state-id
        :event event
-       :data data}))))
+       :data history-data}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Diagnostics
