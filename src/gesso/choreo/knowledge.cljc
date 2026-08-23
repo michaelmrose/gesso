@@ -20,8 +20,10 @@
        The value arrived in a declared participant communication.
 
      :authoritative
-       The value was returned by a trusted realization of a public
-       authoritative operation.
+       The value was established either by a trusted realization of a public
+       authoritative operation or by an explicit authoritative observation /
+       reread carrying its logical authority, observation identity, and opaque
+       authoritative basis.
 
      :derived
        The value was derived from already-known facts by a named rule.
@@ -163,8 +165,36 @@
         (:via value))))
 
      :authoritative
-     (keyword?
-      (:operation value))
+     (let [operation?
+           (contains? value :operation)
+
+           observation?
+           (or
+            (contains? value :authority)
+            (contains? value :observation)
+            (contains? value :basis))]
+
+       (cond
+         (and operation?
+              observation?)
+         false
+
+         operation?
+         (keyword?
+          (:operation value))
+
+         observation?
+         (and
+          (keyword?
+           (:authority value))
+          (keyword?
+           (:observation value))
+          (contains? value :basis)
+          (some?
+           (:basis value)))
+
+         :else
+         false))
 
      :derived
      (and
@@ -272,6 +302,63 @@
      (require-keyword!
       "Authoritative provenance operation"
       operation)}
+
+     (some? state)
+     (assoc
+      :state
+      state)
+
+     (some? metadata)
+     (assoc
+      :metadata
+      (normalize-metadata metadata)))))
+
+(defn authoritative-observation-provenance
+  "Construct provenance for a fact learned by authoritative observation/reread.
+
+   This is deliberately distinct from authoritative-provenance, which records
+   trusted execution of a public authoritative operation.
+
+   authority names the logical authority whose current projection was observed.
+   observation names the declared projection/read boundary. basis is opaque
+   authoritative progression context supplied by the layer that owns ordering;
+   this namespace records it but does not compare, order, or authenticate it.
+
+   A nil basis is rejected because a bare reread/invalidation cannot silently be
+   upgraded into authoritative knowledge. Arbitrary non-nil basis values remain
+   opaque here."
+  ([authority observation basis]
+   (authoritative-observation-provenance
+    authority
+    observation
+    basis
+    nil))
+  ([authority
+    observation
+    basis
+    {:keys [state metadata]
+     :as options}]
+   (require-map!
+    "Authoritative observation provenance options"
+    (or options {}))
+   (require-keyword!
+    "Authoritative observation authority"
+    authority)
+   (require-keyword!
+    "Authoritative observation identity"
+    observation)
+   (when (nil? basis)
+     (knowledge-error
+      :invalid-authoritative-observation
+      "Authoritative observation requires an explicit non-nil basis."
+      {:authority authority
+       :observation observation
+       :basis basis}))
+   (cond->
+    {:kind :authoritative
+     :authority authority
+     :observation observation
+     :basis basis}
 
      (some? state)
      (assoc
@@ -668,6 +755,57 @@
     (authoritative-provenance
      operation
      options))))
+
+(defn establish-authoritative-observation
+  "Establish values learned from an authoritative projection/reread.
+
+   The observation provenance records logical authority, observation identity,
+   and opaque basis. This function does not decide whether one basis advances
+   another. Consequently, a conflicting current value still requires the
+   external progression layer to authorize replacement; {:replace? true} alone
+   is intentionally insufficient."
+  ([knowledge
+    value-map
+    authority
+    observation
+    basis]
+   (establish-authoritative-observation
+    knowledge
+    value-map
+    authority
+    observation
+    basis
+    nil))
+  ([knowledge
+    value-map
+    authority
+    observation
+    basis
+    options]
+   (let [options'
+         (or options {})
+
+         provenance-options
+         (select-keys
+          options'
+          [:state :metadata])
+
+         establishment-options
+         (select-keys
+          options'
+          [:replace?])]
+     (require-map!
+      "Authoritative observation establishment options"
+      options')
+     (establish-many
+      knowledge
+      value-map
+      (authoritative-observation-provenance
+       authority
+       observation
+       basis
+       provenance-options)
+      establishment-options))))
 
 (defn establish-asserted
   "Establish explicitly asserted values.

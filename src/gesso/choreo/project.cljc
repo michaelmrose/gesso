@@ -74,11 +74,15 @@
    participant communications; those communications become alternatives of one
    projected :receive gate.
 
-   This is intentionally only a first projection semantics. It does not yet
-   claim a refinement proof. The later local-machine semantics and independent
-   execution work must establish what a projected :send/:receive pair means
-   operationally and whether this projection actually realizes the global
-   transition semantics.
+   The emitted artifact is a canonical ExecutablePlan. Semantic/source state
+   identities are compiler-only: production plans use compact non-negative
+   integer runtime locators and contain no proof or diagnostic sidecar data.
+   The exact source/proof mapping belongs to the sibling compiler sidecar, not
+   to this runtime artifact.
+
+   Projection still does not claim a refinement theorem merely by emitting a
+   canonical plan. Correspondence and proof namespaces state their narrower
+   current guarantees separately.
 
    This namespace contains no browser, HTMX, transport, XTDB implementation,
    authentication, knowledge/provenance proof, optimism, or model-specific
@@ -91,11 +95,20 @@
 ;; Identity
 ;; -----------------------------------------------------------------------------
 
-(def projected-plan-version
+(def executable-plan-version
   1)
 
+(def executable-plan-type
+  :gesso.choreo/executable-plan)
+
+;; Transitional names retained for current compiler/runtime callers while the
+;; remaining Choreo namespaces move to the explicit ExecutablePlan vocabulary.
+;; They are aliases only; emitted data uses executable-plan-type.
+(def projected-plan-version
+  executable-plan-version)
+
 (def projected-plan-type
-  :gesso.choreo/projected-plan)
+  executable-plan-type)
 
 (def projected-ops
   #{:local
@@ -124,34 +137,44 @@
      data))))
 
 ;; -----------------------------------------------------------------------------
-;; Projected-plan predicates
+;; Executable-plan predicates
 ;; -----------------------------------------------------------------------------
 
-(defn projected-plan?
-  "True when x has the shallow identity/shape of a projected plan.
+(defn executable-plan?
+  "True when x has the shallow identity/shape of an ExecutablePlan.
 
-   Full correctness of a plan is a compiler/local-machine concern. This
-   predicate intentionally does not duplicate the projector."
+   Full state validation remains a compiler/local-machine concern. This
+   predicate intentionally does not duplicate either implementation."
   [x]
   (and (map? x)
-       (= projected-plan-type
+       (= executable-plan-type
           (:gesso.choreo/type x))
-       (= projected-plan-version
+       (= executable-plan-version
           (:gesso.choreo/version x))
        (keyword? (:role x))
        (map? (:states x))
        (contains? (:states x)
                   (:initial x))))
 
-(defn ensure-projected-plan
-  "Return x when it is a projected plan; otherwise throw."
+(defn ensure-executable-plan
+  "Return x when it is an ExecutablePlan; otherwise throw."
   [x]
-  (when-not (projected-plan? x)
+  (when-not (executable-plan? x)
     (projection-error
-     :invalid-projected-plan
-     "Expected a Gesso projected choreography plan."
+     :invalid-executable-plan
+     "Expected a Gesso Choreo ExecutablePlan."
      {:value x}))
   x)
+
+(defn projected-plan?
+  "Transitional alias predicate for executable-plan?."
+  [x]
+  (executable-plan? x))
+
+(defn ensure-projected-plan
+  "Transitional alias for ensure-executable-plan."
+  [x]
+  (ensure-executable-plan x))
 
 ;; -----------------------------------------------------------------------------
 ;; Global observable frontier
@@ -222,14 +245,67 @@
        (= role
           (:to state))))
 
+(defn- authoritative-observation-event?
+  [state event]
+  (some?
+   (get-in state
+           [:event-contracts
+            event
+            :authoritative-observation])))
+
+(defn- authoritative-observation-events
+  [state]
+  (->> (:events state)
+       keys
+       (filter #(authoritative-observation-event?
+                 state
+                 %))
+       set))
+
+(defn- pure-authoritative-observation-await?
+  [state role]
+  (and (= :await
+          (:op state))
+       (= role
+          (:role state))
+       (= (set (keys (:events state)))
+          (authoritative-observation-events state))))
+
+(defn- mixed-authoritative-observation-await?
+  [state role]
+  (when (and (= :await
+                (:op state))
+             (= role
+                (:role state)))
+    (let [all-events
+          (set (keys (:events state)))
+
+          observation-events
+          (authoritative-observation-events state)]
+      (and (seq observation-events)
+           (not= all-events
+                 observation-events)))))
+
 (defn- observable-frontier
   "Return the first global states that are locally relevant to role.
 
    Traversal carries a causal-barrier marker after a foreign :authoritative
-   state. While that barrier is present, direct work by role is not projectable:
-   the role has no observation establishing that the authoritative predecessor
-   occurred. An incoming participant communication clears the barrier because
-   receiving that message is an observable causal successor.
+   state. While that barrier is present, ordinary direct work by role is not
+   projectable: the role has no observation establishing that the authoritative
+   predecessor occurred. The barrier may be discharged in either of two explicit
+   ways:
+
+   - an incoming participant communication, because receiving it is an observable
+     causal successor;
+   - a role-local :await whose every alternative is declared as an
+     :authoritative-observation, because completing that trusted reread is itself
+     the observation frontier.
+
+   An ordinary environment event never clears the barrier merely because it
+   arrives later. Mixed waits containing both authoritative-observation and
+   ordinary events are rejected while a barrier is outstanding: the current
+   compact ExecutablePlan has no hidden per-alternative causal-barrier state, so
+   accepting such a wait would let an ordinary event erase authority ordering.
 
    Frontier entries:
 
@@ -241,7 +317,8 @@
 
      {:kind :blocked :state id :authority-state id}
        Direct role work is causally after a foreign authoritative operation but
-       no communication has yet made that predecessor observable to role.
+       no communication or authoritative observation has yet made that
+       predecessor observable to role.
 
      {:kind :done}
        This branch has no further local work for role.
@@ -303,6 +380,37 @@
                   :state state-id}))
 
               (cond
+                (and authority-state
+                     (mixed-authoritative-observation-await?
+                      state
+                      role))
+                (projection-error
+                 :mixed-authoritative-observation-await
+                 "A wait reached behind a foreign-authority barrier mixes authoritative-observation and ordinary environment events. The compact projection cannot let the ordinary alternatives erase the barrier."
+                 {:role role
+                  :state state-id
+                  :authority-state authority-state
+                  :events (set (keys (:events state)))
+                  :authoritative-observation-events
+                  (authoritative-observation-events state)})
+
+                (and authority-state
+                     (pure-authoritative-observation-await?
+                      state
+                      role))
+                ;; Waiting is permitted while the foreign-authority barrier is
+                ;; outstanding because every way out of this state is an
+                ;; explicitly declared authoritative reread. ensure-local-state!
+                ;; preserves the event contracts in ExecutablePlan; completing
+                ;; one of those events is the synchronization point, so its
+                ;; successor is compiled without carrying the old barrier.
+                (recur pending
+                       (inc index)
+                       seen'
+                       (conj frontier
+                             {:kind :state
+                              :state state-id}))
+
                 (role-direct-state?
                  state
                  role)
@@ -432,7 +540,7 @@
       (contains? kinds :blocked)
       (projection-error
        :unobserved-authoritative-predecessor
-       "Role-local behavior is causally after a foreign authoritative operation, but no incoming communication establishes that the authoritative predecessor occurred."
+       "Role-local behavior is causally after a foreign authoritative operation, but no incoming communication or authoritative observation establishes that the authoritative predecessor occurred."
        {:role role
         :state source
         :frontier frontier
@@ -601,6 +709,176 @@
          vec)))
 
 ;; -----------------------------------------------------------------------------
+;; Canonical executable layout
+;; -----------------------------------------------------------------------------
+
+(defn- ordered-successors
+  "Return projected successor identities in semantic, source-id-independent order."
+  [state]
+  (case (:op state)
+    :local
+    [(:next state)]
+
+    :authoritative
+    [(:next state)]
+
+    :send
+    [(:next state)]
+
+    :branch
+    (->> (:cases state)
+         (sort-by (comp pr-str key))
+         (mapv val))
+
+    :receive
+    (->> (:alternatives state)
+         (sort-by
+          (fn [alternative]
+            (pr-str
+             (dissoc alternative :next))))
+         (mapv :next))
+
+    :await
+    (->> (:events state)
+         (sort-by (comp pr-str key))
+         (mapv val))
+
+    :return
+    []
+
+    (projection-error
+     :unsupported-projected-op
+     "Cannot canonicalize an unsupported projected operation."
+     {:state state
+      :op (:op state)})))
+
+(defn- reachable-state-order
+  [initial states]
+  (loop [pending [initial]
+         index 0
+         seen #{}
+         order []]
+    (if (= index (count pending))
+      order
+      (let [state-id (nth pending index)]
+        (if (contains? seen state-id)
+          (recur pending
+                 (inc index)
+                 seen
+                 order)
+          (let [state (get states state-id)]
+            (when-not state
+              (projection-error
+               :unknown-projected-successor
+               "Projected state points to an unknown successor."
+               {:state state-id}))
+            (recur (into pending
+                         (ordered-successors state))
+                   (inc index)
+                   (conj seen state-id)
+                   (conj order state-id))))))))
+
+(defn- rewrite-successors
+  [state locator-by-state]
+  (let [locator!
+        (fn [state-id]
+          (if-some [locator
+                    (get locator-by-state state-id)]
+            locator
+            (projection-error
+             :unknown-projected-successor
+             "Projected state points outside the canonical executable layout."
+             {:state state-id})))]
+    (case (:op state)
+      :local
+      (update state :next locator!)
+
+      :authoritative
+      (update state :next locator!)
+
+      :send
+      (update state :next locator!)
+
+      :branch
+      (update state :cases
+              (fn [cases]
+                (into {}
+                      (map (fn [[value target]]
+                             [value (locator! target)]))
+                      cases)))
+
+      :receive
+      (update state :alternatives
+              (fn [alternatives]
+                (mapv #(update % :next locator!)
+                      alternatives)))
+
+      :await
+      (update state :events
+              (fn [events]
+                (into {}
+                      (map (fn [[event target]]
+                             [event (locator! target)]))
+                      events)))
+
+      :return
+      state
+
+      (projection-error
+       :unsupported-projected-op
+       "Cannot rewrite successors for an unsupported projected operation."
+       {:state state
+        :op (:op state)}))))
+
+(defn- executable-plan
+  [choreography role initial states]
+  (let [state-order
+        (reachable-state-order initial states)
+
+        reachable
+        (set state-order)
+
+        all-state-ids
+        (set (keys states))]
+
+    (when-not (= reachable all-state-ids)
+      (projection-error
+       :unreachable-projected-state
+       "Projection produced runtime states unreachable from its initial state."
+       {:role role
+        :unreachable
+        (set (remove reachable all-state-ids))}))
+
+    (let [locator-by-state
+          (zipmap state-order
+                  (range))
+
+          runtime-states
+          (into (sorted-map)
+                (map-indexed
+                 (fn [locator state-id]
+                   [locator
+                    (rewrite-successors
+                     (get states state-id)
+                     locator-by-state)]))
+                state-order)]
+
+      {:gesso.choreo/type
+       executable-plan-type
+
+       :gesso.choreo/version
+       executable-plan-version
+
+       :role
+       role
+
+       :initial
+       (get locator-by-state initial)
+
+       :states
+       runtime-states})))
+
+;; -----------------------------------------------------------------------------
 ;; Projection builder
 ;; -----------------------------------------------------------------------------
 
@@ -622,8 +900,10 @@
 
    Projection currently accepts only roles inferred from the choreography.
 
-   The returned plan is compiler output, not yet a final v4.5 ExecutablePlan
-   format."
+   The returned value is the canonical portable ExecutablePlan consumed by
+   role-local runtimes. Choreography names, compiler/source identities, and
+   proof diagnostics are not included in it; those belong in diagnostic
+   compiler products rather than executable state."
   [choreography-or-verified role]
   (let [verified
         (verify/ensure-verified
@@ -1075,23 +1355,11 @@
            {:role role
             :states leaked-building}))
 
-        {:gesso.choreo/type
-         projected-plan-type
-
-         :gesso.choreo/version
-         projected-plan-version
-
-         :name
-         (:name choreography)
-
-         :role
+        (executable-plan
+         choreography
          role
-
-         :initial
          initial
-
-         :states
-         states}))))
+         states)))))
 
 (defn project-all
   "Project choreography once for every inferred role.
@@ -1121,25 +1389,22 @@
 ;; -----------------------------------------------------------------------------
 
 (defn state
-  "Return one projected state by id."
-  [plan state-id]
+  "Return one executable state by runtime locator."
+  [plan locator]
   (get (:states
-        (ensure-projected-plan plan))
-       state-id))
+        (ensure-executable-plan plan))
+       locator))
 
 (defn explain
-  "Return a compact stable projected-plan summary."
+  "Return a compact stable ExecutablePlan summary."
   [plan]
   (let [plan'
-        (ensure-projected-plan plan)
+        (ensure-executable-plan plan)
 
         states
         (:states plan')]
 
-    {:name
-     (:name plan')
-
-     :role
+    {:role
      (:role plan')
 
      :version

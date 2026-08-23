@@ -241,6 +241,240 @@
      (identity/principal?
       principal))))
 
+(deftest wire-codec-has-an-explicit-versioned-shape
+  (let [command
+        (identity/command-id
+         "command-1")]
+
+    (is
+     (= {:gesso.choreo.identity.wire/type
+         :gesso.choreo.identity/wire
+         :gesso.choreo.identity.wire/version
+         1
+         :gesso.choreo.identity.wire/kind
+         :command
+         :gesso.choreo.identity.wire/value
+         "command-1"}
+        (identity/encode-wire
+         command)))
+
+    (is
+     (= 1
+        identity/wire-version))
+
+    (is
+     (= :gesso.choreo.identity/wire
+        identity/wire-type))))
+
+(deftest wire-round-trip-preserves-every-runtime-identity-kind
+  (let [raw
+        "same-raw-value"
+
+        identities
+        [(identity/principal raw)
+         (identity/actor raw)
+         (identity/authority raw)
+         (identity/host raw)
+         (identity/command-id raw)
+         (identity/execution-id raw)]]
+
+    (doseq [value identities]
+      (let [encoded
+            (identity/encode-wire value)
+
+            decoded
+            (identity/decode-wire encoded)]
+
+        (is
+         (identity/wire-identity?
+          encoded))
+
+        (is
+         (= value
+            decoded))
+
+        (is
+         (= (identity/kind value)
+            (identity/kind decoded)))
+
+        (is
+         (= raw
+            (identity/raw-value decoded)))))
+
+    (testing "same raw command and execution ids remain distinct after crossing the wire boundary"
+      (let [command
+            (-> (identity/command-id raw)
+                identity/encode-wire
+                identity/decode-wire)
+
+            execution
+            (-> (identity/execution-id raw)
+                identity/encode-wire
+                identity/decode-wire)]
+
+        (is
+         (identity/command-id?
+          command))
+
+        (is
+         (identity/execution-id?
+          execution))
+
+        (is
+         (not=
+          command
+          execution))
+
+        (is
+         (identity/same-raw-value?
+          command
+          execution))))))
+
+(deftest wire-round-trip-preserves-opaque-portable-edn-raw-values
+  (let [raw
+        {:tenant :store/id-17
+         :subject ["user" 123]
+         :revision {:basis 9}}
+
+        original
+        (identity/principal raw)
+
+        encoded
+        (identity/encode-wire original)
+
+        decoded
+        (identity/decode-wire encoded)]
+
+    (is
+     (= raw
+        (:gesso.choreo.identity.wire/value
+         encoded)))
+
+    (is
+     (= original
+        decoded))))
+
+(deftest wire-encoder-rejects-values-that-are-not-runtime-identities
+  (doseq [value
+          [nil
+           :browser
+           "command-1"
+           {:kind :command
+            :value "command-1"}]]
+
+    (is
+     (= :invalid-wire-identity
+        (error-kind
+         #(identity/encode-wire
+           value))))))
+
+(deftest wire-decoder-rejects-malformed-or-incompatible-wire-values
+  (let [valid
+        {:gesso.choreo.identity.wire/type
+         :gesso.choreo.identity/wire
+         :gesso.choreo.identity.wire/version
+         1
+         :gesso.choreo.identity.wire/kind
+         :command
+         :gesso.choreo.identity.wire/value
+         "command-1"}]
+
+    (testing "missing or additional fields are not silently accepted"
+      (is
+       (= :invalid-wire-identity
+          (error-kind
+           #(identity/decode-wire
+             (dissoc
+              valid
+              :gesso.choreo.identity.wire/value)))))
+
+      (is
+       (= :invalid-wire-identity
+          (error-kind
+           #(identity/decode-wire
+             (assoc
+              valid
+              :unexpected
+              true))))))
+
+    (testing "wire type and version are explicit compatibility gates"
+      (is
+       (= :invalid-wire-identity
+          (error-kind
+           #(identity/decode-wire
+             (assoc
+              valid
+              :gesso.choreo.identity.wire/type
+              :other/wire)))))
+
+      (is
+       (= :unsupported-wire-version
+          (error-kind
+           #(identity/decode-wire
+             (assoc
+              valid
+              :gesso.choreo.identity.wire/version
+              2))))))
+
+    (testing "unknown kinds and nil raw values remain invalid identities"
+      (is
+       (= :invalid-kind
+          (error-kind
+           #(identity/decode-wire
+             (assoc
+              valid
+              :gesso.choreo.identity.wire/kind
+              :session)))))
+
+      (is
+       (= :invalid-value
+          (error-kind
+           #(identity/decode-wire
+             (assoc
+              valid
+              :gesso.choreo.identity.wire/value
+              nil))))))))
+
+(deftest wire-identity-predicate-is-total-and-version-sensitive
+  (let [valid
+        {:gesso.choreo.identity.wire/type
+         :gesso.choreo.identity/wire
+         :gesso.choreo.identity.wire/version
+         1
+         :gesso.choreo.identity.wire/kind
+         :execution
+         :gesso.choreo.identity.wire/value
+         "execution-1"}]
+
+    (is
+     (identity/wire-identity?
+      valid))
+
+    (doseq [value
+            [nil
+             :execution
+             {}
+             (dissoc
+              valid
+              :gesso.choreo.identity.wire/kind)
+             (assoc
+              valid
+              :gesso.choreo.identity.wire/version
+              2)
+             (assoc
+              valid
+              :gesso.choreo.identity.wire/kind
+              :session)
+             (assoc
+              valid
+              :extra
+              true)]]
+
+      (is
+       (false?
+        (identity/wire-identity?
+         value))))))
+
 (deftest nil-cannot-be-an-identity-value
   (doseq [constructor
           [identity/principal

@@ -46,8 +46,10 @@
    inside the proof layer.
 
    Proof/checker artifacts live on the compiler/test side. Nothing in this
-   namespace is required by the portable production machine or projected-plan
-   runtime semantics."
+   namespace is required by the portable production machine or ExecutablePlan
+   runtime semantics. ExecutablePlan intentionally contains compact runtime
+   locators only; this checker locates preserved boundaries structurally and
+   keeps authored semantic state identities only in proof obligations."
   (:require
    [gesso.choreo.core :as choreo]
    [gesso.choreo.project :as project]
@@ -249,6 +251,23 @@
            :actual
            :valid?)))
 
+(defn- matching-owner-locations
+  [plan global-state expected]
+  (if-not plan
+    []
+    (vec
+     (for [[runtime-locator projected-state]
+           (:states plan)
+
+           :let [actual
+                 (projected-owner-boundary
+                  global-state
+                  projected-state)]
+
+           :when (= expected actual)]
+       {:runtime-locator runtime-locator
+        :boundary actual}))))
+
 (defn- owner-obligation
   [plans state-id global-state]
   (let [role
@@ -257,16 +276,17 @@
         plan
         (get plans role)
 
-        projected-state
-        (get-in plan [:states state-id])
-
         expected
         (expected-owner-boundary global-state)
 
-        actual
-        (projected-owner-boundary
+        matches
+        (matching-owner-locations
+         plan
          global-state
-         projected-state)]
+         expected)
+
+        actual
+        (:boundary (first matches))]
 
     (obligation
      {:id
@@ -280,20 +300,35 @@
       :endpoint :owner
       :expected expected
       :actual actual
-      :valid? (= expected actual)
+      :runtime-locator
+      (:runtime-locator (first matches))
+      :valid? (boolean (seq matches))
       :reason
       (cond
         (nil? plan)
         :missing-role-plan
 
-        (nil? projected-state)
-        :missing-owner-state
-
-        (= expected actual)
+        (seq matches)
         :preserved
 
         :else
-        :boundary-mismatch)})))
+        :missing-owner-boundary)})))
+
+(defn- matching-sender-locations
+  [plan expected]
+  (if-not plan
+    []
+    (vec
+     (for [[runtime-locator projected-state]
+           (:states plan)
+
+           :let [actual
+                 (projected-sender-boundary
+                  projected-state)]
+
+           :when (= expected actual)]
+       {:runtime-locator runtime-locator
+        :boundary actual}))))
 
 (defn- communication-sender-obligation
   [plans state-id global-state]
@@ -303,15 +338,16 @@
         plan
         (get plans role)
 
-        projected-state
-        (get-in plan [:states state-id])
-
         expected
         (sender-boundary global-state)
 
+        matches
+        (matching-sender-locations
+         plan
+         expected)
+
         actual
-        (projected-sender-boundary
-         projected-state)]
+        (:boundary (first matches))]
 
     (obligation
      {:id
@@ -325,20 +361,19 @@
       :endpoint :sender
       :expected expected
       :actual actual
-      :valid? (= expected actual)
+      :runtime-locator
+      (:runtime-locator (first matches))
+      :valid? (boolean (seq matches))
       :reason
       (cond
         (nil? plan)
         :missing-role-plan
 
-        (nil? projected-state)
-        :missing-sender-state
-
-        (= expected actual)
+        (seq matches)
         :preserved
 
         :else
-        :boundary-mismatch)})))
+        :missing-sender-boundary)})))
 
 (defn- receive-alternative-locations
   [plan receiver-role expected]
@@ -364,7 +399,7 @@
          :when
          (= expected actual)]
 
-     {:projected-state projected-state-id
+     {:runtime-locator projected-state-id
       :alternative-index alternative-index
       :alternative actual})))
 
@@ -570,8 +605,8 @@
      :verification-version
      (:gesso.choreo/version verification)
 
-     :projected-plan-version
-     project/projected-plan-version
+     :executable-plan-version
+     project/executable-plan-version
 
      :verification-options
      (:options verification)
@@ -738,3 +773,4 @@
 
    :counterexample
    (:counterexample result)})
+

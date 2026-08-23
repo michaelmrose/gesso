@@ -209,7 +209,13 @@
         server-before-delivery
         (realization/execution
          after-send
-         :server)]
+         :server)
+
+        sender-state
+        (machine/current-state-id
+         (realization/execution
+          after-local
+          :browser))]
 
     (is
      (= {:kind :message
@@ -224,7 +230,7 @@
      (= [{:message-id message-id
           :message message
           :sent-by :browser
-          :sender-state :submit}]
+          :sender-state sender-state}]
         (realization/messages
          after-send)))
 
@@ -606,7 +612,13 @@
 
         started
         (realization/start
-         program)]
+         program)
+
+        waiting-state
+        (machine/current-state-id
+         (realization/execution
+          started
+          :browser))]
 
     (is
      (= #{:browser}
@@ -639,7 +651,7 @@
       (is
        (= {:kind :environment
            :role :browser
-           :state :wait
+           :state waiting-state
            :event :browser/ready
            :data {}}
           (last

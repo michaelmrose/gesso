@@ -1,5 +1,5 @@
 (ns gesso.choreo.machine
-  "Portable role-local execution for projected Gesso choreographies.
+  "Portable role-local execution for Gesso Choreo ExecutablePlans.
 
    The machine consumes only the compact local vocabulary emitted by
    gesso.choreo.project:
@@ -66,7 +66,10 @@
    Participant-message payload shape is enforced from the projected message
    contract. Required keys must be present; undeclared keys are rejected unless
    :open-payload? is explicitly true; optional keys may be omitted. Correlation
-   keys are part of the required contract.
+   keys are part of the required contract. A declared correlation value must
+   agree with any value the receiving execution already knows for that key and
+   with any same-named explicit identity binding. An as-yet-unknown correlation
+   key may be established by the accepted message.
 
    Receiving a valid participant message establishes only its declared
    required/optional fields as :communicated role-local knowledge. Undeclared
@@ -97,7 +100,7 @@
    host, command-id, and execution-id. Bound command-id and execution-id are
    distinct tagged identity references; a raw scalar cannot stand in for either.
 
-   The bound role must equal the projected plan role. Other relationships are
+   The bound role must equal the ExecutablePlan role. Other relationships are
    not inferred: principal does not imply actor, host does not imply authority,
    and constructing a binding does not authenticate or authorize anyone.
 
@@ -122,10 +125,10 @@
 (def execution-type
   :gesso.choreo.machine/execution)
 
-(def projected-plan-type
-  :gesso.choreo/projected-plan)
+(def executable-plan-type
+  :gesso.choreo/executable-plan)
 
-(def projected-plan-version
+(def executable-plan-version
   1)
 
 (def supported-ops
@@ -251,6 +254,77 @@
    (:open-data?
     (event-contract state event))))
 
+(def ^:private authoritative-observation-contract-keys
+  #{:authority
+    :observation
+    :basis-key})
+
+(defn- event-authoritative-observation
+  [state event]
+  (:authoritative-observation
+   (event-contract state event)))
+
+(defn- validate-authoritative-observation-contract!
+  [event contract required context]
+  (when (contains? contract :authoritative-observation)
+    (let [descriptor
+          (:authoritative-observation contract)]
+      (when-not (map? descriptor)
+        (machine-error
+         :invalid-authoritative-observation-contract
+         "Projected authoritative observation descriptor must be a map."
+         (assoc context
+                :event event
+                :authoritative-observation descriptor)))
+
+      (let [descriptor-keys
+            (set (keys descriptor))
+
+            missing
+            (set/difference
+             authoritative-observation-contract-keys
+             descriptor-keys)
+
+            unknown
+            (set/difference
+             descriptor-keys
+             authoritative-observation-contract-keys)]
+        (when (or (seq missing)
+                  (seq unknown))
+          (machine-error
+           :invalid-authoritative-observation-contract
+           "Projected authoritative observation descriptor must contain exactly :authority, :observation, and :basis-key."
+           (assoc context
+                  :event event
+                  :missing missing
+                  :unknown unknown
+                  :authoritative-observation descriptor))))
+
+      (doseq [[field value]
+              (select-keys
+               descriptor
+               authoritative-observation-contract-keys)]
+        (when-not (keyword? value)
+          (machine-error
+           :invalid-authoritative-observation-contract
+           "Projected authoritative observation descriptor fields must be keywords."
+           (assoc context
+                  :event event
+                  :field field
+                  :value value
+                  :authoritative-observation descriptor))))
+
+      (when-not (contains? required
+                           (:basis-key descriptor))
+        (machine-error
+         :invalid-authoritative-observation-contract
+         "Projected authoritative observation :basis-key must be required semantic event data."
+         (assoc context
+                :event event
+                :basis-key (:basis-key descriptor)
+                :required required
+                :authoritative-observation descriptor))))))
+
 (defn- event-allowed
   [state event]
   (set/union
@@ -298,6 +372,12 @@
               :overlap overlap
               :required required
               :optional optional)))
+
+    (validate-authoritative-observation-contract!
+     event
+     contract
+     required
+     context)
 
     contract))
 
@@ -412,6 +492,50 @@
        {}
        data')
      (event-allowed state event))))
+
+(defn- authoritative-observation-basis
+  [state event data]
+  (when-let [descriptor
+             (event-authoritative-observation
+              state
+              event)]
+    (get data
+         (:basis-key descriptor))))
+
+(defn- authoritative-observation-runtime-valid?
+  [state event data]
+  (if (event-authoritative-observation
+       state
+       event)
+    (some?
+     (authoritative-observation-basis
+      state
+      event
+      data))
+    true))
+
+(defn- require-authoritative-observation-basis!
+  [state event data context]
+  (when-let [descriptor
+             (event-authoritative-observation
+              state
+              event)]
+    (let [basis
+          (authoritative-observation-basis
+           state
+           event
+           data)]
+      (when (nil? basis)
+        (machine-error
+         :invalid-authoritative-observation
+         "Authoritative observation environment event requires a non-nil authoritative basis."
+         (merge
+          context
+          {:event event
+           :authority (:authority descriptor)
+           :observation (:observation descriptor)
+           :basis-key (:basis-key descriptor)})))
+      basis)))
 
 (defn- validate-message-contract!
   [label contract context]
@@ -566,7 +690,7 @@
   (or (state-at plan state-id)
       (machine-error
        :unknown-state
-       "Projected plan references an unknown local state."
+       "ExecutablePlan references an unknown local state."
        {:role (:role plan)
         :state state-id})))
 
@@ -584,18 +708,18 @@
   next-state)
 
 ;; -----------------------------------------------------------------------------
-;; Projected-plan validation
+;; ExecutablePlan validation
 ;; -----------------------------------------------------------------------------
 
-(defn plan?
-  "True when x has the shallow identity/shape of a projected plan.
+(defn executable-plan?
+  "True when x has the shallow identity/shape of an ExecutablePlan.
 
-   require-plan! performs the structural checks used by this runtime."
+   require-executable-plan! performs the structural checks used by this runtime."
   [x]
   (and (map? x)
-       (= projected-plan-type
+       (= executable-plan-type
           (:gesso.choreo/type x))
-       (= projected-plan-version
+       (= executable-plan-version
           (:gesso.choreo/version x))
        (keyword? (:role x))
        (map? (:states x))
@@ -650,7 +774,7 @@
                        (:op state))
     (machine-error
      :unsupported-op
-     "Projected plan contains an unsupported local operation."
+     "ExecutablePlan contains an unsupported local operation."
      {:role (:role plan)
       :state state-id
       :op (:op state)
@@ -829,12 +953,12 @@
 
   state)
 
-(defn- require-plan!
+(defn- require-executable-plan!
   [plan]
-  (when-not (plan? plan)
+  (when-not (executable-plan? plan)
     (machine-error
      :invalid-plan
-     "Expected a projected Gesso choreography plan."
+     "Expected a Gesso Choreo ExecutablePlan."
      {:plan plan}))
 
   (doseq [[state-id state]
@@ -1015,7 +1139,7 @@
                      plan-role))
       (machine-error
        :identity-role-mismatch
-       "Machine identity binding :role must equal the projected plan role."
+       "Machine identity binding :role must equal the ExecutablePlan role."
        {:plan-role plan-role
         :bound-role bound-role}))
 
@@ -1067,7 +1191,7 @@
           (:gesso.choreo.machine/type x))
        (contains? statuses
                   (:status x))
-       (plan?
+       (executable-plan?
         (:plan x))
        (identity/bindings?
         (:identity-bindings x))
@@ -1454,7 +1578,7 @@
            knowledge
            history
            max-immediate-steps]}]
-  (require-plan! plan)
+  (require-executable-plan! plan)
 
   (let [execution-id
         (:execution-id identity-bindings)]
@@ -1676,13 +1800,13 @@
 ;; -----------------------------------------------------------------------------
 
 (defn start
-  "Start one projected role-local execution.
+  "Start one role-local execution from an ExecutablePlan.
 
    Options:
 
      :identity-bindings
        Sparse explicit identity bindings. Supported keys are defined by
-       gesso.choreo.identity. A supplied :role must equal the projected plan
+       gesso.choreo.identity. A supplied :role must equal the ExecutablePlan
        role. The resulting execution always contains its role binding.
 
      :command-id
@@ -1717,7 +1841,7 @@
                  max-immediate-steps]
           :or {values {}}}]
    (let [plan'
-         (require-plan! plan)
+         (require-executable-plan! plan)
 
          bindings'
          (normalize-machine-bindings
@@ -2214,6 +2338,47 @@
        (= (:via alternative)
           (:via envelope))))
 
+(defn- correlation-expectations
+  [execution correlation-key]
+  (let [bindings
+        (identity-bindings execution)]
+    (cond-> []
+      (has-execution-value?
+       execution
+       correlation-key)
+      (conj
+       (execution-value
+        execution
+        correlation-key))
+
+      (and
+       (contains?
+        identity/binding-keys
+        correlation-key)
+       (contains?
+        bindings
+        correlation-key))
+      (conj
+       (get bindings
+            correlation-key)))))
+
+(defn- correlation-matches-execution?
+  [execution alternative envelope]
+  (let [payload
+        (:payload envelope)]
+    (every?
+     (fn [correlation-key]
+       (let [actual
+             (get payload
+                  correlation-key)]
+         (every?
+          #(= % actual)
+          (correlation-expectations
+           execution
+           correlation-key))))
+     (contract-correlation
+      alternative))))
+
 (defn- matching-receive-alternatives
   [execution envelope]
   (let [plan
@@ -2232,7 +2397,12 @@
 
         (payload-matches-contract?
          %
-         (:payload envelope)))
+         (:payload envelope))
+
+        (correlation-matches-execution?
+         execution
+         %
+         envelope))
       (:alternatives state)))))
 
 (defn accepts-message?
@@ -2465,7 +2635,13 @@
       (environment-data-matches-contract?
        state
        (:event envelope)
-       (:data envelope))))))
+       (:data envelope))
+
+      (authoritative-observation-runtime-valid?
+       state
+       (:event envelope)
+       (normalize-environment-data
+        (:data envelope)))))))
 
 (defn resume-environment
   "Resume one projected :await from a role-local environment event.
@@ -2475,9 +2651,11 @@
    deterministic history. Undeclared fields admitted by :open-data? remain
    adapter data and are discarded at this semantic boundary.
 
-   Declared environment fields are recorded as :asserted knowledge attributed
-   to the environment event keyword. Assertion records origin; it does not make
-   an arbitrary browser/host observation authoritative."
+   Ordinary declared environment fields are recorded as :asserted knowledge
+   attributed to the environment event keyword. A projected
+   :authoritative-observation contract instead establishes only declared semantic
+   fields as :authoritative knowledge after requiring its explicit non-nil basis.
+   Undeclared open-data extras remain adapter data in either case."
   [execution envelope]
   (let [execution'
         (require-execution!
@@ -2558,17 +2736,46 @@
              normalized-data
              (event-allowed state event))
 
+            observation
+            (event-authoritative-observation
+             state
+             event)
+
+            observation-basis
+            (require-authoritative-observation-basis!
+             state
+             event
+             normalized-data
+             {:execution-id
+              (:execution-id execution')
+              :role
+              (:role execution')
+              :state
+              state-id})
+
             next-knowledge
             (if (seq semantic-data)
-              (knowledge/establish-many
-               (execution-knowledge execution')
-               semantic-data
-               (knowledge/asserted-provenance
-                event
-                {:metadata
-                 {:origin :environment
-                  :state state-id}})
-               {:replace? true})
+              (if observation
+                (knowledge/establish-authoritative-observation
+                 (execution-knowledge execution')
+                 semantic-data
+                 (:authority observation)
+                 (:observation observation)
+                 observation-basis
+                 {:state state-id
+                  :metadata
+                  {:origin :environment
+                   :event event}
+                  :replace? true})
+                (knowledge/establish-many
+                 (execution-knowledge execution')
+                 semantic-data
+                 (knowledge/asserted-provenance
+                  event
+                  {:metadata
+                   {:origin :environment
+                    :state state-id}})
+                 {:replace? true}))
               (execution-knowledge execution'))
 
             history-data

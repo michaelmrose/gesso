@@ -61,6 +61,20 @@
 (def identity-type
   :gesso.choreo.identity/ref)
 
+(def wire-type
+  "Stable type marker for the explicit Choreo identity wire representation."
+  :gesso.choreo.identity/wire)
+
+(def wire-version
+  "Current Choreo identity wire-format version."
+  1)
+
+(def ^:private wire-keys
+  #{:gesso.choreo.identity.wire/type
+    :gesso.choreo.identity.wire/version
+    :gesso.choreo.identity.wire/kind
+    :gesso.choreo.identity.wire/value})
+
 (def identity-kinds
   #{:principal
     :actor
@@ -214,6 +228,95 @@
    (identity? right)
    (= (raw-value left)
       (raw-value right))))
+
+;; -----------------------------------------------------------------------------
+;; Explicit wire representation
+;; -----------------------------------------------------------------------------
+
+(defn encode-wire
+  "Encode one runtime identity reference into the stable versioned wire shape.
+
+   The wire representation is deliberately distinct from the in-memory tagged
+   identity representation. This prevents protocol compatibility from depending
+   on incidental internal map keys and preserves identity kind explicitly across
+   browser/server boundaries.
+
+   This function does not attempt to prove that the opaque raw value is portable
+   EDN; the surrounding serialization/schema boundary owns that obligation."
+  [value]
+  (when-not (identity? value)
+    (identity-error
+     :invalid-wire-identity
+     "Only a valid Choreo runtime identity can be encoded for the wire."
+     {:value value}))
+
+  {:gesso.choreo.identity.wire/type
+   wire-type
+
+   :gesso.choreo.identity.wire/version
+   wire-version
+
+   :gesso.choreo.identity.wire/kind
+   (kind value)
+
+   :gesso.choreo.identity.wire/value
+   (raw-value value)})
+
+(defn- require-wire-shape
+  [value]
+  (when-not
+   (and
+    (map? value)
+    (= wire-keys
+       (set (keys value)))
+    (= wire-type
+       (:gesso.choreo.identity.wire/type value)))
+    (identity-error
+     :invalid-wire-identity
+     "Choreo wire identity must have exactly the current closed wire fields and type marker."
+     {:value value
+      :required-keys wire-keys
+      :wire-type wire-type}))
+  value)
+
+(defn decode-wire
+  "Decode one closed versioned wire identity into a runtime identity reference.
+
+   Unknown/extra fields and the wrong wire type are rejected as malformed wire
+   identities. A structurally valid future version is rejected separately so
+   callers can distinguish incompatibility from malformed data. Identity kind
+   and raw-value validation reuse the normal runtime constructors."
+  [value]
+  (let [wire
+        (require-wire-shape value)
+
+        version
+        (:gesso.choreo.identity.wire/version wire)]
+
+    (when-not (= wire-version
+                 version)
+      (identity-error
+       :unsupported-wire-version
+       "Unsupported Choreo identity wire version."
+       {:version version
+        :supported wire-version}))
+
+    (identity
+     (:gesso.choreo.identity.wire/kind wire)
+     (:gesso.choreo.identity.wire/value wire))))
+
+(defn wire-identity?
+  "True exactly when value is a valid identity in the current wire format.
+
+   This predicate is total and version-sensitive; future versions return false
+   until this namespace explicitly supports them."
+  [value]
+  (try
+    (decode-wire value)
+    true
+    (catch #?(:clj Throwable
+              :cljs :default) _
+      false)))
 
 ;; -----------------------------------------------------------------------------
 ;; Specific constructors and predicates
@@ -463,3 +566,4 @@
             :value
             (raw-value value)})]))
      bindings')))
+

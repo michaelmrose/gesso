@@ -83,7 +83,7 @@
 
     (is (= {:kind :local
             :execution-id nil
-            :state :prepare
+            :state 0
             :role :browser
             :action :prepare-command}
            (machine/pending-action execution)))
@@ -99,7 +99,7 @@
              (machine/result completed)))
 
       (is (= [{:kind :local
-               :state :prepare
+               :state 0
                :role :browser
                :action :prepare-command}
 
@@ -138,7 +138,7 @@
 
     (is (= {:kind :send
             :execution-id nil
-            :state :send
+            :state 0
             :from :browser
             :to :authority
             :event :request/claim
@@ -175,7 +175,7 @@
            next-execution))
 
       (is (= [{:kind :send
-               :state :send
+               :state 0
                :from :browser
                :to :authority
                :event :request/claim
@@ -404,7 +404,7 @@
                (machine/result completed)))
 
         (is (= [{:kind :environment
-                 :state :wait
+                 :state 0
                  :role :browser
                  :event :request/completed
                  :data nil}
@@ -761,7 +761,7 @@
              execution))))
 
     (is (= [{:kind :local
-             :state :local
+             :state 0
              :role :browser
              :action :prepare}
 
@@ -826,36 +826,30 @@
                 (get-in rejected
                         [:result :outcome]))))))
 
-(deftest state-identities-remain-opaque
-  (let [start
-        [:projected :start]
-
-        done
-        [:projected :done]
-
-        plan
+(deftest executable-plan-state-identities-are-runtime-locators
+  (let [plan
         {:gesso.choreo/type
-         :gesso.choreo/projected-plan
+         :gesso.choreo/executable-plan
 
          :gesso.choreo/version
          1
 
          :name
-         :example/opaque
+         :example/runtime-locators
 
          :role
          :browser
 
          :initial
-         start
+         0
 
          :states
-         {start
+         {0
           {:op :local
            :action :prepare
-           :next done}
+           :next 1}
 
-          done
+          1
           {:op :return
            :outcome :done}}}
 
@@ -866,11 +860,11 @@
         (machine/complete-local
          execution)]
 
-    (is (= start
+    (is (= 0
            (machine/current-state-id
             execution)))
 
-    (is (= done
+    (is (= 1
            (machine/current-state-id
             completed)))
 
@@ -907,7 +901,7 @@
 
     (is (= {:kind :local
             :execution-id nil
-            :state :compute
+            :state 0
             :role :browser
             :action :compute-outcome
             :inputs {:request-id 42
@@ -922,19 +916,19 @@
 
 (deftest missing-required-local-input-is-rejected-before-endpoint-action
   (let [plan
-        {:gesso.choreo/type :gesso.choreo/projected-plan
+        {:gesso.choreo/type :gesso.choreo/executable-plan
          :gesso.choreo/version 1
          :role :browser
-         :initial :compute
+         :initial 0
          :states
-         {:compute
+         {0
           {:op :local
            :action :compute
            :requires #{:request-id :attempt}
            :outputs #{:outcome}
-           :next :done}
+           :next 1}
 
-          :done
+          1
           {:op :return
            :outcome :done}}}]
 
@@ -1081,13 +1075,13 @@
 
     (testing "branch is retained in deterministic history"
       (is (= [{:kind :local
-               :state :compute
+               :state 0
                :role :browser
                :action :compute-outcome
                :outputs {:outcome :confirmed}}
 
               {:kind :branch
-               :state :decide
+               :state 1
                :role :browser
                :on :outcome
                :value :confirmed}]
@@ -1133,7 +1127,7 @@
            (:action
             (machine/pending-action execution))))
     (is (= {:kind :branch
-            :state :decide
+            :state 0
             :role :browser
             :on :outcome
             :value :rejected}
@@ -1142,17 +1136,17 @@
 
 (deftest branch-with-uncovered-value-fails-before-endpoint-action
   (let [plan
-        {:gesso.choreo/type :gesso.choreo/projected-plan
+        {:gesso.choreo/type :gesso.choreo/executable-plan
          :gesso.choreo/version 1
          :role :browser
-         :initial :decide
+         :initial 0
          :states
-         {:decide
+         {0
           {:op :branch
            :on :outcome
-           :cases {:confirmed :done}}
+           :cases {:confirmed 1}}
 
-          :done
+          1
           {:op :return
            :outcome :done}}}]
 
@@ -1164,17 +1158,17 @@
 
 (deftest branch-with-missing-value-fails-before-endpoint-action
   (let [plan
-        {:gesso.choreo/type :gesso.choreo/projected-plan
+        {:gesso.choreo/type :gesso.choreo/executable-plan
          :gesso.choreo/version 1
          :role :browser
-         :initial :decide
+         :initial 0
          :states
-         {:decide
+         {0
           {:op :branch
            :on :outcome
-           :cases {:confirmed :done}}
+           :cases {:confirmed 1}}
 
-          :done
+          1
           {:op :return
            :outcome :done}}}]
 
@@ -1184,18 +1178,18 @@
 
 (deftest immediate-branch-loop-is-bounded
   (let [plan
-        {:gesso.choreo/type :gesso.choreo/projected-plan
+        {:gesso.choreo/type :gesso.choreo/executable-plan
          :gesso.choreo/version 1
          :role :browser
-         :initial :loop
+         :initial 0
          :states
-         {:loop
+         {0
           {:op :branch
            :on :again?
-           :cases {true :loop
-                   false :done}}
+           :cases {true 0
+                   false 1}}
 
-          :done
+          1
           {:op :return
            :outcome :done}}}]
 
@@ -1248,7 +1242,7 @@
             :identity-bindings
             {:role :authority
              :execution-id execution-id}
-            :state :claim
+            :state 0
             :role :authority
             :operation :request/claim
             :inputs {:request-id 17
@@ -1315,20 +1309,20 @@
             completed)))
 
     (is (= [{:kind :authoritative
-             :state :claim
+             :state 0
              :role :authority
              :operation :request/claim
              :outputs {:outcome :confirmed
                        :revision 42}}
 
             {:kind :branch
-             :state :branch
+             :state 1
              :role :authority
              :on :outcome
              :value :confirmed}
 
             {:kind :terminal
-             :state [:gesso.choreo.project/synthetic :complete :authority :confirmed]
+             :state 2
              :outcome :gesso.choreo/complete}]
            (machine/execution-history
             completed)))))
@@ -1429,12 +1423,12 @@
          completed))
 
     (is (= [{:kind :authoritative
-             :state :touch
+             :state 0
              :role :authority
              :operation :request/touch}
 
             {:kind :terminal
-             :state [:gesso.choreo.project/synthetic :complete :authority :done]
+             :state 1
              :outcome :gesso.choreo/complete}]
            (machine/execution-history
             completed)))))
@@ -1745,30 +1739,30 @@
 
 (deftest overlapping-receive-contracts-are-rejected-as-ambiguous
   ;; The projector now rejects statically overlapping receive alternatives.
-  ;; This hand-constructed malformed projected plan keeps the machine's
+  ;; This hand-constructed malformed ExecutablePlan keeps the machine's
   ;; ambiguity check as defense in depth for invalid/untrusted plan data.
   (let [plan
-        {:gesso.choreo/type project/projected-plan-type
-         :gesso.choreo/version project/projected-plan-version
+        {:gesso.choreo/type project/executable-plan-type
+         :gesso.choreo/version project/executable-plan-version
          :role :browser
-         :initial :wait
+         :initial 0
          :states
-         {:wait
+         {0
           {:op :receive
            :alternatives
            [{:from :server
              :event :example/result
              :required #{:execution-id}
              :optional #{:detail}
-             :next :done}
+             :next 1}
 
             {:from :server
              :event :example/result
              :required #{:execution-id}
              :optional #{:other}
-             :next :done}]}
+             :next 1}]}
 
-          :done
+          1
           {:op :return
            :outcome :gesso.choreo/complete}}}
 
@@ -1873,7 +1867,7 @@
     (is
      (= {:kind :send
          :execution-id nil
-         :state :send
+         :state 0
          :from :browser
          :to :server
          :event :example/command
@@ -1899,10 +1893,10 @@
         (machine/awaiting
          receiver)))))
 
-(deftest machine-start-defensively-rejects-malformed-projected-send-contract
+(deftest machine-start-defensively-rejects-malformed-executable-send-contract
   (let [plan
         {:gesso.choreo/type
-         :gesso.choreo/projected-plan
+         :gesso.choreo/executable-plan
 
          :gesso.choreo/version
          1
@@ -1911,18 +1905,18 @@
          :browser
 
          :initial
-         :send
+         0
 
          :states
-         {:send
+         {0
           {:op :send
            :to :server
            :event :example/command
            :required #{:execution-id}
            :optional #{:execution-id}
-           :next :done}
+           :next 1}
 
-          :done
+          1
           {:op :return
            :outcome :gesso.choreo/complete}}}]
 
@@ -1932,10 +1926,10 @@
          #(machine/start
            plan))))))
 
-(deftest machine-start-defensively-rejects-malformed-projected-receive-contract
+(deftest machine-start-defensively-rejects-malformed-executable-receive-contract
   (let [plan
         {:gesso.choreo/type
-         :gesso.choreo/projected-plan
+         :gesso.choreo/executable-plan
 
          :gesso.choreo/version
          1
@@ -1944,10 +1938,10 @@
          :browser
 
          :initial
-         :receive
+         0
 
          :states
-         {:receive
+         {0
           {:op :receive
            :alternatives
            [{:from :server
@@ -1955,9 +1949,9 @@
              :required #{:execution-id}
              :optional #{:scope}
              :correlation #{:execution-id :scope}
-             :next :done}]}
+             :next 1}]}
 
-          :done
+          1
           {:op :return
            :outcome :gesso.choreo/complete}}}]
 
@@ -1966,6 +1960,221 @@
         (error-kind
          #(machine/start
            plan))))))
+
+(deftest receive-correlation-must-match-existing-role-local-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id :scope :payload}
+             :correlation #{:execution-id :scope}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution-id
+        (identity/execution-id
+         "execution-1")
+
+        waiting
+        (start-role-with-entry-knowledge
+         choreography
+         :server
+         {:browser #{:execution-id :scope :payload}
+          :server #{:execution-id :scope}}
+         {:execution-id execution-id
+          :scope :request/example})
+
+        matching
+        (machine/message
+         :browser
+         :server
+         :example/command
+         {:execution-id execution-id
+          :scope :request/example
+          :payload :claim})
+
+        wrong-execution
+        (machine/message
+         :browser
+         :server
+         :example/command
+         {:execution-id
+          (identity/execution-id
+           "execution-2")
+          :scope :request/example
+          :payload :claim})
+
+        wrong-scope
+        (machine/message
+         :browser
+         :server
+         :example/command
+         {:execution-id execution-id
+          :scope :request/other
+          :payload :claim})]
+
+    (testing "a receive accepts the declared message only when every correlation value agrees with knowledge established before the receive"
+      (is
+       (machine/accepts-message?
+        waiting
+        matching))
+
+      (is
+       (false?
+        (machine/accepts-message?
+         waiting
+         wrong-execution)))
+
+      (is
+       (false?
+        (machine/accepts-message?
+         waiting
+         wrong-scope))))
+
+    (testing "a wrong correlation value is not rescued merely because the message route and payload shape are otherwise valid"
+      (is
+       (= :message-not-enabled
+          (error-kind
+           #(machine/receive
+             waiting
+             wrong-execution))))
+
+      (is
+       (= :message-not-enabled
+          (error-kind
+           #(machine/receive
+             waiting
+             wrong-scope)))))
+
+    (testing "matching correlation values remain ordinary declared semantic fields after the receive"
+      (let [completed
+            (machine/receive
+             waiting
+             matching)]
+        (is
+         (= execution-id
+            (machine/execution-value
+             completed
+             :execution-id)))
+
+        (is
+         (= :request/example
+            (machine/execution-value
+             completed
+             :scope)))
+
+        (is
+         (= :claim
+            (machine/execution-value
+             completed
+             :payload)))))))
+
+
+(deftest receive-correlation-honors-explicit-execution-identity-binding
+  (let [choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/command
+            :done
+            {:required #{:execution-id :payload}
+             :correlation #{:execution-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        execution-id
+        (identity/execution-id
+         "execution-1")
+
+        waiting
+        (machine/start
+         (projected-with-entry-knowledge
+          choreography
+          :server
+          {:browser #{:execution-id :payload}})
+         {:execution-id execution-id})
+
+        matching
+        (machine/message
+         :browser
+         :server
+         :example/command
+         {:execution-id execution-id
+          :payload :claim})
+
+        wrong-execution
+        (machine/message
+         :browser
+         :server
+         :example/command
+         {:execution-id
+          (identity/execution-id
+           "execution-2")
+          :payload :claim})]
+
+    (testing "identity bindings constrain correlation without becoming semantic values by themselves"
+      (is
+       (= execution-id
+          (:execution-id waiting)))
+
+      (is
+       (= execution-id
+          (:execution-id
+           (machine/identity-bindings
+            waiting))))
+
+      (is
+       (false?
+        (machine/has-execution-value?
+         waiting
+         :execution-id)))
+
+      (is
+       (machine/accepts-message?
+        waiting
+        matching))
+
+      (is
+       (false?
+        (machine/accepts-message?
+         waiting
+         wrong-execution)))
+
+      (is
+       (= :message-not-enabled
+          (error-kind
+           #(machine/receive
+             waiting
+             wrong-execution)))))
+
+    (testing "once explicitly declared on the wire, the accepted correlation field becomes ordinary communicated semantic knowledge"
+      (let [completed
+            (machine/receive
+             waiting
+             matching)]
+        (is
+         (= execution-id
+            (machine/execution-value
+             completed
+             :execution-id)))
+
+        (is
+         (= #{:communicated}
+            (machine/execution-provenance-kinds
+             completed
+             :execution-id)))))))
 
 (deftest receiving-valid-declared-payload-establishes-communicated-knowledge
   (let [choreography
@@ -2114,7 +2323,7 @@
     (is
      (= [{:kind :asserted
           :source :prepare-command
-          :metadata {:state :prepare}}]
+          :metadata {:state 0}}]
         (machine/execution-provenance
          completed
          :prepared?)))
@@ -2165,7 +2374,7 @@
     (is
      (= [{:kind :authoritative
           :operation :request/claim
-          :state :claim}]
+          :state 0}]
         (machine/execution-provenance
          completed
          :revision)))))
@@ -2229,37 +2438,37 @@
 
 (deftest communicated-value-can-drive-a-local-branch
   (let [plan
-        {:gesso.choreo/type :gesso.choreo/projected-plan
+        {:gesso.choreo/type :gesso.choreo/executable-plan
          :gesso.choreo/version 1
          :role :browser
-         :initial :receive
+         :initial 0
          :states
-         {:receive
+         {0
           {:op :receive
            :alternatives
            [{:from :server
              :event :request/settled
              :required #{:outcome}
-             :next :branch}]}
+             :next 1}]}
 
-          :branch
+          1
           {:op :branch
            :on :outcome
            :cases
-           {:confirmed :install
-            :rejected :restore}}
+           {:confirmed 2
+            :rejected 3}}
 
-          :install
+          2
           {:op :local
            :action :install-canonical
-           :next :done}
+           :next 4}
 
-          :restore
+          3
           {:op :local
            :action :restore-snapshot
-           :next :done}
+           :next 4}
 
-          :done
+          4
           {:op :return
            :outcome :gesso.choreo/complete}}}
 
@@ -2275,7 +2484,7 @@
           :request/settled
           {:outcome :confirmed}))]
 
-    ;; This is intentionally a projected-plan-level machine test. The current
+    ;; This is intentionally an ExecutablePlan-level machine test. The current
     ;; verifier still treats communication as producing no semantic values, so
     ;; choreography-level receive->branch is the next verifier/knowledge step.
     (is
@@ -3600,14 +3809,14 @@
           :source :request/completed
           :metadata
           {:origin :environment
-           :state :wait}}]
+           :state 0}}]
         (machine/execution-provenance
          completed
          :outcome)))
 
     (is
      (= {:kind :environment
-         :state :wait
+         :state 0
          :role :browser
          :event :request/completed
          :data {:outcome :confirmed
@@ -3717,7 +3926,7 @@
 
     (is
      (= {:kind :environment
-         :state :wait
+         :state 0
          :role :browser
          :event :browser/observed
          :data {:basis :x24
@@ -3797,11 +4006,11 @@
          (machine/execution-history
           confirmed))))))
 
-(deftest machine-start-defensively-validates-projected-environment-contracts
+(deftest machine-start-defensively-validates-executable-environment-contracts
   (testing "event contracts may name only declared await events"
     (let [plan
           {:gesso.choreo/type
-           :gesso.choreo/projected-plan
+           :gesso.choreo/executable-plan
 
            :gesso.choreo/version
            1
@@ -3810,17 +4019,17 @@
            :browser
 
            :initial
-           :wait
+           0
 
            :states
-           {:wait
+           {0
             {:op :await
-             :events {:request/completed :done}
+             :events {:request/completed 1}
              :event-contracts
              {:request/failed
               {:required #{:reason}}}}
 
-            :done
+            1
             {:op :return
              :outcome :gesso.choreo/complete}}}]
 
@@ -3833,7 +4042,7 @@
   (testing "required and optional environment data keys must be disjoint"
     (let [plan
           {:gesso.choreo/type
-           :gesso.choreo/projected-plan
+           :gesso.choreo/executable-plan
 
            :gesso.choreo/version
            1
@@ -3842,18 +4051,18 @@
            :browser
 
            :initial
-           :wait
+           0
 
            :states
-           {:wait
+           {0
             {:op :await
-             :events {:request/completed :done}
+             :events {:request/completed 1}
              :event-contracts
              {:request/completed
               {:required #{:outcome}
                :optional #{:outcome}}}}
 
-            :done
+            1
             {:op :return
              :outcome :gesso.choreo/complete}}}]
 
@@ -3866,7 +4075,7 @@
   (testing "open-data marker must be boolean"
     (let [plan
           {:gesso.choreo/type
-           :gesso.choreo/projected-plan
+           :gesso.choreo/executable-plan
 
            :gesso.choreo/version
            1
@@ -3875,17 +4084,17 @@
            :browser
 
            :initial
-           :wait
+           0
 
            :states
-           {:wait
+           {0
             {:op :await
-             :events {:request/completed :done}
+             :events {:request/completed 1}
              :event-contracts
              {:request/completed
               {:open-data? :yes}}}
 
-            :done
+            1
             {:op :return
              :outcome :gesso.choreo/complete}}}]
 
@@ -3895,3 +4104,265 @@
            #(machine/start
              plan)))))))
 
+
+;; -----------------------------------------------------------------------------
+;; Authoritative observation / reread environment events
+;; -----------------------------------------------------------------------------
+
+(def authoritative-reread-observation
+  {:authority :request/model
+   :observation :request/current-projection
+   :basis-key :observed-basis})
+
+(deftest authoritative-observation-event-establishes-authoritative-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/reread-complete :done}
+            {:event-contracts
+             {:request/reread-complete
+              {:required #{:request-status :observed-basis}
+               :optional #{:request-owner}
+               :open-data? true
+               :authoritative-observation
+               authoritative-reread-observation}}})
+
+           :done
+           (choreo/return :done)}})
+
+        waiting
+        (start-role
+         choreography
+         :browser)
+
+        basis
+        {:revision 42}
+
+        completed
+        (machine/resume-environment
+         waiting
+         (machine/environment-event
+          :browser
+          :request/reread-complete
+          {:request-status :approved
+           :request-owner "helper-7"
+           :observed-basis basis
+           :host-note "transport-only"}))]
+
+    (is
+     (= authoritative-reread-observation
+        (get-in
+         (machine/awaiting waiting)
+         [:event-contracts
+          :request/reread-complete
+          :authoritative-observation])))
+
+    (is
+     (machine/completed?
+      completed))
+
+    (is
+     (= {:request-status :approved
+         :request-owner "helper-7"
+         :observed-basis basis}
+        (machine/execution-values
+         completed)))
+
+    (is
+     (not
+      (contains?
+       (machine/execution-values completed)
+       :host-note)))
+
+    (doseq [key [:request-status
+                 :request-owner
+                 :observed-basis]]
+      (is
+       (= #{:authoritative}
+          (machine/execution-provenance-kinds
+           completed
+           key))))
+
+    (is
+     (= [{:kind :authoritative
+          :authority :request/model
+          :observation :request/current-projection
+          :basis basis
+          :state 0
+          :metadata
+          {:origin :environment
+           :event :request/reread-complete}}]
+        (machine/execution-provenance
+         completed
+         :request-status)))
+
+    (is
+     (= {:kind :environment
+         :state 0
+         :role :browser
+         :event :request/reread-complete
+         :data {:request-status :approved
+                :request-owner "helper-7"
+                :observed-basis basis}}
+        (first
+         (machine/execution-history
+          completed))))))
+
+(deftest authoritative-observation-requires-a-non-nil-basis-at-runtime
+  (let [choreography
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/reread-complete :done}
+            {:event-contracts
+             {:request/reread-complete
+              {:required #{:request-status :observed-basis}
+               :authoritative-observation
+               authoritative-reread-observation}}})
+
+           :done
+           (choreo/return :done)}})
+
+        waiting
+        (start-role
+         choreography
+         :browser)
+
+        invalid
+        (machine/environment-event
+         :browser
+         :request/reread-complete
+         {:request-status :approved
+          :observed-basis nil})]
+
+    ;; Presence of :observed-basis is not enough. A nil basis cannot justify an
+    ;; authoritative observation, so the machine must not advertise this event
+    ;; as consumable merely because its map shape matches the event contract.
+    (is
+     (false?
+      (machine/accepts-environment-event?
+       waiting
+       invalid)))
+
+    (is
+     (false?
+      (machine/accepts?
+       waiting
+       invalid)))
+
+    (is
+     (= :invalid-authoritative-observation
+        (error-kind
+         #(machine/resume-environment
+           waiting
+           invalid))))))
+
+(defn- raw-authoritative-observation-await-plan
+  [contract]
+  {:gesso.choreo/type
+   :gesso.choreo/executable-plan
+
+   :gesso.choreo/version
+   1
+
+   :role
+   :browser
+
+   :initial
+   0
+
+   :states
+   {0
+    {:op :await
+     :events {:request/reread-complete 1}
+     :event-contracts
+     {:request/reread-complete contract}}
+
+    1
+    {:op :return
+     :outcome :gesso.choreo/complete}}})
+
+(deftest machine-defensively-validates-authoritative-observation-contracts
+  (testing "descriptor must be a map"
+    (is
+     (= :invalid-authoritative-observation-contract
+        (error-kind
+         #(machine/start
+           (raw-authoritative-observation-await-plan
+            {:required #{:observed-basis}
+             :authoritative-observation :trusted}))))))
+
+  (testing "descriptor requires logical authority"
+    (is
+     (= :invalid-authoritative-observation-contract
+        (error-kind
+         #(machine/start
+           (raw-authoritative-observation-await-plan
+            {:required #{:observed-basis}
+             :authoritative-observation
+             {:observation :request/current-projection
+              :basis-key :observed-basis}}))))))
+
+  (testing "descriptor requires observation identity"
+    (is
+     (= :invalid-authoritative-observation-contract
+        (error-kind
+         #(machine/start
+           (raw-authoritative-observation-await-plan
+            {:required #{:observed-basis}
+             :authoritative-observation
+             {:authority :request/model
+              :basis-key :observed-basis}}))))))
+
+  (testing "descriptor requires basis key"
+    (is
+     (= :invalid-authoritative-observation-contract
+        (error-kind
+         #(machine/start
+           (raw-authoritative-observation-await-plan
+            {:required #{:observed-basis}
+             :authoritative-observation
+             {:authority :request/model
+              :observation :request/current-projection}}))))))
+
+  (testing "descriptor is closed"
+    (is
+     (= :invalid-authoritative-observation-contract
+        (error-kind
+         #(machine/start
+           (raw-authoritative-observation-await-plan
+            {:required #{:observed-basis}
+             :authoritative-observation
+             {:authority :request/model
+              :observation :request/current-projection
+              :basis-key :observed-basis
+              :trust-me true}}))))))
+
+  (testing "descriptor fields must be keywords"
+    (is
+     (= :invalid-authoritative-observation-contract
+        (error-kind
+         #(machine/start
+           (raw-authoritative-observation-await-plan
+            {:required #{:observed-basis}
+             :authoritative-observation
+             {:authority "request/model"
+              :observation :request/current-projection
+              :basis-key :observed-basis}}))))))
+
+  (testing "basis key must be required semantic event data"
+    (is
+     (= :invalid-authoritative-observation-contract
+        (error-kind
+         #(machine/start
+           (raw-authoritative-observation-await-plan
+            {:required #{:request-status}
+             :authoritative-observation
+             authoritative-reread-observation})))))))

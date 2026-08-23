@@ -1,6 +1,7 @@
 (ns gesso.choreo.project-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [clojure.set :as set]
    [gesso.choreo.core :as choreo]
    [gesso.choreo.project :as project]
    [gesso.choreo.verify :as verify]))
@@ -473,7 +474,7 @@
            choreography
            :carol))))))
 
-(deftest state-identities-remain-opaque-through-projection
+(deftest opaque-source-state-identities-do-not-become-runtime-locators
   (let [start
         [:global :start]
 
@@ -497,16 +498,28 @@
         alice
         (project/project
          choreography
-         :alice)]
+         :alice)
 
-    (is (= start
-           (:initial alice)))
+        runtime-initial
+        (:initial alice)]
+
+    (is (and (integer? runtime-initial)
+             (not (neg? runtime-initial))))
+
+    (is (not= start
+              runtime-initial))
 
     (is (= :send
            (:op
             (projected-state
              alice
-             start))))))
+             runtime-initial))))
+
+    (is (not-any? #(= start %)
+                  (tree-seq coll? seq alice)))
+
+    (is (not-any? #(= done %)
+                  (tree-seq coll? seq alice)))))
 (deftest local-value-contracts-are-preserved-in-the-owner-projection
   (let [choreography
         (choreo/->choreography
@@ -1704,4 +1717,443 @@
               (verified-with-entry-knowledge
                choreography
                {:server #{:execution-id :outcome}})
+              :browser))))))
+
+
+;; -----------------------------------------------------------------------------
+;; Canonical ExecutablePlan boundary
+;; -----------------------------------------------------------------------------
+
+(defn- executable-locators
+  [plan]
+  (set
+   (keys
+    (:states plan))))
+
+(defn- successor-locators
+  [state]
+  (case (:op state)
+    :local
+    #{(:next state)}
+
+    :authoritative
+    #{(:next state)}
+
+    :send
+    #{(:next state)}
+
+    :branch
+    (set
+     (vals
+      (:cases state)))
+
+    :receive
+    (set
+     (map :next
+          (:alternatives state)))
+
+    :await
+    (set
+     (vals
+      (:events state)))
+
+    :return
+    #{}
+
+    #{}))
+
+(defn- tree-contains-value?
+  [root value]
+  (boolean
+   (some #(= value %)
+         (tree-seq coll? seq root))))
+
+(defn- executable-plan-fixture
+  [states]
+  (choreo/->choreography
+   {:name :example/executable-plan
+    :initial [:source :prepare 9001]
+    :states states}))
+
+(defn- executable-plan-states-a
+  []
+  (array-map
+   [:source :prepare 9001]
+   (choreo/local
+    :alice
+    :prepare
+    [:source :send 9002])
+
+   [:source :send 9002]
+   (choreo/communicate
+    :alice
+    :bob
+    :example/message
+    [:source :done 9003]
+    {:via :http
+     :required #{:request-id}
+     :correlation #{:request-id}})
+
+   [:source :done 9003]
+   (choreo/return :done)))
+
+(defn- executable-plan-states-b
+  []
+  ;; Same semantic graph, deliberately authored in another map insertion order.
+  (array-map
+   [:source :done 9003]
+   (choreo/return :done)
+
+   [:source :send 9002]
+   (choreo/communicate
+    :alice
+    :bob
+    :example/message
+    [:source :done 9003]
+    {:via :http
+     :required #{:request-id}
+     :correlation #{:request-id}})
+
+   [:source :prepare 9001]
+   (choreo/local
+    :alice
+    :prepare
+    [:source :send 9002])))
+
+(deftest projection-emits-canonical-executable-plan-with-compact-runtime-locators
+  (let [source-state-ids
+        #{[:source :prepare 9001]
+          [:source :send 9002]
+          [:source :done 9003]}
+
+        plans
+        (project/project-all
+         (verify/verify!
+          (executable-plan-fixture
+           (executable-plan-states-a))
+          {:entry-knowledge
+           {:alice #{:request-id}}}))]
+
+    (doseq [[role plan] plans]
+      (testing (str "role " role " receives only executable runtime locators")
+        (is (= :gesso.choreo/executable-plan
+               (:gesso.choreo/type plan)))
+
+        (is (= 1
+               (:gesso.choreo/version plan)))
+
+        (is (= role
+               (:role plan)))
+
+        (let [locators
+              (executable-locators plan)
+
+              expected-locators
+              (set
+               (range
+                (count
+                 (:states plan))))]
+
+          (is (= expected-locators
+                 locators))
+
+          (is (contains? locators
+                         (:initial plan)))
+
+          (is (every? #(and (integer? %)
+                            (not (neg? %)))
+                      locators))
+
+          (doseq [[locator state]
+                  (:states plan)]
+            (is (integer? locator))
+            (is (every? locators
+                        (successor-locators state)))))
+
+        (doseq [source-state-id source-state-ids]
+          (is (false?
+               (tree-contains-value?
+                plan
+                source-state-id))))))))
+
+(deftest compact-runtime-locators-cover-every-current-projected-successor-position
+  (let [start [:semantic :start]
+        claim [:semantic :claim]
+        decide [:semantic :decide]
+        send [:semantic :send]
+        wait [:semantic :wait]
+        done [:semantic :done]
+
+        choreography
+        (choreo/->choreography
+         {:name :example/all-local-successors
+          :initial start
+          :states
+          {start
+           (choreo/local
+            :alice
+            :prepare
+            claim
+            {:outputs #{:request-id}})
+
+           claim
+           (choreo/authoritative
+            :alice
+            :request/claim
+            decide
+            {:requires #{:request-id}
+             :outputs #{:outcome}})
+
+           decide
+           (choreo/branch
+            :alice
+            :outcome
+            {:confirmed send
+             :rejected wait})
+
+           send
+           (choreo/communicate
+            :alice
+            :bob
+            :example/message
+            done
+            {:required #{:request-id}})
+
+           wait
+           (choreo/await
+            :alice
+            {:environment/retry done})
+
+           done
+           (choreo/return :done)}})
+
+        plan
+        (project/project choreography :alice)
+
+        locators
+        (executable-locators plan)]
+
+    (is (= :gesso.choreo/executable-plan
+           (:gesso.choreo/type plan)))
+
+    (is (= (set (range (count (:states plan))))
+           locators))
+
+    (doseq [[locator state] (:states plan)]
+      (is (and (integer? locator)
+               (not (neg? locator))))
+      (is (every? locators
+                  (successor-locators state))))
+
+    (doseq [source-state-id [start claim decide send wait done]]
+      (is (false?
+           (tree-contains-value?
+            plan
+            source-state-id))))))
+
+(deftest executable-plan-layout-is-deterministic-across-source-map-insertion-order
+  (let [verification-options
+        {:entry-knowledge
+         {:alice #{:request-id}}}
+
+        first-plans
+        (project/project-all
+         (verify/verify!
+          (executable-plan-fixture
+           (executable-plan-states-a))
+          verification-options))
+
+        second-plans
+        (project/project-all
+         (verify/verify!
+          (executable-plan-fixture
+           (executable-plan-states-b))
+          verification-options))]
+
+    (is (= first-plans
+           second-plans))))
+
+(deftest executable-plan-does-not-contain-proof-or-diagnostic-sidecar-data
+  (let [plan
+        (project/project
+         (verify/verify!
+          (executable-plan-fixture
+           (executable-plan-states-a))
+          {:entry-knowledge
+           {:alice #{:request-id}}})
+         :alice)
+
+        forbidden-keys
+        #{:verification
+          :verified
+          :proof
+          :proofs
+          :obligations
+          :counterexample
+          :derivation
+          :derivations
+          :diagnostic
+          :diagnostics
+          :global-state
+          :global-state-id
+          :semantic-state-id
+          :source-state
+          :source-state-id
+          :metadata}
+
+        all-maps
+        (filter map?
+                (tree-seq coll? seq plan))]
+
+    (is (= :gesso.choreo/executable-plan
+           (:gesso.choreo/type plan)))
+
+    (is (every?
+         (fn [m]
+           (empty?
+            (set/intersection
+             forbidden-keys
+             (set (keys m)))))
+         all-maps))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative observation / reread as a projection synchronization path
+;; -----------------------------------------------------------------------------
+
+(def authoritative-reread-contract
+  {:authority :request/model
+   :observation :request/current-projection
+   :basis-key :observed-basis})
+
+(defn- projection-result
+  [choreography role]
+  (try
+    {:plan (project/project choreography role)}
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) e
+      {:error-kind (:error/kind (ex-data e))
+       :error-data (ex-data e)})))
+
+(deftest authoritative-observation-contract-survives-public-await-construction
+  (let [wait
+        (choreo/await
+         :browser
+         {:request/reread-complete :done}
+         {:event-contracts
+          {:request/reread-complete
+           {:required #{:request-status :observed-basis}
+            :authoritative-observation
+            authoritative-reread-contract}}})]
+
+    ;; This descriptor is semantic compiler/runtime data, not metadata.  The
+    ;; projector and machine need it to distinguish a trusted authoritative
+    ;; reread from an ordinary environment event that merely happens later.
+    (is (= authoritative-reread-contract
+           (get-in wait
+                   [:event-contracts
+                    :request/reread-complete
+                    :authoritative-observation])))))
+
+(deftest authoritative-observation-clears-foreign-authoritative-causal-barrier
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :observe)
+
+           :observe
+           (choreo/await
+            :browser
+            {:request/reread-complete :browser-local}
+            {:event-contracts
+             {:request/reread-complete
+              {:required #{:request-status :observed-basis}
+               :authoritative-observation
+               authoritative-reread-contract}}})
+
+           :browser-local
+           (choreo/local
+            :browser
+            :install-result
+            :done
+            {:requires #{:request-status}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (projection-result choreography :browser)
+
+        browser
+        (:plan result)]
+
+    ;; A role need not receive a participant message solely to learn that a
+    ;; durable authoritative fact changed.  A declared authoritative reread is
+    ;; another valid observation frontier.
+    (is (nil? (:error-kind result))
+        (str "Projection rejected authoritative reread with "
+             (:error-kind result)))
+
+    (when browser
+      (let [await-state
+            (initial-state browser)
+
+            next-state
+            (projected-state
+             browser
+             (get-in await-state
+                     [:events :request/reread-complete]))]
+
+        (is (= :await
+               (:op await-state)))
+
+        (is (= authoritative-reread-contract
+               (get-in await-state
+                       [:event-contracts
+                        :request/reread-complete
+                        :authoritative-observation])))
+
+        (is (= :local
+               (:op next-state)))
+
+        (is (= :install-result
+               (:action next-state)))))))
+
+(deftest ordinary-environment-event-does-not-clear-foreign-authoritative-causal-barrier
+  (let [choreography
+        (choreo/->choreography
+         {:initial :claim
+          :states
+          {:claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :wait)
+
+           :wait
+           (choreo/await
+            :browser
+            {:browser/timer-fired :browser-local})
+
+           :browser-local
+           (choreo/local
+            :browser
+            :install-result
+            :done)
+
+           :done
+           (choreo/return :done)}})]
+
+    ;; Arrival after the authoritative transition in wall-clock time is not a
+    ;; causal/knowledge proof.  Timers, visibility events, invalidation nudges,
+    ;; and other ordinary environment events must remain unable to clear the
+    ;; foreign-authority barrier by coincidence.
+    (is (= :unobserved-authoritative-predecessor
+           (error-kind
+            #(project/project
+              choreography
               :browser))))))

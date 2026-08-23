@@ -637,3 +637,213 @@
         (knowledge/provenance-kinds-for
          state
          :missing)))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative observation / reread provenance
+;; -----------------------------------------------------------------------------
+
+(deftest authoritative-observation-is-distinct-from-authoritative-operation
+  (let [provenance
+        (knowledge/authoritative-observation-provenance
+         :request/model
+         :request/projection
+         {:revision 42}
+         {:state [:approval :observe]})]
+
+    (is
+     (= {:kind :authoritative
+         :authority :request/model
+         :observation :request/projection
+         :basis {:revision 42}
+         :state [:approval :observe]}
+        provenance))
+
+    (is
+     (knowledge/provenance?
+      provenance))
+
+    (is
+     (not
+      (contains?
+       provenance
+       :operation)))))
+
+(deftest authoritative-observation-requires-an-explicit-authority-observation-and-basis
+  (testing "authority and observation identities remain explicit"
+    (is
+     (= :invalid-value
+        (error-kind
+         #(knowledge/authoritative-observation-provenance
+           "request/model"
+           :request/projection
+           {:revision 42}))))
+
+    (is
+     (= :invalid-value
+        (error-kind
+         #(knowledge/authoritative-observation-provenance
+           :request/model
+           "request/projection"
+           {:revision 42})))))
+
+  (testing "a missing basis cannot be silently upgraded into authoritative observation"
+    (is
+     (= :invalid-authoritative-observation
+        (error-kind
+         #(knowledge/authoritative-observation-provenance
+           :request/model
+           :request/projection
+           nil)))))
+
+  (testing "an arbitrary asserted event is still not authoritative"
+    (is
+     (= #{:asserted}
+        (-> (knowledge/empty-knowledge
+             :browser)
+            (knowledge/establish-asserted
+             {:approved? true}
+             :live/invalidation)
+            (knowledge/provenance-kinds-for
+             :approved?))))))
+
+(deftest authoritative-observation-establishes-authoritative-knowledge
+  (let [state
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge
+          :browser)
+         {:approved? true
+          :revision 42}
+         :request/model
+         :request/projection
+         {:revision 42}
+         {:state [:approval :observe]})]
+
+    (is
+     (= true
+        (knowledge/value
+         state
+         :approved?)))
+
+    (is
+     (= 42
+        (knowledge/value
+         state
+         :revision)))
+
+    (is
+     (= #{:authoritative}
+        (knowledge/provenance-kinds-for
+         state
+         :approved?)))
+
+    (is
+     (= [{:kind :authoritative
+          :authority :request/model
+          :observation :request/projection
+          :basis {:revision 42}
+          :state [:approval :observe]}]
+        (knowledge/provenance
+         state
+         :approved?)))))
+
+(deftest same-value-may-gain-authoritative-observation-justification
+  (let [before
+        (knowledge/establish-inputs
+         (knowledge/empty-knowledge
+          :browser)
+         {:approved? true}
+         :initial-render)
+
+        after
+        (knowledge/establish-authoritative-observation
+         before
+         {:approved? true}
+         :request/model
+         :request/projection
+         {:revision 42})]
+
+    (is
+     (= true
+        (knowledge/value
+         after
+         :approved?)))
+
+    (is
+     (= #{:input :authoritative}
+        (knowledge/provenance-kinds-for
+         after
+         :approved?)))
+
+    (is
+     (= 2
+        (count
+         (knowledge/provenance
+          after
+          :approved?))))))
+
+(deftest conflicting-authoritative-reread-still-requires-progression
+  (let [before
+        (knowledge/establish-inputs
+         (knowledge/empty-knowledge
+          :browser)
+         {:revision 41}
+         :initial-render)]
+
+    (is
+     (= :authoritative-progression-required
+        (error-kind
+         #(knowledge/establish-authoritative-observation
+           before
+           {:revision 42}
+           :request/model
+           :request/projection
+           {:revision 42}
+           {:replace? true})))))
+
+  (testing "the knowledge layer records the opaque basis but does not invent ordering for it"
+    (let [state
+          (knowledge/establish-authoritative-observation
+           (knowledge/empty-knowledge
+            :browser)
+           {:revision 42}
+           :request/model
+           :request/projection
+           {:opaque "basis-42"})]
+      (is
+       (= {:opaque "basis-42"}
+          (-> (knowledge/provenance
+               state
+               :revision)
+              first
+              :basis))))))
+
+(deftest malformed-authoritative-observation-provenance-is-rejected
+  (doseq [malformed
+          [{:kind :authoritative
+            :authority :request/model
+            :observation :request/projection}
+           {:kind :authoritative
+            :authority :request/model
+            :basis {:revision 42}}
+           {:kind :authoritative
+            :observation :request/projection
+            :basis {:revision 42}}
+           {:kind :authoritative
+            :operation :request/approve
+            :authority :request/model
+            :observation :request/projection
+            :basis {:revision 42}}]]
+    (is
+     (false?
+      (knowledge/provenance?
+       malformed)))
+
+    (is
+     (= :invalid-provenance
+        (error-kind
+         #(knowledge/establish
+           (knowledge/empty-knowledge
+            :browser)
+           :approved?
+           true
+           malformed))))))

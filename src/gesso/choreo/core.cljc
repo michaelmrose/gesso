@@ -32,7 +32,11 @@
 
    :await
      A role-local event produced by that role's environment. Participant
-     messages do not satisfy :await.
+     messages do not satisfy :await. An event contract may explicitly describe
+     an authoritative observation/reread. That descriptor does not make an
+     arbitrary environment event authoritative: it names the logical authority,
+     the trusted observation/projection, and the required semantic field that
+     carries the authoritative basis.
 
    :return
      Global terminal outcome. Terminality is not owned by one participant.
@@ -503,13 +507,80 @@
         :metadata
         (normalize-metadata metadata))))))
 
+(def authoritative-observation-keys
+  #{:authority
+    :observation
+    :basis-key})
+
+(defn- normalize-authoritative-observation
+  [event required observation]
+  (require-map!
+   "Await event contract :authoritative-observation"
+   observation)
+
+  (let [actual-keys
+        (set (keys observation))
+
+        missing-keys
+        (set/difference
+         authoritative-observation-keys
+         actual-keys)
+
+        unknown-keys
+        (set/difference
+         actual-keys
+         authoritative-observation-keys)]
+
+    (when (seq missing-keys)
+      (fail!
+       :incomplete-authoritative-observation
+       "Authoritative observation descriptors require :authority, :observation, and :basis-key."
+       {:event event
+        :missing-keys missing-keys
+        :descriptor observation}))
+
+    (when (seq unknown-keys)
+      (fail!
+       :unknown-authoritative-observation-key
+       "Authoritative observation descriptors are closed semantic contracts."
+       {:event event
+        :unknown-keys unknown-keys
+        :descriptor observation}))
+
+    (let [authority
+          (require-keyword!
+           "Authoritative observation :authority"
+           (:authority observation))
+
+          observation-name
+          (require-keyword!
+           "Authoritative observation :observation"
+           (:observation observation))
+
+          basis-key
+          (require-keyword!
+           "Authoritative observation :basis-key"
+           (:basis-key observation))]
+
+      (when-not (contains? required basis-key)
+        (fail!
+         :authoritative-observation-basis-not-required
+         "An authoritative observation's :basis-key must be required semantic event data."
+         {:event event
+          :basis-key basis-key
+          :required required}))
+
+      {:authority authority
+       :observation observation-name
+       :basis-key basis-key})))
+
 (defn- normalize-await-event-contract
   [event contract]
   (require-map!
    "Await event contract"
    contract)
 
-  (let [{:keys [required optional open-data?]
+  (let [{:keys [required optional open-data? authoritative-observation]
          :or {required #{}
               optional #{}
               open-data? false}}
@@ -546,15 +617,26 @@
        {:event event
         :open-data? open-data?}))
 
-    (cond-> {}
-      (seq required')
-      (assoc :required required')
+    (let [authoritative-observation'
+          (when (some? authoritative-observation)
+            (normalize-authoritative-observation
+             event
+             required'
+             authoritative-observation))]
 
-      (seq optional')
-      (assoc :optional optional')
+      (cond-> {}
+        (seq required')
+        (assoc :required required')
 
-      open-data?
-      (assoc :open-data? true))))
+        (seq optional')
+        (assoc :optional optional')
+
+        open-data?
+        (assoc :open-data? true)
+
+        (some? authoritative-observation')
+        (assoc :authoritative-observation
+               authoritative-observation')))))
 
 (defn- normalize-await-event-contracts
   [events event-contracts]
@@ -608,6 +690,14 @@
          :open-data?
            When true, undeclared event-data keys may also be present. Defaults
            to false. This is an explicit escape hatch rather than the default.
+
+         :authoritative-observation
+           Optional closed descriptor for a trusted authoritative reread. It
+           requires keyword :authority, :observation, and :basis-key fields.
+           :basis-key names a semantic event-data key and therefore must also be
+           present in this contract's :required set. The descriptor says what
+           kind of observation this event represents; it does not authenticate
+           an endpoint or make an arbitrary browser claim authoritative.
 
        Required and optional keys must be disjoint sets of keywords. Contracts
        may name only events declared by this await state. An event with no
@@ -1022,3 +1112,4 @@
       (map
        (comp :op val)
        states))}))
+
