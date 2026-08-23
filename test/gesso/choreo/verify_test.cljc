@@ -1984,3 +1984,443 @@
              (choreo/return :done)}})
           {:entry-knowledge
            {"server" #{:request-id}}}))))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative observation: static knowledge/provenance distinction
+;; -----------------------------------------------------------------------------
+
+(def authoritative-reread-contract
+  {:authority :request/model
+   :observation :request/current-projection
+   :basis-key :observed-basis})
+
+(deftest authoritative-observation-is-an-explicit-static-authoritative-knowledge-source
+  (let [choreography
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/reread-complete :consume}
+            {:event-contracts
+             {:request/reread-complete
+              {:required #{:request-status :observed-basis}
+               :optional #{:display-label}
+               :authoritative-observation
+               authoritative-reread-contract}}})
+
+           :consume
+           (choreo/local
+            :browser
+            :install-result
+            :done
+            {:requires #{:request-status :observed-basis}})
+
+           :done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify choreography)
+
+        analysis
+        (:analysis result)]
+
+    (is (:valid? result))
+
+    (testing "the verifier exposes the exact declared authoritative observation"
+      (is (= authoritative-reread-contract
+             (get-in analysis
+                     [:authoritative-observations-by-state
+                      :observe
+                      :request/reread-complete]))))
+
+    (testing "required reread fields are definite role-local knowledge"
+      (is (= #{:request-status :observed-basis}
+             (get-in analysis
+                     [:definitely-known-before-state
+                      :consume
+                      :browser]))))
+
+    (testing "the same required fields are definitely authoritative knowledge"
+      (is (= #{:request-status :observed-basis}
+             (get-in analysis
+                     [:definitely-authoritatively-known-before-state
+                      :consume
+                      :browser]))))
+
+    (testing "optional observation fields are not statically definite"
+      (is (not
+           (contains?
+            (get-in analysis
+                    [:definitely-authoritatively-known-before-state
+                     :consume
+                     :browser])
+            :display-label))))))
+
+(deftest ordinary-environment-observation-does-not-become-authoritative-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:environment/current :consume}
+            {:event-contracts
+             {:environment/current
+              {:required #{:request-status}}}})
+
+           :consume
+           (choreo/local
+            :browser
+            :install-result
+            :done
+            {:requires #{:request-status}})
+
+           :done
+           (choreo/return :done)}})
+
+        analysis
+        (:analysis
+         (verify/verify choreography))]
+
+    (is (= #{:request-status}
+           (get-in analysis
+                   [:definitely-known-before-state
+                    :consume
+                    :browser])))
+
+    (is (= #{}
+           (get-in analysis
+                   [:definitely-authoritatively-known-before-state
+                    :consume
+                    :browser])))
+
+    (is (= {}
+           (:authoritative-observations-by-state analysis)))))
+
+(deftest authoritative-operation-output-is-definitely-authoritative-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :read
+          :states
+          {:read
+           (choreo/authoritative
+            :server
+            :request/read-current
+            :consume
+            {:outputs #{:request-status}})
+
+           :consume
+           (choreo/local
+            :server
+            :use-current
+            :done
+            {:requires #{:request-status}})
+
+           :done
+           (choreo/return :done)}})
+
+        analysis
+        (:analysis
+         (verify/verify choreography))]
+
+    (is (= #{:request-status}
+           (get-in analysis
+                   [:definitely-authoritatively-known-before-state
+                    :consume
+                    :server])))))
+
+(deftest communication-establishes-communicated-not-authoritative-receiver-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :read
+          :states
+          {:read
+           (choreo/authoritative
+            :server
+            :request/read-current
+            :send
+            {:outputs #{:request-status}})
+
+           :send
+           (choreo/communicate
+            :server
+            :browser
+            :request/current
+            :consume
+            {:required #{:request-status}})
+
+           :consume
+           (choreo/local
+            :browser
+            :install-result
+            :done
+            {:requires #{:request-status}})
+
+           :done
+           (choreo/return :done)}})
+
+        analysis
+        (:analysis
+         (verify/verify choreography))]
+
+    (is (= #{:request-status}
+           (get-in analysis
+                   [:definitely-known-before-state
+                    :consume
+                    :browser])))
+
+    ;; The runtime records the receiver's acquisition as :communicated.  The
+    ;; verifier must not silently preserve the sender's :authoritative provenance
+    ;; kind across a participant-message boundary.
+    (is (= #{}
+           (get-in analysis
+                   [:definitely-authoritatively-known-before-state
+                    :consume
+                    :browser])))))
+
+(deftest authoritative-knowledge-at-a-join-is-a-must-property
+  (let [choreography
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/reread-complete :join
+             :environment/current :join}
+            {:event-contracts
+             {:request/reread-complete
+              {:required #{:request-status :observed-basis}
+               :authoritative-observation
+               authoritative-reread-contract}
+
+              :environment/current
+              {:required #{:request-status :observed-basis}}}})
+
+           :join
+           (choreo/local
+            :browser
+            :install-result
+            :done
+            {:requires #{:request-status :observed-basis}})
+
+           :done
+           (choreo/return :done)}})
+
+        analysis
+        (:analysis
+         (verify/verify choreography))]
+
+    (testing "the values are definitely known because both event edges require them"
+      (is (= #{:request-status :observed-basis}
+             (get-in analysis
+                     [:definitely-known-before-state
+                      :join
+                      :browser]))))
+
+    (testing "they are not definitely authoritative because one edge is ordinary"
+      (is (= #{}
+             (get-in analysis
+                     [:definitely-authoritatively-known-before-state
+                      :join
+                      :browser]))))))
+
+(deftest converging-authoritative-observations-preserve-definite-authoritative-knowledge
+  (let [choreography
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/reread-primary :join
+             :request/reread-secondary :join}
+            {:event-contracts
+             {:request/reread-primary
+              {:required #{:request-status :observed-basis}
+               :authoritative-observation
+               {:authority :request/model
+                :observation :request/primary-projection
+                :basis-key :observed-basis}}
+
+              :request/reread-secondary
+              {:required #{:request-status :observed-basis}
+               :authoritative-observation
+               {:authority :request/model
+                :observation :request/secondary-projection
+                :basis-key :observed-basis}}}})
+
+           :join
+           (choreo/local
+            :browser
+            :install-result
+            :done
+            {:requires #{:request-status :observed-basis}})
+
+           :done
+           (choreo/return :done)}})
+
+        analysis
+        (:analysis
+         (verify/verify choreography))]
+
+    (is (= #{:request-status :observed-basis}
+           (get-in analysis
+                   [:definitely-authoritatively-known-before-state
+                    :join
+                    :browser])))
+
+    (is (= #{:request/reread-primary
+             :request/reread-secondary}
+           (set
+            (keys
+             (get-in analysis
+                     [:authoritative-observations-by-state
+                      :observe])))))))
+
+;; -----------------------------------------------------------------------------
+;; Verification-artifact integrity
+;; -----------------------------------------------------------------------------
+
+(defn- completed-choreography
+  [name outcome]
+  (choreo/->choreography
+   {:name name
+    :initial :done
+    :states
+    {:done
+     (choreo/return outcome)}}))
+
+(deftest verification-predicate-rejects-structurally-impossible-lookalikes
+  (let [choreography
+        (completed-choreography
+         :example/verification-artifact-a
+         :done)
+
+        verification
+        (verify/verify choreography)
+
+        invalid-choreography
+        {:not :a-choreography}]
+
+    (is (verify/verification? verification))
+
+    (testing "a result for this verifier version must carry the choreography it analyzed"
+      (is (false?
+           (verify/verification?
+            (dissoc verification
+                    :choreography))))
+
+      (is (false?
+           (verify/verification?
+            (assoc verification
+                   :choreography
+                   invalid-choreography)))))
+
+    (testing "a result emitted by verify always carries its normalized verifier options"
+      (is (false?
+           (verify/verification?
+            (dissoc verification
+                    :options)))))
+
+    (testing ":valid? must agree with whether verifier errors are present"
+      (is (false?
+           (verify/verification?
+            (assoc verification
+                   :valid?
+                   false))))
+
+      (is (false?
+           (verify/verification?
+            (assoc verification
+                   :errors
+                   [(verify/problem
+                     :fabricated
+                     [:artifact]
+                     "Fabricated verifier error." )])))))))
+
+(deftest verified-wrapper-must-bind-the-exact-choreography-that-was-verified
+  (let [choreography-a
+        (completed-choreography
+         :example/verified-artifact-a
+         :a)
+
+        choreography-b
+        (completed-choreography
+         :example/verified-artifact-b
+         :b)
+
+        verification-a
+        (verify/verify choreography-a)
+
+        verification-b
+        (verify/verify choreography-b)
+
+        verified-a
+        (verify/verify! choreography-a)]
+
+    (is (verify/verified? verified-a))
+
+    (testing "changing only the wrapper choreography breaks the artifact binding"
+      (is (false?
+           (verify/verified?
+            (assoc verified-a
+                   :choreography
+                   choreography-b)))))
+
+    (testing "changing only the nested verification breaks the artifact binding"
+      (is (false?
+           (verify/verified?
+            (assoc verified-a
+                   :verification
+                   verification-b)))))
+
+    (testing "the nested verification is specifically for the wrapper choreography"
+      (is (= choreography-a
+             (:choreography verification-a)))
+      (is (not= choreography-a
+                (:choreography verification-b))))))
+
+(deftest ensure-verified-rejects-malformed-tagged-verification-artifacts
+  (let [choreography-a
+        (completed-choreography
+         :example/ensure-artifact-a
+         :a)
+
+        choreography-b
+        (completed-choreography
+         :example/ensure-artifact-b
+         :b)
+
+        verification
+        (verify/verify choreography-a)
+
+        verified
+        (verify/verify! choreography-a)
+
+        malformed
+        [(dissoc verification
+                 :choreography)
+
+         (assoc verification
+                :choreography
+                {:not :a-choreography})
+
+         (dissoc verification
+                 :options)
+
+         (assoc verified
+                :choreography
+                choreography-b)]]
+
+    (doseq [artifact malformed]
+      (let [error
+            (verification-error
+             #(verify/ensure-verified artifact))]
+        (is (= :gesso.choreo.verify/error
+               (:error/type error)))
+        (is (= :invalid-verification-artifact
+               (:error/kind error)))))))

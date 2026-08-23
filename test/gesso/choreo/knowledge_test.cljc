@@ -13,6 +13,15 @@
       (:error/kind
        (ex-data ex)))))
 
+(defn- attempt
+  [f]
+  (try
+    {:value (f)}
+    (catch #?(:clj Throwable
+              :cljs :default) ex
+      {:error-kind (:error/kind (ex-data ex))
+       :error-data (ex-data ex)})))
+
 (deftest empty-knowledge-belongs-to-one-role
   (let [state
         (knowledge/empty-knowledge
@@ -782,37 +791,33 @@
           :approved?))))))
 
 (deftest conflicting-authoritative-reread-still-requires-progression
-  (let [before
-        (knowledge/establish-inputs
+  (let [basis-41 {:revision 41}
+        before
+        (knowledge/establish-authoritative-observation
          (knowledge/empty-knowledge
           :browser)
          {:revision 41}
-         :initial-render)]
+         :request/model
+         :request/projection
+         basis-41)]
 
-    (is
-     (= :authoritative-progression-required
-        (error-kind
-         #(knowledge/establish-authoritative-observation
-           before
-           {:revision 42}
-           :request/model
-           :request/projection
-           {:revision 42}
-           {:replace? true})))))
-
-  (testing "the knowledge layer records the opaque basis but does not invent ordering for it"
-    (let [state
-          (knowledge/establish-authoritative-observation
-           (knowledge/empty-knowledge
-            :browser)
-           {:revision 42}
-           :request/model
-           :request/projection
-           {:opaque "basis-42"})]
+    (testing "arrival order and generic replacement are not authoritative progression"
       (is
-       (= {:opaque "basis-42"}
+       (= :authoritative-progression-required
+          (error-kind
+           #(knowledge/establish-authoritative-observation
+             before
+             {:revision 42}
+             :request/model
+             :request/projection
+             {:revision 42}
+             {:replace? true})))))
+
+    (testing "the knowledge layer records the opaque basis but does not invent ordering for it"
+      (is
+       (= basis-41
           (-> (knowledge/provenance
-               state
+               before
                :revision)
               first
               :basis))))))
@@ -847,3 +852,343 @@
            :approved?
            true
            malformed))))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative basis progression
+;; -----------------------------------------------------------------------------
+
+(defn- basis-progression
+  [authority observation from-basis to-basis relation]
+  {:kind :authoritative-basis-progression
+   :authority authority
+   :observation observation
+   :from-basis from-basis
+   :to-basis to-basis
+   :relation relation})
+
+(def basis-41
+  {:revision 41
+   :tx-id "tx-41"})
+
+(def basis-42
+  {:revision 42
+   :tx-id "tx-42"})
+
+(def basis-43
+  {:revision 43
+   :tx-id "tx-43"})
+
+(deftest first-authoritative-observation-may-supersede-non-authoritative-knowledge
+  (let [before
+        (knowledge/establish-inputs
+         (knowledge/empty-knowledge :browser)
+         {:approved? false
+          :revision 41}
+         :initial-render)
+
+        result
+        (attempt
+         #(knowledge/establish-authoritative-observation
+           before
+           {:approved? true
+            :revision 42}
+           :request/model
+           :request/projection
+           basis-42))
+
+        after
+        (:value result)]
+
+    (testing "authority does not need a fictional basis comparison against non-authoritative input"
+      (is (nil? (:error-kind result)))
+      (when after
+        (is (= true
+               (knowledge/value after :approved?)))
+        (is (= 42
+               (knowledge/value after :revision)))
+        (is (= #{:authoritative}
+               (knowledge/provenance-kinds-for after :approved?)))
+        (is (= basis-42
+               (-> (knowledge/provenance after :approved?)
+                   first
+                   :basis)))))))
+
+(deftest distinct-authoritative-bases-require-an-explicit-progression-decision
+  (let [before
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge :browser)
+         {:approved? false}
+         :request/model
+         :request/projection
+         basis-41)]
+
+    (testing "a later-arriving conflicting observation is not automatically newer"
+      (is (= :authoritative-progression-required
+             (error-kind
+              #(knowledge/establish-authoritative-observation
+                before
+                {:approved? true}
+                :request/model
+                :request/projection
+                basis-42)))))
+
+    (testing "the rule also applies when the semantic value happens to be unchanged"
+      (is (= :authoritative-progression-required
+             (error-kind
+              #(knowledge/establish-authoritative-observation
+                before
+                {:approved? false}
+                :request/model
+                :request/projection
+                basis-42)))))))
+
+(deftest advancing-authoritative-basis-can-replace-current-authoritative-knowledge
+  (let [before
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge :browser)
+         {:approved? false
+          :revision 41}
+         :request/model
+         :request/projection
+         basis-41)
+
+        progression
+        (basis-progression
+         :request/model
+         :request/projection
+         basis-41
+         basis-42
+         :advances)
+
+        result
+        (attempt
+         #(knowledge/establish-authoritative-observation
+           before
+           {:approved? true
+            :revision 42}
+           :request/model
+           :request/projection
+           basis-42
+           {:basis-progression progression}))
+
+        after
+        (:value result)]
+
+    (is (nil? (:error-kind result)))
+    (when after
+      (is (= true
+             (knowledge/value after :approved?)))
+      (is (= 42
+             (knowledge/value after :revision)))
+
+      (doseq [key [:approved? :revision]]
+        (is (= #{:authoritative}
+               (knowledge/provenance-kinds-for after key)))
+        (is (= basis-42
+               (-> (knowledge/provenance after key)
+                   first
+                   :basis)))))))
+
+(deftest same-value-advance-moves-the-authoritative-frontier
+  (let [at-41
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge :browser)
+         {:approved? true}
+         :request/model
+         :request/projection
+         basis-41)
+
+        result-42
+        (attempt
+         #(knowledge/establish-authoritative-observation
+           at-41
+           {:approved? true}
+           :request/model
+           :request/projection
+           basis-42
+           {:basis-progression
+            (basis-progression
+             :request/model
+             :request/projection
+             basis-41
+             basis-42
+             :advances)}))
+
+        at-42
+        (:value result-42)]
+
+    (is (nil? (:error-kind result-42)))
+
+    (when at-42
+      (testing "a later conflicting advance must start from the actual current frontier"
+        (is (= :authoritative-progression-mismatch
+               (error-kind
+                #(knowledge/establish-authoritative-observation
+                  at-42
+                  {:approved? false}
+                  :request/model
+                  :request/projection
+                  basis-43
+                  {:basis-progression
+                   (basis-progression
+                    :request/model
+                    :request/projection
+                    basis-41
+                    basis-43
+                    :advances)})))))
+
+      (testing "the same transition succeeds when its witness starts at the advanced frontier"
+        (let [result-43
+              (attempt
+               #(knowledge/establish-authoritative-observation
+                 at-42
+                 {:approved? false}
+                 :request/model
+                 :request/projection
+                 basis-43
+                 {:basis-progression
+                  (basis-progression
+                   :request/model
+                   :request/projection
+                   basis-42
+                   basis-43
+                   :advances)}))
+
+              at-43
+              (:value result-43)]
+          (is (nil? (:error-kind result-43)))
+          (when at-43
+            (is (= false
+                   (knowledge/value at-43 :approved?)))
+            (is (= basis-43
+                   (-> (knowledge/provenance at-43 :approved?)
+                       first
+                       :basis)))))))))
+
+(deftest stale-or-incomparable-authoritative-basis-cannot-replace-current-knowledge
+  (let [current
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge :browser)
+         {:approved? true}
+         :request/model
+         :request/projection
+         basis-42)]
+
+    (doseq [[incoming relation]
+            [[basis-41 :precedes]
+             [{:opaque "other-history"} :incomparable]]]
+      (is (= :authoritative-basis-not-advancing
+             (error-kind
+              #(knowledge/establish-authoritative-observation
+                current
+                {:approved? false}
+                :request/model
+                :request/projection
+                incoming
+                {:basis-progression
+                 (basis-progression
+                  :request/model
+                  :request/projection
+                  basis-42
+                  incoming
+                  relation)})))))))
+
+(deftest authoritative-progression-witness-is-closed-and-exactly-bound
+  (let [current
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge :browser)
+         {:approved? false}
+         :request/model
+         :request/projection
+         basis-41)
+
+        valid
+        (basis-progression
+         :request/model
+         :request/projection
+         basis-41
+         basis-42
+         :advances)]
+
+    (testing "authority, observation, prior basis, and incoming basis are all part of the decision identity"
+      (doseq [bad
+              [(assoc valid :authority :other/model)
+               (assoc valid :observation :other/projection)
+               (assoc valid :from-basis {:revision 40})
+               (assoc valid :to-basis {:revision 99})]]
+        (is (= :authoritative-progression-mismatch
+               (error-kind
+                #(knowledge/establish-authoritative-observation
+                  current
+                  {:approved? true}
+                  :request/model
+                  :request/projection
+                  basis-42
+                  {:basis-progression bad}))))))
+
+    (testing "malformed or open-ended progression records are rejected rather than partially interpreted"
+      (doseq [bad
+              [(dissoc valid :relation)
+               (assoc valid :relation :later-ish)
+               (assoc valid :extra :host-policy)
+               {:kind :something-else
+                :authority :request/model
+                :observation :request/projection
+                :from-basis basis-41
+                :to-basis basis-42
+                :relation :advances}]]
+        (is (= :invalid-authoritative-progression
+               (error-kind
+                #(knowledge/establish-authoritative-observation
+                  current
+                  {:approved? true}
+                  :request/model
+                  :request/projection
+                  basis-42
+                  {:basis-progression bad}))))))))
+
+(deftest progression-decision-cannot-be-reused-across-authoritative-observation-scopes
+  (let [current
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge :browser)
+         {:approved? false}
+         :request/model
+         :request/projection
+         basis-41)
+
+        request-progression
+        (basis-progression
+         :request/model
+         :request/projection
+         basis-41
+         basis-42
+         :advances)]
+
+    (is (= :authoritative-progression-mismatch
+           (error-kind
+            #(knowledge/establish-authoritative-observation
+              current
+              {:approved? true}
+              :request/model
+              :request/other-projection
+              basis-42
+              {:basis-progression request-progression}))))))
+
+(deftest equal-basis-cannot-produce-two-different-authoritative-values
+  (let [current
+        (knowledge/establish-authoritative-observation
+         (knowledge/empty-knowledge :browser)
+         {:approved? false}
+         :request/model
+         :request/projection
+         basis-42)]
+
+    (is (= :authoritative-basis-conflict
+           (error-kind
+            #(knowledge/establish-authoritative-observation
+              current
+              {:approved? true}
+              :request/model
+              :request/projection
+              basis-42))))))
+

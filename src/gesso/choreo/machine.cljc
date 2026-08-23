@@ -84,6 +84,15 @@
    records their origin without upgrading an arbitrary environment observation to
    authoritative truth.
 
+   Authoritative observations additionally carry an opaque authoritative basis.
+   Once a role has an authoritative frontier for an observation scope, an event at
+   a distinct basis is admissible only with explicit
+   :authoritative-basis-progression envelope metadata accepted by
+   gesso.choreo.knowledge. The progression decision is policy evidence about basis
+   ordering, not semantic event data: it never enters execution-values or
+   deterministic environment history. Arrival order and generic replacement do not
+   establish progression.
+
    Entry values are :input knowledge. Trusted authoritative outputs become
    :authoritative knowledge. Local outputs are conservatively recorded as
    :asserted by the named local action; that records origin without silently
@@ -115,7 +124,8 @@
   (:require
    [clojure.set :as set]
    [gesso.choreo.identity :as identity]
-   [gesso.choreo.knowledge :as knowledge])
+   [gesso.choreo.knowledge :as knowledge]
+   [gesso.choreo.project :as project])
   (:refer-clojure :exclude [await]))
 
 ;; -----------------------------------------------------------------------------
@@ -126,19 +136,13 @@
   :gesso.choreo.machine/execution)
 
 (def executable-plan-type
-  :gesso.choreo/executable-plan)
+  project/executable-plan-type)
 
 (def executable-plan-version
-  1)
+  project/executable-plan-version)
 
 (def supported-ops
-  #{:local
-    :authoritative
-    :branch
-    :send
-    :receive
-    :await
-    :return})
+  project/projected-ops)
 
 (def statuses
   #{:waiting-local
@@ -502,17 +506,18 @@
     (get data
          (:basis-key descriptor))))
 
-(defn- authoritative-observation-runtime-valid?
-  [state event data]
-  (if (event-authoritative-observation
-       state
-       event)
-    (some?
-     (authoritative-observation-basis
-      state
-      event
-      data))
-    true))
+(def ^:private authoritative-basis-progression-envelope-key
+  :authoritative-basis-progression)
+
+(defn- authoritative-basis-progression
+  [envelope]
+  (get envelope
+       authoritative-basis-progression-envelope-key))
+
+(defn- authoritative-basis-progression-present?
+  [envelope]
+  (contains? envelope
+             authoritative-basis-progression-envelope-key))
 
 (defn- require-authoritative-observation-basis!
   [state event data context]
@@ -694,280 +699,26 @@
        {:role (:role plan)
         :state state-id})))
 
-(defn- require-successor!
-  [plan state-id state next-state]
-  (when-not (contains? (:states plan)
-                       next-state)
-    (machine-error
-     :unknown-successor
-     "Projected local state references an unknown successor."
-     {:role (:role plan)
-      :state state-id
-      :op (:op state)
-      :next next-state}))
-  next-state)
-
 ;; -----------------------------------------------------------------------------
 ;; ExecutablePlan validation
 ;; -----------------------------------------------------------------------------
 
 (defn executable-plan?
-  "True when x has the shallow identity/shape of an ExecutablePlan.
+  "True exactly when x satisfies the canonical ExecutablePlan contract owned by
+   gesso.choreo.project.
 
-   require-executable-plan! performs the structural checks used by this runtime."
+   The machine deliberately does not maintain a second plan-format predicate.
+   Projection/compiler format validation happens before execution semantics."
   [x]
-  (and (map? x)
-       (= executable-plan-type
-          (:gesso.choreo/type x))
-       (= executable-plan-version
-          (:gesso.choreo/version x))
-       (keyword? (:role x))
-       (map? (:states x))
-       (contains? (:states x)
-                  (:initial x))))
-
-(defn- validate-receive-alternative!
-  [plan state-id alternative]
-  (require-map!
-   "Projected receive alternative"
-   alternative)
-
-  (require-keyword!
-   "Projected receive :from"
-   (:from alternative))
-
-  (require-keyword!
-   "Projected receive :event"
-   (:event alternative))
-
-  (when (and (contains? alternative :via)
-             (not (keyword? (:via alternative))))
-    (machine-error
-     :invalid-value
-     "Projected receive :via must be a keyword when present."
-     {:role (:role plan)
-      :state state-id
-      :alternative alternative}))
-
-  (validate-message-contract!
-   "Projected receive"
-   alternative
-   {:role (:role plan)
-    :state state-id
-    :alternative alternative})
-
-  (require-successor!
-   plan
-   state-id
-   {:op :receive}
-   (:next alternative))
-
-  alternative)
-
-(defn- validate-state!
-  [plan state-id state]
-  (require-map!
-   "Projected state"
-   state)
-
-  (when-not (contains? supported-ops
-                       (:op state))
-    (machine-error
-     :unsupported-op
-     "ExecutablePlan contains an unsupported local operation."
-     {:role (:role plan)
-      :state state-id
-      :op (:op state)
-      :supported supported-ops}))
-
-  (case (:op state)
-    :local
-    (do
-      (require-keyword!
-       "Projected local :action"
-       (:action state))
-      (require-keyword-set!
-       "Projected local :requires"
-       (or (:requires state) #{}))
-      (require-keyword-set!
-       "Projected local :outputs"
-       (or (:outputs state) #{}))
-      (require-successor!
-       plan
-       state-id
-       state
-       (:next state)))
-
-    :authoritative
-    (do
-      (require-keyword!
-       "Projected authoritative :operation"
-       (:operation state))
-      (require-keyword-set!
-       "Projected authoritative :requires"
-       (or (:requires state) #{}))
-      (require-keyword-set!
-       "Projected authoritative :outputs"
-       (or (:outputs state) #{}))
-      (require-successor!
-       plan
-       state-id
-       state
-       (:next state)))
-
-    :branch
-    (do
-      (require-keyword!
-       "Projected branch :on"
-       (:on state))
-      (let [cases (:cases state)]
-        (when-not (and (map? cases)
-                       (seq cases))
-          (machine-error
-           :invalid-branch
-           "Projected :branch requires a non-empty :cases map."
-           {:role (:role plan)
-            :state state-id
-            :cases cases}))
-        (doseq [[value next-state] cases]
-          (when (nil? value)
-            (machine-error
-             :invalid-branch-value
-             "Projected branch case values may not be nil."
-             {:role (:role plan)
-              :state state-id
-              :value value}))
-          (require-successor!
-           plan
-           state-id
-           state
-           next-state))))
-
-    :send
-    (do
-      (require-keyword!
-       "Projected send :to"
-       (:to state))
-      (require-keyword!
-       "Projected send :event"
-       (:event state))
-      (when (= (:role plan)
-               (:to state))
-        (machine-error
-         :same-role-send
-         "Projected send must target another role."
-         {:role (:role plan)
-          :state state-id
-          :to (:to state)}))
-      (when (and (contains? state :via)
-                 (not (keyword? (:via state))))
-        (machine-error
-         :invalid-value
-         "Projected send :via must be a keyword when present."
-         {:role (:role plan)
-          :state state-id
-          :via (:via state)}))
-      (validate-message-contract!
-       "Projected send"
-       state
-       {:role (:role plan)
-        :state state-id})
-      (require-successor!
-       plan
-       state-id
-       state
-       (:next state)))
-
-    :receive
-    (let [alternatives
-          (:alternatives state)]
-      (when-not (and (vector? alternatives)
-                     (seq alternatives))
-        (machine-error
-         :invalid-receive
-         "Projected :receive requires a non-empty vector of alternatives."
-         {:role (:role plan)
-          :state state-id
-          :alternatives alternatives}))
-      (doseq [alternative alternatives]
-        (validate-receive-alternative!
-         plan
-         state-id
-         alternative)))
-
-    :await
-    (let [events
-          (:events state)
-
-          event-contracts
-          (or (:event-contracts state)
-              {})]
-      (when-not (and (map? events)
-                     (seq events))
-        (machine-error
-         :invalid-await
-         "Projected :await requires a non-empty :events map."
-         {:role (:role plan)
-          :state state-id
-          :events events}))
-
-      (require-map!
-       "Projected await :event-contracts"
-       event-contracts)
-
-      (let [unknown-events
-            (set/difference
-             (set (keys event-contracts))
-             (set (keys events)))]
-        (when (seq unknown-events)
-          (machine-error
-           :unknown-await-event-contract
-           "Projected await event contracts may name only declared environment events."
-           {:role (:role plan)
-            :state state-id
-            :unknown-events unknown-events
-            :events (set (keys events))})))
-
-      (doseq [[event next-state] events]
-        (require-keyword!
-         "Projected await event"
-         event)
-        (require-successor!
-         plan
-         state-id
-         state
-         next-state))
-
-      (doseq [[event contract]
-              event-contracts]
-        (validate-environment-event-contract!
-         event
-         contract
-         {:role (:role plan)
-          :state state-id})))
-
-    :return
-    (require-keyword!
-     "Projected return :outcome"
-     (:outcome state)))
-
-  state)
+  (project/executable-plan? x))
 
 (defn- require-executable-plan!
   [plan]
-  (when-not (executable-plan? plan)
+  (when-not (project/executable-plan? plan)
     (machine-error
      :invalid-plan
-     "Expected a Gesso Choreo ExecutablePlan."
+     "Expected a canonical Gesso Choreo ExecutablePlan."
      {:plan plan}))
-
-  (doseq [[state-id state]
-          (:states plan)]
-    (validate-state!
-     plan
-     state-id
-     state))
-
   plan)
 
 ;; -----------------------------------------------------------------------------
@@ -1027,7 +778,12 @@
    Participant messages and environment events are different envelope kinds and
    cannot cross-satisfy one another. Data is intentionally not interpreted by
    this constructor; the active projected :await event contract validates it at
-   accepts/resume time."
+   accepts/resume time.
+
+   Authoritative basis progression is intentionally not part of :data. A trusted
+   adapter may associate :authoritative-basis-progression with an authoritative
+   observation envelope before acceptance/resume. The machine validates and
+   consumes that evidence without admitting it into semantic values."
   ([role event]
    (environment-event
     role
@@ -2599,12 +2355,115 @@
 ;; Environment waits
 ;; -----------------------------------------------------------------------------
 
+(defn- next-environment-knowledge
+  [execution state state-id event normalized-data envelope]
+  (let [semantic-data
+        (select-keys
+         normalized-data
+         (event-allowed state event))
+
+        observation
+        (event-authoritative-observation
+         state
+         event)
+
+        progression-present?
+        (authoritative-basis-progression-present?
+         envelope)
+
+        progression
+        (authoritative-basis-progression
+         envelope)]
+
+    (when (and (not observation)
+               progression-present?)
+      (machine-error
+       :unexpected-authoritative-progression
+       "Ordinary environment events may not carry authoritative basis progression evidence."
+       {:execution-id
+        (:execution-id execution)
+        :role
+        (:role execution)
+        :state state-id
+        :event event
+        :authoritative-basis-progression progression}))
+
+    (if (seq semantic-data)
+      (if observation
+        (let [basis
+              (require-authoritative-observation-basis!
+               state
+               event
+               normalized-data
+               {:execution-id
+                (:execution-id execution)
+                :role
+                (:role execution)
+                :state state-id})]
+          (knowledge/establish-authoritative-observation
+           (execution-knowledge execution)
+           semantic-data
+           (:authority observation)
+           (:observation observation)
+           basis
+           (cond->
+            {:state state-id
+             :metadata
+             {:origin :environment
+              :event event}
+             :replace? true}
+             progression-present?
+             (assoc
+              :basis-progression progression))))
+        (knowledge/establish-many
+         (execution-knowledge execution)
+         semantic-data
+         (knowledge/asserted-provenance
+          event
+          {:metadata
+           {:origin :environment
+            :state state-id}})
+         {:replace? true}))
+      (execution-knowledge execution))))
+
+(defn- environment-transition-valid?
+  [execution state envelope]
+  (try
+    (let [event
+          (:event envelope)
+
+          normalized-data
+          (require-environment-data-contract!
+           state
+           event
+           (:data envelope)
+           {:execution-id
+            (:execution-id execution)
+            :role
+            (:role execution)
+            :state
+            (:state execution)})]
+      (next-environment-knowledge
+       execution
+       state
+       (:state execution)
+       event
+       normalized-data
+       envelope)
+      true)
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) _
+      false)))
+
 (defn accepts-environment-event?
   "True when a suspended :await execution can consume envelope.
 
    Participant messages are never accepted here. The environment event must
-   select a declared event edge and its data must satisfy that event's projected
-   closed/open data contract."
+   select a declared event edge, its data must satisfy that event's projected
+   closed/open data contract, and any authoritative-basis progression evidence
+   must make the resulting knowledge transition admissible. Acceptance therefore
+   agrees with resume about stale, incomparable, malformed, or mismatched
+   authoritative rereads."
   [execution envelope]
   (let [execution'
         (require-execution!
@@ -2637,11 +2496,10 @@
        (:event envelope)
        (:data envelope))
 
-      (authoritative-observation-runtime-valid?
+      (environment-transition-valid?
+       execution'
        state
-       (:event envelope)
-       (normalize-environment-data
-        (:data envelope)))))))
+       envelope)))))
 
 (defn resume-environment
   "Resume one projected :await from a role-local environment event.
@@ -2655,7 +2513,11 @@
    attributed to the environment event keyword. A projected
    :authoritative-observation contract instead establishes only declared semantic
    fields as :authoritative knowledge after requiring its explicit non-nil basis.
-   Undeclared open-data extras remain adapter data in either case."
+   When an existing authoritative frontier is at a distinct basis, progression
+   evidence must be supplied as top-level :authoritative-basis-progression
+   metadata and accepted by gesso.choreo.knowledge. That evidence is never copied
+   into semantic data or deterministic environment history. Undeclared open-data
+   extras remain adapter data in either case."
   [execution envelope]
   (let [execution'
         (require-execution!
@@ -2736,47 +2598,14 @@
              normalized-data
              (event-allowed state event))
 
-            observation
-            (event-authoritative-observation
+            next-knowledge
+            (next-environment-knowledge
+             execution'
              state
-             event)
-
-            observation-basis
-            (require-authoritative-observation-basis!
-             state
+             state-id
              event
              normalized-data
-             {:execution-id
-              (:execution-id execution')
-              :role
-              (:role execution')
-              :state
-              state-id})
-
-            next-knowledge
-            (if (seq semantic-data)
-              (if observation
-                (knowledge/establish-authoritative-observation
-                 (execution-knowledge execution')
-                 semantic-data
-                 (:authority observation)
-                 (:observation observation)
-                 observation-basis
-                 {:state state-id
-                  :metadata
-                  {:origin :environment
-                   :event event}
-                  :replace? true})
-                (knowledge/establish-many
-                 (execution-knowledge execution')
-                 semantic-data
-                 (knowledge/asserted-provenance
-                  event
-                  {:metadata
-                   {:origin :environment
-                    :state state-id}})
-                 {:replace? true}))
-              (execution-knowledge execution'))
+             envelope)
 
             history-data
             (if (and (nil? (:data envelope))

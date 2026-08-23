@@ -46,9 +46,11 @@
    Knowledge updates are immutable and deterministic. Re-establishing the same
    value may add another provenance justification. Generic replacement remains
    available for non-authoritative bookkeeping, but it may not stand in for
-   authoritative progression: an authoritative observation that conflicts with
-   the current value requires an explicit basis/progression contract in the
-   layer that owns such ordering. History contains no wall-clock timestamps.
+   authoritative progression. Once a fact has an authoritative observation
+   basis, moving that fact to a distinct basis requires an explicit closed
+   progression witness supplied by the layer that owns basis ordering. Arrival
+   order is never treated as evidence of progression. History contains no
+   wall-clock timestamps.
 
    Choreography state ids are opaque EDN values. Provenance therefore preserves
    a supplied :state exactly as given instead of incorrectly constraining state
@@ -70,6 +72,23 @@
     :authoritative
     :derived
     :asserted})
+
+
+(def authoritative-basis-progression-kind
+  :authoritative-basis-progression)
+
+(def authoritative-basis-relations
+  #{:advances
+    :precedes
+    :incomparable})
+
+(def authoritative-basis-progression-keys
+  #{:kind
+    :authority
+    :observation
+    :from-basis
+    :to-basis
+    :relation})
 
 ;; -----------------------------------------------------------------------------
 ;; Errors
@@ -127,6 +146,42 @@
      "Provenance metadata"
      metadata))
   metadata)
+
+
+(defn authoritative-basis-progression?
+  "True when value is a closed authoritative-basis progression decision.
+
+   The decision is intentionally data, not a comparator callback. The layer that
+   owns an authority's basis ordering supplies the decision; Choreo validates
+   that the witness is closed and later binds it exactly to the current and
+   incoming authoritative observation scopes/bases.
+
+   This predicate validates shape only. It does not independently prove that an
+   :advances relation is truthful."
+  [value]
+  (and
+   (map? value)
+   (= authoritative-basis-progression-keys
+      (set (keys value)))
+   (= authoritative-basis-progression-kind
+      (:kind value))
+   (keyword? (:authority value))
+   (keyword? (:observation value))
+   (some? (:from-basis value))
+   (some? (:to-basis value))
+   (contains? authoritative-basis-relations
+              (:relation value))))
+
+(defn- require-authoritative-basis-progression!
+  [value]
+  (when-not (authoritative-basis-progression? value)
+    (knowledge-error
+     :invalid-authoritative-progression
+     "Authoritative basis progression must be one closed, structurally valid decision record."
+     {:basis-progression value
+      :required-keys authoritative-basis-progression-keys
+      :relations authoritative-basis-relations}))
+  value)
 
 ;; -----------------------------------------------------------------------------
 ;; Provenance
@@ -756,14 +811,258 @@
      operation
      options))))
 
+(defn- authoritative-observation-provenance?
+  [record]
+  (and
+   (= :authoritative (:kind record))
+   (keyword? (:authority record))
+   (keyword? (:observation record))
+   (contains? record :basis)
+   (some? (:basis record))
+   (not (contains? record :operation))))
+
+(defn- matching-authoritative-observations
+  [fact-record authority observation]
+  (->> (:provenance fact-record)
+       (filter authoritative-observation-provenance?)
+       (filter
+        (fn [record]
+          (and (= authority (:authority record))
+               (= observation (:observation record)))))
+       vec))
+
+(defn- current-authoritative-observation-basis
+  [knowledge key fact-record authority observation]
+  (let [records
+        (matching-authoritative-observations
+         fact-record
+         authority
+         observation)
+
+        bases
+        (set (map :basis records))]
+    (cond
+      (empty? bases)
+      nil
+
+      (= 1 (count bases))
+      (first bases)
+
+      :else
+      (knowledge-error
+       :authoritative-frontier-ambiguous
+       "Current knowledge contains more than one authoritative basis for the same observation scope."
+       {:role (:role knowledge)
+        :key key
+        :authority authority
+        :observation observation
+        :bases bases
+        :provenance records}))))
+
+(defn- authoritative-provenance-present?
+  [fact-record]
+  (boolean
+   (some #(= :authoritative (:kind %))
+         (:provenance fact-record))))
+
+(defn- replace-with-authoritative-observation
+  [knowledge key new-value provenance history-kind history-extra]
+  (let [existing (fact knowledge key)]
+    (-> knowledge
+        (assoc-in
+         [:facts key]
+         {:value new-value
+          :provenance [provenance]})
+        (update
+         :history
+         conj
+         (merge
+          {:kind history-kind
+           :key key
+           :old-value (:value existing)
+           :value new-value
+           :provenance provenance}
+          history-extra)))))
+
+(defn- require-progression-match!
+  [knowledge key authority observation from-basis to-basis progression]
+  (require-authoritative-basis-progression!
+   progression)
+  (let [expected
+        {:authority authority
+         :observation observation
+         :from-basis from-basis
+         :to-basis to-basis}
+
+        actual
+        (select-keys
+         progression
+         [:authority
+          :observation
+          :from-basis
+          :to-basis])]
+    (when-not (= expected actual)
+      (knowledge-error
+       :authoritative-progression-mismatch
+       "Authoritative basis progression is not bound to the current observation scope and exact basis transition."
+       {:role (:role knowledge)
+        :key key
+        :expected expected
+        :actual actual
+        :basis-progression progression})))
+  progression)
+
+(defn- establish-authoritative-observation-fact
+  [knowledge key new-value provenance basis-progression]
+  (let [existing
+        (fact knowledge key)
+
+        authority
+        (:authority provenance)
+
+        observation
+        (:observation provenance)
+
+        incoming-basis
+        (:basis provenance)]
+    (if (nil? existing)
+      (establish
+       knowledge
+       key
+       new-value
+       provenance)
+      (let [current-basis
+            (current-authoritative-observation-basis
+             knowledge
+             key
+             existing
+             authority
+             observation)
+
+            same-value?
+            (= (:value existing)
+               new-value)]
+        (cond
+          ;; No prior authoritative observation in this exact scope exists. A
+          ;; first trusted reread may supersede merely non-authoritative current
+          ;; knowledge; there is no authoritative basis to compare yet.
+          (nil? current-basis)
+          (cond
+            same-value?
+            (establish
+             knowledge
+             key
+             new-value
+             provenance)
+
+            (authoritative-provenance-present? existing)
+            (knowledge-error
+             :authoritative-progression-required
+             "Authoritative knowledge from another source cannot be replaced without an explicit ordering contract relating those authorities."
+             {:role (:role knowledge)
+              :key key
+              :known-value (:value existing)
+              :new-value new-value
+              :provenance provenance
+              :current-provenance (:provenance existing)})
+
+            :else
+            (replace-with-authoritative-observation
+             knowledge
+             key
+             new-value
+             provenance
+             :authoritative-establish
+             {:basis incoming-basis}))
+
+          ;; Same scope and same basis is one authoritative snapshot. A second
+          ;; value at that basis is an authority inconsistency, not progression.
+          (= current-basis incoming-basis)
+          (if same-value?
+            (establish
+             knowledge
+             key
+             new-value
+             provenance)
+            (knowledge-error
+             :authoritative-basis-conflict
+             "The same authoritative observation basis produced two different current values."
+             {:role (:role knowledge)
+              :key key
+              :authority authority
+              :observation observation
+              :basis incoming-basis
+              :known-value (:value existing)
+              :new-value new-value}))
+
+          ;; A distinct basis always requires a decision, even when the semantic
+          ;; value is unchanged. Otherwise the authoritative frontier could move
+          ;; merely because an event happened to arrive later.
+          (nil? basis-progression)
+          (knowledge-error
+           :authoritative-progression-required
+           "A distinct authoritative observation basis requires an explicit progression decision."
+           {:role (:role knowledge)
+            :key key
+            :authority authority
+            :observation observation
+            :from-basis current-basis
+            :to-basis incoming-basis
+            :known-value (:value existing)
+            :new-value new-value})
+
+          :else
+          (let [progression
+                (require-progression-match!
+                 knowledge
+                 key
+                 authority
+                 observation
+                 current-basis
+                 incoming-basis
+                 basis-progression)]
+            (if (= :advances
+                   (:relation progression))
+              (replace-with-authoritative-observation
+               knowledge
+               key
+               new-value
+               provenance
+               :authoritative-advance
+               {:from-basis current-basis
+                :to-basis incoming-basis
+                :basis-progression progression})
+              (knowledge-error
+               :authoritative-basis-not-advancing
+               "Authoritative observation may replace the current frontier only when the supplied progression relation is :advances."
+               {:role (:role knowledge)
+                :key key
+                :authority authority
+                :observation observation
+                :from-basis current-basis
+                :to-basis incoming-basis
+                :relation (:relation progression)
+                :basis-progression progression}))))))))
+
 (defn establish-authoritative-observation
   "Establish values learned from an authoritative projection/reread.
 
-   The observation provenance records logical authority, observation identity,
-   and opaque basis. This function does not decide whether one basis advances
-   another. Consequently, a conflicting current value still requires the
-   external progression layer to authorize replacement; {:replace? true} alone
-   is intentionally insufficient."
+   authority names the logical authority, observation names the declared read
+   boundary, and basis identifies the authoritative snapshot that was observed.
+   Basis values remain opaque: this namespace never infers ordering from their
+   representation or from arrival order.
+
+   The first observation in a scope may supersede non-authoritative knowledge,
+   because no authoritative frontier exists yet. Once a fact has a basis for
+   that authority/observation scope, however, a distinct incoming basis requires
+   :basis-progression containing one closed decision record exactly bound to the
+   current scope, current basis, and incoming basis. Only :relation :advances
+   permits the frontier to move. :precedes and :incomparable are rejected.
+
+   The same basis may re-establish the same value, but two different values at
+   the same basis are an authoritative inconsistency. Generic {:replace? true}
+   is accepted for API compatibility but deliberately has no power over these
+   progression rules."
   ([knowledge
     value-map
     authority
@@ -781,31 +1080,72 @@
     authority
     observation
     basis
-    options]
-   (let [options'
-         (or options {})
+    {:keys [state metadata replace? basis-progression]
+     :or {replace? false}
+     :as options}]
+   (require-knowledge!
+    knowledge)
+   (require-map!
+    "Authoritative observation values"
+    value-map)
+   (require-map!
+    "Authoritative observation establishment options"
+    (or options {}))
 
-         provenance-options
-         (select-keys
-          options'
-          [:state :metadata])
+   (when-not (boolean? replace?)
+     (knowledge-error
+      :invalid-replace
+      "Knowledge :replace? must be boolean."
+      {:replace? replace?}))
 
-         establishment-options
-         (select-keys
-          options'
-          [:replace?])]
-     (require-map!
-      "Authoritative observation establishment options"
-      options')
-     (establish-many
+   ;; Constructing provenance validates authority, observation, basis, and the
+   ;; provenance-only options before any fact is changed.
+   (let [provenance
+         (authoritative-observation-provenance
+          authority
+          observation
+          basis
+          (cond->
+           {}
+           (some? state)
+           (assoc :state state)
+           (some? metadata)
+           (assoc :metadata metadata)))]
+
+     ;; A supplied witness is shape-validated even if a particular key turns out
+     ;; not to need progression. This prevents malformed policy data from being
+     ;; silently ignored by a successful multi-key observation.
+     (when (some? basis-progression)
+       (require-authoritative-basis-progression!
+        basis-progression)
+       (let [expected-incoming
+             {:authority authority
+              :observation observation
+              :to-basis basis}
+
+             actual-incoming
+             (select-keys
+              basis-progression
+              [:authority :observation :to-basis])]
+         (when-not (= expected-incoming actual-incoming)
+           (knowledge-error
+            :authoritative-progression-mismatch
+            "Authoritative basis progression is not bound to the incoming observation scope and basis."
+            {:role (:role knowledge)
+             :expected expected-incoming
+             :actual actual-incoming
+             :basis-progression basis-progression}))))
+
+     (reduce
+      (fn [current key]
+        (establish-authoritative-observation-fact
+         current
+         key
+         (get value-map key)
+         provenance
+         basis-progression))
       knowledge
-      value-map
-      (authoritative-observation-provenance
-       authority
-       observation
-       basis
-       provenance-options)
-      establishment-options))))
+      (sort-by str (keys value-map))))))
 
 (defn establish-asserted
   "Establish explicitly asserted values.

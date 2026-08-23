@@ -13,8 +13,14 @@
    - receiver knowledge established by required communicated fields;
    - awaiting-role knowledge established by required environment-event fields;
    - edge-sensitive definite-value/knowledge transfer for :await alternatives;
+   - definite-authoritative role knowledge as a separate must-analysis;
+   - authoritative operation outputs and declared authoritative observations as
+     authoritative knowledge sources;
+   - communication, local assertions, and ordinary environment observations do
+     not silently preserve authoritative provenance for overwritten values;
    - basic value producer/use analysis;
-   - explicit identification of authoritative semantic operations in analysis.
+   - explicit identification of authoritative semantic operations and
+     authoritative-observation contracts in analysis.
 
    Definite protocol-value availability is a small forward must-analysis. A
    value is considered established at a state only when it is available on every
@@ -27,9 +33,15 @@
    A second must-analysis tracks role-local knowledge. Local/authoritative outputs
    become known to their owner. Required communicated fields must already be
    known by the sender and become known by the receiver. Required environment
-   fields become known only to the role awaiting that event. This is a static
-   role-local knowledge check; it does not yet prove provenance quality,
-   authentication, authorization, or optional-field sender knowledge.
+   fields become known only to the role awaiting that event. A third must-analysis
+   tracks the smaller set of facts that are definitely authoritative on every
+   incoming path. Trusted authoritative operation outputs and required fields of
+   declared authoritative observations establish that classification. Ordinary
+   local/environment production does not, and communication establishes receiver
+   knowledge as communicated rather than laundering sender authority across the
+   wire. This remains a static source/flow classification: it does not prove the
+   authenticity of a named authority, observation freshness, basis progression,
+   authorization, or optional-field sender knowledge.
 
    Entry assumptions may be supplied in two forms:
 
@@ -52,7 +64,8 @@
    This namespace does NOT yet claim to verify:
 
    - projection/refinement correctness;
-   - provenance quality beyond static role/key flow;
+   - authenticity or freshness of declared authoritative provenance;
+   - authoritative-basis ordering/progression;
    - authentication, authorization, or correctness of authoritative realization;
    - optional communicated fields are known by the sender when actually sent;
    - optional environment fields as definite knowledge;
@@ -72,7 +85,7 @@
 ;; -----------------------------------------------------------------------------
 
 (def verification-version
-  5)
+  6)
 
 (def verification-type
   :gesso.choreo/verification)
@@ -334,6 +347,13 @@
         state
         event))
       #{}))
+
+(defn- await-event-authoritative-observation
+  [state event]
+  (:authoritative-observation
+   (await-event-contract
+    state
+    event)))
 
 (defn- await-events-for-target
   [state target]
@@ -930,6 +950,287 @@
 
           (recur next-in))))))
 
+;; -----------------------------------------------------------------------------
+;; Role-local definite authoritative knowledge
+;; -----------------------------------------------------------------------------
+
+(defn- authoritative-observation-events
+  [state]
+  (when (await-state? state)
+    (into {}
+          (keep
+           (fn [event]
+             (when-let [observation
+                        (await-event-authoritative-observation
+                         state
+                         event)]
+               [event observation])))
+          (keys (:events state)))))
+
+(defn- authoritative-observations-by-state
+  [states state-ids]
+  (into {}
+        (keep
+         (fn [state-id]
+           (let [observations
+                 (authoritative-observation-events
+                  (get states state-id))]
+             (when (seq observations)
+               [state-id observations]))))
+        state-ids))
+
+(defn- update-role-authoritative
+  [knowledge role kill-keys establish-keys]
+  (update knowledge
+          role
+          (fn [known]
+            (-> (or known #{})
+                (set/difference kill-keys)
+                (set/union establish-keys)))))
+
+(defn- transfer-authoritative-await-event
+  [state event incoming]
+  (let [role
+        (choreo/state-owner state)
+
+        required
+        (await-event-required state event)
+
+        optional
+        (await-event-optional state event)
+
+        observation
+        (await-event-authoritative-observation
+         state
+         event)]
+    (if observation
+      ;; Required fields are present on every occurrence and are established by
+      ;; the trusted authoritative observation. Optional fields are not newly
+      ;; definite because they may be absent; an already-authoritative optional
+      ;; field stays authoritative whether it is omitted or re-observed.
+      (update-role-authoritative
+       incoming
+       role
+       #{}
+       required)
+
+      ;; Ordinary environment data is asserted by the runtime. Every declared
+      ;; field may overwrite a previously authoritative current value: required
+      ;; fields certainly occur and optional fields may occur. Therefore neither
+      ;; can remain definitely authoritative after this event merely from the
+      ;; incoming classification.
+      (update-role-authoritative
+       incoming
+       role
+       (set/union required optional)
+       #{}))))
+
+(defn- transfer-authoritative-to-target
+  [roles universe-by-role state target incoming]
+  (cond
+    (await-state? state)
+    (let [events
+          (vec
+           (await-events-for-target
+            state
+            target))]
+      (if (seq events)
+        (intersect-role-knowledge
+         roles
+         (map
+          #(transfer-authoritative-await-event
+            state
+            %
+            incoming)
+          events)
+         universe-by-role)
+        incoming))
+
+    (choreo/local-state? state)
+    ;; Local outputs are asserted. Because static analysis does not know whether
+    ;; a replacement is value-equal to the prior authoritative value, an output
+    ;; key cannot remain definitely authoritative.
+    (update-role-authoritative
+     incoming
+     (choreo/state-owner state)
+     (choreo/local-outputs state)
+     #{})
+
+    (choreo/authoritative-state? state)
+    ;; On successful completion every declared output has authoritative
+    ;; provenance.
+    (update-role-authoritative
+     incoming
+     (choreo/state-owner state)
+     #{}
+     (choreo/authoritative-outputs state))
+
+    (choreo/communication-state? state)
+    ;; Receipt establishes :communicated provenance. Required fields are always
+    ;; received and optional fields may be received, so either class may replace
+    ;; a previously authoritative receiver value. Sender provenance is not
+    ;; transferred across the participant boundary.
+    (update-role-authoritative
+     incoming
+     (:to state)
+     (set/union
+      (choreo/communication-required state)
+      (choreo/communication-optional state))
+     #{})
+
+    :else
+    incoming))
+
+(defn- predecessor-authoritative-contribution
+  [states
+   predecessor-id
+   target-id
+   in-authoritative
+   roles
+   universe-by-role]
+  (transfer-authoritative-to-target
+   roles
+   universe-by-role
+   (get states predecessor-id)
+   target-id
+   (get in-authoritative
+        predecessor-id
+        universe-by-role)))
+
+(defn- incoming-authoritative-for-state
+  [states
+   state-id
+   initial
+   roles
+   entry-by-role
+   predecessors
+   in-authoritative
+   universe-by-role]
+  (let [predecessor-knowledge
+        (map
+         #(predecessor-authoritative-contribution
+           states
+           %
+           state-id
+           in-authoritative
+           roles
+           universe-by-role)
+         (get predecessors state-id #{}))
+
+        incoming-from-predecessors
+        (intersect-role-knowledge
+         roles
+         predecessor-knowledge
+         universe-by-role)]
+    (if (= state-id initial)
+      ;; A back-edge cannot establish authority before the first execution. No
+      ;; current verifier entry option claims authoritative provenance, so the
+      ;; initial authoritative set is empty for every role.
+      (into {}
+            (map
+             (fn [role]
+               [role
+                (set/intersection
+                 (get entry-by-role role #{})
+                 (get incoming-from-predecessors role #{}))]))
+            roles)
+      incoming-from-predecessors)))
+
+(defn- authoritative-after-state
+  [roles state incoming universe-by-role]
+  (let [targets
+        (choreo/successors state)]
+    (if (seq targets)
+      (intersect-role-knowledge
+       roles
+       (map
+        #(transfer-authoritative-to-target
+          roles
+          universe-by-role
+          state
+          %
+          incoming)
+        targets)
+       universe-by-role)
+      incoming)))
+
+(defn- definite-authoritative-knowledge-analysis
+  [states
+   initial
+   reachable
+   predecessors
+   roles
+   entry-value-keys
+   entry-knowledge]
+  (let [all-protocol-values
+        (set/union
+         entry-value-keys
+         (reduce
+          set/union
+          #{}
+          (vals entry-knowledge))
+         (produced-value-keys
+          states
+          reachable))
+
+        universe-by-role
+        (zipmap
+         roles
+         (repeat all-protocol-values))
+
+        entry-by-role
+        (empty-role-knowledge roles)
+
+        initial-in
+        (into {}
+              (map
+               (fn [state-id]
+                 [state-id
+                  (if (= state-id initial)
+                    entry-by-role
+                    universe-by-role)]))
+              reachable)]
+
+    (loop [in-authoritative initial-in]
+      (let [next-in
+            (into {}
+                  (map
+                   (fn [state-id]
+                     [state-id
+                      (incoming-authoritative-for-state
+                       states
+                       state-id
+                       initial
+                       roles
+                       entry-by-role
+                       predecessors
+                       in-authoritative
+                       universe-by-role)]))
+                  reachable)]
+        (if (= in-authoritative next-in)
+          {:entry
+           entry-by-role
+
+           :universe
+           universe-by-role
+
+           :in
+           next-in
+
+           :out
+           (into {}
+                 (map
+                  (fn [[state-id incoming]]
+                    [state-id
+                     (authoritative-after-state
+                      roles
+                      (get states state-id)
+                      incoming
+                      universe-by-role)]))
+                 next-in)}
+
+          (recur next-in))))))
+
 (defn- definite-knowledge-errors
   [states reachable global-in role-in]
   (vec
@@ -1147,6 +1448,16 @@
           entry-value-keys
           entry-knowledge)
 
+         authoritative-knowledge-analysis
+         (definite-authoritative-knowledge-analysis
+          states
+          initial
+          reachable
+          predecessors
+          roles
+          entry-value-keys
+          entry-knowledge)
+
          graph-errors
          (concat
           (missing-terminal-errors
@@ -1330,6 +1641,17 @@
        :definitely-known-after-state
        (:out knowledge-analysis)
 
+       :definitely-authoritatively-known-before-state
+       (:in authoritative-knowledge-analysis)
+
+       :definitely-authoritatively-known-after-state
+       (:out authoritative-knowledge-analysis)
+
+       :authoritative-observations-by-state
+       (authoritative-observations-by-state
+        states
+        reachable)
+
        :knowledge-producers-by-role
        (knowledge-producers-by-role
         states
@@ -1398,38 +1720,78 @@
                            (keys (:events state)))]))))
              reachable)}})))
 
-(defn verification?
-  "True when x is a verifier result emitted by this verifier version."
+(defn- normalized-options?
+  [value]
+  (and
+   (map? value)
+   (try
+     (= value
+        (normalize-options value))
+     (catch #?(:clj clojure.lang.ExceptionInfo
+               :cljs cljs.core.ExceptionInfo) _
+       false))))
+
+(defn- verification-artifact-tag?
   [x]
-  (and (map? x)
-       (= verification-type
-          (:gesso.choreo/type x))
-       (= verification-version
-          (:gesso.choreo/version x))
-       (boolean?
-        (:valid? x))
-       (vector?
-        (:errors x))
-       (vector?
-        (:warnings x))
-       (map?
-        (:analysis x))))
+  (and
+   (map? x)
+   (contains? #{verification-type
+                verified-type}
+              (:gesso.choreo/type x))))
+
+(defn verification?
+  "True when x has the internally consistent shape of a verification result
+   emitted by this verifier version.
+
+   In addition to the public type/version tag, a verification artifact must bind
+   a normalized choreography and normalized verifier options, and :valid? must
+   agree with whether the result contains errors. This predicate deliberately
+   does not claim cryptographic provenance: it checks artifact consistency, not
+   who produced the value."
+  [x]
+  (and
+   (map? x)
+   (= verification-type
+      (:gesso.choreo/type x))
+   (= verification-version
+      (:gesso.choreo/version x))
+   (boolean?
+    (:valid? x))
+   (choreo/choreography?
+    (:choreography x))
+   (normalized-options?
+    (:options x))
+   (vector?
+    (:errors x))
+   (vector?
+    (:warnings x))
+   (map?
+    (:analysis x))
+   (= (:valid? x)
+      (empty? (:errors x)))))
 
 (defn verified?
-  "True when x is a successful verified wrapper."
+  "True when x is a successful verified wrapper bound to the exact choreography
+   carried by its nested verification result.
+
+   The equality check is intentional: a valid analysis for choreography B may
+   never be paired with choreography A merely because both values are otherwise
+   individually well formed."
   [x]
-  (and (map? x)
-       (= verified-type
-          (:gesso.choreo/type x))
-       (= verification-version
-          (:gesso.choreo/version x))
-       (choreo/choreography?
-        (:choreography x))
-       (verification?
-        (:verification x))
-       (true?
-        (get-in x
-                [:verification :valid?]))))
+  (let [verification
+        (:verification x)]
+    (and
+     (map? x)
+     (= verified-type
+        (:gesso.choreo/type x))
+     (= verification-version
+        (:gesso.choreo/version x))
+     (choreo/choreography?
+      (:choreography x))
+     (verification? verification)
+     (true? (:valid? verification))
+     (= (:choreography x)
+        (:choreography verification)))))
 
 (defn verify!
   "Verify choreography or throw ExceptionInfo containing the complete result."
@@ -1490,12 +1852,17 @@
         "Cannot use an invalid Gesso choreography verification result."
         x))
 
+     (verification-artifact-tag? x)
+     (fail!
+      :invalid-verification-artifact
+      "Tagged Gesso Choreo verification artifact is malformed or internally inconsistent."
+      {:value x})
+
      :else
      (verify! x)))
 
   ([x options]
-   (when (or (verified? x)
-             (verification? x))
+   (when (verification-artifact-tag? x)
      (fail!
       :options-with-verification-artifact
       "Verifier options cannot be reapplied to an existing verification artifact."
@@ -1551,3 +1918,4 @@
 
      :states-by-op
      (:states-by-op analysis)}))
+

@@ -834,9 +834,6 @@
          :gesso.choreo/version
          1
 
-         :name
-         :example/runtime-locators
-
          :role
          :browser
 
@@ -1921,7 +1918,7 @@
            :outcome :gesso.choreo/complete}}}]
 
     (is
-     (= :ambiguous-message-key
+     (= :invalid-plan
         (error-kind
          #(machine/start
            plan))))))
@@ -1956,7 +1953,7 @@
            :outcome :gesso.choreo/complete}}}]
 
     (is
-     (= :optional-correlation-key
+     (= :invalid-plan
         (error-kind
          #(machine/start
            plan))))))
@@ -4034,7 +4031,7 @@
              :outcome :gesso.choreo/complete}}}]
 
       (is
-       (= :unknown-await-event-contract
+       (= :invalid-plan
           (error-kind
            #(machine/start
              plan))))))
@@ -4067,7 +4064,7 @@
              :outcome :gesso.choreo/complete}}}]
 
       (is
-       (= :ambiguous-event-data-key
+       (= :invalid-plan
           (error-kind
            #(machine/start
              plan))))))
@@ -4099,7 +4096,7 @@
              :outcome :gesso.choreo/complete}}}]
 
       (is
-       (= :invalid-open-data
+       (= :invalid-plan
           (error-kind
            #(machine/start
              plan)))))))
@@ -4292,7 +4289,7 @@
 (deftest machine-defensively-validates-authoritative-observation-contracts
   (testing "descriptor must be a map"
     (is
-     (= :invalid-authoritative-observation-contract
+     (= :invalid-plan
         (error-kind
          #(machine/start
            (raw-authoritative-observation-await-plan
@@ -4301,7 +4298,7 @@
 
   (testing "descriptor requires logical authority"
     (is
-     (= :invalid-authoritative-observation-contract
+     (= :invalid-plan
         (error-kind
          #(machine/start
            (raw-authoritative-observation-await-plan
@@ -4312,7 +4309,7 @@
 
   (testing "descriptor requires observation identity"
     (is
-     (= :invalid-authoritative-observation-contract
+     (= :invalid-plan
         (error-kind
          #(machine/start
            (raw-authoritative-observation-await-plan
@@ -4323,7 +4320,7 @@
 
   (testing "descriptor requires basis key"
     (is
-     (= :invalid-authoritative-observation-contract
+     (= :invalid-plan
         (error-kind
          #(machine/start
            (raw-authoritative-observation-await-plan
@@ -4334,7 +4331,7 @@
 
   (testing "descriptor is closed"
     (is
-     (= :invalid-authoritative-observation-contract
+     (= :invalid-plan
         (error-kind
          #(machine/start
            (raw-authoritative-observation-await-plan
@@ -4347,7 +4344,7 @@
 
   (testing "descriptor fields must be keywords"
     (is
-     (= :invalid-authoritative-observation-contract
+     (= :invalid-plan
         (error-kind
          #(machine/start
            (raw-authoritative-observation-await-plan
@@ -4359,10 +4356,452 @@
 
   (testing "basis key must be required semantic event data"
     (is
-     (= :invalid-authoritative-observation-contract
+     (= :invalid-plan
         (error-kind
          #(machine/start
            (raw-authoritative-observation-await-plan
             {:required #{:request-status}
              :authoritative-observation
              authoritative-reread-observation})))))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative basis progression through environment rereads
+;; -----------------------------------------------------------------------------
+
+(defn- authoritative-reread-pair
+  []
+  (choreo/->choreography
+   {:initial :observe-1
+    :states
+    {:observe-1
+     (choreo/await
+      :browser
+      {:request/reread-complete :observe-2}
+      {:event-contracts
+       {:request/reread-complete
+        {:required #{:request-status :observed-basis}
+         :open-data? true
+         :authoritative-observation
+         authoritative-reread-observation}}})
+
+     :observe-2
+     (choreo/await
+      :browser
+      {:request/reread-complete :done}
+      {:event-contracts
+       {:request/reread-complete
+        {:required #{:request-status :observed-basis}
+         :open-data? true
+         :authoritative-observation
+         authoritative-reread-observation}}})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- machine-basis-progression
+  ([from-basis to-basis relation]
+   (machine-basis-progression
+    :request/model
+    :request/current-projection
+    from-basis
+    to-basis
+    relation))
+  ([authority observation from-basis to-basis relation]
+   {:kind :authoritative-basis-progression
+    :authority authority
+    :observation observation
+    :from-basis from-basis
+    :to-basis to-basis
+    :relation relation}))
+
+(defn- authoritative-reread-event
+  ([basis status]
+   (authoritative-reread-event basis status nil))
+  ([basis status progression]
+   (cond->
+    (machine/environment-event
+     :browser
+     :request/reread-complete
+     {:request-status status
+      :observed-basis basis
+      :host-note :nonsemantic})
+     (some? progression)
+     (assoc :authoritative-basis-progression progression))))
+
+(defn- attempt
+  [f]
+  (try
+    {:value (f)}
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) e
+      {:error-kind (:error/kind (ex-data e))
+       :error-data (ex-data e)})))
+
+(deftest distinct-authoritative-reread-basis-requires-progression-at-machine-boundary
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        waiting (start-role (authoritative-reread-pair) :browser)
+        at-41 (machine/resume-environment
+               waiting
+               (authoritative-reread-event basis-41 :pending))
+        later-without-proof
+        (authoritative-reread-event basis-42 :approved)]
+    (is (machine/waiting-environment? at-41))
+    (is (= basis-41
+           (:basis
+            (first
+             (machine/execution-provenance
+              at-41
+              :request-status)))))
+    (is (false?
+         (machine/accepts-environment-event?
+          at-41
+          later-without-proof)))
+    (is (false?
+         (machine/accepts?
+          at-41
+          later-without-proof)))
+    (is (= :authoritative-progression-required
+           (error-kind
+            #(machine/resume-environment
+              at-41
+              later-without-proof))))))
+
+(deftest explicit-advancing-basis-progression-allows-runtime-reread
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        waiting (start-role (authoritative-reread-pair) :browser)
+        at-41 (machine/resume-environment
+               waiting
+               (authoritative-reread-event basis-41 :pending))
+        progression
+        (machine-basis-progression
+         basis-41
+         basis-42
+         :advances)
+        event
+        (authoritative-reread-event
+         basis-42
+         :approved
+         progression)
+        {:keys [value error-kind]}
+        (attempt
+         #(machine/resume-environment
+           at-41
+           event))]
+    (is (machine/accepts-environment-event?
+         at-41
+         event))
+    (is (machine/accepts?
+         at-41
+         event))
+    (is (nil? error-kind))
+    (when value
+      (is (machine/completed? value))
+      (is (= {:request-status :approved
+              :observed-basis basis-42}
+             (machine/execution-values value)))
+      (is (= basis-42
+             (:basis
+              (first
+               (machine/execution-provenance
+                value
+                :request-status)))))
+      (is (= progression
+             (:basis-progression
+              (last
+               (:history
+                (machine/execution-knowledge value))))))
+      (is (not
+           (contains?
+            (machine/execution-values value)
+            :authoritative-basis-progression)))
+      (is (not
+           (contains?
+            (machine/execution-values value)
+            :host-note)))
+      (is (= :environment
+             (:kind
+              (second
+               (machine/execution-history value)))))
+      (is (= {:request-status :approved
+              :observed-basis basis-42}
+             (:data
+              (second
+               (machine/execution-history value))))))))
+
+(deftest stale-or-incomparable-reread-cannot-advance-runtime-knowledge
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        waiting (start-role (authoritative-reread-pair) :browser)
+        at-42 (machine/resume-environment
+               waiting
+               (authoritative-reread-event basis-42 :approved))]
+    (doseq [relation [:precedes :incomparable]]
+      (let [event
+            (authoritative-reread-event
+             basis-41
+             :pending
+             (machine-basis-progression
+              basis-42
+              basis-41
+              relation))]
+        (is (false?
+             (machine/accepts-environment-event?
+              at-42
+              event)))
+        (is (= :authoritative-basis-not-advancing
+               (error-kind
+                #(machine/resume-environment
+                  at-42
+                  event))))))))
+
+(deftest progression-decision-must-match-runtime-observation-scope-and-bases
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        waiting (start-role (authoritative-reread-pair) :browser)
+        at-41 (machine/resume-environment
+               waiting
+               (authoritative-reread-event basis-41 :pending))
+        mismatches
+        [(machine-basis-progression
+          :other/model
+          :request/current-projection
+          basis-41
+          basis-42
+          :advances)
+         (machine-basis-progression
+          :request/model
+          :request/other-projection
+          basis-41
+          basis-42
+          :advances)
+         (machine-basis-progression
+          :request/model
+          :request/current-projection
+          {:revision 40}
+          basis-42
+          :advances)
+         (machine-basis-progression
+          :request/model
+          :request/current-projection
+          basis-41
+          {:revision 99}
+          :advances)]]
+    (doseq [progression mismatches]
+      (let [event
+            (authoritative-reread-event
+             basis-42
+             :approved
+             progression)]
+        (is (false?
+             (machine/accepts-environment-event?
+              at-41
+              event)))
+        (is (= :authoritative-progression-mismatch
+               (error-kind
+                #(machine/resume-environment
+                  at-41
+                  event))))))))
+
+(deftest same-value-at-a-distinct-authoritative-basis-still-requires-progression
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        waiting (start-role (authoritative-reread-pair) :browser)
+        at-41 (machine/resume-environment
+               waiting
+               (authoritative-reread-event basis-41 :approved))
+        event (authoritative-reread-event basis-42 :approved)]
+    (is (false?
+         (machine/accepts-environment-event?
+          at-41
+          event)))
+    (is (= :authoritative-progression-required
+           (error-kind
+            #(machine/resume-environment
+              at-41
+              event))))))
+
+(deftest malformed-progression-is-not-advertised-as-an-acceptable-reread
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        waiting (start-role (authoritative-reread-pair) :browser)
+        at-41 (machine/resume-environment
+               waiting
+               (authoritative-reread-event basis-41 :pending))
+        malformed
+        {:kind :authoritative-basis-progression
+         :authority :request/model
+         :observation :request/current-projection
+         :from-basis basis-41
+         :to-basis basis-42
+         :relation :advances
+         :trust-me true}
+        event
+        (authoritative-reread-event
+         basis-42
+         :approved
+         malformed)]
+    (is (false?
+         (machine/accepts-environment-event?
+          at-41
+          event)))
+    (is (= :invalid-authoritative-progression
+           (error-kind
+            #(machine/resume-environment
+              at-41
+              event))))))
+
+(deftest ordinary-environment-event-cannot-smuggle-authoritative-progression
+  (let [choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:ui/changed :done}
+            {:event-contracts
+             {:ui/changed
+              {:required #{:selection}
+               :open-data? true}}})
+           :done
+           (choreo/return :done)}})
+        waiting (start-role choreography :browser)
+        progression
+        (machine-basis-progression
+         {:revision 1}
+         {:revision 2}
+         :advances)
+        event
+        (assoc
+         (machine/environment-event
+          :browser
+          :ui/changed
+          {:selection :a})
+         :authoritative-basis-progression
+         progression)]
+    (is (false?
+         (machine/accepts-environment-event?
+          waiting
+          event)))
+    (is (= :unexpected-authoritative-progression
+           (error-kind
+            #(machine/resume-environment
+              waiting
+              event))))))
+
+;; -----------------------------------------------------------------------------
+;; ExecutablePlan integrity boundary
+;; -----------------------------------------------------------------------------
+
+(defn- integrity-machine-plan
+  []
+  (project/project
+   (choreo/->choreography
+    {:name :example/machine-plan-integrity
+     :initial :prepare
+     :states
+     {:prepare
+      (choreo/local
+       :browser
+       :prepare
+       :done)
+
+      :done
+      (choreo/return :done)}})
+   :browser))
+
+(defn- machine-plan-lookalikes
+  [plan]
+  (let [initial
+        (:initial plan)]
+    {:unknown-top-level-key
+     (assoc plan
+            :diagnostic-only true)
+
+     :negative-runtime-locator
+     {:gesso.choreo/type project/executable-plan-type
+      :gesso.choreo/version project/executable-plan-version
+      :role :browser
+      :initial -1
+      :states
+      {-1 {:op :return
+           :outcome :gesso.choreo/complete}}}
+
+     :non-integer-runtime-locator
+     {:gesso.choreo/type project/executable-plan-type
+      :gesso.choreo/version project/executable-plan-version
+      :role :browser
+      :initial "start"
+      :states
+      {"start" {:op :return
+                 :outcome :gesso.choreo/complete}}}
+
+     :non-compact-runtime-locators
+     {:gesso.choreo/type project/executable-plan-type
+      :gesso.choreo/version project/executable-plan-version
+      :role :browser
+      :initial 0
+      :states
+      {0 {:op :local
+          :action :prepare
+          :next 2}
+       2 {:op :return
+          :outcome :gesso.choreo/complete}}}
+
+     :unsupported-operation
+     (assoc-in plan
+               [:states initial :op]
+               :not-a-choreo-operation)
+
+     :unknown-successor
+     (assoc-in plan
+               [:states initial :next]
+               999)
+
+     :non-map-state
+     (assoc-in plan
+               [:states initial]
+               :not-a-state)
+
+     :unknown-state-key
+     (assoc-in plan
+               [:states initial :adapter/private]
+               true)}))
+
+(deftest machine-executable-plan-boundary-is-the-canonical-project-contract
+  (let [plan
+        (integrity-machine-plan)]
+
+    (testing "machine identity constants cannot drift from the compiler contract"
+      (is (= project/executable-plan-type
+             machine/executable-plan-type))
+      (is (= project/executable-plan-version
+             machine/executable-plan-version)))
+
+    (testing "a canonical projected plan is accepted by both boundaries"
+      (is (project/executable-plan? plan))
+      (is (machine/executable-plan? plan))
+      (is (machine/execution?
+           (machine/start plan))))
+
+    (doseq [[label lookalike]
+            (machine-plan-lookalikes plan)]
+      (testing (str (name label)
+                    " cannot be accepted by a machine-only shadow contract")
+        (is (false?
+             (project/executable-plan? lookalike)))
+        (is (= (project/executable-plan? lookalike)
+               (machine/executable-plan? lookalike)))))))
+
+(deftest machine-start-fails-before-execution-for-every-noncanonical-plan
+  (let [plan
+        (integrity-machine-plan)]
+
+    (doseq [[label lookalike]
+            (machine-plan-lookalikes plan)]
+      (testing (name label)
+        (is (= :invalid-plan
+               (error-kind
+                #(machine/start lookalike))))))))

@@ -1639,3 +1639,573 @@
          :kind
          (realization/history
           queued))))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative observation / reread through independent role realization
+;; -----------------------------------------------------------------------------
+
+(def authoritative-reread-contract
+  {:authority :request/model
+   :observation :request/current-projection
+   :basis-key :observed-basis})
+
+(defn- authoritative-reread-choreography
+  []
+  (choreo/->choreography
+   {:name :example/authoritative-reread
+    :initial :claim
+    :states
+    {:claim
+     (choreo/authoritative
+      :server
+      :request/claim
+      :observe)
+
+     :observe
+     (choreo/await
+      :browser
+      {:request/reread-complete :install}
+      {:event-contracts
+       {:request/reread-complete
+        {:required #{:request-status :observed-basis}
+         :open-data? true
+         :authoritative-observation
+         authoritative-reread-contract}}})
+
+     :install
+     (choreo/local
+      :browser
+      :install-result
+      :done
+      {:requires #{:request-status :observed-basis}})
+
+     :done
+     (choreo/return :done)}}))
+
+(deftest authoritative-reread-realizes-without-participant-message
+  (let [started
+        (realization/start
+         (authoritative-reread-choreography))
+
+        browser-before
+        (realization/execution started :browser)
+
+        server-before
+        (realization/execution started :server)
+
+        browser-await-state
+        (machine/current-state-id browser-before)
+
+        after-authority
+        (realization/complete-authoritative
+         started
+         :server
+         {})
+
+        basis
+        {:revision 42
+         :tx-id "tx-42"}
+
+        after-reread
+        (realization/environment
+         after-authority
+         :browser
+         :request/reread-complete
+         {:request-status :approved
+          :observed-basis basis
+          :host-only "not-semantic"})
+
+        browser-after
+        (realization/execution after-reread :browser)
+
+        reread-history
+        (last
+         (realization/history after-reread))
+
+        completed
+        (realization/complete-local
+         after-reread
+         :browser
+         {})]
+
+    (testing "roles begin as independent projected machines"
+      (is (machine/waiting-environment? browser-before))
+      (is (machine/waiting-authoritative? server-before))
+      (is (= [] (realization/messages started))))
+
+    (testing "foreign authoritative completion does not manufacture a participant message"
+      (is
+       (machine/completed?
+        (realization/execution after-authority :server)))
+      (is
+       (machine/waiting-environment?
+        (realization/execution after-authority :browser)))
+      (is (= [] (realization/messages after-authority))))
+
+    (testing "the declared authoritative reread establishes authoritative browser knowledge"
+      (is (machine/waiting-local? browser-after))
+      (is (= :approved
+             (machine/execution-value
+              browser-after
+              :request-status)))
+      (is (= basis
+             (machine/execution-value
+              browser-after
+              :observed-basis)))
+      (is (= #{:authoritative}
+             (machine/execution-provenance-kinds
+              browser-after
+              :request-status)))
+      (is (= [{:kind :authoritative
+               :authority :request/model
+               :observation :request/current-projection
+               :basis basis
+               :state browser-await-state
+               :metadata {:origin :environment
+                          :event :request/reread-complete}}]
+             (machine/execution-provenance
+              browser-after
+              :request-status))))
+
+    (testing "open adapter data remains outside portable knowledge and deterministic history"
+      (is
+       (false?
+        (machine/has-execution-value?
+         browser-after
+         :host-only)))
+      (is
+       (= {:kind :environment
+           :role :browser
+           :state browser-await-state
+           :event :request/reread-complete
+           :data {:request-status :approved
+                  :observed-basis basis}}
+          reread-history)))
+
+    (testing "the reread is a synchronization path, not a synthetic message"
+      (is (= [] (realization/messages after-reread)))
+      (is (realization/completed? completed))
+      (is (= [] (realization/messages completed))))))
+
+
+;; -----------------------------------------------------------------------------
+;; Authoritative basis progression through independent realization
+;; -----------------------------------------------------------------------------
+
+(def repeated-authoritative-reread-contract
+  {:authority :request/model
+   :observation :request/current-projection
+   :basis-key :observed-basis})
+
+(defn- repeated-authoritative-reread-choreography
+  []
+  (choreo/->choreography
+   {:name :example/repeated-authoritative-reread
+    :initial :observe-first
+    :states
+    {:observe-first
+     (choreo/await
+      :browser
+      {:request/reread-complete :observe-second}
+      {:event-contracts
+       {:request/reread-complete
+        {:required #{:request-status :observed-basis}
+         :open-data? true
+         :authoritative-observation
+         repeated-authoritative-reread-contract}}})
+
+     :observe-second
+     (choreo/await
+      :browser
+      {:request/reread-complete :done}
+      {:event-contracts
+       {:request/reread-complete
+        {:required #{:request-status :observed-basis}
+         :open-data? true
+         :authoritative-observation
+         repeated-authoritative-reread-contract}}})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- basis-progression
+  [from-basis to-basis relation]
+  {:kind :authoritative-basis-progression
+   :authority :request/model
+   :observation :request/current-projection
+   :from-basis from-basis
+   :to-basis to-basis
+   :relation relation})
+
+(defn- invoke-environment-with-options
+  "Invoke the intended five-argument realization/environment contract.
+
+   During the test-first red phase, the current realization namespace has only
+   four arguments. Convert only that expected missing-arity condition into an
+   explicit result so the new behavioral tests fail as assertions instead of
+   aborting with harness errors. Any other unexpected throwable is rethrown."
+  [realization-value role event data options]
+  (let [f realization/environment]
+    #?(:clj
+       (try
+         {:status :ok
+          :value
+          (apply f
+                 [realization-value
+                  role
+                  event
+                  data
+                  options])}
+         (catch Throwable e
+           (let [message (or (.getMessage e) "")]
+             (cond
+               (re-find #"(?i)(cannot call environment with 5 arguments|wrong number of args.*5)"
+                        message)
+               {:status :unsupported-arity}
+
+               (instance? clojure.lang.ExceptionInfo e)
+               {:status :exception
+                :error-kind (:error/kind (ex-data e))
+                :exception e}
+
+               :else
+               (throw e)))))
+
+       :cljs
+       (try
+         {:status :ok
+          :value
+          (apply f
+                 [realization-value
+                  role
+                  event
+                  data
+                  options])}
+         (catch :default e
+           (let [message (or (.-message e) "")]
+             (cond
+               (re-find #"(?i)(invalid arity|wrong number of args)" message)
+               {:status :unsupported-arity}
+
+               (ex-data e)
+               {:status :exception
+                :error-kind (:error/kind (ex-data e))
+                :exception e}
+
+               :else
+               (throw e))))))))
+
+(deftest repeated-authoritative-reread-requires-explicit-basis-progression
+  (let [basis-1
+        {:revision 41
+         :tx-id "tx-41"}
+
+        basis-2
+        {:revision 42
+         :tx-id "tx-42"}
+
+        started
+        (realization/start
+         (repeated-authoritative-reread-choreography))
+
+        after-first
+        (realization/environment
+         started
+         :browser
+         :request/reread-complete
+         {:request-status :pending
+          :observed-basis basis-1})
+
+        browser-after-first
+        (realization/execution after-first :browser)]
+
+    (is (machine/waiting-environment? browser-after-first))
+    (is (= :pending
+           (machine/execution-value
+            browser-after-first
+            :request-status)))
+    (is (= basis-1
+           (machine/execution-value
+            browser-after-first
+            :observed-basis)))
+
+    (testing "arrival order alone cannot advance the authoritative frontier"
+      (is
+       (= :authoritative-progression-required
+          (error-kind
+           #(realization/environment
+             after-first
+             :browser
+             :request/reread-complete
+             {:request-status :approved
+              :observed-basis basis-2}))))
+
+      (is (= :pending
+             (machine/execution-value
+              (realization/execution after-first :browser)
+              :request-status)))
+      (is (= 1
+             (count
+              (realization/history after-first)))))))
+
+(deftest advancing-basis-witness-flows-through-realization-without-becoming-semantic-data
+  (let [basis-1
+        {:revision 41
+         :tx-id "tx-41"}
+
+        basis-2
+        {:revision 42
+         :tx-id "tx-42"}
+
+        witness
+        (basis-progression basis-1 basis-2 :advances)
+
+        started
+        (realization/start
+         (repeated-authoritative-reread-choreography))
+
+        after-first
+        (realization/environment
+         started
+         :browser
+         :request/reread-complete
+         {:request-status :pending
+          :observed-basis basis-1
+          :host-only :first})
+
+        attempt
+        (invoke-environment-with-options
+         after-first
+         :browser
+         :request/reread-complete
+         {:request-status :approved
+          :observed-basis basis-2
+          :host-only :second}
+         {:authoritative-basis-progression witness})]
+
+    (is (= :ok (:status attempt)))
+
+    (when-let [completed (:value attempt)]
+      (let [browser
+            (realization/execution completed :browser)
+
+            history
+            (realization/history completed)
+
+            second-environment
+            (last history)]
+
+        (is (realization/completed? completed))
+        (is (= [] (realization/messages completed)))
+        (is (= :approved
+               (machine/execution-value browser :request-status)))
+        (is (= basis-2
+               (machine/execution-value browser :observed-basis)))
+        (is (= #{:authoritative}
+               (machine/execution-provenance-kinds
+                browser
+                :request-status)))
+
+        (testing "progression evidence is control evidence, not role-local semantic knowledge"
+          (is
+           (false?
+            (machine/has-execution-value?
+             browser
+             :authoritative-basis-progression)))
+          (is
+           (false?
+            (contains?
+             (:data second-environment)
+             :authoritative-basis-progression)))
+          (is
+           (false?
+            (contains?
+             (:data second-environment)
+             :host-only))))
+
+        (is (= {:kind :environment
+                :role :browser
+                :state (:state second-environment)
+                :event :request/reread-complete
+                :data {:request-status :approved
+                       :observed-basis basis-2}}
+               second-environment))))))
+
+(deftest nonadvancing-or-mismatched-progression-witness-does-not-mutate-realization
+  (let [basis-1
+        {:revision 41}
+
+        basis-2
+        {:revision 42}
+
+        started
+        (realization/start
+         (repeated-authoritative-reread-choreography))
+
+        after-first
+        (realization/environment
+         started
+         :browser
+         :request/reread-complete
+         {:request-status :pending
+          :observed-basis basis-1})
+
+        candidates
+        [{:label :precedes
+          :witness
+          (basis-progression basis-1 basis-2 :precedes)}
+
+         {:label :incomparable
+          :witness
+          (basis-progression basis-1 basis-2 :incomparable)}
+
+         {:label :wrong-authority
+          :witness
+          (assoc
+           (basis-progression basis-1 basis-2 :advances)
+           :authority
+           :other/model)}
+
+         {:label :wrong-observation
+          :witness
+          (assoc
+           (basis-progression basis-1 basis-2 :advances)
+           :observation
+           :request/other-projection)}
+
+         {:label :wrong-from-basis
+          :witness
+          (assoc
+           (basis-progression basis-1 basis-2 :advances)
+           :from-basis
+           {:revision 40})}
+
+         {:label :wrong-to-basis
+          :witness
+          (assoc
+           (basis-progression basis-1 basis-2 :advances)
+           :to-basis
+           {:revision 43})}]]
+
+    (doseq [{:keys [label witness]} candidates]
+      (testing (name label)
+        (let [attempt
+              (invoke-environment-with-options
+               after-first
+               :browser
+               :request/reread-complete
+               {:request-status :approved
+                :observed-basis basis-2}
+               {:authoritative-basis-progression witness})]
+
+          (is (= :exception (:status attempt)))
+          (when (= :exception (:status attempt))
+            (is
+             (contains?
+              #{:authoritative-basis-not-advancing
+                :authoritative-progression-mismatch}
+              (:error-kind attempt)))))))
+
+    (testing "all failed attempts leave the prior immutable realization untouched"
+      (is (= :pending
+             (machine/execution-value
+              (realization/execution after-first :browser)
+              :request-status)))
+      (is (= basis-1
+             (machine/execution-value
+              (realization/execution after-first :browser)
+              :observed-basis)))
+      (is (= 1
+             (count
+              (realization/history after-first)))))))
+
+(deftest same-value-at-new-basis-still-needs-progression-through-realization
+  (let [basis-1
+        {:revision 41}
+
+        basis-2
+        {:revision 42}
+
+        started
+        (realization/start
+         (repeated-authoritative-reread-choreography))
+
+        after-first
+        (realization/environment
+         started
+         :browser
+         :request/reread-complete
+         {:request-status :approved
+          :observed-basis basis-1})]
+
+    (is
+     (= :authoritative-progression-required
+        (error-kind
+         #(realization/environment
+           after-first
+           :browser
+           :request/reread-complete
+           {:request-status :approved
+            :observed-basis basis-2}))))
+
+    (let [attempt
+          (invoke-environment-with-options
+           after-first
+           :browser
+           :request/reread-complete
+           {:request-status :approved
+            :observed-basis basis-2}
+           {:authoritative-basis-progression
+            (basis-progression
+             basis-1
+             basis-2
+             :advances)})]
+
+      (is (= :ok (:status attempt)))
+      (when-let [completed (:value attempt)]
+        (is (= basis-2
+               (machine/execution-value
+                (realization/execution completed :browser)
+                :observed-basis)))
+        (is (realization/completed? completed))))))
+
+(deftest realization-environment-progression-options-are-closed
+  (let [basis-1 {:revision 41}
+        basis-2 {:revision 42}
+        witness (basis-progression basis-1 basis-2 :advances)
+        started
+        (realization/start
+         (repeated-authoritative-reread-choreography))
+        after-first
+        (realization/environment
+         started
+         :browser
+         :request/reread-complete
+         {:request-status :pending
+          :observed-basis basis-1})]
+
+    (doseq [options
+            [[:not-a-map]
+             {:authoritative-basis-progression witness
+              :adapter/extra true}]]
+      (let [attempt
+            (invoke-environment-with-options
+             after-first
+             :browser
+             :request/reread-complete
+             {:request-status :approved
+              :observed-basis basis-2}
+             options)]
+        (is (= :exception (:status attempt)))
+        (when (= :exception (:status attempt))
+          (is (= :invalid-environment-options
+                 (:error-kind attempt))))))
+
+    (testing "invalid option shapes do not mutate the prior realization"
+      (is (= :pending
+             (machine/execution-value
+              (realization/execution after-first :browser)
+              :request-status)))
+      (is (= 1
+             (count
+              (realization/history after-first)))))))

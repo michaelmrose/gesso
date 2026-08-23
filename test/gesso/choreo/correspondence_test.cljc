@@ -1001,3 +1001,374 @@
            (get-in data [:result :property])))
     (is (= :weak-realization-boundary-mismatch
            (get-in data [:result :counterexample :kind])))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative-observation correspondence
+;; -----------------------------------------------------------------------------
+
+(defn- authoritative-observation-choreography
+  []
+  (choreo/->choreography
+   {:name :example/authoritative-observation-correspondence
+    :initial :approve
+    :states
+    {:approve
+     (choreo/authoritative
+      :authority
+      :request/approve
+      :observe
+      {:outputs #{:approved?}})
+
+     :observe
+     (choreo/await
+      :browser
+      {:request/observed :show}
+      {:event-contracts
+       {:request/observed
+        {:required #{:approved? :basis}
+         :authoritative-observation
+         {:authority :request-db
+          :observation :request/read
+          :basis-key :basis}}}})
+
+     :show
+     (choreo/local
+      :browser
+      :request/show
+      :done
+      {:requires #{:approved? :basis}})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- authoritative-observation-witness
+  []
+  [{:op :authoritative
+    :role :authority
+    :operation :request/approve
+    :outputs {:approved? true}}
+
+   {:op :environment
+    :role :browser
+    :event :request/observed
+    :data {:approved? true
+           :basis 42}}
+
+   {:op :local
+    :role :browser
+    :action :request/show
+    :outputs {}}])
+
+(def authoritative-observation-semantic-occurrence
+  {:kind :authoritative-observation
+   :state :observe
+   :role :browser
+   :event :request/observed
+   :authority :request-db
+   :observation :request/read
+   :basis-key :basis
+   :basis 42
+   :data {:approved? true
+          :basis 42}})
+
+(deftest lockstep-checker-explicitly-checks-authoritative-observation-correspondence
+  (let [result
+        (correspondence/check-witness
+         (authoritative-observation-choreography)
+         (authoritative-observation-witness)
+         {:require-complete? true})
+
+        observation-obligation
+        (first
+         (filter
+          #(= :authoritative-observation-correspondence
+              (:kind %))
+          (:obligations result)))]
+
+    (is (correspondence/valid? result))
+    (is (true? (:global-completed? result)))
+    (is (true? (:realization-completed? result)))
+
+    (testing "authoritative reread is a checked semantic/runtime correspondence obligation"
+      (is (some? observation-obligation))
+      (is (true? (:valid? observation-obligation)))
+      (is (= 1 (:step-index observation-obligation)))
+      (is (= authoritative-observation-semantic-occurrence
+             (:semantic-occurrence observation-obligation)))
+      (is (= #{:approved? :basis}
+             (:checked-keys observation-obligation)))
+      (is (= 42
+             (:basis observation-obligation))))
+
+    (testing "the reread remains role-local rather than becoming a distributed observable occurrence"
+      (is (= [{:kind :authoritative
+               :role :authority
+               :operation :request/approve
+               :outputs {:approved? true}}]
+             (:semantic-trace result)))
+      (is (= (:semantic-trace result)
+             (:realization-trace result))))))
+
+(deftest weak-checker-also-checks-authoritative-observation-when-replaying-hidden-environment-work
+  (let [result
+        (correspondence/check-weak-witness
+         (authoritative-observation-choreography)
+         (authoritative-observation-witness)
+         {:require-complete? true})
+
+        observation-obligation
+        (first
+         (filter
+          #(= :authoritative-observation-correspondence
+              (:kind %))
+          (:obligations result)))]
+
+    (is (correspondence/valid? result))
+    (is (empty? (:pending-unobservable result)))
+    (is (empty? (:pending-observable result)))
+    (is (true? (:global-completed? result)))
+    (is (true? (:realization-completed? result)))
+
+    (testing "weak replay preserves the same authoritative-observation evidence"
+      (is (some? observation-obligation))
+      (is (true? (:valid? observation-obligation)))
+      (is (= authoritative-observation-semantic-occurrence
+             (:semantic-occurrence observation-obligation)))
+      (is (= #{:approved? :basis}
+             (:checked-keys observation-obligation)))
+      (is (= 42
+             (:basis observation-obligation))))
+
+    (testing "authoritative observation remains absent from the distributed trace"
+      (is (= [{:kind :authoritative
+               :role :authority
+               :operation :request/approve
+               :outputs {:approved? true}}]
+             (:semantic-trace result)))
+      (is (= (:semantic-trace result)
+             (:realization-trace result))))))
+
+;; -----------------------------------------------------------------------------
+;; Successive authoritative-observation basis progression
+;; -----------------------------------------------------------------------------
+
+(defn- successive-authoritative-observation-choreography
+  []
+  (choreo/->choreography
+   {:name :example/successive-authoritative-observation-correspondence
+    :initial :observe-1
+    :states
+    {:observe-1
+     (choreo/await
+      :browser
+      {:request/observed :observe-2}
+      {:event-contracts
+       {:request/observed
+        {:required #{:request-status :basis}
+         :open-data? true
+         :authoritative-observation
+         {:authority :request-db
+          :observation :request/read
+          :basis-key :basis}}}})
+
+     :observe-2
+     (choreo/await
+      :browser
+      {:request/observed :done}
+      {:event-contracts
+       {:request/observed
+        {:required #{:request-status :basis}
+         :open-data? true
+         :authoritative-observation
+         {:authority :request-db
+          :observation :request/read
+          :basis-key :basis}}}})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- correspondence-basis-progression
+  ([from-basis to-basis relation]
+   (correspondence-basis-progression
+    :request-db
+    :request/read
+    from-basis
+    to-basis
+    relation))
+  ([authority observation from-basis to-basis relation]
+   {:kind :authoritative-basis-progression
+    :authority authority
+    :observation observation
+    :from-basis from-basis
+    :to-basis to-basis
+    :relation relation}))
+
+(defn- successive-observation-witness
+  ([second-status second-basis]
+   (successive-observation-witness
+    second-status
+    second-basis
+    nil))
+  ([second-status second-basis progression]
+   (cond->
+    [{:op :environment
+      :role :browser
+      :event :request/observed
+      :data {:request-status :pending
+             :basis {:revision 41}
+             :host-note :first-nonsemantic}}
+
+     {:op :environment
+      :role :browser
+      :event :request/observed
+      :data {:request-status second-status
+             :basis second-basis
+             :host-note :second-nonsemantic}}]
+     (some? progression)
+     (assoc-in [1 :authoritative-basis-progression]
+               progression))))
+
+(defn- authoritative-observation-obligations
+  [result]
+  (->> (:obligations result)
+       (filter #(= :authoritative-observation-correspondence
+                   (:kind %)))
+       vec))
+
+(defn- counterexample-error-kind
+  [result]
+  (get-in
+   (correspondence/first-counterexample result)
+   [:realization-error :data :error/kind]))
+
+(deftest lockstep-correspondence-requires-explicit-basis-progression-for-successive-rereads
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        progression
+        (correspondence-basis-progression
+         basis-41
+         basis-42
+         :advances)
+        without-proof
+        (correspondence/check-witness
+         (successive-authoritative-observation-choreography)
+         (successive-observation-witness :approved basis-42)
+         {:require-complete? true})
+        with-proof
+        (correspondence/check-witness
+         (successive-authoritative-observation-choreography)
+         (successive-observation-witness
+          :approved
+          basis-42
+          progression)
+         {:require-complete? true})
+        obligations
+        (authoritative-observation-obligations with-proof)]
+
+    (testing "later witness position is not itself evidence that an authoritative basis advanced"
+      (is (false? (correspondence/valid? without-proof)))
+      (is (= :realization-rejected-semantic-step
+             (:kind
+              (correspondence/first-counterexample without-proof))))
+      (is (= :authoritative-progression-required
+             (counterexample-error-kind without-proof))))
+
+    (testing "an exact advancing witness makes the same global/projected execution correspond"
+      (is (correspondence/valid? with-proof))
+      (is (true? (:global-completed? with-proof)))
+      (is (true? (:realization-completed? with-proof)))
+      (is (empty? (:semantic-trace with-proof)))
+      (is (empty? (:realization-trace with-proof))))
+
+    (testing "correspondence evidence records which explicit basis progression justified the second reread"
+      (is (= 2 (count obligations)))
+      (is (= [basis-41 basis-42]
+             (mapv :basis obligations)))
+      (is (nil? (:basis-progression (first obligations))))
+      (is (= progression
+             (:basis-progression (second obligations)))))))
+
+(deftest weak-correspondence-preserves-explicit-basis-progression-for-successive-rereads
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        progression
+        (correspondence-basis-progression
+         basis-41
+         basis-42
+         :advances)
+        without-proof
+        (correspondence/check-weak-witness
+         (successive-authoritative-observation-choreography)
+         (successive-observation-witness :approved basis-42)
+         {:require-complete? true})
+        with-proof
+        (correspondence/check-weak-witness
+         (successive-authoritative-observation-choreography)
+         (successive-observation-witness
+          :approved
+          basis-42
+          progression)
+         {:require-complete? true})
+        obligations
+        (authoritative-observation-obligations with-proof)]
+
+    (is (false? (correspondence/valid? without-proof)))
+    (is (= :authoritative-progression-required
+           (counterexample-error-kind without-proof)))
+
+    (is (correspondence/valid? with-proof))
+    (is (empty? (:pending-unobservable with-proof)))
+    (is (empty? (:pending-observable with-proof)))
+    (is (true? (:global-completed? with-proof)))
+    (is (true? (:realization-completed? with-proof)))
+    (is (= 2 (count obligations)))
+    (is (= progression
+           (:basis-progression (second obligations))))))
+
+(deftest correspondence-distinguishes-nonadvancing-progression-from-missing-progression
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}]
+    (doseq [checker [correspondence/check-witness
+                     correspondence/check-weak-witness]
+            relation [:precedes :incomparable]]
+      (let [result
+            (checker
+             (successive-authoritative-observation-choreography)
+             (successive-observation-witness
+              :pending
+              basis-42
+              (correspondence-basis-progression
+               basis-41
+               basis-42
+               relation))
+             {:require-complete? true})]
+        (is (false? (correspondence/valid? result)))
+        (is (= :authoritative-basis-not-advancing
+               (counterexample-error-kind result)))))))
+
+(deftest correspondence-distinguishes-mismatched-progression-from-missing-progression
+  (let [basis-41 {:revision 41}
+        basis-42 {:revision 42}
+        mismatches
+        [(correspondence-basis-progression
+          :other-db :request/read basis-41 basis-42 :advances)
+         (correspondence-basis-progression
+          :request-db :request/other-read basis-41 basis-42 :advances)
+         (correspondence-basis-progression
+          :request-db :request/read {:revision 40} basis-42 :advances)
+         (correspondence-basis-progression
+          :request-db :request/read basis-41 {:revision 99} :advances)]]
+    (doseq [checker [correspondence/check-witness
+                     correspondence/check-weak-witness]
+            progression mismatches]
+      (let [result
+            (checker
+             (successive-authoritative-observation-choreography)
+             (successive-observation-witness
+              :approved
+              basis-42
+              progression)
+             {:require-complete? true})]
+        (is (false? (correspondence/valid? result)))
+        (is (= :authoritative-progression-mismatch
+               (counterexample-error-kind result)))))))

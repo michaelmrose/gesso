@@ -961,6 +961,36 @@
 ;; Environment scheduling
 ;; -----------------------------------------------------------------------------
 
+(def ^:private environment-option-keys
+  #{:authoritative-basis-progression})
+
+(defn- require-environment-options!
+  [options]
+  (let [options'
+        (if (nil? options)
+          {}
+          (if (map? options)
+            options
+            (realization-error
+             :invalid-environment-options
+             "Realization environment options must be a map."
+             {:options options})))
+
+        unknown
+        (set/difference
+         (set (keys options'))
+         environment-option-keys)]
+
+    (when (seq unknown)
+      (realization-error
+       :invalid-environment-options
+       "Realization environment options contain unsupported keys."
+       {:options options'
+        :unknown-options unknown
+        :allowed-options environment-option-keys}))
+
+    options'))
+
 (defn- realization-semantic-environment-data
   [execution event data]
   (let [awaiting
@@ -988,6 +1018,13 @@
    unchanged, then records only the event's declared semantic data in its own
    deterministic history.
 
+   The optional five-argument form accepts one closed options map. Its only
+   supported key is :authoritative-basis-progression, which is attached to the
+   machine envelope as control evidence. It is deliberately not merged into
+   event :data and therefore cannot become semantic knowledge or deterministic
+   realization history. The machine remains responsible for validating whether
+   that witness applies to the active authoritative-observation boundary.
+
    Undeclared fields admitted by :open-data? are adapter/test-harness data. They
    may influence the surrounding host fixture, but they do not become portable
    Choreo knowledge or deterministic realization history. A browser adapter must
@@ -998,14 +1035,26 @@
     realization
     role
     event
+    nil
     nil))
   ([realization role event data]
+   (environment
+    realization
+    role
+    event
+    data
+    nil))
+  ([realization role event data options]
    (let [realization'
          (require-realization!
           realization)
 
          role'
          (require-role! role)
+
+         options'
+         (require-environment-options!
+          options)
 
          current
          (require-role-execution!
@@ -1017,10 +1066,17 @@
           current)
 
          envelope
-         (machine/environment-event
-          role'
-          event
-          data)
+         (cond->
+          (machine/environment-event
+           role'
+           event
+           data)
+          (contains? options'
+                     :authoritative-basis-progression)
+          (assoc
+           :authoritative-basis-progression
+           (:authoritative-basis-progression
+            options')))
 
          next-execution
          (machine/resume-environment

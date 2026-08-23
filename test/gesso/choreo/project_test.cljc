@@ -2157,3 +2157,113 @@
             #(project/project
               choreography
               :browser))))))
+
+;; -----------------------------------------------------------------------------
+;; ExecutablePlan integrity boundary
+;; -----------------------------------------------------------------------------
+
+(defn- integrity-executable-plan
+  []
+  (project/project
+   (choreo/->choreography
+    {:name :example/executable-plan-integrity
+     :initial :prepare
+     :states
+     {:prepare
+      (choreo/local
+       :browser
+       :prepare
+       :done)
+
+      :done
+      (choreo/return :done)}})
+   :browser))
+
+(defn- executable-plan-lookalikes
+  [plan]
+  (let [initial
+        (:initial plan)]
+    {:unknown-top-level-key
+     (assoc plan
+            :diagnostic-only true)
+
+     :negative-runtime-locator
+     {:gesso.choreo/type :gesso.choreo/executable-plan
+      :gesso.choreo/version project/executable-plan-version
+      :role :browser
+      :initial -1
+      :states
+      {-1 {:op :return
+           :outcome :gesso.choreo/complete}}}
+
+     :non-integer-runtime-locator
+     {:gesso.choreo/type :gesso.choreo/executable-plan
+      :gesso.choreo/version project/executable-plan-version
+      :role :browser
+      :initial "start"
+      :states
+      {"start" {:op :return
+                 :outcome :gesso.choreo/complete}}}
+
+     :non-compact-runtime-locators
+     {:gesso.choreo/type :gesso.choreo/executable-plan
+      :gesso.choreo/version project/executable-plan-version
+      :role :browser
+      :initial 0
+      :states
+      {0 {:op :local
+          :action :prepare
+          :next 2}
+       2 {:op :return
+          :outcome :gesso.choreo/complete}}}
+
+     :unsupported-operation
+     (assoc-in plan
+               [:states initial :op]
+               :not-a-choreo-operation)
+
+     :unknown-successor
+     (assoc-in plan
+               [:states initial :next]
+               999)
+
+     :non-map-state
+     (assoc-in plan
+               [:states initial]
+               :not-a-state)
+
+     :unknown-state-key
+     (assoc-in plan
+               [:states initial :adapter/private]
+               true)}))
+
+(deftest executable-plan-predicate-recognizes-the-canonical-runtime-format-not-just-a-tagged-map
+  (let [plan
+        (integrity-executable-plan)]
+
+    (is (project/executable-plan? plan))
+    (is (= plan
+           (project/ensure-executable-plan plan)))
+
+    (testing "runtime locators are the canonical compact non-negative integer range"
+      (is (= 0 (:initial plan)))
+      (is (= (set (range (count (:states plan))))
+             (set (keys (:states plan))))))
+
+    (doseq [[label lookalike]
+            (executable-plan-lookalikes plan)]
+      (testing (name label)
+        (is (false?
+             (project/executable-plan? lookalike)))))))
+
+(deftest ensure-executable-plan-fails-closed-for-convincing-lookalikes
+  (let [plan
+        (integrity-executable-plan)]
+
+    (doseq [[label lookalike]
+            (executable-plan-lookalikes plan)]
+      (testing (name label)
+        (is (= :invalid-executable-plan
+               (error-kind
+                #(project/ensure-executable-plan
+                  lookalike))))))))

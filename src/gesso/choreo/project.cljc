@@ -88,6 +88,7 @@
    authentication, knowledge/provenance proof, optimism, or model-specific
    behavior."
   (:require
+   [clojure.set :as set]
    [gesso.choreo.core :as choreo]
    [gesso.choreo.verify :as verify]))
 
@@ -140,29 +141,292 @@
 ;; Executable-plan predicates
 ;; -----------------------------------------------------------------------------
 
-(defn executable-plan?
-  "True when x has the shallow identity/shape of an ExecutablePlan.
+(def ^:private executable-plan-keys
+  #{:gesso.choreo/type
+    :gesso.choreo/version
+    :role
+    :initial
+    :states})
 
-   Full state validation remains a compiler/local-machine concern. This
-   predicate intentionally does not duplicate either implementation."
+(def ^:private projected-state-keys
+  {:local
+   #{:op :action :next :requires :outputs}
+
+   :authoritative
+   #{:op :operation :next :requires :outputs}
+
+   :branch
+   #{:op :on :cases}
+
+   :send
+   #{:op :to :event :next :via :required :optional :correlation :open-payload?}
+
+   :receive
+   #{:op :alternatives}
+
+   :await
+   #{:op :events :event-contracts}
+
+   :return
+   #{:op :outcome}})
+
+(def ^:private receive-alternative-keys
+  #{:from :event :next :via :required :optional :correlation :open-payload?})
+
+(def ^:private environment-contract-keys
+  #{:required :optional :open-data? :authoritative-observation})
+
+(def ^:private authoritative-observation-keys
+  #{:authority :observation :basis-key})
+
+(defn- nat-int-locator?
+  [value]
+  (and (integer? value)
+       (not (neg? value))))
+
+(defn- keyword-set?
+  [value]
+  (and (set? value)
+       (every? keyword? value)))
+
+(defn- closed-map?
+  [value allowed-keys]
+  (and (map? value)
+       (every? allowed-keys
+               (keys value))))
+
+(defn- present-nonempty-keyword-set?
+  [value key]
+  (or (not (contains? value key))
+      (let [items (get value key)]
+        (and (keyword-set? items)
+             (seq items)))))
+
+(defn- canonical-message-contract?
+  [contract]
+  (let [required
+        (or (:required contract) #{})
+
+        optional
+        (or (:optional contract) #{})
+
+        correlation
+        (or (:correlation contract) #{})]
+    (and
+     (present-nonempty-keyword-set? contract :required)
+     (present-nonempty-keyword-set? contract :optional)
+     (present-nonempty-keyword-set? contract :correlation)
+     (empty? (set/intersection required optional))
+     (set/subset? correlation required)
+     (or (not (contains? contract :open-payload?))
+         (true? (:open-payload? contract))))))
+
+(defn- canonical-authoritative-observation?
+  [contract observation]
+  (and
+   (map? observation)
+   (= authoritative-observation-keys
+      (set (keys observation)))
+   (keyword? (:authority observation))
+   (keyword? (:observation observation))
+   (keyword? (:basis-key observation))
+   (contains? (or (:required contract) #{})
+              (:basis-key observation))))
+
+(defn- canonical-environment-contract?
+  [contract]
+  (and
+   (closed-map? contract environment-contract-keys)
+   (present-nonempty-keyword-set? contract :required)
+   (present-nonempty-keyword-set? contract :optional)
+   (empty?
+    (set/intersection
+     (or (:required contract) #{})
+     (or (:optional contract) #{})))
+   (or (not (contains? contract :open-data?))
+       (true? (:open-data? contract)))
+   (or (not (contains? contract :authoritative-observation))
+       (canonical-authoritative-observation?
+        contract
+        (:authoritative-observation contract)))))
+
+(defn- successor-locators
+  [state]
+  (case (:op state)
+    :local
+    [(:next state)]
+
+    :authoritative
+    [(:next state)]
+
+    :send
+    [(:next state)]
+
+    :branch
+    (vals (:cases state))
+
+    :receive
+    (map :next (:alternatives state))
+
+    :await
+    (vals (:events state))
+
+    :return
+    []
+
+    []))
+
+(defn- canonical-receive-alternative?
+  [plan alternative]
+  (and
+   (closed-map? alternative receive-alternative-keys)
+   (keyword? (:from alternative))
+   (not= (:role plan) (:from alternative))
+   (keyword? (:event alternative))
+   (or (not (contains? alternative :via))
+       (keyword? (:via alternative)))
+   (canonical-message-contract? alternative)
+   (nat-int-locator? (:next alternative))))
+
+(defn- canonical-projected-state?
+  [plan state]
+  (and
+   (map? state)
+   (contains? projected-ops (:op state))
+   (closed-map? state
+                (get projected-state-keys
+                     (:op state)
+                     #{}))
+   (case (:op state)
+     :local
+     (and
+      (keyword? (:action state))
+      (present-nonempty-keyword-set? state :requires)
+      (present-nonempty-keyword-set? state :outputs)
+      (nat-int-locator? (:next state)))
+
+     :authoritative
+     (and
+      (keyword? (:operation state))
+      (present-nonempty-keyword-set? state :requires)
+      (present-nonempty-keyword-set? state :outputs)
+      (nat-int-locator? (:next state)))
+
+     :branch
+     (and
+      (keyword? (:on state))
+      (map? (:cases state))
+      (seq (:cases state))
+      (every? (fn [[value target]]
+                (and (some? value)
+                     (nat-int-locator? target)))
+              (:cases state)))
+
+     :send
+     (and
+      (keyword? (:to state))
+      (not= (:role plan) (:to state))
+      (keyword? (:event state))
+      (or (not (contains? state :via))
+          (keyword? (:via state)))
+      (canonical-message-contract? state)
+      (nat-int-locator? (:next state)))
+
+     :receive
+     (and
+      (vector? (:alternatives state))
+      (seq (:alternatives state))
+      (every? #(canonical-receive-alternative? plan %)
+              (:alternatives state)))
+
+     :await
+     (let [events (:events state)
+           contracts (or (:event-contracts state) {})]
+       (and
+        (map? events)
+        (seq events)
+        (every? (fn [[event target]]
+                  (and (keyword? event)
+                       (nat-int-locator? target)))
+                events)
+        (or (not (contains? state :event-contracts))
+            (and
+             (map? contracts)
+             (seq contracts)
+             (set/subset? (set (keys contracts))
+                          (set (keys events)))
+             (every? (fn [[event contract]]
+                       (and (keyword? event)
+                            (canonical-environment-contract? contract)))
+                     contracts)))))
+
+     :return
+     (keyword? (:outcome state))
+
+     false)))
+
+(defn- canonical-runtime-layout?
+  [plan]
+  (let [states (:states plan)
+        locator-set (set (keys states))
+        expected-locators (set (range (count states)))]
+    (and
+     (seq states)
+     (= expected-locators locator-set)
+     (nat-int-locator? (:initial plan))
+     (contains? locator-set (:initial plan))
+     (every? (fn [[locator state]]
+               (and
+                (nat-int-locator? locator)
+                (canonical-projected-state? plan state)
+                (every? locator-set
+                        (successor-locators state))))
+             states)
+     ;; Canonical projection contains no unreachable runtime states.  This is
+     ;; stronger than merely requiring compact locator numbers: a convincing
+     ;; tagged lookalike must not smuggle inert executable states into a plan.
+     (= locator-set
+        (loop [pending [(:initial plan)]
+               index 0
+               seen #{}]
+          (if (= index (count pending))
+            seen
+            (let [locator (nth pending index)]
+              (if (contains? seen locator)
+                (recur pending (inc index) seen)
+                (recur (into pending
+                             (successor-locators
+                              (get states locator)))
+                       (inc index)
+                       (conj seen locator))))))))))
+
+(defn executable-plan?
+  "True exactly when x is a canonical current ExecutablePlan.
+
+   This is the public executable-format boundary, not a shallow tag predicate.
+   It validates the closed top-level/state shapes emitted by projection, compact
+   non-negative runtime locators, local contract shapes, successor integrity,
+   and reachability.  Runtime consumers may therefore depend on this predicate
+   instead of maintaining a weaker competing definition of plan validity."
   [x]
-  (and (map? x)
-       (= executable-plan-type
-          (:gesso.choreo/type x))
-       (= executable-plan-version
-          (:gesso.choreo/version x))
-       (keyword? (:role x))
-       (map? (:states x))
-       (contains? (:states x)
-                  (:initial x))))
+  (and
+   (closed-map? x executable-plan-keys)
+   (= executable-plan-type
+      (:gesso.choreo/type x))
+   (= executable-plan-version
+      (:gesso.choreo/version x))
+   (keyword? (:role x))
+   (map? (:states x))
+   (canonical-runtime-layout? x)))
 
 (defn ensure-executable-plan
-  "Return x when it is an ExecutablePlan; otherwise throw."
+  "Return x when it is a canonical current ExecutablePlan; otherwise throw a
+   deterministic projection error."
   [x]
   (when-not (executable-plan? x)
     (projection-error
      :invalid-executable-plan
-     "Expected a Gesso Choreo ExecutablePlan."
+     "Expected a canonical Gesso Choreo ExecutablePlan."
      {:value x}))
   x)
 

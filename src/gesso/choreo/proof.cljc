@@ -23,7 +23,9 @@
        owner, selector key, and the complete set of concrete case values
 
      :await
-       owner, environment-event set, and declared semantic event-data contracts
+       owner, environment-event set, and declared semantic event-data contracts;
+       every declared authoritative-observation event additionally retains the
+       authority, observation identity, basis key, and semantic field contract
 
      :communicate
        the sender projection retains the exact route/message contract and the
@@ -35,10 +37,28 @@
    preserving raw global successor ids would therefore be the wrong theorem.
 
    Likewise this property does not yet prove trace/refinement preservation,
-   knowledge derivations, authority safety, liveness, or browser realization.
-   It is an exhaustive structural check over every reachable boundary in the
-   exact finite authored program supplied to it. The result says exactly that
-   and no more.
+   knowledge derivations, authority authenticity, observation freshness, basis
+   ordering, liveness, or browser realization. An authoritative-observation
+   obligation proves only that the knowledge-producing observation contract
+   required by the global choreography survives projection into executable data.
+
+   Authoritative basis advancement is reported separately from proved structural
+   obligations. For every authoritative-observation scope the result states:
+
+     - a :runtime-enforced obligation requiring an explicit, exactly scoped
+       :advances witness before an existing authoritative basis may move; and
+     - a :trusted assumption that the truth of that authority-specific ordering
+       judgment is supplied by the trusted authority/adapter rather than derived
+       by this checker.
+
+   These runtime/trusted entries are deliberately siblings of :obligations. They
+   do not contribute to :valid? and are not counted as structural proof
+   obligations. The checker therefore cannot accidentally upgrade runtime basis
+   enforcement into a proof of freshness, ordering, or authority authenticity.
+
+   The structural portion remains an exhaustive check over every reachable
+   boundary in the exact finite authored program supplied to it. The result says
+   exactly that and no more.
 
    Concrete behavioral witness checking lives separately in
    gesso.choreo.correspondence. This namespace owns only structural/compiler
@@ -51,6 +71,7 @@
    locators only; this checker locates preserved boundaries structurally and
    keeps authored semantic state identities only in proof obligations."
   (:require
+   [clojure.set :as set]
    [gesso.choreo.core :as choreo]
    [gesso.choreo.project :as project]
    [gesso.choreo.verify :as verify]))
@@ -59,7 +80,7 @@
 ;; Identity
 ;; -----------------------------------------------------------------------------
 
-(def proof-version 1)
+(def proof-version 2)
 
 (def result-type
   :gesso.choreo.proof/result)
@@ -222,6 +243,40 @@
      (or (:event-contracts global-state) {})}
 
     nil))
+
+
+;; -----------------------------------------------------------------------------
+;; Authoritative-observation boundary descriptions
+;; -----------------------------------------------------------------------------
+
+(defn- semantic-event-keys
+  [event-contract]
+  (set/union
+   (or (:required event-contract) #{})
+   (or (:optional event-contract) #{})))
+
+(defn- authoritative-observation-boundary
+  [event event-contract]
+  (when-let [observation
+             (:authoritative-observation event-contract)]
+    {:event event
+     :authority (:authority observation)
+     :observation (:observation observation)
+     :basis-key (:basis-key observation)
+     :required (or (:required event-contract) #{})
+     :optional (or (:optional event-contract) #{})
+     :semantic-keys (semantic-event-keys event-contract)
+     :open-data? (true? (:open-data? event-contract))}))
+
+(defn- authoritative-observation-events
+  [state]
+  (->> (:event-contracts state)
+       (keep
+        (fn [[event event-contract]]
+          (when (:authoritative-observation event-contract)
+            event)))
+       (sort-by pr-str)
+       vec))
 
 ;; -----------------------------------------------------------------------------
 ;; Obligation construction
@@ -449,6 +504,90 @@
         :else
         :missing-receive-alternative)})))
 
+
+(defn- authoritative-observation-obligation
+  [plans state-id global-state event]
+  (let [role
+        (:role global-state)
+
+        plan
+        (get plans role)
+
+        expected-owner
+        (expected-owner-boundary global-state)
+
+        owner-matches
+        (matching-owner-locations
+         plan
+         global-state
+         expected-owner)
+
+        owner-match
+        (first owner-matches)
+
+        runtime-locator
+        (:runtime-locator owner-match)
+
+        projected-state
+        (when (and plan
+                   (some? runtime-locator))
+          (get-in plan
+                  [:states runtime-locator]))
+
+        expected
+        (authoritative-observation-boundary
+         event
+         (get-in global-state
+                 [:event-contracts event]))
+
+        actual
+        (when projected-state
+          (authoritative-observation-boundary
+           event
+           (get-in projected-state
+                   [:event-contracts event])))]
+
+    (obligation
+     {:id
+      [:projection-boundary
+       state-id
+       :authoritative-observation
+       event]
+
+      :property projection-boundary-property
+      :state state-id
+      :role role
+      :endpoint :authoritative-observation
+      :expected expected
+      :actual actual
+      :runtime-locator runtime-locator
+      :valid? (= expected actual)
+      :reason
+      (cond
+        (nil? plan)
+        :missing-role-plan
+
+        (nil? owner-match)
+        :missing-owner-boundary
+
+        (= expected actual)
+        :preserved
+
+        :else
+        :missing-authoritative-observation-boundary)})))
+
+(defn- authoritative-observation-obligations
+  [plans state-id global-state]
+  (mapv
+   (fn [event]
+     (authoritative-observation-obligation
+      plans
+      state-id
+      global-state
+      event))
+   (authoritative-observation-events
+    global-state)))
+
 (defn- state-obligations
   [plans state-id global-state]
   (case (:op global-state)
@@ -482,10 +621,15 @@
       global-state)]
 
     :await
-    [(owner-obligation
+    (into
+     [(owner-obligation
+       plans
+       state-id
+       global-state)]
+     (authoritative-observation-obligations
       plans
       state-id
-      global-state)]
+      global-state))
 
     ;; Global :return has no role-owned boundary contract. Local completion is
     ;; intentionally weaker than assertion of the global terminal outcome, so
@@ -520,6 +664,103 @@
          vec)))
 
 ;; -----------------------------------------------------------------------------
+;; Runtime obligations and trusted assumptions
+;; -----------------------------------------------------------------------------
+
+(def authoritative-basis-progression-property
+  :authoritative-basis-progression)
+
+(def authoritative-basis-ordering-property
+  :authoritative-basis-ordering)
+
+(defn- authoritative-observation-scopes
+  [verified]
+  (let [choreography (:choreography verified)
+        states (:states choreography)
+        reachable (get-in verified
+                          [:verification
+                           :analysis
+                           :reachable-state-ids])]
+    (->> reachable
+         (mapcat
+          (fn [state-id]
+            (let [state (get states state-id)]
+              (when (= :await (:op state))
+                (map
+                 (fn [event]
+                   (let [descriptor
+                         (get-in state
+                                 [:event-contracts
+                                  event
+                                  :authoritative-observation])]
+                     {:state state-id
+                      :role (:role state)
+                      :event event
+                      :authority (:authority descriptor)
+                      :observation (:observation descriptor)
+                      :basis-key (:basis-key descriptor)}))
+                 (authoritative-observation-events state))))))
+         (sort-by
+          (fn [{:keys [authority observation state event]}]
+            [(pr-str authority)
+             (pr-str observation)
+             (pr-str state)
+             (pr-str event)]))
+         vec)))
+
+(defn- progression-runtime-obligation
+  [{:keys [state role event authority observation basis-key]}]
+  {:id
+   [:authoritative-basis-progression
+    state
+    event]
+
+   :property authoritative-basis-progression-property
+   :classification :runtime-enforced
+   :state state
+   :role role
+   :event event
+   :authority authority
+   :observation observation
+   :basis-key basis-key
+   :when :advancing-distinct-existing-authoritative-basis
+   :requires
+   #{:explicit-progression-witness
+     :exact-authority-match
+     :exact-observation-match
+     :exact-from-basis-match
+     :exact-to-basis-match
+     :advances-relation}})
+
+(defn- progression-trusted-assumption
+  [{:keys [state role event authority observation basis-key]}]
+  {:id
+   [:authoritative-basis-ordering
+    state
+    event]
+
+   :property authoritative-basis-ordering-property
+   :classification :trusted
+   :state state
+   :role role
+   :event event
+   :authority authority
+   :observation observation
+   :basis-key basis-key
+   :assumption
+   :advances-witness-truth-is-supplied-by-trusted-authority})
+
+(defn- authoritative-basis-runtime-obligations
+  [verified]
+  (mapv progression-runtime-obligation
+        (authoritative-observation-scopes verified)))
+
+(defn- authoritative-basis-trusted-assumptions
+  [verified]
+  (mapv progression-trusted-assumption
+        (authoritative-observation-scopes verified)))
+
+;; -----------------------------------------------------------------------------
 ;; Results
 ;; -----------------------------------------------------------------------------
 
@@ -538,6 +779,10 @@
     (:valid? value))
    (vector?
     (:obligations value))
+   (vector?
+    (:runtime-obligations value))
+   (vector?
+    (:trusted-assumptions value))
    (vector?
     (:failures value))))
 
@@ -566,7 +811,7 @@
    (failures result)))
 
 (defn- successful-result
-  [verified plans obligations]
+  [verified plans obligations runtime-obligations trusted-assumptions]
   (let [failures'
         (vec
          (remove :valid?
@@ -614,6 +859,12 @@
      :obligations
      obligations
 
+     :runtime-obligations
+     runtime-obligations
+
+     :trusted-assumptions
+     trusted-assumptions
+
      :failures
      failures'
 
@@ -640,6 +891,8 @@
      {:kind :not-checked
       :reason :construction-failure}
      :obligations []
+     :runtime-obligations []
+     :trusted-assumptions []
      :failures [counterexample]
      :counterexample counterexample}))
 
@@ -721,12 +974,22 @@
                  obligations
                  (projection-boundary-obligations
                   verified
-                  plans)]
+                  plans)
+
+                 runtime-obligations
+                 (authoritative-basis-runtime-obligations
+                  verified)
+
+                 trusted-assumptions
+                 (authoritative-basis-trusted-assumptions
+                  verified)]
 
              (successful-result
               verified
               plans
-              obligations))))))))
+              obligations
+              runtime-obligations
+              trusted-assumptions))))))))
 
 (defn check-projection-boundaries!
   "Check projection-boundary preservation or throw with the complete result."
@@ -770,6 +1033,14 @@
    :failure-count
    (count
     (:failures result))
+
+   :runtime-obligation-count
+   (count
+    (:runtime-obligations result))
+
+   :trusted-assumption-count
+   (count
+    (:trusted-assumptions result))
 
    :counterexample
    (:counterexample result)})

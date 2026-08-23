@@ -432,6 +432,110 @@
                  :gesso.choreo/version
                  999))))))
 
+(deftest diagnostic-sidecar-top-level-shape-is-closed
+  (let [emitted
+        (artifact/emit-artifacts
+         (all-boundary-choreography))
+
+        plans
+        (:executable-plans emitted)
+
+        sidecar
+        (:diagnostic-proof-sidecar emitted)]
+    (is (= #{:gesso.choreo/type
+             :gesso.choreo/version
+             :executable-plan-version
+             :proof-version
+             :choreography-name
+             :executable-digests
+             :locations
+             :proof}
+           (set (keys sidecar))))
+
+    (doseq [extra-key
+            [:adapter/extra
+             :runtime/control
+             :executable-plans]]
+      (let [lookalike
+            (assoc sidecar extra-key :must-not-be-accepted)]
+        (is (false?
+             (artifact/diagnostic-sidecar?
+              lookalike)))
+        (is (false?
+             (artifact/sidecar-matches?
+              plans
+              lookalike)))
+
+        (let [data
+              (error-data
+               #(artifact/require-sidecar-match!
+                 plans
+                 lookalike))]
+          (is (= :gesso.choreo.artifact/error
+                 (:error/type data)))
+          (is (= :invalid-diagnostic-sidecar
+                 (:error/kind data))))))))
+
+(deftest artifact-set-top-level-shape-is-closed
+  (let [emitted
+        (artifact/emit-artifacts
+         (all-boundary-choreography))]
+    (is (= #{:gesso.choreo/type
+             :gesso.choreo/version
+             :executable-plans
+             :diagnostic-proof-sidecar}
+           (set (keys emitted))))
+
+    (doseq [extra-key
+            [:adapter/extra
+             :runtime/control
+             :proof]]
+      (is (false?
+           (artifact/artifact-set?
+            (assoc emitted
+                   extra-key
+                   :must-not-be-accepted)))))))
+
+(deftest require-sidecar-match-validates-the-plan-map-before-digest-comparison
+  (let [emitted
+        (artifact/emit-artifacts
+         (all-boundary-choreography))
+
+        browser-plan
+        (get-in emitted
+                [:executable-plans :browser])
+
+        malformed-plans
+        {:not-the-browser-role browser-plan}
+
+        matching-lookalike-sidecar
+        (assoc
+         (:diagnostic-proof-sidecar emitted)
+         :executable-digests
+         {:not-the-browser-role
+          (artifact/executable-digest browser-plan)})]
+
+    ;; The public boolean checker already knows this plan map is invalid because
+    ;; the map key and ExecutablePlan :role disagree.  The throwing checker must
+    ;; enforce the same precondition before comparing digests.
+    (is (false?
+         (artifact/sidecar-matches?
+          malformed-plans
+          matching-lookalike-sidecar)))
+
+    (doseq [plans
+            [malformed-plans
+             [:not :a-plan-map]]]
+      (let [data
+            (error-data
+             #(artifact/require-sidecar-match!
+               plans
+               matching-lookalike-sidecar))]
+        (is (= :gesso.choreo.artifact/error
+               (:error/type data)))
+        (is (= :invalid-executable-plans
+               (:error/kind data)))))))
+
 (deftest executable-digest-requires-an-executable-plan
   (let [data
         (error-data

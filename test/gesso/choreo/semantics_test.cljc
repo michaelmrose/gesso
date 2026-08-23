@@ -476,6 +476,251 @@
            (semantics/expected-event
             (semantics/start program))))))
 
+(deftest authoritative-observation-contract-is-visible-in-global-semantics
+  (let [program
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/observed :done}
+            {:event-contracts
+             {:request/observed
+              {:required #{:basis :outcome}
+               :optional #{:revision}
+               :open-data? true
+               :authoritative-observation
+               {:authority :request/model
+                :observation :request/read
+                :basis-key :basis}}}})
+
+           :done
+           (choreo/return :done)}})]
+
+    (is
+     (= {:kind :environment
+         :role :browser
+         :events #{:request/observed}
+         :event-contracts
+         {:request/observed
+          {:required #{:basis :outcome}
+           :optional #{:revision}
+           :open-data? true
+           :authoritative-observation
+           {:authority :request/model
+            :observation :request/read
+            :basis-key :basis}}}}
+        (semantics/expected-event
+         (semantics/start program))))))
+
+(deftest authoritative-observation-is-an-explicit-role-local-semantic-occurrence
+  (let [program
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/observed :done}
+            {:event-contracts
+             {:request/observed
+              {:required #{:basis :outcome}
+               :optional #{:revision}
+               :open-data? true
+               :authoritative-observation
+               {:authority :request/model
+                :observation :request/read
+                :basis-key :basis}}}})
+
+           :done
+           (choreo/return :done)}})
+
+        event
+        (semantics/environment-event
+         :browser
+         :request/observed
+         {:basis [:xtdb-basis 42]
+          :outcome :approved
+          :revision 42
+          :xhr :host-object})
+
+        initial
+        (semantics/start program)
+
+        completed
+        (semantics/step initial event)]
+
+    (is (semantics/enabled? initial event))
+
+    (is
+     (= {:basis [:xtdb-basis 42]
+         :outcome :approved
+         :revision 42}
+        (semantics/values completed)))
+
+    (is
+     (= [{:kind :authoritative-observation
+          :state :observe
+          :role :browser
+          :event :request/observed
+          :authority :request/model
+          :observation :request/read
+          :basis-key :basis
+          :basis [:xtdb-basis 42]
+          :data {:basis [:xtdb-basis 42]
+                 :outcome :approved
+                 :revision 42}}
+
+         {:kind :terminal
+          :state :done
+          :outcome :done}]
+        (semantics/history completed)))
+
+    (testing "a role-local authoritative reread is not an authoritative mutation"
+      (is
+       (= [{:kind :terminal
+            :state :done
+            :outcome :done}]
+          (semantics/observable-trace completed))))))
+
+(deftest authoritative-observation-requires-a-present-non-nil-basis
+  (let [program
+        (choreo/->choreography
+         {:initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/observed :done}
+            {:event-contracts
+             {:request/observed
+              {:required #{:basis :outcome}
+               :authoritative-observation
+               {:authority :request/model
+                :observation :request/read
+                :basis-key :basis}}}})
+
+           :done
+           (choreo/return :done)}})
+
+        initial
+        (semantics/start program)
+
+        nil-basis
+        (semantics/environment-event
+         :browser
+         :request/observed
+         {:basis nil
+          :outcome :approved})]
+
+    (is
+     (false?
+      (semantics/enabled?
+       initial
+       nil-basis)))
+
+    (is
+     (= :event-not-enabled
+        (error-kind
+         #(semantics/step
+           initial
+           nil-basis))))))
+
+(deftest semantic-program-validates-authoritative-observation-contract-independently
+  (testing "all descriptor fields are required"
+    (is
+     (= :incomplete-authoritative-observation
+        (error-kind
+         #(semantics/->program
+           {:initial :observe
+            :states
+            {:observe
+             {:op :await
+              :role :browser
+              :events {:request/observed :done}
+              :event-contracts
+              {:request/observed
+               {:required #{:basis}
+                :authoritative-observation
+                {:authority :request/model
+                 :basis-key :basis}}}}
+
+             :done
+             {:op :return
+              :outcome :done}}})))))
+
+  (testing "the descriptor is closed"
+    (is
+     (= :unknown-authoritative-observation-key
+        (error-kind
+         #(semantics/->program
+           {:initial :observe
+            :states
+            {:observe
+             {:op :await
+              :role :browser
+              :events {:request/observed :done}
+              :event-contracts
+              {:request/observed
+               {:required #{:basis}
+                :authoritative-observation
+                {:authority :request/model
+                 :observation :request/read
+                 :basis-key :basis
+                 :trusted? true}}}}
+
+             :done
+             {:op :return
+              :outcome :done}}})))))
+
+  (testing "the basis key must be required semantic event data"
+    (is
+     (= :authoritative-observation-basis-not-required
+        (error-kind
+         #(semantics/->program
+           {:initial :observe
+            :states
+            {:observe
+             {:op :await
+              :role :browser
+              :events {:request/observed :done}
+              :event-contracts
+              {:request/observed
+               {:required #{:outcome}
+                :optional #{:basis}
+                :authoritative-observation
+                {:authority :request/model
+                 :observation :request/read
+                 :basis-key :basis}}}}
+
+             :done
+             {:op :return
+              :outcome :done}}})))))
+
+  (testing "descriptor fields are typed semantic names"
+    (is
+     (= :invalid-value
+        (error-kind
+         #(semantics/->program
+           {:initial :observe
+            :states
+            {:observe
+             {:op :await
+              :role :browser
+              :events {:request/observed :done}
+              :event-contracts
+              {:request/observed
+               {:required #{:basis}
+                :authoritative-observation
+                {:authority "request/model"
+                 :observation :request/read
+                 :basis-key :basis}}}}
+
+             :done
+             {:op :return
+              :outcome :done}}}))))))
+
 (deftest communication-and-environment-events-do-not-cross-satisfy
   (let [program
         (choreo/->choreography

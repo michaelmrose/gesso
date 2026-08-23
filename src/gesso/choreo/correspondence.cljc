@@ -29,6 +29,15 @@
    because that is when the receiving projected machine consumes the exact
    sender-emitted envelope.
 
+   Authoritative environment observations may carry
+   :authoritative-basis-progression as witness control evidence. Correspondence
+   forwards that evidence only to the projected realization; it is not part of
+   the global semantic event data or distributed observable trace. Successful
+   authoritative-observation obligations retain the exact progression witness
+   used by that concrete step so the correspondence evidence states why a later
+   authoritative basis was admissible rather than confusing witness order with
+   basis order.
+
    A valid result therefore establishes correspondence for one concrete witness
    only. The weak checker admits commuting hidden work, but it still checks only
    the supplied schedule. Neither checker is the all-schedules
@@ -39,6 +48,7 @@
    structural proof/checker namespace from becoming a second distributed runtime
    and gives later refinement work a clean boundary around concrete witnesses."
   (:require
+   [gesso.choreo.machine :as machine]
    [gesso.choreo.realization :as realization]
    [gesso.choreo.semantics :as semantics]
    [gesso.choreo.verify :as verify]))
@@ -350,6 +360,140 @@
     :valid? (true? valid?)}
    data))
 
+(defn- authoritative-observation-occurrences
+  "Return authoritative-observation history entries added after history-count.
+
+   One external environment event should contribute at most one such occurrence;
+   the vector shape keeps this helper correct if semantic stepping also records
+   branch/terminal history around that event."
+  [configuration history-count]
+  (->> (subvec (semantics/history configuration)
+               history-count)
+       (filterv #(= :authoritative-observation
+                    (:kind %)))))
+
+(defn- matching-authoritative-observation-provenance?
+  [occurrence provenance]
+  (and (= :authoritative
+          (:kind provenance))
+       (= (:authority occurrence)
+          (:authority provenance))
+       (= (:observation occurrence)
+          (:observation provenance))
+       (= (:basis occurrence)
+          (:basis provenance))))
+
+(defn- authoritative-observation-evidence
+  "Compare one global authoritative-observation occurrence with the receiving
+   projected role's current machine knowledge.
+
+   Correspondence requires every declared semantic field to have the same
+   value in the role-local machine and to carry authoritative provenance naming
+   the same logical authority, observation identity, and opaque basis. Runtime
+   state locators are deliberately not compared with semantic state ids."
+  [realized occurrence]
+  (let [role
+        (:role occurrence)
+
+        execution
+        (realization/execution realized role)
+
+        semantic-data
+        (:data occurrence)
+
+        checked-keys
+        (set (keys semantic-data))
+
+        runtime-values
+        (when execution
+          (into
+           {}
+           (map
+            (fn [key]
+              [key
+               (machine/execution-value execution key)]))
+           (sort-by pr-str checked-keys)))
+
+        matching-provenance-by-key
+        (when execution
+          (into
+           {}
+           (map
+            (fn [key]
+              [key
+               (first
+                (filter
+                 #(matching-authoritative-observation-provenance?
+                   occurrence
+                   %)
+                 (or
+                  (machine/execution-provenance execution key)
+                  [])))])
+            (sort-by pr-str checked-keys))))
+
+        values-valid?
+        (and execution
+             (= semantic-data
+                runtime-values))
+
+        provenance-valid?
+        (and execution
+             (every?
+              some?
+              (vals matching-provenance-by-key)))]
+
+    {:valid?
+     (and values-valid?
+          provenance-valid?)
+
+     :semantic-occurrence
+     occurrence
+
+     :checked-keys
+     checked-keys
+
+     :basis
+     (:basis occurrence)
+
+     :runtime-values
+     runtime-values
+
+     :matching-provenance-by-key
+     matching-provenance-by-key
+
+     :values-valid?
+     (true? values-valid?)
+
+     :provenance-valid?
+     (true? provenance-valid?)}))
+
+(defn- append-authoritative-observation-obligations
+  [state index step occurrences obligation-fn]
+  (reduce
+   (fn [state occurrence]
+     (let [evidence
+           (cond->
+            (authoritative-observation-evidence
+             (:realization state)
+             occurrence)
+            (contains? step
+                       :authoritative-basis-progression)
+            (assoc
+             :basis-progression
+             (:authoritative-basis-progression step)))]
+       (update
+        state
+        :obligations
+        conj
+        (obligation-fn
+         index
+         step
+         :authoritative-observation-correspondence
+         (:valid? evidence)
+         (dissoc evidence :valid?)))))
+   state
+   occurrences))
+
 (defn- resolve-message-id
   [message-refs message]
   (cond
@@ -395,9 +539,40 @@
    message
    [:to :event :via]))
 
+(defn- realize-environment-step
+  "Apply one witness environment step to the projected realization.
+
+   :authoritative-basis-progression is control evidence for the machine's
+   authoritative knowledge transition. It is deliberately forwarded through
+   realization options rather than merged into semantic event :data. Witnesses
+   without that field retain the ordinary four-argument environment path."
+  [realized step]
+  (let [role (:role step)
+        event (:event step)
+        data (:data step)]
+    (if (contains? step
+                   :authoritative-basis-progression)
+      (realization/environment
+       realized
+       role
+       event
+       data
+       {:authoritative-basis-progression
+        (:authoritative-basis-progression step)})
+      (realization/environment
+       realized
+       role
+       event
+       data))))
+
 (defn- paired-semantic-realization-step
   [state index step semantic-event realization-f]
-  (let [semantic-attempt
+  (let [history-count
+        (count
+         (semantics/history
+          (:semantic state)))
+
+        semantic-attempt
         (attempt
          #(let [{:keys [configuration branches]}
                 (settle-semantic-branches
@@ -405,7 +580,11 @@
                   (:semantic state)
                   semantic-event))]
             {:configuration configuration
-             :branches branches}))
+             :branches branches
+             :authoritative-observations
+             (authoritative-observation-occurrences
+              configuration
+              history-count)}))
 
         realization-attempt
         (attempt realization-f)
@@ -418,24 +597,34 @@
 
     (if (and semantic-ok?
              realization-ok?)
-      {:ok
-       (-> state
-           (assoc :semantic
-                  (get-in semantic-attempt
-                          [:ok :configuration]))
-           (assoc :realization
-                  (:ok realization-attempt))
-           (update :obligations
-                   conj
-                   (witness-obligation
-                    index
-                    step
-                    :paired-semantic-step
-                    true
-                    {:semantic-event semantic-event
-                     :auto-branches
-                     (get-in semantic-attempt
-                             [:ok :branches])})))}
+      (let [next-state
+            (-> state
+                (assoc :semantic
+                       (get-in semantic-attempt
+                               [:ok :configuration]))
+                (assoc :realization
+                       (:ok realization-attempt))
+                (update :obligations
+                        conj
+                        (witness-obligation
+                         index
+                         step
+                         :paired-semantic-step
+                         true
+                         {:semantic-event semantic-event
+                          :auto-branches
+                          (get-in semantic-attempt
+                                  [:ok :branches])})))
+
+            next-state'
+            (append-authoritative-observation-obligations
+             next-state
+             index
+             step
+             (get-in semantic-attempt
+                     [:ok :authoritative-observations])
+             witness-obligation)]
+        {:ok next-state'})
 
       {:error
        {:kind
@@ -512,11 +701,9 @@
           role
           event
           data)
-         #(realization/environment
+         #(realize-environment-step
            (:realization state)
-           role
-           event
-           data)))
+           step)))
 
       :send
       (let [attempted
@@ -1102,23 +1289,43 @@
                       semantic-event]}
               (first pending-observable)
 
+              history-count
+              (count
+               (semantics/history settled))
+
               next-semantic
               (semantics/step
                settled
-               semantic-event)]
+               semantic-event)
+
+              occurrences
+              (authoritative-observation-occurrences
+               next-semantic
+               history-count)
+
+              next-state
+              (-> state''
+                  (assoc :semantic next-semantic)
+                  (assoc :pending-observable
+                         (subvec pending-observable 1))
+                  (update :obligations
+                          conj
+                          (weak-witness-obligation
+                           step-index
+                           step
+                           :replayed-observable
+                           true
+                           {:semantic-event semantic-event})))
+
+              next-state'
+              (append-authoritative-observation-obligations
+               next-state
+               step-index
+               step
+               occurrences
+               weak-witness-obligation)]
           (recur
-           (-> state''
-               (assoc :semantic next-semantic)
-               (assoc :pending-observable
-                      (subvec pending-observable 1))
-               (update :obligations
-                       conj
-                       (weak-witness-obligation
-                        step-index
-                        step
-                        :replayed-observable
-                        true
-                        {:semantic-event semantic-event})))
+           next-state'
            (dec remaining)))
 
         :else
@@ -1131,26 +1338,46 @@
                         semantic-event]}
                 (nth pending-unobservable pending-index)
 
+                history-count
+                (count
+                 (semantics/history settled))
+
                 next-semantic
                 (semantics/step
                  settled
-                 semantic-event)]
+                 semantic-event)
+
+                occurrences
+                (authoritative-observation-occurrences
+                 next-semantic
+                 history-count)
+
+                next-state
+                (-> state''
+                    (assoc :semantic next-semantic)
+                    (assoc :pending-unobservable
+                           (remove-vector-index
+                            pending-unobservable
+                            pending-index))
+                    (update :obligations
+                            conj
+                            (weak-witness-obligation
+                             step-index
+                             step
+                             :replayed-unobservable
+                             true
+                             {:semantic-event semantic-event
+                              :buffer-position pending-index})))
+
+                next-state'
+                (append-authoritative-observation-obligations
+                 next-state
+                 step-index
+                 step
+                 occurrences
+                 weak-witness-obligation)]
             (recur
-             (-> state''
-                 (assoc :semantic next-semantic)
-                 (assoc :pending-unobservable
-                        (remove-vector-index
-                         pending-unobservable
-                         pending-index))
-                 (update :obligations
-                         conj
-                         (weak-witness-obligation
-                          step-index
-                          step
-                          :replayed-unobservable
-                          true
-                          {:semantic-event semantic-event
-                           :buffer-position pending-index})))
+             next-state'
              (dec remaining)))
 
           state'')))))
@@ -1299,11 +1526,9 @@
           data (:data step)
           realization-attempt
           (attempt
-           #(realization/environment
+           #(realize-environment-step
              (:realization state)
-             role
-             event
-             data))]
+             step))]
       ;; Environment waits are suspension points rather than realization/boundary
       ;; endpoint actions, so the projected machine itself performs the identity
       ;; and contract check.

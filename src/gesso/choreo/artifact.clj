@@ -32,6 +32,22 @@
 (def diagnostic-sidecar-type
   :gesso.choreo/diagnostic-proof-sidecar)
 
+(def ^:private diagnostic-sidecar-keys
+  #{:gesso.choreo/type
+    :gesso.choreo/version
+    :executable-plan-version
+    :proof-version
+    :choreography-name
+    :executable-digests
+    :locations
+    :proof})
+
+(def ^:private artifact-set-keys
+  #{:gesso.choreo/type
+    :gesso.choreo/version
+    :executable-plans
+    :diagnostic-proof-sidecar})
+
 ;; -----------------------------------------------------------------------------
 ;; Errors
 ;; -----------------------------------------------------------------------------
@@ -204,6 +220,8 @@
   [value]
   (and
    (map? value)
+   (= diagnostic-sidecar-keys
+      (set (keys value)))
    (= diagnostic-sidecar-type
       (:gesso.choreo/type value))
    (= artifact-version
@@ -226,6 +244,28 @@
    (vector? (:locations value))
    (proof/result? (:proof value))))
 
+(defn- executable-plans?
+  "True when plans is a role-keyed map of current ExecutablePlan values and
+   every map key agrees with the plan's own role identity."
+  [plans]
+  (and
+   (map? plans)
+   (every?
+    (fn [[role plan]]
+      (and (keyword? role)
+           (project/executable-plan? plan)
+           (= role (:role plan))))
+    plans)))
+
+(defn- require-executable-plans!
+  [plans]
+  (when-not (executable-plans? plans)
+    (artifact-error
+     :invalid-executable-plans
+     "Expected a role-keyed map of matching Gesso Choreo ExecutablePlan values."
+     {:plans plans}))
+  plans)
+
 (declare sidecar-matches?)
 
 (defn artifact-set?
@@ -234,16 +274,13 @@
   [value]
   (and
    (map? value)
+   (= artifact-set-keys
+      (set (keys value)))
    (= artifact-set-type
       (:gesso.choreo/type value))
    (= artifact-version
       (:gesso.choreo/version value))
-   (map? (:executable-plans value))
-   (every?
-    (fn [[role plan]]
-      (and (keyword? role)
-           (project/executable-plan? plan)
-           (= role (:role plan))))
+   (executable-plans?
     (:executable-plans value))
    (sidecar-matches?
     (:executable-plans value)
@@ -300,13 +337,7 @@
    and executable digests match plans."
   [plans sidecar]
   (and
-   (map? plans)
-   (every?
-    (fn [[role plan]]
-      (and (keyword? role)
-           (project/executable-plan? plan)
-           (= role (:role plan))))
-    plans)
+   (executable-plans? plans)
    (diagnostic-sidecar? sidecar)
    (nil?
     (first-digest-mismatch
@@ -317,6 +348,8 @@
   "Return sidecar when it is valid and bound to exactly plans; otherwise throw
    a deterministic diagnostic error. This function never alters plans."
   [plans sidecar]
+  (require-executable-plans! plans)
+
   (when-not (diagnostic-sidecar? sidecar)
     (artifact-error
      :invalid-diagnostic-sidecar
