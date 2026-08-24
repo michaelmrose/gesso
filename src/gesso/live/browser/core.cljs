@@ -1,826 +1,1136 @@
 (ns gesso.live.browser.core
-  "Browser entry point for Gesso Live.
+  "Thin HTMX/browser normalization boundary for Gesso Live.
 
-   The top-level runtime is intentionally an adapter. Core behavior lives in:
+   Semantic browser state lives in gesso.live.browser.adapter. Imperative
+   effect execution and opaque host resources live in gesso.live.browser.shell.
+   This namespace owns only the physical integration between documented HTMX
+   lifecycle observations and those two layers.
 
-     gesso.live.browser.dom
-       trusted DOM mechanics
+   In particular, core owns:
 
-     gesso.live.browser.continuity
-       the single continuity implementation used by all replacement paths
+   - locating the stable Gesso Live fragment root associated with an HTMX event
+   - correlating one adapter-issued fragment request generation with one
+     physical HTMX request
+   - normalizing HTMX lifecycle callbacks into plain adapter events
+   - physically allowing/cancelling HTMX requests and swaps when the adapter
+     requests that disposition
+   - triggering an HTMX-owned refresh from :fragment/refresh effects
+   - translating fragment removal into :fragment/retire
+   - exposing a small explicit invalidation entry point for SSE/other wakeups
+   - installing/removing the documented browser listeners
 
-     gesso.live.browser.choreo
-       generic long-lived choreography execution
+   It deliberately does not:
 
-     gesso.live.browser.optimistic
-       browser effects for the verified optimistic choreography
+   - decide whether a request, swap, callback, or basis is current
+   - compare authoritative bases or progression requirements
+   - advance Choreo machines directly
+   - own optimistic policy
+   - own continuity semantics
+   - retain raw DOM/HTMX/XHR objects in AdapterState
+   - issue XMLHttpRequest/fetch directly
+   - recreate HTMX request, target, swap, include, or synchronization behavior
 
-   This namespace owns only browser-framework integration:
+   Physical request correlation is intentionally outside AdapterState. A stable
+   fragment root may temporarily be associated with adapter generation data and
+   an XHR object in WeakMaps, but those host values are used only to normalize
+   later HTMX callbacks. The adapter remains the sole semantic arbiter.
 
-   - HTMX/SSE event listener registration
-   - request execution-id/header correlation
-   - starting an optimistic choreography at HTMX's request boundary
-   - settlement delivery and environmental request failure delivery
-   - ordinary continuity capture/restore around HTMX/OOB/SSE replacement
-   - observation of externally installed canonical state
-   - small public diagnostics API
+   The adapter emits :fragment/refresh. Core responds by asking HTMX to trigger
+   `gesso:live-refresh` on the stable fragment root. Server markup will be
+   tightened separately so managed fragments declaratively listen for this
+   event. Core never synthesizes an HTTP request itself.
 
-   It contains no optimistic state machine and no independent continuity logic."
+   Continuity defaults to one per-core physical gesso.live.browser.continuity
+   runtime. That runtime captures/restores only browser-local presentation
+   state; adapter generation ownership and semantic completion remain in
+   adapter/shell. Applications may configure the physical runtime or replace
+   individual continuity handler seams without changing the adapter protocol."
   (:require
    [clojure.string :as str]
-   [gesso.live.optimistic.protocol :as protocol]
-   [gesso.live.browser.choreo :as choreo-runtime]
    [gesso.live.browser.continuity :as continuity]
-   [gesso.live.browser.dom :as dom]
-   [gesso.live.browser.optimistic :as optimistic]))
+   [gesso.live.browser.shell :as shell]))
 
-;; -----------------------------------------------------------------------------
-;; Runtime identity
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Public identity / browser vocabulary
+;; =============================================================================
 
 (def runtime-version
-  "2.0.0")
+  "3.0.0-dev")
 
-(defonce initialized?
-  (atom false))
+(def runtime-type
+  :gesso.live.browser.core/runtime)
 
-;; Detached-or-live optimistic source uid -> preflight request information.
-;; Entries are allocated at configRequest so the execution id can be attached
-;; before HTMX sends, then consumed when the choreography starts at beforeRequest.
-(defonce pending-requests
-  (atom {}))
+(def fragment-attribute
+  "data-gesso-live-fragment")
 
-;; Source uids whose current HTMX response has already been semantically
-;; consumed by optimistic choreography. This prevents the same response
-;; lifecycle from recapturing over the execution's continuity slot.
-(defonce settled-response-sources
-  (atom #{}))
+(def fragment-selector
+  (str "[" fragment-attribute "]"))
 
-;; -----------------------------------------------------------------------------
-;; Generic event helpers
-;; -----------------------------------------------------------------------------
+(def refresh-event-name
+  "gesso:live-refresh")
+
+(def invalidated-event-name
+  "gesso:live-invalidated")
+
+(def managed-request-marker
+  "gesso-live-managed-request")
+
+(def failure-event-types
+  #{"htmx:responseError"
+    "htmx:sendError"
+    "htmx:timeout"
+    "htmx:abort"})
+
+(def listener-specs
+  "Documented lifecycle events observed by the first pure-adapter browser core.
+
+   Optimistic command correlation and SSE payload parsing are intentionally not
+   hidden here. They will be layered onto this same normalized boundary when
+   their new contracts are implemented."
+  [["htmx:beforeRequest" :before-request]
+   ["htmx:beforeSwap" :before-swap]
+   ["htmx:afterSwap" :after-swap]
+   ["htmx:afterRequest" :after-request]
+   ["htmx:responseError" :request-failed]
+   ["htmx:sendError" :request-failed]
+   ["htmx:timeout" :request-failed]
+   ["htmx:abort" :request-failed]
+   ["htmx:beforeCleanupElement" :before-cleanup]
+   [invalidated-event-name :invalidated]])
+
+(def option-keys
+  #{:document
+    :htmx
+    :request-id-fn
+    :authoritative-from-event
+    :handlers
+    :continuity-options
+    :continuity-capture!
+    :continuity-restore!
+    :continuity-release!
+    :shell-options})
+
+(def protected-handler-kinds
+  "Physical effects whose implementation belongs to this HTMX normalization
+   boundary and cannot be replaced by application handlers."
+  #{:fragment/refresh
+    :htmx/allow-request
+    :htmx/cancel-request
+    :htmx/allow-swap
+    :htmx/cancel-swap})
+
+;; =============================================================================
+;; Errors / validation
+;; =============================================================================
+
+(defn- core-error
+  ([kind message data]
+   (core-error kind message data nil))
+  ([kind message data cause]
+   (ex-info
+    message
+    (merge
+     {:error/type :gesso.live.browser.core/error
+      :error/kind kind}
+     data)
+    cause)))
+
+(defn- require-map!
+  [label value]
+  (when-not (map? value)
+    (throw
+     (core-error
+      :invalid-map
+      (str label " must be a map.")
+      {:label label
+       :value value})))
+  value)
+
+(defn- require-callable!
+  [label value]
+  (when-not (fn? value)
+    (throw
+     (core-error
+      :invalid-callable
+      (str label " must be callable.")
+      {:label label
+       :value value})))
+  value)
+
+(defn- require-optional-callable!
+  [label value]
+  (when (some? value)
+    (require-callable! label value))
+  value)
+
+(defn- check-option-keys!
+  [options]
+  (let [unknown (seq (remove option-keys (keys options)))]
+    (when unknown
+      (throw
+       (core-error
+        :unknown-options
+        "Gesso Live browser core options contain unsupported keys."
+        {:unknown-keys (set unknown)
+         :allowed-keys option-keys}))))
+  options)
+
+(defn- require-nonblank-string!
+  [label value]
+  (when-not (and (string? value)
+                 (not (str/blank? value)))
+    (throw
+     (core-error
+      :invalid-string
+      (str label " must be a non-blank string.")
+      {:label label
+       :value value})))
+  value)
+
+;; =============================================================================
+;; Small browser helpers
+;; =============================================================================
 
 (defn event-detail
   [event]
-  (.-detail event))
+  (when event
+    (.-detail event)))
 
 (defn detail-field
   [event field]
-  (let [detail
-        (event-detail event)]
-    (when detail
-      (aget detail field))))
+  (when-let [detail (event-detail event)]
+    (aget detail field)))
 
-(defn event-source
-  "Return HTMX request source when present."
+(defn event-type
   [event]
-  (continuity/event-source event))
-
-(defn event-target
-  [event]
-  (or
-   (some->
-    (detail-field event "target")
-    (#(when (dom/element? %) %)))
-   (some->
-    (detail-field event "elt")
-    (#(when (dom/element? %) %)))
-   (when (dom/element?
-          (.-target event))
-     (.-target event))))
-
-(defn optimistic-source-from-event
-  [event]
-  (or
-   (some->
-    (event-source event)
-    optimistic/optimistic-source)
-   (some
-    optimistic/optimistic-source
-    (continuity/event-elements event))))
-
-(defn prevent-event!
-  [event]
-  (when (.-preventDefault event)
-    (.preventDefault event))
-  false)
-
-(defn- source-uid
-  [source]
-  (when source
-    (or
-     (aget source
-           "__gessoLiveRequestUid")
-     (let [uid
-           (str
-            "gesso-request-source-"
-            (random-uuid))]
-       (aset source
-             "__gessoLiveRequestUid"
-             uid)
-       uid))))
-
-(defn- pending-request
-  [source]
-  (get @pending-requests
-       (source-uid source)))
-
-(defn- put-pending-request!
-  [source value]
-  (swap!
-   pending-requests
-   assoc
-   (source-uid source)
-   value)
-  value)
-
-(defn- remove-pending-request!
-  [source]
-  (when source
-    (swap!
-     pending-requests
-     dissoc
-     (source-uid source)))
-  true)
-
-(defn- mark-settled-response!
-  [source]
-  (when source
-    (swap!
-     settled-response-sources
-     conj
-     (source-uid source)))
-  true)
-
-(defn- settled-response?
-  [source]
-  (boolean
-   (and source
-        (contains?
-         @settled-response-sources
-         (source-uid source)))))
-
-(defn- clear-settled-response-later!
-  [source]
-  (when source
-    (let [uid
-          (source-uid source)]
-      (js/setTimeout
-       #(swap!
-         settled-response-sources
-         disj
-         uid)
-       0)))
-  true)
-
-;; -----------------------------------------------------------------------------
-;; HTMX headers
-;; -----------------------------------------------------------------------------
-
-(def optimistic-request-header
-  "Optimistic execution-correlation request header owned by the shared protocol."
-  protocol/execution-header-name)
-
-(def consistency-request-header
-  "Browser HTTP spelling for Gesso's consistency token header."
-  "X-Gesso-Live-Consistency-Token")
-
-(defn- ensure-headers!
-  [event]
-  (let [detail
-        (event-detail event)]
-    (when detail
-      (or
-       (aget detail "headers")
-       (let [headers #js {}]
-         (aset detail
-               "headers"
-               headers)
-         headers)))))
-
-(defn- header-value
-  "Read a JS header object case-insensitively."
-  [headers wanted-name]
-  (when headers
-    (let [wanted
-          (str/lower-case
-           wanted-name)]
-      (some
-       (fn [key]
-         (when (= wanted
-                  (str/lower-case
-                   key))
-           (aget headers key)))
-       (array-seq
-        (.keys js/Object
-               headers))))))
-
-(defn- set-header!
-  [headers name value]
-  (when (and headers
-             (some? value))
-    (aset headers
-          name
-          (str value)))
-  headers)
-
-;; -----------------------------------------------------------------------------
-;; Request status / failure
-;; -----------------------------------------------------------------------------
-
-(defn request-successful?
-  [event]
-  (let [detail
-        (event-detail event)
-        explicit
-        (when detail
-          (aget detail
-                "successful"))
-        xhr
-        (when detail
-          (aget detail
-                "xhr"))
-        status
-        (when xhr
-          (.-status xhr))]
-    (if (boolean? explicit)
-      explicit
-      (and (number? status)
-           (<= 200 status 399)))))
-
-(defn failure-reason
-  [event]
-  (keyword
-   "gesso.live.optimistic.request"
-   (case (.-type event)
-     "htmx:responseError"
-     "response-error"
-
-     "htmx:sendError"
-     "send-error"
-
-     "htmx:timeout"
-     "timeout"
-
-     "htmx:abort"
-     "aborted"
-
-     "request-failed")))
+  (some-> event .-type str))
 
 (defn xhr-from-event
   [event]
   (detail-field event "xhr"))
 
-;; -----------------------------------------------------------------------------
-;; Optimistic request preflight
-;; -----------------------------------------------------------------------------
-
-(defn- source-consistency-token
+(defn request-successful?
+  "Normalize HTMX request success without treating HTTP status as semantic
+   command success. This function says only whether the physical HTTP request
+   completed successfully enough for HTMX."
   [event]
-  (let [headers
-        (ensure-headers! event)]
-    (header-value
-     headers
-     consistency-request-header)))
+  (let [detail (event-detail event)
+        explicit (when detail
+                   (aget detail "successful"))
+        xhr (when detail
+              (aget detail "xhr"))
+        status (when xhr
+                 (.-status xhr))]
+    (if (boolean? explicit)
+      explicit
+      (boolean
+       (and (number? status)
+            (<= 200 status 399))))))
 
-(defn on-config-request!
-  "Allocate optimistic execution identity and attach it to the request.
-
-   No DOM projection happens here. HTMX may still be finishing request
-   preparation and must not lose its live action source prematurely."
+(defn failure-reason
+  "Return a transport/lifecycle reason only. It is not a domain outcome."
   [event]
-  (when-some [source
-              (optimistic-source-from-event
-               event)]
-    (let [headers
-          (ensure-headers! event)
-          existing
-          (pending-request source)
-          execution-id
-          (or (:execution-id existing)
-              (optimistic/execution-id))
-          consistency-token
-          (or (:consistency-token existing)
-              (source-consistency-token
-               event))]
-      (put-pending-request!
-       source
-       {:execution-id execution-id
-        :consistency-token
-        consistency-token})
-      (set-header!
-       headers
-       optimistic-request-header
-       execution-id)))
+  (case (event-type event)
+    "htmx:responseError" :http/response-error
+    "htmx:sendError" :http/send-error
+    "htmx:timeout" :http/timeout
+    "htmx:abort" :http/aborted
+    :http/request-failed))
+
+(defn prevent-event!
+  [event]
+  (when-let [prevent-default (some-> event .-preventDefault)]
+    (when (= "function"
+             (js* "typeof ~{}" prevent-default))
+      (.call prevent-default event)))
+  false)
+
+(defn cancel-swap-event!
+  "Physically suppress one HTMX swap.
+
+   HTMX exposes detail.shouldSwap at beforeSwap. preventDefault is also invoked
+   when available so synthetic/test events and future-compatible listeners fail
+   closed rather than silently swapping."
+  [event]
+  (when-let [detail (event-detail event)]
+    (aset detail "shouldSwap" false))
+  (prevent-event! event)
+  false)
+
+(defn- node-element?
+  [value]
+  (boolean
+   (and value
+        (= 1 (.-nodeType value)))))
+
+(defn- element-attr
+  [element name]
+  (when (node-element? element)
+    (.getAttribute element name)))
+
+(defn fragment-id-from-root
+  [root]
+  (some-> (element-attr root fragment-attribute)
+          str
+          not-empty))
+
+(defn fragment-root?
+  [element]
+  (boolean
+   (and (node-element? element)
+        (some? (fragment-id-from-root element)))))
+
+(defn fragment-root-from-element
+  "Return the nearest stable Gesso Live fragment root for element."
+  [element]
+  (cond
+    (fragment-root? element)
+    element
+
+    (node-element? element)
+    (let [closest (.-closest element)]
+      (when (= "function"
+               (js* "typeof ~{}" closest))
+        (.call closest element fragment-selector)))
+
+    :else
+    nil))
+
+(defn event-elements
+  "Candidate physical elements carried by documented HTMX event shapes.
+
+   Order matters: request source (:elt) precedes swap target, then the DOM event
+   target. Duplicate host identities are removed without converting them to
+   portable data."
+  [event]
+  (let [candidates [(detail-field event "elt")
+                    (detail-field event "target")
+                    (when event (.-target event))]]
+    (reduce
+     (fn [result candidate]
+       (if (and (node-element? candidate)
+                (not-any? #(identical? % candidate) result))
+         (conj result candidate)
+         result))
+     []
+     candidates)))
+
+(defn fragment-root-from-event
+  "Resolve the stable behavior-owning fragment root associated with an HTMX
+   lifecycle event. Returns nil for unrelated HTMX traffic."
+  [event]
+  (some fragment-root-from-element
+        (event-elements event)))
+
+(defn- nested-fragment-roots
+  [element]
+  (if-not (node-element? element)
+    []
+    (let [nested
+          (try
+            (vec (array-seq (.querySelectorAll element fragment-selector)))
+            (catch :default _
+              []))]
+      (if (fragment-root? element)
+        (into [element]
+              (remove #(identical? element %))
+              nested)
+        nested))))
+
+;; =============================================================================
+;; Default host seams
+;; =============================================================================
+
+(defn- default-document
+  []
+  js/document)
+
+(defn- default-htmx
+  []
+  (.-htmx js/window))
+
+(defn- default-request-id
+  []
+  (str (random-uuid)))
+
+(defn- default-authoritative-from-event
+  [_event]
+  nil)
+
+;; =============================================================================
+;; Core runtime construction / accessors
+;; =============================================================================
+
+(defn core?
+  [value]
+  (and (map? value)
+       (= runtime-type
+          (:gesso.live.browser.core/type value))))
+
+(defn require-core!
+  [value]
+  (when-not (core? value)
+    (throw
+     (core-error
+      :invalid-runtime
+      "Expected a Gesso Live browser core runtime."
+      {:value value})))
+  value)
+
+(defn shell-runtime
+  [runtime]
+  (:shell (require-core! runtime)))
+
+(defn continuity-runtime
+  "Return this core runtime's physical continuity runtime.
+
+   Captured resources are not stored here; shell owns those by adapter-issued
+   slot generation. This accessor exists for per-runtime physical extension
+   such as continuity/register-box!."
+  [runtime]
+  (:continuity (require-core! runtime)))
+
+(defn state
+  [runtime]
+  (shell/state (shell-runtime runtime)))
+
+(defn diagnostics
+  "Plain diagnostics. WeakMap/XHR/DOM resources are deliberately absent."
+  [runtime]
+  (let [runtime (require-core! runtime)]
+    {:gesso.live.browser.core/type runtime-type
+     :gesso.live.browser.core/version runtime-version
+     :started? @(:started? runtime)
+     :continuity (continuity/diagnostics (:continuity runtime))
+     :shell (shell/diagnostics (:shell runtime))}))
+
+(defn- option-document
+  [options]
+  (or (:document options)
+      (default-document)))
+
+(defn- option-htmx
+  [options]
+  (or (:htmx options)
+      (default-htmx)))
+
+(defn- htmx-trigger!
+  [runtime root event-name detail]
+  (let [htmx (:htmx runtime)
+        trigger (when htmx
+                  (.-trigger htmx))]
+    (when-not (= "function"
+                 (js* "typeof ~{}" trigger))
+      (throw
+       (core-error
+        :missing-htmx-trigger
+        "Managed Gesso Live fragment refresh requires window.htmx.trigger."
+        {:event-name event-name
+         :fragment-id (fragment-id-from-root root)})))
+    (.call trigger htmx root event-name detail)))
+
+(defn- fragment-root-by-id
+  [runtime fragment-id]
+  (let [document (:document runtime)
+        roots
+        (if document
+          (try
+            (array-seq (.querySelectorAll document fragment-selector))
+            (catch :default _
+              nil))
+          nil)]
+    (some
+     (fn [root]
+       (when (= fragment-id
+                (fragment-id-from-root root))
+         root))
+     roots)))
+
+(defn- weak-get
+  [^js weak-map key]
+  (when (and weak-map key)
+    (.get weak-map key)))
+
+(defn- weak-set!
+  [^js weak-map key value]
+  (.set weak-map key value)
+  value)
+
+(defn- weak-delete!
+  [^js weak-map key]
+  (when (and weak-map key)
+    (.delete weak-map key)))
+
+(defn- delete-if-same!
+  "Identity-safe physical cleanup.
+
+   A completing request may synchronously cause the adapter to issue the next
+   queued refresh. Never allow cleanup for generation A to delete a physical
+   record that was already replaced by generation B."
+  [^js weak-map key expected]
+  (when (and key
+             (identical? expected
+                         (weak-get weak-map key)))
+    (weak-delete! weak-map key))
+  nil)
+
+(defn- matching-active-request
+  [runtime root effect-data]
+  (let [record (weak-get (:active-requests runtime) root)]
+    (when (and record
+               (= (:fragment-id effect-data)
+                  (:fragment-id record))
+               (= (:request-generation effect-data)
+                  (:request-generation record))
+               (= (:request-id effect-data)
+                  (:request-id record)))
+      record)))
+
+(defn- register-active-request!
+  [runtime root record]
+  (weak-set! (:active-requests runtime) root record)
+  (when-let [xhr (:xhr record)]
+    (weak-set! (:requests-by-xhr runtime)
+               xhr
+               {:root root
+                :record record}))
+  record)
+
+(defn- unregister-active-request!
+  [runtime root record]
+  (delete-if-same! (:active-requests runtime) root record)
+  (when-let [xhr (:xhr record)]
+    (when-let [entry (weak-get (:requests-by-xhr runtime) xhr)]
+      (when (identical? record (:record entry))
+        (weak-delete! (:requests-by-xhr runtime) xhr))))
+  nil)
+
+(defn- active-request-from-event
+  "Resolve the exact physical managed request represented by an HTMX event.
+
+   When HTMX supplies an XHR, the XHR identity is authoritative for physical
+   correlation. A late callback from request A therefore cannot be interpreted
+   as request B merely because both used the same stable fragment root. Root-only
+   fallback is used only for lifecycle observations that supply no XHR."
+  [runtime event]
+  (let [xhr (xhr-from-event event)]
+    (if xhr
+      (when-let [{:keys [root record]}
+                 (weak-get (:requests-by-xhr runtime) xhr)]
+        (when (identical? record
+                          (weak-get (:active-requests runtime) root))
+          {:root root
+           :record record}))
+      (when-let [root (fragment-root-from-event event)]
+        (when-let [record (weak-get (:active-requests runtime) root)]
+          {:root root
+           :record record})))))
+
+(defn- abort-xhr!
+  [xhr]
+  (when xhr
+    (let [abort (.-abort xhr)]
+      (when (= "function"
+               (js* "typeof ~{}" abort))
+        (.call abort xhr))))
   true)
+
+(defn- physical-event
+  [physical]
+  (:event physical))
+
+(defn- physical-root
+  [physical]
+  (:fragment-root physical))
+
+(defn- built-in-handlers
+  [runtime options]
+  (let [continuity-handlers (continuity/handlers (:continuity runtime))
+        capture! (or (:continuity-capture! options)
+                     (:continuity-capture! continuity-handlers))
+        restore! (or (:continuity-restore! options)
+                     (:continuity-restore! continuity-handlers))
+        release! (or (:continuity-release! options)
+                     (:continuity-release! continuity-handlers))]
+    {:fragment/refresh
+     (fn [{:keys [effect]}]
+       (let [fragment-id (:fragment-id effect)
+             root (or (fragment-root-by-id runtime fragment-id)
+                      (throw
+                       (core-error
+                        :missing-fragment-root
+                        "Adapter requested refresh for a fragment root that is not present."
+                        {:fragment-id fragment-id
+                         :effect effect})))
+             pending
+             {:fragment-id fragment-id
+              :request-generation (:request-generation effect)
+              :requirements (set (:requirements effect))}]
+         (weak-set! (:pending-refreshes runtime) root pending)
+         (try
+           (htmx-trigger!
+            runtime
+            root
+            refresh-event-name
+            (clj->js
+             {:fragmentId fragment-id
+              :requestGeneration (:request-generation effect)}))
+           :triggered
+           (catch :default error
+             (delete-if-same!
+              (:pending-refreshes runtime)
+              root
+              pending)
+             (throw error)))))
+
+     :htmx/allow-request
+     (fn [{:keys [physical]}]
+       (when-let [disposition (:disposition physical)]
+         (reset! disposition :allowed))
+       :allowed)
+
+     :htmx/cancel-request
+     (fn [{:keys [effect physical]}]
+       (when-let [disposition (:disposition physical)]
+         (reset! disposition :cancelled))
+       (when-let [event (physical-event physical)]
+         (prevent-event! event))
+       (let [root (or (physical-root physical)
+                      (fragment-root-by-id runtime (:fragment-id effect)))]
+         (when-let [record (and root
+                                (matching-active-request runtime root effect))]
+           (abort-xhr! (:xhr record))))
+       :cancelled)
+
+     :htmx/allow-swap
+     (fn [{:keys [physical]}]
+       (when-let [disposition (:disposition physical)]
+         (reset! disposition :allowed))
+       :allowed)
+
+     :htmx/cancel-swap
+     (fn [{:keys [physical]}]
+       (when-let [disposition (:disposition physical)]
+         (reset! disposition :cancelled))
+       (when-let [event (physical-event physical)]
+         (cancel-swap-event! event))
+       :cancelled)
+
+     :continuity/capture
+     (fn [context]
+       (capture! context))
+
+     :continuity/restore
+     (fn [context]
+       (restore! context))
+
+     :continuity/release
+     (fn [context]
+       (release! context))}))
+
+(defn create
+  "Create one HTMX/browser normalization runtime.
+
+   The returned value owns one shell runtime plus only physical correlation
+   WeakMaps and listener registrations. No raw browser object enters the shell's
+   AdapterState.
+
+   Options:
+
+     :document
+       Browser document seam. Defaults to js/document.
+
+     :htmx
+       HTMX object seam. Defaults to window.htmx.
+
+     :request-id-fn
+       Zero-arity physical request identity generator.
+
+     :authoritative-from-event
+       event -> nil or plain adapter authoritative candidate. This is a parser/
+       carrier seam only; the adapter decides whether installation is allowed.
+
+     :handlers
+       Additional shell effect handlers for machine/transport/etc. Framework
+       HTMX disposition handlers may not be overridden.
+
+     :continuity-options
+       Options passed to continuity/create for this core runtime. This is the
+       normal extension point for custom physical boxes, diagnostics, and RAF
+       seams.
+
+     :continuity-capture! / :continuity-restore! / :continuity-release!
+       Optional physical continuity handler overrides. They do not receive or
+       return semantic state. When omitted, this runtime's continuity instance
+       provides the handlers.
+
+     :shell-options
+       Additional options forwarded to shell/create, excluding :handlers."
+  ([]
+   (create nil))
+  ([options]
+   (let [options (or options {})
+         _ (require-map! "Browser core options" options)
+         _ (check-option-keys! options)
+         request-id-fn (or (:request-id-fn options)
+                           default-request-id)
+         authoritative-from-event
+         (or (:authoritative-from-event options)
+             default-authoritative-from-event)
+         custom-handlers (or (:handlers options) {})
+         _ (require-map! "Browser core handlers" custom-handlers)
+         _ (require-callable! "Browser core :request-id-fn" request-id-fn)
+         _ (require-callable! "Browser core :authoritative-from-event"
+                              authoritative-from-event)
+         continuity-options (or (:continuity-options options) {})
+         _ (require-map! "Browser core :continuity-options" continuity-options)
+         continuity-runtime (continuity/create continuity-options)
+         _ (require-optional-callable! "Browser core :continuity-capture!"
+                                       (:continuity-capture! options))
+         _ (require-optional-callable! "Browser core :continuity-restore!"
+                                       (:continuity-restore! options))
+         _ (require-optional-callable! "Browser core :continuity-release!"
+                                       (:continuity-release! options))
+         collisions (seq (filter protected-handler-kinds
+                                 (keys custom-handlers)))
+         _ (when collisions
+             (throw
+              (core-error
+               :protected-handler-override
+               "Application handlers may not replace framework-owned HTMX effect handlers."
+               {:effect-kinds (set collisions)})))
+         shell-options (or (:shell-options options) {})
+         _ (require-map! "Browser core :shell-options" shell-options)
+         _ (when (contains? shell-options :handlers)
+             (throw
+              (core-error
+               :nested-shell-handlers
+               "Supply shell effect handlers through browser core :handlers."
+               {})))
+         runtime-base
+         {:gesso.live.browser.core/type runtime-type
+          :document (option-document options)
+          :htmx (option-htmx options)
+          :request-id-fn request-id-fn
+          :authoritative-from-event authoritative-from-event
+          :continuity continuity-runtime
+          :pending-refreshes (js/WeakMap.)
+          :active-requests (js/WeakMap.)
+          :requests-by-xhr (js/WeakMap.)
+          :listeners (atom [])
+          :started? (atom false)}
+         built-ins (built-in-handlers runtime-base options)
+         handlers (merge built-ins custom-handlers)
+         shell-runtime
+         (shell/create
+          (assoc shell-options :handlers handlers))]
+     (assoc runtime-base
+            :shell shell-runtime))))
+
+;; =============================================================================
+;; Physical request correlation
+;; =============================================================================
+
+(defn pending-refresh
+  "Return DOM-light pending correlation data for tests/diagnostics, or nil.
+
+   This function never returns the root itself."
+  [runtime root]
+  (when-let [pending
+             (weak-get (:pending-refreshes (require-core! runtime)) root)]
+    (select-keys pending
+                 [:fragment-id :request-generation :requirements])))
+
+(defn active-request
+  "Return DOM-light active request correlation data, excluding XHR."
+  [runtime root]
+  (when-let [record
+             (weak-get (:active-requests (require-core! runtime)) root)]
+    (select-keys record
+                 [:fragment-id
+                  :request-generation
+                  :request-id
+                  :requirements])))
+
+(defn- physical-context
+  [runtime event root record disposition]
+  {:event event
+   :fragment-root root
+   :request
+   (when record
+     (select-keys record
+                  [:fragment-id
+                   :request-generation
+                   :request-id
+                   :requirements]))
+   :disposition disposition})
+
+(defn- normalized-request-event
+  [kind record]
+  {:event kind
+   :fragment-id (:fragment-id record)
+   :request-generation (:request-generation record)
+   :request-id (:request-id record)})
+
+(defn- event-authoritative-candidate
+  [runtime event]
+  (let [value ((:authoritative-from-event runtime) event)]
+    (when (some? value)
+      (when-not (map? value)
+        (throw
+         (core-error
+          :invalid-authoritative-parser-result
+          "Browser authoritative parser must return nil or a plain map."
+          {:value value})))
+      value)))
+
+;; =============================================================================
+;; Explicit invalidation boundary
+;; =============================================================================
+
+(defn notify-fragment!
+  "Notify the pure adapter that a logical Live fragment must refresh.
+
+   requirement is opaque. Core neither compares nor interprets it. Multiple
+   invalidations while a request is active are coalesced by adapter.cljc.
+
+   This is the intended browser entry point for SSE wakeups and other Live
+   invalidation sources."
+  ([runtime fragment-id]
+   (notify-fragment! runtime fragment-id nil false))
+  ([runtime fragment-id requirement]
+   (notify-fragment! runtime fragment-id requirement true))
+  ([runtime fragment-id requirement requirement-present?]
+   (let [runtime (require-core! runtime)
+         fragment-id (require-nonblank-string! "Fragment id" fragment-id)
+         event
+         (cond-> {:event :live/invalidated
+                  :fragment-id fragment-id}
+           requirement-present?
+           (assoc :requirement requirement))]
+     (shell/dispatch! (:shell runtime) event))))
+
+(defn on-invalidated!
+  "Normalize one explicit DOM invalidation event.
+
+   Expected detail:
+     {fragmentId: \"...\", requirement: <optional opaque plain data>}
+
+   Core does not parse raw SSE frames here. SSE transport integration can emit
+   this event or call notify-fragment! directly once it has identified the
+   logical fragment."
+  [runtime event]
+  (let [fragment-id (detail-field event "fragmentId")
+        detail (event-detail event)
+        requirement-present?
+        (boolean
+         (and detail
+              (.call (.-hasOwnProperty (.-prototype js/Object))
+                     detail
+                     "requirement")))
+        requirement (when requirement-present?
+                      (js->clj
+                       (aget detail "requirement")
+                       :keywordize-keys true))]
+    (when fragment-id
+      (notify-fragment!
+       runtime
+       (str fragment-id)
+       requirement
+       requirement-present?)))
+  true)
+
+;; =============================================================================
+;; HTMX lifecycle normalization
+;; =============================================================================
 
 (defn on-before-request!
-  "Start the verified browser choreography immediately before network send.
+  "Bind the adapter-issued request generation to one physical HTMX request.
 
-   configRequest has already assigned the correlation header, so starting here
-   may safely replace the action's target contents without disrupting HTMX
-   request construction."
-  [event]
-  (when-some [source
-              (optimistic-source-from-event
-               event)]
-    (let [preflight
-          (pending-request source)]
-      (when-not preflight
-        (prevent-event! event)
-        (let [error
-              (ex-info
-               "Optimistic HTMX request reached beforeRequest without configRequest correlation."
-               {:error/type
-                :gesso.live.browser.core/missing-optimistic-preflight})]
-          (optimistic/emit!
-           (continuity/root source)
-           "error"
-           #js {:phase "before-request"
-                :reason "missing-config-request"
-                :error error})
-          (throw error)))
-      (let [execution-id
-            (:execution-id preflight)]
+   Unmanaged HTMX requests are ignored. The adapter remains responsible for
+   deciding whether this request generation is current; core only supplies a
+   fresh physical request id and enforces the resulting allow/cancel effect.
+
+   Pending correlation is consumed only after normalization and semantic
+   dispatch succeed. A host-side failure before binding therefore fails the
+   physical request closed without losing the adapter-issued generation."
+  [runtime event]
+  (let [runtime (require-core! runtime)
+        root (fragment-root-from-event event)
+        pending (and root
+                     (weak-get (:pending-refreshes runtime) root))]
+    (when pending
+      (let [disposition (atom :undecided)]
         (try
-          (optimistic/start!
-         source
-         {:execution-id execution-id
-          :consistency-token
-          (:consistency-token preflight)})
-        (remove-pending-request!
-         source)
-        (catch :default error
-          (remove-pending-request!
-           source)
-          ;; Never allow an uncorrelated authoritative command to leave the
-          ;; browser after local optimistic protocol startup failed.
-          (prevent-event! event)
-          (optimistic/emit!
-           (continuity/root source)
-           "error"
-           #js {:phase "before-request"
-                :executionId execution-id
-                :error error})
-          (throw error))))))
-  true)
-
-;; -----------------------------------------------------------------------------
-;; Settlement delivery
-;; -----------------------------------------------------------------------------
-
-(defn- active-execution-for-source
-  [source]
-  (when-some [execution-id
-              (optimistic/execution-for-source
-               source)]
-    (when (optimistic/active?
-           execution-id)
-      execution-id)))
-
-(defn- settle-from-event!
-  "Attempt semantic settlement delivery from an HTMX response.
-
-   Returns one of:
-     :settled
-     :no-settlement
-     :inactive
-     :not-optimistic
-
-   This is safe to call at beforeSwap and again at afterRequest. Once the first
-   delivery completes the choreography, the later call observes an inactive
-   execution and cannot resurrect it."
-  [event]
-  (if-some [source
-            (optimistic-source-from-event
-             event)]
-    (if-some [execution-id
-              (active-execution-for-source
-               source)]
-      (if-some [xhr
-                (xhr-from-event event)]
-        (if (optimistic/settle-from-xhr!
-             execution-id
-             xhr)
-          (do
-            (mark-settled-response!
-             source)
-            (optimistic/cleanup-source-if-terminal!
-             source)
-            :settled)
-          :no-settlement)
-        :no-settlement)
-      :inactive)
-    :not-optimistic))
-
-(defn on-after-request!
-  [event]
-  (when-some [source
-              (optimistic-source-from-event
-               event)]
-    (when-some [execution-id
-                (active-execution-for-source
-                 source)]
-      (let [settlement-status
-            (settle-from-event!
-             event)]
-        (when (and
-               (= :no-settlement
-                  settlement-status)
-               (not
-                (request-successful?
-                 event)))
-          (optimistic/request-failed!
-           execution-id
-           (failure-reason event)))
-        ;; A successful correlated optimistic response without a settlement is a
-        ;; server/framework protocol error, not semantic command failure. Keep
-        ;; the execution alive so its modeled timeout recovers safely, and emit
-        ;; a diagnostic instead of pretending the network failed.
-        (when (and
-               (= :no-settlement
-                  settlement-status)
-               (request-successful?
-                event))
-          (optimistic/emit!
-           (continuity/root source)
-           "error"
-           #js {:phase "after-request"
-                :reason "missing-settlement"
-                :executionId execution-id}))))
-    (optimistic/cleanup-source-if-terminal!
-     source)
-    (remove-pending-request!
-     source)
-    (clear-settled-response-later!
-     source))
-  true)
-
-(defn on-request-failed!
-  [event]
-  (when-some [source
-              (optimistic-source-from-event
-               event)]
-    (when-some [execution-id
-                (active-execution-for-source
-                 source)]
-      (optimistic/request-failed!
-       execution-id
-       (failure-reason event)))
-    (optimistic/cleanup-source-if-terminal!
-     source)
-    (remove-pending-request!
-     source)
-    (clear-settled-response-later!
-     source))
-  true)
-
-;; -----------------------------------------------------------------------------
-;; Continuity + canonical observation
-;; -----------------------------------------------------------------------------
-
-(defn- event-roots
-  [event]
-  (continuity/roots-from-event
-   event))
-
-(defn- observe-canonical-event!
-  [event]
-  (doseq [element
-          (continuity/event-elements
-           event)]
-    (optimistic/observe-canonical-tree!
-     element))
+          (let [request-id ((:request-id-fn runtime))
+                _ (require-nonblank-string! "Physical HTMX request id" request-id)
+                record (assoc pending
+                              :request-id request-id
+                              :xhr (xhr-from-event event))
+                physical (physical-context runtime event root record disposition)
+                result
+                (shell/dispatch!
+                 (:shell runtime)
+                 (normalized-request-event :htmx/before-request record)
+                 physical)]
+            ;; Remove only the correlation this callback consumed. A re-entrant
+            ;; effect is allowed to have installed a newer pending generation.
+            (delete-if-same! (:pending-refreshes runtime) root pending)
+            (if (= :cancelled @disposition)
+              (unregister-active-request! runtime root record)
+              (register-active-request! runtime root record))
+            result)
+          (catch :default error
+            ;; Generation/validation/adapter/shell failure must never let an
+            ;; unowned managed request escape to the network. Because pending
+            ;; correlation is consumed only on success, a pre-binding host
+            ;; failure also leaves the exact generation available for recovery.
+            (prevent-event! event)
+            (throw error))))))
   true)
 
 (defn on-before-swap!
-  [event]
-  ;; Settlement is consumed before HTMX gets a chance to install the same
-  ;; response. This preserves semantic outcome and lets the choreography make
-  ;; the canonical authority decision itself. HTMX may subsequently process
-  ;; equivalent OOB markup; ordinary continuity will handle that later pass.
-  (let [source
-        (optimistic-source-from-event
-         event)
-        settlement-status
-        (settle-from-event!
-         event)]
-    (when-not (or
-               (= :settled
-                  settlement-status)
-               (settled-response?
-                source))
-      (continuity/capture-from-event!
-       event)))
+  "Normalize HTMX beforeSwap for the exact currently correlated managed request.
+
+   The optional authoritative candidate is parsed into plain data, then the
+   adapter alone decides whether the swap may install it. Parsing and
+   normalization are inside the same fail-closed boundary as semantic dispatch:
+   no malformed or exceptional response metadata may escape into a DOM swap."
+  [runtime event]
+  (let [runtime (require-core! runtime)
+        {:keys [root record]} (active-request-from-event runtime event)]
+    (when record
+      (let [disposition (atom :undecided)
+            physical (physical-context runtime event root record disposition)]
+        (try
+          (let [candidate (event-authoritative-candidate runtime event)
+                normalized
+                (cond-> (normalized-request-event :htmx/before-swap record)
+                  candidate
+                  (assoc :authoritative candidate))]
+            (shell/dispatch!
+             (:shell runtime)
+             normalized
+             physical))
+          (catch :default error
+            ;; beforeSwap is the last safe point to prevent an unclassified
+            ;; replacement from reaching the DOM. This includes parser and
+            ;; normalization failures, not only adapter/shell failures.
+            (cancel-swap-event! event)
+            (throw error))))))
   true)
 
 (defn on-after-swap!
-  [event]
-  (observe-canonical-event!
-   event)
-  (continuity/restore-immediate-from-event!
-   event)
+  "Normalize HTMX afterSwap. Core does not infer that a swap was authoritative;
+   only candidate data previously accepted at beforeSwap can advance the
+   adapter's authoritative frontier."
+  [runtime event]
+  (let [runtime (require-core! runtime)
+        {:keys [root record]} (active-request-from-event runtime event)]
+    (when record
+      (shell/dispatch!
+       (:shell runtime)
+       (normalized-request-event :htmx/after-swap record)
+       (physical-context runtime event root record (atom :observed)))))
   true)
 
-(defn on-after-settle!
-  [event]
-  (observe-canonical-event!
-   event)
-  (continuity/restore-after-layout-from-event!
-   event)
+(defn- finish-active-request!
+  [runtime event failure?]
+  (let [{:keys [root record]}
+        (active-request-from-event runtime event)]
+    (when record
+      (let [normalized
+            (if failure?
+              (assoc
+               (normalized-request-event :http/failed record)
+               :reason (failure-reason event))
+              (normalized-request-event :htmx/after-request record))
+            result
+            (shell/dispatch!
+             (:shell runtime)
+             normalized
+             (physical-context runtime event root record (atom :observed)))]
+        ;; dispatch! may synchronously start the queued next generation. Remove
+        ;; only the record that actually completed.
+        (unregister-active-request! runtime root record)
+        result))))
+
+(defn on-after-request!
+  "Finish one managed HTMX request.
+
+   Physical success/failure is deliberately not a semantic command outcome. It
+   only closes or fails the fragment request generation."
+  [runtime event]
+  (finish-active-request!
+   (require-core! runtime)
+   event
+   (not (request-successful? event)))
   true)
 
-(defn on-oob-before-swap!
-  [event]
-  (let [source
-        (optimistic-source-from-event
-         event)
-        settlement-status
-        (settle-from-event!
-         event)]
-    (when-not (or
-               (= :settled
-                  settlement-status)
-               (settled-response?
-                source))
-      (continuity/capture-from-event!
-       event)))
+(defn on-request-failed!
+  "Normalize HTMX transport/error events.
+
+   If afterRequest later reports the same request, identity-safe cleanup makes
+   the duplicate callback harmless."
+  [runtime event]
+  (finish-active-request!
+   (require-core! runtime)
+   event
+   true)
   true)
-
-(defn on-oob-after-swap!
-  [event]
-  (observe-canonical-event!
-   event)
-  (continuity/restore-from-event!
-   event)
-  true)
-
-(defn on-sse-before-message!
-  [event]
-  (continuity/capture-from-event!
-   event)
-  true)
-
-(defn on-sse-message!
-  [event]
-  ;; Live invalidation/refetch delivery is authoritative only where the server
-  ;; explicitly marked resulting DOM canonical.
-  (observe-canonical-event!
-   event)
-  (continuity/restore-from-event!
-   event)
-  true)
-
-;; -----------------------------------------------------------------------------
-;; Duplicate activation
-;; -----------------------------------------------------------------------------
-
-(defn- busy-source?
-  [source]
-  (try
-    (let [descriptor
-          (optimistic/source-descriptor
-           source)]
-      (optimistic/scope-busy?
-       (:scope descriptor)))
-    (catch :default _
-      false)))
-
-(defn on-click-capture!
-  [event]
-  (when-some [source
-              (optimistic/optimistic-source
-               (.-target event))]
-    (when (busy-source? source)
-      (prevent-event! event)))
-  true)
-
-(defn on-submit-capture!
-  [event]
-  (when-some [source
-              (optimistic/optimistic-source
-               (.-target event))]
-    (when (busy-source? source)
-      (prevent-event! event)))
-  true)
-
-;; -----------------------------------------------------------------------------
-;; Cleanup
-;; -----------------------------------------------------------------------------
 
 (defn on-before-cleanup!
-  [event]
-  (let [target
-        (event-target event)]
-    (when target
-      ;; Normal active optimistic executions are not forcibly aborted merely
-      ;; because their provisional target is being replaced: canonical
-      ;; observation/settlement is the authority mechanism. Whole subtree
-      ;; teardown, however, must release browser-only continuity resources.
-      (continuity/cleanup-element!
-       target))
-    (when-some [source
-                (optimistic-source-from-event
-                 event)]
-      (optimistic/cleanup-source-if-terminal!
-       source)
-      (remove-pending-request!
-       source)))
+  "Retire managed fragments whose stable roots are being removed.
+
+   Semantic retirement happens through adapter events before physical WeakMap
+   correlation is discarded. Nested fragment roots are independently retired."
+  [runtime event]
+  (let [runtime (require-core! runtime)
+        element (or (detail-field event "elt")
+                    (when event (.-target event)))]
+    (doseq [root (nested-fragment-roots element)
+            :let [fragment-id (fragment-id-from-root root)
+                  record (weak-get (:active-requests runtime) root)]
+            :when fragment-id]
+      (shell/dispatch!
+       (:shell runtime)
+       {:event :fragment/retire
+        :fragment-id fragment-id
+        :reason :dom-cleanup}
+       {:event event
+        :fragment-root root})
+      (weak-delete! (:pending-refreshes runtime) root)
+      (when record
+        (unregister-active-request! runtime root record))))
   true)
 
-;; -----------------------------------------------------------------------------
-;; Public browser API
-;; -----------------------------------------------------------------------------
-
-(defn runtime-state
-  []
-  {:version runtime-version
-   :protocol-version
-   protocol/version
-   :pending-request-count
-   (count @pending-requests)
-   :settled-response-count
-   (count @settled-response-sources)
-   :choreo
-   (choreo-runtime/diagnostics)
-   :continuity
-   {:slots
-    (continuity/slot-summaries)}
-   :optimistic
-   (optimistic/diagnostics)})
-
-(defn- js-register-box!
-  [type implementation]
-  (continuity/register-box!
-   type
-   implementation))
-
-(defn- js-runtime-state
-  []
-  (clj->js
-   (runtime-state)))
-
-(defn install-public-api!
-  []
-  (let [gesso-live
-        (or
-         (aget js/window
-               "gessoLive")
-         #js {})
-        continuity-api
-        #js {:version runtime-version
-             :parseConfig
-             continuity/parse-config
-             :boxesFromConfig
-             continuity/boxes-from-config
-             :captureFromEvent
-             continuity/capture-from-event!
-             :restoreFromEvent
-             continuity/restore-from-event!
-             :registerBox
-             js-register-box!}
-        choreo-api
-        #js {:version runtime-version
-             :state
-             (fn []
-               (clj->js
-                (choreo-runtime/diagnostics)))
-             :active
-             (fn []
-               (clj->js
-                (choreo-runtime/active-summaries)))
-             :terminal
-             (fn []
-               (clj->js
-                (choreo-runtime/terminal-summaries)))}
-        optimistic-api
-        #js {:version runtime-version
-             :state
-             (fn []
-               (clj->js
-                (optimistic/diagnostics)))
-             :active
-             optimistic/active?
-             :scopeBusy
-             optimistic/scope-busy?
-             :commandPayload
-             (fn [execution-id]
-               (clj->js
-                (optimistic/command-payload
-                 execution-id)))}]
-    (aset gesso-live
-          "version"
-          runtime-version)
-    (aset gesso-live
-          "protocolVersion"
-          protocol/version)
-    (aset gesso-live
-          "state"
-          js-runtime-state)
-    (aset gesso-live
-          "continuity"
-          continuity-api)
-    (aset gesso-live
-          "choreo"
-          choreo-api)
-    (aset gesso-live
-          "optimistic"
-          optimistic-api)
-    (aset js/window
-          "gessoLive"
-          gesso-live))
-  true)
-
-;; -----------------------------------------------------------------------------
-;; Listener installation
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Listener installation / removal
+;; =============================================================================
 
 (defn add-document-listener!
-  ([name handler]
-   (.addEventListener
-    js/document
-    name
-    handler))
-  ([name handler capture?]
-   (.addEventListener
-    js/document
-    name
-    handler
-    capture?)))
+  ([document name handler]
+   (add-document-listener! document name handler false))
+  ([document name handler capture?]
+   (.addEventListener document name handler capture?)
+   [name handler capture?]))
 
-(defn ^:export init!
-  []
-  (when (compare-and-set!
-         initialized?
-         false
-         true)
-    (continuity/initialize!)
-    (optimistic/initialize!)
-
-    ;; Duplicate suppression is a capture-phase concern. Unlike the old runtime,
-    ;; no provisional DOM mutation is performed on pointerdown.
-    (add-document-listener!
-     "click"
-     on-click-capture!
-     true)
-    (add-document-listener!
-     "submit"
-     on-submit-capture!
-     true)
-
-    ;; Request correlation and lifecycle.
-    (add-document-listener!
-     "htmx:configRequest"
-     on-config-request!)
-    (add-document-listener!
-     "htmx:beforeRequest"
-     on-before-request!)
-    (add-document-listener!
-     "htmx:afterRequest"
-     on-after-request!)
-    (add-document-listener!
-     "htmx:responseError"
-     on-request-failed!)
-    (add-document-listener!
-     "htmx:sendError"
-     on-request-failed!)
-    (add-document-listener!
-     "htmx:timeout"
-     on-request-failed!)
-    (add-document-listener!
-     "htmx:abort"
-     on-request-failed!)
-
-    ;; Ordinary HTMX replacement continuity and canonical observation.
-    (add-document-listener!
-     "htmx:beforeSwap"
-     on-before-swap!)
-    (add-document-listener!
-     "htmx:afterSwap"
-     on-after-swap!)
-    (add-document-listener!
-     "htmx:afterSettle"
-     on-after-settle!)
-    (add-document-listener!
-     "htmx:oobBeforeSwap"
-     on-oob-before-swap!)
-    (add-document-listener!
-     "htmx:oobAfterSwap"
-     on-oob-after-swap!)
-
-    ;; htmx-ext-sse replacement lifecycle.
-    (add-document-listener!
-     "htmx:sseBeforeMessage"
-     on-sse-before-message!)
-    (add-document-listener!
-     "htmx:sseMessage"
-     on-sse-message!)
-
-    (add-document-listener!
-     "htmx:beforeCleanupElement"
-     on-before-cleanup!)
-
-    (install-public-api!))
+(defn remove-document-listener!
+  [document name handler capture?]
+  (.removeEventListener document name handler capture?)
   true)
 
-(init!)
+(defn- handler-for
+  [runtime handler-id]
+  (case handler-id
+    :before-request #(on-before-request! runtime %)
+    :before-swap #(on-before-swap! runtime %)
+    :after-swap #(on-after-swap! runtime %)
+    :after-request #(on-after-request! runtime %)
+    :request-failed #(on-request-failed! runtime %)
+    :before-cleanup #(on-before-cleanup! runtime %)
+    :invalidated #(on-invalidated! runtime %)))
+
+(defn start!
+  "Install the first pure-adapter HTMX integration listeners exactly once for
+   this core runtime."
+  [runtime]
+  (let [runtime (require-core! runtime)]
+    (when (compare-and-set! (:started? runtime) false true)
+      (let [document (:document runtime)]
+        (when-not document
+          (reset! (:started? runtime) false)
+          (throw
+           (core-error
+            :missing-document
+            "Browser core requires a document to install lifecycle listeners."
+            {})))
+        (doseq [[name handler-id] listener-specs]
+          (let [handler (handler-for runtime handler-id)
+                registration (add-document-listener!
+                              document name handler false)]
+            (swap! (:listeners runtime) conj registration)))))
+    runtime))
+
+(defn stop!
+  "Remove installed listeners and shut down the shell runtime.
+
+   Shell shutdown semantically retires owned work before best-effort physical
+   cleanup. Listener removal itself carries no semantic authority."
+  [runtime]
+  (let [runtime (require-core! runtime)
+        document (:document runtime)]
+    (when @(:started? runtime)
+      (doseq [[name handler capture?] @(:listeners runtime)]
+        (try
+          (remove-document-listener! document name handler capture?)
+          (catch :default _
+            nil)))
+      (reset! (:listeners runtime) [])
+      (reset! (:started? runtime) false))
+    (shell/shutdown! (:shell runtime))
+    :stopped))
+
+;; =============================================================================
+;; Small browser-global entry point
+;; =============================================================================
+
+(defonce ^:private default-runtime*
+  (atom nil))
+
+(defn default-runtime
+  []
+  @default-runtime*)
+
+(defn- install-public-api!
+  [runtime]
+  (let [api
+        #js {:version runtime-version
+             :state (fn []
+                      (clj->js (diagnostics runtime)))
+             :notifyFragment
+             (fn
+               ([fragment-id]
+                (notify-fragment! runtime fragment-id))
+               ([fragment-id requirement]
+                (notify-fragment! runtime fragment-id (js->clj requirement))))
+             :shutdown (fn []
+                         (stop! runtime))}]
+    (aset js/window "gessoLive" api)
+    true))
+
+(defn ^:export init!
+  "Create/start the default browser runtime once.
+
+   The namespace itself does not auto-initialize. The generated Gesso Live entry
+   script should call this exported function explicitly, which keeps tests and
+   hot reload from acquiring hidden browser ownership merely by requiring the
+   namespace."
+  ([]
+   (init! nil))
+  ([options]
+   (or @default-runtime*
+       (let [runtime (create options)]
+         (if (compare-and-set! default-runtime* nil runtime)
+           (do
+             (try
+               (start! runtime)
+               (install-public-api! runtime)
+               runtime
+               (catch :default error
+                 (reset! default-runtime* nil)
+                 (try
+                   (stop! runtime)
+                   (catch :default _
+                     nil))
+                 (throw error))))
+           @default-runtime*)))))
+
+(defn ^:export shutdown!
+  "Stop and forget the default runtime. Intended for hot reload/tests and full
+   page runtime teardown."
+  []
+  (when-let [runtime @default-runtime*]
+    (reset! default-runtime* nil)
+    (stop! runtime))
+  :stopped)

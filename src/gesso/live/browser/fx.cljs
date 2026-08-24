@@ -7,7 +7,8 @@
    Compatibility goals:
    - machines are maps of keyword state ids to state functions and start at
      :start
-   - state functions receive accumulated input merged over the original ctx
+   - each state receives the original ctx merged with only the immediately
+     previous state output, matching Biff transition semantics
    - effect descriptors are vectors whose first item names a registered handler
    - handler results replace their descriptor at the descriptor's map key
    - sequential state results are reduced left-to-right
@@ -195,17 +196,24 @@
                     (first value)))))
 
 (defn- state-function
-  [machine-name state->fn state]
-  (or (get state->fn state)
-      (throw
-       (ex "Invalid FX state."
-           {state-key state
-            machine-name-key machine-name
-            :biff.fx/available-states (keys state->fn)}))))
+  ([machine-name state->fn state]
+   (state-function machine-name state->fn state nil false))
+  ([machine-name state->fn state trace]
+   (state-function machine-name state->fn state trace true))
+  ([machine-name state->fn state trace include-trace?]
+   (or (get state->fn state)
+       (throw
+        (ex "Invalid FX state."
+            (cond->
+             {state-key state
+              machine-name-key machine-name
+              :biff.fx/available-states (keys state->fn)}
+              include-trace?
+              (assoc trace-key trace)))))))
 
 (defn- invoke-state
   [machine-name state->fn ctx state input trace]
-  (let [state-fn (state-function machine-name state->fn state)
+  (let [state-fn (state-function machine-name state->fn state trace)
         injected (injected-context)
         state-input (merge ctx input injected)
         result
@@ -357,7 +365,7 @@
                        machine-name-key machine-name
                        :biff.fx/output output})))
                (recur (get output next-key)
-                      (merge input output)
+                      output
                       (conj trace output)))
 
              (contains? output return-key)

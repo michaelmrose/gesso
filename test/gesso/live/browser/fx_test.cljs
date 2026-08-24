@@ -3,9 +3,9 @@
    [cljs.test :refer-macros [deftest is testing]]
    [gesso.live.browser.fx :as fx]))
 
-;; -----------------------------------------------------------------------------
-;; Helpers
-;; -----------------------------------------------------------------------------
+;; Browser-specific implementation tests only.
+;; Cross-platform Biff semantic correspondence belongs in
+;; gesso.live.browser.fx-conformance-test.
 
 (defn- thrown
   [f]
@@ -14,17 +14,10 @@
     nil
     (catch :default error
       error)))
-
 (defn- thrown-data
   [f]
   (some-> (thrown f)
           ex-data))
-
-(defn- thrown-message
-  [f]
-  (some-> (thrown f)
-          ex-message))
-
 (defn- date?
   [value]
   (instance? js/Date value))
@@ -54,7 +47,7 @@
          fx/trace-key)))
 
 ;; -----------------------------------------------------------------------------
-;; Handler resolution
+;; Handler resolution API
 ;; -----------------------------------------------------------------------------
 
 (deftest empty-handler-map-test
@@ -156,12 +149,12 @@
         (thrown-data
          #(fx/handlers
            {:biff.fx/get-handlers
-            :not-callable}))]
+            42}))]
 
     (is (= ":biff.fx/get-handlers"
            (:label data)))
 
-    (is (= :not-callable
+    (is (= 42
            (:value data)))))
 
 (deftest dynamic-handler-provider-must-return-map-or-nil-test
@@ -205,7 +198,7 @@
            (:value data)))))
 
 ;; -----------------------------------------------------------------------------
-;; Machine construction
+;; Machine construction validation
 ;; -----------------------------------------------------------------------------
 
 (deftest machine-requires-start-state-test
@@ -244,7 +237,7 @@
            :test/bad-state-value
 
            :start
-           :not-callable))]
+           42))]
 
     (is (= :test/bad-state-value
            (:biff.fx/machine-name data)))))
@@ -362,7 +355,7 @@
             (:biff.fx/available-states data))))))
 
 ;; -----------------------------------------------------------------------------
-;; Per-state browser injections
+;; Browser-only per-state injections
 ;; -----------------------------------------------------------------------------
 
 (deftest normal-machine-injects-now-and-seed-test
@@ -493,481 +486,8 @@
          @seen))))
 
 ;; -----------------------------------------------------------------------------
-;; State accumulation
+;; Browser validation diagnostics
 ;; -----------------------------------------------------------------------------
-
-(deftest state-output-is-merged-over-original-context-for-next-state-test
-  (let [seen
-        (atom nil)
-
-        machine
-        (fx/machine
-         :test/accumulation
-
-         :start
-         (fn [ctx]
-           {:from-start
-            (inc
-             (:base ctx))
-
-            :biff.fx/next
-            :finish})
-
-         :finish
-         (fn [ctx]
-           (reset! seen ctx)
-
-           {:biff.fx/return
-            {:base
-             (:base ctx)
-
-             :from-start
-             (:from-start ctx)}}))]
-
-    (is (= {:base 10
-            :from-start 11}
-           (machine
-            {:base 10})))
-
-    (is (= 10
-           (:base @seen)))
-
-    (is (= 11
-           (:from-start @seen)))))
-
-(deftest later-state-output-overrides-earlier-input-test
-  (let [machine
-        (fx/machine
-         :test/override
-
-         :start
-         (fn [_ctx]
-           {:value
-            :start
-
-            :biff.fx/next
-            :middle})
-
-         :middle
-         (fn [_ctx]
-           {:value
-            :middle
-
-            :biff.fx/next
-            :finish})
-
-         :finish
-         (fn [ctx]
-           {:biff.fx/return
-            (:value ctx)}))]
-
-    (is (= :middle
-           (machine
-            {:value :original})))))
-
-(deftest nil-state-output-is-empty-contribution-test
-  (let [machine
-        (fx/machine
-         :test/nil-output
-
-         :start
-         (fn [_ctx]
-           nil))]
-
-    (is (= {}
-           (machine {})))))
-
-(deftest ordinary-state-output-without-next-or-return-is-final-result-test
-  (let [machine
-        (fx/machine
-         :test/plain-result
-
-         :start
-         (fn [ctx]
-           {:answer
-            (inc
-             (:value ctx))}))]
-
-    (is (= {:answer 42}
-           (machine
-            {:value 41})))))
-
-;; -----------------------------------------------------------------------------
-;; Sequential state results
-;; -----------------------------------------------------------------------------
-
-(deftest sequential-state-results-reduce-left-to-right-test
-  (let [calls
-        (atom [])
-
-        machine
-        (fx/machine
-         :test/sequential
-
-         :start
-         (fn [_ctx]
-           [{:a 1}
-            nil
-            {:b 2}
-            {:a 3}]))]
-
-    (is (= {:a 3
-            :b 2}
-           (machine {})))))
-
-(deftest later-sequential-result-sees-earlier-output-in-effect-handler-test
-  (let [handler-contexts
-        (atom [])
-
-        machine
-        (fx/machine
-         :test/sequential-handler-context
-
-         :start
-         (fn [_ctx]
-           [{:base 10}
-            {:answer
-             [:test/add-from-output 5]}]))
-
-        result
-        (machine
-         {:biff.fx/handlers
-          {:test/add-from-output
-           (fn [ctx value]
-             (swap!
-              handler-contexts
-              conj
-              ctx)
-
-             (+ (:base ctx)
-                value))}})]
-
-    (is (= {:base 10
-            :answer 15}
-           result))
-
-    (is (= 1
-           (count @handler-contexts)))
-
-    (is (= 10
-           (:base
-            (first
-             @handler-contexts))))))
-
-(deftest sequential-results-may-carry-next-test
-  (let [machine
-        (fx/machine
-         :test/sequential-next
-
-         :start
-         (fn [_ctx]
-           [{:a 1}
-            {:b 2
-             :biff.fx/next
-             :finish}])
-
-         :finish
-         (fn [ctx]
-           {:biff.fx/return
-            [(:a ctx)
-             (:b ctx)]}))]
-
-    (is (= [1 2]
-           (machine {})))))
-
-;; -----------------------------------------------------------------------------
-;; Effect descriptor execution
-;; -----------------------------------------------------------------------------
-
-(deftest registered-effect-descriptor-is-replaced-by-handler-result-test
-  (let [calls
-        (atom [])
-
-        machine
-        (fx/machine
-         :test/effect
-
-         :start
-         (fn [_ctx]
-           {:answer
-            [:test/add 20 22]}))
-
-        result
-        (machine
-         {:request-id "request-1"
-
-          :biff.fx/handlers
-          {:test/add
-           (fn [ctx left right]
-             (swap!
-              calls
-              conj
-              {:ctx ctx
-               :left left
-               :right right})
-
-             (+ left right))}})]
-
-    (is (= {:answer 42}
-           result))
-
-    (is (= 1
-           (count @calls)))
-
-    (is (= 20
-           (:left
-            (first @calls))))
-
-    (is (= 22
-           (:right
-            (first @calls))))
-
-    (is (= "request-1"
-           (get-in
-            @calls
-            [0 :ctx :request-id])))))
-
-(deftest multiple-effect-descriptors-in-one-result-are-executed-test
-  (let [machine
-        (fx/machine
-         :test/multiple-effects
-
-         :start
-         (fn [_ctx]
-           {:left
-            [:test/inc 1]
-
-            :right
-            [:test/inc 10]
-
-            :plain
-            :preserved}))]
-
-    (is (= {:left 2
-            :right 11
-            :plain :preserved}
-           (machine
-            {:biff.fx/handlers
-             {:test/inc
-              (fn [_ctx value]
-                (inc value))}})))))
-
-(deftest unregistered-vector-is-ordinary-data-test
-  (let [machine
-        (fx/machine
-         :test/unregistered-vector
-
-         :start
-         (fn [_ctx]
-           {:ordinary
-            [:not/an-effect 1 2]}))]
-
-    (is (= {:ordinary
-            [:not/an-effect 1 2]}
-           (machine {})))))
-
-(deftest effect-handler-receives-plain-output-from-same-result-test
-  (let [seen
-        (atom nil)
-
-        machine
-        (fx/machine
-         :test/same-result-context
-
-         :start
-         (fn [_ctx]
-           {:base 40
-
-            :answer
-            [:test/add 2]}))]
-
-    (is (= {:base 40
-            :answer 42}
-           (machine
-            {:biff.fx/handlers
-             {:test/add
-              (fn [ctx value]
-                (reset! seen ctx)
-                (+ (:base ctx)
-                   value))}})))
-
-    (is (= 40
-           (:base @seen)))))
-
-(deftest effect-handler-result-replaces-descriptor-at-original-key-test
-  (let [result-value
-        {:nested true}
-
-        machine
-        (fx/machine
-         :test/effect-replacement
-
-         :start
-         (fn [_ctx]
-           {:result
-            [:test/return-map]}))]
-
-    (is (= {:result result-value}
-           (machine
-            {:biff.fx/handlers
-             {:test/return-map
-              (fn [_ctx]
-                result-value)}})))))
-
-;; -----------------------------------------------------------------------------
-;; Dynamic-handler execution
-;; -----------------------------------------------------------------------------
-
-(deftest machine-uses-dynamic-handler-provider-test
-  (let [calls
-        (atom 0)
-
-        machine
-        (fx/machine
-         :test/dynamic-handler
-
-         :start
-         (fn [_ctx]
-           {:answer
-            [:test/value]}))]
-
-    (is (= {:answer :dynamic}
-           (machine
-            {:biff.fx/get-handlers
-             (fn []
-               (swap! calls inc)
-
-               {:test/value
-                (fn [_ctx]
-                  :dynamic)})})))
-
-    (is (= 1
-           @calls))))
-
-(deftest dynamic-handler-overrides-explicit-handler-during-execution-test
-  (let [machine
-        (fx/machine
-         :test/dynamic-precedence
-
-         :start
-         (fn [_ctx]
-           {:answer
-            [:test/value]}))]
-
-    (is (= {:answer :dynamic}
-           (machine
-            {:biff.fx/handlers
-             {:test/value
-              (fn [_ctx]
-                :explicit)}
-
-             :biff.fx/get-handlers
-             (fn []
-               {:test/value
-                (fn [_ctx]
-                  :dynamic)})})))))
-
-;; -----------------------------------------------------------------------------
-;; :biff.fx/next and :biff.fx/return
-;; -----------------------------------------------------------------------------
-
-(deftest next-transitions-through-local-states-test
-  (let [visited
-        (atom [])
-
-        machine
-        (fx/machine
-         :test/next
-
-         :start
-         (fn [_ctx]
-           (swap!
-            visited
-            conj
-            :start)
-
-           {:value 1
-            :biff.fx/next
-            :middle})
-
-         :middle
-         (fn [ctx]
-           (swap!
-            visited
-            conj
-            :middle)
-
-           {:value
-            (inc
-             (:value ctx))
-
-            :biff.fx/next
-            :finish})
-
-         :finish
-         (fn [ctx]
-           (swap!
-            visited
-            conj
-            :finish)
-
-           {:biff.fx/return
-            (:value ctx)}))]
-
-    (is (= 2
-           (machine {})))
-
-    (is (= [:start
-            :middle
-            :finish]
-           @visited))))
-
-(deftest return-terminates-immediately-test
-  (let [visited
-        (atom [])
-
-        machine
-        (fx/machine
-         :test/return
-
-         :start
-         (fn [_ctx]
-           (swap!
-            visited
-            conj
-            :start)
-
-           {:biff.fx/return
-            :done})
-
-         :never
-         (fn [_ctx]
-           (swap!
-            visited
-            conj
-            :never)
-
-           {:biff.fx/return
-            :wrong}))]
-
-    (is (= :done
-           (machine {})))
-
-    (is (= [:start]
-           @visited))))
-
-(deftest return-key-may-return-nil-test
-  (let [machine
-        (fx/machine
-         :test/nil-return
-
-         :start
-         (fn [_ctx]
-           {:biff.fx/return
-            nil}))]
-
-    (is (nil?
-         (machine {})))))
 
 (deftest next-and-return-together-are-rejected-test
   (let [machine
@@ -1009,34 +529,6 @@
             [:biff.fx/output
              :biff.fx/return])))))
 
-(deftest next-to-missing-state-is-rejected-test
-  (let [machine
-        (fx/machine
-         :test/missing-next
-
-         :start
-         (fn [_ctx]
-           {:biff.fx/next
-            :missing}))
-
-        data
-        (thrown-data
-         #(machine {}))]
-
-    (is (= :missing
-           (:biff.fx/state data)))
-
-    (is (= :test/missing-next
-           (:biff.fx/machine-name data)))
-
-    (is (= [:start]
-           (vec
-            (:biff.fx/available-states data))))))
-
-;; -----------------------------------------------------------------------------
-;; Invalid state result shapes
-;; -----------------------------------------------------------------------------
-
 (deftest state-must-return-map-nil-or-sequence-of-map-nil-test
   (doseq [result
           [42
@@ -1068,7 +560,7 @@
              (:biff.fx/result data))))))
 
 ;; -----------------------------------------------------------------------------
-;; State exception wrapping
+;; Exception wrapping and diagnostics
 ;; -----------------------------------------------------------------------------
 
 (deftest state-exception-is-wrapped-with-machine-context-test
@@ -1158,10 +650,6 @@
              0
              :biff.fx/next])))))
 
-;; -----------------------------------------------------------------------------
-;; Handler exception wrapping
-;; -----------------------------------------------------------------------------
-
 (deftest handler-exception-is-wrapped-with-effect-context-test
   (let [cause
         (js/Error.
@@ -1230,167 +718,7 @@
            (:biff.fx/trace data)))))
 
 ;; -----------------------------------------------------------------------------
-;; State-input versus handler-input semantics
-;; -----------------------------------------------------------------------------
-
-(deftest state-receives-original-context-plus-accumulated-state-input-test
-  (let [seen
-        (atom nil)
-
-        machine
-        (fx/machine
-         :test/state-input
-
-         :start
-         (fn [_ctx]
-           {:derived
-            10
-
-            :biff.fx/next
-            :finish})
-
-         :finish
-         (fn [ctx]
-           (reset! seen ctx)
-
-           {:biff.fx/return
-            :done}))]
-
-    (machine
-     {:original
-      5})
-
-    (is (= 5
-           (:original @seen)))
-
-    (is (= 10
-           (:derived @seen)))))
-
-(deftest handler-receives-original-context-plus-current-plain-output-test
-  (let [seen
-        (atom nil)
-
-        machine
-        (fx/machine
-         :test/handler-input
-
-         :start
-         (fn [_ctx]
-           {:plain
-            10
-
-            :effect
-            [:test/observe]}))]
-
-    (machine
-     {:original
-      5
-
-      :biff.fx/handlers
-      {:test/observe
-       (fn [ctx]
-         (reset! seen ctx)
-         :done)}})
-
-    (is (= 5
-           (:original @seen)))
-
-    (is (= 10
-           (:plain @seen)))
-
-    (is (not
-         (contains?
-          @seen
-          :effect)))))
-
-;; -----------------------------------------------------------------------------
-;; A realistic small browser FX workflow
-;; -----------------------------------------------------------------------------
-
-(deftest biff-style-browser-fx-workflow-test
-  (let [effects
-        (atom [])
-
-        machine
-        (fx/machine
-         :example/save
-
-         :start
-         (fn [ctx]
-           {:validated
-            [:example.fx/validate
-             (:value ctx)]
-
-            :biff.fx/next
-            :save})
-
-         :save
-         (fn [ctx]
-           {:saved
-            [:example.fx/save
-             (:validated ctx)]
-
-            :biff.fx/next
-            :finish})
-
-         :finish
-         (fn [ctx]
-           {:biff.fx/return
-            {:validated
-             (:validated ctx)
-
-             :saved
-             (:saved ctx)}}))
-
-        result
-        (machine
-         {:value
-          41
-
-          :request-id
-          "request-1"
-
-          :biff.fx/handlers
-          {:example.fx/validate
-           (fn [ctx value]
-             (swap!
-              effects
-              conj
-              [:validate
-               (:request-id ctx)
-               value])
-
-             (inc value))
-
-           :example.fx/save
-           (fn [ctx value]
-             (swap!
-              effects
-              conj
-              [:save
-               (:request-id ctx)
-               value])
-
-             {:id "saved-1"
-              :value value})}})]
-
-    (is (= {:validated 42
-            :saved
-            {:id "saved-1"
-             :value 42}}
-           result))
-
-    (is (= [[:validate
-             "request-1"
-             41]
-
-            [:save
-             "request-1"
-             42]]
-           @effects))))
-
-;; -----------------------------------------------------------------------------
-;; Synchronous-only contract
+;; Synchronous-only browser contract
 ;; -----------------------------------------------------------------------------
 
 (deftest promise-results-are-not-special-cased-test
