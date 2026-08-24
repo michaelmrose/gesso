@@ -55,6 +55,7 @@
    [clojure.set :as set]
    [gesso.choreo.machine :as machine]
    [gesso.choreo.project :as project]
+   [gesso.choreo.semantics :as semantics]
    [gesso.choreo.verify :as verify]))
 
 ;; -----------------------------------------------------------------------------
@@ -405,6 +406,106 @@
    (require-realization!
     realization)))
 
+(defn distributed-observation
+  "Project one realization-history entry into the canonical distributed
+   observation alphabet owned by gesso.choreo.semantics.
+
+   The projected realization history contains both semantic occurrences and
+   physical scheduling/transport occurrences. Only trusted authoritative
+   completion and receiver consumption of one genuinely sender-emitted
+   participant message contribute distributed observations.
+
+   :local and :environment are semantic but distributed-hidden. :send, :drop,
+   and :duplicate are physical realization operations and are also hidden:
+   communication becomes the atomic semantic distributed occurrence only when
+   the receiver consumes the emitted envelope.
+
+   Projected role-local completion is deliberately not synthesized here as a
+   global :terminal observation. A local projected :return means only that this
+   role has no further protocol work; it does not establish which global return
+   outcome occurred. Terminal compatibility remains a separate projection/proof
+   obligation.
+
+   Canonical observation shape is delegated to semantics/distributed-observation
+   rather than redefined here. Unknown realization-history kinds fail closed so
+   adding a new occurrence forces an explicit observability decision."
+  [entry]
+  (require-map!
+   "Realization history entry"
+   entry)
+
+  (case (:kind entry)
+    :authoritative
+    (semantics/distributed-observation
+     entry)
+
+    :deliver
+    (let [message
+          (:message entry)]
+      (when-not (map? message)
+        (realization-error
+         :invalid-delivery-history
+         "Realization delivery history must retain the consumed participant-message envelope."
+         {:entry entry}))
+
+      (semantics/distributed-observation
+       (cond->
+        {:kind :communication
+         :from (:from message)
+         :to (:to message)
+         :event (:event message)
+         :payload (:payload message)}
+         (contains? message :via)
+         (assoc
+          :via
+          (:via message)))))
+
+    ;; Distributed-hidden semantic realization occurrences.
+    :local
+    nil
+
+    :environment
+    nil
+
+    ;; Physical realization operations. A send is not yet the semantic atomic
+    ;; communication because the receiver has not consumed it.
+    :send
+    nil
+
+    :drop
+    nil
+
+    :duplicate
+    nil
+
+    (realization-error
+     :unknown-history-kind
+     "Realization history kind has no declared distributed-observation semantics."
+     {:kind (:kind entry)
+      :entry entry
+      :known-kinds
+      #{:local
+        :authoritative
+        :send
+        :deliver
+        :drop
+        :duplicate
+        :environment}})))
+
+(defn distributed-observable-trace
+  "Return the canonical distributed observations produced so far by this
+   independently projected realization.
+
+   The result inhabits the same authoritative/communication observation shapes
+   as semantics/distributed-observable-trace, contains no semantic source-state
+   ids or realization transport diagnostics, and deliberately does not invent a
+   global terminal outcome from role-local completion."
+  [realization]
+  (into
+   []
+   (keep distributed-observation)
+   (history realization)))
+
 (defn messages
   "Return queued transport entries in enqueue order.
 
@@ -431,6 +532,27 @@
              (:message-id %))
       %)
    (messages realization)))
+
+(defn- root-message-id
+  [entry]
+  (or (:origin-message-id entry)
+      (:message-id entry)))
+
+(defn- delivered-root-message-ids
+  [realization]
+  (into
+   #{}
+   (keep
+    (fn [entry]
+      (when (= :deliver (:kind entry))
+        (root-message-id entry))))
+   (:history realization)))
+
+(defn- delivered-root-message?
+  [realization entry]
+  (contains?
+   (delivered-root-message-ids realization)
+   (root-message-id entry)))
 
 (defn boundary
   "Return one role's current explicit endpoint boundary, or nil.
@@ -493,20 +615,29 @@
   "Return queued message ids currently accepted by their declared receiver.
 
    A queued message may be temporarily undeliverable because its receiver has
-   not yet reached the corresponding receive gate."
+   not yet reached the corresponding receive gate. A duplicate whose root
+   emission has already been delivered is permanently stale and is never
+   reported as deliverable, even if a later receive gate has an identical
+   message contract."
   [realization]
   (let [realization'
         (require-realization!
          realization)]
     (->> (:messages realization')
          (keep
-          (fn [{:keys [message-id message]}]
+          (fn [{:keys [message-id message]
+                :as entry}]
             (when-some [receiver
                         (get (:executions realization')
                              (:to message))]
-              (when (machine/accepts-message?
-                     receiver
-                     message)
+              (when (and
+                     (not
+                      (delivered-root-message?
+                       realization'
+                       entry))
+                     (machine/accepts-message?
+                      receiver
+                      message))
                 message-id))))
          vec)))
 
@@ -763,6 +894,12 @@
    that is early, stale, contract-invalid for the current receive gate, or made
    ambiguous by the projected plan therefore remains visible for diagnosis.
 
+   Physical duplicates retain the root id of the original emitted message. Once
+   any copy of one root emission has been consumed successfully, another copy of
+   that same root may not become a second semantic communication occurrence.
+   This remains true if the receiver later reaches an otherwise identical
+   receive gate.
+
    Returns the next realization state."
   [realization message-id]
   (let [realization'
@@ -809,6 +946,26 @@
         receiver-state
         (machine/current-state-id
          receiver)
+
+        stale-enabled-duplicate?
+        (and
+         (delivered-root-message?
+          realization'
+          entry)
+         (machine/accepts-message?
+          receiver
+          message))
+
+        _
+        (when stale-enabled-duplicate?
+          (realization-error
+           :stale-duplicate-message
+           "A physical duplicate of an already-delivered root message cannot become a second semantic communication occurrence."
+           {:message-id message-id'
+            :root-message-id (root-message-id entry)
+            :receiver receiver-role
+            :receiver-state receiver-state
+            :message message}))
 
         next-receiver
         (machine/receive

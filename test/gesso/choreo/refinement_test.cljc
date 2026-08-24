@@ -1,10 +1,14 @@
 (ns gesso.choreo.refinement-test
-  "Small finite refinement/property checks over the portable Choreo semantics.
+  "Small finite replay/property checks over the portable Choreo semantics.
 
-   These tests deliberately enumerate small semantic classes instead of claiming
-   that a bounded concrete range proves an unbounded theorem.  The properties
-   are tied to concrete failure classes and require useful counterexample paths
-   when a generated witness is rejected."
+   This namespace deliberately does not define a second refinement engine.
+   Bounded schedules are executed through gesso.choreo.correspondence and inspect
+   its explicit witness-level observable replay relation.
+
+   These tests enumerate small semantic classes instead of claiming that a
+   bounded concrete range proves the unbounded projection/refinement theorem from
+   the v4.5 design. The properties are tied to concrete failure classes and
+   require useful counterexample paths when a generated witness is rejected."
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.core :as choreo]
@@ -145,7 +149,7 @@
               :revision 9}
     :via :sse}])
 
-(deftest finite-duplicate-drop-schedules-refine-the-same-semantic-trace
+(deftest finite-duplicate-drop-schedules-replay-the-same-admitted-observable-trace
   (doseq [{:keys [name first second]}
           successful-command-fault-schedules]
     (testing (str name)
@@ -159,6 +163,34 @@
                (:semantic-trace result)))
         (is (= expected-transport-trace
                (:realization-trace result)))
+        (is (= correspondence/observable-trace-replay-relation
+               (get-in result
+                       [:observable-trace-replay :relation])))
+        (is (true?
+             (get-in result
+                     [:observable-trace-replay :valid?])))
+        (is (= (count expected-transport-trace)
+               (get-in result
+                       [:observable-trace-replay
+                        :common-prefix-count])))
+        (is (= (count expected-transport-trace)
+               (get-in result
+                       [:observable-trace-replay
+                        :global-count])))
+        (is (= (count expected-transport-trace)
+               (get-in result
+                       [:observable-trace-replay
+                        :realized-count])))
+        (is (nil?
+             (get-in result
+                     [:observable-trace-replay
+                      :first-divergence])))
+        (is (false?
+             (contains? result
+                        :trace-refinement)))
+        (is (false?
+             (contains? result
+                        :projection-refinement)))
         (is (true? (:global-completed? result)))
         (is (true? (:realization-completed? result)))
         (is (nil? (correspondence/first-counterexample result)))))))
@@ -187,10 +219,69 @@
                (:semantic-trace weak)))
         (is (= (:realization-trace lockstep)
                (:realization-trace weak)))
+        (is (= (:observable-trace-replay lockstep)
+               (:observable-trace-replay weak)))
+        (is (true?
+             (get-in lockstep
+                     [:observable-trace-replay :valid?])))
+        (is (true?
+             (get-in weak
+                     [:observable-trace-replay :valid?])))
         (is (= (:global-outcome lockstep)
                (:global-outcome weak)))
         (is (= (:realization-outcomes lockstep)
-               (:realization-outcomes weak)))))))
+               (:realization-outcomes weak)))
+        (is (false?
+             (contains? lockstep
+                        :trace-refinement)))
+        (is (false?
+             (contains? weak
+                        :trace-refinement)))))))
+
+(deftest bounded-schedule-enumeration-remains-witness-level-evidence
+  (let [results
+        (mapv
+         (fn [{:keys [first second]}]
+           (correspondence/check-weak-witness
+            (transport-choreography)
+            (command-fault-schedule 17 first second)
+            {:require-complete? true}))
+         successful-command-fault-schedules)]
+
+    (is (= (count successful-command-fault-schedules)
+           (count results)))
+
+    (is (every? correspondence/valid?
+                results))
+
+    (is (every?
+         #(true?
+           (get-in %
+                   [:observable-trace-replay :valid?]))
+         results))
+
+    (is (= #{expected-transport-trace}
+           (set
+            (map :semantic-trace
+                 results))))
+
+    (is (= #{expected-transport-trace}
+           (set
+            (map :realization-trace
+                 results))))
+
+    (testing "finite enumeration is not labeled as the general theorem"
+      (is (every?
+           #(not
+             (contains? %
+                        :trace-refinement))
+           results))
+
+      (is (every?
+           #(not
+             (contains? %
+                        :projection-refinement))
+           results)))))
 
 (defn- bad-delivery-witness
   []
@@ -321,7 +412,19 @@
       (is (false? (correspondence/valid? without-progression)))
       (is (= :authoritative-progression-required
              (realization-error-kind without-progression)))
-      (is (correspondence/valid? advances)))))
+      (is (correspondence/valid? advances))
+      (is (= correspondence/observable-trace-replay-relation
+             (get-in advances
+                     [:observable-trace-replay :relation])))
+      (is (true?
+           (get-in advances
+                   [:observable-trace-replay :valid?])))
+      (is (false?
+           (contains? advances
+                      :trace-refinement)))
+      (is (false?
+           (contains? advances
+                      :projection-refinement))))))
 
 (deftest explicit-progression-relation-not-concrete-basis-shape-controls-admissibility
   (doseq [[from-basis to-basis] basis-pairs

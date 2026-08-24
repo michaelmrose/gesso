@@ -4,6 +4,7 @@
    [clojure.walk :as walk]
    [gesso.choreo.artifact :as artifact]
    [gesso.choreo.core :as choreo]
+   [gesso.choreo.correspondence :as correspondence]
    [gesso.choreo.machine :as machine]
    [gesso.choreo.project :as project]
    [gesso.choreo.proof :as proof]))
@@ -135,6 +136,70 @@
      :done
      (choreo/return :done)}}))
 
+
+
+(defn- artifact-bound-protocol
+  [outcome]
+  (choreo/->choreography
+   {:name :example/artifact-bound-evidence
+    :initial :prepare
+    :states
+    {:prepare
+     (choreo/local
+      :browser
+      :prepare
+      :send
+      {:outputs #{:request-id}})
+
+     :send
+     (choreo/communicate
+      :browser
+      :server
+      :request/command
+      :apply
+      {:via :http
+       :required #{:request-id}
+       :correlation #{:request-id}})
+
+     :apply
+     (choreo/authoritative
+      :server
+      :request/apply
+      :done
+      {:requires #{:request-id}
+       :outputs #{:status}})
+
+     :done
+     (choreo/return outcome)}}))
+
+(def artifact-bound-good-witness
+  [{:op :local
+    :role :browser
+    :action :prepare
+    :outputs {:request-id 1}}
+
+   {:op :send
+    :role :browser
+    :to :server
+    :event :request/command
+    :via :http
+    :payload {:request-id 1}
+    :as :command}
+
+   {:op :deliver
+    :message :command}
+
+   {:op :authoritative
+    :role :server
+    :operation :request/apply
+    :outputs {:status :accepted}}])
+
+(def artifact-bound-incomplete-witness
+  [{:op :local
+    :role :browser
+    :action :prepare
+    :outputs {:request-id 1}}])
+
 (defn- recursively-contains-key?
   [value target-key]
   (let [found?
@@ -168,7 +233,7 @@
   (:locations sidecar))
 
 (deftest artifact-vocabulary-is-explicit-and-versioned
-  (is (= 1 artifact/artifact-version))
+  (is (= 2 artifact/artifact-version))
   (is (= :gesso.choreo/artifact-set
          artifact/artifact-set-type))
   (is (= :gesso.choreo/diagnostic-proof-sidecar
@@ -199,8 +264,14 @@
     (is (artifact/diagnostic-sidecar? sidecar))
     (is (= :example/artifact-all-boundaries
            (:choreography-name sidecar)))
-    (is (proof/result? (:proof sidecar)))
-    (is (proof/valid? (:proof sidecar)))
+    (is (= proof/projection-structural-certificate-version
+           (:projection-structural-certificate-version sidecar)))
+    (is (proof/projection-structural-certificate?
+         (:proof sidecar)))
+    (is (proof/structural-certificate-valid?
+         (:proof sidecar)))
+    (is (= proof/projection-structural-certificate-properties
+           (get-in sidecar [:proof :properties])))
 
     (testing "source identity belongs to diagnostics, not the executable plans"
       (doseq [[_role plan] plans]
@@ -289,6 +360,104 @@
       (is (not= original-digest
                 (artifact/executable-digest
                  changed-browser))))))
+
+(deftest sidecar-binds-the-current-structural-certificate-to-the-exact-plans
+  (let [emitted
+        (artifact/emit-artifacts
+         (all-boundary-choreography))
+
+        plans
+        (:executable-plans emitted)
+
+        sidecar
+        (:diagnostic-proof-sidecar emitted)
+
+        certificate
+        (:proof sidecar)]
+    (is (= 2
+           (:gesso.choreo/version sidecar)))
+    (is (= proof/projection-structural-certificate-version
+           (:projection-structural-certificate-version sidecar)))
+    (is (proof/projection-structural-certificate?
+         certificate))
+    (is (proof/structural-certificate-valid?
+         certificate))
+    (is (= proof/projection-structural-certificate-properties
+           (:properties certificate)))
+
+    (testing "the sidecar carries all current structural sub-proofs"
+      (is (= proof/projection-boundary-property
+             (get-in certificate [:boundary-proof :property])))
+      (is (= proof/projection-successor-property
+             (get-in certificate [:successor-proof :property])))
+      (is (= proof/projection-completion-property
+             (get-in certificate [:completion-proof :property])))
+      (is (proof/valid?
+           (:boundary-proof certificate)))
+      (is (proof/valid?
+           (:successor-proof certificate)))
+      (is (proof/valid?
+           (:completion-proof certificate))))
+
+    (testing "the certificate remains diagnostic while digests bind it to exact runtime artifacts"
+      (is (= (set (keys plans))
+             (set (keys (:executable-digests sidecar)))))
+      (doseq [[role plan] plans]
+        (is (= (artifact/executable-digest plan)
+               (get-in sidecar
+                       [:executable-digests role]))))
+      (is (artifact/sidecar-matches?
+           plans
+           sidecar)))))
+
+(deftest sidecar-rejects-stale-or-invalid-structural-proof-artifacts
+  (let [emitted
+        (artifact/emit-artifacts
+         (all-boundary-choreography))
+
+        plans
+        (:executable-plans emitted)
+
+        sidecar
+        (:diagnostic-proof-sidecar emitted)
+
+        stale-version
+        (assoc sidecar
+               :projection-structural-certificate-version
+               1)
+
+        invalid-certificate
+        (assoc-in sidecar
+                  [:proof :valid?]
+                  false)]
+
+    (testing "the sidecar format is tied to the current structural-certificate version"
+      (is (false?
+           (artifact/diagnostic-sidecar?
+            stale-version)))
+      (is (false?
+           (artifact/sidecar-matches?
+            plans
+            stale-version))))
+
+    (testing "an invalid structural certificate cannot be laundered by matching executable digests"
+      (is (false?
+           (artifact/diagnostic-sidecar?
+            invalid-certificate)))
+      (is (false?
+           (artifact/sidecar-matches?
+            plans
+            invalid-certificate)))
+
+      (let [data
+            (error-data
+             #(artifact/require-sidecar-match!
+               plans
+               invalid-certificate))]
+        (is (= :gesso.choreo.artifact/error
+               (:error/type data)))
+        (is (= :invalid-diagnostic-sidecar
+               (:error/kind data)))))))
 
 (deftest sidecar-is-bound-to-every-emitted-executable-plan
   (let [emitted
@@ -446,6 +615,7 @@
              :gesso.choreo/version
              :executable-plan-version
              :proof-version
+             :projection-structural-certificate-version
              :choreography-name
              :executable-digests
              :locations
@@ -545,3 +715,233 @@
            (:error/type data)))
     (is (= :invalid-executable-plan
            (:error/kind data)))))
+
+
+(deftest lockstep-correspondence-evidence-is-bound-to-the-exact-artifact-set
+  (let [choreography
+        (artifact-bound-protocol :done)
+
+        emitted
+        (artifact/emit-artifacts choreography)
+
+        evidence
+        (artifact/check-artifact-witness
+         emitted
+         choreography
+         artifact-bound-good-witness
+         {:require-complete? true})]
+
+    (is (artifact/artifact-correspondence-evidence? evidence))
+    (is (artifact/artifact-correspondence-valid? evidence))
+    (is (artifact/evidence-matches? emitted evidence))
+    (is (= :lockstep (:mode evidence)))
+    (is (= correspondence/correspondence-property
+           (get-in evidence [:correspondence :property])))
+    (is (= artifact/artifact-correspondence-evidence-nonclaims
+           (:nonclaims evidence)))
+    (is (= :done
+           (get-in evidence [:correspondence :global-outcome])))
+    (is (= (get-in emitted
+                   [:diagnostic-proof-sidecar
+                    :executable-digests])
+           (:executable-digests evidence)))
+    (is (= (get-in emitted
+                   [:diagnostic-proof-sidecar
+                    :proof])
+           (:structural-certificate evidence)))
+    (is (= evidence
+           (artifact/require-evidence-match!
+            emitted
+            evidence)))))
+
+(deftest weak-correspondence-evidence-is-bound-to-the-exact-artifact-set
+  (let [choreography
+        (artifact-bound-protocol :done)
+
+        emitted
+        (artifact/emit-artifacts choreography)
+
+        evidence
+        (artifact/check-artifact-weak-witness
+         emitted
+         choreography
+         artifact-bound-good-witness
+         {:require-complete? true})]
+
+    (is (artifact/artifact-correspondence-evidence? evidence))
+    (is (artifact/artifact-correspondence-valid? evidence))
+    (is (artifact/evidence-matches? emitted evidence))
+    (is (= :weak (:mode evidence)))
+    (is (= correspondence/weak-correspondence-property
+           (get-in evidence [:correspondence :property])))))
+
+(deftest failed-concrete-witness-can-remain-correctly-artifact-bound
+  (let [choreography
+        (artifact-bound-protocol :done)
+
+        emitted
+        (artifact/emit-artifacts choreography)
+
+        evidence
+        (artifact/check-artifact-witness
+         emitted
+         choreography
+         artifact-bound-incomplete-witness
+         {:require-complete? true})]
+
+    (is (artifact/artifact-correspondence-evidence? evidence))
+    (is (false?
+         (artifact/artifact-correspondence-valid? evidence)))
+    (is (artifact/evidence-matches? emitted evidence))
+    (is (false? (:valid? evidence)))
+    (is (seq (get-in evidence
+                     [:correspondence :failures])))))
+
+(deftest identical-executable-plans-cannot-hide-different-global-terminal-semantics
+  (let [done
+        (artifact-bound-protocol :done)
+
+        rejected
+        (artifact-bound-protocol :rejected)
+
+        done-artifacts
+        (artifact/emit-artifacts done)
+
+        rejected-artifacts
+        (artifact/emit-artifacts rejected)
+
+        done-digests
+        (get-in done-artifacts
+                [:diagnostic-proof-sidecar
+                 :executable-digests])
+
+        rejected-digests
+        (get-in rejected-artifacts
+                [:diagnostic-proof-sidecar
+                 :executable-digests])
+
+        done-proof
+        (get-in done-artifacts
+                [:diagnostic-proof-sidecar
+                 :proof])
+
+        rejected-proof
+        (get-in rejected-artifacts
+                [:diagnostic-proof-sidecar
+                 :proof])
+
+        data
+        (error-data
+         #(artifact/check-artifact-witness
+           done-artifacts
+           rejected
+           artifact-bound-good-witness
+           {:require-complete? true}))]
+
+    ;; Projection intentionally erases the authored global terminal outcome, so
+    ;; these two programs can have byte-for-byte equivalent local executable
+    ;; artifacts. Digest equality alone is therefore insufficient global-program
+    ;; identity for theorem-facing evidence composition.
+    (is (= done-digests rejected-digests))
+    (is (not= done-proof rejected-proof))
+    (is (= :gesso.choreo.artifact/error
+           (:error/type data)))
+    (is (= :artifact-proof-choreography-mismatch
+           (:error/kind data)))))
+
+(deftest changed-runtime-artifact-is-rejected-before-correspondence-replay
+  (let [certified
+        (artifact-bound-protocol :done)
+
+        changed
+        (choreo/->choreography
+         {:name :example/artifact-bound-runtime-change
+          :initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :different-action
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        emitted
+        (artifact/emit-artifacts certified)
+
+        data
+        (error-data
+         #(artifact/check-artifact-witness
+           emitted
+           changed
+           []))]
+
+    (is (= :gesso.choreo.artifact/error
+           (:error/type data)))
+    (is (= :artifact-choreography-mismatch
+           (:error/kind data)))))
+
+(deftest artifact-correspondence-evidence-contract-fails-closed
+  (let [choreography
+        (artifact-bound-protocol :done)
+
+        emitted
+        (artifact/emit-artifacts choreography)
+
+        evidence
+        (artifact/check-artifact-witness
+         emitted
+         choreography
+         artifact-bound-good-witness
+         {:require-complete? true})
+
+        rejected-artifacts
+        (artifact/emit-artifacts
+         (artifact-bound-protocol :rejected))]
+
+    (is (= #{:gesso.choreo/type
+             :gesso.choreo/version
+             :property
+             :classification
+             :valid?
+             :mode
+             :artifact-version
+             :correspondence-version
+             :executable-digests
+             :structural-certificate
+             :correspondence
+             :nonclaims}
+           (set (keys evidence))))
+
+    (doseq [lookalike
+            [(assoc evidence :mode :weak)
+             (assoc evidence :gesso.choreo/version 999)
+             (assoc evidence :artifact-version 999)
+             (assoc evidence :correspondence-version 999)
+             (assoc evidence :nonclaims #{})
+             (assoc evidence :extra :not-allowed)
+             (assoc-in evidence
+                       [:structural-certificate :valid?]
+                       false)]]
+      (is (false?
+           (artifact/artifact-correspondence-evidence?
+            lookalike))))
+
+    (is (false?
+         (artifact/evidence-matches?
+          rejected-artifacts
+          evidence)))
+
+    ;; The executable plans are intentionally identical for the terminal-only
+    ;; change, so require-evidence-match! reaches the independent proof binding
+    ;; check rather than failing first on digest identity.
+    (let [data
+          (error-data
+           #(artifact/require-evidence-match!
+             rejected-artifacts
+             evidence))]
+      (is (= :gesso.choreo.artifact/error
+             (:error/type data)))
+      (is (= :evidence-proof-mismatch
+             (:error/kind data))))))

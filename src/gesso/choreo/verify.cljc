@@ -19,6 +19,8 @@
    - communication, local assertions, and ordinary environment observations do
      not silently preserve authoritative provenance for overwritten values;
    - basic value producer/use analysis;
+   - fail-closed validation of verifier option names;
+   - portable Role/FactKey shape validation through gesso.choreo.type;
    - explicit identification of authoritative semantic operations and
      authoritative-observation contracts in analysis.
 
@@ -74,18 +76,21 @@
    - browser execution;
    - arbitrary liveness.
 
-   Verification results are compiler/static-analysis data. They confer no
-   runtime authority."
+   Malli-backed primitive shape checks in this namespace are runtime-enforced
+   premises only. They do not replace the semantic knowledge/authority analyses
+   above and confer no runtime authority. Verification results are compiler/static
+   analysis data and likewise confer no runtime authority."
   (:require
    [clojure.set :as set]
-   [gesso.choreo.core :as choreo]))
+   [gesso.choreo.core :as choreo]
+   [gesso.choreo.type :as choreo-type]))
 
 ;; -----------------------------------------------------------------------------
 ;; Identity
 ;; -----------------------------------------------------------------------------
 
 (def verification-version
-  6)
+  7)
 
 (def verification-type
   :gesso.choreo/verification)
@@ -133,12 +138,17 @@
 ;; Verification options
 ;; -----------------------------------------------------------------------------
 
+(def ^:private allowed-option-keys
+  #{:entry-value-keys
+    :entry-knowledge})
+
 (defn- normalize-entry-value-keys
   [value]
   (let [value'
         (or value #{})]
     (when-not (and (set? value')
-                   (every? keyword? value'))
+                   (every? #(choreo-type/valid? ::choreo-type/fact-key %)
+                           value'))
       (fail!
        :invalid-entry-value-keys
        "Verifier :entry-value-keys must be a set of keywords."
@@ -158,10 +168,10 @@
     (into {}
           (map
            (fn [[role value-keys]]
-             (when-not (keyword? role)
+             (when-not (choreo-type/valid? ::choreo-type/role role)
                (fail!
                 :invalid-entry-knowledge
-                "Verifier :entry-knowledge role keys must be keywords."
+                "Verifier :entry-knowledge role keys must satisfy the portable Choreo Role shape."
                 {:entry-knowledge value
                  :role role}))
              [role
@@ -178,6 +188,18 @@
        :invalid-options
        "Verifier options must be a map."
        {:options options}))
+
+    (let [unknown-option-keys
+          (set/difference
+           (set (keys options'))
+           allowed-option-keys)]
+      (when (seq unknown-option-keys)
+        (fail!
+         :unknown-option-keys
+         "Verifier options contain unknown keys; verifier assumptions fail closed rather than being silently ignored."
+         {:options options
+          :unknown-option-keys unknown-option-keys
+          :allowed-option-keys allowed-option-keys})))
 
     {:entry-value-keys
      (normalize-entry-value-keys

@@ -38,11 +38,34 @@
    authoritative basis was admissible rather than confusing witness order with
    basis order.
 
+   The distributed observation alphabet and the hide/project relation from global
+   semantic occurrences are owned by gesso.choreo.semantics. Correspondence does
+   not maintain a second normalization on either side: global traces come from
+   semantics/distributed-observable-trace and projected traces come from
+   realization/distributed-observable-trace. Realization delegates its individual
+   observation shapes back to semantics, so there remains one canonical alphabet.
+
+   Global :terminal observations are intentionally not inserted into the concrete
+   projected trace. Projected role-local completion does not itself encode the
+   authored global return outcome, so treating local completion as a terminal
+   observation would manufacture semantic knowledge. Instead, a complete concrete
+   correspondence witness establishes terminal compatibility relationally: the
+   projected execution is complete, its canonical nonterminal distributed trace
+   matches one admitted global semantic execution, no semantic work remains, and
+   that matched global execution supplies the authored terminal outcome. This is
+   witness-level evidence only; it does not make the outcome a local-machine value
+   and does not quantify over all projected executions.
+
    A valid result therefore establishes correspondence for one concrete witness
-   only. The weak checker admits commuting hidden work, but it still checks only
-   the supplied schedule. Neither checker is the all-schedules
-   projection/refinement theorem, a liveness proof, or a proof that every fair
-   transport schedule completes.
+   only. Both checkers expose the explicit witness-level observable trace replay
+   relation they checked, including the first divergence when traces disagree.
+   The weak checker admits commuting hidden work, but it still checks only the
+   supplied schedule. Neither checker is the all-schedules projection/refinement
+   theorem, a liveness proof, or a proof that every fair transport schedule
+   completes. Checker options are a closed evidence envelope so misspelled
+   assumptions cannot silently change what was checked. Witness steps may carry
+   additional harness/diagnostic metadata, but replay consumes only the documented
+   semantic fields for each operation.
 
    Keeping this machinery separate from gesso.choreo.proof prevents the
    structural proof/checker namespace from becoming a second distributed runtime
@@ -57,7 +80,7 @@
 ;; Identity / result contract
 ;; -----------------------------------------------------------------------------
 
-(def correspondence-version 1)
+(def correspondence-version 2)
 
 (def result-type
   :gesso.choreo.correspondence/result)
@@ -76,6 +99,15 @@
 
 (def weak-correspondence-classification
   :concrete-weak-execution-check)
+
+(def observable-trace-replay-relation
+  :concrete-observable-trace-replay-v1)
+
+(def terminal-compatibility-obligation
+  :global-terminal-outcome-compatibility-v2)
+
+(def terminal-compatibility-classification
+  :concrete-witness-refinement-obligation)
 
 (def correspondence-properties
   #{correspondence-property
@@ -130,6 +162,95 @@
      {:value result}))
   (:counterexample result))
 
+(defn observable-trace-replay
+  "Compare one realized observable trace with the concrete global trace that
+   admits the replay used by a correspondence witness.
+
+   For the currently supported deterministic witness replay, the concrete replay
+   relation is exact observable-trace equality after hidden
+   local/environment work has been normalized by the chosen checker. The result
+   records the common prefix and first divergence so a failed witness identifies
+   a useful counterexample path.
+
+   This relation is intentionally witness-level. A valid result does NOT quantify
+   over all projected schedules and is therefore not the central projection
+   theorem from the v4.5 design."
+  [global-admitted-trace realized-trace]
+  (when-not (vector? global-admitted-trace)
+    (correspondence-error
+     :invalid-observable-trace
+     "Global admitted observable trace must be a vector."
+     {:side :global-admitted
+      :trace global-admitted-trace}))
+
+  (when-not (vector? realized-trace)
+    (correspondence-error
+     :invalid-observable-trace
+     "Realized observable trace must be a vector."
+     {:side :realized
+      :trace realized-trace}))
+
+  (let [global-count
+        (count global-admitted-trace)
+
+        realized-count
+        (count realized-trace)
+
+        limit
+        (min global-count realized-count)
+
+        divergence-index
+        (loop [index 0]
+          (cond
+            (= index limit)
+            (when-not (= global-count realized-count)
+              index)
+
+            (= (nth global-admitted-trace index)
+               (nth realized-trace index))
+            (recur (inc index))
+
+            :else
+            index))
+
+        valid?
+        (nil? divergence-index)
+
+        first-divergence
+        (when (some? divergence-index)
+          (let [global-present?
+                (< divergence-index global-count)
+
+                realized-present?
+                (< divergence-index realized-count)]
+            {:index divergence-index
+             :kind
+             (cond
+               (and global-present? realized-present?)
+               :observable-value-mismatch
+
+               global-present?
+               :realization-ended-before-global-trace
+
+               :else
+               :realization-produced-extra-observation)
+             :global-observation
+             (when global-present?
+               (nth global-admitted-trace divergence-index))
+             :realized-observation
+             (when realized-present?
+               (nth realized-trace divergence-index))}))]
+
+    {:relation observable-trace-replay-relation
+     :valid? valid?
+     :common-prefix-count
+     (if valid?
+       global-count
+       divergence-index)
+     :global-count global-count
+     :realized-count realized-count
+     :first-divergence first-divergence}))
+
 ;; -----------------------------------------------------------------------------
 ;; Concrete global/local behavioral correspondence witnesses
 ;; -----------------------------------------------------------------------------
@@ -142,6 +263,37 @@
     :drop
     :duplicate
     :environment})
+
+(def checker-option-keys
+  #{:entry-values-by-role
+    :semantic-entry-values
+    :machine-options-by-role
+    :require-complete?})
+
+(defn- require-options!
+  [checker-kind options]
+  (when (and (some? options)
+             (not (map? options)))
+    (correspondence-error
+     :invalid-options
+     "Concrete correspondence checker options must be a map."
+     {:checker checker-kind
+      :options options}))
+
+  (when (map? options)
+    (let [unknown-keys
+          (set
+           (remove checker-option-keys
+                   (keys options)))]
+      (when (seq unknown-keys)
+        (correspondence-error
+         :unknown-option-keys
+         "Concrete correspondence checker options contain unsupported keys."
+         {:checker checker-kind
+          :unknown-option-keys unknown-keys
+          :allowed-option-keys checker-option-keys}))))
+
+  options)
 
 (defn- attempt
   [f]
@@ -292,61 +444,111 @@
                 :value value})
          (dec remaining))))))
 
-(defn- normalize-observation
-  [entry]
-  (case (:kind entry)
-    :authoritative
-    {:kind :authoritative
-     :role (:role entry)
-     :operation (:operation entry)
-     :outputs (or (:outputs entry) {})}
+(defn- semantic-projectable-trace
+  "Return the portion of the canonical global distributed trace currently
+   represented by projected realization history.
 
-    :communication
-    (select-keys
-     entry
-     [:kind :from :to :event :payload :via])
-
-    :terminal
-    (select-keys
-     entry
-     [:kind :outcome])
-
-    entry))
-
-(defn- semantic-nonterminal-trace
+   :terminal is deliberately excluded here because role-local projected
+   completion does not encode the authored global outcome. The corresponding
+   missing refinement premise is reported explicitly by terminal-compatibility-
+   report rather than being silently treated as proved."
   [configuration]
-  (->> (semantics/observable-trace
+  (->> (semantics/distributed-observable-trace
         configuration)
        (remove #(= :terminal
                    (:kind %)))
-       (mapv normalize-observation)))
+       vec))
 
 (defn- realized-observable-trace
   [realization]
-  (->> (realization/history realization)
-       (keep
-        (fn [entry]
-          (case (:kind entry)
-            :authoritative
-            {:kind :authoritative
-             :role (:role entry)
-             :operation (:operation entry)
-             :outputs (:outputs entry)}
+  (realization/distributed-observable-trace
+   realization))
 
-            :deliver
-            (let [message
-                  (:message entry)]
-              (cond->
-               {:kind :communication
-                :from (:from message)
-                :to (:to message)
-                :event (:event message)
-                :payload (:payload message)}
-                (contains? message :via)
-                (assoc :via (:via message))))
+(defn- terminal-compatibility-report
+  [semantic realized trace-replay pending-work-count]
+  (let [global-completed?
+        (semantics/completed? semantic)
 
-            nil)))
-       vec))
+        realization-completed?
+        (realization/completed? realized)
+
+        trace-valid?
+        (true? (:valid? trace-replay))
+
+        global-outcome
+        (semantics/outcome semantic)
+
+        no-pending-work?
+        (zero? pending-work-count)
+
+        established?
+        (and global-completed?
+             realization-completed?
+             trace-valid?
+             no-pending-work?
+             (some? global-outcome))
+
+        status
+        (cond
+          (not global-completed?)
+          :not-yet-applicable-to-prefix
+
+          established?
+          :established-for-concrete-witness
+
+          (not realization-completed?)
+          :projected-realization-not-complete
+
+          (not trace-valid?)
+          :observable-trace-mismatch
+
+          (not no-pending-work?)
+          :pending-semantic-work
+
+          (nil? global-outcome)
+          :missing-global-outcome
+
+          :else
+          :not-established)
+
+        reason
+        (case status
+          :not-yet-applicable-to-prefix
+          :global-execution-has-not-reached-terminal
+
+          :established-for-concrete-witness
+          :matched-global-replay-establishes-authored-terminal-outcome
+
+          :projected-realization-not-complete
+          :projected-realization-has-not-reached-local-completion
+
+          :observable-trace-mismatch
+          :projected-trace-does-not-match-global-replay
+
+          :pending-semantic-work
+          :semantic-replay-still-has-buffered-work
+
+          :missing-global-outcome
+          :completed-global-semantics-did-not-report-outcome
+
+          :terminal-compatibility-not-established)]
+
+    {:obligation terminal-compatibility-obligation
+     :classification terminal-compatibility-classification
+     :required-for-projection-refinement? true
+     :established? established?
+     :status status
+     :global-completed? global-completed?
+     :global-outcome global-outcome
+     :realization-completed? realization-completed?
+     :observable-trace-replay-valid? trace-valid?
+     :pending-work-count pending-work-count
+     :projected-terminal-observation nil
+     :projected-terminal-outcome-encoded? false
+     :outcome-source
+     (when established?
+       :matched-global-semantic-replay)
+     :reason reason}))
 
 (defn- witness-obligation
   [index step kind valid? data]
@@ -923,14 +1125,25 @@
         (:realization state)
 
         semantic-trace
-        (semantic-nonterminal-trace semantic)
+        (semantic-projectable-trace semantic)
 
         realized-trace
         (realized-observable-trace realized)
 
+        trace-replay
+        (observable-trace-replay
+         semantic-trace
+         realized-trace)
+
         trace-valid?
-        (= semantic-trace
-           realized-trace)
+        (:valid? trace-replay)
+
+        terminal-compatibility
+        (terminal-compatibility-report
+         semantic
+         realized
+         trace-replay
+         0)
 
         trace-obligation
         (witness-obligation
@@ -939,7 +1152,8 @@
          :observable-trace
          trace-valid?
          {:expected semantic-trace
-          :actual realized-trace})
+          :actual realized-trace
+          :replay trace-replay})
 
         completion-valid?
         (or
@@ -962,11 +1176,23 @@
           :global-outcome
           (semantics/outcome semantic)})
 
+        terminal-obligation
+        (witness-obligation
+         (+ 2 (count witness))
+         nil
+         :terminal-compatibility
+         (or
+          (not require-complete?)
+          (:established? terminal-compatibility))
+         {:required? require-complete?
+          :terminal-compatibility terminal-compatibility})
+
         obligations
         (conj
          (vec (:obligations state))
          trace-obligation
-         completion-obligation)
+         completion-obligation
+         terminal-obligation)
 
         failures'
         (vec
@@ -986,6 +1212,8 @@
      :obligations obligations
      :failures failures'
      :counterexample (first failures')
+     :observable-trace-replay trace-replay
+     :terminal-compatibility terminal-compatibility
      :semantic-trace semantic-trace
      :realization-trace realized-trace
      :global-completed?
@@ -999,8 +1227,10 @@
   "Check one concrete lockstep execution witness against both global semantics
    and independently projected role machines.
 
-   This is the first behavioral correspondence checker. It is deliberately NOT
-   the general projection/refinement theorem.
+   This is the first behavioral correspondence checker. Complete witnesses also
+   establish terminal-outcome compatibility relationally with the matched global
+   replay; role-local completion still does not encode that outcome. This checker
+   remains deliberately NOT the general projection/refinement theorem.
 
    A witness is a vector containing explicit operations such as:
 
@@ -1063,12 +1293,9 @@
           machine-options-by-role {}
           require-complete? false}
      :as options}]
-   (when (and (some? options)
-              (not (map? options)))
-     (correspondence-error
-      :invalid-options
-      "Concrete witness checker options must be a map."
-      {:options options}))
+   (require-options!
+    :lockstep
+    options)
 
    (when-not (boolean? require-complete?)
      (correspondence-error
@@ -1657,8 +1884,20 @@
 (defn- pending-observable-trace
   [pending-observable]
   (mapv
-   (comp normalize-observation
-         :semantic-event)
+   (fn [entry]
+     (let [semantic-event
+           (:semantic-event entry)
+
+           observation
+           (semantics/distributed-observation
+            semantic-event)]
+       (when-not observation
+         (correspondence-error
+          :pending-observable-became-hidden
+          "Pending observable semantic event projected to no distributed observation."
+          {:entry entry
+           :semantic-event semantic-event}))
+       observation))
    pending-observable))
 
 (defn- weak-witness-failure-result
@@ -1702,7 +1941,7 @@
         (:pending-observable settled-state)
 
         semantic-trace
-        (semantic-nonterminal-trace semantic)
+        (semantic-projectable-trace semantic)
 
         pending-observable-trace'
         (pending-observable-trace
@@ -1715,9 +1954,24 @@
         (into semantic-trace
               pending-observable-trace')
 
+        trace-replay
+        (observable-trace-replay
+         expected-realized-trace
+         realized-trace)
+
         trace-valid?
-        (= expected-realized-trace
-           realized-trace)
+        (:valid? trace-replay)
+
+        pending-work-count
+        (+ (count pending-unobservable)
+           (count pending-observable))
+
+        terminal-compatibility
+        (terminal-compatibility-report
+         semantic
+         realized
+         trace-replay
+         pending-work-count)
 
         pending-unobservable-valid?
         (or
@@ -1754,7 +2008,8 @@
                :pending-observable-trace
                pending-observable-trace'
                :expected expected-realized-trace
-               :actual realized-trace}))
+               :actual realized-trace
+               :replay trace-replay}))
             (conj
              (weak-witness-obligation
               (inc (count witness))
@@ -1789,14 +2044,23 @@
                ;; Retain the older aggregate field for diagnostics/tests that
                ;; only need to know whether semantic work remains.
                :pending-count
-               (+ (count pending-unobservable)
-                  (count pending-observable))
+               pending-work-count
                :global-completed?
                (semantics/completed? semantic)
                :realization-completed?
                (realization/completed? realized)
                :global-outcome
-               (semantics/outcome semantic)})))
+               (semantics/outcome semantic)}))
+            (conj
+             (weak-witness-obligation
+              (+ 4 (count witness))
+              nil
+              :terminal-compatibility
+              (or
+               (not require-complete?)
+               (:established? terminal-compatibility))
+              {:required? require-complete?
+               :terminal-compatibility terminal-compatibility})))
 
         failures'
         (vec
@@ -1825,6 +2089,8 @@
      (vec pending-unobservable)
      :pending-observable
      (vec pending-observable)
+     :observable-trace-replay trace-replay
+     :terminal-compatibility terminal-compatibility
      :semantic-trace semantic-trace
      :pending-observable-trace
      pending-observable-trace'
@@ -1846,6 +2112,10 @@
    participant messages in that same observable order, while local/environment
    events may be buffered and replayed when their matching global state becomes
    reachable. Deterministic global branches are settled automatically.
+
+   Complete weak witnesses establish terminal-outcome compatibility relationally
+   with their fully settled matched global replay, while local role completion
+   remains outcome-agnostic.
 
    This closes an important gap in the lockstep checker: projection is allowed
    to skip foreign local work, so an independently projected role may legally do
@@ -1871,12 +2141,9 @@
           machine-options-by-role {}
           require-complete? false}
      :as options}]
-   (when (and (some? options)
-              (not (map? options)))
-     (correspondence-error
-      :invalid-options
-      "Concrete weak witness checker options must be a map."
-      {:options options}))
+   (require-options!
+    :weak
+    options)
 
    (when-not (boolean? require-complete?)
      (correspondence-error

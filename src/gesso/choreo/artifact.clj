@@ -4,14 +4,23 @@
    This namespace emits two sibling products from one choreography:
 
    - ExecutablePlan values, one per role, containing only portable runtime data;
-   - one DiagnosticProofSidecar containing proof/diagnostic information bound to
-     those exact executable values by content digest.
+   - one DiagnosticProofSidecar containing the current projection structural
+     certificate and diagnostic information bound to those exact executable
+     values by content digest.
 
    The sidecar is deliberately non-executable. Runtime code must not need it,
    and the sidecar never embeds an ExecutablePlan. Semantic/source identities
    may therefore remain useful for diagnostics without leaking back into the
-   production runtime artifact."
+   production runtime artifact.
+
+   This namespace also owns the JVM-only exact-artifact binding for concrete
+   correspondence evidence. A correspondence witness may be attached to an
+   ArtifactSet only after re-projecting the same verified choreography and
+   proving that those projected ExecutablePlan values match the ArtifactSet
+   exactly. This prevents structural proof evidence for choreography A from
+   being accidentally composed with behavioral evidence for choreography B."
   (:require
+   [gesso.choreo.correspondence :as correspondence]
    [gesso.choreo.project :as project]
    [gesso.choreo.proof :as proof]
    [gesso.choreo.verify :as verify])
@@ -24,7 +33,7 @@
 ;; -----------------------------------------------------------------------------
 
 (def artifact-version
-  1)
+  2)
 
 (def artifact-set-type
   :gesso.choreo/artifact-set)
@@ -37,6 +46,7 @@
     :gesso.choreo/version
     :executable-plan-version
     :proof-version
+    :projection-structural-certificate-version
     :choreography-name
     :executable-digests
     :locations
@@ -230,6 +240,8 @@
       (:executable-plan-version value))
    (= proof/proof-version
       (:proof-version value))
+   (= proof/projection-structural-certificate-version
+      (:projection-structural-certificate-version value))
    (or (nil? (:choreography-name value))
        (keyword? (:choreography-name value)))
    (map? (:executable-digests value))
@@ -242,7 +254,10 @@
                         digest))))
     (:executable-digests value))
    (vector? (:locations value))
-   (proof/result? (:proof value))))
+   (proof/projection-structural-certificate?
+    (:proof value))
+   (proof/structural-certificate-valid?
+    (:proof value))))
 
 (defn- executable-plans?
   "True when plans is a role-keyed map of current ExecutablePlan values and
@@ -375,9 +390,9 @@
 (defn emit-artifacts
   "Compile one choreography into sibling executable and diagnostic products.
 
-   Projection and the current finite structural proof are run from the same
-   successful verification artifact. The proof result is diagnostic/compiler
-   data only and is not inserted into any ExecutablePlan.
+   Projection and the current finite structural proof certificate are produced
+   from the same successful verification artifact. The certificate is
+   diagnostic/compiler data only and is not inserted into any ExecutablePlan.
 
    Emission refuses to produce an ArtifactSet when the current structural proof
    fails. This makes the checked compiler invariant a build-time gate without
@@ -394,15 +409,16 @@
         (project/project-all
          verified)
 
-        proof-result
-        (proof/check-projection-boundaries
+        proof-certificate
+        (proof/check-projection-structure
          verified)]
 
-    (when-not (proof/valid? proof-result)
+    (when-not (proof/structural-certificate-valid?
+               proof-certificate)
       (artifact-error
        :proof-check-failed
-       "Cannot emit Choreo artifacts because projection-boundary checking failed."
-       {:proof proof-result}))
+       "Cannot emit Choreo artifacts because projection structural checking failed."
+       {:proof proof-certificate}))
 
     (let [sidecar
           {:gesso.choreo/type
@@ -417,6 +433,9 @@
            :proof-version
            proof/proof-version
 
+           :projection-structural-certificate-version
+           proof/projection-structural-certificate-version
+
            :choreography-name
            (:name choreography)
 
@@ -425,10 +444,10 @@
 
            :locations
            (diagnostic-locations
-            proof-result)
+            (:boundary-proof proof-certificate))
 
            :proof
-           proof-result}]
+           proof-certificate}]
 
       {:gesso.choreo/type
        artifact-set-type
@@ -441,3 +460,332 @@
 
        :diagnostic-proof-sidecar
        sidecar})))
+
+;; -----------------------------------------------------------------------------
+;; Exact-artifact-bound concrete correspondence evidence
+;; -----------------------------------------------------------------------------
+
+(def artifact-correspondence-evidence-version
+  1)
+
+(def artifact-correspondence-evidence-type
+  :gesso.choreo.artifact/concrete-correspondence-evidence)
+
+(def artifact-correspondence-evidence-property
+  :exact-artifact-bound-concrete-correspondence-v1)
+
+(def artifact-correspondence-evidence-classification
+  :exact-artifact-bound-concrete-witness-evidence)
+
+(def artifact-correspondence-evidence-nonclaims
+  #{:all-projected-executions
+    :trace-refinement
+    :projection-refinement})
+
+(def ^:private artifact-correspondence-evidence-keys
+  #{:gesso.choreo/type
+    :gesso.choreo/version
+    :property
+    :classification
+    :valid?
+    :mode
+    :artifact-version
+    :correspondence-version
+    :executable-digests
+    :structural-certificate
+    :correspondence
+    :nonclaims})
+
+(defn artifact-correspondence-evidence?
+  "True when value has the closed shape of exact-artifact-bound concrete
+   correspondence evidence.
+
+   This predicate checks the internal evidence contract. Use evidence-matches?
+   when the question is whether the evidence belongs to a particular ArtifactSet."
+  [value]
+  (and
+   (map? value)
+   (= artifact-correspondence-evidence-keys
+      (set (keys value)))
+   (= artifact-correspondence-evidence-type
+      (:gesso.choreo/type value))
+   (= artifact-correspondence-evidence-version
+      (:gesso.choreo/version value))
+   (= artifact-correspondence-evidence-property
+      (:property value))
+   (= artifact-correspondence-evidence-classification
+      (:classification value))
+   (boolean? (:valid? value))
+   (contains? #{:lockstep :weak}
+              (:mode value))
+   (= artifact-version
+      (:artifact-version value))
+   (= correspondence/correspondence-version
+      (:correspondence-version value))
+   (map? (:executable-digests value))
+   (every?
+    (fn [[role digest]]
+      (and (keyword? role)
+           (string? digest)
+           (boolean
+            (re-matches #"[0-9a-f]{64}"
+                        digest))))
+    (:executable-digests value))
+   (proof/projection-structural-certificate?
+    (:structural-certificate value))
+   (proof/structural-certificate-valid?
+    (:structural-certificate value))
+   (correspondence/result?
+    (:correspondence value))
+   (= (case (:mode value)
+        :lockstep correspondence/correspondence-property
+        :weak correspondence/weak-correspondence-property)
+      (get-in value [:correspondence :property]))
+   (= artifact-correspondence-evidence-nonclaims
+      (:nonclaims value))
+   (= (:valid? value)
+      (correspondence/valid?
+       (:correspondence value)))))
+
+
+(defn artifact-correspondence-valid?
+  "True only for recognized exact-artifact-bound evidence whose concrete
+   correspondence result is valid. Binding to a particular ArtifactSet is a
+   separate question checked by evidence-matches?."
+  [evidence]
+  (and
+   (artifact-correspondence-evidence? evidence)
+   (true? (:valid? evidence))))
+
+(defn evidence-matches?
+  "True exactly when recognized correspondence evidence is bound to
+   artifact-set. A failed concrete witness can still be correctly artifact-bound;
+   use artifact-correspondence-valid? when semantic success is also required.
+
+   Matching requires the exact executable digest map and the exact structural
+   certificate carried by the ArtifactSet sidecar. A matching digest map alone
+   cannot launder a stale, foreign, or fabricated proof certificate."
+  [artifact-set evidence]
+  (and
+   (artifact-set? artifact-set)
+   (artifact-correspondence-evidence? evidence)
+   (= (get-in artifact-set
+              [:diagnostic-proof-sidecar
+               :executable-digests])
+      (:executable-digests evidence))
+   (= (get-in artifact-set
+              [:diagnostic-proof-sidecar
+               :proof])
+      (:structural-certificate evidence))))
+
+(defn require-evidence-match!
+  "Return evidence when it is valid and bound to exactly artifact-set;
+   otherwise throw a deterministic diagnostic error."
+  [artifact-set evidence]
+  (when-not (artifact-set? artifact-set)
+    (artifact-error
+     :invalid-artifact-set
+     "Expected a current Gesso Choreo ArtifactSet."
+     {:artifact-set artifact-set}))
+
+  (when-not (artifact-correspondence-evidence? evidence)
+    (artifact-error
+     :invalid-artifact-correspondence-evidence
+     "Expected Gesso Choreo exact-artifact-bound correspondence evidence."
+     {:evidence evidence}))
+
+  (when-not (= (get-in artifact-set
+                       [:diagnostic-proof-sidecar
+                        :executable-digests])
+               (:executable-digests evidence))
+    (artifact-error
+     :evidence-digest-mismatch
+     "Concrete correspondence evidence does not match the executable artifact digests."
+     {:artifact-digests
+      (get-in artifact-set
+              [:diagnostic-proof-sidecar
+               :executable-digests])
+      :evidence-digests
+      (:executable-digests evidence)}))
+
+  (when-not (= (get-in artifact-set
+                       [:diagnostic-proof-sidecar
+                        :proof])
+               (:structural-certificate evidence))
+    (artifact-error
+     :evidence-proof-mismatch
+     "Concrete correspondence evidence does not match the ArtifactSet structural certificate."
+     {:artifact-proof
+      (get-in artifact-set
+              [:diagnostic-proof-sidecar
+               :proof])
+      :evidence-proof
+      (:structural-certificate evidence)}))
+
+  evidence)
+
+(defn- require-artifact-choreography-match!
+  [artifact-set choreography-or-verified]
+  (when-not (artifact-set? artifact-set)
+    (artifact-error
+     :invalid-artifact-set
+     "Expected a current Gesso Choreo ArtifactSet."
+     {:artifact-set artifact-set}))
+
+  (let [verified
+        (verify/ensure-verified
+         choreography-or-verified)
+
+        projected
+        (project/project-all verified)
+
+        structural-certificate
+        (proof/check-projection-structure verified)
+
+        sidecar
+        (:diagnostic-proof-sidecar artifact-set)]
+
+    (when-let [{:keys [role actual-digest sidecar-digest]}
+               (first-digest-mismatch
+                projected
+                sidecar)]
+      (artifact-error
+       :artifact-choreography-mismatch
+       "The supplied choreography does not project to the exact ExecutablePlan artifacts certified by this ArtifactSet."
+       {:role role
+        :projected-digest actual-digest
+        :artifact-digest sidecar-digest}))
+
+    ;; Exact executable identity alone is not enough to bind the global program:
+    ;; projection intentionally erases some global-only facts, most notably the
+    ;; authored terminal outcome. Recompute the current structural certificate
+    ;; from the supplied verified choreography and require exact agreement with
+    ;; the sidecar as a second, independent binding condition.
+    (when-not (= (:proof sidecar)
+                 structural-certificate)
+      (artifact-error
+       :artifact-proof-choreography-mismatch
+       "The supplied choreography does not reproduce the structural proof certificate bound to this ArtifactSet."
+       {:artifact-proof
+        (:proof sidecar)
+        :choreography-proof
+        structural-certificate}))
+
+    verified))
+
+(defn- artifact-correspondence-evidence
+  [artifact-set mode result]
+  (let [sidecar
+        (:diagnostic-proof-sidecar artifact-set)]
+    {:gesso.choreo/type
+     artifact-correspondence-evidence-type
+
+     :gesso.choreo/version
+     artifact-correspondence-evidence-version
+
+     :property
+     artifact-correspondence-evidence-property
+
+     :classification
+     artifact-correspondence-evidence-classification
+
+     :valid?
+     (correspondence/valid? result)
+
+     :mode
+     mode
+
+     :artifact-version
+     artifact-version
+
+     :correspondence-version
+     correspondence/correspondence-version
+
+     :executable-digests
+     (:executable-digests sidecar)
+
+     :structural-certificate
+     (:proof sidecar)
+
+     :correspondence
+     result
+
+     :nonclaims
+     artifact-correspondence-evidence-nonclaims}))
+
+(defn check-artifact-witness
+  "Check one concrete lockstep witness and bind the resulting correspondence
+   evidence to exactly artifact-set.
+
+   The supplied choreography is verified and independently re-projected first.
+   Its exact ExecutablePlan digests AND recomputed structural certificate must
+   match the ArtifactSet sidecar before correspondence is executed. The second
+   condition matters because projection intentionally erases global-only facts
+   such as authored terminal outcomes. Together they prevent evidence for another choreography,
+   even one with a coincidentally similar name or role set, from being composed
+   with this structural certificate.
+
+   The result remains witness-level evidence only. It does not quantify over all
+   projected executions and therefore explicitly does not claim trace or
+   projection refinement."
+  ([artifact-set choreography-or-verified witness]
+   (check-artifact-witness
+    artifact-set
+    choreography-or-verified
+    witness
+    nil))
+  ([artifact-set choreography-or-verified witness options]
+   (let [verified
+         (require-artifact-choreography-match!
+          artifact-set
+          choreography-or-verified)
+
+         result
+         (correspondence/check-witness
+          verified
+          witness
+          options)
+
+         evidence
+         (artifact-correspondence-evidence
+          artifact-set
+          :lockstep
+          result)]
+     (require-evidence-match!
+      artifact-set
+      evidence))))
+
+(defn check-artifact-weak-witness
+  "Check one concrete weak/commuting witness and bind the resulting
+   correspondence evidence to exactly artifact-set.
+
+   Exact choreography->ExecutablePlan agreement is required before witness
+   replay for the same reason as check-artifact-witness. The result is still one
+   concrete schedule, not the quantified projection/refinement theorem."
+  ([artifact-set choreography-or-verified witness]
+   (check-artifact-weak-witness
+    artifact-set
+    choreography-or-verified
+    witness
+    nil))
+  ([artifact-set choreography-or-verified witness options]
+   (let [verified
+         (require-artifact-choreography-match!
+          artifact-set
+          choreography-or-verified)
+
+         result
+         (correspondence/check-weak-witness
+          verified
+          witness
+          options)
+
+         evidence
+         (artifact-correspondence-evidence
+          artifact-set
+          :weak
+          result)]
+     (require-evidence-match!
+      artifact-set
+      evidence))))
+

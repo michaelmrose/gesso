@@ -17,6 +17,15 @@
       (:error/kind
        (ex-data e)))))
 
+(defn- error-data
+  [f]
+  (try
+    (f)
+    nil
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) e
+      (ex-data e))))
+
 (defn- projected
   [choreography role]
   (project/project
@@ -4805,3 +4814,386 @@
         (is (= :invalid-plan
                (error-kind
                 #(machine/start lookalike))))))))
+
+;; -----------------------------------------------------------------------------
+;; Canonical execution-record integrity
+;; -----------------------------------------------------------------------------
+
+(defn- assert-invalid-execution-record!
+  [label execution]
+  (testing (name label)
+    (is (false?
+         (machine/execution? execution)))
+    (is (= :invalid-execution
+           (error-kind
+            #(machine/current-state-id execution))))))
+
+(deftest execution-record-integrity-rejects-corrupted-base-and-boundary-state
+  (let [waiting
+        (machine/start
+         (integrity-machine-plan))
+
+        completed
+        (machine/complete-local waiting)
+
+        corruptions
+        {:missing-state
+         (dissoc waiting :state)
+
+         :unknown-state
+         (assoc waiting :state 999)
+
+         :missing-immediate-step-guard
+         (dissoc waiting :max-immediate-steps)
+
+         :zero-immediate-step-guard
+         (assoc waiting :max-immediate-steps 0)
+
+         :non-integer-immediate-step-guard
+         (assoc waiting :max-immediate-steps 1.5)
+
+         :status-does-not-match-current-state
+         (-> waiting
+             (assoc :status :completed
+                    :result {:outcome :gesso.choreo/complete})
+             (dissoc :action))
+
+         :missing-local-boundary
+         (dissoc waiting :action)
+
+         :forged-local-boundary
+         (assoc waiting
+                :action
+                (assoc (:action waiting)
+                       :action :forged/action))
+
+         :stale-terminal-boundary-on-local-state
+         (assoc waiting
+                :result
+                {:outcome :gesso.choreo/complete})
+
+         :missing-terminal-boundary
+         (dissoc completed :result)
+
+         :forged-terminal-boundary
+         (assoc completed
+                :result
+                {:outcome :gesso.choreo/forged})
+
+         :stale-local-boundary-on-terminal-state
+         (assoc completed
+                :action
+                (:action waiting))}]
+
+    (is (machine/execution? waiting))
+    (is (machine/execution? completed))
+
+    (doseq [[label execution]
+            corruptions]
+      (assert-invalid-execution-record!
+       label
+       execution))))
+
+(deftest execution-record-integrity-recomputes-receive-and-environment-boundaries
+  (let [receive-choreography
+        (choreo/->choreography
+         {:initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :authority
+            :request/claim
+            :done
+            {:required #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        receive-execution
+        (start-role-with-entry-knowledge
+         receive-choreography
+         :authority
+         {:browser #{:request-id}})
+
+        await-choreography
+        (choreo/->choreography
+         {:initial :wait
+          :states
+          {:wait
+           (choreo/await
+            :browser
+            {:request/confirmed :done
+             :request/rejected :done})
+
+           :done
+           (choreo/return :done)}})
+
+        await-execution
+        (start-role
+         await-choreography
+         :browser)
+
+        forged-receive
+        (assoc-in receive-execution
+                  [:awaiting :alternatives 0 :event]
+                  :request/forged)
+
+        forged-environment
+        (assoc-in await-execution
+                  [:awaiting :events]
+                  #{:request/forged})]
+
+    (is (machine/execution? receive-execution))
+    (is (machine/execution? await-execution))
+
+    (assert-invalid-execution-record!
+     :forged-receive-boundary
+     forged-receive)
+
+    (assert-invalid-execution-record!
+     :forged-environment-boundary
+     forged-environment)))
+
+(deftest branch-state-cannot-be-materialized-as-a-durable-execution-boundary
+  (let [choreography
+        (choreo/->choreography
+         {:initial :decide
+          :states
+          {:decide
+           (choreo/branch
+            :browser
+            :choice
+            {:left :done
+             :right :done})
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (projected-with-entry-knowledge
+         choreography
+         :browser
+         {:browser #{:choice}})
+
+        completed
+        (machine/start
+         plan
+         {:values {:choice :left}})
+
+        branch-state-id
+        (some
+         (fn [[state-id state]]
+           (when (= :branch
+                    (:op state))
+             state-id))
+         (:states plan))
+
+        forged
+        (assoc completed
+               :state branch-state-id)]
+
+    (is (some? branch-state-id))
+    (is (machine/completed? completed))
+    (is (machine/execution? completed))
+
+    (assert-invalid-execution-record!
+     :materialized-branch-boundary
+     forged)))
+
+;; -----------------------------------------------------------------------------
+;; Shared portable type contracts at external machine boundaries
+;; -----------------------------------------------------------------------------
+
+(defn- simple-local-plan
+  []
+  (projected
+   (choreo/->choreography
+    {:name :example/machine-boundary-contract
+     :initial :work
+     :states
+     {:work
+      (choreo/local
+       :browser
+       :work
+       :done)
+
+      :done
+      (choreo/return :done)}})
+   :browser))
+
+(deftest machine-start-options-fail-closed
+  (let [plan
+        (simple-local-plan)
+
+        data
+        (error-data
+         #(machine/start
+           plan
+           {:max-imediate-steps 8}))]
+
+    (is (= :unknown-start-option-keys
+           (:error/kind data)))
+
+    (is (= #{:max-imediate-steps}
+           (:unknown-option-keys data)))
+
+    (is (= #{:identity-bindings
+             :command-id
+             :execution-id
+             :values
+             :max-immediate-steps}
+           (:allowed-option-keys data)))))
+
+(deftest initial-semantic-value-keys-must-use-portable-fact-key-shape
+  (let [plan
+        (simple-local-plan)
+
+        data
+        (error-data
+         #(machine/start
+           plan
+           {:values
+            {:request-id 42
+             "request-status" :open
+             [:request :priority] :high}}))]
+
+    (is (= :invalid-semantic-value-keys
+           (:error/kind data)))
+
+    (is (= #{"request-status"
+             [:request :priority]}
+           (:invalid-keys data)))
+
+    (is (= :gesso.choreo.type/fact-key
+           (:schema-key data))))
+
+  (testing "ordinary keyword fact keys remain accepted"
+    (let [execution
+          (machine/start
+           (simple-local-plan)
+           {:values
+            {:request-id 42
+             :request-status :open}})]
+
+      (is (machine/waiting-local? execution))
+      (is (= 42
+             (machine/execution-value execution :request-id)))
+      (is (= :open
+             (machine/execution-value execution :request-status))))))
+
+(deftest participant-message-options-fail-closed
+  (let [data
+        (error-data
+         #(machine/message
+           :browser
+           :server
+           :request/submit
+           {:request-id 42}
+           {:via :http
+            :trace-id "trace-1"}))]
+
+    (is (= :unknown-message-option-keys
+           (:error/kind data)))
+
+    (is (= #{:trace-id}
+           (:unknown-option-keys data)))
+
+    (is (= #{:via}
+           (:allowed-option-keys data))))
+
+  (testing "the supported transport selector remains accepted"
+    (is (= {:kind :message
+            :from :browser
+            :to :server
+            :event :request/submit
+            :payload {:request-id 42}
+            :via :http}
+           (machine/message
+            :browser
+            :server
+            :request/submit
+            {:request-id 42}
+            {:via :http})))))
+
+(deftest participant-and-environment-envelope-roles-use-portable-role-shape
+  (is
+   (= :invalid-value
+      (error-kind
+       #(machine/message
+         "browser"
+         :server
+         :request/submit
+         {}
+         nil))))
+
+  (is
+   (= :invalid-value
+      (error-kind
+       #(machine/message
+         :browser
+         "server"
+         :request/submit
+         {}
+         nil))))
+
+  (is
+   (= :invalid-value
+      (error-kind
+       #(machine/environment-event
+         "browser"
+         :request/reread-complete
+         {:request-status :open}))))
+
+  (testing "keyword roles remain valid portable role labels"
+    (is (= {:kind :environment
+            :role :browser
+            :event :request/reread-complete
+            :data {:request-status :open}}
+           (machine/environment-event
+            :browser
+            :request/reread-complete
+            {:request-status :open})))))
+
+(deftest transport-payload-data-remains-open-until-a-projected-contract-interprets-it
+  (let [payload
+        {"transport-field" 1
+         [:diagnostic :path] [1 2 3]
+         42 :opaque}
+
+        message
+        (machine/message
+         :browser
+         :server
+         :transport/raw
+         payload)]
+
+    (is (= payload
+           (:payload message)))
+
+    (is (= {:kind :message
+            :from :browser
+            :to :server
+            :event :transport/raw
+            :payload payload}
+           message)))
+
+  (let [data
+        {"native-event" true
+         42 {:anything :goes}}
+
+        event
+        (machine/environment-event
+         :browser
+         :browser/native
+         data)]
+
+    (is (= data
+           (:data event)))
+
+    (is (= {:kind :environment
+            :role :browser
+            :event :browser/native
+            :data data}
+           event))))
+

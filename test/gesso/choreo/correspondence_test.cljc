@@ -3,7 +3,8 @@
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.core :as choreo]
    [gesso.choreo.correspondence :as correspondence]
-   [gesso.choreo.realization :as realization]))
+   [gesso.choreo.realization :as realization]
+   [gesso.choreo.semantics :as semantics]))
 
 (defn- error-data
   [f]
@@ -144,7 +145,7 @@
     :outputs {}}])
 
 (deftest correspondence-property-is-explicitly-concrete-and-narrow
-  (is (= 1
+  (is (= 2
          correspondence/correspondence-version))
   (is (= :gesso.choreo.correspondence/result
          correspondence/result-type))
@@ -1372,3 +1373,667 @@
         (is (false? (correspondence/valid? result)))
         (is (= :authoritative-progression-mismatch
                (counterexample-error-kind result)))))))
+
+;; -----------------------------------------------------------------------------
+;; Concrete observable trace replay diagnostics
+;; -----------------------------------------------------------------------------
+
+(deftest observable-trace-replay-accepts-an-exact-concrete-replay
+  (let [trace
+        [{:kind :authoritative
+          :role :authority
+          :operation :request/claim
+          :outputs {:outcome :confirmed}}
+         {:kind :message
+          :from :authority
+          :to :browser
+          :event :request/settled
+          :payload {:outcome :confirmed}}]
+
+        replay
+        (correspondence/observable-trace-replay
+         trace
+         trace)]
+
+    (is (= correspondence/observable-trace-replay-relation
+           (:relation replay)))
+
+    (is (true?
+         (:valid? replay)))
+
+    (is (= 2
+           (:common-prefix-count replay)))
+
+    (is (= 2
+           (:global-count replay)))
+
+    (is (= 2
+           (:realized-count replay)))
+
+    (is (nil?
+         (:first-divergence replay)))))
+
+(deftest observable-trace-replay-reports-the-first-concrete-divergence
+  (testing "different observations at the same position"
+    (let [replay
+          (correspondence/observable-trace-replay
+           [:first :global-second :third]
+           [:first :realized-second :third])]
+
+      (is (false?
+           (:valid? replay)))
+
+      (is (= 1
+             (:common-prefix-count replay)))
+
+      (is (= {:index 1
+              :kind :observable-value-mismatch
+              :global-observation :global-second
+              :realized-observation :realized-second}
+             (:first-divergence replay)))))
+
+  (testing "the realization may terminate before an admitted global observation"
+    (let [replay
+          (correspondence/observable-trace-replay
+           [:first :second]
+           [:first])]
+
+      (is (false?
+           (:valid? replay)))
+
+      (is (= 1
+             (:common-prefix-count replay)))
+
+      (is (= {:index 1
+              :kind :realization-ended-before-global-trace
+              :global-observation :second
+              :realized-observation nil}
+             (:first-divergence replay)))))
+
+  (testing "the realization may produce an observation absent from the admitted global replay"
+    (let [replay
+          (correspondence/observable-trace-replay
+           [:first]
+           [:first :extra])]
+
+      (is (false?
+           (:valid? replay)))
+
+      (is (= 1
+             (:common-prefix-count replay)))
+
+      (is (= {:index 1
+              :kind :realization-produced-extra-observation
+              :global-observation nil
+              :realized-observation :extra}
+             (:first-divergence replay))))))
+
+(deftest observable-trace-replay-input-shape-errors-remain-programmer-errors
+  (let [global-error
+        (error-data
+         #(correspondence/observable-trace-replay
+           '(:not :a :vector)
+           []))
+
+        realized-error
+        (error-data
+         #(correspondence/observable-trace-replay
+           []
+           '(:not :a :vector)))]
+
+    (is (= :invalid-observable-trace
+           (:error/kind global-error)))
+
+    (is (= :global-admitted
+           (:side global-error)))
+
+    (is (= :invalid-observable-trace
+           (:error/kind realized-error)))
+
+    (is (= :realized
+           (:side realized-error)))))
+
+(deftest correspondence-results-expose-witness-level-replay-without-claiming-refinement
+  (let [strict
+        (correspondence/check-witness
+         (all-boundary-choreography)
+         (confirmed-fault-witness)
+         {:require-complete? true})
+
+        weak
+        (correspondence/check-weak-witness
+         (independent-locals-choreography)
+         [{:op :local
+           :role :bob
+           :action :bob/work
+           :outputs {}}
+          {:op :local
+           :role :alice
+           :action :alice/work
+           :outputs {}}]
+         {:require-complete? true})]
+
+    (doseq [result [strict weak]]
+      (is (correspondence/valid? result))
+
+      (is (= correspondence/observable-trace-replay-relation
+             (get-in result
+                     [:observable-trace-replay :relation])))
+
+      (is (true?
+           (get-in result
+                   [:observable-trace-replay :valid?])))
+
+      (is (false?
+           (contains? result
+                      :trace-refinement)))
+
+      (is (false?
+           (contains? result
+                      :projection-refinement))))))
+
+(deftest correspondence-checker-options-fail-closed
+  (doseq [[checker checker-kind]
+          [[correspondence/check-witness
+            :lockstep]
+           [correspondence/check-weak-witness
+            :weak]]]
+    (let [data
+          (error-data
+           #(checker
+             (all-boundary-choreography)
+             []
+             {:requre-complete? true}))]
+
+      (is (= :unknown-option-keys
+             (:error/kind data)))
+
+      (is (= checker-kind
+             (:checker data)))
+
+      (is (= #{:requre-complete?}
+             (:unknown-option-keys data)))
+
+      (is (= #{:entry-values-by-role
+               :semantic-entry-values
+               :machine-options-by-role
+               :require-complete?}
+             (:allowed-option-keys data))))))
+
+(deftest witness-steps-remain-open-to-nonsemantic-harness-metadata
+  (let [witness
+        (update
+         (confirmed-fault-witness)
+         0
+         assoc
+         :which :browser-a
+         :diagnostic/note "scheduled first")
+
+        result
+        (correspondence/check-witness
+         (all-boundary-choreography)
+         witness
+         {:require-complete? true})]
+
+    (is (correspondence/valid? result))
+
+    (is (= :browser-a
+           (get-in witness
+                   [0 :which])))
+
+    (is (= "scheduled first"
+           (get-in witness
+                   [0 :diagnostic/note])))))
+
+;; -----------------------------------------------------------------------------
+;; Formal distributed-observation relation ownership
+;; -----------------------------------------------------------------------------
+
+(deftest strict-correspondence-delegates-global-trace-to-formal-semantics
+  (let [sentinel
+        [{:kind :test/formal-distributed-observation}]
+
+        result
+        (with-redefs
+          [semantics/distributed-observable-trace
+           (fn [_configuration]
+             sentinel)]
+
+          (correspondence/check-witness
+           (all-boundary-choreography)
+           (confirmed-fault-witness)
+           {:require-complete? true}))]
+
+    (is (= sentinel
+           (:semantic-trace result)))
+
+    (is (= 1
+           (get-in result
+                   [:observable-trace-replay
+                    :global-count])))
+
+    (is (false?
+         (correspondence/valid? result)))
+
+    (is (= :observable-value-mismatch
+           (get-in result
+                   [:observable-trace-replay
+                    :first-divergence
+                    :kind])))))
+
+(deftest strict-correspondence-projects-both-sides-through-the-formal-observation-map
+  (let [original
+        semantics/distributed-observation
+
+        canonicalized
+        (fn [occurrence]
+          (some->
+           (original occurrence)
+           (assoc :test/formal-observation true)))
+
+        result
+        (with-redefs
+          [semantics/distributed-observation
+           canonicalized]
+
+          (correspondence/check-witness
+           (all-boundary-choreography)
+           (confirmed-fault-witness)
+           {:require-complete? true}))]
+
+    (is (correspondence/valid? result))
+
+    (is (= (:semantic-trace result)
+           (:realization-trace result)))
+
+    (is (seq
+         (:semantic-trace result)))
+
+    (is (every?
+         :test/formal-observation
+         (:semantic-trace result)))
+
+    (is (every?
+         :test/formal-observation
+         (:realization-trace result)))
+
+    (is (true?
+         (get-in result
+                 [:observable-trace-replay
+                  :valid?])))))
+
+(deftest weak-correspondence-projects-buffered-observables-through-formal-semantics
+  (let [original
+        semantics/distributed-observation
+
+        canonicalized
+        (fn [occurrence]
+          (some->
+           (original occurrence)
+           (assoc :test/formal-observation true)))
+
+        result
+        (with-redefs
+          [semantics/distributed-observation
+           canonicalized]
+
+          (correspondence/check-weak-witness
+           (local-before-foreign-authority-choreography)
+           [{:op :authoritative
+             :role :bob
+             :operation :bob/commit
+             :outputs {}}
+            {:op :local
+             :role :alice
+             :action :alice/work
+             :outputs {}}]
+           {:require-complete? true}))]
+
+    (is (correspondence/valid? result))
+
+    (is (empty?
+         (:pending-observable result)))
+
+    (is (= (:semantic-trace result)
+           (:realization-trace result)))
+
+    (is (= [{:kind :authoritative
+             :role :bob
+             :operation :bob/commit
+             :outputs {}
+             :test/formal-observation true}]
+           (:semantic-trace result)))
+
+    (is (true?
+         (get-in result
+                 [:observable-trace-replay
+                  :valid?])))))
+
+(deftest correspondence-results-contain-no-semantic-source-identity-in-distributed-traces
+  (let [strict
+        (correspondence/check-witness
+         (all-boundary-choreography)
+         (confirmed-fault-witness)
+         {:require-complete? true})
+
+        weak
+        (correspondence/check-weak-witness
+         (local-before-foreign-authority-choreography)
+         [{:op :authoritative
+           :role :bob
+           :operation :bob/commit
+           :outputs {}}
+          {:op :local
+           :role :alice
+           :action :alice/work
+           :outputs {}}]
+         {:require-complete? true})]
+
+    (doseq [result [strict weak]
+            observation
+            (concat
+             (:semantic-trace result)
+             (:realization-trace result))]
+
+      (is (semantics/distributed-observation?
+           observation))
+
+      (is (false?
+           (contains? observation
+                      :state)))
+
+      (is (false?
+           (contains? observation
+                      :runtime-locator)))
+
+      (is (false?
+           (contains? observation
+                      :proof-id))))))
+
+;; -----------------------------------------------------------------------------
+;; Projected trace ownership and explicit terminal compatibility
+;; -----------------------------------------------------------------------------
+
+(deftest strict-correspondence-delegates-projected-trace-to-realization
+  (let [sentinel
+        [{:kind :test/projected-distributed-observation}]
+
+        result
+        (with-redefs
+          [realization/distributed-observable-trace
+           (fn [_realization]
+             sentinel)]
+
+          (correspondence/check-witness
+           (all-boundary-choreography)
+           (confirmed-fault-witness)
+           {:require-complete? true}))]
+
+    (is (= sentinel
+           (:realization-trace result)))
+
+    (is (= 1
+           (get-in result
+                   [:observable-trace-replay
+                    :realized-count])))
+
+    (is (false?
+         (correspondence/valid? result)))
+
+    (is (= :observable-value-mismatch
+           (get-in result
+                   [:observable-trace-replay
+                    :first-divergence
+                    :kind])))))
+
+(deftest completed-strict-witness-establishes-terminal-compatibility-relationally
+  (let [result
+        (correspondence/check-witness
+         (all-boundary-choreography)
+         (confirmed-fault-witness)
+         {:require-complete? true})
+
+        terminal
+        (:terminal-compatibility result)]
+
+    (is (correspondence/valid? result))
+
+    (is (= correspondence/terminal-compatibility-obligation
+           (:obligation terminal)))
+
+    (is (= correspondence/terminal-compatibility-classification
+           (:classification terminal)))
+
+    (is (true?
+         (:required-for-projection-refinement? terminal)))
+
+    (is (true?
+         (:established? terminal)))
+
+    (is (= :established-for-concrete-witness
+           (:status terminal)))
+
+    (is (true?
+         (:global-completed? terminal)))
+
+    (is (= :done
+           (:global-outcome terminal)))
+
+    (is (true?
+         (:realization-completed? terminal)))
+
+    (is (nil?
+         (:projected-terminal-observation terminal)))
+
+    (is (= :matched-global-replay-establishes-authored-terminal-outcome
+           (:reason terminal)))
+
+    (is (= :matched-global-semantic-replay
+           (:outcome-source terminal)))
+
+    (is (false?
+         (:projected-terminal-outcome-encoded? terminal)))
+
+    (is (true?
+         (:observable-trace-replay-valid? terminal)))
+
+    (is (zero?
+         (:pending-work-count terminal)))
+
+    (testing "concrete correspondence remains valid without laundering terminal compatibility into the witnessed trace relation"
+      (is (true?
+           (get-in result
+                   [:observable-trace-replay
+                    :valid?])))
+
+      (is (false?
+           (contains? result
+                      :trace-refinement)))
+
+      (is (false?
+           (contains? result
+                      :projection-refinement))))))
+
+(deftest legal-prefix-reports-terminal-compatibility-as-not-yet-applicable
+  (let [result
+        (correspondence/check-witness
+         (all-boundary-choreography)
+         [{:op :local
+           :role :browser
+           :action :prepare
+           :outputs {:request-id 17}}])
+
+        terminal
+        (:terminal-compatibility result)]
+
+    (is (correspondence/valid? result))
+
+    (is (= correspondence/terminal-compatibility-obligation
+           (:obligation terminal)))
+
+    (is (false?
+         (:established? terminal)))
+
+    (is (= :not-yet-applicable-to-prefix
+           (:status terminal)))
+
+    (is (false?
+         (:global-completed? terminal)))
+
+    (is (nil?
+         (:global-outcome terminal)))
+
+    (is (false?
+         (:realization-completed? terminal)))
+
+    (is (nil?
+         (:projected-terminal-observation terminal)))))
+
+(deftest completed-weak-witness-establishes-the-same-relational-terminal-compatibility
+  (let [result
+        (correspondence/check-weak-witness
+         (independent-locals-choreography)
+         [{:op :local
+           :role :bob
+           :action :bob/work
+           :outputs {}}
+          {:op :local
+           :role :alice
+           :action :alice/work
+           :outputs {}}]
+         {:require-complete? true})
+
+        terminal
+        (:terminal-compatibility result)]
+
+    (is (correspondence/valid? result))
+
+    (is (= correspondence/terminal-compatibility-obligation
+           (:obligation terminal)))
+
+    (is (= correspondence/terminal-compatibility-classification
+           (:classification terminal)))
+
+    (is (true?
+         (:required-for-projection-refinement? terminal)))
+
+    (is (true?
+         (:established? terminal)))
+
+    (is (= :established-for-concrete-witness
+           (:status terminal)))
+
+    (is (true?
+         (:global-completed? terminal)))
+
+    (is (= :done
+           (:global-outcome terminal)))
+
+    (is (true?
+         (:realization-completed? terminal)))
+
+    (is (nil?
+         (:projected-terminal-observation terminal)))
+
+    (is (true?
+         (get-in result
+                 [:observable-trace-replay
+                  :valid?])))))
+
+(deftest terminal-compatibility-report-is-consistent-with-top-level-completion-diagnostics
+  (doseq [result
+          [(correspondence/check-witness
+            (all-boundary-choreography)
+            (confirmed-fault-witness)
+            {:require-complete? true})
+
+           (correspondence/check-weak-witness
+            (independent-locals-choreography)
+            [{:op :local
+              :role :bob
+              :action :bob/work
+              :outputs {}}
+             {:op :local
+              :role :alice
+              :action :alice/work
+              :outputs {}}]
+            {:require-complete? true})]]
+
+    (is (= (:global-completed? result)
+           (get-in result
+                   [:terminal-compatibility
+                    :global-completed?])))
+
+    (is (= (:global-outcome result)
+           (get-in result
+                   [:terminal-compatibility
+                    :global-outcome])))
+
+    (is (= (:realization-completed? result)
+           (get-in result
+                   [:terminal-compatibility
+                    :realization-completed?])))))
+
+(deftest concrete-correspondence-traces-exclude-global-terminal-while-terminal-compatibility-is-established-relationally
+  (let [result
+        (correspondence/check-witness
+         (all-boundary-choreography)
+         (confirmed-fault-witness)
+         {:require-complete? true})]
+
+    (is (correspondence/valid? result))
+
+    (is (= :done
+           (:global-outcome result)))
+
+    (is (true?
+         (:global-completed? result)))
+
+    (is (nil?
+         (some #(= :terminal
+                   (:kind %))
+               (:semantic-trace result))))
+
+    (is (nil?
+         (some #(= :terminal
+                   (:kind %))
+               (:realization-trace result))))
+
+    (is (true?
+         (get-in result
+                 [:terminal-compatibility
+                  :established?])))))
+
+
+
+(deftest complete-correspondence-enforces-terminal-compatibility-as-an-explicit-witness-obligation
+  (doseq [result
+          [(correspondence/check-witness
+            (all-boundary-choreography)
+            (confirmed-fault-witness)
+            {:require-complete? true})
+
+           (correspondence/check-weak-witness
+            (independent-locals-choreography)
+            [{:op :local
+              :role :bob
+              :action :bob/work
+              :outputs {}}
+             {:op :local
+              :role :alice
+              :action :alice/work
+              :outputs {}}]
+            {:require-complete? true})]]
+    (let [terminal-obligation
+          (some #(when (= :terminal-compatibility
+                          (:kind %))
+                   %)
+                (:obligations result))]
+      (is (some? terminal-obligation))
+      (is (true? (:valid? terminal-obligation)))
+      (is (true? (get terminal-obligation :valid?)))
+      (is (true? (get-in terminal-obligation
+                         [:terminal-compatibility :established?])))
+      (is (= :matched-global-semantic-replay
+             (get-in terminal-obligation
+                     [:terminal-compatibility :outcome-source]))))))

@@ -1,5 +1,6 @@
 (ns gesso.choreo.semantics-test
   (:require
+   [clojure.set :as set]
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.core :as choreo]
    [gesso.choreo.semantics :as semantics]))
@@ -2111,3 +2112,343 @@
       (semantics/knows-value?
        completed
        :revision)))))
+
+;; -----------------------------------------------------------------------------
+;; Distributed observation alphabet and hide/project relation
+;; -----------------------------------------------------------------------------
+
+(deftest distributed-observation-alphabet-is-explicit-and-closed
+  (is (= #{:authoritative
+           :communication
+           :terminal}
+         semantics/distributed-observation-kinds))
+
+  (is (= #{:local
+           :branch
+           :environment
+           :authoritative-observation}
+         semantics/distributed-hidden-kinds))
+
+  (is (empty?
+       (set/intersection
+        semantics/distributed-observation-kinds
+        semantics/distributed-hidden-kinds))))
+
+(deftest distributed-observation-erases-semantic-source-identity
+  (testing "authoritative transitions keep semantic content but erase source/proof identity"
+    (let [occurrence
+          {:kind :authoritative
+           :state :claim
+           :role :server
+           :operation :request/claim
+           :outputs {:outcome :confirmed
+                     :revision 42}
+           :runtime-locator 17
+           :proof/id :diagnostic-only}
+
+          observation
+          (semantics/distributed-observation occurrence)]
+
+      (is (= {:kind :authoritative
+              :role :server
+              :operation :request/claim
+              :outputs {:outcome :confirmed
+                        :revision 42}}
+             observation))
+
+      (is (semantics/distributed-observation? observation))
+      (is (false? (contains? observation :state)))
+      (is (false? (contains? observation :runtime-locator)))
+      (is (false? (contains? observation :proof/id)))))
+
+  (testing "communications retain declared transport semantics but erase semantic state identity"
+    (let [occurrence
+          {:kind :communication
+           :state :send
+           :from :browser
+           :to :server
+           :event :request/claim
+           :payload {:request-id 17}
+           :via :http
+           :source/location [:send 0]}
+
+          observation
+          (semantics/distributed-observation occurrence)]
+
+      (is (= {:kind :communication
+              :from :browser
+              :to :server
+              :event :request/claim
+              :payload {:request-id 17}
+              :via :http}
+             observation))
+
+      (is (semantics/distributed-observation? observation))
+      (is (false? (contains? observation :state)))
+      (is (false? (contains? observation :source/location)))))
+
+  (testing "terminal observations expose only the semantic outcome"
+    (let [observation
+          (semantics/distributed-observation
+           {:kind :terminal
+            :state :done
+            :outcome :done
+            :compiler/id :done})]
+
+      (is (= {:kind :terminal
+              :outcome :done}
+             observation))
+
+      (is (semantics/distributed-observation? observation)))))
+
+(deftest distributed-hidden-occurrences-project-to-no-distributed-observation
+  (doseq [occurrence
+          [{:kind :local
+            :state :prepare
+            :role :browser
+            :action :prepare}
+
+           {:kind :branch
+            :state :decide
+            :role :browser
+            :choice-key :outcome
+            :choice :confirmed}
+
+           {:kind :environment
+            :state :wait
+            :role :browser
+            :event :browser/ready
+            :data {:revision 42}}
+
+           {:kind :authoritative-observation
+            :state :observe
+            :role :browser
+            :event :request/observed
+            :authority :request/model
+            :observation :request/read
+            :basis-key :basis
+            :basis [:xtdb-basis 42]
+            :data {:basis [:xtdb-basis 42]
+                   :outcome :confirmed}}]]
+
+    (is (nil?
+         (semantics/distributed-observation occurrence)))
+
+    (is (semantics/distributed-hidden? occurrence))
+
+    (is (false?
+         (semantics/distributed-observable? occurrence)))))
+
+(deftest unknown-semantic-occurrence-kind-fails-closed-at-the-observation-boundary
+  (let [occurrence
+        {:kind :future-operation
+         :state :future}]
+
+    (is (= :unknown-observation-kind
+           (error-kind
+            #(semantics/distributed-observation occurrence))))
+
+    (is (= :unknown-observation-kind
+           (error-kind
+            #(semantics/distributed-observable? occurrence))))
+
+    (is (= :unknown-observation-kind
+           (error-kind
+            #(semantics/distributed-hidden? occurrence))))))
+
+(deftest canonical-distributed-observations-reject-source-or-diagnostic-fields
+  (is (semantics/distributed-observation?
+       {:kind :terminal
+        :outcome :done}))
+
+  (is (false?
+       (semantics/distributed-observation?
+        {:kind :terminal
+         :state :done
+         :outcome :done})))
+
+  (is (false?
+       (semantics/distributed-observation?
+        {:kind :communication
+         :from :browser
+         :to :server
+         :event :request/claim
+         :payload {}
+         :trace-id "transport-diagnostic"})))
+
+  (is (false?
+       (semantics/distributed-observation?
+        {:kind :authoritative
+         :role :server
+         :operation :request/claim
+         :outputs {}
+         :runtime-locator 4}))))
+
+(deftest distributed-observable-trace-is-the-canonical-projection-of-full-semantic-history
+  (let [program
+        (choreo/->choreography
+         {:initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :browser
+            :prepare-command
+            :claim)
+
+           :claim
+           (choreo/authoritative
+            :server
+            :request/claim
+            :notify
+            {:requires #{:request-id}
+             :outputs #{:outcome :revision}})
+
+           :notify
+           (choreo/communicate
+            :server
+            :browser
+            :request/settled
+            :done
+            {:required #{:outcome :revision}})
+
+           :done
+           (choreo/return :done)}})
+
+        after-local
+        (-> program
+            (semantics/start
+             {:values {:request-id 17}})
+            (semantics/step
+             (semantics/local-event
+              :browser
+              :prepare-command)))
+
+        after-authority
+        (semantics/step
+         after-local
+         (semantics/authoritative-event
+          :server
+          :request/claim
+          {:outcome :confirmed
+           :revision 42}))
+
+        completed
+        (semantics/step
+         after-authority
+         (semantics/communication-event
+          :server
+          :browser
+          :request/settled
+          {:outcome :confirmed
+           :revision 42}))]
+
+    (is (= [:local
+            :authoritative
+            :communication
+            :terminal]
+           (mapv :kind
+                 (semantics/history completed))))
+
+    (is (= [{:kind :authoritative
+             :role :server
+             :operation :request/claim
+             :outputs {:outcome :confirmed
+                       :revision 42}}
+
+            {:kind :communication
+             :from :server
+             :to :browser
+             :event :request/settled
+             :payload {:outcome :confirmed
+                       :revision 42}}
+
+            {:kind :terminal
+             :outcome :done}]
+           (semantics/distributed-observable-trace completed)))
+
+    (is (= (semantics/distributed-observable-trace completed)
+           (into []
+                 (keep semantics/distributed-observation)
+                 (semantics/history completed))))
+
+    (is (every?
+         semantics/distributed-observation?
+         (semantics/distributed-observable-trace completed)))
+
+    (is (every?
+         #(not (contains? % :state))
+         (semantics/distributed-observable-trace completed)))))
+
+(deftest transition-reports-exactly-the-canonical-distributed-observations-it-contributes
+  (testing "a hidden local step that settles terminally contributes only the terminal observation"
+    (let [program
+          (choreo/->choreography
+           {:initial :prepare
+            :states
+            {:prepare
+             (choreo/local
+              :browser
+              :prepare-command
+              :done)
+
+             :done
+             (choreo/return :done)}})
+
+          result
+          (semantics/transition
+           (semantics/start program)
+           (semantics/local-event
+            :browser
+            :prepare-command))]
+
+      (is (= [{:kind :terminal
+               :state :done
+               :outcome :done}]
+             (:observations result)))
+
+      (is (= [{:kind :terminal
+               :outcome :done}]
+             (:distributed-observations result)))
+
+      (is (= (:distributed-observations result)
+             (into []
+                   (keep semantics/distributed-observation)
+                   (:observations result))))))
+
+  (testing "an authoritative transition followed by terminal settlement contributes two distributed observations"
+    (let [program
+          (choreo/->choreography
+           {:initial :claim
+            :states
+            {:claim
+             (choreo/authoritative
+              :server
+              :request/claim
+              :done
+              {:outputs #{:outcome}})
+
+             :done
+             (choreo/return :done)}})
+
+          result
+          (semantics/transition
+           (semantics/start program)
+           (semantics/authoritative-event
+            :server
+            :request/claim
+            {:outcome :confirmed}))]
+
+      (is (= [{:kind :authoritative
+               :role :server
+               :operation :request/claim
+               :outputs {:outcome :confirmed}}
+
+              {:kind :terminal
+               :outcome :done}]
+             (:distributed-observations result)))
+
+      (is (= (:distributed-observations result)
+             (into []
+                   (keep semantics/distributed-observation)
+                   (:observations result)))))))
+

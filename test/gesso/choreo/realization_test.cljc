@@ -1604,6 +1604,202 @@
          (realization/completed?
           drained))))))
 
+
+(deftest duplicate-of-earlier-identical-send-cannot-satisfy-a-later-receive
+  (let [program
+        (choreo/->choreography
+         {:name :test/repeated-identical-communication
+          :initial :prepare
+          :states
+          {:prepare
+           (choreo/local
+            :alice
+            :prepare
+            :send-first
+            {:outputs #{:x}})
+
+           :send-first
+           (choreo/communicate
+            :alice
+            :bob
+            :test/repeated
+            :send-second
+            {:via :test
+             :required #{:x}})
+
+           :send-second
+           (choreo/communicate
+            :alice
+            :bob
+            :test/repeated
+            :done
+            {:via :test
+             :required #{:x}})
+
+           :done
+           (choreo/return :done)}})
+
+        after-local
+        (realization/complete-local
+         (realization/start program)
+         :alice
+         {:x 7})
+
+        {after-first-send :realization
+         first-message-id :message-id
+         first-message :message}
+        (realization/complete-send
+         after-local
+         :alice
+         {:x 7})
+
+        {after-duplicate :realization
+         stale-duplicate-id :message-id}
+        (realization/duplicate-message
+         after-first-send
+         first-message-id)
+
+        after-first-delivery
+        (realization/deliver-message
+         after-duplicate
+         first-message-id)
+
+        alice-before-second-send
+        (realization/execution
+         after-first-delivery
+         :alice)
+
+        bob-waiting-second
+        (realization/execution
+         after-first-delivery
+         :bob)]
+
+    (testing "the first delivery advances Bob to an otherwise identical second receive"
+      (is
+       (machine/waiting-send?
+        alice-before-second-send))
+
+      (is
+       (machine/waiting-receive?
+        bob-waiting-second))
+
+      (is
+       (= [stale-duplicate-id]
+          (mapv
+           :message-id
+           (realization/messages
+            after-first-delivery))))
+
+      (is
+       (= []
+          (realization/deliverable-message-ids
+           after-first-delivery)))
+
+      (is
+       (= 1
+          (count
+           (realization/distributed-observable-trace
+            after-first-delivery))))
+
+      (is
+       (= :stale-duplicate-message
+          (error-kind
+           #(realization/deliver-message
+             after-first-delivery
+             stale-duplicate-id))))
+
+      (is
+       (= [stale-duplicate-id]
+          (mapv
+           :message-id
+           (realization/messages
+            after-first-delivery))))
+
+      (is
+       (= first-message
+          (:message
+           (realization/queued-message
+            after-first-delivery
+            stale-duplicate-id)))))
+
+    (testing "a distinct second send occurrence is independently deliverable"
+      (let [{after-second-send :realization
+             second-message-id :message-id
+             second-message :message}
+            (realization/complete-send
+             after-first-delivery
+             :alice
+             {:x 7})]
+
+        (is
+         (not=
+          first-message-id
+          second-message-id))
+
+        (is
+         (= first-message
+            second-message))
+
+        (is
+         (= [second-message-id]
+            (realization/deliverable-message-ids
+             after-second-send)))
+
+        (let [after-second-delivery
+              (realization/deliver-message
+               after-second-send
+               second-message-id)
+
+              trace
+              (realization/distributed-observable-trace
+               after-second-delivery)]
+
+          (is
+           (machine/completed?
+            (realization/execution
+             after-second-delivery
+             :alice)))
+
+          (is
+           (machine/completed?
+            (realization/execution
+             after-second-delivery
+             :bob)))
+
+          (is
+           (= 2
+              (count trace)))
+
+          (is
+           (= [{:kind :communication
+                :from :alice
+                :to :bob
+                :event :test/repeated
+                :payload {:x 7}
+                :via :test}
+               {:kind :communication
+                :from :alice
+                :to :bob
+                :event :test/repeated
+                :payload {:x 7}
+                :via :test}]
+              trace))
+
+          (is
+           (= [stale-duplicate-id]
+              (mapv
+               :message-id
+               (realization/messages
+                after-second-delivery))))
+
+          (let [completed
+                (realization/drop-message
+                 after-second-delivery
+                 stale-duplicate-id)]
+            (is
+             (realization/completed?
+              completed))))))))
+
 (deftest fault-operations-reject-unknown-message-ids-without-changing-the-prior-value
   (let [{queued :realization
          message-id :message-id}
@@ -2209,3 +2405,348 @@
       (is (= 1
              (count
               (realization/history after-first)))))))
+
+;; -----------------------------------------------------------------------------
+;; Canonical distributed observations from independent realization
+;; -----------------------------------------------------------------------------
+
+(deftest realization-distributed-observation-classifies-history-kinds-explicitly
+  (testing "authoritative completion is a canonical distributed observation"
+    (is (= {:kind :authoritative
+            :role :server
+            :operation :request/claim
+            :outputs {:outcome :confirmed
+                      :revision 42}}
+           (realization/distributed-observation
+            {:kind :authoritative
+             :role :server
+             :state 7
+             :operation :request/claim
+             :outputs {:outcome :confirmed
+                       :revision 42}}))))
+
+  (testing "receiver-consumed delivery is the atomic communication observation"
+    (is (= {:kind :communication
+            :from :browser
+            :to :server
+            :event :request/claim
+            :payload {:request-id 17}
+            :via :http}
+           (realization/distributed-observation
+            {:kind :deliver
+             :role :server
+             :state 3
+             :message-id 11
+             :message {:kind :message
+                       :from :browser
+                       :to :server
+                       :event :request/claim
+                       :payload {:request-id 17}
+                       :via :http}}))))
+
+  (testing "local/environment and physical transport scheduling remain hidden"
+    (doseq [entry
+            [{:kind :local
+              :role :browser
+              :state 0
+              :action :prepare-command
+              :outputs {:request-id 17}}
+             {:kind :environment
+              :role :browser
+              :state 4
+              :event :request/reread-complete
+              :data {:request-status :claimed}}
+             {:kind :send
+              :role :browser
+              :state 1
+              :message-id 2
+              :message {:kind :message}}
+             {:kind :drop
+              :message-id 2
+              :message {:kind :message}}
+             {:kind :duplicate
+              :message-id 3
+              :origin-message-id 2
+              :message {:kind :message}}]]
+      (is (nil?
+           (realization/distributed-observation entry)))))
+
+  (testing "new realization history kinds fail closed"
+    (is (= :unknown-history-kind
+           (error-kind
+            #(realization/distributed-observation
+              {:kind :future/history-kind}))))))
+
+(deftest send-alone-does-not-create-a-distributed-communication-observation
+  (let [started
+        (realization/start
+         (claim-choreography))
+
+        after-local
+        (realization/complete-local
+         started
+         :browser
+         {:request-id 17})
+
+        {after-send :realization
+         message-id :message-id}
+        (realization/complete-send
+         after-local
+         :browser
+         {:request-id 17})]
+
+    (is (= []
+           (realization/distributed-observable-trace
+            started)))
+
+    (is (= []
+           (realization/distributed-observable-trace
+            after-local)))
+
+    (is (= []
+           (realization/distributed-observable-trace
+            after-send)))
+
+    (is (= [message-id]
+           (mapv :message-id
+                 (realization/messages after-send))))
+
+    (testing "delivery, not emission, creates the communication observation"
+      (let [after-delivery
+            (realization/deliver-message
+             after-send
+             message-id)]
+
+        (is (= [{:kind :communication
+                 :from :browser
+                 :to :server
+                 :event :request/claim
+                 :payload {:request-id 17}
+                 :via :http}]
+               (realization/distributed-observable-trace
+                after-delivery)))))))
+
+(deftest distributed-realization-trace-uses-the-formal-semantics-observation-shape
+  (let [started
+        (realization/start
+         (claim-choreography))
+
+        after-local
+        (realization/complete-local
+         started
+         :browser
+         {:request-id 17})
+
+        {after-browser-send :realization
+         command-message-id :message-id}
+        (realization/complete-send
+         after-local
+         :browser
+         {:request-id 17})
+
+        after-command
+        (realization/deliver-message
+         after-browser-send
+         command-message-id)
+
+        after-authority
+        (realization/complete-authoritative
+         after-command
+         :server
+         {:outcome :confirmed
+          :revision 42})
+
+        {after-server-send :realization
+         settlement-message-id :message-id}
+        (realization/complete-send
+         after-authority
+         :server
+         {:outcome :confirmed
+          :revision 42})
+
+        completed
+        (realization/deliver-message
+         after-server-send
+         settlement-message-id)
+
+        expected
+        [{:kind :communication
+          :from :browser
+          :to :server
+          :event :request/claim
+          :payload {:request-id 17}
+          :via :http}
+         {:kind :authoritative
+          :role :server
+          :operation :request/claim
+          :outputs {:outcome :confirmed
+                    :revision 42}}
+         {:kind :communication
+          :from :server
+          :to :browser
+          :event :request/settled
+          :payload {:outcome :confirmed
+                    :revision 42}
+          :via :http}]]
+
+    (is (realization/completed? completed))
+
+    (is (= expected
+           (realization/distributed-observable-trace
+            completed)))
+
+    (is (every?
+         semantics/distributed-observation?
+         expected))
+
+    (doseq [observation
+            (realization/distributed-observable-trace completed)]
+      (is (false?
+           (contains? observation :state)))
+      (is (false?
+           (contains? observation :message-id)))
+      (is (false?
+           (contains? observation :origin-message-id))))))
+
+(deftest transport-fault-scheduling-does-not-create-distributed-observations
+  (let [started
+        (realization/start
+         (claim-choreography))
+
+        after-local
+        (realization/complete-local
+         started
+         :browser
+         {:request-id 17})
+
+        {after-send :realization
+         message-id :message-id}
+        (realization/complete-send
+         after-local
+         :browser
+         {:request-id 17})
+
+        {after-duplicate :realization
+         duplicate-id :message-id}
+        (realization/duplicate-message
+         after-send
+         message-id)
+
+        after-drop
+        (realization/drop-message
+         after-duplicate
+         message-id)]
+
+    (is (= []
+           (realization/distributed-observable-trace
+            after-duplicate)))
+
+    (is (= []
+           (realization/distributed-observable-trace
+            after-drop)))
+
+    (testing "a surviving duplicate becomes observable only if the receiver consumes it"
+      (let [after-delivery
+            (realization/deliver-message
+             after-drop
+             duplicate-id)]
+
+        (is (= [{:kind :communication
+                 :from :browser
+                 :to :server
+                 :event :request/claim
+                 :payload {:request-id 17}
+                 :via :http}]
+               (realization/distributed-observable-trace
+                after-delivery)))))))
+
+(deftest role-local-completion-does-not-fabricate-a-global-terminal-observation
+  (let [{:keys [completed]}
+        (complete-confirmed-claim
+         (realization/start
+          (claim-choreography)))
+
+        trace
+        (realization/distributed-observable-trace
+         completed)]
+
+    (is (realization/completed?
+         completed))
+
+    (is (= 3
+           (count trace)))
+
+    (is (nil?
+         (some
+          #(= :terminal (:kind %))
+          trace)))
+
+    (testing "the global semantics still has a terminal observation; projected realization does not invent one"
+      (let [global-final
+            (-> (semantics/start
+                 (claim-choreography))
+                (semantics/step
+                 (semantics/local-event
+                  :browser
+                  :prepare-command
+                  {:request-id 17}))
+                (semantics/step
+                 (semantics/communication-event
+                  :browser
+                  :server
+                  :request/claim
+                  {:request-id 17}
+                  {:via :http}))
+                (semantics/step
+                 (semantics/authoritative-event
+                  :server
+                  :request/claim
+                  {:outcome :confirmed
+                   :revision 42}))
+                (semantics/step
+                 (semantics/branch-event
+                  :server
+                  :outcome
+                  :confirmed))
+                (semantics/step
+                 (semantics/communication-event
+                  :server
+                  :browser
+                  :request/settled
+                  {:outcome :confirmed
+                   :revision 42}
+                  {:via :http})))
+
+            global-trace
+            (semantics/distributed-observable-trace
+             global-final)]
+
+        (is (= :terminal
+               (:kind (last global-trace))))
+
+        (is (= :done
+               (:outcome (last global-trace))))
+
+        (is (= 4
+               (count global-trace)))
+
+        (is (= trace
+               (pop global-trace)))))))
+
+(deftest malformed-delivery-history-cannot-be-reinterpreted-as-communication
+  (is (= :invalid-delivery-history
+         (error-kind
+          #(realization/distributed-observation
+            {:kind :deliver
+             :role :server
+             :state 3
+             :message-id 11
+             :message nil}))))
+
+  (is (= :invalid-delivery-history
+         (error-kind
+          #(realization/distributed-observation
+            {:kind :deliver
+             :role :server
+             :state 3
+             :message-id 11})))))

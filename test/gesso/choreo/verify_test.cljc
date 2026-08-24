@@ -791,6 +791,93 @@
     (is (= :options-with-verification-artifact
            (:error/kind error)))))
 
+(deftest verifier-options-fail-closed-on-unknown-keys
+  (let [choreography
+        (choreo/->choreography
+         {:initial :done
+          :states
+          {:done
+           (choreo/return :done)}})]
+
+    (doseq [[options expected-unknown]
+            [[{:entry-knolwedge
+               {:server #{:request-id}}}
+              #{:entry-knolwedge}]
+
+             [{:entry-value-keys #{}
+               :future-assumption true}
+              #{:future-assumption}]]]
+      (let [error
+            (verification-error
+             #(verify/verify choreography options))]
+        (is (= :gesso.choreo.verify/error
+               (:error/type error)))
+        (is (= :unknown-option-keys
+               (:error/kind error)))
+        (is (= expected-unknown
+               (:unknown-option-keys error)))
+        (is (= #{:entry-value-keys
+                 :entry-knowledge}
+               (:allowed-option-keys error)))))))
+
+(deftest verifier-option-values-fail-closed-on-invalid-portable-shapes
+  (let [choreography
+        (choreo/->choreography
+         {:initial :done
+          :states
+          {:done
+           (choreo/return :done)}})]
+
+    (doseq [entry-value-keys
+            [[:request-id]
+             #{"request-id"}
+             #{:request-id "principal"}]]
+      (let [error
+            (verification-error
+             #(verify/verify
+               choreography
+               {:entry-value-keys entry-value-keys}))]
+        (is (= :gesso.choreo.verify/error
+               (:error/type error)))
+        (is (= :invalid-entry-value-keys
+               (:error/kind error)))))
+
+    (let [error
+          (verification-error
+           #(verify/verify
+             choreography
+             {:entry-knowledge
+              {:server #{:request-id "principal"}}}))]
+      (is (= :gesso.choreo.verify/error
+             (:error/type error)))
+      (is (= :invalid-entry-value-keys
+             (:error/kind error))))))
+
+(deftest verifier-does-not-own-entry-role-participant-validation
+  (let [choreography
+        (choreo/->choreography
+         {:initial :done
+          :states
+          {:done
+           (choreo/return :done)}})
+
+        result
+        (verify/verify
+         choreography
+         {:entry-knowledge
+          {:external-role #{:request-id}}})]
+
+    (testing "verify validates the portable Role shape, not caller-specific participation"
+      (is (:valid? result))
+      (is (= {:external-role #{:request-id}}
+             (get-in result
+                     [:options :entry-knowledge]))))
+
+    (testing "the assumption still contributes to the low-level protocol value universe"
+      (is (= #{:request-id}
+             (get-in result
+                     [:analysis :protocol-entry-value-keys]))))))
+
 (deftest authoritative-operation-consumes-and-produces-definite-values
   (let [choreography
         (choreo/->choreography

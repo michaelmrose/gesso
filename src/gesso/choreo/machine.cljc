@@ -118,14 +118,17 @@
    must cross a protocol boundary, the choreography must declare that semantic
    message field explicitly.
 
-   This machine still does not prove authentication, authorization, provenance
-   quality, or purity of local computation."
+   Portable boundary shapes reuse gesso.choreo.type. Those checks establish only
+   ordinary value shape; this machine still does not prove authentication,
+   authorization, provenance quality, authoritative progression truth, or purity
+   of local computation."
 
   (:require
    [clojure.set :as set]
    [gesso.choreo.identity :as identity]
    [gesso.choreo.knowledge :as knowledge]
-   [gesso.choreo.project :as project])
+   [gesso.choreo.project :as project]
+   [gesso.choreo.type :as type])
   (:refer-clojure :exclude [await]))
 
 ;; -----------------------------------------------------------------------------
@@ -197,15 +200,55 @@
       :value value}))
   value)
 
-(defn- require-keyword-set!
+(defn- require-type!
+  [schema-key label value]
+  (when-not (type/valid? schema-key value)
+    (machine-error
+     :invalid-value
+     (str label " has an invalid portable Choreo value shape.")
+     {:label label
+      :schema-key schema-key
+      :value value
+      :explanation
+      (type/explain-data schema-key value)}))
+  value)
+
+(defn- require-role!
+  [label value]
+  (require-type!
+   ::type/role
+   label
+   value))
+
+(defn- require-fact-key-set!
   [label value]
   (when-not (and (set? value)
-                 (every? keyword? value))
+                 (every?
+                  #(type/valid? ::type/fact-key %)
+                  value))
     (machine-error
      :invalid-value-set
-     (str label " must be a set of keywords.")
+     (str label " must be a set of portable Choreo fact keys.")
      {:label label
+      :schema-key ::type/fact-key
       :value value}))
+  value)
+
+(defn- require-semantic-value-map!
+  [label value]
+  (require-map! label value)
+  (let [invalid-keys
+        (->> (keys value)
+             (remove #(type/valid? ::type/fact-key %))
+             set)]
+    (when (seq invalid-keys)
+      (machine-error
+       :invalid-semantic-value-keys
+       (str label " keys must be portable Choreo fact keys.")
+       {:label label
+        :schema-key ::type/fact-key
+        :invalid-keys invalid-keys
+        :value value})))
   value)
 
 (defn- contract-required
@@ -342,12 +385,12 @@
    contract)
 
   (let [required
-        (require-keyword-set!
+        (require-fact-key-set!
          "Projected await event contract :required"
          (or (:required contract) #{}))
 
         optional
-        (require-keyword-set!
+        (require-fact-key-set!
          "Projected await event contract :optional"
          (or (:optional contract) #{}))
 
@@ -530,32 +573,36 @@
            state
            event
            data)]
-      (when (nil? basis)
+      (when-not (type/valid? ::type/basis basis)
         (machine-error
          :invalid-authoritative-observation
-         "Authoritative observation environment event requires a non-nil authoritative basis."
+         "Authoritative observation environment event requires a valid portable authoritative basis."
          (merge
           context
           {:event event
            :authority (:authority descriptor)
            :observation (:observation descriptor)
-           :basis-key (:basis-key descriptor)})))
+           :basis-key (:basis-key descriptor)
+           :basis basis
+           :schema-key ::type/basis
+           :explanation
+           (type/explain-data ::type/basis basis)})))
       basis)))
 
 (defn- validate-message-contract!
   [label contract context]
   (let [required
-        (require-keyword-set!
+        (require-fact-key-set!
          (str label " :required")
          (contract-required contract))
 
         optional
-        (require-keyword-set!
+        (require-fact-key-set!
          (str label " :optional")
          (contract-optional contract))
 
         correlation
-        (require-keyword-set!
+        (require-fact-key-set!
          (str label " :correlation")
          (contract-correlation contract))
 
@@ -674,10 +721,14 @@
 
   payload)
 
+(defn- positive-integer?
+  [value]
+  (and (integer? value)
+       (pos? value)))
+
 (defn- require-positive-integer!
   [label value]
-  (when-not (and (integer? value)
-                 (pos? value))
+  (when-not (positive-integer? value)
     (machine-error
      :invalid-value
      (str label " must be a positive integer.")
@@ -729,18 +780,47 @@
   "Construct one participant-message envelope.
 
    This constructor validates only envelope shape because it is not tied to a
-   projected state. The active :send or :receive contract is enforced when the
-   envelope crosses that machine boundary."
+   projected state. Roles use the shared portable Choreo Role shape. Options are
+   closed to :via so misspelled transport metadata cannot be silently ignored.
+   The active :send or :receive contract is enforced when the envelope crosses
+   that machine boundary."
   ([from to event payload]
    (message from to event payload nil))
-  ([from to event payload {:keys [via]}]
-   (let [from'
-         (require-keyword!
+  ([from to event payload opts]
+   (let [opts'
+         (or opts {})
+
+         _
+         (require-map!
+          "Message options"
+          opts')
+
+         allowed-option-keys
+         #{:via}
+
+         unknown-option-keys
+         (set/difference
+          (set (keys opts'))
+          allowed-option-keys)
+
+         _
+         (when (seq unknown-option-keys)
+           (machine-error
+            :unknown-message-option-keys
+            "Message options contain unknown keys."
+            {:unknown-option-keys unknown-option-keys
+             :allowed-option-keys allowed-option-keys}))
+
+         via
+         (:via opts')
+
+         from'
+         (require-role!
           "Message :from"
           from)
 
          to'
-         (require-keyword!
+         (require-role!
           "Message :to"
           to)
 
@@ -792,7 +872,7 @@
   ([role event data]
    {:kind :environment
     :role
-    (require-keyword!
+    (require-role!
      "Environment event :role"
      role)
     :event
@@ -814,20 +894,26 @@
 
 (defn- require-command-id!
   [value]
-  (when-not (identity/command-id? value)
+  (when-not (type/valid? ::type/command-id value)
     (machine-error
      :invalid-command-id
      "Machine :command-id must be a tagged Choreo command identity."
-     {:command-id value}))
+     {:command-id value
+      :schema-key ::type/command-id
+      :explanation
+      (type/explain-data ::type/command-id value)}))
   value)
 
 (defn- require-execution-id!
   [value]
-  (when-not (identity/execution-id? value)
+  (when-not (type/valid? ::type/execution-id value)
     (machine-error
      :invalid-execution-id
      "Machine :execution-id must be a tagged Choreo execution identity."
-     {:execution-id value}))
+     {:execution-id value
+      :schema-key ::type/execution-id
+      :explanation
+      (type/explain-data ::type/execution-id value)}))
   value)
 
 (defn- merge-explicit-binding
@@ -939,16 +1025,59 @@
 ;; Execution records
 ;; -----------------------------------------------------------------------------
 
+(def ^:private execution-base-keys
+  #{:gesso.choreo.machine/type
+    :plan
+    :role
+    :identity-bindings
+    :command-id
+    :execution-id
+    :status
+    :state
+    :knowledge
+    :history
+    :max-immediate-steps})
+
+(def ^:private execution-boundary-key-by-status
+  {:waiting-local :action
+   :waiting-authoritative :action
+   :waiting-send :action
+   :waiting-receive :awaiting
+   :waiting-environment :awaiting
+   :completed :result})
+
+(defn- execution-closed-shape?
+  [execution]
+  (when-let [boundary-key
+             (get execution-boundary-key-by-status
+                  (:status execution))]
+    (= (conj execution-base-keys boundary-key)
+       (set (keys execution)))))
+
+(declare execution-boundary-consistent?)
+
 (defn execution?
-  "True when x is a role-local machine execution."
+  "True exactly when x is a canonical role-local machine execution.
+
+   In addition to validating the plan, identities, knowledge, and history
+   containers, this predicate validates the execution's closed runtime shape,
+   current state locator, immediate-step guard, and current boundary descriptor.
+   A persisted execution therefore cannot claim a status that disagrees with its
+   projected state or carry stale :action/:awaiting/:result data from another
+   boundary."
   [x]
   (and (map? x)
        (= execution-type
           (:gesso.choreo.machine/type x))
        (contains? statuses
                   (:status x))
+       (execution-closed-shape? x)
        (executable-plan?
         (:plan x))
+       (contains? (:states (:plan x))
+                  (:state x))
+       (positive-integer?
+        (:max-immediate-steps x))
        (identity/bindings?
         (:identity-bindings x))
        (= (:role x)
@@ -957,6 +1086,17 @@
        (= (:role x)
           (:role
            (:plan x)))
+       (type/valid?
+        ::type/role
+        (:role x))
+       (or (nil? (:execution-id x))
+           (type/valid?
+            ::type/execution-id
+            (:execution-id x)))
+       (or (nil? (:command-id x))
+           (type/valid?
+            ::type/command-id
+            (:command-id x)))
        (= (:execution-id x)
           (:execution-id
            (:identity-bindings x)))
@@ -969,7 +1109,8 @@
           (knowledge/role
            (:knowledge x)))
        (vector?
-        (:history x))))
+        (:history x))
+       (execution-boundary-consistent? x)))
 
 (defn- require-execution!
   [execution]
@@ -1186,23 +1327,23 @@
       :status
       status
 
-    :state
-    state
+      :state
+      state
 
-    :knowledge
-    knowledge
+      :knowledge
+      knowledge
 
-    :history
-    (vec history)
+      :history
+      (vec history)
 
-    :max-immediate-steps
-    max-immediate-steps}
+      :max-immediate-steps
+      max-immediate-steps}
 
-    action
-    (assoc :action action)
+      action
+      (assoc :action action)
 
-    awaiting
-    (assoc :awaiting awaiting)
+      awaiting
+      (assoc :awaiting awaiting)
 
       (= :completed status)
       (assoc :result result))))
@@ -1322,6 +1463,92 @@
     (assoc
      :identity-bindings
      identity-bindings)))
+
+(defn- execution-boundary-consistent?
+  [execution]
+  (let [plan
+        (:plan execution)
+
+        state-id
+        (:state execution)
+
+        state
+        (state-at plan state-id)
+
+        identity-bindings
+        (:identity-bindings execution)
+
+        values
+        (knowledge/values
+         (:knowledge execution))]
+
+    (case (:op state)
+      :local
+      (and
+       (= :waiting-local
+          (:status execution))
+       (= (local-action
+           plan
+           identity-bindings
+           state-id
+           state
+           values)
+          (:action execution)))
+
+      :authoritative
+      (and
+       (= :waiting-authoritative
+          (:status execution))
+       (= (authoritative-action
+           plan
+           identity-bindings
+           state-id
+           state
+           values)
+          (:action execution)))
+
+      :send
+      (and
+       (= :waiting-send
+          (:status execution))
+       (= (send-action
+           plan
+           identity-bindings
+           state-id
+           state)
+          (:action execution)))
+
+      :receive
+      (and
+       (= :waiting-receive
+          (:status execution))
+       (= (receive-awaiting
+           plan
+           identity-bindings
+           state)
+          (:awaiting execution)))
+
+      :await
+      (and
+       (= :waiting-environment
+          (:status execution))
+       (= (environment-awaiting
+           plan
+           identity-bindings
+           state)
+          (:awaiting execution)))
+
+      :return
+      (and
+       (= :completed
+          (:status execution))
+       (= {:outcome (:outcome state)}
+          (:result execution)))
+
+      ;; :branch is intentionally never a durable machine boundary. enter
+      ;; resolves deterministic branches immediately before returning an
+      ;; execution record.
+      false)))
 
 ;; -----------------------------------------------------------------------------
 ;; Advancement
@@ -1579,24 +1806,60 @@
        must choose whether a raw identifier is a command or an execution.
 
      :values
-       Initial role-local semantic values. Each supplied key/value is
-       established as :input knowledge for this role. Semantic values remain
-       separate from machine identity bindings.
+       Initial role-local semantic values. Keys must satisfy the shared portable
+       Choreo FactKey shape. Each supplied key/value is established as :input
+       knowledge for this role. Semantic values remain separate from machine
+       identity bindings.
 
      :max-immediate-steps
        Guard against accidental immediate branch loops. Defaults to 1024.
+
+   Start options are closed: unknown keys are rejected rather than silently
+   ignored, so a misspelled identity/guard assumption cannot disappear at the
+   runtime boundary.
 
    Anonymous portable executions remain valid: command-id, execution-id,
    principal, actor, authority, and host are all optional at this layer."
   ([plan]
    (start plan nil))
-  ([plan {:keys [identity-bindings
+  ([plan opts]
+   (let [opts'
+         (or opts {})
+
+         _
+         (require-map!
+          "Machine start options"
+          opts')
+
+         allowed-option-keys
+         #{:identity-bindings
+           :command-id
+           :execution-id
+           :values
+           :max-immediate-steps}
+
+         unknown-option-keys
+         (set/difference
+          (set (keys opts'))
+          allowed-option-keys)
+
+         _
+         (when (seq unknown-option-keys)
+           (machine-error
+            :unknown-start-option-keys
+            "Machine start options contain unknown keys."
+            {:unknown-option-keys unknown-option-keys
+             :allowed-option-keys allowed-option-keys}))
+
+         {:keys [identity-bindings
                  command-id
                  execution-id
                  values
                  max-immediate-steps]
-          :or {values {}}}]
-   (let [plan'
+          :or {values {}}}
+         opts'
+
+         plan'
          (require-executable-plan! plan)
 
          bindings'
@@ -1607,7 +1870,7 @@
           execution-id)
 
          values'
-         (require-map!
+         (require-semantic-value-map!
           "Machine initial :values"
           values)
 
@@ -2387,6 +2650,26 @@
         :state state-id
         :event event
         :authoritative-basis-progression progression}))
+
+    (when (and observation
+               progression-present?
+               (not
+                (type/valid?
+                 ::type/authoritative-basis-progression
+                 progression)))
+      (machine-error
+       :invalid-authoritative-progression
+       "Authoritative basis progression must satisfy the shared portable Choreo progression shape."
+       {:execution-id (:execution-id execution)
+        :role (:role execution)
+        :state state-id
+        :event event
+        :schema-key ::type/authoritative-basis-progression
+        :authoritative-basis-progression progression
+        :explanation
+        (type/explain-data
+         ::type/authoritative-basis-progression
+         progression)}))
 
     (if (seq semantic-data)
       (if observation

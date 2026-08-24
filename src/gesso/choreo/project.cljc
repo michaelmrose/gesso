@@ -90,6 +90,7 @@
   (:require
    [clojure.set :as set]
    [gesso.choreo.core :as choreo]
+   [gesso.choreo.type :as type]
    [gesso.choreo.verify :as verify]))
 
 ;; -----------------------------------------------------------------------------
@@ -101,6 +102,12 @@
 
 (def executable-plan-type
   :gesso.choreo/executable-plan)
+
+(def compiler-projection-version
+  3)
+
+(def compiler-projection-type
+  :gesso.choreo/compiler-projection)
 
 ;; Transitional names retained for current compiler/runtime callers while the
 ;; remaining Choreo namespaces move to the explicit ExecutablePlan vocabulary.
@@ -184,10 +191,11 @@
   (and (integer? value)
        (not (neg? value))))
 
-(defn- keyword-set?
+(defn- fact-key-set?
   [value]
   (and (set? value)
-       (every? keyword? value)))
+       (every? #(type/valid? ::type/fact-key %)
+               value)))
 
 (defn- closed-map?
   [value allowed-keys]
@@ -195,11 +203,11 @@
        (every? allowed-keys
                (keys value))))
 
-(defn- present-nonempty-keyword-set?
+(defn- present-nonempty-fact-key-set?
   [value key]
   (or (not (contains? value key))
       (let [items (get value key)]
-        (and (keyword-set? items)
+        (and (fact-key-set? items)
              (seq items)))))
 
 (defn- canonical-message-contract?
@@ -213,9 +221,9 @@
         correlation
         (or (:correlation contract) #{})]
     (and
-     (present-nonempty-keyword-set? contract :required)
-     (present-nonempty-keyword-set? contract :optional)
-     (present-nonempty-keyword-set? contract :correlation)
+     (present-nonempty-fact-key-set? contract :required)
+     (present-nonempty-fact-key-set? contract :optional)
+     (present-nonempty-fact-key-set? contract :correlation)
      (empty? (set/intersection required optional))
      (set/subset? correlation required)
      (or (not (contains? contract :open-payload?))
@@ -227,9 +235,12 @@
    (map? observation)
    (= authoritative-observation-keys
       (set (keys observation)))
-   (keyword? (:authority observation))
-   (keyword? (:observation observation))
-   (keyword? (:basis-key observation))
+   (type/valid? ::type/authority-name
+                (:authority observation))
+   (type/valid? ::type/fact-key
+                (:observation observation))
+   (type/valid? ::type/fact-key
+                (:basis-key observation))
    (contains? (or (:required contract) #{})
               (:basis-key observation))))
 
@@ -237,8 +248,8 @@
   [contract]
   (and
    (closed-map? contract environment-contract-keys)
-   (present-nonempty-keyword-set? contract :required)
-   (present-nonempty-keyword-set? contract :optional)
+   (present-nonempty-fact-key-set? contract :required)
+   (present-nonempty-fact-key-set? contract :optional)
    (empty?
     (set/intersection
      (or (:required contract) #{})
@@ -280,7 +291,8 @@
   [plan alternative]
   (and
    (closed-map? alternative receive-alternative-keys)
-   (keyword? (:from alternative))
+   (type/valid? ::type/role
+                (:from alternative))
    (not= (:role plan) (:from alternative))
    (keyword? (:event alternative))
    (or (not (contains? alternative :via))
@@ -301,20 +313,21 @@
      :local
      (and
       (keyword? (:action state))
-      (present-nonempty-keyword-set? state :requires)
-      (present-nonempty-keyword-set? state :outputs)
+      (present-nonempty-fact-key-set? state :requires)
+      (present-nonempty-fact-key-set? state :outputs)
       (nat-int-locator? (:next state)))
 
      :authoritative
      (and
       (keyword? (:operation state))
-      (present-nonempty-keyword-set? state :requires)
-      (present-nonempty-keyword-set? state :outputs)
+      (present-nonempty-fact-key-set? state :requires)
+      (present-nonempty-fact-key-set? state :outputs)
       (nat-int-locator? (:next state)))
 
      :branch
      (and
-      (keyword? (:on state))
+      (type/valid? ::type/fact-key
+                   (:on state))
       (map? (:cases state))
       (seq (:cases state))
       (every? (fn [[value target]]
@@ -324,7 +337,8 @@
 
      :send
      (and
-      (keyword? (:to state))
+      (type/valid? ::type/role
+                   (:to state))
       (not= (:role plan) (:to state))
       (keyword? (:event state))
       (or (not (contains? state :via))
@@ -361,7 +375,8 @@
                      contracts)))))
 
      :return
-     (keyword? (:outcome state))
+     (type/valid? ::type/outcome
+                   (:outcome state))
 
      false)))
 
@@ -415,7 +430,8 @@
       (:gesso.choreo/type x))
    (= executable-plan-version
       (:gesso.choreo/version x))
-   (keyword? (:role x))
+   (type/valid? ::type/role
+                (:role x))
    (map? (:states x))
    (canonical-runtime-layout? x)))
 
@@ -439,6 +455,269 @@
   "Transitional alias for ensure-executable-plan."
   [x]
   (ensure-executable-plan x))
+
+;; -----------------------------------------------------------------------------
+;; Compiler-only projection provenance
+;; -----------------------------------------------------------------------------
+
+(def ^:private compiler-projection-keys
+  #{:gesso.choreo/type
+    :gesso.choreo/version
+    :executable-plan
+    :semantic-locations
+    :semantic-continuations
+    :runtime-origins})
+
+(def ^:private semantic-location-endpoints
+  #{:owner :sender :receiver})
+
+(def ^:private runtime-origin-kinds
+  #{:authored-boundary
+    :synthetic-receive
+    :synthetic-completion})
+
+(defn- authored-origin-endpoint
+  [runtime-state]
+  (case (:op runtime-state)
+    :local :owner
+    :authoritative :owner
+    :branch :owner
+    :await :owner
+    :send :sender
+    nil))
+
+(defn- runtime-origin?
+  [compiled runtime-locator origin]
+  (let [plan (:executable-plan compiled)
+        runtime-state (get-in plan [:states runtime-locator])
+        semantic-locations' (:semantic-locations compiled)
+        semantic-continuations' (:semantic-continuations compiled)]
+    (and
+     (map? origin)
+     (contains? runtime-origin-kinds (:kind origin))
+     (case (:kind origin)
+       :authored-boundary
+       (let [semantic-state (:semantic-state origin)
+             endpoint (authored-origin-endpoint runtime-state)]
+         (and
+          (= #{:kind :semantic-state} (set (keys origin)))
+          (some? semantic-state)
+          (some? endpoint)
+          (some #(= {:runtime-locator runtime-locator :endpoint endpoint} %)
+                (get semantic-locations' semantic-state []))))
+
+       :synthetic-receive
+       (let [source (:source-semantic-state origin)
+             alternative-sources (:alternative-semantic-states origin)
+             alternatives (:alternatives runtime-state)]
+         (and
+          (= #{:kind :source-semantic-state :alternative-semantic-states}
+             (set (keys origin)))
+          (some? source)
+          (= :receive (:op runtime-state))
+          (= runtime-locator (get semantic-continuations' source))
+          (vector? alternative-sources)
+          (= (count alternatives) (count alternative-sources))
+          (every? vector? alternative-sources)
+          (every? seq alternative-sources)
+          (every?
+           true?
+           (map-indexed
+            (fn [alternative-index semantic-states]
+              (and
+               (= (count semantic-states) (count (distinct semantic-states)))
+               (every?
+                (fn [semantic-state]
+                  (some #(= {:runtime-locator runtime-locator
+                             :endpoint :receiver
+                             :alternative-index alternative-index} %)
+                        (get semantic-locations' semantic-state [])))
+                semantic-states)))
+            alternative-sources))))
+
+       :synthetic-completion
+       (let [source (:source-semantic-state origin)]
+         (and
+          (= #{:kind :source-semantic-state} (set (keys origin)))
+          (some? source)
+          (= :return (:op runtime-state))
+          (= complete-outcome (:outcome runtime-state))
+          (= runtime-locator (get semantic-continuations' source))))
+
+       false))))
+
+(defn- compiler-location?
+  [plan location]
+  (and
+   (map? location)
+   (contains? semantic-location-endpoints
+              (:endpoint location))
+   (nat-int-locator? (:runtime-locator location))
+   (contains? (:states plan)
+              (:runtime-locator location))
+   (case (:endpoint location)
+     :owner
+     (and
+      (= #{:runtime-locator :endpoint}
+         (set (keys location)))
+      (contains? #{:local :authoritative :branch :await}
+                 (get-in plan
+                         [:states
+                          (:runtime-locator location)
+                          :op])))
+
+     :sender
+     (and
+      (= #{:runtime-locator :endpoint}
+         (set (keys location)))
+      (= :send
+         (get-in plan
+                 [:states
+                  (:runtime-locator location)
+                  :op])))
+
+     :receiver
+     (let [alternative-index
+           (:alternative-index location)
+
+           alternatives
+           (get-in plan
+                   [:states
+                    (:runtime-locator location)
+                    :alternatives])]
+       (and
+        (= #{:runtime-locator :endpoint :alternative-index}
+           (set (keys location)))
+        (= :receive
+           (get-in plan
+                   [:states
+                    (:runtime-locator location)
+                    :op]))
+        (nat-int? alternative-index)
+        (< alternative-index
+           (count alternatives))))
+
+     false)))
+
+(defn compiler-projection?
+  "True when value is one current compiler-only projection product.
+
+   A CompilerProjection contains the canonical ExecutablePlan plus exact
+   semantic-state -> runtime-boundary, semantic-entry -> runtime-continuation,
+   and total runtime-locator -> semantic/synthetic-origin provenance captured
+   while projection is constructed. The provenance is
+   compiler/diagnostic data and is deliberately not part of ExecutablePlan or
+   runtime semantics."
+  [value]
+  (and
+   (map? value)
+   (= compiler-projection-keys
+      (set (keys value)))
+   (= compiler-projection-type
+      (:gesso.choreo/type value))
+   (= compiler-projection-version
+      (:gesso.choreo/version value))
+   (executable-plan? (:executable-plan value))
+   (map? (:semantic-locations value))
+   (every?
+    (fn [[semantic-state locations]]
+      (and
+       (some? semantic-state)
+       (vector? locations)
+       (seq locations)
+       (= (count locations)
+          (count (distinct locations)))
+       (every? #(compiler-location?
+                 (:executable-plan value)
+                 %)
+               locations)))
+    (:semantic-locations value))
+   (map? (:semantic-continuations value))
+   (every?
+    (fn [[semantic-state runtime-locator]]
+      (and
+       (some? semantic-state)
+       (nat-int-locator? runtime-locator)
+       (contains?
+        (get-in value [:executable-plan :states])
+        runtime-locator)))
+    (:semantic-continuations value))
+   (map? (:runtime-origins value))
+   (= (set (keys (get-in value [:executable-plan :states])))
+      (set (keys (:runtime-origins value))))
+   (every?
+    (fn [[runtime-locator origin]]
+      (runtime-origin? value runtime-locator origin))
+    (:runtime-origins value))))
+
+(defn ensure-compiler-projection
+  "Return value when it is a valid current CompilerProjection; otherwise throw.
+
+   This is a compiler/debug boundary only. Runtime code should continue to
+   accept ExecutablePlan and must not require this provenance product."
+  [value]
+  (when-not (compiler-projection? value)
+    (projection-error
+     :invalid-compiler-projection
+     "Expected a valid Gesso Choreo CompilerProjection."
+     {:value value}))
+  value)
+
+(defn semantic-locations
+  "Return the exact compiler-recorded runtime boundary locations for semantic-state.
+
+   The result may contain more than one location when distinct projected
+   receive alternatives intentionally collapse to the same runtime alternative.
+   Returns an empty vector when the semantic state has no runtime boundary in
+   this role projection."
+  [compiled semantic-state]
+  (get (:semantic-locations
+        (ensure-compiler-projection compiled))
+       semantic-state
+       []))
+
+(defn semantic-continuation
+  "Return the exact runtime locator reached by this role when execution enters
+   semantic-state, or nil when the compiler never needed that semantic entry as
+   a projected continuation.
+
+   Unlike semantic-locations, this records continuation identity even when the
+   role immediately skips foreign/unobservable semantic work before reaching its
+   next local boundary. It is compiler/proof provenance only and is deliberately
+   absent from ExecutablePlan."
+  [compiled semantic-state]
+  (get (:semantic-continuations
+        (ensure-compiler-projection compiled))
+       semantic-state))
+
+(defn runtime-origins
+  "Return the total compiler-recorded runtime-locator -> origin map.
+
+   Every emitted runtime state has exactly one origin classification:
+
+     :authored-boundary
+       a role-owned/sender boundary copied from one exact semantic state;
+
+     :synthetic-receive
+       a compiler-generated receive gate, with exact semantic communication
+       states recorded per emitted alternative; or
+
+     :synthetic-completion
+       a compiler-generated role-local completion state, recording the semantic
+       entry whose continuation reached completion.
+
+   This inverse provenance is compiler/proof data only. Runtime execution must
+   continue to depend solely on ExecutablePlan."
+  [compiled]
+  (:runtime-origins
+   (ensure-compiler-projection compiled)))
+
+(defn runtime-origin
+  "Return the exact compiler-recorded origin of runtime-locator, or nil when the
+   locator is not part of this CompilerProjection."
+  [compiled runtime-locator]
+  (get (runtime-origins compiled)
+       runtime-locator))
 
 ;; -----------------------------------------------------------------------------
 ;; Global observable frontier
@@ -1094,7 +1373,7 @@
        {:state state
         :op (:op state)}))))
 
-(defn- executable-plan
+(defn- build-executable-plan
   [choreography role initial states]
   (let [state-order
         (reachable-state-order initial states)
@@ -1125,22 +1404,178 @@
                     (rewrite-successors
                      (get states state-id)
                      locator-by-state)]))
-                state-order)]
+                state-order)
 
-      {:gesso.choreo/type
-       executable-plan-type
+          plan
+          (ensure-executable-plan
+           {:gesso.choreo/type
+            executable-plan-type
 
-       :gesso.choreo/version
-       executable-plan-version
+            :gesso.choreo/version
+            executable-plan-version
 
-       :role
-       role
+            :role
+            role
 
-       :initial
-       (get locator-by-state initial)
+            :initial
+            (get locator-by-state initial)
 
-       :states
-       runtime-states})))
+            :states
+            runtime-states})]
+
+      {:executable-plan plan
+       :locator-by-state locator-by-state})))
+
+(defn- direct-semantic-locations
+  [global-states projected-states locator-by-state]
+  (reduce-kv
+   (fn [locations semantic-state _global-state]
+     (if-some [runtime-locator
+               (get locator-by-state semantic-state)]
+       (let [projected-op
+             (:op (get projected-states semantic-state))
+
+             endpoint
+             (case projected-op
+               :local :owner
+               :authoritative :owner
+               :branch :owner
+               :await :owner
+               :send :sender
+               nil)]
+         (if endpoint
+           (update locations
+                   semantic-state
+                   (fnil conj [])
+                   {:runtime-locator runtime-locator
+                    :endpoint endpoint})
+           locations))
+       locations))
+   {}
+   global-states))
+
+(defn- receive-semantic-locations
+  [locations locator-by-state receive-provenance]
+  (reduce-kv
+   (fn [locations projected-state-id source-sets]
+     (let [runtime-locator
+           (get locator-by-state projected-state-id)]
+       (reduce-kv
+        (fn [locations alternative-index semantic-states]
+          (reduce
+           (fn [locations semantic-state]
+             (update locations
+                     semantic-state
+                     (fnil conj [])
+                     {:runtime-locator runtime-locator
+                      :endpoint :receiver
+                      :alternative-index alternative-index}))
+           locations
+           semantic-states))
+        locations
+        (vec source-sets))))
+   locations
+   receive-provenance))
+
+(defn- canonical-semantic-locations
+  [global-states projected-states locator-by-state receive-provenance]
+  (let [direct
+        (direct-semantic-locations
+         global-states
+         projected-states
+         locator-by-state)
+
+        all-locations
+        (receive-semantic-locations
+         direct
+         locator-by-state
+         receive-provenance)]
+    (into {}
+          (map
+           (fn [[semantic-state locations]]
+             [semantic-state
+              (->> locations
+                   distinct
+                   (sort-by
+                    (juxt :runtime-locator
+                          (comp pr-str :endpoint)
+                          #(or (:alternative-index %) -1)))
+                   vec)]))
+          all-locations)))
+
+(defn- canonical-semantic-continuations
+  [continuation-cache locator-by-state]
+  (into {}
+        (map
+         (fn [[semantic-state projected-state-id]]
+           (let [runtime-locator
+                 (get locator-by-state projected-state-id)]
+             (when-not (nat-int-locator? runtime-locator)
+               (projection-error
+                :missing-continuation-provenance
+                "Compiler continuation provenance did not resolve to an emitted runtime locator."
+                {:semantic-state semantic-state
+                 :projected-state projected-state-id
+                 :runtime-locator runtime-locator}))
+             [semantic-state runtime-locator])))
+        (sort-by
+         (comp pr-str key)
+         continuation-cache)))
+
+(defn- synthetic-state-id-parts
+  [state-id role]
+  (when (and
+         (vector? state-id)
+         (= 4 (count state-id))
+         (= :gesso.choreo.project/synthetic (nth state-id 0))
+         (= role (nth state-id 2)))
+    {:kind (nth state-id 1)
+     :source (nth state-id 3)}))
+
+(defn- canonical-runtime-origins
+  [role global-states projected-states locator-by-state receive-provenance]
+  (into
+   (sorted-map)
+   (map
+    (fn [[projected-state-id runtime-locator]]
+      (let [runtime-state (get projected-states projected-state-id)
+            synthetic (synthetic-state-id-parts projected-state-id role)
+            origin
+            (if synthetic
+              (case (:kind synthetic)
+                :receive
+                {:kind :synthetic-receive
+                 :source-semantic-state (:source synthetic)
+                 :alternative-semantic-states
+                 (->> (get receive-provenance projected-state-id)
+                      (mapv (fn [semantic-states]
+                              (->> semantic-states (sort-by pr-str) vec))))}
+
+                :complete
+                {:kind :synthetic-completion
+                 :source-semantic-state (:source synthetic)}
+
+                (projection-error
+                 :unknown-synthetic-runtime-origin
+                 "Projection emitted a synthetic runtime state with an unsupported origin kind."
+                 {:role role
+                  :projected-state projected-state-id
+                  :runtime-locator runtime-locator
+                  :synthetic-origin synthetic}))
+
+              (do
+                (when-not (contains? global-states projected-state-id)
+                  (projection-error
+                   :unknown-runtime-origin
+                   "Projection emitted a runtime state with neither an authored semantic origin nor a recognized synthetic origin."
+                   {:role role
+                    :projected-state projected-state-id
+                    :runtime-locator runtime-locator
+                    :runtime-state runtime-state}))
+                {:kind :authored-boundary
+                 :semantic-state projected-state-id}))]
+        [runtime-locator origin]))
+    (sort-by (comp pr-str key) locator-by-state))))
 
 ;; -----------------------------------------------------------------------------
 ;; Projection builder
@@ -1153,8 +1588,8 @@
    role
    source])
 
-(defn project
-  "Project one choreography to one role-local plan.
+(defn compile-role
+  "Compile one choreography to one role-local ExecutablePlan plus exact compiler provenance.
 
    choreography-or-verified may be:
 
@@ -1164,10 +1599,11 @@
 
    Projection currently accepts only roles inferred from the choreography.
 
-   The returned value is the canonical portable ExecutablePlan consumed by
-   role-local runtimes. Choreography names, compiler/source identities, and
-   proof diagnostics are not included in it; those belong in diagnostic
-   compiler products rather than executable state."
+   The returned CompilerProjection contains the canonical portable
+   ExecutablePlan plus compiler-only semantic-state -> runtime-location
+   provenance. Runtime code must consume only :executable-plan. The provenance
+   exists so proof/diagnostic sidecars do not have to reconstruct semantic
+   identity by heuristically matching executable boundary shapes."
   [choreography-or-verified role]
   (let [verified
         (verify/ensure-verified
@@ -1183,6 +1619,9 @@
         (:states choreography)
 
         projected-states
+        (atom {})
+
+        receive-provenance
         (atom {})
 
         continuation-cache
@@ -1254,58 +1693,81 @@
                  (reserve-state!
                   state-id)
 
-                 (let [alternatives
-                       (->> entries
-                            (mapv
-                             (fn [{global-state-id
-                                   :state}]
-                               (let [global-state
-                                     (get global-states
-                                          global-state-id)]
+                 (let [raw-alternatives
+                       (mapv
+                        (fn [{global-state-id
+                              :state}]
+                          (let [global-state
+                                (get global-states
+                                     global-state-id)]
+                            {:semantic-state global-state-id
+                             :alternative
+                             (cond->
+                              {:from
+                               (:from global-state)
 
-                                 (cond->
-                                  {:from
-                                   (:from global-state)
+                               :event
+                               (:event global-state)
 
-                                   :event
-                                   (:event global-state)
+                               :next
+                               (ensure-continuation!
+                                (:next global-state))}
+                               (contains?
+                                global-state
+                                :via)
+                               (assoc
+                                :via
+                                (:via global-state))
 
-                                   :next
-                                   (ensure-continuation!
-                                    (:next global-state))}
-                                   (contains?
-                                    global-state
-                                    :via)
-                                   (assoc
-                                    :via
-                                    (:via global-state))
+                               (seq
+                                (:required global-state))
+                               (assoc
+                                :required
+                                (:required global-state))
 
-                                   (seq
-                                    (:required global-state))
-                                   (assoc
-                                    :required
-                                    (:required global-state))
+                               (seq
+                                (:optional global-state))
+                               (assoc
+                                :optional
+                                (:optional global-state))
 
-                                   (seq
-                                    (:optional global-state))
-                                   (assoc
-                                    :optional
-                                    (:optional global-state))
+                               (seq
+                                (:correlation global-state))
+                               (assoc
+                                :correlation
+                                (:correlation global-state))
 
-                                   (seq
-                                    (:correlation global-state))
-                                   (assoc
-                                    :correlation
-                                    (:correlation global-state))
+                               (true?
+                                (:open-payload? global-state))
+                               (assoc
+                                :open-payload?
+                                true))}))
+                        entries)
 
-                                   (true?
-                                    (:open-payload? global-state))
-                                   (assoc
-                                    :open-payload?
-                                    true)))))
-                            (normalize-receive-alternatives
-                             role
-                             source))]
+                       alternatives
+                       (normalize-receive-alternatives
+                        role
+                        source
+                        (mapv :alternative
+                              raw-alternatives))
+
+                       source-sets
+                       (mapv
+                        (fn [alternative]
+                          (->> raw-alternatives
+                               (keep
+                                (fn [{:keys [semantic-state]
+                                      candidate :alternative}]
+                                  (when (= alternative candidate)
+                                    semantic-state)))
+                               (sort-by pr-str)
+                               vec))
+                        alternatives)]
+
+                   (swap! receive-provenance
+                          assoc
+                          state-id
+                          source-sets)
 
                    (install-state!
                     state-id
@@ -1619,16 +2081,64 @@
            {:role role
             :states leaked-building}))
 
-        (executable-plan
-         choreography
-         role
-         initial
-         states)))))
+        (let [{:keys [executable-plan
+                      locator-by-state]}
+              (build-executable-plan
+               choreography
+               role
+               initial
+               states)
 
-(defn project-all
-  "Project choreography once for every inferred role.
+              semantic-locations'
+              (canonical-semantic-locations
+               global-states
+               states
+               locator-by-state
+               @receive-provenance)
 
-   Returns role -> projected plan."
+              semantic-continuations'
+              (canonical-semantic-continuations
+               @continuation-cache
+               locator-by-state)
+
+              runtime-origins'
+              (canonical-runtime-origins
+               role
+               global-states
+               states
+               locator-by-state
+               @receive-provenance)]
+
+          (ensure-compiler-projection
+           {:gesso.choreo/type
+            compiler-projection-type
+
+            :gesso.choreo/version
+            compiler-projection-version
+
+            :executable-plan
+            executable-plan
+
+            :semantic-locations
+            semantic-locations'
+
+            :semantic-continuations
+            semantic-continuations'
+
+            :runtime-origins
+            runtime-origins'}))))))
+
+(defn project
+  "Project one choreography to the canonical role-local ExecutablePlan.
+
+   This is the runtime-facing API. Exact semantic provenance is available from
+   compile-role and is intentionally excluded from the returned plan."
+  [choreography-or-verified role]
+  (:executable-plan
+   (compile-role choreography-or-verified role)))
+
+(defn compile-all
+  "Compile every inferred role, returning role -> CompilerProjection."
   [choreography-or-verified]
   (let [verified
         (verify/ensure-verified
@@ -1636,17 +2146,25 @@
 
         choreography
         (:choreography verified)]
-
     (into {}
           (map
            (fn [role]
              [role
-              (project
-               verified
-               role)]))
+              (compile-role verified role)]))
           (sort-by pr-str
-                   (choreo/roles
-                    choreography)))))
+                   (choreo/roles choreography)))))
+
+(defn project-all
+  "Project choreography once for every inferred role.
+
+   Returns role -> canonical ExecutablePlan. Compiler-only provenance is
+   available from compile-all."
+  [choreography-or-verified]
+  (into {}
+        (map
+         (fn [[role compiled]]
+           [role (:executable-plan compiled)]))
+        (compile-all choreography-or-verified)))
 
 ;; -----------------------------------------------------------------------------
 ;; Inspection
@@ -1658,6 +2176,31 @@
   (get (:states
         (ensure-executable-plan plan))
        locator))
+
+(defn explain-compiler-projection
+  "Return a compact summary of one compiler-only projection product."
+  [compiled]
+  (let [compiled'
+        (ensure-compiler-projection compiled)
+
+        plan
+        (:executable-plan compiled')]
+    {:role (:role plan)
+     :compiler-projection-version
+     (:gesso.choreo/version compiled')
+     :executable-plan-version
+     (:gesso.choreo/version plan)
+     :semantic-state-count
+     (count (:semantic-locations compiled'))
+     :location-count
+     (reduce +
+             0
+             (map count
+                  (vals (:semantic-locations compiled'))))
+     :semantic-continuation-count
+     (count (:semantic-continuations compiled'))
+     :runtime-origin-count
+     (count (:runtime-origins compiled'))}))
 
 (defn explain
   "Return a compact stable ExecutablePlan summary."

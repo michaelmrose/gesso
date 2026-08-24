@@ -2267,3 +2267,926 @@
                (error-kind
                 #(project/ensure-executable-plan
                   lookalike))))))))
+
+;; -----------------------------------------------------------------------------
+;; Shared portable type vocabulary at the ExecutablePlan boundary
+;; -----------------------------------------------------------------------------
+
+(defn- locator-by-op
+  [plan op]
+  (some
+   (fn [[locator state]]
+     (when (= op (:op state))
+       locator))
+   (:states plan)))
+
+(deftest executable-plan-boundary-uses-shared-portable-role-fact-and-outcome-shapes
+  (let [plan
+        (integrity-executable-plan)
+
+        initial
+        (:initial plan)
+
+        return-locator
+        (locator-by-op plan :return)]
+
+    (testing "the plan role must satisfy the shared Choreo Role shape"
+      (is (false?
+           (project/executable-plan?
+            (assoc plan :role "browser")))))
+
+    (testing "local semantic fact contracts must use shared FactKey shapes"
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      [:states initial :requires]
+                      #{"request-id"}))))
+
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      [:states initial :outputs]
+                      #{42}))))
+
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      [:states initial :requires]
+                      #{})))))
+
+    (testing "terminal outcomes must satisfy the shared Outcome shape"
+      (is (some? return-locator))
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      [:states return-locator :outcome]
+                      "complete")))))))
+
+(deftest executable-plan-boundary-uses-shared-portable-message-role-and-fact-shapes
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/executable-plan-message-types
+          :initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/submit
+            :done
+            {:required #{:command-id}
+             :optional #{:comment}
+             :correlation #{:command-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        verified
+        (verify/verify!
+         choreography
+         {:entry-knowledge
+          {:browser #{:command-id}}})
+
+        browser
+        (project/project verified :browser)
+
+        server
+        (project/project verified :server)
+
+        browser-send
+        (:initial browser)
+
+        server-receive
+        (:initial server)]
+
+    (testing "send destinations must satisfy the shared Role shape"
+      (is (false?
+           (project/executable-plan?
+            (assoc-in browser
+                      [:states browser-send :to]
+                      "server")))))
+
+    (testing "send message contracts must satisfy the shared FactKey shape"
+      (is (false?
+           (project/executable-plan?
+            (assoc-in browser
+                      [:states browser-send :required]
+                      #{"command-id"}))))
+
+      (is (false?
+           (project/executable-plan?
+            (assoc-in browser
+                      [:states browser-send :optional]
+                      #{[:comment]}))))
+
+      (is (false?
+           (project/executable-plan?
+            (assoc-in browser
+                      [:states browser-send :correlation]
+                      #{42})))))
+
+    (testing "receive sender identities and contracts use the same vocabulary"
+      (is (false?
+           (project/executable-plan?
+            (assoc-in server
+                      [:states
+                       server-receive
+                       :alternatives
+                       0
+                       :from]
+                      "browser"))))
+
+      (is (false?
+           (project/executable-plan?
+            (assoc-in server
+                      [:states
+                       server-receive
+                       :alternatives
+                       0
+                       :required]
+                      #{"command-id"})))))))
+
+(deftest executable-plan-boundary-uses-shared-authoritative-observation-vocabulary
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/executable-plan-authoritative-observation-types
+          :initial :observe
+          :states
+          {:observe
+           (choreo/await
+            :browser
+            {:request/reread-complete :done}
+            {:event-contracts
+             {:request/reread-complete
+              {:required #{:request-status :observed-basis}
+               :authoritative-observation
+               {:authority :request/model
+                :observation :request/current-projection
+                :basis-key :observed-basis}}}})
+
+           :done
+           (choreo/return :done)}})
+
+        plan
+        (project/project choreography :browser)
+
+        initial
+        (:initial plan)
+
+        observation-path
+        [:states
+         initial
+         :event-contracts
+         :request/reread-complete
+         :authoritative-observation]]
+
+    (testing "authority names use the shared AuthorityName shape"
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      (conj observation-path :authority)
+                      "request/model")))))
+
+    (testing "observation and basis identifiers use the shared FactKey shape"
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      (conj observation-path :observation)
+                      "request/current-projection"))))
+
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      (conj observation-path :basis-key)
+                      42)))))
+
+    (testing "the basis key must remain declared as required semantic data"
+      (is (false?
+           (project/executable-plan?
+            (assoc-in plan
+                      [:states
+                       initial
+                       :event-contracts
+                       :request/reread-complete
+                       :required]
+                      #{:request-status})))))))
+
+
+;; -----------------------------------------------------------------------------
+;; Exact compiler-only semantic provenance
+;; -----------------------------------------------------------------------------
+
+(deftest compiler-projection-keeps-identical-local-boundaries-semantically-distinct
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/exact-local-provenance
+          :initial :choose
+          :states
+          {:choose
+           (choreo/branch
+            :browser
+            :choice
+            {:first :first
+             :second :second})
+
+           :first
+           (choreo/local
+            :browser
+            :same-action
+            :done)
+
+           :second
+           (choreo/local
+            :browser
+            :same-action
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        verified
+        (verified-with-entry-knowledge
+         choreography
+         {:browser #{:choice}})
+
+        compiled
+        (project/compile-role verified :browser)
+
+        plan
+        (:executable-plan compiled)
+
+        first-location
+        (first
+         (project/semantic-locations compiled :first))
+
+        second-location
+        (first
+         (project/semantic-locations compiled :second))
+
+        first-state
+        (project/state
+         plan
+         (:runtime-locator first-location))
+
+        second-state
+        (project/state
+         plan
+         (:runtime-locator second-location))]
+
+    (is (project/compiler-projection? compiled))
+    (is (= plan
+           (project/project verified :browser)))
+
+    (testing "compiler provenance is not runtime ExecutablePlan data"
+      (is (not (contains? plan :semantic-locations)))
+      (is (not (contains? plan :compiler-projection)))
+      (is (= #{:gesso.choreo/type
+               :gesso.choreo/version
+               :role
+               :initial
+               :states}
+             (set (keys plan)))))
+
+    (testing "identical executable boundary shapes retain exact semantic identity"
+      (is (= first-state second-state))
+      (is (= :local (:op first-state)))
+      (is (= :same-action (:action first-state)))
+
+      (is (= [{:runtime-locator
+               (:runtime-locator first-location)
+               :endpoint :owner}]
+             (project/semantic-locations compiled :first)))
+
+      (is (= [{:runtime-locator
+               (:runtime-locator second-location)
+               :endpoint :owner}]
+             (project/semantic-locations compiled :second)))
+
+      (is (not= (:runtime-locator first-location)
+                (:runtime-locator second-location))))
+
+    (testing "semantic states with no runtime boundary return no locations"
+      (is (= []
+             (project/semantic-locations compiled :missing))))))
+
+(deftest compiler-projection-records-intentional-receive-alternative-collapse-exactly
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/exact-collapsed-receive-provenance
+          :initial :choose
+          :states
+          {:choose
+           (choreo/branch
+            :server
+            :choice
+            {:first :send-first
+             :second :send-second})
+
+           :send-first
+           (choreo/communicate
+            :server
+            :browser
+            :request/update
+            :done
+            {:required #{:request-id}
+             :correlation #{:request-id}})
+
+           :send-second
+           (choreo/communicate
+            :server
+            :browser
+            :request/update
+            :done
+            {:required #{:request-id}
+             :correlation #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        verified
+        (verified-with-entry-knowledge
+         choreography
+         {:server #{:choice :request-id}})
+
+        compiled
+        (project/compile-role verified :browser)
+
+        plan
+        (:executable-plan compiled)
+
+        receive
+        (initial-state plan)
+
+        first-locations
+        (project/semantic-locations compiled :send-first)
+
+        second-locations
+        (project/semantic-locations compiled :send-second)]
+
+    (is (= :receive (:op receive)))
+    (is (= 1 (count (:alternatives receive))))
+
+    (testing "two global communications may intentionally compile to one receive alternative"
+      (is (= first-locations second-locations))
+      (is (= 1 (count first-locations)))
+      (is (= {:runtime-locator (:initial plan)
+              :endpoint :receiver
+              :alternative-index 0}
+             (first first-locations))))
+
+    (testing "the collapsed runtime alternative still carries the authored contract"
+      (is (= {:from :server
+              :event :request/update
+              :required #{:request-id}
+              :correlation #{:request-id}}
+             (select-keys
+              (first (:alternatives receive))
+              [:from :event :required :correlation]))))))
+
+(deftest compiler-projection-validates-provenance-against-its-executable-plan
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/compiler-projection-validation
+          :initial :work
+          :states
+          {:work
+           (choreo/local :browser :work :done)
+
+           :done
+           (choreo/return :done)}})
+
+        compiled
+        (project/compile-role choreography :browser)
+
+        location
+        (first
+         (project/semantic-locations compiled :work))
+
+        unknown-locator
+        (inc
+         (apply max
+                (keys
+                 (get-in compiled
+                         [:executable-plan :states]))))]
+
+    (is (project/compiler-projection? compiled))
+    (is (= compiled
+           (project/ensure-compiler-projection compiled)))
+
+    (testing "provenance locations must resolve inside the bound ExecutablePlan"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:semantic-locations :work]
+                      [(assoc location
+                              :runtime-locator unknown-locator)]))))
+
+      (is (= :invalid-compiler-projection
+             (error-kind
+              #(project/ensure-compiler-projection
+                (assoc-in compiled
+                          [:semantic-locations :work]
+                          [(assoc location
+                                  :runtime-locator unknown-locator)]))))))
+
+    (testing "one semantic state's location list is non-empty and duplicate-free"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:semantic-locations :work]
+                      []))))
+
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:semantic-locations :work]
+                      [location location])))))
+
+    (testing "CompilerProjection is closed compiler data"
+      (is (false?
+           (project/compiler-projection?
+            (assoc compiled :diagnostic :extra)))))))
+
+(deftest compile-all-and-project-all-share-the-exact-same-executable-products
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/compile-all-runtime-identity
+          :initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :alice
+            :bob
+            :example/hello
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        compiled
+        (project/compile-all choreography)
+
+        projected
+        (project/project-all choreography)]
+
+    (is (= (set (keys projected))
+           (set (keys compiled))))
+
+    (doseq [[role compiler-product] compiled]
+      (is (project/compiler-projection? compiler-product))
+      (is (= (get projected role)
+             (:executable-plan compiler-product))))))
+
+;; -----------------------------------------------------------------------------
+;; Compiler-only semantic continuation provenance
+;; -----------------------------------------------------------------------------
+
+(deftest compiler-projection-records-direct-semantic-continuations
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/direct-semantic-continuations
+          :initial :work
+          :states
+          {:work
+           (choreo/local :alice :work :done)
+
+           :done
+           (choreo/return :done)}})
+
+        compiled
+        (project/compile-role choreography :alice)
+
+        plan
+        (:executable-plan compiled)
+
+        work-location
+        (first
+         (project/semantic-locations compiled :work))
+
+        work-continuation
+        (project/semantic-continuation compiled :work)
+
+        done-continuation
+        (project/semantic-continuation compiled :done)]
+
+    (is (= project/compiler-projection-version
+           (:gesso.choreo/version compiled)))
+
+    (testing "entering an immediately observable semantic state reaches its exact boundary"
+      (is (= (:runtime-locator work-location)
+             work-continuation))
+
+      (is (= :local
+             (:op
+              (project/state plan work-continuation)))))
+
+    (testing "entering semantic completion reaches the emitted local return boundary"
+      (is (some? done-continuation))
+
+      (is (= :return
+             (:op
+              (project/state plan done-continuation)))))
+
+    (testing "unknown/uncompiled semantic entries have no continuation provenance"
+      (is (nil?
+           (project/semantic-continuation compiled :missing))))))
+
+(deftest semantic-continuation-provenance-skips-foreign-local-work-exactly
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/semantic-continuation-foreign-local-skip
+          :initial :alice-work
+          :states
+          {:alice-work
+           (choreo/local
+            :alice
+            :alice/work
+            :bob-work)
+
+           :bob-work
+           (choreo/local
+            :bob
+            :bob/work
+            :alice-send)
+
+           :alice-send
+           (choreo/communicate
+            :alice
+            :bob
+            :example/ready
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        compiled
+        (project/compile-all choreography)
+
+        alice
+        (:alice compiled)
+
+        bob
+        (:bob compiled)
+
+        alice-plan
+        (:executable-plan alice)
+
+        bob-plan
+        (:executable-plan bob)
+
+        alice-send-location
+        (first
+         (project/semantic-locations alice :alice-send))
+
+        bob-work-location
+        (first
+         (project/semantic-locations bob :bob-work))]
+
+    (testing "Alice entering Bob-only semantic work continues at Alice's next observable send"
+      (is (= (:runtime-locator alice-send-location)
+             (project/semantic-continuation alice :bob-work)))
+
+      (is (= :send
+             (:op
+              (project/state
+               alice-plan
+               (project/semantic-continuation
+                alice
+                :bob-work))))))
+
+    (testing "Bob entering the choreography skips Alice's first local action and reaches Bob's local boundary"
+      (is (= (:runtime-locator bob-work-location)
+             (project/semantic-continuation bob :alice-work)))
+
+      (is (= :local
+             (:op
+              (project/state
+               bob-plan
+               (project/semantic-continuation
+                bob
+                :alice-work))))))
+
+    (testing "the skipped foreign local states do not become runtime boundaries"
+      (is (= []
+             (project/semantic-locations alice :bob-work)))
+
+      (is (= []
+             (project/semantic-locations bob :alice-work))))))
+
+(deftest semantic-continuation-provenance-distinguishes-entry-from-boundary-identity
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/semantic-entry-versus-boundary
+          :initial :alice-work
+          :states
+          {:alice-work
+           (choreo/local
+            :alice
+            :alice/work
+            :bob-work)
+
+           :bob-work
+           (choreo/local
+            :bob
+            :bob/work
+            :alice-next)
+
+           :alice-next
+           (choreo/local
+            :alice
+            :alice/next
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        alice
+        (project/compile-role choreography :alice)
+
+        plan
+        (:executable-plan alice)
+
+        next-location
+        (first
+         (project/semantic-locations alice :alice-next))
+
+        skipped-entry
+        (project/semantic-continuation alice :bob-work)]
+
+    (testing "the foreign semantic state has no Alice-owned boundary"
+      (is (= []
+             (project/semantic-locations alice :bob-work))))
+
+    (testing "but entering that semantic state has an exact Alice-local continuation"
+      (is (= (:runtime-locator next-location)
+             skipped-entry))
+
+      (is (= :alice/next
+             (:action
+              (project/state plan skipped-entry)))))
+
+    (testing "continuation provenance remains compiler-only"
+      (is (not
+           (contains?
+            plan
+            :semantic-continuations)))
+
+      (is (= #{:gesso.choreo/type
+               :gesso.choreo/version
+               :role
+               :initial
+               :states}
+             (set (keys plan)))))))
+
+(deftest compiler-projection-validates-semantic-continuations-against-the-bound-plan
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/semantic-continuation-validation
+          :initial :work
+          :states
+          {:work
+           (choreo/local :alice :work :done)
+
+           :done
+           (choreo/return :done)}})
+
+        compiled
+        (project/compile-role choreography :alice)
+
+        unknown-locator
+        (inc
+         (apply max
+                (keys
+                 (get-in compiled
+                         [:executable-plan :states]))))]
+
+    (is (project/compiler-projection? compiled))
+
+    (testing "continuation locators must resolve inside the bound ExecutablePlan"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:semantic-continuations :work]
+                      unknown-locator))))
+
+      (is (= :invalid-compiler-projection
+             (error-kind
+              #(project/ensure-compiler-projection
+                (assoc-in compiled
+                          [:semantic-continuations :work]
+                          unknown-locator))))))
+
+    (testing "continuation locators use the canonical runtime locator type"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:semantic-continuations :work]
+                      "0"))))
+
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:semantic-continuations :work]
+                      -1)))))
+
+    (testing "semantic continuation keys must identify actual semantic entries"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:semantic-continuations nil]
+                      (:initial
+                       (:executable-plan compiled)))))))))
+
+
+
+;; -----------------------------------------------------------------------------
+;; Compiler-only reverse runtime-origin provenance
+;; -----------------------------------------------------------------------------
+
+(deftest compiler-projection-records-total-runtime-origins
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/runtime-origin-totality
+          :initial :work
+          :states
+          {:work
+           (choreo/local :alice :work :send)
+
+           :send
+           (choreo/communicate
+            :alice
+            :bob
+            :example/hello
+            :done)
+
+           :done
+           (choreo/return :done)}})
+
+        alice
+        (project/compile-role choreography :alice)
+
+        bob
+        (project/compile-role choreography :bob)
+
+        alice-plan
+        (:executable-plan alice)
+
+        bob-plan
+        (:executable-plan bob)]
+
+    (is (= 3 project/compiler-projection-version))
+
+    (testing "every emitted runtime locator has exactly one compiler origin"
+      (is (= (set (keys (:states alice-plan)))
+             (set (keys (project/runtime-origins alice)))))
+      (is (= (set (keys (:states bob-plan)))
+             (set (keys (project/runtime-origins bob)))))
+      (is (= (count (:states alice-plan))
+             (:runtime-origin-count
+              (project/explain-compiler-projection alice))))
+      (is (= (count (:states bob-plan))
+             (:runtime-origin-count
+              (project/explain-compiler-projection bob)))))
+
+    (testing "authored owner/sender states retain exact semantic identity"
+      (let [work-locator
+            (:runtime-locator
+             (first
+              (project/semantic-locations alice :work)))
+
+            send-locator
+            (:runtime-locator
+             (first
+              (project/semantic-locations alice :send)))]
+        (is (= {:kind :authored-boundary
+                :semantic-state :work}
+               (project/runtime-origin alice work-locator)))
+        (is (= {:kind :authored-boundary
+                :semantic-state :send}
+               (project/runtime-origin alice send-locator)))))
+
+    (testing "receiver gates and local completion are explicitly synthetic"
+      (let [receive-locator (:initial bob-plan)
+            done-locator (project/semantic-continuation bob :done)]
+        (is (= {:kind :synthetic-receive
+                :source-semantic-state :work
+                :alternative-semantic-states [[:send]]}
+               (project/runtime-origin bob receive-locator)))
+        (is (= {:kind :synthetic-completion
+                :source-semantic-state :done}
+               (project/runtime-origin bob done-locator)))
+        (is (nil? (project/runtime-origin bob 999999)))))))
+
+(deftest runtime-origin-provenance-preserves-collapsed-receive-semantic-sources
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/runtime-origin-collapsed-receive
+          :initial :choose
+          :states
+          {:choose
+           (choreo/branch
+            :server
+            :choice
+            {:first :send-first
+             :second :send-second})
+
+           :send-first
+           (choreo/communicate
+            :server
+            :browser
+            :request/update
+            :done
+            {:required #{:request-id}
+             :correlation #{:request-id}})
+
+           :send-second
+           (choreo/communicate
+            :server
+            :browser
+            :request/update
+            :done
+            {:required #{:request-id}
+             :correlation #{:request-id}})
+
+           :done
+           (choreo/return :done)}})
+
+        verified
+        (verified-with-entry-knowledge
+         choreography
+         {:server #{:choice :request-id}})
+
+        browser
+        (project/compile-role verified :browser)
+
+        receive-locator
+        (:initial (:executable-plan browser))
+
+        origin
+        (project/runtime-origin browser receive-locator)]
+
+    (is (= :synthetic-receive (:kind origin)))
+    (is (= :choose (:source-semantic-state origin)))
+    (is (= [[:send-first :send-second]]
+           (:alternative-semantic-states origin)))
+
+    (doseq [semantic-state [:send-first :send-second]]
+      (is (= [{:runtime-locator receive-locator
+               :endpoint :receiver
+               :alternative-index 0}]
+             (project/semantic-locations browser semantic-state))))))
+
+(deftest compiler-projection-validates-runtime-origins-as-total-cross-checked-provenance
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/runtime-origin-validation
+          :initial :work
+          :states
+          {:work
+           (choreo/local :alice :work :done)
+
+           :done
+           (choreo/return :done)}})
+
+        compiled
+        (project/compile-role choreography :alice)
+
+        work-locator
+        (:runtime-locator
+         (first
+          (project/semantic-locations compiled :work)))
+
+        done-locator
+        (project/semantic-continuation compiled :done)]
+
+    (testing "origin map is total and closed over the exact runtime locator set"
+      (is (false?
+           (project/compiler-projection?
+            (update compiled :runtime-origins dissoc done-locator))))
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:runtime-origins 999999]
+                      {:kind :synthetic-completion
+                       :source-semantic-state :done})))))
+
+    (testing "authored origin semantic identity is cross-checked against semantic locations"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:runtime-origins work-locator :semantic-state]
+                      :done)))))
+
+    (testing "completion origin source is cross-checked against semantic continuation provenance"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:runtime-origins done-locator :source-semantic-state]
+                      :work)))))
+
+    (testing "runtime origin entries are themselves closed"
+      (is (false?
+           (project/compiler-projection?
+            (assoc-in compiled
+                      [:runtime-origins work-locator :extra]
+                      :forged)))))))

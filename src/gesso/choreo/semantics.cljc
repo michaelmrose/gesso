@@ -66,13 +66,16 @@
    receiving them establishes justified role-local knowledge; those are later
    knowledge/provenance obligations.
 
-   Execution records both full semantic history and a semantic observable
+   Execution records both full semantic history and a richer semantic observable
    trace. Local actions, branch decisions, ordinary environment events, and
    authoritative observations appear in history but not in that trace.
    Authoritative operation results, participant communication, and terminal
-   outcome appear in both. Authoritative observation is deliberately excluded
-   from the distributed observable trace because it is a role-local reread of
-   authority, not a new authoritative transition.
+   outcome appear in both. The richer observable trace retains semantic source
+   state ids for proof-side explanation. The explicit distributed observation
+   projection erases those source/compiler identities and defines the canonical
+   observation alphabet used by correspondence/refinement. Authoritative
+   observation is deliberately hidden by that projection because it is a
+   role-local reread of authority, not a new authoritative transition.
 
    An :authoritative event means the trusted authoritative adapter completed the
    named public semantic operation and obtained its semantic result. The result
@@ -116,6 +119,26 @@
 (def statuses
   #{:running
     :completed})
+
+(def distributed-observation-kinds
+  "The observable alphabet used by the portable projection/refinement relation.
+
+   These are deliberately semantic observation kinds, not browser events, HTMX
+   lifecycle events, transport callbacks, or source/compiler locations."
+  #{:authoritative
+    :communication
+    :terminal})
+
+(def distributed-hidden-kinds
+  "Semantic occurrence kinds hidden by the distributed observation projection.
+
+   :authoritative-observation is a role-local reread of authority. It can advance
+   justified knowledge, but it is not itself a new authoritative world
+   transition."
+  #{:local
+    :branch
+    :environment
+    :authoritative-observation})
 
 ;; -----------------------------------------------------------------------------
 ;; Errors
@@ -951,14 +974,187 @@
     configuration)))
 
 (defn observable-trace
-  "Distributed observable trace: authoritative operation results, participant
-   communication, and terminal outcome. Role-local authoritative observations
-   are retained in semantic history but are not new distributed authority
-   transitions."
+  "Semantic observable history retained by the executable global semantics.
+
+   Entries preserve their semantic source :state for diagnostics and proof-side
+   explanation. That source identity is intentionally NOT part of the
+   distributed observation alphabet used for projection/refinement. Use
+   distributed-observable-trace when comparing global behavior with independently
+   projected executions.
+
+   Role-local authoritative observations remain in semantic history but are not
+   new distributed authority transitions."
   [configuration]
   (:trace
    (require-configuration!
     configuration)))
+
+(defn- exact-keys?
+  [m required optional]
+  (let [actual
+        (set (keys m))
+
+        allowed
+        (set/union required optional)]
+    (and
+     (set/subset? required actual)
+     (set/subset? actual allowed))))
+
+(defn distributed-observation?
+  "True when x is one canonical member of the distributed observation alphabet.
+
+   Source semantic-state ids, compiler/runtime locators, timestamps, transport
+   diagnostics, and proof metadata are intentionally absent."
+  [x]
+  (and
+   (map? x)
+   (case (:kind x)
+     :authoritative
+     (and
+      (exact-keys?
+       x
+       #{:kind :role :operation :outputs}
+       #{})
+      (keyword? (:role x))
+      (keyword? (:operation x))
+      (map? (:outputs x)))
+
+     :communication
+     (and
+      (exact-keys?
+       x
+       #{:kind :from :to :event :payload}
+       #{:via})
+      (keyword? (:from x))
+      (keyword? (:to x))
+      (keyword? (:event x))
+      (map? (:payload x))
+      (or
+       (not (contains? x :via))
+       (keyword? (:via x))))
+
+     :terminal
+     (and
+      (exact-keys?
+       x
+       #{:kind :outcome}
+       #{})
+      (keyword? (:outcome x)))
+
+     false)))
+
+(defn- ensure-distributed-observation!
+  [occurrence observation]
+  (when-not (distributed-observation? observation)
+    (fail!
+     :invalid-distributed-observation
+     "Semantic occurrence cannot be projected to a well-formed distributed observation."
+     {:occurrence occurrence
+      :observation observation}))
+  observation)
+
+(defn distributed-observation
+  "Project one semantic occurrence into the distributed observation alphabet.
+
+   occurrence may be a semantic event, a semantic history entry, or one of the
+   richer entries returned by observable-trace. Semantic source-state ids are
+   erased. Distributed-unobservable semantic occurrences return nil.
+
+   This function is the explicit hide/project map used by correspondence and the
+   eventual projection-refinement proof. It intentionally does not normalize
+   arbitrary unknown occurrence kinds: adding a new semantic kind requires an
+   explicit decision about whether and how it is distributed-observable."
+  [occurrence]
+  (require-map!
+   "Semantic occurrence"
+   occurrence)
+
+  (let [kind
+        (:kind occurrence)]
+    (cond
+      (= :authoritative kind)
+      (ensure-distributed-observation!
+       occurrence
+       {:kind :authoritative
+        :role (:role occurrence)
+        :operation (:operation occurrence)
+        :outputs (or (:outputs occurrence) {})})
+
+      (= :communication kind)
+      (ensure-distributed-observation!
+       occurrence
+       (cond->
+        {:kind :communication
+         :from (:from occurrence)
+         :to (:to occurrence)
+         :event (:event occurrence)
+         :payload (:payload occurrence)}
+         (contains? occurrence :via)
+         (assoc
+          :via
+          (:via occurrence))))
+
+      (= :terminal kind)
+      (ensure-distributed-observation!
+       occurrence
+       {:kind :terminal
+        :outcome (:outcome occurrence)})
+
+      (contains? distributed-hidden-kinds kind)
+      nil
+
+      :else
+      (fail!
+       :unknown-observation-kind
+       "Semantic occurrence kind has no declared distributed-observation semantics."
+       {:kind kind
+        :occurrence occurrence
+        :observable-kinds distributed-observation-kinds
+        :hidden-kinds distributed-hidden-kinds}))))
+
+(defn distributed-observable?
+  "True when occurrence projects to one distributed observation."
+  [occurrence]
+  (some?
+   (distributed-observation occurrence)))
+
+(defn distributed-hidden?
+  "True when occurrence is a declared semantic occurrence hidden from the
+   distributed observation relation."
+  [occurrence]
+  (require-map!
+   "Semantic occurrence"
+   occurrence)
+
+  (let [kind
+        (:kind occurrence)]
+    (cond
+      (contains? distributed-hidden-kinds kind)
+      true
+
+      (contains? distributed-observation-kinds kind)
+      false
+
+      :else
+      (fail!
+       :unknown-observation-kind
+       "Semantic occurrence kind has no declared distributed-observation semantics."
+       {:kind kind
+        :occurrence occurrence
+        :observable-kinds distributed-observation-kinds
+        :hidden-kinds distributed-hidden-kinds}))))
+
+(defn distributed-observable-trace
+  "Canonical distributed behavior admitted by one semantic configuration.
+
+   This is derived from full semantic history by the explicit
+   distributed-observation projection. Unlike observable-trace it contains no
+   semantic source-state ids or other proof/compiler locations."
+  [configuration]
+  (into
+   []
+   (keep distributed-observation)
+   (history configuration)))
 
 (defn- settle-terminal
   [configuration]
@@ -1552,7 +1748,12 @@
 
      {:configuration next-configuration
       :effects []
-      :observations [...]}
+      :observations [...]
+      :distributed-observations [...]}
+
+   :observations retains richer semantic/source information for diagnostics.
+   :distributed-observations is the canonical source-location-free observation
+   alphabet used by correspondence/refinement.
 
    The current slice still has no physical effects. It defines semantic
    occurrence and abstract value flow only. An :authoritative event records the
@@ -1638,16 +1839,29 @@
                  entry))
               settle-terminal)]
 
-      {:configuration
-       next-configuration
+      (let [observations
+            (subvec
+             (:trace next-configuration)
+             trace-count)]
 
-       :effects
-       []
+        {:configuration
+         next-configuration
 
-       :observations
-       (subvec
-        (:trace next-configuration)
-        trace-count)})))
+         :effects
+         []
+
+         ;; Rich semantic observations retain :state for diagnostics and
+         ;; proof-side explanation.
+         :observations
+         observations
+
+         ;; This is the canonical alphabet used to compare global behavior with
+         ;; independently projected execution.
+         :distributed-observations
+         (into
+          []
+          (keep distributed-observation)
+          observations)}))))
 
 (defn step
   "Apply one GlobalStep and return only the next configuration."
