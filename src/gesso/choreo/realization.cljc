@@ -704,6 +704,78 @@
    (require-realization!
     realization)))
 
+(defn- newly-recorded-machine-occurrence
+  "Return the one occurrence of kind introduced while advancing one role-local
+   machine from before to after. Immediate branch/terminal steps may follow the
+   explicit boundary, so callers must not assume the occurrence is last.
+
+   Realization uses this to reuse the machine's already-validated semantic
+   projection instead of reimplementing message-contract filtering."
+  [before after kind]
+  (let [before-history
+        (machine/execution-history before)
+
+        after-history
+        (machine/execution-history after)
+
+        before-count
+        (count before-history)
+
+        added
+        (subvec
+         (vec after-history)
+         before-count)
+
+        matches
+        (filterv
+         #(= kind (:kind %))
+         added)]
+    (when-not (= 1 (count matches))
+      (realization-error
+       :machine-history-inconsistency
+       "Expected exactly one newly recorded machine occurrence for the completed realization boundary."
+       {:kind kind
+        :before-history-count before-count
+        :after-history-count (count after-history)
+        :added-history added
+        :matches matches}))
+    (first matches)))
+
+(defn- semantic-message-from-machine-occurrence
+  "Build the portable semantic participant-message envelope corresponding to
+   one physical transport envelope and its machine-history occurrence.
+
+   The machine occurrence has already removed undeclared fields admitted only by
+   an open payload contract. Identity and transport-route fields remain those of
+   the exact physical envelope."
+  [physical-message occurrence]
+  (cond->
+   {:kind :message
+    :from (:from physical-message)
+    :to (:to physical-message)
+    :event (:event physical-message)
+    :payload (:payload occurrence)}
+    (contains? physical-message :via)
+    (assoc :via (:via physical-message))))
+
+(defn- semantic-message-for-message-id
+  "Return the semantic message projection previously recorded for one transport
+   message id. Original emissions are introduced by :send history and physical
+   copies by :duplicate history.
+
+   Keeping this lookup in deterministic history lets the physical queue remain
+   the exact emitted/copied envelope without adding semantic shadow state to queue
+   entries."
+  [realization message-id]
+  (some
+   (fn [entry]
+     (when (and
+            (= message-id (:message-id entry))
+            (contains? #{:send :duplicate}
+                       (:kind entry)))
+       (:message entry)))
+   (reverse (:history realization))))
+
 (defn- enqueue
   [realization message entry-data]
   (let [message-id
@@ -825,8 +897,10 @@
 (defn complete-send
   "Complete one sender boundary and enqueue the exact machine-emitted message.
 
-   payload selection remains explicit endpoint policy. machine/complete-send
+   Payload selection remains explicit endpoint policy. machine/complete-send
    validates payload shape and sender knowledge before this realization changes.
+   The transport queue and returned :message retain the exact physical envelope;
+   deterministic realization history records only its declared semantic payload.
 
    Returns {:realization next-state :message-id id :message envelope}."
   [realization role payload]
@@ -851,6 +925,17 @@
         (machine/complete-send
          current
          payload)
+
+        semantic-send
+        (newly-recorded-machine-occurrence
+         current
+         next-execution
+         :send)
+
+        semantic-message
+        (semantic-message-from-machine-occurrence
+         message
+         semantic-send)
 
         realization-with-sender
         (assoc-in realization'
@@ -877,7 +962,7 @@
           :role role'
           :state state-id
           :message-id message-id
-          :message message})]
+          :message semantic-message})]
 
     {:realization next-realization
      :message-id message-id
@@ -889,6 +974,11 @@
 
 (defn deliver-message
   "Deliver one queued message to the receiver named by the emitted envelope.
+
+   The exact queued physical envelope is supplied to machine/receive. Successful
+   deterministic realization history records only the machine-validated semantic
+   payload projection, so undeclared open transport fields cannot become Choreo
+   history or distributed observations.
 
    The queue entry is removed only after machine/receive succeeds. A message
    that is early, stale, contract-invalid for the current receive gate, or made
@@ -970,7 +1060,18 @@
         next-receiver
         (machine/receive
          receiver
-         message)]
+         message)
+
+        semantic-receive
+        (newly-recorded-machine-occurrence
+         receiver
+         next-receiver
+         :receive)
+
+        semantic-message
+        (semantic-message-from-machine-occurrence
+         message
+         semantic-receive)]
 
     (-> realization'
         (assoc-in
@@ -986,7 +1087,7 @@
            :role receiver-role
            :state receiver-state
            :message-id message-id'
-           :message message}
+           :message semantic-message}
            (contains? entry :origin-message-id)
            (assoc
             :origin-message-id
@@ -1001,8 +1102,9 @@
 
    Dropping models transport loss after a sender successfully emitted the
    participant message. The sender execution is not rewound and the receiver
-   learns nothing. The removed envelope remains present in deterministic
-   realization history for correspondence/fault diagnostics.
+   learns nothing. A semantic projection of the removed envelope remains present in deterministic
+   realization history for correspondence/fault diagnostics; undeclared open
+   transport fields remain confined to the physical queue/envelope.
 
    Returns the next realization state."
   [realization message-id]
@@ -1029,11 +1131,22 @@
             (map :message-id
                  (:messages realization'))) }))
 
+        semantic-message
+        (or
+         (semantic-message-for-message-id
+          realization'
+          message-id')
+         (realization-error
+          :missing-semantic-message-history
+          "Queued transport message has no corresponding semantic send/duplicate history."
+          {:message-id message-id'
+           :entry entry}))
+
         history-entry
         (cond->
          {:kind :drop
           :message-id message-id'
-          :message (:message entry)}
+          :message semantic-message}
           (contains? entry :origin-message-id)
           (assoc
            :origin-message-id
@@ -1055,8 +1168,9 @@
    a fresh deterministic message id and records the root emitted message id as
    :origin-message-id. Re-duplicating a duplicate preserves that root origin.
 
-   The semantic participant-message bytes are copied exactly; callers cannot use
-   this operation to forge or modify a payload.
+   The physical participant-message bytes are copied exactly; callers cannot use
+   this operation to forge or modify a payload. Deterministic realization history
+   records the already-established semantic projection of the copied message.
 
    Returns {:realization next-state :message-id duplicate-id :message envelope}."
   [realization message-id]
@@ -1086,6 +1200,17 @@
         message
         (:message source-entry)
 
+        semantic-message
+        (or
+         (semantic-message-for-message-id
+          realization'
+          source-id)
+         (realization-error
+          :missing-semantic-message-history
+          "Queued transport message has no corresponding semantic send/duplicate history."
+          {:message-id source-id
+           :entry source-entry}))
+
         origin-id
         (or (:origin-message-id source-entry)
             source-id)
@@ -1108,7 +1233,7 @@
           :source-message-id source-id
           :message-id duplicate-id
           :origin-message-id origin-id
-          :message message})]
+          :message semantic-message})]
 
     {:realization next-realization
      :message-id duplicate-id

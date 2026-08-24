@@ -5197,3 +5197,310 @@
             :data data}
            event))))
 
+;; -----------------------------------------------------------------------------
+;; Browser-adapter-facing portable machine contract
+;; -----------------------------------------------------------------------------
+
+(defn- browser-adapter-contract-choreography
+  []
+  (choreo/->choreography
+   {:name :example/browser-adapter-contract
+    :initial :prepare
+    :states
+    {:prepare
+     (choreo/local
+      :browser
+      :request/prepare-command
+      :command
+      {:outputs #{:request-id}})
+
+     :command
+     (choreo/communicate
+      :browser
+      :server
+      :request/claim
+      :claim
+      {:via :http
+       :required #{:request-id}
+       :correlation #{:request-id}})
+
+     :claim
+     (choreo/authoritative
+      :server
+      :request/claim
+      :settled
+      {:requires #{:request-id}
+       :outputs #{:outcome :revision}})
+
+     :settled
+     (choreo/communicate
+      :server
+      :browser
+      :request/settled
+      :canonical
+      {:via :sse
+       :required #{:outcome :revision}})
+
+     :canonical
+     (choreo/await
+      :browser
+      {:browser/canonical-installed :render}
+      {:event-contracts
+       {:browser/canonical-installed
+        {:required #{:basis}}}})
+
+     :render
+     (choreo/local
+      :browser
+      :request/render-canonical
+      :done
+      {:requires #{:outcome :revision :basis}})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- adapter-visible-boundary
+  "Classify one execution using only the public machine API a browser adapter
+   needs. This helper deliberately does not inspect :plan, compiler projection,
+   semantic source state ids, proof artifacts, or diagnostic sidecars."
+  [execution]
+  (cond
+    (machine/waiting-local? execution)
+    {:kind :local
+     :descriptor (machine/pending-action execution)}
+
+    (machine/waiting-authoritative? execution)
+    {:kind :authoritative
+     :descriptor (machine/pending-action execution)}
+
+    (machine/waiting-send? execution)
+    {:kind :send
+     :descriptor (machine/pending-action execution)}
+
+    (machine/waiting-receive? execution)
+    {:kind :receive
+     :descriptor (machine/awaiting execution)}
+
+    (machine/waiting-environment? execution)
+    {:kind :environment
+     :descriptor (machine/awaiting execution)}
+
+    (machine/completed? execution)
+    {:kind :completed
+     :result (machine/result execution)}
+
+    :else
+    {:kind :unknown}))
+
+(defn- assert-adapter-descriptor-portable!
+  [descriptor]
+  (is (map? descriptor))
+  (doseq [forbidden-key
+          [:plan
+           :proof
+           :obligations
+           :semantic-state
+           :choreography-name
+           :compiler-projection]]
+    (is (false?
+         (contains? descriptor forbidden-key)))))
+
+(deftest browser-adapter-can-drive-a-browser-role-through-public-machine-boundaries
+  (let [choreography
+        (browser-adapter-contract-choreography)
+
+        command-id
+        (identity/command-id "command-browser-contract")
+
+        execution-id
+        (identity/execution-id "execution-browser-contract")
+
+        started
+        (machine/start
+         (projected choreography :browser)
+         {:command-id command-id
+          :execution-id execution-id})
+
+        prepare-boundary
+        (adapter-visible-boundary started)
+
+        prepared
+        (machine/complete-local
+         started
+         {:request-id 17})
+
+        send-boundary
+        (adapter-visible-boundary prepared)
+
+        send-result
+        (machine/complete-send
+         prepared
+         {:request-id 17})
+
+        sent
+        (:execution send-result)
+
+        emitted-message
+        (:message send-result)
+
+        receive-boundary
+        (adapter-visible-boundary sent)
+
+        settled
+        (machine/resume
+         sent
+         (machine/message
+          :server
+          :browser
+          :request/settled
+          {:outcome :confirmed
+           :revision 42}
+          {:via :sse}))
+
+        environment-boundary
+        (adapter-visible-boundary settled)
+
+        canonical-installed
+        (machine/resume
+         settled
+         (machine/environment-event
+          :browser
+          :browser/canonical-installed
+          {:basis {:revision 42}}))
+
+        render-boundary
+        (adapter-visible-boundary canonical-installed)
+
+        completed
+        (machine/complete-local
+         canonical-installed
+         {})
+
+        completed-boundary
+        (adapter-visible-boundary completed)]
+
+    (testing "the adapter can classify every browser-visible phase without inspecting the plan"
+      (is (= [:local
+              :send
+              :receive
+              :environment
+              :local
+              :completed]
+             (mapv :kind
+                   [prepare-boundary
+                    send-boundary
+                    receive-boundary
+                    environment-boundary
+                    render-boundary
+                    completed-boundary]))))
+
+    (testing "endpoint descriptors carry portable runtime identity but no compiler/proof sidecars"
+      (doseq [boundary
+              [prepare-boundary
+               send-boundary
+               receive-boundary
+               environment-boundary
+               render-boundary]]
+        (assert-adapter-descriptor-portable!
+         (:descriptor boundary)))
+
+      (is (= command-id
+             (get-in prepare-boundary
+                     [:descriptor
+                      :identity-bindings
+                      :command-id])))
+      (is (= execution-id
+             (get-in prepare-boundary
+                     [:descriptor
+                      :identity-bindings
+                      :execution-id])))
+      (is (= command-id
+             (get-in receive-boundary
+                     [:descriptor
+                      :identity-bindings
+                      :command-id])))
+      (is (= execution-id
+             (get-in environment-boundary
+                     [:descriptor
+                      :identity-bindings
+                      :execution-id]))))
+
+    (testing "runtime state identity exposed at executable boundaries is compact and opaque"
+      (doseq [boundary
+              [prepare-boundary
+               send-boundary
+               render-boundary]]
+        (is (nat-int?
+             (get-in boundary
+                     [:descriptor :state])))))
+
+    (testing "send gives the adapter the exact semantic envelope it must hand to transport"
+      (is (= {:kind :message
+              :from :browser
+              :to :server
+              :event :request/claim
+              :payload {:request-id 17}
+              :via :http}
+             emitted-message)))
+
+    (testing "receive and environment suspensions remain distinct even through the generic resume API"
+      (is (= :receive
+             (get-in receive-boundary
+                     [:descriptor :kind])))
+      (is (= :environment
+             (get-in environment-boundary
+                     [:descriptor :kind])))
+      (is (= #{:browser/canonical-installed}
+             (get-in environment-boundary
+                     [:descriptor :events]))))
+
+    (testing "browser-local completion reports no further protocol work, not the authored global outcome"
+      (is (= {:outcome :gesso.choreo/complete}
+             (:result completed-boundary)))
+      (is (not= :done
+                (get-in completed-boundary
+                        [:result :outcome]))))))
+
+(deftest browser-adapter-contract-does-not-require-diagnostic-or-source-artifacts
+  (let [choreography
+        (browser-adapter-contract-choreography)
+
+        execution
+        (machine/start
+         (projected choreography :browser)
+         {:command-id
+          (identity/command-id "command-no-sidecar")
+          :execution-id
+          (identity/execution-id "execution-no-sidecar")})
+
+        boundary
+        (adapter-visible-boundary execution)
+
+        descriptor
+        (:descriptor boundary)]
+
+    (is (= :local
+           (:kind boundary)))
+
+    (assert-adapter-descriptor-portable!
+     descriptor)
+
+    (testing "the adapter-facing descriptor is complete without source identities"
+      (is (= :request/prepare-command
+             (:action descriptor)))
+      (is (= :browser
+             (:role descriptor)))
+      (is (nat-int?
+           (:state descriptor)))
+      (is (= #{:request-id}
+             (:outputs descriptor))))
+
+    (testing "diagnostic projection details remain unnecessary for semantic dispatch"
+      (is (nil?
+           (:semantic-state descriptor)))
+      (is (nil?
+           (:runtime-origin descriptor)))
+      (is (nil?
+           (:proof descriptor)))
+      (is (nil?
+           (:choreography-name descriptor))))))

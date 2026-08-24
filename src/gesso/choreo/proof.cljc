@@ -86,11 +86,11 @@
    origin side of a later step-simulation relation but does not itself quantify
    over dynamic executions.
 
-   check-projection-structure now emits ProjectionStructuralCertificate v3,
-   composing all four finite structural results into one theorem-facing
-   certificate. ProjectionStructuralCertificate v1 and v2 remain recognizable
-   as historical artifacts; their meanings and closed shapes are not
-   retroactively changed. The current certificate also binds
+   check-projection-structure now emits ProjectionStructuralCertificate v4,
+   composing all five finite structural results into one theorem-facing
+   certificate. ProjectionStructuralCertificate v1, v2, and v3 remain
+   recognizable as historical artifacts; their meanings and closed shapes are
+   not retroactively changed. The current certificate also binds
    the composition to the current verifier, ExecutablePlan, CompilerProjection,
    global semantics, and distributed-observation alphabet. It deliberately records
    dynamic projected-step simulation, terminal-outcome preservation,
@@ -182,11 +182,18 @@
     projection-successor-property
     projection-completion-property})
 
-(def projection-structural-certificate-properties
+(def projection-structural-certificate-v3-properties
   #{projection-boundary-property
     projection-successor-property
     projection-completion-property
     projection-observable-origin-property})
+
+(def projection-structural-certificate-properties
+  #{projection-boundary-property
+    projection-successor-property
+    projection-completion-property
+    projection-observable-origin-property
+    projection-runtime-origin-property})
 
 (def result-classification
   :exhaustive-finite-structural-check)
@@ -212,8 +219,11 @@
 (def projection-structural-certificate-v2-version
   2)
 
-(def projection-structural-certificate-version
+(def projection-structural-certificate-v3-version
   3)
+
+(def projection-structural-certificate-version
+  4)
 
 (def projection-structural-certificate-classification
   :composed-finite-structural-certificate)
@@ -224,6 +234,12 @@
 
 (def projection-structural-certificate-v2-nonclaims
   #{:terminal-outcome-preservation
+    :trace-refinement
+    :projection-refinement})
+
+(def projection-structural-certificate-v3-nonclaims
+  #{:projected-step-simulation
+    :terminal-outcome-preservation
     :trace-refinement
     :projection-refinement})
 
@@ -3734,10 +3750,15 @@
    projection-structural-certificate-v1-keys
    :completion-proof))
 
-(def ^:private projection-structural-certificate-keys
+(def ^:private projection-structural-certificate-v3-keys
   (conj
    projection-structural-certificate-v2-keys
    :observable-origin-proof))
+
+(def ^:private projection-structural-certificate-keys
+  (conj
+   projection-structural-certificate-v3-keys
+   :runtime-origin-proof))
 
 (defn- certificate-contract-versions-valid?
   [value]
@@ -3815,6 +3836,41 @@
 (defn- projection-structural-certificate-v3?
   [value]
   (and
+   (= projection-structural-certificate-v3-keys
+      (set (keys value)))
+   (= projection-structural-certificate-v3-version
+      (:gesso.choreo/version value))
+   (= projection-structural-certificate-v3-properties
+      (:properties value))
+   (certificate-contract-versions-valid? value)
+   (result? (:boundary-proof value))
+   (= projection-boundary-property
+      (get-in value [:boundary-proof :property]))
+   (result? (:successor-proof value))
+   (= projection-successor-property
+      (get-in value [:successor-proof :property]))
+   (result? (:completion-proof value))
+   (= projection-completion-property
+      (get-in value [:completion-proof :property]))
+   (result? (:observable-origin-proof value))
+   (= projection-observable-origin-property
+      (get-in value [:observable-origin-proof :property]))
+   (vector? (:runtime-obligations value))
+   (vector? (:trusted-assumptions value))
+   (vector? (:failures value))
+   (= projection-structural-certificate-v3-nonclaims
+      (:nonclaims value))
+   (= (:valid? value)
+      (and
+       (valid? (:boundary-proof value))
+       (valid? (:successor-proof value))
+       (valid? (:completion-proof value))
+       (valid? (:observable-origin-proof value))
+       (empty? (:failures value))))))
+
+(defn- projection-structural-certificate-v4?
+  [value]
+  (and
    (= projection-structural-certificate-keys
       (set (keys value)))
    (= projection-structural-certificate-version
@@ -3834,6 +3890,9 @@
    (result? (:observable-origin-proof value))
    (= projection-observable-origin-property
       (get-in value [:observable-origin-proof :property]))
+   (result? (:runtime-origin-proof value))
+   (= projection-runtime-origin-property
+      (get-in value [:runtime-origin-proof :property]))
    (vector? (:runtime-obligations value))
    (vector? (:trusted-assumptions value))
    (vector? (:failures value))
@@ -3845,6 +3904,7 @@
        (valid? (:successor-proof value))
        (valid? (:completion-proof value))
        (valid? (:observable-origin-proof value))
+       (valid? (:runtime-origin-proof value))
        (empty? (:failures value))))))
 
 (defn projection-structural-certificate?
@@ -3855,10 +3915,13 @@
 
    Version 2 is the historical boundary+successor+completion certificate.
 
-   Version 3 is the current certificate. It additionally composes projected
-   observable-origin preservation and binds all four finite structural checks to
-   the current verifier/compiler/global-semantics versions and distributed
-   observation alphabet.
+   Version 3 is the historical boundary+successor+completion+observable-origin
+   certificate.
+
+   Version 4 is the current certificate. It additionally composes projected
+   runtime-origin preservation and binds all five finite structural checks to the
+   current verifier/compiler/global-semantics versions and distributed observation
+   alphabet.
 
    Historical versions remain recognizable with exactly their original shapes
    and nonclaims. No version is itself the dynamic projected-step simulation or
@@ -3875,11 +3938,12 @@
      1 (projection-structural-certificate-v1? value)
      2 (projection-structural-certificate-v2? value)
      3 (projection-structural-certificate-v3? value)
+     4 (projection-structural-certificate-v4? value)
      false)))
 
 (defn structural-certificate-valid?
   "True exactly when certificate is a recognized valid projection structural
-   certificate, including historical v1/v2 and current v3 artifacts."
+   certificate, including historical v1/v2/v3 and current v4 artifacts."
   [certificate]
   (and
    (projection-structural-certificate? certificate)
@@ -3894,7 +3958,11 @@
    (:failures result)))
 
 (defn- structural-certificate-failures
-  [boundary-proof successor-proof completion-proof observable-origin-proof]
+  [boundary-proof
+   successor-proof
+   completion-proof
+   observable-origin-proof
+   runtime-origin-proof]
   (vec
    (concat
     (property-failures
@@ -3908,7 +3976,10 @@
      completion-proof)
     (property-failures
      projection-observable-origin-property
-     observable-origin-proof))))
+     observable-origin-proof)
+    (property-failures
+     projection-runtime-origin-property
+     runtime-origin-proof))))
 
 (defn- combined-runtime-obligations
   [& results]
@@ -3924,16 +3995,17 @@
 
 (defn check-projection-structure
   "Compose the currently proved finite projection-structure properties into the
-   current theorem-facing ProjectionStructuralCertificate v3.
+   current theorem-facing ProjectionStructuralCertificate v4.
 
-   Version 3 establishes exactly:
+   Version 4 establishes exactly:
 
      - projection boundary preservation;
      - projection successor preservation;
-     - projection completion preservation; and
-     - projected observable-origin preservation.
+     - projection completion preservation;
+     - projected observable-origin preservation; and
+     - projected runtime-origin preservation.
 
-   Historical v1 and v2 certificates remain recognizable but are never
+   Historical v1, v2, and v3 certificates remain recognizable but are never
    rewritten or reinterpreted as having proved later properties.
 
    The current certificate records the exact verifier/compiler/global-semantics
@@ -3944,7 +4016,9 @@
 
    Observable-origin preservation proves that every compiler-emitted projected
    boundary capable of directly creating a distributed observation has exact
-   authored semantic justification. It does NOT yet prove that arbitrary dynamic
+   authored semantic justification. Runtime-origin preservation extends that
+   static converse check to every emitted runtime state, including hidden/stuttering
+   states and synthetic completion. Neither property proves that arbitrary dynamic
    projected executions are simulated by legal global executions.
 
    The certificate therefore deliberately records :projected-step-simulation,
@@ -3981,12 +4055,18 @@
           choreography-or-verified
           options)
 
+         runtime-origin-proof
+         (check-projection-runtime-origins
+          choreography-or-verified
+          options)
+
          failures'
          (structural-certificate-failures
           boundary-proof
           successor-proof
           completion-proof
-          observable-origin-proof)
+          observable-origin-proof
+          runtime-origin-proof)
 
          valid?'
          (and
@@ -3994,6 +4074,7 @@
           (valid? successor-proof)
           (valid? completion-proof)
           (valid? observable-origin-proof)
+          (valid? runtime-origin-proof)
           (empty? failures'))]
 
      {:gesso.choreo/type
@@ -4039,19 +4120,24 @@
       :observable-origin-proof
       observable-origin-proof
 
+      :runtime-origin-proof
+      runtime-origin-proof
+
       :runtime-obligations
       (combined-runtime-obligations
        boundary-proof
        successor-proof
        completion-proof
-       observable-origin-proof)
+       observable-origin-proof
+       runtime-origin-proof)
 
       :trusted-assumptions
       (combined-trusted-assumptions
        boundary-proof
        successor-proof
        completion-proof
-       observable-origin-proof)
+       observable-origin-proof
+       runtime-origin-proof)
 
       :failures
       failures'
@@ -4083,7 +4169,8 @@
 
    Historical v1 explanations retain their original shape.
    Historical v2 explanations additionally report completion-obligation count.
-   Current v3 explanations additionally report observable-origin-obligation
+   Historical v3 explanations additionally report observable-origin-obligation
+   count. Current v4 explanations additionally report runtime-origin-obligation
    count."
   [certificate]
   (when-not (projection-structural-certificate? certificate)
@@ -4148,17 +4235,28 @@
            (count
             (get-in certificate
                     [:completion-proof :obligations])))
-          base)]
+          base)
+
+        with-observable-origin
+        (if (<= projection-structural-certificate-v3-version
+                (:gesso.choreo/version certificate))
+          (assoc
+           with-completion
+           :observable-origin-obligation-count
+           (count
+            (get-in certificate
+                    [:observable-origin-proof :obligations])))
+          with-completion)]
 
     (if (= projection-structural-certificate-version
            (:gesso.choreo/version certificate))
       (assoc
-       with-completion
-       :observable-origin-obligation-count
+       with-observable-origin
+       :runtime-origin-obligation-count
        (count
         (get-in certificate
-                [:observable-origin-proof :obligations])))
-      with-completion)))
+                [:runtime-origin-proof :obligations])))
+      with-observable-origin)))
 
 (defn explain
   "Return a compact stable summary of a structural proof result."
@@ -4195,4 +4293,3 @@
 
    :counterexample
    (:counterexample result)})
-

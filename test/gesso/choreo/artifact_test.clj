@@ -232,6 +232,32 @@
   [sidecar]
   (:locations sidecar))
 
+(defn- historical-v3-certificate
+  "Construct the exact historical v3 structural-certificate shape from one
+   current v4 certificate. Historical recognition belongs to proof.cljc; an
+   ArtifactSet sidecar must nevertheless bind only the current certificate
+   version emitted with its executable plans."
+  [current-certificate]
+  (-> current-certificate
+      (assoc
+       :gesso.choreo/version
+       proof/projection-structural-certificate-v3-version
+
+       :properties
+       proof/projection-structural-certificate-v3-properties
+
+       :nonclaims
+       proof/projection-structural-certificate-v3-nonclaims
+
+       :valid?
+       (and
+        (proof/valid? (:boundary-proof current-certificate))
+        (proof/valid? (:successor-proof current-certificate))
+        (proof/valid? (:completion-proof current-certificate))
+        (proof/valid? (:observable-origin-proof current-certificate))))
+      (dissoc :runtime-origin-proof)
+      (assoc :failures [])))
+
 (deftest artifact-vocabulary-is-explicit-and-versioned
   (is (= 2 artifact/artifact-version))
   (is (= :gesso.choreo/artifact-set
@@ -264,8 +290,12 @@
     (is (artifact/diagnostic-sidecar? sidecar))
     (is (= :example/artifact-all-boundaries
            (:choreography-name sidecar)))
+    (is (= 4
+           proof/projection-structural-certificate-version))
     (is (= proof/projection-structural-certificate-version
            (:projection-structural-certificate-version sidecar)))
+    (is (= (:projection-structural-certificate-version sidecar)
+           (get-in sidecar [:proof :gesso.choreo/version])))
     (is (proof/projection-structural-certificate?
          (:proof sidecar)))
     (is (proof/structural-certificate-valid?
@@ -385,19 +415,27 @@
     (is (= proof/projection-structural-certificate-properties
            (:properties certificate)))
 
-    (testing "the sidecar carries all current structural sub-proofs"
+    (testing "the sidecar carries all five current structural sub-proofs"
       (is (= proof/projection-boundary-property
              (get-in certificate [:boundary-proof :property])))
       (is (= proof/projection-successor-property
              (get-in certificate [:successor-proof :property])))
       (is (= proof/projection-completion-property
              (get-in certificate [:completion-proof :property])))
+      (is (= proof/projection-observable-origin-property
+             (get-in certificate [:observable-origin-proof :property])))
+      (is (= proof/projection-runtime-origin-property
+             (get-in certificate [:runtime-origin-proof :property])))
       (is (proof/valid?
            (:boundary-proof certificate)))
       (is (proof/valid?
            (:successor-proof certificate)))
       (is (proof/valid?
-           (:completion-proof certificate))))
+           (:completion-proof certificate)))
+      (is (proof/valid?
+           (:observable-origin-proof certificate)))
+      (is (proof/valid?
+           (:runtime-origin-proof certificate))))
 
     (testing "the certificate remains diagnostic while digests bind it to exact runtime artifacts"
       (is (= (set (keys plans))
@@ -454,6 +492,61 @@
              #(artifact/require-sidecar-match!
                plans
                invalid-certificate))]
+        (is (= :gesso.choreo.artifact/error
+               (:error/type data)))
+        (is (= :invalid-diagnostic-sidecar
+               (:error/kind data)))))))
+
+(deftest sidecar-cannot-relabel-a-historical-certificate-as-current
+  (let [emitted
+        (artifact/emit-artifacts
+         (all-boundary-choreography))
+
+        plans
+        (:executable-plans emitted)
+
+        sidecar
+        (:diagnostic-proof-sidecar emitted)
+
+        current-certificate
+        (:proof sidecar)
+
+        historical-v3
+        (historical-v3-certificate
+         current-certificate)
+
+        relabelled
+        (assoc sidecar
+               ;; Keep the sidecar's declared version current while replacing
+               ;; the nested certificate with a genuinely valid historical v3
+               ;; artifact. A sidecar validator must bind these identities
+               ;; together rather than merely validating each independently.
+               :projection-structural-certificate-version
+               proof/projection-structural-certificate-version
+               :proof
+               historical-v3)]
+
+    (is (proof/projection-structural-certificate? historical-v3))
+    (is (proof/structural-certificate-valid? historical-v3))
+    (is (= proof/projection-structural-certificate-v3-version
+           (:gesso.choreo/version historical-v3)))
+    (is (not= (:projection-structural-certificate-version relabelled)
+              (get-in relabelled [:proof :gesso.choreo/version])))
+
+    (testing "a DiagnosticProofSidecar certifies the current proof contract, not merely any recognized historical certificate"
+      (is (false?
+           (artifact/diagnostic-sidecar?
+            relabelled)))
+      (is (false?
+           (artifact/sidecar-matches?
+            plans
+            relabelled)))
+
+      (let [data
+            (error-data
+             #(artifact/require-sidecar-match!
+               plans
+               relabelled))]
         (is (= :gesso.choreo.artifact/error
                (:error/type data)))
         (is (= :invalid-diagnostic-sidecar
@@ -945,3 +1038,4 @@
              (:error/type data)))
       (is (= :evidence-proof-mismatch
              (:error/kind data))))))
+

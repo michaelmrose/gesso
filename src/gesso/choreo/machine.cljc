@@ -2108,6 +2108,17 @@
     (keys payload))
    (contract-allowed contract)))
 
+(defn- semantic-payload
+  "Project one physical participant payload onto the fields declared by its
+   portable message contract. Explicitly open undeclared fields remain available
+   to the transport envelope but never enter deterministic semantic history."
+  [contract payload]
+  (select-keys
+   payload
+   (semantic-payload-keys
+    contract
+    payload)))
+
 (defn- sender-payload-knowledge-result
   [execution contract payload]
   (let [semantic-keys
@@ -2265,9 +2276,11 @@
   "Continue after the endpoint successfully emits the pending participant
    message.
 
-   payload is recorded in deterministic local history so later correspondence
-   work can compare the sender's emitted communication with the receiver's
-   consumed communication.
+   Only the payload fields declared by the projected communication contract are
+   recorded in deterministic local history. Explicitly open undeclared fields
+   remain available on the returned physical envelope for transport/adapter use
+   but are not semantic history. This keeps later correspondence independent of
+   host attachments while still letting the transport carry them.
 
    A successful send boundary means only that the endpoint accepted/performed
    the send operation according to its transport contract. It does not mean the
@@ -2308,7 +2321,10 @@
             :from (:from envelope)
             :to (:to envelope)
             :event (:event envelope)
-            :payload (:payload envelope)}
+            :payload
+            (semantic-payload
+             state
+             (:payload envelope))}
             (contains? envelope :via)
             (assoc :via
                    (:via envelope)))
@@ -2575,7 +2591,10 @@
                 :from (:from envelope)
                 :to (:to envelope)
                 :event (:event envelope)
-                :payload (:payload envelope)}
+                :payload
+                (semantic-payload
+                 alternative
+                 (:payload envelope))}
                 (contains? envelope :via)
                 (assoc :via
                        (:via envelope)))]

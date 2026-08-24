@@ -1530,7 +1530,8 @@
         (proof/valid? (:boundary-proof current-certificate))
         (proof/valid? (:successor-proof current-certificate))))
       (dissoc :completion-proof
-              :observable-origin-proof)
+              :observable-origin-proof
+              :runtime-origin-proof)
       (assoc :failures [])))
 
 
@@ -1552,10 +1553,33 @@
         (proof/valid? (:boundary-proof current-certificate))
         (proof/valid? (:successor-proof current-certificate))
         (proof/valid? (:completion-proof current-certificate))))
-      (dissoc :observable-origin-proof)
+      (dissoc :observable-origin-proof
+              :runtime-origin-proof)
       (assoc :failures [])))
 
-(deftest projection-structural-certificate-v3-is-an-explicitly-versioned-composition
+(defn- historical-v3-certificate
+  [current-certificate]
+  (-> current-certificate
+      (assoc
+       :gesso.choreo/version
+       proof/projection-structural-certificate-v3-version
+
+       :properties
+       proof/projection-structural-certificate-v3-properties
+
+       :nonclaims
+       proof/projection-structural-certificate-v3-nonclaims
+
+       :valid?
+       (and
+        (proof/valid? (:boundary-proof current-certificate))
+        (proof/valid? (:successor-proof current-certificate))
+        (proof/valid? (:completion-proof current-certificate))
+        (proof/valid? (:observable-origin-proof current-certificate))))
+      (dissoc :runtime-origin-proof)
+      (assoc :failures [])))
+
+(deftest projection-structural-certificate-v4-is-an-explicitly-versioned-composition
   (is (= :gesso.choreo.proof/projection-structural-certificate
          proof/projection-structural-certificate-type))
 
@@ -1566,6 +1590,9 @@
          proof/projection-structural-certificate-v2-version))
 
   (is (= 3
+         proof/projection-structural-certificate-v3-version))
+
+  (is (= 4
          proof/projection-structural-certificate-version))
 
   (is (= :composed-finite-structural-certificate
@@ -1584,6 +1611,13 @@
            proof/projection-successor-property
            proof/projection-completion-property
            proof/projection-observable-origin-property}
+         proof/projection-structural-certificate-v3-properties))
+
+  (is (= #{proof/projection-boundary-property
+           proof/projection-successor-property
+           proof/projection-completion-property
+           proof/projection-observable-origin-property
+           proof/projection-runtime-origin-property}
          proof/projection-structural-certificate-properties))
 
   (is (= #{:trace-refinement
@@ -1599,6 +1633,9 @@
            :terminal-outcome-preservation
            :trace-refinement
            :projection-refinement}
+         proof/projection-structural-certificate-v3-nonclaims))
+
+  (is (= proof/projection-structural-certificate-v3-nonclaims
          proof/projection-refinement-nonclaims))
 
   (let [certificate
@@ -1627,12 +1664,16 @@
     (is (= proof/projection-observable-origin-property
            (get-in certificate [:observable-origin-proof :property])))
 
+    (is (= proof/projection-runtime-origin-property
+           (get-in certificate [:runtime-origin-proof :property])))
+
     (is (proof/valid? (:boundary-proof certificate)))
     (is (proof/valid? (:successor-proof certificate)))
     (is (proof/valid? (:completion-proof certificate)))
-    (is (proof/valid? (:observable-origin-proof certificate)))))
+    (is (proof/valid? (:observable-origin-proof certificate)))
+    (is (proof/valid? (:runtime-origin-proof certificate)))))
 
-(deftest projection-structural-certificate-v3-binds-the-exact-formal-contract-versions
+(deftest projection-structural-certificate-v4-binds-the-exact-formal-contract-versions
   (let [certificate
         (proof/check-projection-structure
          (all-boundary-choreography))]
@@ -1665,7 +1706,7 @@
     (is (false?
          (contains? certificate :projection-refinement)))))
 
-(deftest projection-structural-certificate-v3-explanation-reports-all-four-structural-proofs
+(deftest projection-structural-certificate-v4-explanation-reports-all-five-structural-proofs
   (let [certificate
         (proof/check-projection-structure
          (all-boundary-choreography))
@@ -1693,6 +1734,9 @@
     (is (= 4
            (:observable-origin-obligation-count explanation)))
 
+    (is (= 13
+           (:runtime-origin-obligation-count explanation)))
+
     (is (= (count (:runtime-obligations certificate))
            (:runtime-obligation-count explanation)))
 
@@ -1714,13 +1758,54 @@
     (is (false?
          (contains? explanation :projection-refinement)))))
 
+(deftest historical-v3-structural-certificates-remain-recognizable-with-their-original-meaning
+  (let [v4
+        (proof/check-projection-structure
+         (all-boundary-choreography))
+
+        v3
+        (historical-v3-certificate v4)
+
+        explanation
+        (proof/explain-structural-certificate v3)]
+
+    (is (= proof/projection-structural-certificate-v3-version
+           (:gesso.choreo/version v3)))
+
+    (is (= proof/projection-structural-certificate-v3-properties
+           (:properties v3)))
+
+    (is (= proof/projection-structural-certificate-v3-nonclaims
+           (:nonclaims v3)))
+
+    (is (contains? v3 :observable-origin-proof))
+    (is (false? (contains? v3 :runtime-origin-proof)))
+    (is (proof/projection-structural-certificate? v3))
+    (is (proof/structural-certificate-valid? v3))
+
+    (is (= 4 (:observable-origin-obligation-count explanation)))
+    (is (false? (contains? explanation :runtime-origin-obligation-count)))
+
+    (testing "v3 remains closed to the v4 runtime-origin field and claim"
+      (is (false?
+           (proof/projection-structural-certificate?
+            (assoc v3
+                   :runtime-origin-proof
+                   (:runtime-origin-proof v4)))))
+
+      (is (false?
+           (proof/projection-structural-certificate?
+            (assoc v3
+                   :properties
+                   proof/projection-structural-certificate-properties)))))))
+
 (deftest historical-v2-structural-certificates-remain-recognizable-with-their-original-meaning
-  (let [v3
+  (let [v4
         (proof/check-projection-structure
          (all-boundary-choreography))
 
         v2
-        (historical-v2-certificate v3)
+        (historical-v2-certificate v4)
 
         explanation
         (proof/explain-structural-certificate v2)]
@@ -1745,15 +1830,21 @@
          (proof/projection-structural-certificate?
           (assoc v2
                  :observable-origin-proof
-                 (:observable-origin-proof v3)))))))
+                 (:observable-origin-proof v4)))))
+
+    (is (false?
+         (proof/projection-structural-certificate?
+          (assoc v2
+                 :runtime-origin-proof
+                 (:runtime-origin-proof v4)))))))
 
 (deftest historical-v1-structural-certificates-remain-recognizable-with-their-original-meaning
-  (let [v3
+  (let [v4
         (proof/check-projection-structure
          (all-boundary-choreography))
 
         v2
-        (historical-v2-certificate v3)
+        (historical-v2-certificate v4)
 
         v1
         (historical-v1-certificate v2)
@@ -1798,7 +1889,7 @@
                    :nonclaims
                    proof/projection-refinement-nonclaims)))))))
 
-(deftest projection-structural-certificate-v3-predicate-is-closed-and-version-bound
+(deftest projection-structural-certificate-v4-predicate-is-closed-and-version-bound
   (let [certificate
         (proof/check-projection-structure
          (all-boundary-choreography))]
@@ -1841,6 +1932,9 @@
              (dissoc certificate
                      :observable-origin-proof)
 
+             (dissoc certificate
+                     :runtime-origin-proof)
+
              (assoc certificate
                     :nonclaims
                     proof/projection-structural-certificate-v1-nonclaims)
@@ -1854,7 +1948,7 @@
       (is (false?
            (proof/structural-certificate-valid? invalid))))))
 
-(deftest projection-structural-certificate-v2-propagates-the-owning-successor-subproof-failure
+(deftest projection-structural-certificate-v4-propagates-the-owning-successor-subproof-failure
   (let [original-compile-all
         project/compile-all
 
@@ -1987,7 +2081,7 @@
       (proof/check-projection-completions
        (all-boundary-choreography)))))
 
-(deftest projection-structural-certificate-v2-propagates-an-isolated-completion-subproof-failure
+(deftest projection-structural-certificate-v4-propagates-an-isolated-completion-subproof-failure
   (let [failed-completion
         (corrupted-completion-proof-result)
 
@@ -2029,7 +2123,7 @@
            (get-in certificate
                    [:failures 0 :counterexample :reason])))))
 
-(deftest projection-structural-certificate-bang-form-throws-the-complete-invalid-v2-certificate
+(deftest projection-structural-certificate-bang-form-throws-the-complete-invalid-v4-certificate
   (let [original-compile-all
         project/compile-all
 
@@ -2102,7 +2196,7 @@
     (is (= #{:verification-options}
            (:allowed-option-keys data)))))
 
-(deftest projection-structural-certificate-v2-preserves-runtime-obligations-and-trusted-assumptions-without-proving-them
+(deftest projection-structural-certificate-v4-preserves-runtime-obligations-and-trusted-assumptions-without-proving-them
   (let [certificate
         (proof/check-projection-structure
          (authoritative-observation-choreography))
@@ -2116,7 +2210,11 @@
            (get-in certificate
                    [:successor-proof :runtime-obligations])
            (get-in certificate
-                   [:completion-proof :runtime-obligations]))))
+                   [:completion-proof :runtime-obligations])
+           (get-in certificate
+                   [:observable-origin-proof :runtime-obligations])
+           (get-in certificate
+                   [:runtime-origin-proof :runtime-obligations]))))
 
         expected-trusted-assumptions
         (vec
@@ -2127,7 +2225,11 @@
            (get-in certificate
                    [:successor-proof :trusted-assumptions])
            (get-in certificate
-                   [:completion-proof :trusted-assumptions]))))]
+                   [:completion-proof :trusted-assumptions])
+           (get-in certificate
+                   [:observable-origin-proof :trusted-assumptions])
+           (get-in certificate
+                   [:runtime-origin-proof :trusted-assumptions]))))]
 
     (is (proof/structural-certificate-valid? certificate))
 
@@ -2200,7 +2302,7 @@
        proof/structural-properties
        proof/projection-completion-property))
 
-  (testing "current certificate v2 includes completion while historical v1 does not"
+  (testing "current certificate v4 includes completion while historical v1 does not"
     (is (contains?
          proof/projection-structural-certificate-properties
          proof/projection-completion-property))
@@ -2833,14 +2935,286 @@
                    :projection-refinement]]
       (is (false? (contains? result claim))))
 
-    (testing "the v3 structural certificate composes the stabilized origin property without claiming dynamic simulation"
-      (is (= 3 (:gesso.choreo/version certificate)))
+    (testing "the v4 structural certificate composes both stabilized origin properties without claiming dynamic simulation"
+      (is (= 4 (:gesso.choreo/version certificate)))
       (is (proof/structural-certificate-valid? certificate))
       (is (= proof/projection-structural-certificate-properties
              (:properties certificate)))
       (is (contains? (:properties certificate)
                      proof/projection-observable-origin-property))
+      (is (contains? (:properties certificate)
+                     proof/projection-runtime-origin-property))
       (is (= proof/projection-refinement-nonclaims
              (:nonclaims certificate)))
       (is (contains? (:nonclaims certificate)
                      :projected-step-simulation)))))
+
+
+
+;; -----------------------------------------------------------------------------
+;; Converse projected runtime-origin preservation
+;; -----------------------------------------------------------------------------
+
+(deftest runtime-origin-property-is-explicitly-converse-and-exhaustive
+  (is (= :projection-runtime-origin-preservation-v1
+         proof/projection-runtime-origin-property))
+
+  (is (= :exhaustive-finite-runtime-origin-check
+         proof/runtime-origin-result-classification))
+
+  (is (= #{:local
+           :authoritative
+           :branch
+           :await
+           :send
+           :receive
+           :return}
+         proof/projected-runtime-ops))
+
+  (is (contains? proof/structural-properties
+                 proof/projection-runtime-origin-property))
+
+  (is (contains? proof/projection-structural-certificate-properties
+                 proof/projection-runtime-origin-property))
+
+  (is (false?
+       (contains? proof/projection-structural-certificate-v3-properties
+                  proof/projection-runtime-origin-property))))
+
+(deftest every-emitted-runtime-state-has-exact-semantic-origin-justification
+  (let [result
+        (proof/check-projection-runtime-origins
+         (all-boundary-choreography))
+
+        obligations
+        (:obligations result)]
+
+    (is (proof/result? result))
+    (is (proof/valid? result))
+    (is (= proof/projection-runtime-origin-property
+           (:property result)))
+    (is (= proof/runtime-origin-result-classification
+           (:classification result)))
+
+    (is (= {:kind :exact-finite-projected-runtime-origin-structure
+            :reachable-state-count 9
+            :role-count 2
+            :projected-runtime-ops proof/projected-runtime-ops
+            :obligation-count 13}
+           (:scope result)))
+
+    (is (= [[:projection-runtime-origin :authority 0 :synthetic-receive]
+            [:projection-runtime-origin :authority 1 :authored-boundary]
+            [:projection-runtime-origin :authority 2 :authored-boundary]
+            [:projection-runtime-origin :authority 3 :authored-boundary]
+            [:projection-runtime-origin :authority 4 :authored-boundary]
+            [:projection-runtime-origin :authority 5 :synthetic-completion]
+            [:projection-runtime-origin :authority 6 :synthetic-completion]
+            [:projection-runtime-origin :browser 0 :authored-boundary]
+            [:projection-runtime-origin :browser 1 :authored-boundary]
+            [:projection-runtime-origin :browser 2 :synthetic-receive]
+            [:projection-runtime-origin :browser 3 :synthetic-completion]
+            [:projection-runtime-origin :browser 4 :authored-boundary]
+            [:projection-runtime-origin :browser 5 :authored-boundary]]
+           (mapv :id obligations)))
+
+    (is (= {:authored-runtime-origin-preserved 8
+            :synthetic-receive-origin-preserved 2
+            :synthetic-completion-origin-preserved 3}
+           (frequencies (map :reason obligations))))
+
+    (is (every? :valid? obligations))
+    (is (every? #(= :runtime-state (:endpoint %)) obligations))
+    (is (every? nat-int? (map :runtime-locator obligations)))
+    (is (= [] (:runtime-obligations result)))
+    (is (= [] (:trusted-assumptions result)))
+    (is (empty? (:failures result)))
+    (is (nil? (:counterexample result)))))
+
+(deftest runtime-origin-proof-rejects-valid-receive-provenance-pointing-outside-the-choreography
+  (let [original-compile-all
+        project/compile-all
+
+        forged-projections
+        (forge-valid-missing-observable-origin
+         (original-compile-all
+          (verify/ensure-verified
+           (all-boundary-choreography))))]
+
+    (is (every? project/compiler-projection?
+                (vals forged-projections)))
+
+    (let [result
+          (with-redefs
+            [project/compile-all
+             (fn [_]
+               forged-projections)]
+            (proof/check-projection-runtime-origins
+             (all-boundary-choreography)))
+
+          counterexample
+          (:counterexample result)]
+
+      (is (proof/result? result))
+      (is (false? (proof/valid? result)))
+      (is (= proof/projection-runtime-origin-property
+             (:property result)))
+      (is (= :missing-authored-semantic-state
+             (:reason counterexample)))
+      (is (= :browser (:role counterexample)))
+      (is (= :claim (:state counterexample)))
+      (is (= :synthetic-receive
+             (last (:id counterexample)))))))
+
+(deftest runtime-origin-proof-rejects-valid-forged-completion-source
+  (let [original-compile-all
+        project/compile-all
+
+        forged-projections
+        (forge-valid-wrong-completion-projection
+         (original-compile-all
+          (verify/ensure-verified
+           (all-boundary-choreography))))]
+
+    (is (every? project/compiler-projection?
+                (vals forged-projections)))
+
+    (let [result
+          (with-redefs
+            [project/compile-all
+             (fn [_]
+               forged-projections)]
+            (proof/check-projection-runtime-origins
+             (all-boundary-choreography)))
+
+          counterexample
+          (:counterexample result)]
+
+      (is (false? (proof/valid? result)))
+      (is (= :missing-completion-source-semantic-state
+             (:reason counterexample)))
+      (is (= :browser (:role counterexample)))
+      (is (= :synthetic-completion
+             (last (:id counterexample)))))))
+
+(deftest runtime-origin-proof-bang-form-throws-with-complete-counterexample
+  (let [original-compile-all
+        project/compile-all
+
+        forged-projections
+        (forge-valid-wrong-completion-projection
+         (original-compile-all
+          (verify/ensure-verified
+           (all-boundary-choreography))))
+
+        data
+        (with-redefs
+          [project/compile-all
+           (fn [_]
+             forged-projections)]
+          (error-data
+           #(proof/check-projection-runtime-origins!
+             (all-boundary-choreography))))]
+
+    (is (= :projection-runtime-origin-proof-failed
+           (:error/kind data)))
+
+    (is (= proof/projection-runtime-origin-property
+           (get-in data [:result :property])))
+
+    (is (= :missing-completion-source-semantic-state
+           (get-in data [:result :counterexample :reason])))))
+
+(deftest runtime-origin-proof-options-fail-closed
+  (let [data
+        (error-data
+         #(proof/check-projection-runtime-origins
+           (all-boundary-choreography)
+           {:verifiction-options
+            {:entry-value-keys #{:request-id}}}))]
+
+    (is (= :unknown-option-keys
+           (:error/kind data)))
+
+    (is (= #{:verifiction-options}
+           (:unknown-option-keys data)))
+
+    (is (= #{:verification-options}
+           (:allowed-option-keys data)))))
+
+(deftest projection-structural-certificate-v4-propagates-an-isolated-runtime-origin-subproof-failure
+  (let [original-compile-all
+        project/compile-all
+
+        forged-projections
+        (forge-valid-wrong-completion-projection
+         (original-compile-all
+          (verify/ensure-verified
+           (all-boundary-choreography))))
+
+        failed-runtime-origin
+        (with-redefs
+          [project/compile-all
+           (fn [_]
+             forged-projections)]
+          (proof/check-projection-runtime-origins
+           (all-boundary-choreography)))
+
+        certificate
+        (with-redefs
+          [proof/check-projection-runtime-origins
+           (fn
+             ([_]
+              failed-runtime-origin)
+             ([_ _]
+              failed-runtime-origin))]
+          (proof/check-projection-structure
+           (all-boundary-choreography)))]
+
+    (is (false? (proof/valid? failed-runtime-origin)))
+    (is (proof/projection-structural-certificate? certificate))
+    (is (false? (proof/structural-certificate-valid? certificate)))
+
+    (is (proof/valid? (:boundary-proof certificate)))
+    (is (proof/valid? (:successor-proof certificate)))
+    (is (proof/valid? (:completion-proof certificate)))
+    (is (proof/valid? (:observable-origin-proof certificate)))
+    (is (false? (proof/valid? (:runtime-origin-proof certificate))))
+
+    (is (= 1 (count (:failures certificate))))
+    (is (= proof/projection-runtime-origin-property
+           (get-in certificate [:failures 0 :property])))
+    (is (= :missing-completion-source-semantic-state
+           (get-in certificate
+                   [:failures 0 :counterexample :reason])))))
+
+(deftest runtime-origin-proof-and-v4-certificate-remain-honest-about-dynamic-refinement
+  (let [result
+        (proof/check-projection-runtime-origins
+         (all-boundary-choreography))
+
+        certificate
+        (proof/check-projection-structure
+         (all-boundary-choreography))]
+
+    (is (proof/valid? result))
+    (is (= [] (:runtime-obligations result)))
+    (is (= [] (:trusted-assumptions result)))
+
+    (doseq [claim [:all-projected-executions
+                   :projected-step-simulation
+                   :sender-occurrence-delivery-justification
+                   :terminal-outcome-preservation
+                   :trace-refinement
+                   :projection-refinement]]
+      (is (false? (contains? result claim))))
+
+    (is (= proof/projection-structural-certificate-version
+           (:gesso.choreo/version certificate)))
+    (is (proof/structural-certificate-valid? certificate))
+    (is (contains? (:properties certificate)
+                   proof/projection-runtime-origin-property))
+    (is (= proof/projection-refinement-nonclaims
+           (:nonclaims certificate)))
+    (is (contains? (:nonclaims certificate)
+                   :projected-step-simulation))))

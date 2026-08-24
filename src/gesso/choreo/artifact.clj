@@ -256,6 +256,13 @@
    (vector? (:locations value))
    (proof/projection-structural-certificate?
     (:proof value))
+   ;; A current sidecar may not relabel a recognized historical certificate as
+   ;; current. Historical certificate recognition is useful to proof tooling,
+   ;; but an ArtifactSet sidecar certifies the exact current compiler proof
+   ;; contract emitted alongside its ExecutablePlans. Bind the declared
+   ;; certificate version to the nested certificate itself before accepting it.
+   (= (:projection-structural-certificate-version value)
+      (get-in value [:proof :gesso.choreo/version]))
    (proof/structural-certificate-valid?
     (:proof value))))
 

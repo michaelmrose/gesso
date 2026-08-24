@@ -2750,3 +2750,274 @@
              :role :server
              :state 3
              :message-id 11})))))
+
+;; -----------------------------------------------------------------------------
+;; Browser-adapter portability gate: open transport extras stay out of semantics
+;; -----------------------------------------------------------------------------
+
+(deftest open-participant-payload-extras-remain-transport-only
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/open-transport-only
+          :initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/open-command
+            :done
+            {:required #{:execution-id}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        host-attachment
+        (fn [] :opaque-host-attachment)
+
+        started
+        (realization/start
+         choreography
+         {:entry-values-by-role
+          {:browser
+           {:execution-id "execution-1"}}})
+
+        {queued :realization
+         message-id :message-id
+         message :message}
+        (realization/complete-send
+         started
+         :browser
+         {:execution-id "execution-1"
+          :adapter/attachment host-attachment})
+
+        sender
+        (realization/execution queued :browser)
+
+        sender-send
+        (first
+         (filter #(= :send (:kind %))
+                 (machine/execution-history sender)))
+
+        realization-send
+        (first
+         (filter #(= :send (:kind %))
+                 (realization/history queued)))
+
+        delivered
+        (realization/deliver-message
+         queued
+         message-id)
+
+        receiver
+        (realization/execution delivered :server)
+
+        receiver-receive
+        (first
+         (filter #(= :receive (:kind %))
+                 (machine/execution-history receiver)))
+
+        realization-deliver
+        (first
+         (filter #(= :deliver (:kind %))
+                 (realization/history delivered)))
+
+        distributed
+        (realization/distributed-observable-trace
+         delivered)]
+
+    (testing "the physical envelope may carry explicitly open adapter data"
+      (is (= "execution-1"
+             (get-in message [:payload :execution-id])))
+      (is (identical?
+           host-attachment
+           (get-in message [:payload :adapter/attachment]))))
+
+    (testing "only declared participant fields enter role-local knowledge"
+      (is (= "execution-1"
+             (machine/execution-value receiver :execution-id)))
+      (is (false?
+           (machine/has-execution-value?
+            receiver
+            :adapter/attachment))))
+
+    (testing "transport-only extras never enter deterministic portable machine history"
+      (is (= {:execution-id "execution-1"}
+             (:payload sender-send)))
+      (is (= {:execution-id "execution-1"}
+             (:payload receiver-receive))))
+
+    (testing "the independent-realization history also excludes host attachments"
+      (is (= {:execution-id "execution-1"}
+             (get-in realization-send [:message :payload])))
+      (is (= {:execution-id "execution-1"}
+             (get-in realization-deliver [:message :payload]))))
+
+    (testing "the canonical distributed observation contains semantic payload only"
+      (is (= [{:kind :communication
+               :from :browser
+               :to :server
+               :event :example/open-command
+               :payload {:execution-id "execution-1"}}]
+             distributed)))
+
+    (testing "transport completion still behaves normally"
+      (is (empty? (realization/messages delivered)))
+      (is (realization/completed? delivered)))))
+
+(deftest open-participant-payload-fault-history-remains-semantic-while-physical-copies-stay-exact
+  (let [choreography
+        (choreo/->choreography
+         {:name :example/open-transport-fault-history
+          :initial :send
+          :states
+          {:send
+           (choreo/communicate
+            :browser
+            :server
+            :example/open-command
+            :done
+            {:required #{:execution-id}
+             :open-payload? true})
+
+           :done
+           (choreo/return :done)}})
+
+        host-attachment
+        (fn [] :opaque-host-attachment)
+
+        physical-payload
+        {:execution-id "execution-1"
+         :adapter/attachment host-attachment}
+
+        semantic-payload
+        {:execution-id "execution-1"}
+
+        started
+        (realization/start
+         choreography
+         {:entry-values-by-role
+          {:browser
+           {:execution-id "execution-1"}}})
+
+        {after-send :realization
+         original-id :message-id
+         original-message :message}
+        (realization/complete-send
+         started
+         :browser
+         physical-payload)
+
+        {after-first-duplicate :realization
+         duplicate-1-id :message-id
+         duplicate-1-message :message}
+        (realization/duplicate-message
+         after-send
+         original-id)
+
+        {after-second-duplicate :realization
+         duplicate-2-id :message-id
+         duplicate-2-message :message}
+        (realization/duplicate-message
+         after-first-duplicate
+         duplicate-1-id)
+
+        queued-before-faults
+        (realization/messages
+         after-second-duplicate)
+
+        after-original-drop
+        (realization/drop-message
+         after-second-duplicate
+         original-id)
+
+        after-copy-drop
+        (realization/drop-message
+         after-original-drop
+         duplicate-1-id)
+
+        delivered
+        (realization/deliver-message
+         after-copy-drop
+         duplicate-2-id)
+
+        history
+        (realization/history delivered)
+
+        message-history
+        (filterv #(contains? % :message)
+                 history)
+
+        duplicate-history
+        (filterv #(= :duplicate (:kind %))
+                 history)
+
+        drop-history
+        (filterv #(= :drop (:kind %))
+                 history)]
+
+    (testing "transport copies retain the exact explicitly-open physical envelope"
+      (doseq [message
+              [original-message
+               duplicate-1-message
+               duplicate-2-message]]
+        (is (= "execution-1"
+               (get-in message [:payload :execution-id])))
+        (is (identical?
+             host-attachment
+             (get-in message
+                     [:payload :adapter/attachment]))))
+
+      (is (= 3
+             (count queued-before-faults)))
+
+      (doseq [entry queued-before-faults]
+        (is (= physical-payload
+               (get-in entry [:message :payload])))
+        (is (identical?
+             host-attachment
+             (get-in entry
+                     [:message :payload :adapter/attachment])))))
+
+    (testing "duplicate lineage remains physical while its recorded message is semantic"
+      (is (= 2
+             (count duplicate-history)))
+      (is (= [original-id duplicate-1-id]
+             (mapv :source-message-id
+                   duplicate-history)))
+      (is (= [original-id original-id]
+             (mapv :origin-message-id
+                   duplicate-history)))
+      (is (= [duplicate-1-id duplicate-2-id]
+             (mapv :message-id
+                   duplicate-history))))
+
+    (testing "drop and duplicate history cannot promote adapter-only fields into portable history"
+      (is (= 2
+             (count drop-history)))
+      (is (= [original-id duplicate-1-id]
+             (mapv :message-id
+                   drop-history)))
+
+      (doseq [entry message-history]
+        (is (= semantic-payload
+               (get-in entry [:message :payload])))
+        (is (false?
+             (contains?
+              (get-in entry [:message :payload])
+              :adapter/attachment)))))
+
+    (testing "only the surviving physical copy becomes one semantic communication"
+      (is (empty?
+           (realization/messages delivered)))
+      (is (= [{:kind :communication
+               :from :browser
+               :to :server
+               :event :example/open-command
+               :payload semantic-payload}]
+             (realization/distributed-observable-trace
+              delivered)))
+      (is (realization/completed?
+           delivered)))))
+
