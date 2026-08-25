@@ -1,28 +1,23 @@
 (ns gesso.live.browser.choreo-test
+  "Browser Choreo binding tests.
+
+   These tests deliberately treat gesso.live.browser.choreo as a physical
+   integration layer over shell + adapter. Portable machine semantics are tested
+   elsewhere; this namespace freezes the absence of an independent browser
+   execution runtime and exercises the physical realization/callback boundary."
   (:require
    [cljs.test :refer-macros [async deftest is testing]]
+   [gesso.choreo.core :as c]
    [gesso.choreo.machine :as machine]
+   [gesso.choreo.project :as project]
+   [gesso.live.browser.adapter :as adapter]
    [gesso.live.browser.choreo :as choreo]
-   [gesso.live.browser.fx :as fx]))
+   [gesso.live.browser.fx :as fx]
+   [gesso.live.browser.shell :as shell]))
 
-;; -----------------------------------------------------------------------------
-;; Helpers
-;; -----------------------------------------------------------------------------
-
-(defn- plan
-  ([initial states]
-   (plan :browser initial states nil))
-  ([role initial states]
-   (plan role initial states nil))
-  ([role initial states opts]
-   (merge
-    {:name :test/browser-choreo
-     :role role
-     :initial initial
-     :states states
-     :resources {}
-     :environment-events #{}}
-    opts)))
+;; =============================================================================
+;; Helpers / fixture choreographies
+;; =============================================================================
 
 (defn- thrown
   [f]
@@ -34,3184 +29,586 @@
 
 (defn- thrown-data
   [f]
-  (some-> (thrown f)
-          ex-data))
+  (some-> (thrown f) ex-data))
 
-(defn- with-runtime*
-  [f]
-  (choreo/reset-runtime!)
-  (try
-    (f)
-    (finally
-      (choreo/reset-runtime!))))
+(defn- browser-execution
+  [choreography]
+  (machine/start
+   (project/project choreography :browser)))
 
-(defn- terminal-by-id
-  [execution-id]
-  (some
-   #(when
-      (= execution-id
-         (:execution-id %))
-      %)
-   (choreo/terminal-summaries)))
+(defn- local-once
+  ([]
+   (local-once :browser/work))
+  ([action-id]
+   (c/->choreography
+    {:initial :work
+     :states
+     {:work (c/local :browser action-id :done {:outputs #{:value}})
+      :done (c/return :done)}})))
 
-(defn- only-active-summary
+(defn- send-once
   []
-  (let [summaries
-        (choreo/active-summaries)]
-    (is (= 1
-           (count summaries)))
-    (first summaries)))
-
-(defn- registered-machine
-  [machine-id result-fn]
-  (choreo/register-fx-machine!
-   machine-id
-   (fn [ctx]
-     (result-fn ctx))))
-
-(defn- start-suspended!
-  ([execution-id]
-   (start-suspended!
-    execution-id
-    nil))
-  ([execution-id opts]
-   (choreo/start!
-    (plan
-     :browser/wait
-     {:browser/wait
-      {:op :await
-       :role :browser
-       :events
-       {:continue :browser/done}
-       :bind :resume-data
-       :receives []}
-
-      :browser/done
-      {:op :return
-       :role :browser
-       :outcome :done
-       :value-key :resume-data}})
-    (merge
-     {:execution-id execution-id}
-     opts))))
-
-;; -----------------------------------------------------------------------------
-;; Fixture plans
-;; -----------------------------------------------------------------------------
-
-(def immediate-plan
-  (plan
-   :browser/done
-   {:browser/done
-    {:op :return
-     :role :browser
-     :outcome :done}}))
-
-(def fx-plan
-  (plan
-   :browser/prepare
-   {:browser/prepare
-    {:op :fx
-     :role :browser
-     :machine :test/prepare
-     :input {:phase :prepare}
-     :next :browser/done}
-
-    :browser/done
-    {:op :return
-     :role :browser
-     :outcome :done
-     :value-key :result}}))
-
-(def send-plan
-  (plan
-   :browser/send
-   {:browser/send
-    {:op :send
-     :role :browser
-     :to :server
-     :event :command
-     :via :http
-     :required #{:execution-id :action}
-     :optional #{:note}
-     :correlation #{:execution-id}
-     :next :browser/done}
-
-    :browser/done
-    {:op :return
-     :role :browser
-     :outcome :sent}}))
-
-(def await-plan
-  (plan
-   :browser/wait
-   {:browser/wait
-    {:op :await
-     :role :browser
-     :events
-     {:continue :browser/done
-      :failed :browser/failed}
-     :bind :resume-data
-     :receives []}
-
-    :browser/done
-    {:op :return
-     :role :browser
-     :outcome :done
-     :value-key :resume-data}
-
-    :browser/failed
-    {:op :return
-     :role :browser
-     :outcome :failed}}))
-
-(def message-plan
-  (plan
-   :browser/wait
-   {:browser/wait
-    {:op :await
-     :role :browser
-     :events {}
-     :receives
-     [{:from :server
-       :to :browser
-       :event :settled
-       :via :sse
-       :required #{:execution-id :outcome}
-       :optional #{:message}
-       :correlation #{:execution-id}
-       :match {}
-       :bind :settlement
-       :next :browser/done}]}
-
-    :browser/done
-    {:op :return
-     :role :browser
-     :outcome :done
-     :value-key :settlement}}))
-
-(def fx-send-await-plan
-  (plan
-   :browser/prepare
-   {:browser/prepare
-    {:op :fx
-     :role :browser
-     :machine :test/prepare
-     :next :browser/send}
-
-    :browser/send
-    {:op :send
-     :role :browser
-     :to :server
-     :event :command
-     :via :http
-     :required #{:execution-id :action}
-     :optional #{}
-     :correlation #{:execution-id}
-     :next :browser/wait}
-
-    :browser/wait
-    {:op :await
-     :role :browser
-     :events
-     {:request-failed :browser/failed}
-     :receives
-     [{:from :server
-       :to :browser
-       :event :settled
-       :via :http
-       :required #{:execution-id :outcome}
-       :optional #{}
-       :correlation #{:execution-id}
-       :match {}
-       :bind :settlement
-       :next :browser/done}]}
-
-    :browser/done
-    {:op :return
-     :role :browser
-     :outcome :done
-     :value-key :settlement}
-
-    :browser/failed
-    {:op :return
-     :role :browser
-     :outcome :request-failed}}))
-
-;; -----------------------------------------------------------------------------
-;; Runtime identity and public context keys
-;; -----------------------------------------------------------------------------
-
-(deftest runtime-identity-test
-  (is (= :gesso.live.browser.choreo/runtime
-         choreo/runtime-type))
-
-  (is (= :gesso.live.browser.choreo/execution-id
-         choreo/execution-id-key))
-
-  (is (= :gesso.live.browser.choreo/action
-         choreo/action-key))
-
-  (is (= :gesso.live.browser.choreo/metadata
-         choreo/metadata-key))
-
-  (is (= :gesso.live.browser.choreo/resume-envelope
-         choreo/resume-envelope-key))
-
-  (is (= 64
-         choreo/default-terminal-history-limit)))
-
-(deftest now-ms-is-number-test
-  (is (number?
-       (choreo/now-ms))))
-
-;; -----------------------------------------------------------------------------
-;; Error observer
-;; -----------------------------------------------------------------------------
-
-(deftest set-error-handler-test
-  (with-runtime*
-   (fn []
-     (let [handler
-           (fn [_payload]
-             nil)]
-
-       (is (true?
-            (choreo/set-error-handler!
-             handler)))
-
-       (is (identical?
-            handler
-            @choreo/error-handler))
-
-       (is (true?
-            (choreo/set-error-handler!
-             nil)))
-
-       (is (nil?
-            @choreo/error-handler))))))
-
-(deftest invalid-error-handler-test
-  (with-runtime*
-   (fn []
-     (let [data
-           (thrown-data
-            #(choreo/set-error-handler!
-              :not-callable))]
-
-       (is (= :gesso.live.browser.choreo/invalid-error-handler
-              (:error/type data)))
-
-       (is (= :not-callable
-              (:handler data)))))))
-
-(deftest error-observer-receives-start-failure-test
-  (with-runtime*
-   (fn []
-     (let [seen
-           (atom nil)]
-
-       (choreo/set-error-handler!
-        #(reset!
-          seen
-          %))
-
-       (let [error
-             (thrown
-              #(choreo/start!
-                fx-plan
-                {:execution-id
-                 "execution-1"}))]
-
-         (is (some?
-              error))
-
-         (is (= :start
-                (:operation @seen)))
-
-         (is (= "execution-1"
-                (:execution-id @seen)))
-
-         (is (identical?
-              error
-              (:error @seen)))
-
-         (is (= :test/browser-choreo
-                (:plan-name @seen))))))))
-
-(deftest throwing-error-observer-cannot-mask-original-error-test
-  (with-runtime*
-   (fn []
-     (choreo/set-error-handler!
-      (fn [_payload]
-        (throw
-         (js/Error.
-          "observer exploded"))))
-
-     (let [error
-           (thrown
-            #(choreo/start!
-              fx-plan
-              {:execution-id "execution-1"}))]
-
-       (is (= :gesso.live.browser.choreo/missing-fx-machine
-              (:error/type
-               (ex-data error))))))))
-
-;; -----------------------------------------------------------------------------
-;; FX machine registration
-;; -----------------------------------------------------------------------------
-
-(deftest register-and-unregister-fx-machine-test
-  (with-runtime*
-   (fn []
-     (let [machine-fn
-           (fn [_ctx]
-             {})]
-
-       (is (= :test/machine
-              (choreo/register-fx-machine!
-               :test/machine
-               machine-fn)))
-
-       (is (= #{:test/machine}
-              (choreo/registered-fx-machines)))
-
-       (is (identical?
-            machine-fn
-            (choreo/fx-machine
-             :test/machine)))
-
-       (is (= :test/machine
-              (choreo/unregister-fx-machine!
-               :test/machine)))
-
-       (is (= #{}
-              (choreo/registered-fx-machines)))
-
-       (is (nil?
-            (choreo/fx-machine
-             :test/machine)))))))
-
-(deftest registering-fx-machine-replaces-existing-registration-test
-  (with-runtime*
-   (fn []
-     (let [first-machine
-           (fn [_ctx]
-             {:value :first})
-
-           second-machine
-           (fn [_ctx]
-             {:value :second})]
-
-       (choreo/register-fx-machine!
-        :test/machine
-        first-machine)
-
-       (choreo/register-fx-machine!
-        :test/machine
-        second-machine)
-
-       (is (= #{:test/machine}
-              (choreo/registered-fx-machines)))
-
-       (is (identical?
-            second-machine
-            (choreo/fx-machine
-             :test/machine)))))))
-
-(deftest fx-machine-registration-validates-id-and-callability-test
-  (with-runtime*
-   (fn []
-     (let [bad-id
-           (thrown-data
-            #(choreo/register-fx-machine!
-              "not-keyword"
-              (fn [_ctx]
-                {})))
-
-           bad-machine
-           (thrown-data
-            #(choreo/register-fx-machine!
-              :test/machine
-              :not-callable))]
-
-       (is (= :gesso.live.browser.choreo/invalid-keyword
-              (:error/type bad-id)))
-
-       (is (= "Browser FX machine id"
-              (:label bad-id)))
-
-       (is (= :gesso.live.browser.choreo/invalid-callable
-              (:error/type bad-machine)))
-
-       (is (= "Browser FX machine"
-              (:label bad-machine)))))))
-
-;; -----------------------------------------------------------------------------
-;; Browser FX handler registration
-;; -----------------------------------------------------------------------------
-
-(deftest register-and-unregister-fx-handler-test
-  (with-runtime*
-   (fn []
-     (let [handler
-           (fn [_ctx]
-             :handled)]
-
-       (is (= :test/handler
-              (choreo/register-fx-handler!
-               :test/handler
-               handler)))
-
-       (is (= #{:test/handler}
-              (choreo/registered-fx-handlers)))
-
-       (is (identical?
-            handler
-            (:test/handler
-             (choreo/current-fx-handlers))))
-
-       (is (= :test/handler
-              (choreo/unregister-fx-handler!
-               :test/handler)))
-
-       (is (= {}
-              (choreo/current-fx-handlers)))))))
-
-(deftest registering-fx-handler-replaces-existing-registration-test
-  (with-runtime*
-   (fn []
-     (let [first-handler
-           (fn [_ctx]
-             :first)
-
-           second-handler
-           (fn [_ctx]
-             :second)]
-
-       (choreo/register-fx-handler!
-        :test/handler
-        first-handler)
-
-       (choreo/register-fx-handler!
-        :test/handler
-        second-handler)
-
-       (is (identical?
-            second-handler
-            (:test/handler
-             (choreo/current-fx-handlers))))))))
-
-(deftest fx-handler-registration-validates-id-and-callability-test
-  (with-runtime*
-   (fn []
-     (is (= :gesso.live.browser.choreo/invalid-keyword
-            (:error/type
-             (thrown-data
-              #(choreo/register-fx-handler!
-                "bad"
-                (fn [_ctx]
-                  nil))))))
-
-     (is (= :gesso.live.browser.choreo/invalid-callable
-            (:error/type
-             (thrown-data
-              #(choreo/register-fx-handler!
-                :test/handler
-                42))))))))
-
-;; -----------------------------------------------------------------------------
-;; Transport handoff registration
-;; -----------------------------------------------------------------------------
-
-(deftest send-handler-registration-test
-  (with-runtime*
-   (fn []
-     (let [handler
-           (fn [_action _execution]
-             nil)]
-
-       (is (true?
-            (choreo/set-send-handler!
-             handler)))
-
-       (is (identical?
-            handler
-            (choreo/current-send-handler)))
-
-       (is (true?
-            (choreo/set-send-handler!
-             nil)))
-
-       (is (nil?
-            (choreo/current-send-handler)))))))
-
-(deftest invalid-send-handler-test
-  (with-runtime*
-   (fn []
-     (let [data
-           (thrown-data
-            #(choreo/set-send-handler!
-              :not-callable))]
-
-       (is (= :gesso.live.browser.choreo/invalid-send-handler
-              (:error/type data)))
-
-       (is (= :not-callable
-              (:handler data)))))))
-
-;; -----------------------------------------------------------------------------
-;; Start validation and execution ids
-;; -----------------------------------------------------------------------------
-
-(deftest execution-id-accepted-types-test
-  (with-runtime*
-   (fn []
-     (doseq [execution-id
-             [:execution/id
-              (random-uuid)
-              "execution-1"]]
-
-       (let [execution
-             (choreo/start!
-              await-plan
-              {:execution-id
-               execution-id})]
-
-         (is (= execution-id
-                (:execution-id execution)))
-
-         (is (choreo/active?
-              execution-id))
-
-         (choreo/abort!
-          execution-id
-          :test-cleanup))))))
-
-(deftest invalid-execution-id-test
-  (with-runtime*
-   (fn []
-     (doseq [execution-id
-             [nil
-              ""
-              "   "
-              42
-              {}
-              []]]
-
-       (let [data
-             (thrown-data
-              #(choreo/start!
-                await-plan
-                {:execution-id
-                 execution-id}))]
-
-         (is (= :gesso.live.browser.choreo/invalid-execution-id
-                (:error/type data)))
-
-         (is (= execution-id
-                (:execution-id data))))))))
-
-(deftest metadata-must-be-map-test
-  (with-runtime*
-   (fn []
-     (let [data
-           (thrown-data
-            #(choreo/start!
-              await-plan
-              {:execution-id "execution-1"
-               :metadata
-               [:not :a-map]}))]
-
-       (is (= :gesso.live.browser.choreo/invalid-map
-              (:error/type data)))
-
-       (is (= "Browser choreography metadata"
-              (:label data)))))))
-
-(deftest duplicate-active-execution-id-is-rejected-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id "execution-1"})
-
-     (let [data
-           (thrown-data
-            #(choreo/start!
-              await-plan
-              {:execution-id "execution-1"}))]
-
-       (is (= :gesso.live.browser.choreo/duplicate-execution
-              (:error/type data)))
-
-       (is (= "execution-1"
-              (:execution-id data)))))))
-
-(deftest retired-execution-id-may-be-reused-test
-  (with-runtime*
-   (fn []
-     (is (machine/completed?
-          (choreo/start!
-           immediate-plan
-           {:execution-id
-            "execution-1"})))
-
-     (is (false?
-          (choreo/active?
-           "execution-1")))
-
-     (let [second
-           (choreo/start!
-            await-plan
-            {:execution-id
-             "execution-1"})]
-
-       (is (machine/suspended?
-            second))
-
-       (is (choreo/active?
-            "execution-1"))))))
-
-;; -----------------------------------------------------------------------------
-;; Immediate completion and retirement
-;; -----------------------------------------------------------------------------
-
-(deftest immediate-completion-is-retired-test
-  (with-runtime*
-   (fn []
-     (let [execution
-           (choreo/start!
-            immediate-plan
-            {:execution-id "execution-1"
-             :metadata
-             {:source "button"
-              :kind :request-action
-              :private "not-diagnostic"}})]
-
-       (is (machine/completed?
-            execution))
-
-       (is (false?
-            (choreo/active?
-             "execution-1")))
-
-       (is (nil?
-            (choreo/execution
-             "execution-1")))
-
-       (is (nil?
-            (choreo/metadata
-             "execution-1")))
-
-       (is (nil?
-            (choreo/execution-context
-             "execution-1")))
-
-       (let [terminal
-             (terminal-by-id
-              "execution-1")]
-
-         (is (= :completed
-                (:status terminal)))
-
-         (is (= :done
-                (get-in terminal
-                        [:result
-                         :outcome])))
-
-         (is (= "button"
-                (get-in terminal
-                        [:metadata
-                         :source])))
-
-         (is (= :request-action
-                (get-in terminal
-                        [:metadata
-                         :kind])))
-
-         (is (not
-              (contains?
-               (:metadata terminal)
-               :private)))
-
-         (is (number?
-              (:completed-at terminal))))))))
-
-(deftest terminal-history-is-bounded-test
-  (with-runtime*
-   (fn []
-     (dotimes [index
-               (inc
-                choreo/default-terminal-history-limit)]
-
-       (choreo/start!
-        immediate-plan
-        {:execution-id
-         (str "execution-" index)}))
-
-     (let [history
-           (choreo/terminal-summaries)]
-
-       (is (= choreo/default-terminal-history-limit
-              (count history)))
-
-       (is (nil?
-            (some
-             #(= "execution-0"
-                 (:execution-id %))
-             history)))
-
-       (is (some
-            #(= (str
-                 "execution-"
-                 choreo/default-terminal-history-limit)
-                (:execution-id %))
-            history))))))
-
-;; -----------------------------------------------------------------------------
-;; Suspended execution storage and metadata
-;; -----------------------------------------------------------------------------
-
-(deftest suspended-start-is-committed-test
-  (with-runtime*
-   (fn []
-     (with-redefs
-      [choreo/now-ms
-       (let [values
-             (atom
-              [100
-               101
-               102])]
-         (fn []
-           (let [value
-                 (first @values)]
-             (swap!
-              values
-              subvec
-              1)
-             value)))]
-
-       (let [execution
-             (choreo/start!
-              await-plan
-              {:execution-id "execution-1"
-               :context
-               {:request-id "request-1"}
-               :metadata
-               {:source "claim-button"
-                :kind :request-action
-                :extra "preserved while active"}})]
-
-         (is (machine/suspended?
-              execution))
-
-         (is (identical?
-              execution
-              (choreo/execution
-               "execution-1")))
-
-         (is (= #{"execution-1"}
-                (choreo/active-execution-ids)))
-
-         (is (= 1
-                (choreo/execution-count)))
-
-         (is (= {:request-id "request-1"}
-                (choreo/execution-context
-                 "execution-1")))
-
-         (is (= {:started-at 100
-                 :updated-at 102
-                 :source "claim-button"
-                 :kind :request-action
-                 :extra "preserved while active"}
-                (choreo/metadata
-                 "execution-1"))))))))
-
-(deftest active-summary-is-dom-neutral-machine-summary-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id "execution-1"
-       :context
-       {:value 1}})
-
-     (let [summary
-           (only-active-summary)]
-
-       (is (= "execution-1"
-              (:execution-id summary)))
-
-       (is (= :test/browser-choreo
-              (:plan-name summary)))
-
-       (is (= :browser
-              (:role summary)))
-
-       (is (= :suspended
-              (:status summary)))
-
-       (is (= :browser/wait
-              (:state summary)))
-
-       (is (nil?
-            (:action summary)))
-
-       (is (= {:events
-               #{:continue :failed}
-               :receives []}
-              (:awaiting summary)))
-
-       (is (= {}
-              (:held-resources summary)))
-
-       (is (nil?
-            (:result summary)))
-
-       (is (vector?
-            (:trace summary)))))))
-
-;; -----------------------------------------------------------------------------
-;; FX boundary driving
-;; -----------------------------------------------------------------------------
-
-(deftest registered-fx-machine-is-run-automatically-test
-  (with-runtime*
-   (fn []
-     (let [seen
-           (atom nil)]
-
-       (registered-machine
-        :test/prepare
-        (fn [ctx]
-          (reset!
-           seen
-           ctx)
-
-          {:result 42}))
-
-       (let [execution
-             (choreo/start!
-              fx-plan
-              {:execution-id "execution-1"
-               :context
-               {:request-id "request-1"}
-               :metadata
-               {:source "button"
-                :kind :action}})]
-
-         (is (machine/completed?
-              execution))
-
-         (is (= 42
-                (machine/execution-result
-                 execution)))
-
-         (is (= "execution-1"
-                (get
-                 @seen
-                 choreo/execution-id-key)))
-
-         (is (= :fx
-                (get-in
-                 @seen
-                 [choreo/action-key
-                  :kind])))
-
-         (is (= :test/prepare
-                (get-in
-                 @seen
-                 [choreo/action-key
-                  :machine])))
-
-         (is (= {:phase :prepare}
-                (get-in
-                 @seen
-                 [choreo/action-key
-                  :input])))
-
-         (is (= "button"
-                (get-in
-                 @seen
-                 [choreo/metadata-key
-                  :source])))
-
-         (is (= "request-1"
-                (:request-id @seen))))))))
-
-(deftest registered-browser-fx-handlers-are-injected-into-local-machine-test
-  (with-runtime*
-   (fn []
-     (choreo/register-fx-handler!
-      :test/double
-      (fn [_ctx value]
-        (* 2
-           value)))
-
-     (choreo/register-fx-machine!
-      :test/prepare
-      (fx/machine
-       :test/prepare-machine
-
-       :start
-       (fn [_ctx]
-         {:result
-          [:test/double 21]})))
-
-     (let [execution
-           (choreo/start!
-            fx-plan
-            {:execution-id
-             "execution-1"})]
-
-       (is (= 42
-              (machine/execution-result
-               execution)))))))
-
-(deftest fx-machine-nil-result-is-empty-context-contribution-test
-  (with-runtime*
-   (fn []
-     (registered-machine
-      :test/prepare
-      (fn [_ctx]
-        nil))
-
-     (let [execution
-           (choreo/start!
-            fx-plan
-            {:execution-id
-             "execution-1"
-             :context
-             {:result 7}})]
-
-       (is (= 7
-              (machine/execution-result
-               execution)))))))
-
-(deftest missing-fx-machine-fails-start-and-cleans-process-state-test
-  (with-runtime*
-   (fn []
-     (let [data
-           (thrown-data
-            #(choreo/start!
-              fx-plan
-              {:execution-id "execution-1"
-               :metadata
-               {:source "button"}}))]
-
-       (is (= :gesso.live.browser.choreo/missing-fx-machine
-              (:error/type data)))
-
-       (is (= "execution-1"
-              (:execution-id data)))
-
-       (is (= :browser/prepare
-              (:state data)))
-
-       (is (= :test/prepare
-              (:machine data)))
-
-       (is (= #{}
-              (:registered data)))
-
-       (is (false?
-            (choreo/active?
-             "execution-1")))
-
-       (is (nil?
-            (choreo/metadata
-             "execution-1")))
-
-       (is (= {}
-              @choreo/timers))))))
-
-(deftest fx-machine-must-return-map-or-nil-test
-  (with-runtime*
-   (fn []
-     (registered-machine
-      :test/prepare
-      (fn [_ctx]
-        [:not :a-map]))
-
-     (let [data
-           (thrown-data
-            #(choreo/start!
-              fx-plan
-              {:execution-id
-               "execution-1"}))]
-
-       (is (= :gesso.live.browser.choreo/invalid-fx-result
-              (:error/type data)))
-
-       (is (= [:not :a-map]
-              (:result data)))
-
-       (is (false?
-            (choreo/active?
-             "execution-1")))))))
-
-(deftest thrown-fx-machine-error-propagates-and-cleans-start-test
-  (with-runtime*
-   (fn []
-     (let [cause
-           (js/Error.
-            "FX exploded")]
-
-       (registered-machine
-        :test/prepare
-        (fn [_ctx]
-          (throw cause)))
-
-       (let [error
-             (thrown
-              #(choreo/start!
-                fx-plan
-                {:execution-id
-                 "execution-1"}))]
-
-         (is (identical?
-              cause
-              error))
-
-         (is (false?
-              (choreo/active?
-               "execution-1")))
-
-         (is (nil?
-              (choreo/metadata
-               "execution-1"))))))))
-
-;; -----------------------------------------------------------------------------
-;; Send boundary driving
-;; -----------------------------------------------------------------------------
-
-(deftest send-handler-is-run-automatically-test
-  (with-runtime*
-   (fn []
-     (let [seen
-           (atom nil)]
-
-       (choreo/set-send-handler!
-        (fn [action execution]
-          (reset!
-           seen
-           {:action action
-            :execution execution})))
-
-       (let [execution
-             (choreo/start!
-              send-plan
-              {:execution-id "machine-execution"
-               :context
-               {:execution-id "wire-execution"
-                :action :claim
-                :note "hello"
-                :private "local"}})]
-
-         (is (machine/completed?
-              execution))
-
-         (is (= {:outcome :sent}
-                (machine/execution-result
-                 execution)))
-
-         (is (= {:execution-id "wire-execution"
-                 :action :claim
-                 :note "hello"}
-                (get-in
-                 @seen
-                 [:action
-                  :payload])))
-
-         (is (= :send
-                (get-in
-                 @seen
-                 [:action
-                  :kind])))
-
-         (is (= :server
-                (get-in
-                 @seen
-                 [:action
-                  :to])))
-
-         (is (= :command
-                (get-in
-                 @seen
-                 [:action
-                  :event])))
-
-         (is (= "machine-execution"
-                (get-in
-                 @seen
-                 [:execution
-                  :execution-id]))))))))
-
-(deftest missing-send-handler-fails-start-and-cleans-state-test
-  (with-runtime*
-   (fn []
-     (let [data
-           (thrown-data
-            #(choreo/start!
-              send-plan
-              {:execution-id "execution-1"
-               :context
-               {:execution-id "wire-1"
-                :action :claim}}))]
-
-       (is (= :gesso.live.browser.choreo/missing-send-handler
-              (:error/type data)))
-
-       (is (= "execution-1"
-              (:execution-id data)))
-
-       (is (= :browser/send
-              (:state data)))
-
-       (is (= :send
-              (get-in
-               data
-               [:action
-                :kind])))
-
-       (is (false?
-            (choreo/active?
-             "execution-1")))
-
-       (is (nil?
-            (choreo/metadata
-             "execution-1")))))))
-
-(deftest thrown-send-handler-error-propagates-and-cleans-start-test
-  (with-runtime*
-   (fn []
-     (let [cause
-           (js/Error.
-            "transport exploded")]
-
-       (choreo/set-send-handler!
-        (fn [_action _execution]
-          (throw cause)))
-
-       (let [error
-             (thrown
-              #(choreo/start!
-                send-plan
-                {:execution-id "execution-1"
-                 :context
-                 {:execution-id "wire-1"
-                  :action :claim}}))]
-
-         (is (identical?
-              cause
-              error))
-
-         (is (false?
-              (choreo/active?
-               "execution-1"))))))))
-
-;; -----------------------------------------------------------------------------
-;; Automatic multi-boundary driving
-;; -----------------------------------------------------------------------------
-
-(deftest fx-and-send-are-driven-before-suspension-test
-  (with-runtime*
-   (fn []
-     (let [fx-seen
-           (atom nil)
-
-           send-seen
-           (atom nil)]
-
-       (registered-machine
-        :test/prepare
-        (fn [ctx]
-          (reset!
-           fx-seen
-           ctx)
-
-          {:execution-id "wire-1"
-           :action :claim}))
-
-       (choreo/set-send-handler!
-        (fn [action execution]
-          (reset!
-           send-seen
-           {:action action
-            :execution execution})))
-
-       (let [execution
-             (choreo/start!
-              fx-send-await-plan
-              {:execution-id "process-1"
-               :metadata
-               {:source "claim"}})]
-
-         (is (machine/suspended?
-              execution))
-
-         (is (choreo/active?
-              "process-1"))
-
-         (is (= "process-1"
-                (get
-                 @fx-seen
-                 choreo/execution-id-key)))
-
-         (is (= {:execution-id "wire-1"
-                 :action :claim}
-                (get-in
-                 @send-seen
-                 [:action
-                  :payload])))
-
-         (is (= #{:request-failed}
-                (get-in
-                 execution
-                 [:awaiting
-                  :events])))
-
-         (is (= 1
-                (count
-                 (get-in
-                  execution
-                  [:awaiting
-                   :receives])))))))))
-
-;; -----------------------------------------------------------------------------
-;; Resume with environment events
-;; -----------------------------------------------------------------------------
-
-(deftest resume-event-completes-and-retires-execution-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id "execution-1"})
-
-     (let [result
-           (choreo/resume-event!
-            "execution-1"
-            :continue
-            {:value 42})]
-
-       (is (= :completed
-              (:status result)))
-
-       (is (machine/completed?
-            (:execution result)))
-
-       (is (= {:value 42}
-              (:result result)))
-
-       (is (false?
-            (choreo/active?
-             "execution-1")))
-
-       (is (= {:value 42}
-              (:result
-               (terminal-by-id
-                "execution-1"))))))))
-
-(deftest resume-event-may-drive-new-fx-boundary-test
-  (with-runtime*
-   (fn []
-     (let [event-fx-plan
-           (plan
-            :browser/wait
-            {:browser/wait
-             {:op :await
-              :role :browser
-              :events
-              {:continue
-               :browser/process}
-              :bind :resume-data
-              :receives []}
-
-             :browser/process
-             {:op :fx
-              :role :browser
-              :machine :test/process
-              :next :browser/done}
-
-             :browser/done
-             {:op :return
-              :role :browser
-              :outcome :done
-              :value-key :processed}})
-
-           seen
-           (atom nil)]
-
-       (registered-machine
-        :test/process
-        (fn [ctx]
-          (reset!
-           seen
-           ctx)
-
-          {:processed
-           (:resume-data ctx)}))
-
-       (choreo/start!
-        event-fx-plan
-        {:execution-id
-         "execution-1"})
-
-       (let [result
-             (choreo/resume-event!
-              "execution-1"
-              :continue
-              {:value 42})]
-
-         (is (= :completed
-                (:status result)))
-
-         (is (= {:value 42}
-                (:result result)))
-
-         (is (= {:value 42}
-                (:resume-data @seen)))
-
-         (is (= :event
-                (get-in
-                 @seen
-                 [choreo/resume-envelope-key
-                  :kind])))
-
-         (is (= :continue
-                (get-in
-                 @seen
-                 [choreo/resume-envelope-key
-                  :event]))))))))
-
-(deftest resume-envelope-is-visible-only-to-first-post-resume-fx-boundary-test
-  (with-runtime*
-   (fn []
-     (let [two-fx-plan
-           (plan
-            :browser/wait
-            {:browser/wait
-             {:op :await
-              :role :browser
-              :events
-              {:continue :browser/first}
-              :receives []}
-
-             :browser/first
-             {:op :fx
-              :role :browser
-              :machine :test/first
-              :next :browser/second}
-
-             :browser/second
-             {:op :fx
-              :role :browser
-              :machine :test/second
-              :next :browser/done}
-
-             :browser/done
-             {:op :return
-              :role :browser
-              :outcome :done}})
-
-           first-context
-           (atom nil)
-
-           second-context
-           (atom nil)]
-
-       (registered-machine
-        :test/first
-        (fn [ctx]
-          (reset!
-           first-context
-           ctx)
-          nil))
-
-       (registered-machine
-        :test/second
-        (fn [ctx]
-          (reset!
-           second-context
-           ctx)
-          nil))
-
-       (choreo/start!
-        two-fx-plan
-        {:execution-id
-         "execution-1"})
-
-       (choreo/resume-event!
-        "execution-1"
-        :continue
-        {:value 42})
-
-       (is (= :continue
-              (get-in
-               @first-context
-               [choreo/resume-envelope-key
-                :event])))
-
-       (is (not
-            (contains?
-             @second-context
-             choreo/resume-envelope-key)))))))
-
-(deftest resume-invalid-event-is-error-but-keeps-active-execution-test
-  (with-runtime*
-   (fn []
-     (let [seen
-           (atom nil)]
-
-       (choreo/set-error-handler!
-        #(reset!
-          seen
-          %))
-
-       (let [original
-             (choreo/start!
-              await-plan
-              {:execution-id "execution-1"})
-
-             error
-             (thrown
-              #(choreo/resume-event!
-                "execution-1"
-                :not-awaited))]
-
-         (is (some?
-              error))
-
-         (is (= :resume
-                (:operation @seen)))
-
-         (is (= :browser/wait
-                (:state @seen)))
-
-         (is (= :not-awaited
-                (get-in
-                 @seen
-                 [:event
-                  :event])))
-
-         (testing "resume failure does not destroy the suspended process"
-           (is (choreo/active?
-                "execution-1"))
-
-           (is (identical?
-                original
-                (choreo/execution
-                 "execution-1"))))
-
-         (testing "a later valid modeled event may still complete it"
-           (is (= :completed
-                  (:status
-                   (choreo/resume-event!
-                    "execution-1"
-                    :continue
-                    {:ok true}))))
-
-           (is (false?
-                (choreo/active?
-                 "execution-1")))))))))
-
-;; -----------------------------------------------------------------------------
-;; Participant messages
-;; -----------------------------------------------------------------------------
-
-(deftest accepts-message-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      message-plan
-      {:execution-id "process-1"
-       :context
-       {:execution-id
-        "wire-1"}})
-
-     (is (choreo/accepts-message?
-          "process-1"
-          {:from :server
-           :to :browser
-           :event :settled
-           :via :sse}
-          {:execution-id "wire-1"
-           :outcome :confirmed}))
-
-     (is (false?
-          (choreo/accepts-message?
-           "process-1"
-           {:from :server
-            :to :browser
-            :event :settled
-            :via :sse}
-           {:execution-id "wire-2"
-            :outcome :confirmed}))))))
-
-(deftest resume-message-completes-and-binds-payload-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      message-plan
-      {:execution-id "process-1"
-       :context
-       {:execution-id "wire-1"}})
-
-     (let [payload
-           {:execution-id "wire-1"
-            :outcome :confirmed
-            :message "Claimed"}
-
-           result
-           (choreo/resume-message!
-            "process-1"
-            {:from :server
-             :to :browser
-             :event :settled
-             :via :sse}
-            payload)]
-
-       (is (= :completed
-              (:status result)))
-
-       (is (= payload
-              (:result result)))
-
-       (is (= payload
-              (:result
-               (terminal-by-id
-                "process-1"))))))))
-
-(deftest transport-must-address-explicit-process-id-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      message-plan
-      {:execution-id "process-1"
-       :context
-       {:execution-id "wire-1"}})
-
-     (choreo/start!
-      message-plan
-      {:execution-id "process-2"
-       :context
-       {:execution-id "wire-2"}})
-
-     (testing "payload correlation cannot silently choose a different process"
-       (is (thrown?
-            cljs.core.ExceptionInfo
-            (choreo/resume-message!
-             "process-2"
-             {:from :server
-              :to :browser
-              :event :settled
-              :via :sse}
-             {:execution-id "wire-1"
-              :outcome :confirmed})))
-
-       (is (choreo/active?
-            "process-1"))
-
-       (is (choreo/active?
-            "process-2")))
-
-     (is (= :completed
-            (:status
-             (choreo/resume-message!
-              "process-1"
-              {:from :server
-               :to :browser
-               :event :settled
-               :via :sse}
-              {:execution-id "wire-1"
-               :outcome :confirmed})))))))
-
-;; -----------------------------------------------------------------------------
-;; accepts? inspection
-;; -----------------------------------------------------------------------------
-
-(deftest accepts-event-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (is (choreo/accepts-event?
-          "execution-1"
-          :continue))
-
-     (is (choreo/accepts-event?
-          "execution-1"
-          :failed))
-
-     (is (false?
-          (choreo/accepts-event?
-           "execution-1"
-           :other))))))
-
-(deftest accepts-is-false-for-inactive-execution-test
-  (with-runtime*
-   (fn []
-     (is (false?
-          (choreo/accepts?
-           "missing"
-           (machine/event
-            :anything))))
-
-     (is (false?
-          (choreo/accepts-event?
-           "missing"
-           :anything)))
-
-     (is (false?
-          (choreo/accepts-message?
-           "missing"
-           {:from :server
-            :to :browser
-            :event :settled}
-           {}))))))
-
-(deftest accepts-does-not-resume-or-mutate-test
-  (with-runtime*
-   (fn []
-     (let [execution
-           (choreo/start!
-            await-plan
-            {:execution-id "execution-1"
-             :context
-             {:before true}})]
-
-       (is (choreo/accepts?
-            "execution-1"
-            (machine/event
-             :continue
-             {:after true})))
-
-       (is (identical?
-            execution
-            (choreo/execution
-             "execution-1")))
-
-       (is (= {:before true}
-              (choreo/execution-context
-               "execution-1")))))))
-
-;; -----------------------------------------------------------------------------
-;; Late delivery
-;; -----------------------------------------------------------------------------
-
-(deftest late-event-to-retired-execution-is-harmless-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (choreo/resume-event!
-      "execution-1"
-      :continue)
-
-     (is (= {:status :ignored
-             :reason :inactive-execution
-             :execution-id "execution-1"}
-            (choreo/resume-event!
-             "execution-1"
-             :continue)))
-
-     (is (false?
-          (choreo/active?
-           "execution-1"))))))
-
-(deftest late-message-to-retired-execution-is-harmless-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      message-plan
-      {:execution-id "process-1"
-       :context
-       {:execution-id
-        "wire-1"}})
-
-     (choreo/resume-message!
-      "process-1"
-      {:from :server
-       :to :browser
-       :event :settled
-       :via :sse}
-      {:execution-id "wire-1"
-       :outcome :confirmed})
-
-     (is (= {:status :ignored
-             :reason :inactive-execution
-             :execution-id "process-1"}
-            (choreo/resume-message!
-             "process-1"
-             {:from :server
-              :to :browser
-              :event :settled
-              :via :sse}
-             {:execution-id "wire-1"
-              :outcome :confirmed}))))))
-
-;; -----------------------------------------------------------------------------
-;; Abort semantics
-;; -----------------------------------------------------------------------------
-
-(deftest abort-active-execution-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id "execution-1"
-       :metadata
-       {:source "button"
-        :kind :request-action
-        :private "not-terminal"}})
-
-     (is (= {:status :aborted
-             :execution-id "execution-1"
-             :reason :page-removed}
-            (choreo/abort!
-             "execution-1"
-             :page-removed)))
-
-     (is (false?
-          (choreo/active?
-           "execution-1")))
-
-     (is (nil?
-          (choreo/metadata
-           "execution-1")))
-
-     (let [terminal
-           (terminal-by-id
-            "execution-1")]
-
-       (is (= :aborted
-              (:status terminal)))
-
-       (is (= :page-removed
-              (:reason terminal)))
-
-       (is (= :browser/wait
-              (:state terminal)))
-
-       (is (= "button"
-              (get-in terminal
-                      [:metadata
-                       :source])))
-
-       (is (not
-            (contains?
-             (:metadata terminal)
-             :private)))))))
-
-(deftest abort-inactive-execution-is-harmless-test
-  (with-runtime*
-   (fn []
-     (is (= {:status :ignored
-             :reason :inactive-execution
-             :execution-id "missing"}
-            (choreo/abort!
-             "missing"
-             :cleanup))))))
-
-(deftest abort-validates-execution-id-test
-  (with-runtime*
-   (fn []
-     (is (= :gesso.live.browser.choreo/invalid-execution-id
-            (:error/type
-             (thrown-data
-              #(choreo/abort!
-                nil
-                :cleanup))))))))
-
-;; -----------------------------------------------------------------------------
-;; Timer ownership
-;; -----------------------------------------------------------------------------
-
-(deftest schedule-event-validates-input-test
-  (with-runtime*
-   (fn []
-     (doseq [[args expected-type expected-label]
-             [[[nil
-                :timer
-                1
-                :continue]
-               :gesso.live.browser.choreo/invalid-execution-id
-               nil]
-
-              [["execution-1"
-                "timer"
-                1
-                :continue]
-               :gesso.live.browser.choreo/invalid-keyword
-               "Browser choreography timer key"]
-
-              [["execution-1"
-                :timer
-                -1
-                :continue]
-               :gesso.live.browser.choreo/invalid-number
-               "Browser choreography timer delay"]
-
-              [["execution-1"
-                :timer
-                js/NaN
-                :continue]
-               :gesso.live.browser.choreo/invalid-number
-               "Browser choreography timer delay"]
-
-              [["execution-1"
-                :timer
-                1
-                "continue"]
-               :gesso.live.browser.choreo/invalid-keyword
-               "Browser choreography timer event"]]]
-
-       (let [data
-             (thrown-data
-              #(apply
-                choreo/schedule-event!
-                args))]
-
-         (is (= expected-type
-                (:error/type data)))
-
-         (when expected-label
-           (is (= expected-label
-                  (:label data)))))))))
-
-(deftest schedule-and-cancel-timer-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (let [handle
-           (choreo/schedule-event!
-            "execution-1"
-            :timeout
-            60000
-            :continue
-            {:late true})]
-
-       (is (some?
-            handle))
-
-       (is (= handle
-              (choreo/timer
-               "execution-1"
-               :timeout)))
-
-       (is (= 1
-              (get-in
-               (choreo/diagnostics)
-               [:timer-count])))
-
-       (is (true?
-            (choreo/cancel-timer!
-             "execution-1"
-             :timeout)))
-
-       (is (nil?
-            (choreo/timer
-             "execution-1"
-             :timeout)))
-
-       (is (= {}
-              @choreo/timers))))))
-
-(deftest scheduling-same-timer-key-replaces-prior-handle-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (let [first-handle
-           (choreo/schedule-event!
-            "execution-1"
-            :timeout
-            60000
-            :continue)
-
-           second-handle
-           (choreo/schedule-event!
-            "execution-1"
-            :timeout
-            60000
-            :failed)]
-
-       (is (= second-handle
-              (choreo/timer
-               "execution-1"
-               :timeout)))
-
-       (is (= 1
-              (count
-               (get
-                @choreo/timers
-                "execution-1"))))
-
-       ;; Browsers generally allocate distinct timeout handles. The registry
-       ;; contract does not depend on that, so only make this a sanity check
-       ;; when they are observably different.
-       (when (not=
-              first-handle
-              second-handle)
-         (is (not=
-              first-handle
-              (choreo/timer
-               "execution-1"
-               :timeout))))
-
-       (choreo/cancel-all-timers!
-        "execution-1")))))
-
-(deftest cancel-all-timers-removes-only-owned-execution-timers-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-2"})
-
-     (choreo/schedule-event!
-      "execution-1"
-      :one
-      60000
-      :continue)
-
-     (choreo/schedule-event!
-      "execution-1"
-      :two
-      60000
-      :failed)
-
-     (choreo/schedule-event!
-      "execution-2"
-      :other
-      60000
-      :continue)
-
-     (is (true?
-          (choreo/cancel-all-timers!
-           "execution-1")))
-
-     (is (nil?
-          (get
-           @choreo/timers
-           "execution-1")))
-
-     (is (= 1
-            (count
-             (get
-              @choreo/timers
-              "execution-2"))))
-
-     (choreo/cancel-all-timers!
-      "execution-2"))))
-
-(deftest completion-cancels-owned-timers-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (choreo/schedule-event!
-      "execution-1"
-      :late
-      60000
-      :failed)
-
-     (is (some?
-          (choreo/timer
-           "execution-1"
-           :late)))
-
-     (choreo/resume-event!
-      "execution-1"
-      :continue)
-
-     (is (nil?
-          (choreo/timer
-           "execution-1"
-           :late)))
-
-     (is (= {}
-            @choreo/timers)))))
-
-(deftest abort-cancels-owned-timers-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (choreo/schedule-event!
-      "execution-1"
-      :late
-      60000
-      :continue)
-
-     (choreo/abort!
-      "execution-1"
-      :cleanup)
-
-     (is (= {}
-            @choreo/timers)))))
-
-(deftest scheduled-event-resumes-and-retires-execution-test
+  (c/->choreography
+   {:initial :send
+    :states
+    {:send (c/communicate :browser :server :browser/message :done
+                          {:open-payload? true})
+     :done (c/return :done)}}))
+
+(defn- await-once
+  []
+  (c/->choreography
+   {:initial :wait
+    :states
+    {:wait (c/await :browser {:browser/continue :done})
+     :done (c/return :done)}}))
+
+(defn- receive-once
+  []
+  (c/->choreography
+   {:initial :receive
+    :states
+    {:receive (c/communicate :server :browser :server/message :done
+                             {:open-payload? true})
+     :done (c/return :done)}}))
+
+(defn- await-timeout
+  []
+  (c/->choreography
+   {:initial :wait
+    :states
+    {:wait (c/await :browser {:browser/timeout :done})
+     :done (c/return :done)}}))
+
+(defn- invariant-clean?
+  [runtime]
+  (empty? (adapter/invariant-errors (choreo/state runtime))))
+
+;; =============================================================================
+;; Identity / construction / ownership
+;; =============================================================================
+
+(deftest runtime-identity-and-owned-effect-kinds-test
+  (is (= 2 choreo/runtime-version))
+  (is (= :gesso.live.browser.choreo/runtime choreo/runtime-type))
+  (is (= :gesso.live.browser.choreo/execution-ref choreo/execution-ref-type))
+  (is (= #{:machine/local :machine/send :transport/send}
+         choreo/owned-effect-kinds)))
+
+(deftest create-attaches-only-three-physical-effect-handlers-test
+  (let [shell-runtime (shell/create)
+        runtime (choreo/create shell-runtime)]
+    (is (choreo/runtime? runtime))
+    (is (identical? shell-runtime (choreo/shell-runtime runtime)))
+    (is (= choreo/owned-effect-kinds
+           (set (keys (shell/handlers shell-runtime)))))
+    (is (= choreo/owned-effect-kinds
+           (:attached-effect-kinds (choreo/diagnostics runtime))))
+    (is (invariant-clean? runtime))))
+
+(deftest runtime-owns-no-semantic-or-browser-resource-registries-test
+  (let [runtime (choreo/create (shell/create))]
+    (doseq [forbidden-key [:executions
+                           :execution-metadata
+                           :timers
+                           :terminal-history
+                           :targets
+                           :continuity
+                           :resources]]
+      (is (not (contains? runtime forbidden-key))
+          (str "browser.choreo must not own " forbidden-key)))
+    (is (= #{} (choreo/active-execution-ids runtime)))))
+
+(deftest create-rejects-unknown-options-before-mutating-shell-test
+  (let [shell-runtime (shell/create)
+        data (thrown-data
+              #(choreo/create shell-runtime {:mystery true}))]
+    (is (= :unknown-options (:error/kind data)))
+    (is (= #{:mystery} (:unknown-keys data)))
+    (is (empty? (shell/handlers shell-runtime)))))
+
+(deftest create-validates-registration-maps-test
+  (doseq [[options expected-kind]
+          [[{:local-actions [:not :a-map]} :invalid-map]
+           [{:fx-handlers [:not :a-map]} :invalid-map]
+           [{:local-actions {"not-keyword" (fn [_] nil)}} :invalid-keyword]
+           [{:local-actions {:browser/work 42}} :invalid-callable]
+           [{:fx-handlers {:browser/fx 42}} :invalid-callable]
+           [{:send-payload 42} :invalid-callable]
+           [{:transport-send 42} :invalid-callable]]]
+    (let [shell-runtime (shell/create)
+          data (thrown-data #(choreo/create shell-runtime options))]
+      (is (= expected-kind (:error/kind data)) (pr-str options))
+      (is (empty? (shell/handlers shell-runtime)) (pr-str options)))))
+
+(deftest create-refuses-effect-slot-collision-atomically-test
+  (let [existing (fn [_] :existing)
+        shell-runtime (shell/create {:handlers {:machine/send existing}})
+        data (thrown-data #(choreo/create shell-runtime))]
+    (is (= :effect-handler-collision (:error/kind data)))
+    (is (= #{:machine/send} (:effect-kinds data)))
+    (is (= {:machine/send existing}
+           (shell/handlers shell-runtime)))))
+
+;; =============================================================================
+;; Physical registration APIs
+;; =============================================================================
+
+(deftest local-action-registration-is-per-runtime-test
+  (let [runtime-a (choreo/create (shell/create))
+        runtime-b (choreo/create (shell/create))
+        handler (fn [_] {:value 1})]
+    (is (= :browser/work
+           (choreo/register-local-action! runtime-a :browser/work handler)))
+    (is (identical? handler (:browser/work (choreo/local-actions runtime-a))))
+    (is (empty? (choreo/local-actions runtime-b)))
+    (is (= :browser/work
+           (choreo/unregister-local-action! runtime-a :browser/work)))
+    (is (empty? (choreo/local-actions runtime-a)))))
+
+(deftest fx-handler-registration-is-per-runtime-test
+  (let [runtime-a (choreo/create (shell/create))
+        runtime-b (choreo/create (shell/create))
+        handler (fn [_ value] (inc value))]
+    (is (= :test/inc
+           (choreo/register-fx-handler! runtime-a :test/inc handler)))
+    (is (identical? handler (:test/inc (choreo/fx-handlers runtime-a))))
+    (is (empty? (choreo/fx-handlers runtime-b)))
+    (is (= :test/inc
+           (choreo/unregister-fx-handler! runtime-a :test/inc)))
+    (is (empty? (choreo/fx-handlers runtime-a)))))
+
+(deftest send-and-transport-handler-setters-are-physical-configuration-only-test
+  (let [runtime (choreo/create (shell/create))
+        send (fn [_] {:payload true})
+        transport (fn [_] :sent)]
+    (is (true? (choreo/set-send-payload-handler! runtime send)))
+    (is (identical? send (choreo/send-payload-handler runtime)))
+    (is (true? (choreo/set-transport-handler! runtime transport)))
+    (is (identical? transport (choreo/transport-handler runtime)))
+    (is (true? (choreo/set-send-payload-handler! runtime nil)))
+    (is (nil? (choreo/send-payload-handler runtime)))
+    (is (true? (choreo/set-transport-handler! runtime nil)))
+    (is (nil? (choreo/transport-handler runtime)))))
+
+(deftest registration-ids-and-values-are-validated-test
+  (let [runtime (choreo/create (shell/create))]
+    (is (= :invalid-keyword
+           (:error/kind
+            (thrown-data #(choreo/register-local-action! runtime "bad" (fn [_] nil))))))
+    (is (= :invalid-callable
+           (:error/kind
+            (thrown-data #(choreo/register-local-action! runtime :browser/work 42)))))
+    (is (= :invalid-keyword
+           (:error/kind
+            (thrown-data #(choreo/register-fx-handler! runtime "bad" (fn [_] nil))))))
+    (is (= :invalid-callable
+           (:error/kind
+            (thrown-data #(choreo/register-fx-handler! runtime :test/fx 42)))))
+    (is (= :invalid-callable
+           (:error/kind
+            (thrown-data #(choreo/set-send-payload-handler! runtime 42)))))
+    (is (= :invalid-callable
+           (:error/kind
+            (thrown-data #(choreo/set-transport-handler! runtime 42)))))))
+
+;; =============================================================================
+;; Local realization through shell + adapter
+;; =============================================================================
+
+(deftest local-action-goes-through-adapter-and-retires-on-completion-test
+  (let [shell-runtime (shell/create)
+        seen (atom nil)
+        runtime (choreo/create
+                 shell-runtime
+                 {:local-actions
+                  {:browser/work
+                   (fn [ctx]
+                     (reset! seen ctx)
+                     {:value 42})}})
+        result (choreo/start-execution!
+                runtime :execution/local
+                (browser-execution (local-once)))]
+    (is (= :dispatched (:status result)))
+    (is (nil? (:execution-ref result)))
+    (is (nil? (choreo/execution runtime :execution/local)))
+    (is (false? (choreo/active? runtime :execution/local)))
+    (is (= :browser/work (get-in @seen [choreo/action-key :action])))
+    (is (= :execution/local (get @seen choreo/execution-id-key)))
+    (is (pos-int? (get @seen choreo/generation-key)))
+    (is (pos-int? (get @seen choreo/effect-generation-key)))
+    (is (invariant-clean? runtime))))
+
+(deftest local-action-receives-inputs-and-current-fx-handler-map-test
+  (let [seen (atom nil)
+        runtime (choreo/create (shell/create))
+        inc-handler (fn [_ value] (inc value))
+        local-machine
+        (fx/machine
+         :test/local
+         :start
+         (fn [ctx]
+           (reset! seen ctx)
+           {:value [:test/inc 41]}))]
+    (choreo/register-fx-handler! runtime :test/inc inc-handler)
+    (choreo/register-local-action! runtime :browser/work local-machine)
+    (choreo/start-execution! runtime :execution/fx
+                             (browser-execution (local-once)))
+    (is (identical? inc-handler
+                    (get-in @seen [:biff.fx/handlers :test/inc])))
+    (is (= :execution/fx (get @seen choreo/execution-id-key)))
+    (is (false? (choreo/active? runtime :execution/fx)))
+    (is (invariant-clean? runtime))))
+
+(deftest missing-local-realization-fails-physical-effect-and-retires-test
+  (let [errors (atom [])
+        shell-runtime (shell/create {:on-error #(swap! errors conj %)})
+        runtime (choreo/create shell-runtime)
+        result (choreo/start-execution!
+                runtime :execution/missing-local
+                (browser-execution (local-once :browser/missing)))]
+    (is (= :failed (first (:effect-results result))))
+    (is (false? (choreo/active? runtime :execution/missing-local)))
+    (is (seq @errors))
+    (is (invariant-clean? runtime))))
+
+(deftest rejected-local-promise-retires-through-shell-not-choreo-test
   (async done
-    (choreo/reset-runtime!)
-
-    (choreo/start!
-     await-plan
-     {:execution-id
-      "execution-1"})
-
-    (choreo/schedule-event!
-     "execution-1"
-     :continue
-     0
-     :continue
-     {:timer true})
-
-    (js/setTimeout
-     (fn []
-       (try
-         (is (false?
-              (choreo/active?
-               "execution-1")))
-
-         (is (= {}
-                @choreo/timers))
-
-         (is (= {:timer true}
-                (:result
-                 (terminal-by-id
-                  "execution-1"))))
-
-         (finally
-           (choreo/reset-runtime!)
-           (done))))
-     20)))
-
-;; -----------------------------------------------------------------------------
-;; Timers scheduled by a local FX machine
-;; -----------------------------------------------------------------------------
-
-(deftest fx-machine-may-schedule-event-before-suspended-commit-test
-  (async done
-    (choreo/reset-runtime!)
-    (let [timer-plan
-          (plan
-           :browser/schedule
-           {:browser/schedule
-            {:op :fx
-             :role :browser
-             :machine :test/schedule
-             :next :browser/wait}
-
-            :browser/wait
-            {:op :await
-             :role :browser
-             :events
-             {:timer-fired
-              :browser/done}
-             :bind :timer-data
-             :receives []}
-
-            :browser/done
-            {:op :return
-             :role :browser
-             :outcome :done
-             :value-key :timer-data}})]
-
-      (registered-machine
-       :test/schedule
-       (fn [ctx]
-         (choreo/schedule-event!
-          (get
-           ctx
-           choreo/execution-id-key)
-          :timer
-          0
-          :timer-fired
-          {:from-fx true})
-         nil))
-
-      (choreo/start!
-       timer-plan
-       {:execution-id
-        "execution-1"})
-
-      (js/setTimeout
-       (fn []
-         (try
-           (is (false?
-                (choreo/active?
-                 "execution-1")))
-
-           (is (= {:from-fx true}
-                  (:result
-                   (terminal-by-id
-                    "execution-1"))))
-
-           (finally
-             (choreo/reset-runtime!)
-             (done))))
-       20))))
-
-(deftest failed-start-cleans-timers-scheduled-by-fx-test
-  (with-runtime*
-   (fn []
-     (registered-machine
-      :test/prepare
-      (fn [ctx]
-        (choreo/schedule-event!
-         (get
-          ctx
-          choreo/execution-id-key)
-         :late
-         60000
-         :never
-         nil)
-
-        (throw
-         (js/Error.
-          "fail after scheduling"))))
-
-     (is (some?
-          (thrown
-           #(choreo/start!
-             fx-plan
-             {:execution-id
-              "execution-1"}))))
-
-     (is (= {}
-            @choreo/timers))
-
-     (is (false?
-          (choreo/active?
-           "execution-1"))))))
-
-;; -----------------------------------------------------------------------------
-;; Resume failures after timer scheduling
-;; -----------------------------------------------------------------------------
-
-(deftest resume-drive-error-is-reported-without-retiring-current-suspension-test
-  (with-runtime*
-   (fn []
-     (let [post-event-fx-plan
-           (plan
-            :browser/wait
-            {:browser/wait
-             {:op :await
-              :role :browser
-              :events
-              {:continue
-               :browser/missing-fx}
-              :receives []}
-
-             :browser/missing-fx
-             {:op :fx
-              :role :browser
-              :machine :test/missing
-              :next :browser/done}
-
-             :browser/done
-             {:op :return
-              :role :browser
-              :outcome :done}})
-
-           original
-           (choreo/start!
-            post-event-fx-plan
-            {:execution-id
-             "execution-1"})
-
-           error
-           (thrown
-            #(choreo/resume-event!
-              "execution-1"
-              :continue))]
-
-       (is (= :gesso.live.browser.choreo/missing-fx-machine
-              (:error/type
-               (ex-data error))))
-
-       (testing "the pre-resume suspended execution remains active"
-         (is (choreo/active?
-              "execution-1"))
-
-         (is (identical?
-              original
-              (choreo/execution
-               "execution-1"))))))))
-
-;; -----------------------------------------------------------------------------
-;; Reset behavior
-;; -----------------------------------------------------------------------------
-
-(deftest reset-executions-preserves-registrations-test
-  (with-runtime*
-   (fn []
-     (let [machine-fn
-           (fn [_ctx]
-             nil)
-
-           handler
-           (fn [_ctx]
-             nil)
-
-           sender
-           (fn [_action _execution]
-             nil)
-
-           errors
-           (fn [_payload]
-             nil)]
-
-       (choreo/register-fx-machine!
-        :test/machine
-        machine-fn)
-
-       (choreo/register-fx-handler!
-        :test/handler
-        handler)
-
-       (choreo/set-send-handler!
-        sender)
-
-       (choreo/set-error-handler!
-        errors)
-
-       (choreo/start!
-        await-plan
-        {:execution-id
-         "execution-1"})
-
-       (choreo/schedule-event!
-        "execution-1"
-        :late
-        60000
-        :continue)
-
-       (is (true?
-            (choreo/reset-executions!)))
-
-       (is (= 0
-              (choreo/execution-count)))
-
-       (is (= {}
-              @choreo/timers))
-
-       (is (= []
-              (choreo/terminal-summaries)))
-
-       (is (identical?
-            machine-fn
-            (choreo/fx-machine
-             :test/machine)))
-
-       (is (identical?
-            handler
-            (:test/handler
-             (choreo/current-fx-handlers))))
-
-       (is (identical?
-            sender
-            (choreo/current-send-handler)))
-
-       (is (identical?
-            errors
-            @choreo/error-handler))))))
-
-(deftest reset-runtime-clears-everything-test
-  (choreo/reset-runtime!)
-
-  (choreo/register-fx-machine!
-   :test/machine
-   (fn [_ctx]
-     nil))
-
-  (choreo/register-fx-handler!
-   :test/handler
-   (fn [_ctx]
-     nil))
-
-  (choreo/set-send-handler!
-   (fn [_action _execution]
-     nil))
-
-  (choreo/set-error-handler!
-   (fn [_payload]
-     nil))
-
-  (choreo/start!
-   await-plan
-   {:execution-id
-    "execution-1"})
-
-  (choreo/schedule-event!
-   "execution-1"
-   :late
-   60000
-   :continue)
-
-  (is (true?
-       (choreo/reset-runtime!)))
-
-  (is (= {}
-         @choreo/executions))
-
-  (is (= {}
-         @choreo/execution-metadata))
-
-  (is (= {}
-         @choreo/fx-machines))
-
-  (is (= {}
-         @choreo/fx-handlers))
-
-  (is (nil?
-       @choreo/send-handler))
-
-  (is (= {}
-         @choreo/timers))
-
-  (is (= []
-         @choreo/terminal-history))
-
-  (is (nil?
-       @choreo/error-handler)))
-
-;; -----------------------------------------------------------------------------
-;; Diagnostics
-;; -----------------------------------------------------------------------------
-
-(deftest diagnostics-test
-  (with-runtime*
-   (fn []
-     (choreo/register-fx-machine!
-      :test/machine
-      (fn [_ctx]
-        nil))
-
-     (choreo/register-fx-handler!
-      :test/handler
-      (fn [_ctx]
-        nil))
-
-     (choreo/set-send-handler!
-      (fn [_action _execution]
-        nil))
-
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "active-1"})
-
-     (choreo/start!
-      immediate-plan
-      {:execution-id
-       "terminal-1"})
-
-     (choreo/schedule-event!
-      "active-1"
-      :one
-      60000
-      :continue)
-
-     (choreo/schedule-event!
-      "active-1"
-      :two
-      60000
-      :failed)
-
-     (let [diagnostics
-           (choreo/diagnostics)]
-
-       (is (= choreo/runtime-type
-              (:gesso.live.browser.choreo/type
-               diagnostics)))
-
-       (is (= 1
-              (:active-count diagnostics)))
-
-       (is (= 1
-              (count
-               (:active diagnostics))))
-
-       (is (= 1
-              (count
-               (:terminal diagnostics))))
-
-       (is (= #{:test/machine}
-              (:registered-fx-machines
-               diagnostics)))
-
-       (is (= #{:test/handler}
-              (:registered-fx-handlers
-               diagnostics)))
-
-       (is (true?
-            (:send-handler?
-             diagnostics)))
-
-       (is (= 2
-              (:timer-count
-               diagnostics)))))))
-
-;; -----------------------------------------------------------------------------
-;; Metadata lifecycle
-;; -----------------------------------------------------------------------------
-
-(deftest metadata-is-visible-to-each-local-fx-boundary-test
-  (with-runtime*
-   (fn []
-     (let [contexts
-           (atom [])
-
-           two-fx-plan
-           (plan
-            :browser/one
-            {:browser/one
-             {:op :fx
-              :role :browser
-              :machine :test/one
-              :next :browser/two}
-
-             :browser/two
-             {:op :fx
-              :role :browser
-              :machine :test/two
-              :next :browser/wait}
-
-             :browser/wait
-             {:op :await
-              :role :browser
-              :events
-              {:done :browser/done}
-              :receives []}
-
-             :browser/done
-             {:op :return
-              :role :browser
-              :outcome :done}})]
-
-       (doseq [machine-id
-               [:test/one
-                :test/two]]
-
-         (registered-machine
-          machine-id
+    (let [errors (atom [])
+          shell-runtime (shell/create {:on-error #(swap! errors conj %)})
+          runtime (choreo/create
+                   shell-runtime
+                   {:local-actions
+                    {:browser/work
+                     (fn [_]
+                       (js/Promise.reject (js/Error. "local failed")))}})
+          result (choreo/start-execution!
+                  runtime :execution/rejected-local
+                  (browser-execution (local-once)))]
+      (is (= :pending (first (:effect-results result))))
+      (.then (js/Promise.resolve nil)
+             (fn [_]
+               (js/setTimeout
+                (fn []
+                  (is (false? (choreo/active? runtime :execution/rejected-local)))
+                  (is (seq @errors))
+                  (is (invariant-clean? runtime))
+                  (done))
+                0))))))
+
+;; =============================================================================
+;; Send payload and physical transport remain distinct
+;; =============================================================================
+
+(deftest send-payload-and-transport-are-distinct-physical-boundaries-test
+  (let [payload-context (atom nil)
+        transport-context (atom nil)
+        runtime
+        (choreo/create
+         (shell/create)
+         {:send-payload
           (fn [ctx]
-            (swap!
-             contexts
-             conj
-             ctx)
-            nil)))
-
-       (choreo/start!
-        two-fx-plan
-        {:execution-id
-         "execution-1"
-
-         :metadata
-         {:source "button"
-          :kind :request-action
-          :arbitrary {:kept true}}})
-
-       (is (= 2
-              (count
-               @contexts)))
-
-       (doseq [ctx
-               @contexts]
-
-         (is (= "button"
-                (get-in
-                 ctx
-                 [choreo/metadata-key
-                  :source])))
-
-         (is (= :request-action
-                (get-in
-                 ctx
-                 [choreo/metadata-key
-                  :kind])))
-
-         (is (= {:kept true}
-                (get-in
-                 ctx
-                 [choreo/metadata-key
-                  :arbitrary]))))))))
-
-(deftest terminal-diagnostic-metadata-is-intentionally-narrower-than-active-metadata-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id "execution-1"
-       :metadata
-       {:source "button"
-        :kind :request-action
-        :arbitrary :private}})
-
-     (is (= :private
-            (:arbitrary
-             (choreo/metadata
-              "execution-1"))))
-
-     (choreo/resume-event!
-      "execution-1"
-      :continue)
-
-     (let [terminal
-           (terminal-by-id
-            "execution-1")]
-
-       (is (= "button"
-              (get-in
-               terminal
-               [:metadata
-                :source])))
-
-       (is (= :request-action
-              (get-in
-               terminal
-               [:metadata
-                :kind])))
-
-       (is (not
-            (contains?
-             (:metadata terminal)
-             :arbitrary)))))))
-
-;; -----------------------------------------------------------------------------
-;; Resource state survives browser-process suspension
-;; -----------------------------------------------------------------------------
-
-(deftest held-resources-remain-visible-while-suspended-test
-  (with-runtime*
-   (fn []
-     (let [resource-plan
-           (plan
-            :browser/acquire
-            {:browser/acquire
-             {:op :acquire
-              :role :browser
-              :resource :target
-              :next :browser/wait}
-
-             :browser/wait
-             {:op :await
-              :role :browser
-              :events
-              {:release
-               :browser/release}
-              :receives []}
-
-             :browser/release
-             {:op :release
-              :role :browser
-              :resource :target
-              :next :browser/done}
-
-             :browser/done
-             {:op :return
-              :role :browser
-              :outcome :done}}
-            {:resources
-             {:target
-              {:owner :browser
-               :linear? true
-               :terminal-release? true}}})
-
-           execution
-           (choreo/start!
-            resource-plan
-            {:execution-id
-             "execution-1"})]
-
-       (is (= {:target 1}
-              (machine/held-resources
-               execution)))
-
-       (is (= {:target 1}
-              (:held-resources
-               (only-active-summary))))
-
-       (let [result
-             (choreo/resume-event!
-              "execution-1"
-              :release)]
-
-         (is (= :completed
-                (:status result)))
-
-         (is (= {}
-                (machine/held-resources
-                 (:execution result)))))))))
-
-;; -----------------------------------------------------------------------------
-;; Browser FX async contract
-;; -----------------------------------------------------------------------------
-
-(deftest local-fx-machine-may-schedule-but-must-return-synchronously-test
-  (with-runtime*
-   (fn []
-     (let [scheduled?
-           (atom false)]
-
-       (registered-machine
-        :test/prepare
-        (fn [_ctx]
-          (js/setTimeout
-           #(reset!
-             scheduled?
-             true)
-           0)
-
-          {:result
-           :synchronous}))
-
-       (let [execution
-             (choreo/start!
-              fx-plan
-              {:execution-id
-               "execution-1"})]
-
-         (is (= :synchronous
-                (machine/execution-result
-                 execution)))
-
-         ;; The timer callback belongs to the browser event loop, not FX
-         ;; completion. No assertion about its later value is necessary here.
-         (is (boolean?
-              @scheduled?)))))))
-
-(deftest promise-return-from-local-fx-machine-is-invalid-test
-  (with-runtime*
-   (fn []
-     (registered-machine
-      :test/prepare
-      (fn [_ctx]
-        (js/Promise.resolve
-         {:result 42})))
-
-     (let [data
-           (thrown-data
-            #(choreo/start!
-              fx-plan
-              {:execution-id
-               "execution-1"}))]
-
-       (is (= :gesso.live.browser.choreo/invalid-fx-result
-              (:error/type data)))
-
-       (is (instance?
-            js/Promise
-            (:result data)))))))
-
-;; -----------------------------------------------------------------------------
-;; A complete browser process
-;; -----------------------------------------------------------------------------
-
-(deftest complete-fx-send-message-process-test
-  (with-runtime*
-   (fn []
-     (let [fx-context
-           (atom nil)
-
-           sent
-           (atom nil)
-
-           payload
-           {:execution-id "wire-1"
-            :outcome :confirmed}]
-
-       (registered-machine
-        :test/prepare
-        (fn [ctx]
-          (reset!
-           fx-context
-           ctx)
-
-          {:execution-id "wire-1"
-           :action :claim}))
-
-       (choreo/set-send-handler!
-        (fn [action execution]
-          (reset!
-           sent
-           {:action action
-            :execution execution})))
-
-       (let [started
-             (choreo/start!
-              fx-send-await-plan
-              {:execution-id "process-1"
-               :metadata
-               {:source "claim-button"
-                :kind :request-action}})]
-
-         (is (machine/suspended?
-              started))
-
-         (is (= {:execution-id "wire-1"
-                 :action :claim}
-                (get-in
-                 @sent
-                 [:action
-                  :payload])))
-
-         (is (= "claim-button"
-                (get-in
-                 @fx-context
-                 [choreo/metadata-key
-                  :source])))
-
-         (let [finished
-               (choreo/resume-message!
-                "process-1"
-                {:from :server
-                 :to :browser
-                 :event :settled
-                 :via :http}
-                payload)]
-
-           (is (= :completed
-                  (:status finished)))
-
-           (is (= payload
-                  (:result finished)))
-
-           (is (false?
-                (choreo/active?
-                 "process-1")))
-
-           (is (= payload
-                  (:result
-                   (terminal-by-id
-                    "process-1"))))))))))
-
-;; -----------------------------------------------------------------------------
-;; Failure path remains modeled
-;; -----------------------------------------------------------------------------
-
-(deftest complete-fx-send-environment-failure-process-test
-  (with-runtime*
-   (fn []
-     (registered-machine
-      :test/prepare
-      (fn [_ctx]
-        {:execution-id "wire-1"
-         :action :claim}))
-
-     (choreo/set-send-handler!
-      (fn [_action _execution]
-        nil))
-
-     (let [started
-           (choreo/start!
-            fx-send-await-plan
-            {:execution-id
-             "process-1"})]
-
-       (is (machine/suspended?
-            started))
-
-       (let [finished
-             (choreo/resume-event!
-              "process-1"
-              :request-failed
-              {:status 500})]
-
-         (is (= :completed
-                (:status finished)))
-
-         (is (= {:outcome :request-failed}
-                (:result finished))))))))
-
-;; -----------------------------------------------------------------------------
-;; Error observer on resume
-;; -----------------------------------------------------------------------------
-
-(deftest resume-error-observer-gets-current-state-and-envelope-test
-  (with-runtime*
-   (fn []
-     (let [seen
-           (atom nil)]
-
-       (choreo/set-error-handler!
-        #(reset!
-          seen
-          %))
-
-       (choreo/start!
-        await-plan
-        {:execution-id
-         "execution-1"})
-
-       (let [envelope
-             (machine/event
-              :not-accepted
-              {:x 1})
-
-             error
-             (thrown
-              #(choreo/resume!
-                "execution-1"
-                envelope))]
-
-         (is (some?
-              error))
-
-         (is (= :resume
-                (:operation @seen)))
-
-         (is (= "execution-1"
-                (:execution-id @seen)))
-
-         (is (= :browser/wait
-                (:state @seen)))
-
-         (is (= envelope
-                (:event @seen)))
-
-         (is (identical?
-              error
-              (:error @seen))))))))
-
-;; -----------------------------------------------------------------------------
-;; reset-executions cancels active timers but does not record abort history
-;; -----------------------------------------------------------------------------
-
-(deftest reset-executions-is-process-teardown-not-semantic-abort-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"})
-
-     (choreo/schedule-event!
-      "execution-1"
-      :late
-      60000
-      :continue)
-
-     (choreo/reset-executions!)
-
-     (is (= 0
-            (choreo/execution-count)))
-
-     (is (= {}
-            @choreo/timers))
-
-     (is (= []
-            (choreo/terminal-summaries))))))
-
-;; -----------------------------------------------------------------------------
-;; Diagnostics stay bounded and do not expose active metadata wholesale
-;; -----------------------------------------------------------------------------
-
-(deftest active-summary-does-not-embed-browser-metadata-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id
-       "execution-1"
-
-       :metadata
-       {:source
-        (js-obj
-         "large"
-         true)
-
-        :kind
-        :request-action}})
-
-     (let [summary
-           (only-active-summary)]
-
-       (is (not
-            (contains?
-             summary
-             :metadata)))
-
-       (is (= :suspended
-              (:status summary)))))))
-
-;; -----------------------------------------------------------------------------
-;; Terminal trace survives retirement
-;; -----------------------------------------------------------------------------
-
-(deftest terminal-summary-retains-machine-trace-test
-  (with-runtime*
-   (fn []
-     (registered-machine
-      :test/prepare
-      (fn [_ctx]
-        {:result 42}))
-
-     (choreo/start!
-      fx-plan
-      {:execution-id
-       "execution-1"})
-
-     (let [terminal
-           (terminal-by-id
-            "execution-1")]
-
-       (is (= [:fx
-               :return]
-              (mapv
-               :op
-               (:trace terminal))))
-
-       (is (= :browser/prepare
-              (get-in
-               terminal
-               [:trace
-                0
-                :state])))
-
-       (is (= :browser/done
-              (get-in
-               terminal
-               [:trace
-                1
-                :state])))))))
-
-;; -----------------------------------------------------------------------------
-;; Public lookup behavior for missing executions
-;; -----------------------------------------------------------------------------
-
-(deftest missing-execution-lookups-test
-  (with-runtime*
-   (fn []
-     (is (nil?
-          (choreo/execution
-           "missing")))
-
-     (is (false?
-          (choreo/active?
-           "missing")))
-
-     (is (nil?
-          (choreo/metadata
-           "missing")))
-
-     (is (nil?
-          (choreo/execution-context
-           "missing")))
-
-     (is (nil?
-          (choreo/timer
-           "missing"
-           :timer))))))
-
-;; -----------------------------------------------------------------------------
-;; Cancel operations are deliberately idempotent
-;; -----------------------------------------------------------------------------
-
-(deftest timer-cancellation-is-idempotent-test
-  (with-runtime*
-   (fn []
-     (is (true?
-          (choreo/cancel-timer!
-           "missing"
-           :timer)))
-
-     (is (true?
-          (choreo/cancel-all-timers!
-           "missing")))
-
-     (is (= {}
-            @choreo/timers)))))
-
-;; -----------------------------------------------------------------------------
-;; Current registrations are process-global, not execution-local
-;; -----------------------------------------------------------------------------
-
-(deftest registration-changes-affect-subsequent-boundaries-test
-  (with-runtime*
-   (fn []
-     (let [dynamic-plan
-           (plan
-            :browser/wait
-            {:browser/wait
-             {:op :await
-              :role :browser
-              :events
-              {:continue
-               :browser/process}
-              :receives []}
-
-             :browser/process
-             {:op :fx
-              :role :browser
-              :machine :test/process
-              :next :browser/done}
-
-             :browser/done
-             {:op :return
-              :role :browser
-              :outcome :done
-              :value-key :value}})]
-
-       (choreo/start!
-        dynamic-plan
-        {:execution-id
-         "execution-1"})
-
-       (registered-machine
-        :test/process
-        (fn [_ctx]
-          {:value
-           :registered-later}))
-
-       (is (= :registered-later
-              (:result
-               (choreo/resume-event!
-                "execution-1"
-                :continue))))))))
-
-;; -----------------------------------------------------------------------------
-;; Multiple active executions remain isolated
-;; -----------------------------------------------------------------------------
-
-(deftest multiple-active-executions-are-isolated-test
-  (with-runtime*
-   (fn []
-     (choreo/start!
-      await-plan
-      {:execution-id "execution-1"
-       :context
-       {:owner :one}})
-
-     (choreo/start!
-      await-plan
-      {:execution-id "execution-2"
-       :context
-       {:owner :two}})
-
-     (is (= #{"execution-1"
-              "execution-2"}
-            (choreo/active-execution-ids)))
-
-     (choreo/resume-event!
-      "execution-1"
-      :continue
-      {:done :one})
-
-     (is (false?
-          (choreo/active?
-           "execution-1")))
-
-     (is (choreo/active?
-          "execution-2"))
-
-     (is (= {:owner :two}
-            (choreo/execution-context
-             "execution-2")))
-
-     (is (= :completed
-            (:status
-             (choreo/resume-event!
-              "execution-2"
-              :continue
-              {:done :two})))))))
-
-;; -----------------------------------------------------------------------------
-;; Terminal result shape is exactly portable-machine result
-;; -----------------------------------------------------------------------------
-
-(deftest terminal-result-is-not-wrapped-by-browser-adapter-test
-  (with-runtime*
-   (fn []
-     (let [value-plan
-           (plan
-            :browser/done
-            {:browser/done
-             {:op :return
-              :role :browser
-              :outcome :done
-              :value-key :value}})
-
-           value
-           {:arbitrary
-            [:portable
-             :result]}
-
-           execution
-           (choreo/start!
-            value-plan
-            {:execution-id "execution-1"
-             :context
-             {:value value}})]
-
-       (is (= value
-              (machine/execution-result
-               execution)))
-
-       (is (= value
-              (:result
-               (terminal-by-id
-                "execution-1"))))))))
-
-;; -----------------------------------------------------------------------------
-;; Browser adapter does not know DOM/HTMX/application semantics
-;; -----------------------------------------------------------------------------
-
-(deftest metadata-and-context-are-opaque-to-browser-choreography-adapter-test
-  (with-runtime*
-   (fn []
-     (let [opaque-context
-           {:source-element
-            #js {:fake true}
-
-            :application-command
-            :request/claim
-
-            :optimistic-target
-            "closest [data-request-card]"}
-
-           execution
-           (choreo/start!
-            await-plan
-            {:execution-id "execution-1"
-             :context
-             opaque-context})]
-
-       (is (= opaque-context
-              (machine/execution-context
-               execution)))
-
-       (is (= opaque-context
-              (choreo/execution-context
-               "execution-1")))))))
+            (reset! payload-context ctx)
+            {:wire 7})
+          :transport-send
+          (fn [ctx]
+            (reset! transport-context ctx)
+            :sent)})
+        result
+        (choreo/start-execution!
+         runtime :execution/send
+         (browser-execution (send-once)))]
+    (is (nil? (:execution-ref result)))
+    (is (= :execution/send (get @payload-context choreo/execution-id-key)))
+    (is (= :browser/message (get-in @payload-context [choreo/action-key :event])))
+    (is (= {:wire 7}
+           (get-in @transport-context [choreo/message-key :payload])))
+    (is (= :browser/message
+           (get-in @transport-context [choreo/message-key :event])))
+    (is (not (contains? @payload-context choreo/message-key)))
+    (is (not (contains? @transport-context choreo/action-key)))
+    (is (false? (choreo/active? runtime :execution/send)))
+    (is (invariant-clean? runtime))))
+
+(deftest missing-send-payload-handler-retires-execution-test
+  (let [runtime (choreo/create (shell/create)
+                               {:transport-send (fn [_] :sent)})
+        result (choreo/start-execution!
+                runtime :execution/no-payload
+                (browser-execution (send-once)))]
+    (is (= :failed (first (:effect-results result))))
+    (is (false? (choreo/active? runtime :execution/no-payload)))
+    (is (invariant-clean? runtime))))
+
+(deftest missing-transport-handler-leaves-send-boundary-retryable-test
+  (let [transported (atom nil)
+        runtime (choreo/create (shell/create)
+                               {:send-payload (fn [_] {:wire 1})})
+        result (choreo/start-execution!
+                runtime :execution/no-transport
+                (browser-execution (send-once)))
+        ref (:execution-ref result)]
+    (is (= :dispatched (:status result)))
+    ;; Physical transport failure must not fabricate successful semantic send.
+    (is (choreo/active? runtime :execution/no-transport))
+    (is (choreo/execution-ref? ref))
+    (choreo/set-transport-handler!
+     runtime
+     (fn [ctx]
+       (reset! transported ctx)
+       :sent))
+    (choreo/retry! runtime ref)
+    (is (= {:wire 1}
+           (get-in @transported [choreo/message-key :payload])))
+    (is (false? (choreo/active? runtime :execution/no-transport)))
+    (is (invariant-clean? runtime))))
+
+;; =============================================================================
+;; Captured generation is mandatory for every external callback
+;; =============================================================================
+
+(deftest environment-resumption-uses-captured-generation-test
+  (let [runtime (choreo/create (shell/create))
+        start (choreo/start-execution!
+               runtime :execution/environment
+               (browser-execution (await-once)))
+        execution-ref (:execution-ref start)]
+    (is (choreo/execution-ref? execution-ref))
+    (is (choreo/active? runtime :execution/environment))
+    (choreo/deliver-environment!
+     runtime execution-ref
+     (machine/environment-event :browser :browser/continue))
+    (is (false? (choreo/active? runtime :execution/environment)))
+    (is (invariant-clean? runtime))))
+
+(deftest stale-environment-callback-cannot-resume-replacement-generation-test
+  (let [runtime (choreo/create (shell/create))
+        first-start (choreo/start-execution!
+                     runtime :execution/replaced
+                     (browser-execution (await-once)))
+        old-ref (:execution-ref first-start)
+        _ (choreo/start-execution!
+           runtime :execution/replaced
+           (browser-execution (await-once))
+           {:replace-execution? true})
+        new-ref (choreo/execution-ref runtime :execution/replaced)
+        envelope (machine/environment-event :browser :browser/continue)
+        stale (choreo/deliver-environment! runtime old-ref envelope)]
+    (is (not= (:generation old-ref) (:generation new-ref)))
+    (is (= :stale-execution-generation
+           (get-in stale [:effects 0 1 :reason])))
+    (is (choreo/active? runtime :execution/replaced))
+    (choreo/deliver-environment! runtime new-ref envelope)
+    (is (false? (choreo/active? runtime :execution/replaced)))
+    (is (invariant-clean? runtime))))
+
+(deftest participant-message-delivery-goes-through-adapter-test
+  (let [runtime (choreo/create (shell/create))
+        start (choreo/start-execution!
+               runtime :execution/message
+               (browser-execution (receive-once)))
+        ref (:execution-ref start)
+        envelope (machine/message :server :browser :server/message {:answer 42})]
+    (is (choreo/active? runtime :execution/message))
+    (choreo/deliver-message! runtime ref :physical/message-1 envelope)
+    (is (false? (choreo/active? runtime :execution/message)))
+    (is (invariant-clean? runtime))))
+
+(deftest stale-participant-message-cannot-resume-replacement-generation-test
+  (let [runtime (choreo/create (shell/create))
+        first-start (choreo/start-execution!
+                     runtime :execution/message-replaced
+                     (browser-execution (receive-once)))
+        old-ref (:execution-ref first-start)
+        _ (choreo/start-execution!
+           runtime :execution/message-replaced
+           (browser-execution (receive-once))
+           {:replace-execution? true})
+        new-ref (choreo/execution-ref runtime :execution/message-replaced)
+        envelope (machine/message :server :browser :server/message {:answer 42})
+        stale (choreo/deliver-message!
+               runtime old-ref :physical/stale-message envelope)]
+    (is (= :stale-execution-generation
+           (get-in stale [:effects 0 1 :reason])))
+    (is (choreo/active? runtime :execution/message-replaced))
+    (choreo/deliver-message!
+     runtime new-ref :physical/current-message envelope)
+    (is (false? (choreo/active? runtime :execution/message-replaced)))
+    (is (invariant-clean? runtime))))
+
+(deftest external-callback-api-requires-an-adapter-issued-reference-shape-test
+  (let [runtime (choreo/create (shell/create))
+        envelope (machine/environment-event :browser :browser/continue)]
+    (doseq [bad-ref [nil
+                     {}
+                     {:execution-id :e :generation 1}
+                     {:gesso.live.browser.choreo/type choreo/execution-ref-type
+                      :execution-id :e
+                      :generation 0}]]
+      (is (= :invalid-execution-ref
+             (:error/kind
+              (thrown-data
+               #(choreo/deliver-environment! runtime bad-ref envelope))))))))
+
+;; =============================================================================
+;; Timer ownership remains adapter + shell
+;; =============================================================================
+
+(deftest timer-schedule-and-fire-use-adapter-generation-test
+  (let [scheduled (atom nil)
+        shell-runtime
+        (shell/create
+         {:set-timeout!
+          (fn [callback delay-ms]
+            (reset! scheduled {:callback callback :delay-ms delay-ms})
+            :physical/handle)
+          :clear-timeout! (fn [_] nil)})
+        runtime (choreo/create shell-runtime)
+        start (choreo/start-execution!
+               runtime :execution/timer
+               (browser-execution (await-timeout)))
+        ref (:execution-ref start)
+        envelope (machine/environment-event :browser :browser/timeout)]
+    (choreo/schedule! runtime ref :timer/one 25 envelope)
+    (is (= 25 (:delay-ms @scheduled)))
+    (is (choreo/active? runtime :execution/timer))
+    ((:callback @scheduled))
+    (is (false? (choreo/active? runtime :execution/timer)))
+    (is (invariant-clean? runtime))))
+
+(deftest timer-cancel-removes-physical-resource-and-late-fire-is-stale-test
+  (let [scheduled (atom nil)
+        cleared (atom [])
+        shell-runtime
+        (shell/create
+         {:set-timeout!
+          (fn [callback _delay-ms]
+            (reset! scheduled callback)
+            :physical/handle)
+          :clear-timeout!
+          (fn [handle]
+            (swap! cleared conj handle))})
+        runtime (choreo/create shell-runtime)
+        start (choreo/start-execution!
+               runtime :execution/cancel-timer
+               (browser-execution (await-timeout)))
+        ref (:execution-ref start)
+        envelope (machine/environment-event :browser :browser/timeout)]
+    (choreo/schedule! runtime ref :timer/one 10 envelope)
+    (choreo/cancel-timer! runtime ref :timer/one)
+    (is (= [:physical/handle] @cleared))
+    (is (choreo/active? runtime :execution/cancel-timer))
+    ;; Simulate a browser callback which escaped clearTimeout.
+    (@scheduled)
+    (is (choreo/active? runtime :execution/cancel-timer))
+    (is (invariant-clean? runtime))))
+
+;; =============================================================================
+;; Start/retire/query API
+;; =============================================================================
+
+(deftest start-plan-is-only-a-convenience-over-portable-machine-start-test
+  (let [runtime (choreo/create (shell/create))
+        executable-plan (project/project (await-once) :browser)
+        result (choreo/start-plan! runtime :execution/plan executable-plan)
+        ref (:execution-ref result)]
+    (is (choreo/execution-ref? ref))
+    (is (machine/execution? (choreo/execution runtime :execution/plan)))
+    (is (= #{:execution/plan} (choreo/active-execution-ids runtime)))
+    (is (invariant-clean? runtime))))
+
+(deftest start-validation-does-not-create-an-alternate-machine-format-test
+  (let [runtime (choreo/create (shell/create))]
+    (is (= :invalid-machine-execution
+           (:error/kind
+            (thrown-data
+             #(choreo/start-execution! runtime :execution/bad {:not :machine})))))
+    (is (= :unknown-start-options
+           (:error/kind
+            (thrown-data
+             #(choreo/start-execution!
+               runtime :execution/bad-options
+               (browser-execution (await-once))
+               {:metadata {}})))))
+    (is (= #{} (choreo/active-execution-ids runtime)))))
+
+(deftest retire-submits-generation-bound-retirement-test
+  (let [runtime (choreo/create (shell/create))
+        start (choreo/start-execution!
+               runtime :execution/retire
+               (browser-execution (await-once)))
+        ref (:execution-ref start)]
+    (is (choreo/active? runtime :execution/retire))
+    (choreo/retire! runtime ref :test/retire)
+    (is (false? (choreo/active? runtime :execution/retire)))
+    (is (invariant-clean? runtime))))
+
+(deftest stale-retire-cannot-retire-new-generation-test
+  (let [runtime (choreo/create (shell/create))
+        first-ref
+        (:execution-ref
+         (choreo/start-execution!
+          runtime :execution/stale-retire
+          (browser-execution (await-once))))
+        _ (choreo/start-execution!
+           runtime :execution/stale-retire
+           (browser-execution (await-once))
+           {:replace-execution? true})
+        current-ref (choreo/execution-ref runtime :execution/stale-retire)
+        stale (choreo/retire! runtime first-ref :stale)]
+    (is (= :stale-execution-generation
+           (get-in stale [:effects 0 1 :reason])))
+    (is (choreo/active? runtime :execution/stale-retire))
+    (choreo/retire! runtime current-ref :current)
+    (is (false? (choreo/active? runtime :execution/stale-retire)))
+    (is (invariant-clean? runtime))))
+
+;; =============================================================================
+;; Detach / diagnostics
+;; =============================================================================
+
+(deftest detach-does-not-retire-semantic-work-test
+  (let [shell-runtime (shell/create)
+        runtime (choreo/create shell-runtime)
+        _ (choreo/start-execution!
+           runtime :execution/live
+           (browser-execution (await-once)))]
+    (is (choreo/active? runtime :execution/live))
+    (is (= :detached (choreo/detach! runtime)))
+    (is (choreo/active? runtime :execution/live))
+    (is (empty? (shell/handlers shell-runtime)))
+    (is (invariant-clean? runtime))))
+
+(deftest detach-removes-only-handler-functions-it-installed-test
+  (let [shell-runtime (shell/create)
+        runtime (choreo/create shell-runtime)
+        replacement (fn [_] :replacement)]
+    (shell/register-handler! shell-runtime :machine/local replacement)
+    (is (= :detached (choreo/detach! runtime)))
+    (is (identical? replacement
+                    (:machine/local (shell/handlers shell-runtime))))
+    (is (not (contains? (shell/handlers shell-runtime) :machine/send)))
+    (is (not (contains? (shell/handlers shell-runtime) :transport/send)))))
+
+(deftest diagnostics-exposes-configuration-not-host-functions-or-private-state-test
+  (let [local-handler (fn [_] {:value 1})
+        fx-handler (fn [_ value] value)
+        send-handler (fn [_] {})
+        transport-handler (fn [_] :sent)
+        runtime
+        (choreo/create
+         (shell/create)
+         {:local-actions {:browser/work local-handler}
+          :fx-handlers {:test/fx fx-handler}
+          :send-payload send-handler
+          :transport-send transport-handler})
+        diagnostics (choreo/diagnostics runtime)]
+    (is (= #{:browser/work} (:registered-local-actions diagnostics)))
+    (is (= #{:test/fx} (:registered-fx-handlers diagnostics)))
+    (is (true? (:send-payload-handler? diagnostics)))
+    (is (true? (:transport-handler? diagnostics)))
+    (is (= choreo/owned-effect-kinds (:attached-effect-kinds diagnostics)))
+    (is (not-any? fn? (tree-seq coll? seq diagnostics)))
+    (is (not (contains? diagnostics :executions)))
+    (is (not (contains? diagnostics :timers)))
+    (is (not (contains? diagnostics :terminal-history)))))

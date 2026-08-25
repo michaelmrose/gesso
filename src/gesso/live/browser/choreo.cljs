@@ -1,33 +1,43 @@
 (ns gesso.live.browser.choreo
-  "Browser-process adapter for portable Gesso choreography endpoints.
+  "Physical browser binding for portable Gesso Choreo executions.
 
-   gesso.choreo.machine owns protocol execution. This namespace owns the
-   stateful browser process around it:
+   Portable protocol state lives in gesso.choreo.machine. Browser semantic
+   ownership, generations, stale-callback rejection, timers, and execution
+   retirement live in gesso.live.browser.adapter. Imperative resource handling
+   lives in gesso.live.browser.shell.
 
-   - active execution storage
-   - local FX-machine registration and invocation
-   - browser FX-handler registration
-   - transport send handoff
-   - automatic driving through synchronous :fx/:send boundaries
-   - suspension/resumption on modeled events and participant messages
-   - execution-owned timers
-   - bounded terminal diagnostics
-   - harmless rejection of late delivery to retired executions
+   This namespace deliberately owns none of those state machines. It binds the
+   shell's three Choreo-facing physical effects to browser/application handlers:
 
-   It deliberately does not know optimistic semantics, DOM replacement,
-   continuity policy, HTMX details, SSE details, or application commands.
-   Those concerns register FX machines/handlers and a send adapter here.
+     :machine/local
+       dispatch a named role-local action (commonly a browser.fx machine)
 
-   Async work is not an FX feature. A local FX machine may schedule browser
-   work, but the choreography must then suspend on an explicit event. The
-   callback resumes that suspended execution later."
+     :machine/send
+       construct the payload for the current portable send boundary
+
+     :transport/send
+       hand the adapter-constructed participant message to physical transport
+
+   It also provides small helpers which submit normalized execution/message/
+   environment/timer events to the shell. Every callback that can advance a
+   portable machine carries an adapter-issued execution generation. A callback
+   never looks up the current generation and then resumes it; stale generations
+   are submitted unchanged so the adapter remains the sole arbiter.
+
+   There are no namespace-global execution registries, timers, target locks,
+   terminal histories, send state machines, or alternate resume paths here.
+   Registration atoms contain only physical implementation configuration and are
+   scoped to one runtime instance."
   (:require
    [gesso.choreo.machine :as machine]
-   [gesso.live.browser.fx :as fx]))
+   [gesso.live.browser.adapter :as adapter]
+   [gesso.live.browser.shell :as shell]))
 
-;; -----------------------------------------------------------------------------
-;; Runtime identity and public context keys
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Public identity / context vocabulary
+;; =============================================================================
+
+(def runtime-version 2)
 
 (def runtime-type
   :gesso.live.browser.choreo/runtime)
@@ -35,652 +45,628 @@
 (def execution-id-key
   :gesso.live.browser.choreo/execution-id)
 
+(def generation-key
+  :gesso.live.browser.choreo/generation)
+
+(def effect-generation-key
+  :gesso.live.browser.choreo/effect-generation)
+
 (def action-key
   :gesso.live.browser.choreo/action)
 
-(def metadata-key
-  :gesso.live.browser.choreo/metadata)
+(def message-key
+  :gesso.live.browser.choreo/message)
 
-(def resume-envelope-key
-  :gesso.live.browser.choreo/resume-envelope)
+(def execution-ref-type
+  :gesso.live.browser.choreo/execution-ref)
 
-(def default-terminal-history-limit 64)
+(def option-keys
+  #{:local-actions
+    :fx-handlers
+    :send-payload
+    :transport-send})
 
-;; -----------------------------------------------------------------------------
-;; Browser-process stores
-;; -----------------------------------------------------------------------------
+(def owned-effect-kinds
+  #{:machine/local
+    :machine/send
+    :transport/send})
 
-(defonce executions (atom {}))
-(defonce execution-metadata (atom {}))
-(defonce fx-machines (atom {}))
-(defonce fx-handlers (atom {}))
-(defonce send-handler (atom nil))
-(defonce timers (atom {}))
-(defonce terminal-history (atom []))
-(defonce error-handler (atom nil))
+;; =============================================================================
+;; Errors / validation
+;; =============================================================================
 
-;; -----------------------------------------------------------------------------
-;; Small helpers
-;; -----------------------------------------------------------------------------
-
-(defn now-ms
-  []
-  (.getTime (js/Date.)))
-
-(defn- non-blank-string?
-  [x]
-  (and (string? x)
-       (not= "" (.trim x))))
-
-(defn- require-execution-id!
-  [execution-id]
-  (when-not (or (keyword? execution-id)
-                (uuid? execution-id)
-                (non-blank-string? execution-id))
-    (throw
-     (ex-info
-      "Browser choreography execution id must be a keyword, UUID, or non-blank string."
-      {:error/type :gesso.live.browser.choreo/invalid-execution-id
-       :execution-id execution-id})))
-  execution-id)
-
-(defn- require-keyword!
-  [label value]
-  (when-not (keyword? value)
-    (throw
-     (ex-info
-      (str label " must be a keyword.")
-      {:error/type :gesso.live.browser.choreo/invalid-keyword
-       :label label
-       :value value})))
-  value)
-
-(defn- require-callable!
-  [label value]
-  (when-not (ifn? value)
-    (throw
-     (ex-info
-      (str label " must be callable.")
-      {:error/type :gesso.live.browser.choreo/invalid-callable
-       :label label
-       :value value})))
-  value)
+(defn- choreo-error
+  ([kind message data]
+   (choreo-error kind message data nil))
+  ([kind message data cause]
+   (ex-info
+    message
+    (merge
+     {:error/type :gesso.live.browser.choreo/error
+      :error/kind kind}
+     data)
+    cause)))
 
 (defn- require-map!
   [label value]
   (when-not (map? value)
     (throw
-     (ex-info
+     (choreo-error
+      :invalid-map
       (str label " must be a map.")
-      {:error/type :gesso.live.browser.choreo/invalid-map
-       :label label
+      {:label label
        :value value})))
   value)
 
-(defn- require-nonnegative-number!
+(defn- require-callable!
   [label value]
-  (when-not (and (number? value)
-                 (not (js/isNaN value))
-                 (not (neg? value)))
+  (when-not (fn? value)
     (throw
-     (ex-info
-      (str label " must be a non-negative number.")
-      {:error/type :gesso.live.browser.choreo/invalid-number
-       :label label
+     (choreo-error
+      :invalid-callable
+      (str label " must be callable.")
+      {:label label
        :value value})))
   value)
 
-(defn- trim-history
-  [history limit]
-  (let [history' (vec history)
-        excess (- (count history') limit)]
-    (if (pos? excess)
-      (subvec history' excess)
-      history')))
+(defn- require-optional-callable!
+  [label value]
+  (when (some? value)
+    (require-callable! label value))
+  value)
 
-(defn- notify-error!
-  [operation execution-id throwable data]
-  (let [payload
-        (merge
-         {:operation operation
-          :execution-id execution-id
-          :error throwable}
-         data)]
-    (when-some [handler @error-handler]
-      (try
-        (handler payload)
-        (catch :default _
-          nil)))
-    payload))
-
-(defn set-error-handler!
-  "Install a diagnostic error observer, or nil to clear it."
-  [handler]
-  (when-not (or (nil? handler)
-                (ifn? handler))
+(defn- require-keyword!
+  [label value]
+  (when-not (keyword? value)
     (throw
-     (ex-info
-      "Browser choreography error handler must be callable or nil."
-      {:error/type :gesso.live.browser.choreo/invalid-error-handler
-       :handler handler})))
-  (reset! error-handler handler)
-  true)
+     (choreo-error
+      :invalid-keyword
+      (str label " must be a keyword.")
+      {:label label
+       :value value})))
+  value)
 
-;; -----------------------------------------------------------------------------
-;; FX registration
-;; -----------------------------------------------------------------------------
-
-(defn register-fx-machine!
-  "Register or replace one role-local browser FX machine.
-
-   machine-fn is normally produced by gesso.live.browser.fx/machine."
-  [machine-id machine-fn]
-  (require-keyword! "Browser FX machine id" machine-id)
-  (require-callable! "Browser FX machine" machine-fn)
-  (swap! fx-machines assoc machine-id machine-fn)
-  machine-id)
-
-(defn unregister-fx-machine!
-  [machine-id]
-  (swap! fx-machines dissoc machine-id)
-  machine-id)
-
-(defn registered-fx-machines
-  []
-  (set (keys @fx-machines)))
-
-(defn fx-machine
-  [machine-id]
-  (get @fx-machines machine-id))
-
-(defn register-fx-handler!
-  "Register or replace one Biff-style browser FX effect handler."
-  [handler-id handler]
-  (require-keyword! "Browser FX handler id" handler-id)
-  (require-callable! "Browser FX handler" handler)
-  (swap! fx-handlers assoc handler-id handler)
-  handler-id)
-
-(defn unregister-fx-handler!
-  [handler-id]
-  (swap! fx-handlers dissoc handler-id)
-  handler-id)
-
-(defn registered-fx-handlers
-  []
-  (set (keys @fx-handlers)))
-
-(defn current-fx-handlers
-  []
-  @fx-handlers)
-
-;; -----------------------------------------------------------------------------
-;; Transport handoff
-;; -----------------------------------------------------------------------------
-
-(defn set-send-handler!
-  "Install the transport handoff for projected :send boundaries.
-
-   Handler shape:
-
-     (fn [action execution] ...)
-
-   Returning normally means the send has been handed off successfully and the
-   protocol machine may advance. Throwing leaves the execution failed at the
-   adapter boundary and the error is propagated.
-
-   The handler is deliberately transport-neutral. HTMX, fetch, SSE, or another
-   integration may interpret the projected send action outside this namespace."
-  [handler]
-  (when-not (or (nil? handler)
-                (ifn? handler))
+(defn- require-non-nil!
+  [label value]
+  (when (nil? value)
     (throw
-     (ex-info
-      "Browser choreography send handler must be callable or nil."
-      {:error/type :gesso.live.browser.choreo/invalid-send-handler
-       :handler handler})))
-  (reset! send-handler handler)
-  true)
+     (choreo-error
+      :missing-value
+      (str label " must be non-nil.")
+      {:label label})))
+  value)
 
-(defn current-send-handler
-  []
-  @send-handler)
+(defn- require-nonnegative-integer!
+  [label value]
+  (when-not (and (integer? value)
+                 (<= 0 value))
+    (throw
+     (choreo-error
+      :invalid-nonnegative-integer
+      (str label " must be a non-negative integer.")
+      {:label label
+       :value value})))
+  value)
 
-;; -----------------------------------------------------------------------------
-;; Execution lookup and diagnostics
-;; -----------------------------------------------------------------------------
+(defn- require-registration-map!
+  [label value]
+  (require-map! label value)
+  (doseq [[id handler] value]
+    (require-keyword! (str label " key") id)
+    (require-callable! (str label " handler") handler))
+  value)
+
+(defn- check-option-keys!
+  [options]
+  (let [unknown (seq (remove option-keys (keys options)))]
+    (when unknown
+      (throw
+       (choreo-error
+        :unknown-options
+        "Browser Choreo options contain unsupported keys."
+        {:unknown-keys (set unknown)
+         :allowed-keys option-keys}))))
+  options)
+
+;; =============================================================================
+;; Runtime / execution references
+;; =============================================================================
+
+(defn runtime?
+  [value]
+  (and
+   (map? value)
+   (= runtime-type (:gesso.live.browser.choreo/type value))
+   (= runtime-version (:gesso.live.browser.choreo/version value))
+   (shell/shell? (:shell value))
+   (some? (:local-actions value))
+   (some? (:fx-handlers value))
+   (some? (:send-payload value))
+   (some? (:transport-send value))
+   (some? (:installed-handlers value))))
+
+(defn require-runtime!
+  [runtime]
+  (when-not (runtime? runtime)
+    (throw
+     (choreo-error
+      :invalid-runtime
+      "Expected a Gesso Live browser Choreo runtime."
+      {:runtime runtime})))
+  runtime)
+
+(defn shell-runtime
+  [runtime]
+  (:shell (require-runtime! runtime)))
+
+(defn state
+  "Return the shared pure browser AdapterState."
+  [runtime]
+  (shell/state (shell-runtime runtime)))
+
+(defn execution-ref?
+  [value]
+  (and
+   (map? value)
+   (= execution-ref-type
+      (:gesso.live.browser.choreo/type value))
+   (some? (:execution-id value))
+   (integer? (:generation value))
+   (pos? (:generation value))))
+
+(defn require-execution-ref!
+  [value]
+  (when-not (execution-ref? value)
+    (throw
+     (choreo-error
+      :invalid-execution-ref
+      "Expected an adapter-issued browser Choreo execution reference."
+      {:execution-ref value})))
+  value)
+
+(defn- ->execution-ref
+  [execution-id generation]
+  {:gesso.live.browser.choreo/type execution-ref-type
+   :execution-id execution-id
+   :generation generation})
+
+(defn execution-ref
+  "Return the current adapter-issued execution reference, or nil.
+
+   This is intended for synchronous setup/correlation. Long-lived callbacks must
+   retain the reference they were originally given; they must not call this
+   function later to acquire a newer generation."
+  [runtime execution-id]
+  (let [generation
+        (adapter/execution-generation
+         (state runtime)
+         execution-id)]
+    (when generation
+      (->execution-ref execution-id generation))))
+
+(defn execution-record
+  [runtime execution-id]
+  (adapter/execution (state runtime) execution-id))
 
 (defn execution
-  [execution-id]
-  (get @executions execution-id))
+  "Return the active portable machine execution, or nil."
+  [runtime execution-id]
+  (:execution (execution-record runtime execution-id)))
 
 (defn active?
-  [execution-id]
-  (contains? @executions execution-id))
+  [runtime execution-id]
+  (some? (execution-record runtime execution-id)))
 
 (defn active-execution-ids
-  []
-  (set (keys @executions)))
+  [runtime]
+  (set (keys (:executions (state runtime)))))
 
-(defn execution-count
-  []
-  (count @executions))
+;; =============================================================================
+;; Physical registration
+;; =============================================================================
 
-(defn metadata
-  [execution-id]
-  (get @execution-metadata execution-id))
+(defn local-actions
+  [runtime]
+  @(:local-actions (require-runtime! runtime)))
 
-(defn execution-context
-  [execution-id]
-  (some-> (execution execution-id)
-          machine/execution-context))
+(defn fx-handlers
+  [runtime]
+  @(:fx-handlers (require-runtime! runtime)))
 
-(defn- execution-summary
-  [execution]
-  {:execution-id (:execution-id execution)
-   :plan-name (:plan-name execution)
-   :role (:role execution)
-   :status (:status execution)
-   :state (:state execution)
-   :action (machine/pending-action execution)
-   :awaiting (:awaiting execution)
-   :held-resources (machine/held-resources execution)
-   :result (machine/execution-result execution)
-   :trace (machine/execution-trace execution)})
+(defn register-local-action!
+  "Register one physical realization of a projected Choreo :local action.
 
-(defn active-summaries
-  []
-  (mapv execution-summary
-        (vals @executions)))
+   Handler shape is ctx -> nil|map|Promise<nil|map>. browser.fx/machine values
+   satisfy this contract and receive the current :biff.fx/handlers map in ctx."
+  [runtime action-id handler]
+  (let [runtime (require-runtime! runtime)]
+    (require-keyword! "Browser Choreo local action id" action-id)
+    (require-callable! "Browser Choreo local action" handler)
+    (swap! (:local-actions runtime) assoc action-id handler)
+    action-id))
 
-(defn terminal-summaries
-  []
-  @terminal-history)
+(defn unregister-local-action!
+  [runtime action-id]
+  (let [runtime (require-runtime! runtime)]
+    (swap! (:local-actions runtime) dissoc action-id)
+    action-id))
 
-;; -----------------------------------------------------------------------------
-;; Timer ownership
-;; -----------------------------------------------------------------------------
+(defn register-fx-handler!
+  "Register one Biff-style browser FX handler used by registered local machines."
+  [runtime handler-id handler]
+  (let [runtime (require-runtime! runtime)]
+    (require-keyword! "Browser FX handler id" handler-id)
+    (require-callable! "Browser FX handler" handler)
+    (swap! (:fx-handlers runtime) assoc handler-id handler)
+    handler-id))
 
-(defn timer
-  [execution-id timer-key]
-  (get-in @timers [execution-id timer-key]))
+(defn unregister-fx-handler!
+  [runtime handler-id]
+  (let [runtime (require-runtime! runtime)]
+    (swap! (:fx-handlers runtime) dissoc handler-id)
+    handler-id))
 
-(defn cancel-timer!
-  "Cancel one execution-owned browser timeout. Idempotent."
-  [execution-id timer-key]
-  (when-some [handle (timer execution-id timer-key)]
-    (js/clearTimeout handle))
-  (swap!
-   timers
-   (fn [all]
-     (let [remaining (dissoc (get all execution-id {}) timer-key)]
-       (if (seq remaining)
-         (assoc all execution-id remaining)
-         (dissoc all execution-id)))))
-  true)
+(defn set-send-payload-handler!
+  "Install the physical payload constructor for projected send boundaries.
 
-(defn cancel-all-timers!
-  [execution-id]
-  (doseq [[_timer-key handle] (get @timers execution-id)]
-    (js/clearTimeout handle))
-  (swap! timers dissoc execution-id)
-  true)
+   Handler shape is ctx -> map|Promise<map>. The portable machine validates the
+   returned semantic payload before the adapter exposes :transport/send."
+  [runtime handler]
+  (let [runtime (require-runtime! runtime)]
+    (require-optional-callable! "Browser Choreo send-payload handler" handler)
+    (reset! (:send-payload runtime) handler)
+    true))
 
-(declare resume-event!)
+(defn send-payload-handler
+  [runtime]
+  @(:send-payload (require-runtime! runtime)))
 
-(defn schedule-event!
-  "Schedule a modeled environmental event for one execution.
+(defn set-transport-handler!
+  "Install the physical participant-message transport.
 
-   Scheduling may happen while an FX machine is still being driven. JavaScript
-   cannot run the timeout callback until the current stack returns; by then a
-   successful drive has committed the resulting suspended execution. If the
-   drive fails, its cleanup cancels every timer owned by that execution."
-  ([execution-id timer-key delay-ms event-id]
-   (schedule-event! execution-id timer-key delay-ms event-id nil))
-  ([execution-id timer-key delay-ms event-id data]
-   (require-execution-id! execution-id)
-   (require-keyword! "Browser choreography timer key" timer-key)
-   (require-nonnegative-number! "Browser choreography timer delay" delay-ms)
-   (require-keyword! "Browser choreography timer event" event-id)
-   (cancel-timer! execution-id timer-key)
-   (let [handle
-         (js/setTimeout
-          (fn []
-            (swap!
-             timers
-             (fn [all]
-               (let [remaining
-                     (dissoc (get all execution-id {}) timer-key)]
-                 (if (seq remaining)
-                   (assoc all execution-id remaining)
-                   (dissoc all execution-id)))))
-            (resume-event! execution-id event-id data))
-          delay-ms)]
-     (swap! timers assoc-in [execution-id timer-key] handle)
-     handle)))
+   Handler shape is ctx -> completion or
 
-;; -----------------------------------------------------------------------------
-;; Local boundary execution
-;; -----------------------------------------------------------------------------
+     {:completion completion
+      :cancel!    optional-zero-arity-fn}
 
-(defn- fx-context
-  [execution action resume-envelope]
-  (merge
-   (machine/execution-context execution)
-   {execution-id-key (:execution-id execution)
-    action-key action
-    metadata-key (metadata (:execution-id execution))
-    fx/handlers-key @fx-handlers}
-   (when resume-envelope
-     {resume-envelope-key resume-envelope})))
+   and is passed through to shell transport ownership unchanged."
+  [runtime handler]
+  (let [runtime (require-runtime! runtime)]
+    (require-optional-callable! "Browser Choreo transport handler" handler)
+    (reset! (:transport-send runtime) handler)
+    true))
 
-(defn- run-fx-boundary
-  [execution resume-envelope]
-  (let [action (machine/pending-action execution)
-        machine-id (:machine action)
-        machine-fn (fx-machine machine-id)]
-    (when-not machine-fn
-      (throw
-       (ex-info
-        "No browser FX machine is registered for the choreography boundary."
-        {:error/type :gesso.live.browser.choreo/missing-fx-machine
-         :execution-id (:execution-id execution)
-         :state (:state execution)
-         :machine machine-id
-         :registered (registered-fx-machines)})))
-    (let [result (machine-fn (fx-context execution action resume-envelope))]
-      (when-not (or (nil? result)
-                    (map? result))
-        (throw
-         (ex-info
-          "Browser FX machine must return a map or nil to choreography."
-          {:error/type :gesso.live.browser.choreo/invalid-fx-result
-           :execution-id (:execution-id execution)
-           :state (:state execution)
-           :machine machine-id
-           :result result})))
-      (machine/complete-fx execution result))))
+(defn transport-handler
+  [runtime]
+  @(:transport-send (require-runtime! runtime)))
 
-(defn- handoff-send-boundary
-  [execution]
-  (let [action (machine/pending-action execution)
-        handler @send-handler]
+;; =============================================================================
+;; Physical effect realization
+;; =============================================================================
+
+(defn- local-action-context
+  [runtime effect]
+  (let [action (:action effect)]
+    (merge
+     (:inputs action)
+     {execution-id-key (:execution-id effect)
+      generation-key (:generation effect)
+      effect-generation-key (:effect-generation effect)
+      action-key action
+      :biff.fx/handlers @(:fx-handlers runtime)})))
+
+(defn- send-context
+  [effect]
+  {execution-id-key (:execution-id effect)
+   generation-key (:generation effect)
+   effect-generation-key (:effect-generation effect)
+   action-key (:action effect)})
+
+(defn- transport-context
+  [effect]
+  {execution-id-key (:execution-id effect)
+   generation-key (:generation effect)
+   effect-generation-key (:effect-generation effect)
+   message-key (:message effect)})
+
+(defn- realize-local!
+  [runtime effect]
+  (let [action (:action effect)
+        action-id (:action action)
+        handler (get @(:local-actions runtime) action-id)]
     (when-not handler
       (throw
-       (ex-info
-        "No browser choreography send handler is installed."
-        {:error/type :gesso.live.browser.choreo/missing-send-handler
-         :execution-id (:execution-id execution)
-         :state (:state execution)
+       (choreo-error
+        :missing-local-action
+        "No physical browser realization is registered for the Choreo local action."
+        {:action-id action-id
+         :execution-id (:execution-id effect)
+         :generation (:generation effect)
          :action action})))
-    (handler action execution)
-    (machine/complete-send execution)))
+    (handler (local-action-context runtime effect))))
 
-(defn- drive
-  "Drive synchronous local boundaries until await or terminal completion."
-  [execution resume-envelope]
-  (loop [current execution
-         envelope resume-envelope]
-    (cond
-      (machine/waiting-fx? current)
-      (recur (run-fx-boundary current envelope) nil)
-
-      (machine/waiting-send? current)
-      (recur (handoff-send-boundary current) nil)
-
-      (or (machine/suspended? current)
-          (machine/completed? current))
-      current
-
-      :else
+(defn- realize-send-payload!
+  [runtime effect]
+  (let [handler @(:send-payload runtime)]
+    (when-not handler
       (throw
-       (ex-info
-        "Portable choreography machine returned an unknown browser boundary."
-        {:error/type :gesso.live.browser.choreo/invalid-machine-status
-         :execution-id (:execution-id current)
-         :status (:status current)
-         :execution current})))))
+       (choreo-error
+        :missing-send-payload-handler
+        "No browser Choreo send-payload handler is installed."
+        {:execution-id (:execution-id effect)
+         :generation (:generation effect)
+         :action (:action effect)})))
+    (handler (send-context effect))))
 
-;; -----------------------------------------------------------------------------
-;; Execution lifecycle
-;; -----------------------------------------------------------------------------
+(defn- realize-transport-send!
+  [runtime effect]
+  (let [handler @(:transport-send runtime)]
+    (when-not handler
+      (throw
+       (choreo-error
+        :missing-transport-handler
+        "No browser Choreo participant-message transport is installed."
+        {:execution-id (:execution-id effect)
+         :generation (:generation effect)
+         :message (:message effect)})))
+    (handler (transport-context effect))))
 
-(defn- remember-terminal!
-  [execution metadata]
-  (swap!
-   terminal-history
-   (fn [history]
-     (trim-history
-      (conj
-       history
-       (assoc
-        (execution-summary execution)
-        :completed-at (now-ms)
-        :metadata
-        (select-keys metadata
-                     [:started-at :updated-at :source :kind])))
-      default-terminal-history-limit))))
+(defn- physical-handlers
+  [runtime]
+  {:machine/local
+   (fn [{:keys [effect]}]
+     (realize-local! runtime effect))
 
-(defn- retire!
-  [execution-id execution]
-  (let [metadata' (get @execution-metadata execution-id)]
-    (cancel-all-timers! execution-id)
-    (swap! executions dissoc execution-id)
-    (swap! execution-metadata dissoc execution-id)
-    (remember-terminal! execution metadata')
-    execution))
+   :machine/send
+   (fn [{:keys [effect]}]
+     (realize-send-payload! runtime effect))
 
-(defn- commit!
-  [execution-id execution]
-  (cond
-    (machine/suspended? execution)
-    (do
-      (swap! executions assoc execution-id execution)
-      (swap! execution-metadata update execution-id assoc :updated-at (now-ms))
-      execution)
+   :transport/send
+   (fn [{:keys [effect]}]
+     (realize-transport-send! runtime effect))})
 
-    (machine/completed? execution)
-    (retire! execution-id execution)
+(defn- require-unclaimed-effect-slots!
+  [shell-runtime]
+  (let [existing (shell/handlers shell-runtime)
+        collisions (set (filter #(contains? existing %) owned-effect-kinds))]
+    (when (seq collisions)
+      (throw
+       (choreo-error
+        :effect-handler-collision
+        "Browser Choreo cannot attach because its shell effect slots are already occupied."
+        {:effect-kinds collisions}))))
+  shell-runtime)
 
-    :else
-    (throw
-     (ex-info
-      "Browser choreography may only commit suspended or completed executions."
-      {:error/type :gesso.live.browser.choreo/invalid-commit
-       :execution-id execution-id
-       :execution execution}))))
+(defn create
+  "Attach one browser Choreo physical binding to an existing shell runtime.
 
-(defn- failed-drive-cleanup!
-  [execution-id]
-  (cancel-all-timers! execution-id)
-  (swap! executions dissoc execution-id)
-  (swap! execution-metadata dissoc execution-id)
-  true)
+   The shell remains the sole mutable owner of AdapterState and physical
+   timer/transport/continuity resources. This runtime owns only per-instance
+   physical handler registration.
 
-(defn start!
-  "Start one projected browser endpoint and drive it to await or completion.
+   Options:
 
-   Required:
-     :execution-id
+     :local-actions
+       keyword -> local realization function
 
-   Optional:
-     :context
-     :metadata
-     :now-fn
-     :trace-limit
-     :max-immediate-steps"
-  [plan {:keys [execution-id
-                context
-                metadata
-                now-fn
-                trace-limit
-                max-immediate-steps]}]
-  (require-execution-id! execution-id)
-  (when (active? execution-id)
-    (throw
-     (ex-info
-      "Browser choreography execution id is already active."
-      {:error/type :gesso.live.browser.choreo/duplicate-execution
-       :execution-id execution-id})))
-  (let [metadata' (require-map! "Browser choreography metadata"
-                                (or metadata {}))]
-    (swap!
-     execution-metadata
-     assoc
-     execution-id
-     (merge {:started-at (now-ms)
-             :updated-at (now-ms)}
-            metadata'))
-    (try
-      (let [execution0
-            (machine/start
-             plan
-             (cond-> {:execution-id execution-id
-                      :context (or context {})}
-               now-fn (assoc :now-fn now-fn)
-               trace-limit (assoc :trace-limit trace-limit)
-               max-immediate-steps
-               (assoc :max-immediate-steps max-immediate-steps)))
-            execution1 (drive execution0 nil)]
-        (commit! execution-id execution1))
-      (catch :default error
-        (failed-drive-cleanup! execution-id)
-        (notify-error! :start execution-id error {:plan-name (:name plan)})
-        (throw error)))))
+     :fx-handlers
+       keyword -> Biff-style FX handler supplied to local machines
 
-(defn resume!
-  "Resume one active execution with an event/message envelope and drive again.
+     :send-payload
+       generic send-boundary payload constructor
 
-   Late delivery to a retired/nonexistent execution returns :ignored and cannot
-   resurrect it. An illegal envelope for an active execution remains an error."
-  [execution-id envelope]
-  (require-execution-id! execution-id)
-  (if-some [current (execution execution-id)]
-    (try
-      (let [execution0 (machine/resume current envelope)
-            execution1 (drive execution0 envelope)
-            committed (commit! execution-id execution1)]
-        (if (machine/completed? committed)
-          {:status :completed
-           :execution committed
-           :result (machine/execution-result committed)}
-          {:status :resumed
-           :execution committed}))
-      (catch :default error
-        (notify-error!
-         :resume
-         execution-id
-         error
-         {:event envelope
-          :state (:state current)})
-        (throw error)))
-    {:status :ignored
-     :reason :inactive-execution
-     :execution-id execution-id}))
+     :transport-send
+       participant-message physical transport handler"
+  ([shell-runtime]
+   (create shell-runtime nil))
+  ([shell-runtime options]
+   (shell/require-shell! shell-runtime)
+   (require-unclaimed-effect-slots! shell-runtime)
+   (let [options (or options {})
+         _ (require-map! "Browser Choreo options" options)
+         _ (check-option-keys! options)
+         local-actions (or (:local-actions options) {})
+         fx-handlers (or (:fx-handlers options) {})
+         _ (require-registration-map! "Browser Choreo :local-actions" local-actions)
+         _ (require-registration-map! "Browser Choreo :fx-handlers" fx-handlers)
+         _ (require-optional-callable! "Browser Choreo :send-payload"
+                                       (:send-payload options))
+         _ (require-optional-callable! "Browser Choreo :transport-send"
+                                       (:transport-send options))
+         runtime
+         {:gesso.live.browser.choreo/type runtime-type
+          :gesso.live.browser.choreo/version runtime-version
+          :shell shell-runtime
+          :local-actions (atom local-actions)
+          :fx-handlers (atom fx-handlers)
+          :send-payload (atom (:send-payload options))
+          :transport-send (atom (:transport-send options))
+          :installed-handlers (atom {})}
+         handlers (physical-handlers runtime)]
+     (doseq [[effect-kind handler] handlers]
+       (shell/register-handler! shell-runtime effect-kind handler))
+     (reset! (:installed-handlers runtime) handlers)
+     runtime)))
 
-(defn resume-event!
-  "Resume with one modeled environmental event."
-  ([execution-id event-id]
-   (resume-event! execution-id event-id nil))
-  ([execution-id event-id data]
-   (resume! execution-id (machine/event event-id data))))
+(defn detach!
+  "Detach only the physical effect handlers installed by this runtime.
 
-(defn resume-message!
-  "Resume with one participant message.
+   Adapter executions are not retired here. Lifecycle ownership belongs to the
+   enclosing browser runtime; callers should retire/shutdown semantic work before
+   detaching a live integration. Handler slots are removed only when they still
+   contain the exact function installed by this runtime."
+  [runtime]
+  (let [runtime (require-runtime! runtime)
+        shell-runtime (:shell runtime)
+        installed @(:installed-handlers runtime)]
+    (doseq [[effect-kind handler] installed]
+      (when (identical? handler
+                        (get (shell/handlers shell-runtime) effect-kind))
+        (shell/unregister-handler! shell-runtime effect-kind)))
+    (reset! (:installed-handlers runtime) {})
+    :detached))
 
-   execution-id remains explicit even when payload carries correlation fields;
-   transport adapters must not choose an execution from weak payload data."
-  [execution-id descriptor payload]
-  (resume! execution-id (machine/message descriptor payload)))
+;; =============================================================================
+;; Semantic event submission -- adapter remains sole arbiter
+;; =============================================================================
 
-(defn accepts?
-  [execution-id envelope]
-  (boolean
-   (when-some [current (execution execution-id)]
-     (machine/accepts-event? current envelope))))
+(defn start-execution!
+  "Submit an already-created portable machine execution to the browser adapter.
 
-(defn accepts-event?
-  [execution-id event-id]
-  (accepts? execution-id (machine/event event-id)))
+   Returns the shell dispatch result. If the execution remains active after
+   synchronous effect interpretation, :execution-ref contains its adapter-issued
+   generation. Immediate terminal execution therefore legitimately returns a nil
+   reference."
+  ([runtime execution-id machine-execution]
+   (start-execution! runtime execution-id machine-execution nil))
+  ([runtime execution-id machine-execution options]
+   (let [runtime (require-runtime! runtime)
+         options (or options {})
+         _ (require-map! "Browser Choreo start options" options)
+         allowed #{:target-id :replace-owner? :replace-execution?}
+         unknown (seq (remove allowed (keys options)))]
+     (when unknown
+       (throw
+        (choreo-error
+         :unknown-start-options
+         "Browser Choreo start options contain unsupported keys."
+         {:unknown-keys (set unknown)
+          :allowed-keys allowed})))
+     (when-not (machine/execution? machine-execution)
+       (throw
+        (choreo-error
+         :invalid-machine-execution
+         "Browser Choreo requires a portable machine execution."
+         {:execution machine-execution})))
+     (require-non-nil! "Browser Choreo execution id" execution-id)
+     (let [event
+           (cond->
+            {:event :execution/start
+             :execution-id execution-id
+             :execution machine-execution}
+             (contains? options :target-id)
+             (assoc :target-id (:target-id options))
+             (contains? options :replace-owner?)
+             (assoc :replace-owner? (:replace-owner? options))
+             (contains? options :replace-execution?)
+             (assoc :replace-execution? (:replace-execution? options)))
+           dispatch-result (shell/dispatch! (:shell runtime) event)]
+       (assoc dispatch-result
+              :execution-ref (execution-ref runtime execution-id))))))
 
-(defn accepts-message?
-  [execution-id descriptor payload]
-  (accepts? execution-id (machine/message descriptor payload)))
+(defn start-plan!
+  "Create a portable machine execution from executable-plan and submit it.
 
-(defn abort!
-  "Forget an execution without protocol cleanup.
+   :machine-options are passed only to gesso.choreo.machine/start.
+   :adapter-options are passed only to start-execution!."
+  ([runtime execution-id executable-plan]
+   (start-plan! runtime execution-id executable-plan nil nil))
+  ([runtime execution-id executable-plan machine-options adapter-options]
+   (start-execution!
+    runtime
+    execution-id
+    (machine/start executable-plan (or machine-options {}))
+    adapter-options)))
 
-   This is only a browser-process teardown escape hatch. Recoverable failures
-   belong in choreography as modeled events so resources and semantic cleanup
-   still run."
-  [execution-id reason]
-  (require-execution-id! execution-id)
-  (if-some [current (execution execution-id)]
-    (let [metadata' (metadata execution-id)]
-      (cancel-all-timers! execution-id)
-      (swap! executions dissoc execution-id)
-      (swap! execution-metadata dissoc execution-id)
-      (swap!
-       terminal-history
-       (fn [history]
-         (trim-history
-          (conj
-           history
-           {:execution-id execution-id
-            :plan-name (:plan-name current)
-            :role (:role current)
-            :status :aborted
-            :reason reason
-            :state (:state current)
-            :held-resources (machine/held-resources current)
-            :trace (machine/execution-trace current)
-            :completed-at (now-ms)
-            :metadata
-            (select-keys metadata'
-                         [:started-at :updated-at :source :kind])})
-          default-terminal-history-limit)))
-      {:status :aborted
-       :execution-id execution-id
-       :reason reason})
-    {:status :ignored
-     :reason :inactive-execution
-     :execution-id execution-id}))
+(defn retire!
+  [runtime execution-ref reason]
+  (let [runtime (require-runtime! runtime)
+        {:keys [execution-id generation]}
+        (require-execution-ref! execution-ref)]
+    (shell/dispatch!
+     (:shell runtime)
+     {:event :execution/retire
+      :execution-id execution-id
+      :generation generation
+      :reason reason})))
 
-;; -----------------------------------------------------------------------------
-;; Runtime reset and diagnostics
-;; -----------------------------------------------------------------------------
+(defn deliver-message!
+  "Submit one participant message using the generation captured by its callback."
+  [runtime execution-ref message-id envelope]
+  (let [runtime (require-runtime! runtime)
+        {:keys [execution-id generation]}
+        (require-execution-ref! execution-ref)]
+    (require-non-nil! "Browser Choreo physical message id" message-id)
+    (require-map! "Browser Choreo participant envelope" envelope)
+    (shell/dispatch!
+     (:shell runtime)
+     {:event :machine/message
+      :execution-id execution-id
+      :generation generation
+      :message-id message-id
+      :envelope envelope})))
 
-(defn reset-executions!
-  "Abort all process-local executions/timers while preserving registrations."
-  []
-  (doseq [execution-id (keys @executions)]
-    (cancel-all-timers! execution-id))
-  (reset! executions {})
-  (reset! execution-metadata {})
-  (reset! timers {})
-  (reset! terminal-history [])
-  true)
+(defn deliver-environment!
+  "Submit one role-local environment event using a captured execution generation."
+  [runtime execution-ref envelope]
+  (let [runtime (require-runtime! runtime)
+        {:keys [execution-id generation]}
+        (require-execution-ref! execution-ref)]
+    (require-map! "Browser Choreo environment envelope" envelope)
+    (shell/dispatch!
+     (:shell runtime)
+     {:event :machine/environment
+      :execution-id execution-id
+      :generation generation
+      :envelope envelope})))
 
-(defn reset-runtime!
-  "Clear executions and all browser choreography registrations.
+(defn retry!
+  [runtime execution-ref]
+  (let [runtime (require-runtime! runtime)
+        {:keys [execution-id generation]}
+        (require-execution-ref! execution-ref)]
+    (shell/dispatch!
+     (:shell runtime)
+     {:event :machine/retry
+      :execution-id execution-id
+      :generation generation})))
 
-   Intended for tests/hot reload or whole-runtime teardown."
-  []
-  (reset-executions!)
-  (reset! fx-machines {})
-  (reset! fx-handlers {})
-  (reset! send-handler nil)
-  (reset! error-handler nil)
-  true)
+(defn schedule!
+  "Schedule an adapter-owned timer which will later deliver envelope.
+
+   The shell owns the physical timeout handle; this namespace never does."
+  [runtime execution-ref timer-id delay-ms envelope]
+  (let [runtime (require-runtime! runtime)
+        {:keys [execution-id generation]}
+        (require-execution-ref! execution-ref)]
+    (require-non-nil! "Browser Choreo timer id" timer-id)
+    (require-nonnegative-integer! "Browser Choreo timer delay" delay-ms)
+    (require-map! "Browser Choreo timer envelope" envelope)
+    (shell/dispatch!
+     (:shell runtime)
+     {:event :timer/schedule
+      :execution-id execution-id
+      :generation generation
+      :timer-id timer-id
+      :delay-ms delay-ms
+      :envelope envelope})))
+
+(defn cancel-timer!
+  [runtime execution-ref timer-id]
+  (let [runtime (require-runtime! runtime)
+        {:keys [execution-id generation]}
+        (require-execution-ref! execution-ref)]
+    (require-non-nil! "Browser Choreo timer id" timer-id)
+    (shell/dispatch!
+     (:shell runtime)
+     {:event :timer/cancel
+      :execution-id execution-id
+      :generation generation
+      :timer-id timer-id})))
+
+;; =============================================================================
+;; Diagnostics
+;; =============================================================================
 
 (defn diagnostics
-  []
-  {:gesso.live.browser.choreo/type runtime-type
-   :active-count (execution-count)
-   :active (active-summaries)
-   :terminal (terminal-summaries)
-   :registered-fx-machines (registered-fx-machines)
-   :registered-fx-handlers (registered-fx-handlers)
-   :send-handler? (boolean @send-handler)
-   :timer-count
-   (reduce + 0 (map count (vals @timers)))})
+  "Return configuration and shared-shell diagnostics without host resources."
+  [runtime]
+  (let [runtime (require-runtime! runtime)]
+    {:gesso.live.browser.choreo/type runtime-type
+     :gesso.live.browser.choreo/version runtime-version
+     :registered-local-actions (set (keys @(:local-actions runtime)))
+     :registered-fx-handlers (set (keys @(:fx-handlers runtime)))
+     :send-payload-handler? (boolean @(:send-payload runtime))
+     :transport-handler? (boolean @(:transport-send runtime))
+     :attached-effect-kinds (set (keys @(:installed-handlers runtime)))
+     :shell (shell/diagnostics (:shell runtime))}))

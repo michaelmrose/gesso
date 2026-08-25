@@ -1,21 +1,58 @@
 {:paths ["src" "resources"]
+
  :tasks
- {
-  optimistic
-{:doc "Generate the Gesso Live browser runtime."
- :task
- (shell "clojure"
-        "-M:dev"
-        "-m" "cljs.main"
-        "-O" "advanced"
-        "-co" "{:output-dir \"target/gesso-live-cljs\"}"
-        "-o" "resources/public/js/gesso-live.js"
-        "-c" "gesso.live.browser.core")}
+ {optimistic
+  {:doc "Generate the Gesso Live browser runtime."
+   :task
+   (shell "clojure"
+          "-M:dev"
+          "-m" "cljs.main"
+          "-O" "advanced"
+          "-co" "{:output-dir \"target/gesso-live-cljs\"}"
+          "-o" "resources/public/js/gesso-live.js"
+          "-c" "gesso.live.browser.core")}
 
   themes
-  (do
-    (println "running themes task")
-    ((requiring-resolve 'gesso.build.themes/build!)
-     {:input-dir "resources/themes"
-      :output-file "resources/public/gesso/themes.css"})
-    (println "done"))}}
+  {:doc "Build theme CSS."
+   :task
+   (do
+     (println "running themes task")
+     ((requiring-resolve 'gesso.build.themes/build!)
+      {:input-dir "resources/themes"
+       :output-file "resources/public/gesso/themes.css"})
+     (println "done"))}
+
+  test
+  {:doc "Run every Gesso test and build verification gate."
+   :task
+   (shell "bb" "script/gesso_test.clj" "all")}
+
+  test:jvm
+  {:doc "Run all JVM tests."
+   :task
+   (shell "bb" "script/gesso_test.clj" "jvm")}
+
+  test:cljs
+  {:doc "Run Node and Chromium CLJS tests."
+   :task
+   (shell "bb" "script/gesso_test.clj" "cljs")}
+
+  test:node
+  {:doc "Run host-independent CLJS tests under Node."
+   :task
+   (shell "bb" "script/gesso_test.clj" "node")}
+
+  test:browser
+  {:doc "Run every CLJS/CLJC test in headless Chromium."
+   :task
+   (shell "bb" "script/gesso_test.clj" "browser")}
+
+  test:advanced
+  {:doc "Verify the production browser runtime advanced-compiles."
+   :task
+   (shell "bb" "script/gesso_test.clj" "advanced")}
+
+  test:themes
+  {:doc "Verify the theme build without overwriting the checked-in CSS."
+   :task
+   (shell "bb" "script/gesso_test.clj" "themes")}}}
