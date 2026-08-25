@@ -5,7 +5,8 @@
 
    - SSE connection attrs
    - live fragment refresh attrs
-   - SSE trigger strings
+   - adapter-managed fragment refresh triggers
+   - SSE trigger strings for transport/callback helpers
    - optional static refresh jitter
    - POST helper attrs
    - SSE callback attrs
@@ -48,7 +49,22 @@
   "outerHTML")
 
 (def default-fragment-trigger
+  "Legacy/unmanaged fragment wakeup trigger set.
+
+   These events historically issued the fragment GET directly. Adapter-managed
+   live fragments should instead use managed-fragment-refresh-trigger so every
+   replaceable refresh is admitted by gesso.live.browser.adapter first."
   "load, pageshow from:window, visibilitychange from:document, online from:window, htmx:sseOpen from:body, gesso:live-connected from:body")
+
+(def managed-fragment-refresh-event
+  "DOM event emitted by gesso.live.browser.core after the adapter admits one
+   logical fragment refresh generation."
+  "gesso:live-refresh")
+
+(def managed-fragment-invalidated-event
+  "DOM event accepted by gesso.live.browser.core as an explicit logical
+   fragment invalidation boundary."
+  "gesso:live-invalidated")
 
 (def default-post-swap
   "Default HTMX swap mode for helper POST forms/buttons."
@@ -353,27 +369,6 @@
 ;; -----------------------------------------------------------------------------
 
 
-#_(defn fragment-root-attrs
-  "Build attrs for the outer live wrapper.
-
-   Options:
-   - :stream-url
-   - :attrs merged last for ordinary attrs
-
-   :hx-ext is composed rather than overwritten, so caller attrs like
-   {:hx-ext \"path-deps\"} become \"sse, path-deps\".
-
-   The root also emits gesso:live-connected whenever the HTMX SSE extension opens
-   or reconnects the EventSource. Fragment targets can listen for that event to
-   re-fetch current server state after missed live wakeups."
-  [{:keys [attrs] :as opts}]
-  (let [stream-url (require-non-blank! opts :stream-url "SSE stream URL")]
-    (-> (merge-sse-attrs
-         {:sse-connect stream-url}
-         attrs)
-        (append-hyperscript
-         "on htmx:sseOpen send gesso:live-connected to body"))))
-
 (defn fragment-root-attrs
   "Build attrs for the outer live wrapper.
 
@@ -405,8 +400,57 @@
        (remove str/blank?)
        (str/join ", ")))
 
+(defn managed-fragment-refresh-trigger
+  "Return the only HTMX request trigger used by adapter-managed live fragments.
+
+   The browser adapter emits :fragment/refresh only after enforcing fragment
+   generation/single-flight semantics. gesso.live.browser.core realizes that
+   effect by triggering this DOM event on the stable fragment root.
+
+   SSE, reconnect, visibility, online, pageshow, and application wakeups must
+   therefore enter the adapter as invalidations rather than being concatenated
+   into this HTMX request trigger."
+  []
+  managed-fragment-refresh-event)
+
+(defn managed-fragment-refresh-attrs
+  "Build the HTMX-owned request attrs for one adapter-managed live fragment.
+
+   Required:
+   - :src fragment GET URL
+
+   Optional:
+   - :target HTMX target selector/id
+   - :swap defaults to default-fragment-swap
+   - :attrs for non-semantic HTML/HTMX attributes
+
+   Managed request ownership attributes (:hx-get, :hx-trigger, :hx-target, and
+   :hx-swap) are written after caller attrs and therefore cannot be overridden
+   through :attrs. This is intentional: allowing a caller to replace
+   :hx-trigger would recreate a direct SSE/request path around the adapter.
+
+   This helper deliberately does not accept an SSE event or arbitrary request
+   trigger. All refresh intent must first cross the browser adapter invalidation
+   boundary; only :fragment/refresh effects are allowed to cause this request."
+  [{:keys [target swap attrs] :as opts
+    :or {swap default-fragment-swap}}]
+  (let [src (require-non-blank! opts :src "Fragment source URL")]
+    (merge-attrs
+     attrs
+     {:hx-get src
+      :hx-trigger (managed-fragment-refresh-trigger)
+      :hx-swap swap}
+     (when-let [target' (normalize-target target)]
+       {:hx-target target'}))))
+
 (defn fragment-trigger
-  "Build the canonical live fragment trigger string.
+  "Build the legacy/unmanaged live fragment wakeup trigger string.
+
+   This helper remains for direct SSE callback/compatibility paths while the
+   stable live-fragment UI is migrated onto managed-fragment-refresh-attrs. A
+   replaceable fragment governed by gesso.live.browser.adapter must not use this
+   string as its hx-get trigger because doing so bypasses adapter single-flight
+   and generation ownership.
 
    Options:
    - :event
@@ -428,7 +472,11 @@
      (trigger-with-delay (sse-trigger event) delay-ms))))
 
 (defn fragment-target-attrs
-  "Build attrs for a live fragment refresh target.
+  "Build attrs for a legacy/unmanaged live fragment refresh target.
+
+   New stable live-fragment markup should compose managed-fragment-refresh-attrs
+   on its behavior-owning root instead. This helper is retained while existing
+   callers are migrated and for explicit unmanaged uses.
 
    Options:
    - :id

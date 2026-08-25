@@ -685,6 +685,290 @@
     (is (= 0 (:continuity (shell/resource-counts runtime))))
     (is (= {} (:continuity (shell/state runtime))))))
 
+(deftest asynchronous-continuity-restore-rejection-releases-through-adapter-test
+  (let [{:keys [value reject! failure]}
+        (controlled-thenable)
+        captured (js-obj "selection" "opaque")
+        errors (atom [])
+        released (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:fragment/refresh (fn [_] :triggered)
+           :continuity/capture (fn [_] captured)
+           :continuity/restore (fn [_] value)
+           :continuity/release
+           (fn [{:keys [effect resource]}]
+             (swap! released conj [effect resource]))}
+          :on-error #(swap! errors conj %)})
+        {:keys [generation]}
+        (begin-fragment! runtime :request-card)]
+    (bind-request! runtime :request-card generation "xhr-1" nil)
+    (before-swap! runtime :request-card generation "xhr-1" nil)
+
+    (let [result
+          (shell/dispatch!
+           runtime
+           {:event :htmx/after-swap
+            :fragment-id :request-card
+            :request-generation generation
+            :request-id "xhr-1"})]
+      (is (= [:pending] (:effect-results result))))
+
+    (is (fn? @failure))
+    (is (= 1 (:continuity (shell/resource-counts runtime))))
+    (is (= 1 (count (:continuity (shell/state runtime)))))
+
+    (reject! (js/Error. "restore boom"))
+
+    (is (= 0 (:continuity (shell/resource-counts runtime))))
+    (is (= {} (:continuity (shell/state runtime))))
+    (is (= 1 (count @released)))
+    (is (identical? captured (get-in @released [0 1])))
+    (is (= :physical-effect-failed
+           (get-in @released [0 0 :reason :kind])))
+    (is (= :continuity/restore
+           (get-in @released [0 0 :reason :effect])))
+    (is (= "restore boom"
+           (get-in @released [0 0 :reason :message])))
+    (is (= :continuity-restore-failed
+           (:phase (first @errors))))
+    (is (= "restore boom"
+           (:message (first @errors))))
+    (is (= [] (adapter/invariant-errors (shell/state runtime))))))
+
+(deftest synchronous-continuity-restore-failure-uses-same-adapter-owned-release-path-test
+  (let [captured (js-obj "focus" "opaque")
+        errors (atom [])
+        released (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:fragment/refresh (fn [_] :triggered)
+           :continuity/capture (fn [_] captured)
+           :continuity/restore
+           (fn [_]
+             (throw (js/Error. "sync restore boom")))
+           :continuity/release
+           (fn [{:keys [effect resource]}]
+             (swap! released conj [effect resource]))}
+          :on-error #(swap! errors conj %)})
+        {:keys [generation]}
+        (begin-fragment! runtime :request-card)]
+    (bind-request! runtime :request-card generation "xhr-1" nil)
+    (before-swap! runtime :request-card generation "xhr-1" nil)
+
+    (let [result
+          (shell/dispatch!
+           runtime
+           {:event :htmx/after-swap
+            :fragment-id :request-card
+            :request-generation generation
+            :request-id "xhr-1"})]
+      (is (= [:failed] (:effect-results result))))
+
+    (is (= 0 (:continuity (shell/resource-counts runtime))))
+    (is (= {} (:continuity (shell/state runtime))))
+    (is (= 1 (count @released)))
+    (is (identical? captured (get-in @released [0 1])))
+    (is (= :physical-effect-failed
+           (get-in @released [0 0 :reason :kind])))
+    (is (= :continuity/restore
+           (get-in @released [0 0 :reason :effect])))
+    (is (= "sync restore boom"
+           (get-in @released [0 0 :reason :message])))
+    (is (= :continuity-restore-failed
+           (:phase (first @errors))))
+    (is (= [] (adapter/invariant-errors (shell/state runtime))))))
+
+(deftest late-continuity-restore-rejection-after-retirement-is-stale-and-does-not-double-release-test
+  (let [{:keys [value reject!]}
+        (controlled-thenable)
+        captured (js-obj "scroll" "opaque")
+        errors (atom [])
+        diagnostics (atom [])
+        released (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:fragment/refresh (fn [_] :triggered)
+           :htmx/cancel-request (fn [_] :cancelled)
+           :continuity/capture (fn [_] captured)
+           :continuity/restore (fn [_] value)
+           :continuity/release
+           (fn [{:keys [effect resource]}]
+             (swap! released conj [effect resource]))}
+          :on-error #(swap! errors conj %)
+          :on-diagnostic #(swap! diagnostics conj %)})
+        {:keys [generation]}
+        (begin-fragment! runtime :request-card)]
+    (bind-request! runtime :request-card generation "xhr-1" nil)
+    (before-swap! runtime :request-card generation "xhr-1" nil)
+    (shell/dispatch!
+     runtime
+     {:event :htmx/after-swap
+      :fragment-id :request-card
+      :request-generation generation
+      :request-id "xhr-1"})
+
+    (is (= 1 (:continuity (shell/resource-counts runtime))))
+
+    (shell/dispatch!
+     runtime
+     {:event :fragment/retire
+      :fragment-id :request-card
+      :reason :test-retirement})
+
+    (is (= 0 (:continuity (shell/resource-counts runtime))))
+    (is (= {} (:continuity (shell/state runtime))))
+    (is (= 1 (count @released)))
+    (is (identical? captured (get-in @released [0 1])))
+
+    (let [retired-state (shell/state runtime)]
+      (reject! (js/Error. "late restore boom"))
+
+      (is (= retired-state (shell/state runtime)))
+      (is (= 1 (count @released))
+          "A stale restore callback must not release the already-retired resource twice.")
+      (is (= 0 (:continuity (shell/resource-counts runtime))))
+      (is (= :continuity-restore-failed
+             (:phase (last @errors))))
+      (is (= :stale-continuity-failure
+             (:reason (last @diagnostics))))
+      (is (= [] (adapter/invariant-errors (shell/state runtime)))))))
+
+
+(deftest newer-fragment-swap-revokes-old-physical-resource-before-allowing-new-swap-test
+  (let [{:keys [value reject!]}
+        (controlled-thenable)
+        captured-a (js-obj "generation" "a" "revoked" false)
+        captured-b (js-obj "generation" "b" "revoked" false)
+        capture-count (atom 0)
+        physical-order (atom [])
+        diagnostics (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:fragment/refresh (fn [_] :triggered)
+           :continuity/capture
+           (fn [{:keys [effect]}]
+             (let [resource (if (= 1 (swap! capture-count inc))
+                              captured-a
+                              captured-b)]
+               (swap! physical-order conj
+                      [:capture (:request-generation effect) resource])
+               resource))
+           :continuity/restore
+           (fn [{:keys [effect resource]}]
+             (swap! physical-order conj
+                    [:restore (:request-generation effect) resource])
+             value)
+           :continuity/release
+           (fn [{:keys [effect resource]}]
+             (aset resource "revoked" true)
+             (swap! physical-order conj
+                    [:release (:request-generation effect) resource]))
+           :htmx/allow-swap
+           (fn [{:keys [effect]}]
+             (swap! physical-order conj
+                    [:allow
+                     (:request-generation effect)
+                     (aget captured-a "revoked")])
+             :allowed)}
+          :on-diagnostic #(swap! diagnostics conj %)})
+        {:keys [generation]}
+        (begin-fragment! runtime :request-card)]
+    ;; Generation A installs and begins an asynchronous continuity restore.
+    (bind-request! runtime :request-card generation "xhr-1" nil)
+    (before-swap! runtime :request-card generation "xhr-1" nil)
+    (shell/dispatch!
+     runtime
+     {:event :htmx/after-swap
+      :fragment-id :request-card
+      :request-generation generation
+      :request-id "xhr-1"})
+    (is (= 1 (:continuity (shell/resource-counts runtime))))
+
+    ;; A newer invalidation queues generation B behind A's still-live request.
+    (shell/dispatch! runtime (invalidation :request-card :basis-2))
+    (let [after-a
+          (shell/dispatch!
+           runtime
+           {:event :htmx/after-request
+            :fragment-id :request-card
+            :request-generation generation
+            :request-id "xhr-1"})
+          generation-b (request-generation after-a)]
+      (is (some? generation-b))
+      (is (not= generation generation-b))
+
+      (bind-request! runtime :request-card generation-b "xhr-2" nil)
+      (reset! physical-order [])
+      (before-swap! runtime :request-card generation-b "xhr-2" nil)
+
+      (let [[release capture allow] @physical-order]
+        (is (= [:release :capture :allow]
+               (mapv first @physical-order)))
+        (is (= generation (second release)))
+        (is (identical? captured-a (nth release 2)))
+        (is (= generation-b (second capture)))
+        (is (identical? captured-b (nth capture 2)))
+        (is (= generation-b (second allow)))
+        (is (true? (nth allow 2))
+            "The older physical resource must be revoked before the newer swap is allowed."))
+
+      (is (true? (aget captured-a "revoked")))
+      (is (false? (aget captured-b "revoked")))
+      (is (= 1 (:continuity (shell/resource-counts runtime))))
+      (is (= 1 (count (:continuity (shell/state runtime)))))
+
+      ;; The already-pending restore callback from A may still settle, but its
+      ;; generation is stale and must not release B's newer physical resource.
+      (let [state-after-b (shell/state runtime)]
+        (reject! (js/Error. "late generation-a restore"))
+        (is (= state-after-b (shell/state runtime)))
+        (is (= 1 (:continuity (shell/resource-counts runtime))))
+        (is (false? (aget captured-b "revoked")))
+        (is (= :stale-continuity-failure
+               (:reason (last @diagnostics))))))))
+
+(deftest duplicate-before-swap-does-not-revoke-current-physical-resource-test
+  (let [captured (js-obj "generation" "current" "revoked" false)
+        released (atom 0)
+        captures (atom 0)
+        allows (atom 0)
+        runtime
+        (shell/create
+         {:handlers
+          {:fragment/refresh (fn [_] :triggered)
+           :continuity/capture
+           (fn [_]
+             (swap! captures inc)
+             captured)
+           :continuity/release
+           (fn [{:keys [resource]}]
+             (swap! released inc)
+             (aset resource "revoked" true))
+           :htmx/allow-swap
+           (fn [_]
+             (swap! allows inc)
+             :allowed)}})
+        {:keys [generation]}
+        (begin-fragment! runtime :request-card)]
+    (bind-request! runtime :request-card generation "xhr-1" nil)
+    (before-swap! runtime :request-card generation "xhr-1" nil)
+    (before-swap! runtime :request-card generation "xhr-1" nil)
+
+    (is (= 1 @captures)
+        "A duplicate lifecycle observation must not recapture the current generation.")
+    (is (= 0 @released)
+        "A generation may not revoke its own continuity resource.")
+    (is (= 2 @allows)
+        "The duplicate beforeSwap remains an idempotent allow observation.")
+    (is (false? (aget captured "revoked")))
+    (is (= 1 (:continuity (shell/resource-counts runtime))))
+    (is (= [] (adapter/invariant-errors (shell/state runtime))))))
+
 ;; =============================================================================
 ;; Observer noninterference and diagnostics
 ;; =============================================================================

@@ -1,311 +1,591 @@
 (ns gesso.live.optimistic.protocol-test
   (:require
-   [gesso.live.optimistic.protocol :as protocol]
-   #?(:clj [clojure.test :refer [deftest is testing]]
-      :cljs [cljs.test :refer-macros [deftest is testing]])))
+   [clojure.test :refer [deftest is testing]]
+   [gesso.choreo.identity :as identity]
+   [gesso.live.optimistic.protocol :as protocol]))
 
-;; -----------------------------------------------------------------------------
-;; Protocol identity and wire vocabulary
-;; -----------------------------------------------------------------------------
+(defn- error-data
+  [f]
+  (try
+    (f)
+    nil
+    (catch #?(:clj Throwable
+              :cljs :default) ex
+      (ex-data ex))))
 
-(deftest protocol-identity-test
-  (testing "protocol identity is stable"
-    (is (= "2" protocol/version))
-    (is (= :optimistic/command protocol/command-event))
-    (is (= :optimistic/settlement protocol/settlement-event))
-    (is (= "gesso-optimistic-execution"
-           protocol/execution-header-name))))
+(defn- error-kind
+  [f]
+  (:error/kind
+   (error-data f)))
 
-(deftest protocol-attrs-test
-  (testing "request/projection attrs have exact browser-facing names"
-    (is (= :data-gesso-optimistic-protocol protocol/protocol-attr))
-    (is (= :data-gesso-optimistic-transition protocol/transition-attr))
-    (is (= :data-gesso-optimistic-template protocol/template-attr))
-    (is (= :data-gesso-optimistic-target protocol/target-attr))
-    (is (= :data-gesso-optimistic-scope protocol/scope-attr))
-    (is (= :data-gesso-optimistic-base-revision protocol/base-revision-attr))
-    (is (= :data-gesso-optimistic-label protocol/pending-label-attr))
-    (is (= :data-gesso-optimistic-mode protocol/projection-mode-attr)))
+(def command-id
+  (identity/command-id
+   "command-42"))
 
-  (testing "settlement/canonical attrs have exact browser-facing names"
-    (is (= :data-gesso-optimistic-settlement protocol/settlement-attr))
-    (is (= :data-gesso-optimistic-execution protocol/execution-attr))
-    (is (= :data-gesso-optimistic-outcome protocol/outcome-attr))
-    (is (= :data-gesso-optimistic-command-applied
-           protocol/command-applied-attr))
-    (is (= :data-gesso-optimistic-revision protocol/revision-attr))
-    (is (= :data-gesso-optimistic-reason protocol/reason-attr))
-    (is (= :data-gesso-optimistic-canonical protocol/canonical-attr))))
+(def execution-id
+  (identity/execution-id
+   "execution-7"))
 
-(deftest reserved-attrs-test
-  (testing "every framework-owned optimistic attr is reserved exactly once"
-    (let [expected #{protocol/protocol-attr
-                     protocol/transition-attr
-                     protocol/template-attr
-                     protocol/target-attr
-                     protocol/scope-attr
-                     protocol/base-revision-attr
-                     protocol/revision-attr
-                     protocol/pending-label-attr
-                     protocol/projection-mode-attr
-                     protocol/settlement-attr
-                     protocol/execution-attr
-                     protocol/outcome-attr
-                     protocol/command-applied-attr
-                     protocol/reason-attr
-                     protocol/canonical-attr}]
-      (is (= expected (set protocol/reserved-attrs)))
-      (is (= (count expected)
-             (count protocol/reserved-attrs))))))
+(def retry-execution-id
+  (identity/execution-id
+   "execution-8"))
 
-(deftest choreography-payload-contract-test
-  (testing "command correlation and payload keys are explicit"
-    (is (= #{:execution-id :transition :scope}
-           protocol/command-required-keys))
-    (is (= #{:base-revision :consistency-token}
-           protocol/command-optional-keys))
-    (is (= #{:execution-id :scope}
-           protocol/command-correlation-keys)))
+(def basis
+  {:tx-id 42
+   :system-time "2026-08-25T01:00:00Z"})
 
-  (testing "settlement correlation and payload keys are explicit"
-    (is (= #{:execution-id :scope :outcome :command-applied? :canonical}
-           protocol/settlement-required-keys))
-    (is (= #{:revision :reason :consistency-token}
-           protocol/settlement-optional-keys))
-    (is (= #{:execution-id :scope}
-           protocol/settlement-correlation-keys))))
+(def newer-basis
+  {:tx-id 43
+   :system-time "2026-08-25T01:00:01Z"})
 
-;; -----------------------------------------------------------------------------
-;; Semantic names and projection modes
-;; -----------------------------------------------------------------------------
+(def fact-versions
+  {:request/status 9
+   :request/claim "claim-v3"})
 
-(deftest qualified-name-test
-  (testing "qualified keyword namespaces survive wire naming"
-    (is (= "request/claim"
-           (protocol/qualified-name :request/claim))))
+(defn- command-envelope
+  ([]
+   (command-envelope {}))
+  ([overrides]
+   (protocol/command
+    (merge
+     {:command-id command-id
+      :execution-id execution-id
+      :operation :request/claim
+      :arguments {:request-id "request-1"}
+      :observed-basis basis
+      :scope [:request "request-1"]
+      :fact-versions fact-versions}
+     overrides))))
 
-  (testing "symbols and ordinary values normalize textually"
-    (is (= "request/claim"
-           (protocol/qualified-name 'request/claim)))
-    (is (= "42"
-           (protocol/qualified-name 42)))
-    (is (nil? (protocol/qualified-name nil)))))
+(defn- provisional-envelope
+  ([]
+   (provisional-envelope {}))
+  ([overrides]
+   (protocol/provisional
+    (merge
+     {:command-id command-id
+      :execution-id execution-id
+      :observed-basis basis
+      :projection {:request/status :claimed
+                   :request/claimed-by "helper-1"}
+      :scope [:request "request-1"]
+      :fact-versions fact-versions}
+     overrides))))
 
-(deftest normalize-name-test
-  (testing "required names normalize to non-blank strings"
-    (is (= "request/claim"
-           (protocol/normalize-name :transition :request/claim)))
-    (is (= "custom"
-           (protocol/normalize-name :transition 'custom))))
+(defn- present-authority
+  ([]
+   (present-authority {}))
+  ([overrides]
+   (protocol/authoritative
+    (merge
+     {:presence :present
+      :basis newer-basis
+      :projection {:request/status :claimed
+                   :request/claimed-by "helper-1"}
+      :fact-versions {:request/status 10}}
+     overrides))))
 
-  (testing "blank and missing names are rejected"
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"must not be blank"
-         (protocol/normalize-name :transition nil)))
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"must not be blank"
-         (protocol/normalize-name :transition "   ")))))
+(defn- absent-authority
+  ([]
+   (protocol/authoritative
+    {:presence :absent
+     :basis newer-basis}))
+  ([overrides]
+   (protocol/authoritative
+    (merge
+     {:presence :absent
+      :basis newer-basis}
+     overrides))))
 
-(deftest optional-name-test
-  (is (nil? (protocol/normalize-optional-name :reason nil)))
+(deftest protocol-v3-vocabulary-is-explicit-and-closed
+  (is (= "3" protocol/version))
+  (is (= :optimistic/command protocol/command-event))
+  (is (= :optimistic/provisional protocol/provisional-event))
+  (is (= :optimistic/settlement protocol/settlement-event))
+  (is (= :optimistic/authoritative protocol/authoritative-event))
+
+  (is (= #{:present :absent}
+         protocol/authoritative-presences))
+  (is (= #{:confirmed
+           :reconciled
+           :rejected
+           :already-incorporated
+           :failed}
+         protocol/settlement-resolutions))
+  (is (= #{:confirmed
+           :reconciled
+           :already-incorporated}
+         protocol/authoritative-required-resolutions))
+  (is (= (conj protocol/settlement-resolutions :superseded)
+         protocol/provisional-resolution-kinds))
+
+  (is (= #{:command-id :execution-id}
+         protocol/command-correlation-keys))
+  (is (= #{:command-id :execution-id}
+         protocol/settlement-correlation-keys)))
+
+(deftest semantic-names-remain-portable-without-becoming-authority
+  (is (= "request/claim"
+         (protocol/qualified-name :request/claim)))
+  (is (= "request/claim"
+         (protocol/qualified-name 'request/claim)))
+  (is (= "42"
+         (protocol/qualified-name 42)))
+  (is (nil? (protocol/qualified-name nil)))
+
+  (is (= "request/claim"
+         (protocol/normalize-name :operation :request/claim)))
   (is (= "conflict"
-         (protocol/normalize-optional-name :reason :conflict))))
+         (protocol/normalize-optional-name :reason :conflict)))
+  (is (nil? (protocol/normalize-optional-name :reason nil)))
+  (is (= :invalid-name
+         (error-kind
+          #(protocol/normalize-name :operation "   ")))))
 
-(deftest projection-mode-test
-  (testing "nil means provisional"
+(deftest command-and-execution-identities-remain-distinct
+  (let [raw "same-raw-value"
+        command (identity/command-id raw)
+        execution (identity/execution-id raw)]
+    (is (not= command execution))
+    (is (identity/same-raw-value? command execution))
+    (is (= command
+           (protocol/wire->command-id
+            (protocol/command-id->wire command))))
+    (is (= execution
+           (protocol/wire->execution-id
+            (protocol/execution-id->wire execution))))
+    (is (= :invalid-command-id
+           (error-kind
+            #(protocol/require-command-id execution))))
+    (is (= :invalid-execution-id
+           (error-kind
+            #(protocol/require-execution-id command))))
+    (is (= :invalid-command-id
+           (error-kind
+            #(protocol/wire->command-id
+              (protocol/execution-id->wire execution)))))
+    (is (= :invalid-execution-id
+           (error-kind
+            #(protocol/wire->execution-id
+              (protocol/command-id->wire command)))))))
+
+(deftest command-construction-keeps-semantic-and-protocol-identities-separate
+  (let [command (command-envelope)]
+    (is (= protocol/version
+           (:protocol-version command)))
+    (is (= command-id
+           (:command-id command)))
+    (is (= execution-id
+           (:execution-id command)))
+    (is (= :request/claim
+           (:operation command)))
+    (is (= {:request-id "request-1"}
+           (:arguments command)))
+    (is (= basis
+           (:observed-basis command)))
+    (is (= [:request "request-1"]
+           (:scope command)))
+    (is (= fact-versions
+           (:fact-versions command))))
+
+  (testing "a semantic command can be retried with a new execution identity"
+    (let [retry (command-envelope
+                 {:execution-id retry-execution-id})]
+      (is (= command-id (:command-id retry)))
+      (is (= retry-execution-id (:execution-id retry)))))
+
+  (testing "commands need not be optimistic and may omit observed basis"
+    (let [command (protocol/command
+                   {:command-id command-id
+                    :execution-id execution-id
+                    :operation :request/read
+                    :arguments {:request-id "request-1"}})]
+      (is (not (contains? command :observed-basis)))))
+
+  (testing "the constructor is closed"
+    (is (= :unknown-fields
+           (error-kind
+            #(protocol/command
+              {:command-id command-id
+               :execution-id execution-id
+               :operation :request/claim
+               :arguments {}
+               :browser-authority true}))))))
+
+(deftest command-shape-does-not-coerce-operation-or-arguments
+  (is (= :gesso.choreo.type/error
+         (:error/type
+          (error-data
+           #(protocol/command
+             {:command-id command-id
+              :execution-id execution-id
+              :operation "request/claim"
+              :arguments {}})))))
+  (is (= :gesso.choreo.type/error
+         (:error/type
+          (error-data
+           #(protocol/command
+             {:command-id command-id
+              :execution-id execution-id
+              :operation :request/claim
+              :arguments [:request-id "request-1"]}))))))
+
+(deftest scope-remains-ordinary-portable-correlation-data
+  (doseq [scope [[:request "request-1"]
+                 {:request-id "request-1"}
+                 :request/all
+                 "request-1"]]
+    (is (= scope
+           (protocol/normalize-scope scope)))
+    (is (= scope
+           (protocol/wire-scope scope))))
+
+  (is (nil? (protocol/normalize-scope nil)))
+  (is (= :invalid-scope
+         (error-kind
+          #(protocol/normalize-scope "   ")))))
+
+(deftest fact-versions-remain-model-owned-and-distinct-from-basis
+  (is (= fact-versions
+         (protocol/normalize-fact-versions fact-versions)))
+  (is (nil? (protocol/normalize-fact-versions nil)))
+  (is (= :invalid-fact-versions
+         (error-kind
+          #(protocol/normalize-fact-versions [:request/status 9]))))
+  (is (= :invalid-fact-version-key
+         (error-kind
+          #(protocol/normalize-fact-versions {"request/status" 9}))))
+  (is (= :invalid-fact-version
+         (error-kind
+          #(protocol/normalize-fact-versions {:request/status nil})))))
+
+(deftest bases-are-required-when-authority-or-provisionality-depends-on-them
+  (is (= basis
+         (protocol/normalize-basis :basis basis)))
+  (is (nil? (protocol/normalize-optional-basis :basis nil)))
+  (is (= :missing-basis
+         (error-kind
+          #(protocol/normalize-basis :basis nil))))
+
+  (is (= :missing-basis
+         (error-kind
+          #(protocol/provisional
+            {:command-id command-id
+             :execution-id execution-id
+             :observed-basis nil
+             :projection {}}))))
+  (is (= :missing-basis
+         (error-kind
+          #(protocol/authoritative
+            {:presence :present
+             :basis nil
+             :projection {}})))))
+
+(deftest provisional-values-are-explicitly-provisional
+  (let [provisional (provisional-envelope)]
+    (is (= protocol/version
+           (:protocol-version provisional)))
     (is (= :provisional
-           (protocol/normalize-projection-mode nil)))
-    (is (= "provisional"
-           (protocol/projection-mode->wire nil))))
+           (:authority provisional)))
+    (is (= command-id
+           (:command-id provisional)))
+    (is (= execution-id
+           (:execution-id provisional)))
+    (is (= basis
+           (:observed-basis provisional)))
+    (is (= {:request/status :claimed
+            :request/claimed-by "helper-1"}
+           (:projection provisional))))
 
-  (testing "all declared projection modes round-trip"
-    (doseq [mode protocol/projection-modes]
-      (is (= mode
-             (protocol/wire->projection-mode
-              (protocol/projection-mode->wire mode))))))
+  (testing "callers cannot supply an authority field to the constructor"
+    (is (= :unknown-fields
+           (error-kind
+            #(protocol/provisional
+              {:authority :authoritative
+               :command-id command-id
+               :execution-id execution-id
+               :observed-basis basis
+               :projection {}}))))))
 
-  (testing "unknown and malformed modes are rejected"
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"Invalid Gesso Live optimistic projection mode"
-         (protocol/normalize-projection-mode :unknown)))
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"wire value must be non-blank"
-         (protocol/wire->projection-mode "")))))
+(deftest command-and-provisional-values-must-correlate
+  (let [{command' :command
+         provisional' :provisional}
+        (protocol/command-provisional-pair
+         (command-envelope)
+         (provisional-envelope))]
+    (is (= command-id (:command-id command')))
+    (is (= execution-id (:execution-id provisional')))
+    (is (= basis (:observed-basis command')))
+    (is (= basis (:observed-basis provisional'))))
 
-;; -----------------------------------------------------------------------------
-;; Settlement semantics
-;; -----------------------------------------------------------------------------
+  (is (= :correlation-mismatch
+         (error-kind
+          #(protocol/command-provisional-pair
+            (command-envelope)
+            (provisional-envelope
+             {:execution-id retry-execution-id})))))
 
-(deftest settlement-outcomes-test
-  (testing "declared outcomes match applied semantics"
-    (is (= #{:confirmed :reconciled :rejected :failed}
-           protocol/settlement-outcomes))
-    (is (= #{:confirmed :reconciled}
-           protocol/applied-settlement-outcomes))
-    (is (true? (protocol/command-applied-for-outcome? :confirmed)))
-    (is (true? (protocol/command-applied-for-outcome? :reconciled)))
-    (is (false? (protocol/command-applied-for-outcome? :rejected)))
-    (is (false? (protocol/command-applied-for-outcome? :failed))))
+  (is (= :basis-mismatch
+         (error-kind
+          #(protocol/command-provisional-pair
+            (command-envelope)
+            (provisional-envelope
+             {:observed-basis newer-basis})))))
 
-  (testing "unknown outcomes are rejected"
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"Invalid Gesso Live optimistic settlement outcome"
-         (protocol/normalize-settlement-outcome :maybe)))))
+  (is (= :command-missing-observed-basis
+         (error-kind
+          #(protocol/command-provisional-pair
+            (protocol/command
+             {:command-id command-id
+              :execution-id execution-id
+              :operation :request/claim
+              :arguments {}})
+            (provisional-envelope))))))
 
-(deftest settlement-outcome-wire-test
-  (doseq [outcome protocol/settlement-outcomes]
-    (is (= outcome
-           (protocol/wire->settlement-outcome
-            (protocol/settlement-outcome->wire outcome)))))
+(deftest authoritative-presence-and-absence-are-explicit
+  (let [present (present-authority)
+        absent (absent-authority)]
+    (is (= :authoritative (:authority present)))
+    (is (= :present (:presence present)))
+    (is (= newer-basis (:basis present)))
+    (is (contains? present :projection))
 
-  (testing "wire decoding is strict"
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"wire value is required"
-         (protocol/wire->settlement-outcome nil)))
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"Invalid Gesso Live optimistic settlement outcome"
-         (protocol/wire->settlement-outcome "unknown")))))
+    (is (= :authoritative (:authority absent)))
+    (is (= :absent (:presence absent)))
+    (is (= newer-basis (:basis absent)))
+    (is (not (contains? absent :projection))))
 
-(deftest command-applied-wire-test
-  (testing "booleans encode and decode exactly"
-    (is (= "true" (protocol/command-applied->wire true)))
-    (is (= "false" (protocol/command-applied->wire false)))
-    (is (true? (protocol/wire->command-applied "true")))
-    (is (false? (protocol/wire->command-applied "false"))))
+  (testing "present nil is distinct from authoritative absence"
+    (let [present-nil (protocol/authoritative
+                       {:presence :present
+                        :basis newer-basis
+                        :projection nil})]
+      (is (contains? present-nil :projection))
+      (is (nil? (:projection present-nil)))))
 
-  (testing "non-booleans do not silently coerce"
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"must be boolean"
-         (protocol/command-applied->wire nil)))
-    (doseq [wire [nil "" "TRUE" "0" "yes"]]
-      (is (thrown-with-msg?
-           #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-           #"Malformed Gesso Live command-applied wire value"
-           (protocol/wire->command-applied wire))))))
+  (is (= :missing-authoritative-projection
+         (error-kind
+          #(protocol/authoritative
+            {:presence :present
+             :basis newer-basis}))))
+  (is (= :projection-on-authoritative-absence
+         (error-kind
+          #(absent-authority {:projection nil}))))
+  (is (= :invalid-authoritative-presence
+         (error-kind
+          #(protocol/authoritative
+            {:presence :unknown
+             :basis newer-basis}))))
+  (is (= :unknown-fields
+         (error-kind
+          #(protocol/authoritative
+            {:presence :absent
+             :basis newer-basis
+             :command-applied? false})))))
 
-(deftest settlement-consistency-test
-  (testing "outcome and command-applied flag must agree"
-    (is (true? (protocol/settlement-consistent? :confirmed true)))
-    (is (true? (protocol/settlement-consistent? :reconciled true)))
-    (is (true? (protocol/settlement-consistent? :rejected false)))
-    (is (true? (protocol/settlement-consistent? :failed false)))
-    (is (false? (protocol/settlement-consistent? :confirmed false)))
-    (is (false? (protocol/settlement-consistent? :rejected true))))
+(deftest successful-settlements-require-authority
+  (doseq [resolution protocol/authoritative-required-resolutions]
+    (let [settlement (protocol/settlement
+                      {:command-id command-id
+                       :execution-id execution-id
+                       :resolution resolution
+                       :authoritative (present-authority)
+                       :outcome :request/claimed})]
+      (is (= resolution (:resolution settlement)))
+      (is (= command-id (:command-id settlement)))
+      (is (= execution-id (:execution-id settlement)))
+      (is (= :authoritative
+             (get-in settlement [:authoritative :authority]))))
 
-  (testing "assertion returns true for valid combinations"
-    (is (true? (protocol/assert-settlement-consistent! :confirmed true)))
-    (is (true? (protocol/assert-settlement-consistent! :failed false))))
+    (is (= :missing-settlement-authority
+           (error-kind
+            #(protocol/settlement
+              {:command-id command-id
+               :execution-id execution-id
+               :resolution resolution})))))
 
-  (testing "assertion rejects mismatches and non-booleans"
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"disagrees with command-applied"
-         (protocol/assert-settlement-consistent! :confirmed false)))
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"must be boolean"
-         (protocol/assert-settlement-consistent! :failed nil)))))
+  (testing "rejection may avoid disclosing protected authority"
+    (is (= :rejected
+           (:resolution
+            (protocol/settlement
+             {:command-id command-id
+              :execution-id execution-id
+              :resolution :rejected
+              :reason :unauthorized})))))
 
-;; -----------------------------------------------------------------------------
-;; Scope identity
-;; -----------------------------------------------------------------------------
+  (testing "trusted failure may omit authority but is not command-applied metadata"
+    (is (= :failed
+           (:resolution
+            (protocol/settlement
+             {:command-id command-id
+              :execution-id execution-id
+              :resolution :failed
+              :reason :operation-failed})))))
 
-(deftest wire-scope-test
-  (testing "strings and EDN-like data receive distinct type tags"
-    (is (= "s:request-1"
-           (protocol/wire-scope "request-1")))
-    (is (= "e:[:request \"request-1\"]"
-           (protocol/wire-scope [:request "request-1"])))
-    (is (not= (protocol/wire-scope "[:request \"request-1\"]")
-              (protocol/wire-scope [:request "request-1"]))))
+  (testing "supersession is learned from authority, not forged as a settlement"
+    (is (contains? protocol/provisional-resolution-kinds :superseded))
+    (is (not (contains? protocol/settlement-resolutions :superseded)))
+    (is (= :invalid-settlement-resolution
+           (error-kind
+            #(protocol/settlement
+              {:command-id command-id
+               :execution-id execution-id
+               :resolution :superseded})))))
 
-  (testing "scope identity is deterministic"
-    (is (= (protocol/wire-scope [:request 42])
-           (protocol/wire-scope [:request 42]))))
+  (testing "application outcome remains distinct from generic resolution"
+    (let [settlement (protocol/settlement
+                      {:command-id command-id
+                       :execution-id execution-id
+                       :resolution :confirmed
+                       :authoritative (present-authority)
+                       :outcome :request/claimed
+                       :reason :accepted})]
+      (is (= :confirmed (:resolution settlement)))
+      (is (= :request/claimed (:outcome settlement)))
+      (is (= "accepted" (:reason settlement)))))
 
-  (testing "nil and blank string scopes are rejected"
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"scope is required"
-         (protocol/wire-scope nil)))
-    (is (thrown-with-msg?
-         #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-         #"scope must not be blank"
-         (protocol/wire-scope "   ")))))
+  (is (= :invalid-settlement-outcome
+         (error-kind
+          #(protocol/settlement
+            {:command-id command-id
+             :execution-id execution-id
+             :resolution :rejected
+             :outcome "request/claimed"})))))
 
-;; -----------------------------------------------------------------------------
-;; Revisions
-;; -----------------------------------------------------------------------------
+(deftest command-wire-round-trip-preserves-v3-values
+  (let [runtime (command-envelope)
+        wire (protocol/command->wire runtime)
+        decoded (protocol/wire->command wire)]
+    (is (= runtime decoded))
+    (is (= protocol/version (:protocol-version wire)))
+    (is (= :command
+           (:gesso.choreo.identity.wire/kind
+            (:command-id wire))))
+    (is (= :execution
+           (:gesso.choreo.identity.wire/kind
+            (:execution-id wire))))
+    (is (= [:request "request-1"]
+           (:scope wire)))
+    (is (= basis (:observed-basis wire))))
 
-(deftest normalize-revision-test
-  (testing "nil, safe non-negative integers, and non-blank strings are supported"
-    (is (nil? (protocol/normalize-revision :revision nil)))
-    (is (= 0 (protocol/normalize-revision :revision 0)))
-    (is (= protocol/max-safe-integer-revision
-           (protocol/normalize-revision
-            :revision
-            protocol/max-safe-integer-revision)))
-    (is (= "opaque-7"
-           (protocol/normalize-revision :revision "opaque-7"))))
+  (testing "wrong identity kind remains rejected after transport"
+    (let [wire (protocol/command->wire (command-envelope))]
+      (is (= :invalid-command-id
+             (error-kind
+              #(protocol/wire->command
+                (assoc wire
+                       :command-id
+                       (protocol/execution-id->wire execution-id))))))))
 
-  (testing "unsafe, negative, blank, and unsupported revisions are rejected"
-    (doseq [revision [-1
-                      (inc protocol/max-safe-integer-revision)
-                      ""
-                      "   "
-                      :revision-1]]
-      (is (thrown-with-msg?
-           #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-           #"JavaScript-safe non-negative integer or non-blank string"
-           (protocol/normalize-revision :revision revision))))))
+  (testing "wire envelope is versioned and closed"
+    (let [wire (protocol/command->wire (command-envelope))]
+      (is (= :unsupported-version
+             (error-kind
+              #(protocol/wire->command
+                (assoc wire :protocol-version "4")))))
+      (is (= :unknown-fields
+             (error-kind
+              #(protocol/wire->command
+                (assoc wire :principal "browser-claim"))))))))
 
-(deftest revision-wire-test
-  (testing "numeric and opaque revisions keep distinct wire types"
-    (is (= "i:42" (protocol/revision->wire 42)))
-    (is (= "s:42" (protocol/revision->wire "42")))
-    (is (= 42 (protocol/wire->revision "i:42")))
-    (is (= "42" (protocol/wire->revision "s:42")))
-    (is (nil? (protocol/revision->wire nil)))
-    (is (nil? (protocol/wire->revision nil))))
+(deftest provisional-wire-round-trip-preserves-explicit-provisionality
+  (let [runtime (provisional-envelope)
+        wire (protocol/provisional->wire runtime)]
+    (is (= runtime
+           (protocol/wire->provisional wire)))
+    (is (= :provisional (:authority wire))))
 
-  (testing "supported revisions round-trip"
-    (doseq [revision [0 1 42 protocol/max-safe-integer-revision
-                      "r1" "00042" "2026-08-10T08:32:00Z"]]
-      (is (= revision
-             (protocol/wire->revision
-              (protocol/revision->wire revision))))))
+  (let [wire (protocol/provisional->wire (provisional-envelope))]
+    (is (= :invalid-provisional-authority
+           (error-kind
+            #(protocol/wire->provisional
+              (assoc wire :authority :authoritative)))))))
 
-  (testing "malformed wire revisions are rejected"
-    (doseq [wire ["" "42" "x:42" "i:" "i:-1" "i:1.5" "i:9007199254740992" "s:" "s:   "]]
-      (is (thrown?
-           #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
-           (protocol/wire->revision wire))))))
+(deftest authoritative-wire-round-trip-preserves-tombstones
+  (doseq [runtime [(present-authority)
+                   (absent-authority)]]
+    (is (= runtime
+           (protocol/wire->authoritative
+            (protocol/authoritative->wire runtime)))))
 
-(deftest revision-comparison-test
-  (testing "numeric revisions have total ordering"
-    (is (= :same (protocol/compare-revisions 7 7)))
-    (is (= :newer (protocol/compare-revisions 8 7)))
-    (is (= :older (protocol/compare-revisions 6 7))))
+  (let [wire (protocol/authoritative->wire (absent-authority))]
+    (is (= :invalid-authoritative-authority
+           (error-kind
+            #(protocol/wire->authoritative
+              (assoc wire :authority :provisional)))))))
 
-  (testing "opaque revisions have equality semantics only"
-    (is (= :same (protocol/compare-revisions "r7" "r7")))
-    (is (= :incomparable
-           (protocol/compare-revisions "r8" "r7"))))
+(deftest settlement-wire-round-trip-preserves-correlation-and-authority
+  (doseq [settlement
+          [(protocol/settlement
+            {:command-id command-id
+             :execution-id execution-id
+             :resolution :confirmed
+             :authoritative (present-authority)
+             :outcome :request/claimed})
 
-  (testing "mixed numeric/opaque revisions are incomparable"
-    (is (= :incomparable
-           (protocol/compare-revisions 7 "7"))))
+           (protocol/settlement
+            {:command-id command-id
+             :execution-id execution-id
+             :resolution :reconciled
+             :authoritative (absent-authority)})
 
-  (testing "wire comparison preserves typed revision semantics"
-    (is (= :newer
-           (protocol/compare-wire-revisions "i:8" "i:7")))
-    (is (= :incomparable
-           (protocol/compare-wire-revisions "i:7" "s:7")))))
+           (protocol/settlement
+            {:command-id command-id
+             :execution-id retry-execution-id
+             :resolution :already-incorporated
+             :authoritative (present-authority)})
+
+           (protocol/settlement
+            {:command-id command-id
+             :execution-id execution-id
+             :resolution :rejected
+             :reason :unauthorized})
+
+           (protocol/settlement
+            {:command-id command-id
+             :execution-id execution-id
+             :resolution :failed
+             :reason :operation-failed})]]
+    (is (= settlement
+           (protocol/wire->settlement
+            (protocol/settlement->wire settlement)))))
+
+  (testing "the settlement wire remains closed"
+    (let [wire (protocol/settlement->wire
+                (protocol/settlement
+                 {:command-id command-id
+                  :execution-id execution-id
+                  :resolution :rejected}))]
+      (is (= :unknown-fields
+             (error-kind
+              #(protocol/wire->settlement
+                (assoc wire :role :server))))))))
+
+(deftest v2-fields-are-not-accepted-by-v3-constructors
+  (doseq [[constructor envelope removed-key removed-value]
+          [[protocol/command
+            {:command-id command-id
+             :execution-id execution-id
+             :operation :request/claim
+             :arguments {}}
+            :transition
+            :claim]
+
+           [protocol/provisional
+            {:command-id command-id
+             :execution-id execution-id
+             :observed-basis basis
+             :projection {}}
+            :projection-mode
+            :provisional]
+
+           [protocol/settlement
+            {:command-id command-id
+             :execution-id execution-id
+             :resolution :rejected}
+            :command-applied?
+            false]]]
+    (is (= :unknown-fields
+           (error-kind
+            #(constructor
+              (assoc envelope removed-key removed-value)))))))

@@ -1013,6 +1013,9 @@
 ;; Box capture/restore
 ;; =============================================================================
 
+(def ^:private captured-restore-key
+  ::captured-restore)
+
 (defn capture-box
   [runtime root target box]
   (let [runtime (require-runtime! runtime)
@@ -1029,11 +1032,18 @@
           :box-type type})
         nil)
       (try
+        ;; Freeze the restore implementation into the opaque physical capture.
+        ;; register-box! may legitimately change the runtime registry later, but
+        ;; an already-captured continuity resource must restore with the exact
+        ;; implementation that understands the state produced by this capture.
+        ;; The function never enters AdapterState or diagnostics; it lives only
+        ;; inside the shell-owned opaque physical resource.
         {:type type
          :name (or (:name box) type)
          :box box
          :state ((:capture implementation)
-                 runtime root target box)}
+                 runtime root target box)
+         captured-restore-key (:restore implementation)}
         (catch :default error
           ;; One broken optional box must not make browser-local continuity an
           ;; authority gate for the canonical swap.
@@ -1051,12 +1061,21 @@
                 :error error})
           nil)))))
 
+(defn- restore-for-capture
+  [runtime captured]
+  ;; Captures produced by capture-box always contain captured-restore-key, even
+  ;; when the implementation intentionally had no restore function. The
+  ;; registry fallback exists only for older/manually-constructed captured box
+  ;; values accepted by this public helper.
+  (if (contains? captured captured-restore-key)
+    (get captured captured-restore-key)
+    (get-in @(:boxes runtime)
+            [(:type captured) :restore])))
+
 (defn restore-box!
   [runtime root target captured]
-  (when-some [implementation
-              (get @(:boxes (require-runtime! runtime))
-                   (:type captured))]
-    (when-some [restore (:restore implementation)]
+  (let [runtime (require-runtime! runtime)]
+    (when-some [restore (restore-for-capture runtime captured)]
       (try
         (restore runtime
                  root
@@ -1075,8 +1094,8 @@
            "error"
            #js {:phase "restore"
                 :box (clj->js (:box captured))
-                :error error})))))
-  target)
+                :error error}))))
+    target))
 
 ;; =============================================================================
 ;; Height stability
@@ -1088,16 +1107,26 @@
     (let [rect (.getBoundingClientRect root)
           previous (.-minHeight (.-style root))
           height (max (.-height rect)
-                      (.-offsetHeight root))]
+                      (.-offsetHeight root))
+          applied (str height "px")]
       (when (pos? height)
-        (set! (.-minHeight (.-style root))
-              (str height "px"))
+        (set! (.-minHeight (.-style root)) applied)
         {:height height
+         :applied applied
          :previous previous}))))
 
 (defn release-height-lock!
+  "Release only the min-height value installed by lock-height!.
+
+   This makes cleanup idempotent and prevents a late/duplicate continuity
+   cleanup from overwriting a newer physical style change that occurred after
+   capture. Physical cleanup is best effort; it must not reacquire ownership of
+   browser state it no longer controls."
   [root height-lock]
-  (when (and root height-lock)
+  (when (and root
+             height-lock
+             (= (:applied height-lock)
+                (.-minHeight (.-style root))))
     (set! (.-minHeight (.-style root))
           (or (:previous height-lock) "")))
   root)
@@ -1112,6 +1141,12 @@
        (= resource-type
           (:gesso.live.browser.continuity/type value))))
 
+(defn- released-resource?
+  [resource]
+  (boolean
+   (and (resource? resource)
+        (some-> (:released? resource) deref))))
+
 (defn resource-summary
   "Return diagnostics that deliberately exclude DOM/host references."
   [resource]
@@ -1121,7 +1156,8 @@
      :target-id (:target-id resource)
      :captured-at (:captured-at resource)
      :box-types (mapv :type (:captured resource))
-     :height-locked? (boolean (:height-lock resource))}))
+     :height-locked? (boolean (:height-lock resource))
+     :released? (released-resource? resource)}))
 
 (defn- physical-root
   [context]
@@ -1155,6 +1191,10 @@
          :captured-at ((:now-ms runtime))
          :config config
          :captured captured
+         ;; Shell/adapter generation ownership is semantic. This atom is only a
+         ;; physical cancellation latch carried inside the opaque resource so a
+         ;; delayed RAF callback cannot mutate DOM after :continuity/release.
+         :released? (atom false)
          :fallback-scroll (when active?
                             (window-scroll-state))
          :height-lock (when active?
@@ -1207,28 +1247,43 @@
   [runtime resource current-target]
   (let [root (:root resource)
         fallback (:fallback-scroll resource)]
-    (if current-target
-      (restore-all! runtime resource current-target)
-      (when fallback
-        (restore-window-scroll! fallback)))
-    ;; Replacement/layout can clamp the viewport after focus/details changes.
-    ;; Reapply the captured page position at the completion boundary when it is
-    ;; non-zero. This remains physical browser state only.
-    (when (and fallback
-               (pos? (or (:y fallback) 0))
-               (zero? (or (.-pageYOffset js/window) 0)))
-      (restore-window-scroll! fallback))
-    (release-height-lock! root (:height-lock resource))
-    (emit!
-     runtime
-     root
-     "restored"
-     #js {:root root
-          :target current-target
-          :targetId (:target-id resource)
-          :count (count (:captured resource))
-          :heightLocked (boolean (:height-lock resource))})
-    true))
+    (if (released-resource? resource)
+      (do
+        ;; Semantic ownership was revoked while this restore was waiting for
+        ;; layout. The shell may still receive this Promise's eventual completion,
+        ;; but the stale physical callback is no longer allowed to touch DOM.
+        (runtime-diagnostic!
+         runtime
+         :restore-suppressed-after-release
+         {:target-id (:target-id resource)})
+        true)
+      (try
+        (if current-target
+          (restore-all! runtime resource current-target)
+          (when fallback
+            (restore-window-scroll! fallback)))
+        ;; Replacement/layout can clamp the viewport after focus/details changes.
+        ;; Reapply the captured page position at the completion boundary when it is
+        ;; non-zero. This remains physical browser state only.
+        (when (and fallback
+                   (pos? (or (:y fallback) 0))
+                   (zero? (or (.-pageYOffset js/window) 0)))
+          (restore-window-scroll! fallback))
+        (emit!
+         runtime
+         root
+         "restored"
+         #js {:root root
+              :target current-target
+              :targetId (:target-id resource)
+              :count (count (:captured resource))
+              :heightLocked (boolean (:height-lock resource))})
+        true
+        (finally
+          ;; Even a failed browser-local restore must relinquish the layout lock.
+          ;; The shell/adapter decide semantic success/failure; continuity owns only
+          ;; this best-effort physical cleanup.
+          (release-height-lock! root (:height-lock resource)))))))
 
 (defn restore!
   "Shell :continuity/restore handler.
@@ -1245,22 +1300,39 @@
             current-target (when root (target root))]
         (if-not (:enabled? resource)
           (js/Promise.resolve true)
-          (do
-            (if current-target
-              (restore-details-immediate!
-               runtime resource current-target)
-              (when-let [fallback (:fallback-scroll resource)]
-                (restore-window-scroll! fallback)))
-            (after-layout!
-             runtime
-             (fn []
-               ;; Resolve the target again after replacement/layout. The stable
-               ;; continuity root may survive while its replaceable child does
-               ;; not.
-               (final-restore!
-                runtime
-                resource
-                (when root (target root)))))))))))
+          (if (released-resource? resource)
+            (js/Promise.resolve true)
+            (do
+              (if current-target
+                (restore-details-immediate!
+                 runtime resource current-target)
+                (when-let [fallback (:fallback-scroll resource)]
+                  (restore-window-scroll! fallback)))
+              (->
+             (after-layout!
+              runtime
+              (fn []
+                ;; Resolve the target again after replacement/layout. The stable
+                ;; continuity root may survive while its replaceable child does
+                ;; not.
+                (final-restore!
+                 runtime
+                 resource
+                 (when root (target root)))))
+             (.catch
+              (fn [error]
+                ;; requestAnimationFrame itself can fail before final-restore! is
+                ;; reached. Cleanup is idempotent/non-clobbering, so this also
+                ;; safely covers failures thrown from final-restore!. Preserve the
+                ;; rejection so the shell, not continuity, decides semantic
+                ;; completion.
+                (release-height-lock! root (:height-lock resource))
+                (runtime-diagnostic!
+                 runtime
+                 :restore-failed
+                 {:target-id (:target-id resource)
+                  :message (.-message error)})
+                (js/Promise.reject error)))))))))))
 
 (defn release!
   "Shell :continuity/release handler.
@@ -1271,6 +1343,11 @@
   [runtime {:keys [resource] :as _context}]
   (let [runtime (require-runtime! runtime)]
     (when (resource? resource)
+      ;; Revoke physical mutation authority before cleanup. A pending two-RAF
+      ;; restore may still run as JavaScript, but every delayed mutation checks
+      ;; this latch first and becomes powerless immediately.
+      (when-let [released? (:released? resource)]
+        (reset! released? true))
       (release-height-lock!
        (:root resource)
        (:height-lock resource))

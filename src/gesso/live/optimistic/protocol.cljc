@@ -1,477 +1,758 @@
 (ns gesso.live.optimistic.protocol
-  "Platform-neutral wire vocabulary for Gesso Live optimistic commands.
+  "Portable optimistic protocol-v3 vocabulary shared by Clojure and
+   ClojureScript.
 
-   This namespace is the single owner of browser/server optimistic protocol
-   names and pure normalization. It is shared by JVM Clojure and ClojureScript.
+   This namespace owns the semantic browser/server wire envelopes for an
+   optimistic command.  It deliberately does not own DOM markup, HTMX request
+   construction, continuity resources, timers, browser target generations,
+   authentication, authorization, model transition policy, or XTDB-specific
+   serialization.
 
-   It owns:
-   - optimistic protocol/version identity
-   - optimistic request/settlement attribute names
-   - optimistic execution request header name
-   - command and settlement message contracts
-   - semantic settlement outcomes
-   - projection-mode normalization
-   - opaque scope wire identity
-   - typed revision encoding/comparison
-   - strict settlement outcome and command-applied wire parsing
+   Protocol v3 follows the v4.5 choreography design:
 
-   It deliberately does not own:
-   - choreography control flow
-   - DOM behavior or continuity
-   - HTMX request construction
-   - server rendering
-   - consistency-token transport headers
-   - application/domain transition policy."
+   - command-id identifies one semantic command/intention;
+   - execution-id identifies one concrete protocol execution and is distinct
+     from command-id;
+   - an optimistic projection is explicit provisional knowledge derived from a
+     known authoritative basis and command-id;
+   - authoritative observations explicitly distinguish presence from absence;
+   - settlements are typed resolutions correlated to both command-id and
+     execution-id;
+   - optional model-specific fact versions remain separate from the
+     authoritative database basis;
+   - opaque authoritative basis values are never ordered or compared here.
+
+   Shape validation is not authority.  In particular, decoding a well-formed
+   command, basis, provisional value, or settlement never authenticates a
+   principal, authorizes an operation, establishes provenance, or upgrades
+   provisional state into authoritative state."
   (:require
-   [clojure.string :as str]))
+   [clojure.string :as str]
+   [gesso.choreo.identity :as identity]
+   [gesso.choreo.type :as type]))
 
-;; -----------------------------------------------------------------------------
-;; Protocol identity
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Protocol identity and message kinds
+;; =============================================================================
 
 (def version
-  "Optimistic browser/server wire protocol version.
+  "Optimistic browser/server wire protocol version."
+  "3")
 
-   Version 2 uses explicit canonical marking and typed revision encoding. The
-   choreography/runtime rewrite does not by itself change this wire format, so
-   the version remains 2."
-  "2")
+(def protocol-version-key :protocol-version)
 
-(def command-event
-  :optimistic/command)
+(def command-event :optimistic/command)
+(def provisional-event :optimistic/provisional)
+(def settlement-event :optimistic/settlement)
+(def authoritative-event :optimistic/authoritative)
 
-(def settlement-event
-  :optimistic/settlement)
+;; =============================================================================
+;; Public keys and closed envelope contracts
+;; =============================================================================
 
-;; -----------------------------------------------------------------------------
-;; Request header
-;; -----------------------------------------------------------------------------
-
-(def execution-header-name
-  "Canonical lower-case Ring request header carrying the browser-generated
-   optimistic execution id."
-  "gesso-optimistic-execution")
-
-;; -----------------------------------------------------------------------------
-;; Optimistic markup attributes
-;; -----------------------------------------------------------------------------
-
-(def protocol-attr
-  :data-gesso-optimistic-protocol)
-
-(def transition-attr
-  :data-gesso-optimistic-transition)
-
-(def template-attr
-  :data-gesso-optimistic-template)
-
-(def target-attr
-  :data-gesso-optimistic-target)
-
-(def scope-attr
-  :data-gesso-optimistic-scope)
-
-(def base-revision-attr
-  :data-gesso-optimistic-base-revision)
-
-(def revision-attr
-  :data-gesso-optimistic-revision)
-
-(def pending-label-attr
-  :data-gesso-optimistic-label)
-
-(def projection-mode-attr
-  :data-gesso-optimistic-mode)
-
-(def settlement-attr
-  :data-gesso-optimistic-settlement)
-
-(def execution-attr
-  :data-gesso-optimistic-execution)
-
-(def outcome-attr
-  :data-gesso-optimistic-outcome)
-
-(def command-applied-attr
-  :data-gesso-optimistic-command-applied)
-
-(def reason-attr
-  :data-gesso-optimistic-reason)
-
-(def canonical-attr
-  "Marks authoritative server-rendered content.
-
-   Scope membership alone never implies canonical authority: optimistic source
-   elements, projection templates, and settlement markers may carry the same
-   scope."
-  :data-gesso-optimistic-canonical)
-
-(def reserved-attrs
-  "Framework-owned optimistic attrs that application attrs may not override."
-  [protocol-attr
-   transition-attr
-   template-attr
-   target-attr
-   scope-attr
-   base-revision-attr
-   revision-attr
-   pending-label-attr
-   projection-mode-attr
-   settlement-attr
-   execution-attr
-   outcome-attr
-   command-applied-attr
-   reason-attr
-   canonical-attr])
-
-;; -----------------------------------------------------------------------------
-;; Shared semantic vocabulary
-;; -----------------------------------------------------------------------------
-
-(def projection-modes
-  #{:pending :provisional :full})
-
-(def settlement-outcomes
-  #{:confirmed :reconciled :rejected :failed})
-
-(def applied-settlement-outcomes
-  #{:confirmed :reconciled})
-
-(def max-safe-integer-revision
-  "Largest integer revision that round-trips exactly through JavaScript."
-  9007199254740991)
-
-;; -----------------------------------------------------------------------------
-;; Choreography payload keys and message contracts
-;; -----------------------------------------------------------------------------
-
+(def command-id-key :command-id)
 (def execution-id-key :execution-id)
-(def transition-key :transition)
+(def operation-key :operation)
+(def arguments-key :arguments)
+(def observed-basis-key :observed-basis)
 (def scope-key :scope)
-(def base-revision-key :base-revision)
-(def consistency-token-key :consistency-token)
+(def fact-versions-key :fact-versions)
+
+(def authority-key :authority)
+(def projection-key :projection)
+
+(def presence-key :presence)
+(def basis-key :basis)
+
+(def resolution-key :resolution)
+(def authoritative-key :authoritative)
 (def outcome-key :outcome)
-(def command-applied-key :command-applied?)
-(def revision-key :revision)
-(def canonical-key :canonical)
 (def reason-key :reason)
 
 (def command-required-keys
-  #{execution-id-key
-    transition-key
-    scope-key})
+  #{protocol-version-key
+    command-id-key
+    execution-id-key
+    operation-key
+    arguments-key})
 
 (def command-optional-keys
-  #{base-revision-key
-    consistency-token-key})
+  #{observed-basis-key
+    scope-key
+    fact-versions-key})
 
-(def command-correlation-keys
-  #{execution-id-key
-    scope-key})
+(def provisional-required-keys
+  #{protocol-version-key
+    authority-key
+    command-id-key
+    execution-id-key
+    observed-basis-key
+    projection-key})
+
+(def provisional-optional-keys
+  #{scope-key
+    fact-versions-key})
+
+(def authoritative-required-keys
+  #{authority-key
+    presence-key
+    basis-key})
+
+(def authoritative-optional-keys
+  #{projection-key
+    fact-versions-key})
 
 (def settlement-required-keys
-  #{execution-id-key
-    scope-key
-    outcome-key
-    command-applied-key
-    canonical-key})
+  #{protocol-version-key
+    command-id-key
+    execution-id-key
+    resolution-key})
 
 (def settlement-optional-keys
-  #{revision-key
-    reason-key
-    consistency-token-key})
+  #{authoritative-key
+    outcome-key
+    reason-key})
+
+(def command-correlation-keys
+  #{command-id-key execution-id-key})
 
 (def settlement-correlation-keys
-  #{execution-id-key
-    scope-key})
+  #{command-id-key execution-id-key})
 
-;; -----------------------------------------------------------------------------
-;; Small validation helpers
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Semantic vocabulary
+;; =============================================================================
 
-(defn- ex
-  [message data]
-  (ex-info message data))
+(def authoritative-presences
+  "Closed authoritative projection presence vocabulary.
+
+   :present means authority establishes that the projection exists.
+   :absent means authority establishes a tombstone/absence.  Absence is an
+   authoritative observation, not a missing-target error."
+  #{:present :absent})
+
+(def settlement-resolutions
+  "Generic protocol resolution classes.
+
+   Application/model outcomes may be carried separately in :outcome.  These
+   classes describe how an optimistic trajectory relates to trusted authority,
+   not the complete business-domain result vocabulary."
+  #{:confirmed
+    :reconciled
+    :rejected
+    :already-incorporated
+    :failed})
+
+(def authoritative-required-resolutions
+  "Settlement resolutions that must carry an authoritative observation.
+
+   Rejection may intentionally omit protected authoritative state, for example
+   when authorization fails.  :failed is a trusted operation/protocol failure
+   and is not a synonym for post-commit notification or delivery failure."
+  #{:confirmed
+    :reconciled
+    :already-incorporated})
+
+(def provisional-resolution-kinds
+  "All generic ways an optimistic trajectory may finish locally.
+
+   :superseded is intentionally not a settlement resolution: it can be learned
+   from a later authoritative reread even when the original settlement is lost."
+  (conj settlement-resolutions :superseded))
+
+;; =============================================================================
+;; Errors and closed-map helpers
+;; =============================================================================
+
+(defn- protocol-error
+  [kind message data]
+  (throw
+   (ex-info
+    message
+    (merge
+     {:error/type :gesso.live.optimistic.protocol/error
+      :error/kind kind
+      :protocol/version version}
+     data))))
+
+(defn- require-map!
+  [label value]
+  (when-not (map? value)
+    (protocol-error
+     :invalid-shape
+     (str label " must be a map.")
+     {:label label
+      :value value}))
+  value)
+
+(defn- require-closed-map!
+  [label value required optional]
+  (require-map! label value)
+  (let [keys' (set (keys value))
+        allowed (into required optional)
+        missing (set (remove keys' required))
+        extra (set (remove allowed keys'))]
+    (when (seq missing)
+      (protocol-error
+       :missing-fields
+       (str label " is missing required protocol fields.")
+       {:label label
+        :missing missing
+        :required required
+        :value value}))
+    (when (seq extra)
+      (protocol-error
+       :unknown-fields
+       (str label " contains unknown protocol fields.")
+       {:label label
+        :unknown extra
+        :allowed allowed
+        :value value})))
+  value)
+
+(defn- require-version!
+  [envelope]
+  (let [actual (get envelope protocol-version-key)]
+    (when-not (= version actual)
+      (protocol-error
+       :unsupported-version
+       "Unsupported Gesso optimistic protocol version."
+       {:expected version
+        :actual actual})))
+  envelope)
 
 (defn- non-blank-string?
-  [x]
-  (and (string? x)
-       (not (str/blank? x))))
+  [value]
+  (and (string? value)
+       (not (str/blank? value))))
 
 (defn qualified-name
-  "Return a browser-safe textual name while preserving keyword namespaces."
-  [x]
+  "Return a stable textual semantic name while preserving keyword namespaces."
+  [value]
   (cond
-    (keyword? x)
-    (if-some [namespace' (namespace x)]
-      (str namespace' "/" (name x))
-      (name x))
+    (keyword? value)
+    (if-some [namespace' (namespace value)]
+      (str namespace' "/" (name value))
+      (name value))
 
-    (symbol? x)
-    (str x)
+    (symbol? value)
+    (str value)
 
-    (nil? x)
+    (nil? value)
     nil
 
     :else
-    (str x)))
+    (str value)))
 
 (defn normalize-name
-  "Normalize a required semantic name to a non-blank string."
-  [k value]
+  "Normalize one required semantic name to a non-blank string."
+  [key value]
   (let [value' (qualified-name value)]
     (when-not (non-blank-string? value')
-      (throw
-       (ex "Gesso Live optimistic protocol name must not be blank."
-           {:key k
-            :value value})))
+      (protocol-error
+       :invalid-name
+       "Gesso optimistic protocol name must not be blank."
+       {:key key
+        :value value}))
     value'))
 
 (defn normalize-optional-name
-  "Normalize an optional semantic name."
-  [k value]
+  "Normalize one optional semantic name."
+  [key value]
   (when (some? value)
-    (normalize-name k value)))
+    (normalize-name key value)))
 
-;; -----------------------------------------------------------------------------
-;; Projection mode
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Typed command/execution identities and their wire forms
+;; =============================================================================
 
-(defn normalize-projection-mode
-  "Normalize a projection mode keyword.
+(defn require-command-id
+  "Validate and return one typed semantic command identity."
+  [value]
+  (when-not (identity/command-id? value)
+    (protocol-error
+     :invalid-command-id
+     "Optimistic command-id must be a typed Choreo command identity."
+     {:value value}))
+  value)
 
-   nil means :provisional."
-  [mode]
-  (let [mode' (or mode :provisional)]
-    (when-not (contains? projection-modes mode')
-      (throw
-       (ex "Invalid Gesso Live optimistic projection mode."
-           {:projection-mode mode
-            :allowed projection-modes})))
-    mode'))
+(defn require-execution-id
+  "Validate and return one typed concrete execution identity."
+  [value]
+  (when-not (identity/execution-id? value)
+    (protocol-error
+     :invalid-execution-id
+     "Optimistic execution-id must be a typed Choreo execution identity."
+     {:value value}))
+  value)
 
-(defn projection-mode->wire
-  [mode]
-  (name (normalize-projection-mode mode)))
+(defn command-id->wire
+  "Encode one semantic command identity with the canonical Choreo identity wire
+   representation."
+  [value]
+  (identity/encode-wire
+   (require-command-id value)))
 
-(defn wire->projection-mode
+(defn execution-id->wire
+  "Encode one concrete execution identity with the canonical Choreo identity
+   wire representation."
+  [value]
+  (identity/encode-wire
+   (require-execution-id value)))
+
+(defn wire->command-id
+  "Decode and require one command-id wire value.
+
+   An execution-id encoded with the same raw scalar is rejected rather than
+   becoming interchangeable with command identity."
   [wire]
-  (when-not (non-blank-string? wire)
-    (throw
-     (ex "Gesso Live optimistic projection mode wire value must be non-blank."
-         {:wire wire})))
-  (normalize-projection-mode (keyword wire)))
+  (require-command-id
+   (identity/decode-wire wire)))
 
-;; -----------------------------------------------------------------------------
-;; Settlement semantics
-;; -----------------------------------------------------------------------------
-
-(defn normalize-settlement-outcome
-  "Validate and return one semantic settlement outcome keyword."
-  [outcome]
-  (when-not (contains? settlement-outcomes outcome)
-    (throw
-     (ex "Invalid Gesso Live optimistic settlement outcome."
-         {:outcome outcome
-          :allowed settlement-outcomes})))
-  outcome)
-
-(defn command-applied-for-outcome?
-  "True exactly when the semantic settlement means the command was applied."
-  [outcome]
-  (contains? applied-settlement-outcomes
-             (normalize-settlement-outcome outcome)))
-
-(defn settlement-outcome->wire
-  [outcome]
-  (name (normalize-settlement-outcome outcome)))
-
-(defn wire->settlement-outcome
-  "Strictly decode one settlement outcome attribute value."
+(defn wire->execution-id
+  "Decode and require one execution-id wire value."
   [wire]
-  (when-not (non-blank-string? wire)
-    (throw
-     (ex "Gesso Live settlement outcome wire value is required."
-         {:wire wire})))
-  (normalize-settlement-outcome (keyword wire)))
+  (require-execution-id
+   (identity/decode-wire wire)))
 
-(defn command-applied->wire
-  "Encode the required settlement command-applied flag."
-  [applied?]
-  (cond
-    (true? applied?) "true"
-    (false? applied?) "false"
-    :else
-    (throw
-     (ex "Gesso Live command-applied value must be boolean."
-         {:command-applied? applied?}))))
+;; =============================================================================
+;; Basis, scope, and model-specific fact-version helpers
+;; =============================================================================
 
-(defn wire->command-applied
-  "Strictly decode the required settlement command-applied attribute.
+(defn normalize-basis
+  "Require one opaque authoritative basis.
 
-   Missing, blank, or non-boolean values throw. This prevents malformed
-   settlement markers from silently becoming command-applied? false."
-  [wire]
-  (case wire
-    "true" true
-    "false" false
-    (throw
-     (ex "Malformed Gesso Live command-applied wire value."
-         {:wire wire
-          :allowed #{"true" "false"}}))))
+   The basis is deliberately not compared here.  XTDB or another authority
+   owns progression/consistency semantics; the browser must not invent ordering
+   for opaque basis values."
+  [key basis]
+  (when (nil? basis)
+    (protocol-error
+     :missing-basis
+     "Optimistic authoritative basis is required."
+     {:key key
+      :basis basis}))
+  basis)
 
-(defn settlement-consistent?
-  "True when outcome and command-applied? agree with protocol semantics."
-  [outcome command-applied?]
-  (= (command-applied-for-outcome? outcome)
-     command-applied?))
+(defn normalize-optional-basis
+  "Normalize an optional authoritative basis without inventing comparison
+   semantics."
+  [key basis]
+  (when (some? basis)
+    (normalize-basis key basis)))
 
-(defn assert-settlement-consistent!
-  "Return true when settlement outcome and command-applied? agree, otherwise
-   throw."
-  [outcome command-applied?]
-  (let [outcome' (normalize-settlement-outcome outcome)]
-    (when-not (or (true? command-applied?)
-                  (false? command-applied?))
-      (throw
-       (ex "Gesso Live settlement command-applied? must be boolean."
-           {:outcome outcome'
-            :command-applied? command-applied?})))
-    (when-not (settlement-consistent? outcome' command-applied?)
-      (throw
-       (ex "Gesso Live settlement outcome disagrees with command-applied?."
-           {:outcome outcome'
-            :command-applied? command-applied?
-            :expected-command-applied?
-            (command-applied-for-outcome? outcome')})))
-    true))
+(defn normalize-scope
+  "Normalize an optional application projection scope.
 
-;; -----------------------------------------------------------------------------
-;; Scope wire identity
-;; -----------------------------------------------------------------------------
+   Protocol v3 carries scope as ordinary portable data and relies on the
+   surrounding serializer (for example Transit) to preserve its type.  Scope is
+   equality/correlation data only; it never grants authority."
+  [scope]
+  (when (some? scope)
+    (when (and (string? scope)
+               (str/blank? scope))
+      (protocol-error
+       :invalid-scope
+       "Gesso optimistic scope must not be blank."
+       {:scope scope}))
+    scope))
 
 (defn wire-scope
-  "Encode a semantic scope as an opaque browser identity.
+  "Return the protocol-v3 wire scope value.
 
-   Strings and Clojure data are tagged separately so a string that happens to
-   resemble printed EDN cannot collide with the data value itself. The browser
-   treats the result as opaque and compares it only for equality."
+   Unlike protocol v2, v3 does not stringify/tag scope values.  The enclosing
+   portable serializer preserves the value and therefore avoids lossy or
+   double-encoded scope identities."
   [scope]
-  (when (nil? scope)
-    (throw
-     (ex "Gesso Live optimistic scope is required."
-         {:scope scope})))
-  (let [wire (if (string? scope)
-               (str "s:" scope)
-               (str "e:" (pr-str scope)))]
-    (when (str/blank? (subs wire 2))
-      (throw
-       (ex "Gesso Live optimistic scope must not be blank."
-           {:scope scope})))
-    wire))
+  (normalize-scope scope))
 
-;; -----------------------------------------------------------------------------
-;; Revision wire format and comparison
-;; -----------------------------------------------------------------------------
+(defn normalize-fact-versions
+  "Validate optional model-specific fact/version metadata.
 
-(defn normalize-revision
-  "Normalize an optional semantic revision.
+   Fact versions are intentionally separate from :observed-basis/:basis.  They
+   are opaque to Gesso and have no generic ordering semantics.  Keys are
+   semantic keyword names; non-nil values are model-owned version identities."
+  [fact-versions]
+  (when (some? fact-versions)
+    (when-not (map? fact-versions)
+      (protocol-error
+       :invalid-fact-versions
+       "Optimistic fact-versions must be a map when supplied."
+       {:fact-versions fact-versions}))
+    (doseq [[fact-key fact-version] fact-versions]
+      (when-not (keyword? fact-key)
+        (protocol-error
+         :invalid-fact-version-key
+         "Optimistic fact-version keys must be keywords."
+         {:fact-key fact-key
+          :fact-version fact-version}))
+      (when (nil? fact-version)
+        (protocol-error
+         :invalid-fact-version
+         "Optimistic fact-version values must not be nil."
+         {:fact-key fact-key
+          :fact-version fact-version})))
+    fact-versions))
 
-   Supported revisions:
-   - JavaScript-safe non-negative integers, with total numeric ordering
-   - non-blank strings, treated as opaque identities with equality only."
-  [k revision]
-  (when (some? revision)
-    (cond
-      (and (integer? revision)
-           (not (neg? revision))
-           (<= revision max-safe-integer-revision))
-      revision
+;; =============================================================================
+;; Runtime semantic envelopes
+;; =============================================================================
 
-      (non-blank-string? revision)
-      revision
+(defn command
+  "Construct and validate one protocol-v3 command envelope.
 
-      :else
-      (throw
-       (ex "Gesso Live revision must be a JavaScript-safe non-negative integer or non-blank string."
-           {:key k
-            :revision revision
-            :max-safe-integer max-safe-integer-revision})))))
+   command-id is the semantic intention and execution-id is one concrete
+   protocol attempt.  :observed-basis is optional at the command level because
+   commands can exist without optimism; any provisional projection derived from
+   the command must carry a basis.
 
-(defn revision->wire
-  "Encode a revision without losing whether it was numeric or opaque.
+   The operation and arguments are untrusted request data until the trusted
+   server authenticates the principal, selects/authorizes the operation, rereads
+   authority, and invokes the model's public operation."
+  [opts]
+  (require-closed-map!
+   "Optimistic command"
+   opts
+   (disj command-required-keys protocol-version-key)
+   command-optional-keys)
+  (let [{:keys [command-id execution-id operation arguments
+                observed-basis scope fact-versions]}
+        opts
+        semantic-command
+        (type/command
+         (cond->
+          {:command-id (require-command-id command-id)
+           :operation operation
+           :arguments arguments}
+           (some? observed-basis)
+           (assoc :observed-basis
+                  (normalize-basis :observed-basis observed-basis))))]
+    (cond->
+     {protocol-version-key version
+      command-id-key (:command-id semantic-command)
+      execution-id-key (require-execution-id execution-id)
+      operation-key (:operation semantic-command)
+      arguments-key (:arguments semantic-command)}
+      (contains? semantic-command :observed-basis)
+      (assoc observed-basis-key (:observed-basis semantic-command))
 
-   Integer 42 becomes \"i:42\"; opaque string \"42\" becomes \"s:42\"."
-  [revision]
-  (when-some [revision' (normalize-revision :revision revision)]
-    (if (integer? revision')
-      (str "i:" revision')
-      (str "s:" revision'))))
+      (some? scope)
+      (assoc scope-key (normalize-scope scope))
 
-(defn wire->revision
-  "Decode one revision produced by revision->wire.
+      (some? fact-versions)
+      (assoc fact-versions-key
+             (normalize-fact-versions fact-versions)))))
 
-   nil stays nil. Malformed or unknown encodings throw."
+(defn provisional
+  "Construct and validate explicit provisional knowledge for one execution.
+
+   This is never authoritative state.  Every provisional projection requires a
+   typed semantic command-id and a known authoritative basis, exactly as v4.5
+   requires."
+  [opts]
+  (require-closed-map!
+   "Optimistic provisional value"
+   opts
+   (disj provisional-required-keys protocol-version-key authority-key)
+   provisional-optional-keys)
+  (let [{:keys [command-id execution-id observed-basis projection
+                scope fact-versions]}
+        opts
+        provisional-value
+        (type/provisional-value
+         {:authority :provisional
+          :command-id (require-command-id command-id)
+          :observed-basis (normalize-basis :observed-basis observed-basis)
+          :projection projection})]
+    (cond->
+     {protocol-version-key version
+      authority-key :provisional
+      command-id-key (:command-id provisional-value)
+      execution-id-key (require-execution-id execution-id)
+      observed-basis-key (:observed-basis provisional-value)
+      projection-key (:projection provisional-value)}
+      (some? scope)
+      (assoc scope-key (normalize-scope scope))
+
+      (some? fact-versions)
+      (assoc fact-versions-key
+             (normalize-fact-versions fact-versions)))))
+
+(defn normalize-presence
+  "Validate one authoritative presence/absence marker."
+  [presence]
+  (when-not (contains? authoritative-presences presence)
+    (protocol-error
+     :invalid-authoritative-presence
+     "Invalid optimistic authoritative presence marker."
+     {:presence presence
+      :allowed authoritative-presences}))
+  presence)
+
+(defn authoritative
+  "Construct one authoritative projection observation.
+
+   :present requires an explicit :projection key, whose value may itself be nil
+   when nil is meaningful application data.  :absent forbids :projection and is
+   an authoritative tombstone rather than an error.
+
+   Constructing this shape does not establish that its basis or projection is
+   truthful; only a trusted authority boundary may supply it as authoritative."
+  [opts]
+  (require-closed-map!
+   "Optimistic authoritative observation"
+   opts
+   #{presence-key basis-key}
+   #{projection-key fact-versions-key})
+  (let [{:keys [presence basis projection fact-versions]}
+        opts
+        presence' (normalize-presence presence)
+        projection-present? (contains? opts projection-key)]
+    (when (and (= :present presence')
+               (not projection-present?))
+      (protocol-error
+       :missing-authoritative-projection
+       "Authoritative presence requires an explicit projection."
+       {:presence presence'}))
+    (when (and (= :absent presence')
+               projection-present?)
+      (protocol-error
+       :projection-on-authoritative-absence
+       "Authoritative absence must not carry a projection."
+       {:presence presence'
+        :projection projection}))
+    (cond->
+     {authority-key :authoritative
+      presence-key presence'
+      basis-key (normalize-basis :basis basis)}
+      projection-present?
+      (assoc projection-key projection)
+
+      (some? fact-versions)
+      (assoc fact-versions-key
+             (normalize-fact-versions fact-versions)))))
+
+(defn normalize-settlement-resolution
+  "Validate one generic settlement resolution class."
+  [resolution]
+  (when-not (contains? settlement-resolutions resolution)
+    (protocol-error
+     :invalid-settlement-resolution
+     "Invalid Gesso optimistic settlement resolution."
+     {:resolution resolution
+      :allowed settlement-resolutions}))
+  resolution)
+
+(defn settlement
+  "Construct one trusted protocol-v3 settlement.
+
+   :confirmed, :reconciled, and :already-incorporated require a typed
+   authoritative observation.  :rejected may omit authoritative state when
+   returning it would be inappropriate (for example, failed authorization).
+   :failed may also omit authority and MUST NOT be used to disguise a mutation
+   that already committed but whose later invalidation/settlement delivery
+   failed.
+
+   :outcome is an optional model/choreography continuation keyword distinct from
+   the generic :resolution class."
+  [opts]
+  (require-closed-map!
+   "Optimistic settlement"
+   opts
+   (disj settlement-required-keys protocol-version-key)
+   settlement-optional-keys)
+  (let [{:keys [command-id execution-id resolution outcome reason]}
+        opts
+        authoritative-value (get opts authoritative-key)
+        resolution' (normalize-settlement-resolution resolution)
+        authoritative'
+        (when (some? authoritative-value)
+          (authoritative
+           (if (= :authoritative (get authoritative-value authority-key))
+             (dissoc authoritative-value authority-key)
+             authoritative-value)))]
+    (when (and (contains? authoritative-required-resolutions resolution')
+               (nil? authoritative'))
+      (protocol-error
+       :missing-settlement-authority
+       "Settlement resolution requires an authoritative observation."
+       {:resolution resolution'
+        :required-for authoritative-required-resolutions}))
+    (when (and (some? outcome)
+               (not (keyword? outcome)))
+      (protocol-error
+       :invalid-settlement-outcome
+       "Optimistic settlement outcome must be a keyword when supplied."
+       {:outcome outcome}))
+    (cond->
+     {protocol-version-key version
+      command-id-key (require-command-id command-id)
+      execution-id-key (require-execution-id execution-id)
+      resolution-key resolution'}
+      authoritative'
+      (assoc authoritative-key authoritative')
+
+      (some? outcome)
+      (assoc outcome-key outcome)
+
+      (some? reason)
+      (assoc reason-key
+             (normalize-name :reason reason)))))
+
+(defn command-provisional-pair
+  "Validate that command-envelope and provisional-envelope describe one
+   optimistic semantic command/execution and basis.
+
+   This function is intentionally equality-based.  It never invents ordering or
+   advancement semantics for authoritative bases."
+  [command-envelope provisional-envelope]
+  (let [command' (command
+                  (dissoc command-envelope protocol-version-key))
+        provisional' (provisional
+                      (dissoc provisional-envelope
+                              protocol-version-key
+                              authority-key))]
+    (doseq [[key left right]
+            [[command-id-key
+              (get command' command-id-key)
+              (get provisional' command-id-key)]
+             [execution-id-key
+              (get command' execution-id-key)
+              (get provisional' execution-id-key)]]]
+      (when-not (= left right)
+        (protocol-error
+         :correlation-mismatch
+         "Optimistic command and provisional value do not correlate."
+         {:key key
+          :command left
+          :provisional right})))
+    (when-not (contains? command' observed-basis-key)
+      (protocol-error
+       :command-missing-observed-basis
+       "An optimistic command paired with provisional state must carry observed-basis."
+       {:command command'}))
+    (when-not (= (get command' observed-basis-key)
+                 (get provisional' observed-basis-key))
+      (protocol-error
+       :basis-mismatch
+       "Optimistic command and provisional value must share the same observed basis."
+       {:command-basis (get command' observed-basis-key)
+        :provisional-basis (get provisional' observed-basis-key)}))
+    {:command command'
+     :provisional provisional'}))
+
+;; =============================================================================
+;; Wire encoding/decoding
+;; =============================================================================
+
+(defn- encode-correlated-identities
+  [envelope]
+  (-> envelope
+      (update command-id-key command-id->wire)
+      (update execution-id-key execution-id->wire)))
+
+(defn- decode-correlated-identities
+  [envelope]
+  (-> envelope
+      (update command-id-key wire->command-id)
+      (update execution-id-key wire->execution-id)))
+
+(defn command->wire
+  "Validate and encode a runtime command envelope for transport.
+
+   Only command-id/execution-id receive protocol-specific transformation here.
+   The surrounding HTTP/Transit/JSON layer remains responsible for serializing
+   the resulting portable data structure."
+  [command-envelope]
+  (encode-correlated-identities
+   (command
+    (dissoc command-envelope protocol-version-key))))
+
+(defn wire->command
+  "Decode one closed protocol-v3 command wire envelope."
   [wire]
-  (when (some? wire)
-    (when-not (non-blank-string? wire)
-      (throw
-       (ex "Gesso Live wire revision must be a non-blank string."
-           {:wire wire})))
-    (cond
-      (str/starts-with? wire "i:")
-      (let [digits (subs wire 2)]
-        (when-not (re-matches #"[0-9]+" digits)
-          (throw
-           (ex "Malformed numeric Gesso Live wire revision."
-               {:wire wire})))
-        #?(:clj
-           (let [n (Long/parseLong digits)]
-             (normalize-revision :wire-revision n))
-           :cljs
-           (let [n (js/Number digits)]
-             (when-not (js/Number.isSafeInteger n)
-               (throw
-                (ex "Numeric Gesso Live wire revision exceeds JavaScript safe integer range."
-                    {:wire wire})))
-             n)))
+  (require-version!
+   (require-closed-map!
+    "Optimistic command wire envelope"
+    wire
+    command-required-keys
+    command-optional-keys))
+  (let [decoded (decode-correlated-identities wire)]
+    (command
+     (dissoc decoded protocol-version-key))))
 
-      (str/starts-with? wire "s:")
-      (let [value (subs wire 2)]
-        (when (str/blank? value)
-          (throw
-           (ex "Opaque Gesso Live wire revision must not be blank."
-               {:wire wire})))
-        value)
+(defn provisional->wire
+  "Validate and encode explicit provisional knowledge for transport."
+  [provisional-envelope]
+  (encode-correlated-identities
+   (provisional
+    (dissoc provisional-envelope
+            protocol-version-key
+            authority-key))))
 
-      :else
-      (throw
-       (ex "Unknown Gesso Live wire revision encoding."
-           {:wire wire})))))
+(defn wire->provisional
+  "Decode one closed protocol-v3 provisional wire envelope."
+  [wire]
+  (require-version!
+   (require-closed-map!
+    "Optimistic provisional wire envelope"
+    wire
+    provisional-required-keys
+    provisional-optional-keys))
+  (when-not (= :provisional (get wire authority-key))
+    (protocol-error
+     :invalid-provisional-authority
+     "Optimistic provisional wire envelope must be explicitly provisional."
+     {:authority (get wire authority-key)}))
+  (let [decoded (decode-correlated-identities wire)]
+    (provisional
+     (dissoc decoded protocol-version-key authority-key))))
 
-(defn compare-revisions
-  "Compare two normalized or decoded revisions.
+(defn authoritative->wire
+  "Validate an authoritative observation for transport.
 
-   Returns :same, :newer, :older, or :incomparable. Opaque strings intentionally
-   have equality semantics only; Gesso never invents ordering for them."
-  [left right]
-  (let [left' (normalize-revision :left-revision left)
-        right' (normalize-revision :right-revision right)]
-    (cond
-      (= left' right')
-      :same
+   No identity transformation is required; the explicit authority/presence/basis
+   vocabulary is already portable data."
+  [authoritative-observation]
+  (authoritative
+   (dissoc authoritative-observation authority-key)))
 
-      (and (integer? left')
-           (integer? right'))
-      (if (pos? (compare left' right'))
-        :newer
-        :older)
+(defn wire->authoritative
+  "Decode one authoritative presence/absence observation."
+  [wire]
+  (require-map! "Optimistic authoritative wire observation" wire)
+  (when-not (= :authoritative (get wire authority-key))
+    (protocol-error
+     :invalid-authoritative-authority
+     "Optimistic authoritative wire observation must be explicitly authoritative."
+     {:authority (get wire authority-key)}))
+  (authoritative
+   (dissoc wire authority-key)))
 
-      :else
-      :incomparable)))
+(defn settlement->wire
+  "Validate and encode one trusted settlement for transport."
+  [settlement-envelope]
+  (let [settlement'
+        (settlement
+         (dissoc settlement-envelope protocol-version-key))]
+    (cond->
+     (encode-correlated-identities settlement')
+      (contains? settlement' authoritative-key)
+      (update authoritative-key authoritative->wire))))
 
-(defn compare-wire-revisions
-  "Compare two encoded revisions using compare-revisions."
-  [left-wire right-wire]
-  (compare-revisions (wire->revision left-wire)
-                     (wire->revision right-wire)))
+(defn wire->settlement
+  "Decode one closed protocol-v3 settlement wire envelope."
+  [wire]
+  (require-version!
+   (require-closed-map!
+    "Optimistic settlement wire envelope"
+    wire
+    settlement-required-keys
+    settlement-optional-keys))
+  (let [decoded
+        (cond->
+         (decode-correlated-identities wire)
+          (contains? wire authoritative-key)
+          (update authoritative-key wire->authoritative))]
+    (settlement
+     (dissoc decoded protocol-version-key))))

@@ -1,303 +1,632 @@
 (ns gesso.live.optimistic.choreo-test
   (:require
-   [clojure.test :refer [deftest is testing]]
-   [gesso.choreo.project :as project]
-   [gesso.choreo.verify :as verify]
+   [gesso.choreo.core :as choreo]
+   [gesso.choreo.identity :as identity]
+   [gesso.choreo.machine :as machine]
+   [gesso.choreo.realization :as realization]
    [gesso.live.optimistic.choreo :as optimistic-choreo]
-   [gesso.live.optimistic.protocol :as protocol]))
+   [gesso.live.optimistic.protocol :as protocol]
+   #?(:clj [gesso.choreo.project :as project])
+   #?(:clj [gesso.choreo.verify :as verify])
+   #?(:clj [clojure.test :refer [deftest is testing]]
+      :cljs [cljs.test :refer-macros [deftest is testing]])))
 
-;; -----------------------------------------------------------------------------
-;; Helpers
-;; -----------------------------------------------------------------------------
+(defn- error-data
+  [f]
+  (try
+    (f)
+    nil
+    (catch #?(:clj Throwable
+              :cljs :default) ex
+      (ex-data ex))))
 
-(defn- global-state
-  [state-id]
-  (get-in optimistic-choreo/optimistic-command
-          [:states state-id]))
+(defn- error-kind
+  [f]
+  (:error/kind
+   (error-data f)))
 
-(defn- projected-state
-  [plan state-id]
-  (project/state plan state-id))
+(def command-id
+  (identity/command-id "command-42"))
 
-(defn- linear-state-ids
-  "Follow a projected path whose states have at most one :next edge until return.
+(def execution-id
+  (identity/execution-id "execution-7"))
 
-   This is intentionally only used for cleanup paths that are linear by design."
-  [plan start]
-  (loop [state-id start
-         seen #{}
-         result []]
-    (when (contains? seen state-id)
-      (throw
-       (ex-info "Unexpected cycle while inspecting projected linear path."
-                {:state state-id
-                 :path result})))
-    (let [state (projected-state plan state-id)
-          result' (conj result state-id)]
-      (if (= :return (:op state))
-        result'
-        (recur (:next state)
-               (conj seen state-id)
-               result')))))
+(def other-execution-id
+  (identity/execution-id "execution-8"))
 
-;; -----------------------------------------------------------------------------
-;; Semantic identity and compiler products
-;; -----------------------------------------------------------------------------
+(def basis
+  {:tx-id 42
+   :system-time "2026-08-25T01:00:00Z"})
 
-(deftest choreography-identity-test
-  (testing "the built-in choreography has one stable semantic identity"
-    (is (= :gesso.live.optimistic/command
-           optimistic-choreo/protocol-name))
-    (is (= #{:browser :server}
-           (:roles optimistic-choreo/optimistic-command)))
-    (is (= :browser/acquire-target-authority
-           (:initial optimistic-choreo/optimistic-command))))
+(def newer-basis
+  {:tx-id 43
+   :system-time "2026-08-25T01:00:01Z"})
 
-  (testing "wire events come from the optimistic protocol"
-    (is (= protocol/command-event
-           optimistic-choreo/command-event))
-    (is (= protocol/settlement-event
-           optimistic-choreo/settlement-event))))
+(def command-options
+  {:name :request/claim-optimistic
+   :operation :request/claim})
 
-(deftest built-in-choreography-verifies-test
-  (testing "namespace loading produces an already-verified compiler value"
-    (is (verify/verified?
-         optimistic-choreo/verified-optimistic-command)))
+(def supersession-options
+  {:name :request/claim-supersession
+   :authority :request
+   :observation :request/current})
 
-  (testing "the built-in graph has no verification errors or warnings"
-    (is (= {:valid? true
-            :error-count 0
-            :warning-count 0
-            :reachable-state-count 57
-            :unreachable-state-count 0
-            :terminal-state-count 7}
-           (verify/explain
-            optimistic-choreo/verified-optimistic-command)))))
+(defn- command-envelope
+  ([]
+   (command-envelope {}))
+  ([overrides]
+   (protocol/command
+    (merge
+     {:command-id command-id
+      :execution-id execution-id
+      :operation :request/claim
+      :arguments {:request-id "request-1"}
+      :observed-basis basis
+      :scope [:request "request-1"]}
+     overrides))))
 
-(deftest projected-plans-test
-  (testing "both endpoint plans are valid projected plans"
-    (is (project/projected-plan?
-         optimistic-choreo/browser-plan))
-    (is (project/projected-plan?
-         optimistic-choreo/server-plan)))
+(defn- provisional-envelope
+  ([]
+   (provisional-envelope {}))
+  ([overrides]
+   (protocol/provisional
+    (merge
+     {:command-id command-id
+      :execution-id execution-id
+      :observed-basis basis
+      :projection {:request/status :claimed
+                   :request/claimed-by "helper-1"}
+      :scope [:request "request-1"]}
+     overrides))))
 
-  (testing "plans belong to the expected roles"
-    (is (= :browser
-           (:role optimistic-choreo/browser-plan)))
-    (is (= :server
-           (:role optimistic-choreo/server-plan))))
+(defn- authoritative-envelope
+  ([]
+   (authoritative-envelope {}))
+  ([overrides]
+   (protocol/authoritative
+    (merge
+     {:presence :present
+      :basis newer-basis
+      :projection {:request/status :claimed
+                   :request/claimed-by "helper-1"}}
+     overrides))))
 
-  (testing "projecting the verified choreography reproduces the compiler products"
-    (is (= optimistic-choreo/browser-plan
-           (project/project
-            optimistic-choreo/verified-optimistic-command
-            :browser)))
-    (is (= optimistic-choreo/server-plan
-           (project/project
-            optimistic-choreo/verified-optimistic-command
-            :server))))
+(defn- settlement-envelope
+  ([]
+   (settlement-envelope {}))
+  ([overrides]
+   (protocol/settlement
+    (merge
+     {:command-id command-id
+      :execution-id execution-id
+      :resolution :confirmed
+      :authoritative (authoritative-envelope)
+      :outcome :request/claimed}
+     overrides))))
 
-  (testing "a projected plan never contains the global :receive operation"
-    (is (not-any?
-         #(= :receive (:op %))
-         (vals (:states optimistic-choreo/browser-plan))))
-    (is (not-any?
-         #(= :receive (:op %))
-         (vals (:states optimistic-choreo/server-plan))))))
+(defn- started-command-realization
+  []
+  (realization/start
+   (optimistic-choreo/command-choreography command-options)
+   {:entry-values-by-role
+    {:browser
+     (optimistic-choreo/command-values
+      (command-envelope))}}))
 
-;; -----------------------------------------------------------------------------
-;; Resource authority
-;; -----------------------------------------------------------------------------
+(defn- complete-direct-command
+  ([]
+   (complete-direct-command
+    (settlement-envelope)))
+  ([settlement]
+   (let [command (command-envelope)
+         provisional (provisional-envelope)
 
-(deftest resource-authority-test
-  (testing "the global protocol declares separate linear target and snapshot authority"
-    (let [resources (:resources optimistic-choreo/optimistic-command)
-          target (get resources optimistic-choreo/target-authority-resource)
-          snapshot (get resources optimistic-choreo/snapshot-authority-resource)]
-      (is (= :browser (:owner target)))
-      (is (= true (:linear? target)))
-      (is (= true (:terminal-release? target)))
-      (is (= :browser (:owner snapshot)))
-      (is (= true (:linear? snapshot)))
-      (is (= true (:terminal-release? snapshot)))))
+         started
+         (realization/start
+          (optimistic-choreo/command-choreography command-options)
+          {:entry-values-by-role
+           {:browser
+            (optimistic-choreo/command-values command)}})
 
-  (testing "only the browser projection carries those local resources"
-    (is (= #{optimistic-choreo/target-authority-resource
-             optimistic-choreo/snapshot-authority-resource}
-           (set (keys (:resources optimistic-choreo/browser-plan)))))
-    (is (= {}
-           (:resources optimistic-choreo/server-plan)))))
+         after-provisional
+         (realization/complete-local
+          started
+          :browser
+          {optimistic-choreo/provisional-value-key
+           (optimistic-choreo/provisional-value
+            command
+            provisional)})
 
-;; -----------------------------------------------------------------------------
-;; HTTP command / settlement contract
-;; -----------------------------------------------------------------------------
+         {after-command-send :realization
+          command-message-id :message-id
+          command-message :message}
+         (realization/complete-send
+          after-provisional
+          :browser
+          (optimistic-choreo/command-values command))
 
-(deftest command-message-contract-test
-  (let [send-state (global-state :browser/send-command)
-        receive-state (global-state :server/receive-command)]
-    (testing "browser sends the protocol command over HTTP"
-      (is (= :send (:op send-state)))
-      (is (= :browser (:from send-state)))
-      (is (= :server (:to send-state)))
-      (is (= protocol/command-event (:event send-state)))
-      (is (= :http (:via send-state)))
-      (is (= protocol/command-required-keys
-             (:required send-state)))
-      (is (= protocol/command-optional-keys
-             (:optional send-state)))
-      (is (= protocol/command-correlation-keys
-             (:correlation send-state))))
+         after-command-delivery
+         (realization/deliver-message
+          after-command-send
+          command-message-id)
 
-    (testing "server receives and binds that same command"
-      (is (= :receive (:op receive-state)))
-      (is (= :browser (:from receive-state)))
-      (is (= :server (:to receive-state)))
-      (is (= protocol/command-event (:event receive-state)))
-      (is (= :http (:via receive-state)))
-      (is (= :command (:bind receive-state))))))
+         after-authority
+         (realization/complete-authoritative
+          after-command-delivery
+          :authority
+          {optimistic-choreo/settlement-value-key
+           (optimistic-choreo/settlement-value settlement)})
 
-(deftest settlement-message-contract-test
-  (let [send-state (global-state :server/send-settlement)
-        receive-state (global-state :browser/receive-settlement)]
-    (testing "server sends the semantic settlement over HTTP"
-      (is (= :send (:op send-state)))
-      (is (= :server (:from send-state)))
-      (is (= :browser (:to send-state)))
-      (is (= protocol/settlement-event (:event send-state)))
-      (is (= :http (:via send-state)))
-      (is (= protocol/settlement-required-keys
-             (:required send-state)))
-      (is (= protocol/settlement-optional-keys
-             (:optional send-state)))
-      (is (= protocol/settlement-correlation-keys
-             (:correlation send-state))))
+         {after-settlement-send :realization
+          settlement-message-id :message-id
+          settlement-message :message}
+         (realization/complete-send
+          after-authority
+          :authority
+          (optimistic-choreo/settlement-message-values settlement))
 
-    (testing "browser receives and binds that same settlement"
-      (is (= :receive (:op receive-state)))
-      (is (= :server (:from receive-state)))
-      (is (= :browser (:to receive-state)))
-      (is (= protocol/settlement-event (:event receive-state)))
-      (is (= :http (:via receive-state)))
-      (is (= :settlement (:bind receive-state))))))
+         after-settlement-delivery
+         (realization/deliver-message
+          after-settlement-send
+          settlement-message-id)
 
-(deftest semantic-settlement-outcomes-test
-  (testing "the server accepts exactly the protocol settlement outcomes"
-    (is (= (zipmap protocol/settlement-outcomes
-                   (repeat :server/send-settlement))
-           (:branches
-            (global-state :server/validate-outcome)))))
+         completed
+         (realization/complete-local
+          after-settlement-delivery
+          :browser
+          {optimistic-choreo/resolution-value-key
+           (optimistic-choreo/settlement-resolution
+            provisional
+            settlement)})]
+     {:command command
+      :provisional provisional
+      :settlement settlement
+      :command-message command-message
+      :settlement-message settlement-message
+      :completed completed})))
 
-  (testing "the browser returns the four semantic settlement outcomes"
-    (is (= {:confirmed :browser/return-confirmed
-            :reconciled :browser/return-reconciled
-            :rejected :browser/return-rejected
-            :failed :browser/return-failed}
-           (:branches
-            (global-state :browser/settled-outcome))))))
+(deftest semantic-vocabulary-is-protocol-v3-and-browser-resource-free
+  (is (= protocol/command-event
+         optimistic-choreo/command-event))
+  (is (= protocol/settlement-event
+         optimistic-choreo/settlement-event))
+  (is (= #{:command-id :execution-id}
+         optimistic-choreo/command-correlation-keys))
+  (is (= protocol/settlement-resolutions
+         optimistic-choreo/direct-terminal-resolutions))
 
-;; -----------------------------------------------------------------------------
-;; Browser environment interrupts and continuity
-;; -----------------------------------------------------------------------------
-
-(deftest command-interrupt-contract-test
-  (let [interrupts (:interrupts
-                    (global-state :browser/send-command))]
-    (testing "only the three authoritative interruption classes can interrupt the request"
-      (is (= {optimistic-choreo/request-failed-event
-              :browser/recover-request-failed
-
-              optimistic-choreo/timeout-event
-              :browser/recover-timeout
-
-              optimistic-choreo/canonical-superseded-event
-              :browser/discard-superseded-snapshot}
-             interrupts)))))
-
-(deftest continuity-restoration-is-explicitly-awaited-test
-  (doseq [[state-id next-id]
-          [[:browser/await-settled-continuity
-            :browser/cancel-settled-timeout]
-
-           [:browser/await-request-failed-continuity
-            :browser/cancel-request-failed-timeout]
-
-           [:browser/await-timeout-continuity
-            :browser/cancel-timeout-after-timeout]]]
-    (testing (str state-id " waits for actual post-layout restoration")
-      (is (= :await
-             (:op (global-state state-id))))
-      (is (= {optimistic-choreo/continuity-restored-event
-              next-id}
-             (:events (global-state state-id)))))))
-
-(deftest browser-plan-retains-continuity-restored-environment-event-test
-  (testing "the browser projection exposes the continuity completion event"
+  (testing "optimistic choreography requires an authoritative basis"
     (is (contains?
-         (:environment-events optimistic-choreo/browser-plan)
-         optimistic-choreo/continuity-restored-event)))
+         optimistic-choreo/semantic-command-required-keys
+         protocol/observed-basis-key)))
 
-  (testing "the server projection has no browser environment events"
-    (is (= #{}
-           (:environment-events optimistic-choreo/server-plan)))))
+  (testing "browser mechanics do not appear in the portable semantic vocabulary"
+    (let [portable-vocabulary
+          (pr-str
+           {:required optimistic-choreo/semantic-command-required-keys
+            :optional optimistic-choreo/semantic-command-optional-keys
+            :provisional optimistic-choreo/provisional-value-key
+            :settlement optimistic-choreo/settlement-value-key
+            :resolution optimistic-choreo/resolution-value-key})]
+      (doseq [forbidden ["snapshot"
+                         "continuity"
+                         "timer"
+                         "dom"
+                         "target-authority"]]
+        (is (not (re-find (re-pattern forbidden)
+                          portable-vocabulary)))))))
 
-;; -----------------------------------------------------------------------------
-;; Canonical-wins safety path
-;; -----------------------------------------------------------------------------
+(deftest command-choreography-names-the-real-public-model-operation
+  (let [program
+        (optimistic-choreo/command-choreography
+         command-options)
 
-(deftest canonical-superseded-path-does-not-restore-stale-continuity-test
-  (let [path (linear-state-ids
-              optimistic-choreo/browser-plan
-              :browser/discard-superseded-snapshot)
-        machines (->> path
-                      (map #(projected-state
-                             optimistic-choreo/browser-plan
-                             %))
-                      (keep :machine)
-                      vec)]
-    (testing "canonical-wins cleanup discards snapshot and tears down execution"
-      (is (= [:browser/discard-superseded-snapshot
-              :browser/release-superseded-snapshot-authority
-              :browser/cancel-superseded-timeout
-              :browser/clear-superseded-pending
-              :browser/release-superseded-target
-              :browser/release-superseded-target-authority
-              :browser/return-superseded]
-             path)))
+        authority-state
+        (choreo/state
+         program
+         :gesso.live.optimistic/execute-authoritative)]
+    (is (= :authoritative
+           (:op authority-state)))
+    (is (= :authority
+           (:role authority-state)))
+    (is (= :request/claim
+           (:operation authority-state)))
+    (is (= optimistic-choreo/semantic-command-required-keys
+           (:requires authority-state)))
+    (is (= #{optimistic-choreo/settlement-value-key}
+           (:outputs authority-state)))))
 
-    (testing "it never restores continuity captured before the optimistic projection"
-      (is (not-any?
-           #{optimistic-choreo/browser-restore-continuity-machine}
-           machines)))
+(deftest command-entry-knowledge-belongs-only-to-browser
+  (is (= {:browser
+          optimistic-choreo/semantic-command-required-keys}
+         (optimistic-choreo/command-entry-knowledge
+          command-options)))
 
-    (testing "it does perform all remaining cleanup FX"
-      (is (= [optimistic-choreo/browser-discard-snapshot-machine
-              optimistic-choreo/browser-cancel-timeout-machine
-              optimistic-choreo/browser-clear-pending-machine
-              optimistic-choreo/browser-release-target-machine]
-             machines)))))
+  (let [started (started-command-realization)
+        browser (realization/execution started :browser)
+        authority (realization/execution started :authority)]
+    (is (machine/waiting-local? browser))
+    (is (machine/waiting-receive? authority))
+    (doseq [key optimistic-choreo/semantic-command-required-keys]
+      (is (machine/has-execution-value? browser key))
+      (is (false?
+           (machine/has-execution-value? authority key))))))
 
-;; -----------------------------------------------------------------------------
-;; FX-machine identities
-;; -----------------------------------------------------------------------------
+(deftest optimistic-command-requires-observed-authoritative-basis
+  (is (= :missing-observed-basis
+         (error-kind
+          #(optimistic-choreo/command-values
+            (protocol/command
+             {:command-id command-id
+              :execution-id execution-id
+              :operation :request/claim
+              :arguments {:request-id "request-1"}})))))
 
-(deftest participant-fx-boundary-test
-  (testing "browser projection retains browser FX machines"
-    (is (= optimistic-choreo/browser-install-projection-machine
-           (:machine
-            (projected-state
-             optimistic-choreo/browser-plan
-             :browser/install-projection))))
-    (is (= optimistic-choreo/browser-install-canonical-machine
-           (:machine
-            (projected-state
-             optimistic-choreo/browser-plan
-             :browser/install-canonical)))))
+  (is (= basis
+         (get
+          (optimistic-choreo/command-values
+           (command-envelope))
+          protocol/observed-basis-key))))
 
-  (testing "server projection retains only the server execution machine"
-    (let [machines
-          (->> (:states optimistic-choreo/server-plan)
-               vals
-               (keep :machine)
-               set)]
-      (is (= #{optimistic-choreo/server-execute-machine}
-             machines)))))
+(deftest operation-correlation-does-not-become-authorization
+  (is (= :request/claim
+         (:operation
+          (optimistic-choreo/require-operation
+           :request/claim
+           (command-envelope)))))
+
+  (is (= :operation-mismatch
+         (error-kind
+          #(optimistic-choreo/require-operation
+            :request/unclaim
+            (command-envelope)))))
+
+  (testing "operation matching remains portable across keyword/string wire naming"
+    (is (= :request/claim
+           (:operation
+            (optimistic-choreo/require-operation
+             :request/claim
+             (command-envelope)))))))
+
+(deftest command-and-settlement-message-boundaries-enforce-correlation
+  (let [program
+        (optimistic-choreo/command-choreography
+         command-options)
+
+        command-state
+        (choreo/state
+         program
+         :gesso.live.optimistic/send-command)
+
+        settlement-state
+        (choreo/state
+         program
+         :gesso.live.optimistic/send-settlement)]
+    (is (= optimistic-choreo/command-correlation-keys
+           (:correlation command-state)))
+    (is (= optimistic-choreo/command-correlation-keys
+           (:correlation settlement-state)))
+    (is (= protocol/command-event
+           (:event command-state)))
+    (is (= protocol/settlement-event
+           (:event settlement-state)))
+    (is (= optimistic-choreo/settlement-message-required-keys
+           (:required settlement-state)))))
+
+(deftest provisional-and-settlement-values-remain-closed-protocol-values
+  (let [command (command-envelope)
+        provisional (provisional-envelope)
+        settlement (settlement-envelope)]
+    (is (= (protocol/provisional
+            (dissoc provisional
+                    protocol/protocol-version-key
+                    protocol/authority-key))
+           (optimistic-choreo/provisional-value
+            command
+            provisional)))
+
+    (is (= (protocol/settlement
+            (dissoc settlement
+                    protocol/protocol-version-key))
+           (optimistic-choreo/settlement-value
+            settlement)))
+
+    (is (= :confirmed
+           (optimistic-choreo/settlement-resolution
+            provisional
+            settlement)))
+
+    (is (= :settlement-correlation-mismatch
+           (error-kind
+            #(optimistic-choreo/settlement-resolution
+              provisional
+              (settlement-envelope
+               {:execution-id other-execution-id})))))))
+
+(deftest independent-role-realization-performs-one-short-direct-command
+  (let [{:keys [completed
+                command-message
+                settlement-message
+                settlement]}
+        (complete-direct-command)
+
+        browser
+        (realization/execution
+         completed
+         :browser)
+
+        authority
+        (realization/execution
+         completed
+         :authority)]
+
+    (is (realization/completed? completed))
+    (is (= [] (realization/messages completed)))
+    (is (machine/completed? browser))
+    (is (machine/completed? authority))
+
+    (testing "the command is actually emitted by the browser before authority learns it"
+      (is (= {:kind :message
+              :from :browser
+              :to :authority
+              :event protocol/command-event
+              :payload (optimistic-choreo/command-values
+                        (command-envelope))
+              :via :http}
+             command-message))
+      (doseq [key optimistic-choreo/semantic-command-required-keys]
+        (is (= #{:communicated}
+               (machine/execution-provenance-kinds
+                authority
+                key)))))
+
+    (testing "the authority result is communicated rather than becoming browser authority"
+      (is (= :authority
+             (:from settlement-message)))
+      (is (= :browser
+             (:to settlement-message)))
+      (is (= protocol/settlement-event
+             (:event settlement-message)))
+      (is (= settlement
+             (get-in settlement-message
+                     [:payload optimistic-choreo/settlement-value-key])))
+      (is (= #{:authoritative}
+             (machine/execution-provenance-kinds
+              authority
+              optimistic-choreo/settlement-value-key)))
+      (is (= #{:communicated}
+             (machine/execution-provenance-kinds
+              browser
+              optimistic-choreo/settlement-value-key))))
+
+    (testing "generic resolution is terminal and distinct from model outcome"
+      (is (= :confirmed
+             (machine/execution-value
+              browser
+              optimistic-choreo/resolution-value-key)))
+      (is (= :request/claimed
+             (:outcome settlement)))
+      (is (= {:outcome :gesso.choreo/complete}
+             (machine/result browser)))
+      (is (= {:outcome :gesso.choreo/complete}
+             (machine/result authority))))
+
+    (is (= [:local
+            :send
+            :deliver
+            :authoritative
+            :send
+            :deliver
+            :local]
+           (mapv :kind
+                 (realization/history completed))))))
+
+(deftest each-direct-settlement-resolution-has-a-terminal-path
+  (doseq [resolution protocol/settlement-resolutions]
+    (let [settlement
+          (case resolution
+            (:confirmed :reconciled :already-incorporated)
+            (settlement-envelope
+             {:resolution resolution})
+
+            :rejected
+            (protocol/settlement
+             {:command-id command-id
+              :execution-id execution-id
+              :resolution :rejected
+              :reason :not-allowed})
+
+            :failed
+            (protocol/settlement
+             {:command-id command-id
+              :execution-id execution-id
+              :resolution :failed
+              :reason :operation-failed}))
+
+          {:keys [completed]}
+          (complete-direct-command settlement)
+
+          browser
+          (realization/execution
+           completed
+           :browser)]
+      (is (realization/completed? completed))
+      (is (= resolution
+             (machine/execution-value
+              browser
+              optimistic-choreo/resolution-value-key))))))
+
+(deftest supersession-recovery-is-a-separate-short-browser-execution
+  (let [program
+        (optimistic-choreo/supersession-choreography
+         supersession-options)]
+    (is (= #{:browser}
+           (choreo/roles program)))
+    (is (= :await
+           (:op
+            (choreo/state
+             program
+             :gesso.live.optimistic/await-authoritative-reread))))
+    (is (= {:browser
+            #{optimistic-choreo/provisional-value-key}}
+           (optimistic-choreo/supersession-entry-knowledge
+            supersession-options)))
+    (is (not
+         (contains?
+          (choreo/roles program)
+          :authority)))))
+
+(deftest supersession-reread-establishes-authoritative-provenance
+  (let [provisional
+        (provisional-envelope)
+
+        authoritative
+        (authoritative-envelope)
+
+        event-data
+        (optimistic-choreo/authoritative-reread-data
+         authoritative)
+
+        started
+        (realization/start
+         (optimistic-choreo/supersession-choreography
+          supersession-options)
+         {:entry-values-by-role
+          {:browser
+           {optimistic-choreo/provisional-value-key
+            provisional}}})
+
+        after-reread
+        (realization/environment
+         started
+         :browser
+         optimistic-choreo/default-authoritative-observed-event
+         event-data)
+
+        browser-after-reread
+        (realization/execution
+         after-reread
+         :browser)
+
+        completed
+        (realization/complete-local
+         after-reread
+         :browser
+         {optimistic-choreo/resolution-value-key
+          :superseded})
+
+        browser-completed
+        (realization/execution
+         completed
+         :browser)]
+
+    (is (= authoritative
+           (get event-data
+                optimistic-choreo/reread-authoritative-key)))
+    (is (= newer-basis
+           (get event-data
+                optimistic-choreo/reread-basis-key)))
+
+    (is (= #{:authoritative}
+           (machine/execution-provenance-kinds
+            browser-after-reread
+            optimistic-choreo/reread-authoritative-key)))
+    (is (= #{:authoritative}
+           (machine/execution-provenance-kinds
+            browser-after-reread
+            optimistic-choreo/reread-basis-key)))
+
+    (is (realization/completed? completed))
+    (is (= :superseded
+           (machine/execution-value
+            browser-completed
+            optimistic-choreo/resolution-value-key)))
+    (is (= [:environment :local]
+           (mapv :kind
+                 (realization/history completed))))))
+
+(deftest authoritative-reread-data-cannot-invent-or-separate-basis
+  (let [authoritative
+        (authoritative-envelope)
+
+        event-data
+        (optimistic-choreo/authoritative-reread-data
+         authoritative)]
+    (is (= newer-basis
+           (get event-data
+                optimistic-choreo/reread-basis-key)))
+    (is (= newer-basis
+           (get-in event-data
+                   [optimistic-choreo/reread-authoritative-key
+                    protocol/basis-key]))))
+
+  (is (= :unknown-fields
+         (error-kind
+          #(optimistic-choreo/authoritative-reread-data
+            (assoc
+             (authoritative-envelope)
+             :claimed-basis
+             {:tx-id 999}))))))
+
+(deftest command-and-supersession-options-are-closed
+  (is (= :unknown-option
+         (error-kind
+          #(optimistic-choreo/command-choreography
+            (assoc command-options
+                   :snapshot-authority
+                   :browser)))))
+  (is (= :unknown-option
+         (error-kind
+          #(optimistic-choreo/supersession-choreography
+            (assoc supersession-options
+                   :continuity-generation
+                   4)))))
+  (is (= :same-role
+         (error-kind
+          #(optimistic-choreo/command-choreography
+            (assoc command-options
+                   :authority-role
+                   :browser))))))
+
+#?(:clj
+   (deftest verified-artifacts-project-one-independent-plan-per-role
+     (let [verified
+           (optimistic-choreo/verified-command
+            command-options)
+
+           plans
+           (optimistic-choreo/command-plans
+            command-options)]
+       (is (verify/verified? verified))
+       (is (= #{:browser :authority}
+              (set (keys plans))))
+       (doseq [[role plan] plans]
+         (is (project/executable-plan? plan))
+         (is (= role (:role plan))))
+
+       (testing "projected plans contain no obsolete browser resource vocabulary"
+         (let [artifact-text
+               (pr-str plans)]
+           (doseq [forbidden ["snapshot-authority"
+                              "target-authority"
+                              "continuity-generation"
+                              "browser-restore-continuity"
+                              "browser-capture-continuity"]]
+             (is (not (re-find (re-pattern forbidden)
+                               artifact-text)))))))))
+
+#?(:clj
+   (deftest supersession-verifies-and-projects-without-a-suspended-authority-role
+     (let [verified
+           (optimistic-choreo/verified-supersession
+            supersession-options)
+
+           plan
+           (optimistic-choreo/supersession-plan
+            supersession-options)]
+       (is (verify/verified? verified))
+       (is (project/executable-plan? plan))
+       (is (= :browser (:role plan)))
+       (is (= #{:browser}
+              (choreo/roles
+               (:choreography verified)))))))

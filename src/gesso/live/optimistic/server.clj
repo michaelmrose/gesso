@@ -1,837 +1,666 @@
 (ns gesso.live.optimistic.server
-  "JVM/server support for Gesso Live optimistic commands.
+  "Trusted JVM/server boundary for protocol-v3 optimistic commands.
 
-   This namespace owns the server side of the Live optimistic feature:
-   - optimistic descriptor construction and browser-facing Hiccup attrs
-   - authoritative canonical marking
-   - optimistic execution id extraction from Ring context
-   - semantic settlement construction and rendering
-   - execution of the projected server choreography endpoint
-   - the adapter boundary to ordinary Biff FX machines
+   This namespace deliberately owns much less than the protocol-v2 server
+   implementation did.
 
-   Choreography owns distributed protocol order. Biff FX owns application-local
-   command execution. This namespace connects those two without teaching either
-   subsystem about the other.
-
-   The browser/server protocol uses an opaque wire scope for correlation. Public
-   rendering/settlement APIs continue to accept semantic application scopes;
-   this namespace performs wire encoding exactly at the protocol boundary.
+   It owns:
+   - decoding/validating browser command wire values;
+   - deriving the authenticated principal from trusted server context;
+   - resolving a browser-proposed semantic operation through a trusted registry;
+   - starting/resuming the trusted authority projection for that operation;
+   - invoking the registered public model-operation adapter;
+   - constructing a protocol-v3 settlement whose command/execution identities
+     are copied from the validated command rather than accepted from operation
+     output;
+   - preparing and completing the authority projection's settlement-send
+     boundary.
 
    It deliberately does not own:
-   - application/domain transition policy
-   - browser DOM or continuity behavior
-   - XTDB transaction policy
-   - consistency-token header transport
-   - generic choreography execution semantics."
-  (:require
-   [clojure.string :as str]
-   [gesso.choreo.machine :as machine]
-   [gesso.live.htmx :as htmx]
-   [gesso.live.optimistic.choreo :as optimistic-choreo]
-   [gesso.live.optimistic.protocol :as protocol])
-  (:import
-   [java.util UUID]))
+   - browser DOM, optimistic templates, target/snapshot ownership, or continuity;
+   - application authorization/business policy (the registered public operation
+     must re-establish those rules from trusted context and current authority);
+   - XTDB transaction construction or commit guards;
+   - Live invalidation/publication;
+   - HTTP response rendering;
+   - conversion of arbitrary exceptions into :failed settlements.
 
-;; -----------------------------------------------------------------------------
-;; Public identities
-;; -----------------------------------------------------------------------------
+   The last point is important: once an authoritative commit succeeds, a later
+   invalidation, notification, settlement-delivery, or rendering failure must not
+   be reported as though the mutation failed.  Therefore this layer never catches
+   an unknown operation exception and guesses that the semantic resolution was
+   :failed.  A trusted operation may explicitly return :resolution :failed only
+   when it knows that classification is correct."
+  (:require
+   [clojure.set :as set]
+   [gesso.choreo.identity :as identity]
+   [gesso.choreo.machine :as machine]
+   [gesso.live.optimistic.choreo :as optimistic-choreo]
+   [gesso.live.optimistic.protocol :as protocol]))
+
+;; =============================================================================
+;; Stable public vocabulary
+;; =============================================================================
 
 (def protocol-version protocol/version)
 
-(def descriptor-type
-  :gesso.live.optimistic/descriptor)
+(def operation-type
+  :gesso.live.optimistic.server/operation)
 
-(def settlement-type
-  :gesso.live.optimistic/settlement)
+(def server-type
+  :gesso.live.optimistic.server/server)
 
-(def prepared-server-send-type
+(def command-boundary-type
+  :gesso.live.optimistic.server/command-boundary)
+
+(def prepared-send-type
   :gesso.live.optimistic.server/prepared-send)
 
-(def default-template-prefix
-  "gesso-optimistic-template-")
+(def completed-send-type
+  :gesso.live.optimistic.server/completed-send)
 
-(def default-sync-strategy
-  "drop")
+(def operation-result-keys
+  "Closed trusted operation-result vocabulary.
 
-(def default-projection-mode
-  :provisional)
+   :resolution is always required. :authoritative is required by protocol v3
+   for successful authoritative resolutions. :outcome remains model-specific;
+   :reason is optional protocol explanation data."
+  #{:resolution
+    :authoritative
+    :outcome
+    :reason})
 
-(def projection-modes
-  protocol/projection-modes)
+;; =============================================================================
+;; Errors / validation
+;; =============================================================================
 
-(def settlement-outcomes
-  protocol/settlement-outcomes)
-
-(def execution-request-header
-  protocol/execution-header-name)
-
-;; Public aliases keep JVM callers from spelling protocol attrs themselves while
-;; the actual vocabulary remains owned by optimistic.protocol.
-(def protocol-attr protocol/protocol-attr)
-(def transition-attr protocol/transition-attr)
-(def template-attr protocol/template-attr)
-(def target-attr protocol/target-attr)
-(def scope-attr protocol/scope-attr)
-(def base-revision-attr protocol/base-revision-attr)
-(def revision-attr protocol/revision-attr)
-(def pending-label-attr protocol/pending-label-attr)
-(def projection-mode-attr protocol/projection-mode-attr)
-(def settlement-attr protocol/settlement-attr)
-(def execution-attr protocol/execution-attr)
-(def outcome-attr protocol/outcome-attr)
-(def command-applied-attr protocol/command-applied-attr)
-(def reason-attr protocol/reason-attr)
-(def canonical-attr protocol/canonical-attr)
-
-;; -----------------------------------------------------------------------------
-;; Validation helpers
-;; -----------------------------------------------------------------------------
-
-(defn- ex
-  [message data]
-  (ex-info message data))
-
-(defn- blank-string?
-  [x]
-  (and (string? x)
-       (str/blank? x)))
-
-(defn- present?
-  [x]
-  (not (or (nil? x)
-           (blank-string? x))))
-
-(defn- require-present!
-  [k value]
-  (when-not (present? value)
-    (throw
-     (ex (str "gesso.live optimistic config requires " k ".")
-         {k value})))
-  value)
-
-(defn- require-non-blank-string!
-  [k value]
-  (when-not (and (string? value)
-                 (not (str/blank? value)))
-    (throw
-     (ex (str "gesso.live optimistic " k
-              " must be a non-blank string.")
-         {k value})))
-  value)
+(defn- server-error
+  [kind message data]
+  (throw
+   (ex-info
+    message
+    (merge
+     {:error/type :gesso.live.optimistic.server/error
+      :error/kind kind}
+     data))))
 
 (defn- require-map!
-  [k value]
+  [label value]
   (when-not (map? value)
-    (throw
-     (ex (str "gesso.live optimistic " k " must be a map.")
-         {k value})))
+    (server-error
+     :invalid-shape
+     (str label " must be a map.")
+     {:label label
+      :value value}))
+  value)
+
+(defn- require-keyword!
+  [label value]
+  (when-not (keyword? value)
+    (server-error
+     :invalid-keyword
+     (str label " must be a keyword.")
+     {:label label
+      :value value}))
   value)
 
 (defn- require-callable!
-  [k value]
+  [label value]
   (when-not (fn? value)
-    (throw
-     (ex (str "gesso.live optimistic " k " must be callable.")
-         {k value})))
+    (server-error
+     :not-callable
+     (str label " must be callable.")
+     {:label label
+      :value value}))
   value)
 
-(defn- normalize-semantic-scope
-  "Validate semantic scope without converting stored server-side values to wire
-   representation."
-  [scope]
-  (protocol/wire-scope scope)
-  scope)
+(defn- require-closed-map!
+  [label value required allowed]
+  (let [value' (require-map! label value)
+        keys' (set (keys value'))
+        missing (set/difference required keys')
+        unknown (set/difference keys' allowed)]
+    (when (seq missing)
+      (server-error
+       :missing-key
+       (str label " is missing required keys.")
+       {:label label
+        :missing missing
+        :required required}))
+    (when (seq unknown)
+      (server-error
+       :unknown-key
+       (str label " contains unknown keys.")
+       {:label label
+        :unknown unknown
+        :allowed allowed}))
+    value'))
 
-(defn- normalize-transition
-  [transition]
-  (protocol/normalize-name :transition transition))
+(defn- require-principal!
+  [principal]
+  (when-not (identity/principal? principal)
+    (server-error
+     :invalid-principal
+     "Trusted principal resolver must return a typed Choreo principal identity."
+     {:principal principal}))
+  principal)
 
-(defn- normalize-pending-label
+;; =============================================================================
+;; Trusted operation registry
+;; =============================================================================
+
+(def ^:private operation-option-keys
+  #{:name
+    :operation
+    :browser-role
+    :authority-role
+    :execute!})
+
+(defn- operation-choreo-options
+  [{:keys [name operation browser-role authority-role]}]
+  {:name name
+   :operation operation
+   :browser-role browser-role
+   :authority-role authority-role})
+
+(defn operation
+  "Construct one trusted optimistic-operation registry entry.
+
+   Required:
+
+     :name
+       Operation-specific choreography name.
+
+     :operation
+       Public semantic model operation, e.g. :request/claim.
+
+     :execute!
+       Trusted JVM function invoked only after principal binding, registry
+       resolution, command validation, and authority-projection resume.
+
+       It receives one closed-ish trusted context map containing at least:
+
+         :ctx
+         :principal
+         :command
+         :command-id
+         :execution-id
+         :operation
+         :arguments
+
+       plus :observed-basis/:scope/:fact-versions when supplied by the command.
+
+       Browser-supplied observed basis, scope, and arguments remain untrusted
+       protocol context. The function must reread/revalidate current authority
+       and invoke the public model operation that owns the transition.
+
+       It returns a closed operation-result map containing :resolution and
+       optional :authoritative, :outcome, and :reason. It must not return
+       command-id or execution-id; this namespace supplies those identities from
+       the validated command.
+
+   Optional :browser-role and :authority-role customize only static choreography
+   roles. They do not confer runtime authorization."
+  [options]
+  (let [options'
+        (require-closed-map!
+         "Optimistic server operation"
+         options
+         #{:name :operation :execute!}
+         operation-option-keys)
+
+        {:keys [name
+                operation
+                browser-role
+                authority-role
+                execute!]
+         :or {browser-role optimistic-choreo/default-browser-role
+              authority-role optimistic-choreo/default-authority-role}}
+        options']
+    (when (= browser-role authority-role)
+      (server-error
+       :same-role
+       "Optimistic server browser and authority roles must be distinct."
+       {:browser-role browser-role
+        :authority-role authority-role}))
+    (let [entry
+          {:gesso.live.optimistic.server/type operation-type
+           :name (require-keyword! "Optimistic operation :name" name)
+           :operation (require-keyword! "Optimistic operation :operation" operation)
+           :browser-role (require-keyword! "Optimistic operation :browser-role" browser-role)
+           :authority-role (require-keyword! "Optimistic operation :authority-role" authority-role)
+           :execute! (require-callable! "Optimistic operation :execute!" execute!)}]
+      ;; Verification/projection is registry-construction work, not request work.
+      ;; Every request for this operation executes the same canonical authority
+      ;; ExecutablePlan.
+      (assoc entry
+             :authority-plan
+             (optimistic-choreo/command-plan
+              (operation-choreo-options entry)
+              (:authority-role entry))))))
+
+(defn operation?
   [value]
-  (when (some? value)
-    (require-non-blank-string! :pending-label value)))
+  (and (map? value)
+       (= operation-type
+          (:gesso.live.optimistic.server/type value))
+       (keyword? (:name value))
+       (keyword? (:operation value))
+       (keyword? (:browser-role value))
+       (keyword? (:authority-role value))
+       (not= (:browser-role value)
+             (:authority-role value))
+       (fn? (:execute! value))
+       (machine/executable-plan?
+        (:authority-plan value))))
 
-(defn- normalize-sync
-  [sync]
-  (cond
-    (or (nil? sync)
-        (false? sync))
-    nil
+(defn- ensure-operation
+  [value]
+  (if (operation? value)
+    value
+    (operation value)))
 
-    (and (string? sync)
-         (not (str/blank? sync)))
-    sync
+(def ^:private server-option-keys
+  #{:principal-fn
+    :operations})
 
-    :else
-    (throw
-     (ex "gesso.live optimistic :sync must be nil, false, or a non-blank string."
-         {:sync sync}))))
+(defn server
+  "Construct a trusted optimistic server adapter.
 
-(defn- hiccup-tag?
-  [x]
-  (or (keyword? x)
-      (symbol? x)
-      (string? x)))
+   :principal-fn is server configuration, never request data. It receives ctx
+   and must return a typed Choreo principal identity established from trusted
+   authentication/session state.
 
-(defn- fragment-tag?
-  [tag]
-  (contains? #{:<> '<> "<>"} tag))
+   :operations is a map from semantic operation keyword to trusted operation
+   entry/options. The map key must exactly equal the entry's :operation. A
+   browser may propose :operation, but it can only select among entries already
+   installed in this trusted registry."
+  [options]
+  (let [options'
+        (require-closed-map!
+         "Optimistic server"
+         options
+         server-option-keys
+         server-option-keys)
+        principal-fn
+        (require-callable!
+         "Optimistic server :principal-fn"
+         (:principal-fn options'))
+        operations-raw
+        (require-map!
+         "Optimistic server :operations"
+         (:operations options'))
+        operations'
+        (into {}
+              (map
+               (fn [[registry-key operation-value]]
+                 (let [registry-key'
+                       (require-keyword!
+                        "Optimistic operation registry key"
+                        registry-key)
+                       operation'
+                       (ensure-operation operation-value)]
+                   (when-not (= registry-key'
+                                (:operation operation'))
+                     (server-error
+                      :operation-registry-mismatch
+                      "Optimistic operation registry key must equal the operation entry's public semantic operation."
+                      {:registry-key registry-key'
+                       :operation (:operation operation')}))
+                   [registry-key' operation'])))
+              operations-raw)]
+    {:gesso.live.optimistic.server/type server-type
+     :principal-fn principal-fn
+     :operations operations'}))
 
-(defn- single-root-hiccup?
-  [content]
-  (and (vector? content)
-       (hiccup-tag? (first content))
-       (not (fragment-tag? (first content)))))
+(defn server?
+  [value]
+  (and (map? value)
+       (= server-type
+          (:gesso.live.optimistic.server/type value))
+       (fn? (:principal-fn value))
+       (map? (:operations value))
+       (every?
+        (fn [[operation-key operation-entry]]
+          (and (= operation-key
+                  (:operation operation-entry))
+               (operation? operation-entry)))
+        (:operations value))))
 
-(defn- require-single-root!
-  [k content]
-  (when-not (single-root-hiccup? content)
-    (throw
-     (ex (str "gesso.live optimistic " k
-              " must be one rooted Hiccup element and may not be a fragment or sequence.")
-         {k content})))
-  content)
+(defn- require-server!
+  [value]
+  (when-not (server? value)
+    (server-error
+     :invalid-server
+     "Expected a prepared optimistic server adapter."
+     {:server value}))
+  value)
 
-(defn- remove-protocol-attrs
-  [attrs]
-  (apply dissoc attrs protocol/reserved-attrs))
+(defn- resolve-operation
+  [prepared-server semantic-operation]
+  (let [server' (require-server! prepared-server)
+        operation-key
+        (require-keyword!
+         "Optimistic command :operation"
+         semantic-operation)]
+    (or (get-in server' [:operations operation-key])
+        (server-error
+         :unknown-operation
+         "Optimistic command requested an operation not present in the trusted server registry."
+         {:operation operation-key
+          :registered-operations
+          (set (keys (:operations server')))}))))
 
-(defn- hiccup-parts
-  "Return [tag attrs children] for one rooted Hiccup element."
-  [node]
-  (require-single-root! :node node)
-  (let [[tag second-item & rest-items] node]
-    (if (map? second-item)
-      [tag second-item rest-items]
-      [tag
-       {}
-       (if (nil? second-item)
-         rest-items
-         (cons second-item rest-items))])))
+;; =============================================================================
+;; Command decoding and trusted boundary construction
+;; =============================================================================
 
-;; -----------------------------------------------------------------------------
-;; Optimistic descriptor construction
-;; -----------------------------------------------------------------------------
+(defn decode-command
+  "Decode and validate one browser wire command.
 
-(defn new-template-name
-  "Return a fresh browser-safe optimistic template name."
-  []
-  (str default-template-prefix (UUID/randomUUID)))
+   Successful decoding establishes shape/correlation identity only. It does not
+   authenticate the principal, authorize the operation, prove observed basis,
+   or establish any authoritative fact."
+  [wire-command]
+  (protocol/wire->command wire-command))
 
-(defn target-sync
-  "Derive the default target-scoped HTMX single-flight synchronization value."
-  ([target]
-   (target-sync target default-sync-strategy))
-  ([target strategy]
-   (let [target' (->> target
-                      (require-non-blank-string! :target)
-                      htmx/normalize-target)
-         strategy' (protocol/normalize-name :strategy strategy)]
-     (str target' ":" strategy'))))
+(defn normalize-command
+  "Validate one already-decoded runtime protocol-v3 command."
+  [command]
+  (protocol/command
+   (dissoc command protocol/protocol-version-key)))
 
-(defn ->optimistic
-  "Prepare one optimistic transition descriptor.
-
-   Required:
-     :transition  semantic transition identifier
-     :scope       stable semantic application scope
-     :target      selector/id for the existing target element
-     :content     exactly one rooted optimistic Hiccup projection
-
-   Optional:
-     :base-revision
-     :projection-mode  :pending, :provisional, or :full
-     :template-name
-     :pending-label
-     :sync             nil/false disables suggested hx-sync
-     :attrs
-     :template-attrs
-
-   Framework protocol attrs always override caller-supplied conflicts."
-  [{:keys [transition
-           target
-           scope
-           base-revision
-           content
-           projection-mode
-           template-name
-           pending-label
-           attrs
-           template-attrs]
-    :as opts}]
-  (let [transition' (normalize-transition transition)
-        target' (->> target
-                     (require-non-blank-string! :target)
-                     htmx/normalize-target)
-        scope' (normalize-semantic-scope scope)
-        base-revision' (protocol/normalize-revision
-                        :base-revision
-                        base-revision)
-        content' (->> content
-                      (require-present! :content)
-                      (require-single-root! :content))
-        projection-mode' (protocol/normalize-projection-mode
-                          projection-mode)
-        template-name' (or (protocol/normalize-optional-name
-                            :template-name
-                            template-name)
-                           (new-template-name))
-        pending-label' (normalize-pending-label pending-label)
-        attrs' (require-map! :attrs (or attrs {}))
-        template-attrs' (require-map! :template-attrs
-                                     (or template-attrs {}))
-        sync' (if (contains? opts :sync)
-                (normalize-sync (:sync opts))
-                (target-sync target'))]
-    {:gesso.live.optimistic/type descriptor-type
-     :protocol-version protocol-version
-     :transition transition'
-     :scope scope'
-     :base-revision base-revision'
-     :target target'
-     :content content'
-     :projection-mode projection-mode'
-     :template-name template-name'
-     :pending-label pending-label'
-     :sync sync'
-     :attrs attrs'
-     :template-attrs template-attrs'}))
-
-(defn optimistic?
-  [x]
-  (and (map? x)
-       (= descriptor-type
-          (:gesso.live.optimistic/type x))
-       (= protocol-version
-          (:protocol-version x))))
-
-(defn ensure-optimistic
-  "Return a prepared descriptor unchanged, or normalize raw opts."
-  [optimistic]
-  (if (optimistic? optimistic)
-    optimistic
-    (->optimistic optimistic)))
-
-(defn- require-descriptor!
-  [optimistic]
-  (when-not (optimistic? optimistic)
-    (throw
-     (ex (str "gesso.live optimistic markup helpers require a prepared "
-              "descriptor. Call ->optimistic once, or use render-parts with raw opts.")
-         {:optimistic optimistic})))
-  optimistic)
-
-;; -----------------------------------------------------------------------------
-;; Canonical authority
-;; -----------------------------------------------------------------------------
-
-(defn canonical-attrs
-  "Return attrs explicitly marking authoritative server-rendered content.
-
-   :scope is required; :revision is optional. A matching scope by itself never
-   implies canonical authority."
-  [{:keys [scope revision]}]
-  (let [scope' (normalize-semantic-scope scope)
-        revision' (protocol/normalize-revision :revision revision)]
-    (htmx/clean-attrs
-     {protocol-attr protocol-version
-      scope-attr (protocol/wire-scope scope')
-      revision-attr (protocol/revision->wire revision')
-      canonical-attr "true"})))
-
-(defn canonical
-  "Mark one rooted Hiccup element authoritative for semantic scope/revision."
-  [opts node]
-  (let [node' (require-single-root! :canonical-content node)
-        [tag attrs children] (hiccup-parts node')
-        attrs' (merge (remove-protocol-attrs attrs)
-                      (canonical-attrs opts))]
-    (into [tag attrs'] children)))
-
-;; -----------------------------------------------------------------------------
-;; Browser-facing optimistic markup
-;; -----------------------------------------------------------------------------
-
-(defn source-attrs
-  "Build optimistic protocol attrs for the actual HTMX request owner."
-  [optimistic]
-  (let [{:keys [transition
-                template-name
-                target
-                scope
-                base-revision
-                pending-label
-                projection-mode
-                attrs]}
-        (require-descriptor! optimistic)
-        attrs' (remove-protocol-attrs attrs)]
-    (htmx/merge-attrs
-     attrs'
-     {protocol-attr protocol-version
-      transition-attr transition
-      template-attr template-name
-      target-attr target
-      scope-attr (protocol/wire-scope scope)
-      projection-mode-attr
-      (protocol/projection-mode->wire projection-mode)}
-     (when (some? base-revision)
-       {base-revision-attr
-        (protocol/revision->wire base-revision)})
-     (when pending-label
-       {pending-label-attr pending-label}))))
-
-(defn template
-  "Render the hidden one-root optimistic projection template.
-
-   Projection markup carries identity/scope diagnostics but never canonical
-   authority."
-  [optimistic]
-  (let [{:keys [transition
-                template-name
-                scope
-                projection-mode
-                content
-                template-attrs]}
-        (require-descriptor! optimistic)
-        template-attrs' (remove-protocol-attrs template-attrs)]
-    [:template
-     (htmx/clean-attrs
-      (merge
-       template-attrs'
-       {protocol-attr protocol-version
-        transition-attr transition
-        template-attr template-name
-        scope-attr (protocol/wire-scope scope)
-        projection-mode-attr
-        (protocol/projection-mode->wire projection-mode)}))
-     content]))
-
-(defn render-parts
-  "Return the prepared pieces consumed by higher-level HTMX UI helpers."
-  [optimistic]
-  (let [optimistic' (ensure-optimistic optimistic)]
-    {:optimistic optimistic'
-     :source-attrs (source-attrs optimistic')
-     :template (template optimistic')
-     :sync (:sync optimistic')}))
-
-;; -----------------------------------------------------------------------------
-;; Request execution identity
-;; -----------------------------------------------------------------------------
-
-(defn request-execution-id
-  "Return the browser-generated optimistic execution id, when present.
-
-   Normal Ring request header keys are lower-case. Explicit context injection is
-   retained for tests and custom adapters."
-  [ctx]
-  (or (:gesso.live.optimistic/execution-id ctx)
-      (get-in ctx [:headers execution-request-header])
-      (get-in ctx [:headers "Gesso-Optimistic-Execution"])
-      (get-in ctx [:request :headers execution-request-header])
-      (get-in ctx [:request :headers "Gesso-Optimistic-Execution"])))
-
-(defn require-request-execution-id
-  "Return request-execution-id or throw when an optimistic command lacks one."
-  [ctx]
-  (require-non-blank-string!
-   :execution-id
-   (request-execution-id ctx)))
-
-;; -----------------------------------------------------------------------------
-;; Semantic settlement
-;; -----------------------------------------------------------------------------
-
-(defn ->settlement
-  "Prepare one semantic optimistic settlement.
-
-   Required:
-     :execution-id
-     :scope          semantic application scope
-     :outcome        :confirmed, :reconciled, :rejected, or :failed
-
-   Optional:
-     :revision
-     :reason
-     :consistency-token
-
-   :command-applied? is derived from outcome and may not be supplied.
-   :transition is intentionally absent from settlement correlation."
-  [{:keys [execution-id
-           scope
-           outcome
-           revision
-           reason
-           consistency-token]
-    :as opts}]
-  (when (contains? opts :transition)
-    (throw
-     (ex "gesso.live optimistic settlement does not accept redundant :transition."
-         {:transition (:transition opts)})))
-  (when (contains? opts :command-applied?)
-    (throw
-     (ex (str "gesso.live optimistic settlement does not accept "
-              ":command-applied?; it is derived from :outcome.")
-         {:command-applied? (:command-applied? opts)
-          :outcome outcome})))
-  (let [execution-id' (require-non-blank-string!
-                       :execution-id
-                       execution-id)
-        scope' (normalize-semantic-scope scope)
-        outcome' (protocol/normalize-settlement-outcome outcome)
-        revision' (protocol/normalize-revision :revision revision)
-        reason' (protocol/normalize-optional-name :reason reason)]
-    {:gesso.live.optimistic/type settlement-type
-     :protocol-version protocol-version
-     :execution-id execution-id'
-     :scope scope'
-     :outcome outcome'
-     :revision revision'
-     :command-applied?
-     (protocol/command-applied-for-outcome? outcome')
-     :reason reason'
-     :consistency-token consistency-token}))
-
-(defn settlement?
-  [x]
-  (and (map? x)
-       (= settlement-type
-          (:gesso.live.optimistic/type x))
-       (= protocol-version
-          (:protocol-version x))))
-
-(defn ensure-settlement
-  "Return a prepared settlement unchanged, or normalize raw opts."
-  [settlement]
-  (if (settlement? settlement)
-    settlement
-    (->settlement settlement)))
-
-(defn settlement-for-request
-  "Prepare settlement using the browser execution id carried by ctx."
-  [ctx opts]
-  (->settlement
-   (assoc opts
-          :execution-id
-          (or (:execution-id opts)
-              (request-execution-id ctx)))))
-
-(defn settlement-marker
-  "Render the inert browser-readable settlement marker.
-
-   Consistency tokens are intentionally not serialized into this marker; their
-   HTTP transport belongs to gesso.live.token."
-  [settlement]
-  (let [{:keys [execution-id
-                scope
-                outcome
-                revision
-                command-applied?
-                reason]}
-        (ensure-settlement settlement)]
-    [:template
-     (htmx/clean-attrs
-      {protocol-attr protocol-version
-       settlement-attr "true"
-       execution-attr execution-id
-       scope-attr (protocol/wire-scope scope)
-       outcome-attr (protocol/settlement-outcome->wire outcome)
-       revision-attr (protocol/revision->wire revision)
-       command-applied-attr
-       (protocol/command-applied->wire command-applied?)
-       reason-attr reason})]))
-
-(defn with-settlement
-  "Return settlement marker + one authoritative canonical root + extra nodes.
-
-   The canonical root derives its semantic scope/revision from the same prepared
-   settlement, so marker and canonical authority cannot disagree."
-  [settlement canonical-node & nodes]
-  (let [settlement' (ensure-settlement settlement)
-        canonical-node'
-        (canonical
-         {:scope (:scope settlement')
-          :revision (:revision settlement')}
-         (->> canonical-node
-              (require-present! :canonical-content)
-              (require-single-root! :canonical-content)))]
-    (into
-     [:div {:style {:display "contents"}}]
-     (concat
-      [(settlement-marker settlement')
-       canonical-node']
-      (remove nil? nodes)))))
-
-;; -----------------------------------------------------------------------------
-;; Projected server choreography adapter
-;; -----------------------------------------------------------------------------
-
-(defn command-payload
-  "Construct the protocol command payload for a server request.
-
-   Public :scope is semantic application data. The returned :scope is the same
-   opaque wire identity the browser sends and uses for correlation.
-
-   execution-id defaults from ctx's optimistic request header. transition and
-   scope must be supplied by the authoritative route/application operation; the
-   server never trusts DOM metadata that is not actually present in the request."
-  [ctx {:keys [execution-id
-               transition
-               scope
-               base-revision
-               consistency-token]}]
-  (let [execution-id' (require-non-blank-string!
-                       :execution-id
-                       (or execution-id
-                           (request-execution-id ctx)))
-        transition' (normalize-transition transition)
-        semantic-scope (normalize-semantic-scope scope)
-        base-revision' (protocol/normalize-revision
-                        :base-revision
-                        base-revision)]
-    (cond->
-        {protocol/execution-id-key execution-id'
-         protocol/transition-key transition'
-         protocol/scope-key (protocol/wire-scope semantic-scope)}
-      (some? base-revision')
-      (assoc protocol/base-revision-key base-revision')
-
-      (some? consistency-token)
-      (assoc protocol/consistency-token-key consistency-token))))
-
-(defn- command-envelope
-  [payload]
+(defn- command-message
+  [operation-entry command]
   (machine/message
-   {:from optimistic-choreo/browser-role
-    :to optimistic-choreo/server-role
-    :event protocol/command-event
-    :via :http}
-   payload))
+   (:browser-role operation-entry)
+   (:authority-role operation-entry)
+   protocol/command-event
+   (optimistic-choreo/command-values command)
+   {:via :http}))
 
 (defn begin-command
-  "Start the projected server endpoint and deliver one HTTP command into it.
+  "Establish the trusted authority projection for one validated runtime command.
 
-   Returns a choreography execution waiting on the built-in server FX machine.
-   The server context is seeded only with the known correlation identity before
-   the incoming command is matched."
-  [ctx command]
-  (let [payload (command-payload ctx command)
-        execution-id (get payload protocol/execution-id-key)
-        seed-context (select-keys payload
-                                  protocol/command-correlation-keys)
-        execution0 (machine/start
-                    optimistic-choreo/server-plan
-                    {:execution-id execution-id
-                     :context seed-context})
-        execution1 (machine/resume
-                    execution0
-                    (command-envelope payload))
-        action (machine/pending-action execution1)]
-    (when-not (machine/waiting-fx? execution1)
-      (throw
-       (ex "Projected optimistic server endpoint did not reach its FX boundary."
-           {:execution execution1})))
-    (when-not (= optimistic-choreo/server-execute-machine
-                 (:machine action))
-      (throw
-       (ex "Projected optimistic server endpoint requested an unexpected FX machine."
-           {:expected optimistic-choreo/server-execute-machine
-            :action action})))
-    execution1))
+   Security-critical order:
 
-(defn command-context
-  "Return the accumulated protocol context for a server execution waiting on FX."
-  [execution]
-  (when-not (machine/waiting-fx? execution)
-    (throw
-     (ex "Optimistic server execution is not waiting for command FX."
-         {:execution execution})))
-  (machine/execution-context execution))
+     1. normalize the untrusted command shape;
+     2. derive principal from trusted server context;
+     3. resolve command :operation only through the trusted registry;
+     4. require the command operation to match that registry entry;
+     5. start the registry-selected authority ExecutablePlan with trusted
+        principal plus typed command/execution identity bindings;
+     6. resume it with only the declared command message payload;
+     7. require that it reaches the expected public authoritative operation.
 
-(defn biff-fx-context
-  "Merge ordinary server ctx with protocol context for the application Biff FX
-   machine.
+   Browser data cannot supply principal, role, authority, projected machine
+   state, or an arbitrary callable operation."
+  [prepared-server ctx command]
+  (let [server'
+        (require-server! prepared-server)
+        command'
+        (normalize-command command)
+        principal
+        (-> ((:principal-fn server') ctx)
+            require-principal!)
+        operation-entry
+        (resolve-operation server'
+                           (get command' protocol/operation-key))
+        command''
+        (optimistic-choreo/require-operation
+         (:operation operation-entry)
+         command')
+        execution0
+        (machine/start
+         (:authority-plan operation-entry)
+         {:identity-bindings
+          {:principal principal
+           :command-id (get command'' protocol/command-id-key)
+           :execution-id (get command'' protocol/execution-id-key)}})
+        execution1
+        (machine/resume
+         execution0
+         (command-message operation-entry command''))
+        action
+        (machine/pending-action execution1)]
+    (when-not (machine/waiting-authoritative? execution1)
+      (server-error
+       :authority-boundary-not-reached
+       "Trusted optimistic authority projection did not reach an authoritative operation boundary."
+       {:operation (:operation operation-entry)
+        :execution (machine/explain execution1)}))
+    (when-not (= (:operation operation-entry)
+                 (:operation action))
+      (server-error
+       :unexpected-authoritative-operation
+       "Trusted optimistic authority projection reached an unexpected public operation."
+       {:expected-operation (:operation operation-entry)
+        :actual-operation (:operation action)
+        :execution (machine/explain execution1)}))
+    {:gesso.live.optimistic.server/type command-boundary-type
+     :server server'
+     :ctx ctx
+     :principal principal
+     :operation-entry operation-entry
+     :command command''
+     :execution execution1}))
 
-   The received command is additionally available at
-   :gesso.live.optimistic/command. Protocol keys also remain directly available
-   in the merged map for state functions that need them."
-  [ctx execution]
-  (let [protocol-context (command-context execution)]
-    (merge ctx
-           protocol-context
-           {:gesso.live.optimistic/command
-            (:command protocol-context)
-            :gesso.live.optimistic/execution-id
-            (:execution-id execution)})))
+(defn command-boundary?
+  [value]
+  (and (map? value)
+       (= command-boundary-type
+          (:gesso.live.optimistic.server/type value))
+       (machine/waiting-authoritative?
+        (:execution value))))
 
-(defn run-biff-fx
-  "Run the supplied ordinary Biff FX machine at the server choreography FX
-   boundary.
+(defn operation-context
+  "Return the trusted context passed to a registered public operation adapter.
 
-   fx-machine is expected to be the callable produced by com.biffweb.fx/machine
-   or com.biffweb.fx/defmachine. Its terminal value is returned unchanged."
-  [ctx execution fx-machine]
-  (require-callable! :fx-machine fx-machine)
-  (fx-machine (biff-fx-context ctx execution)))
-
-(defn- settlement-protocol-result
-  [execution settlement canonical-node]
-  (let [settlement' (ensure-settlement settlement)
-        execution-id (:execution-id execution)
-        protocol-context (machine/execution-context execution)
-        command-wire-scope (get protocol-context protocol/scope-key)
-        settlement-wire-scope (protocol/wire-scope (:scope settlement'))]
-    (when-not (= execution-id (:execution-id settlement'))
-      (throw
-       (ex "Optimistic settlement execution id does not match the server choreography execution."
-           {:execution-id execution-id
-            :settlement-execution-id (:execution-id settlement')})))
-    (when-not (= command-wire-scope settlement-wire-scope)
-      (throw
-       (ex "Optimistic settlement scope does not match the received command scope."
-           {:command-scope command-wire-scope
-            :settlement-scope settlement-wire-scope})))
-    (require-single-root! :canonical-content canonical-node)
+   This is not a portable Choreo value and may contain host/application ctx.
+   Browser-supplied command fields are deliberately nested under :command and
+   repeated only as convenience values; :principal is always server-derived."
+  [boundary]
+  (when-not (command-boundary? boundary)
+    (server-error
+     :invalid-command-boundary
+     "Expected an optimistic command boundary waiting on authority."
+     {:boundary boundary}))
+  (let [{:keys [ctx principal command operation-entry]}
+        boundary]
     (cond->
-        {protocol/execution-id-key execution-id
-         protocol/scope-key command-wire-scope
-         protocol/outcome-key (:outcome settlement')
-         protocol/command-applied-key (:command-applied? settlement')
-         protocol/canonical-key canonical-node}
-      (some? (:revision settlement'))
-      (assoc protocol/revision-key (:revision settlement'))
+     {:ctx ctx
+      :principal principal
+      :command command
+      :command-id (get command protocol/command-id-key)
+      :execution-id (get command protocol/execution-id-key)
+      :operation (:operation operation-entry)
+      :arguments (get command protocol/arguments-key)}
+      (contains? command protocol/observed-basis-key)
+      (assoc :observed-basis
+             (get command protocol/observed-basis-key))
 
-      (some? (:reason settlement'))
-      (assoc protocol/reason-key (:reason settlement'))
+      (contains? command protocol/scope-key)
+      (assoc :scope
+             (get command protocol/scope-key))
 
-      (some? (:consistency-token settlement'))
-      (assoc protocol/consistency-token-key
-             (:consistency-token settlement')))))
+      (contains? command protocol/fact-versions-key)
+      (assoc :fact-versions
+             (get command protocol/fact-versions-key)))))
+
+;; =============================================================================
+;; Trusted operation result -> protocol-v3 settlement
+;; =============================================================================
+
+(defn- normalize-operation-result
+  [result]
+  (require-closed-map!
+   "Optimistic authoritative operation result"
+   result
+   #{protocol/resolution-key}
+   operation-result-keys))
+
+(defn settlement-from-result
+  "Construct a protocol-v3 settlement from one trusted operation result.
+
+   command-id and execution-id are always copied from the validated command.
+   The operation result cannot replace them. Successful resolutions are required
+   by protocol v3 to carry a typed authoritative observation.
+
+   This function intentionally performs no generic basis ordering/staleness
+   decision. The public model operation owns the semantic interpretation of the
+   browser's observed basis and current authoritative facts."
+  [boundary result]
+  (when-not (command-boundary? boundary)
+    (server-error
+     :invalid-command-boundary
+     "Settlement construction requires an active authoritative command boundary."
+     {:boundary boundary}))
+  (let [result'
+        (normalize-operation-result result)
+        command
+        (:command boundary)]
+    (protocol/settlement
+     (cond->
+      {protocol/command-id-key
+       (get command protocol/command-id-key)
+
+       protocol/execution-id-key
+       (get command protocol/execution-id-key)
+
+       protocol/resolution-key
+       (get result' protocol/resolution-key)}
+
+      (contains? result' protocol/authoritative-key)
+      (assoc protocol/authoritative-key
+             (get result' protocol/authoritative-key))
+
+      (contains? result' protocol/outcome-key)
+      (assoc protocol/outcome-key
+             (get result' protocol/outcome-key))
+
+      (contains? result' protocol/reason-key)
+      (assoc protocol/reason-key
+             (get result' protocol/reason-key))))))
 
 (defn prepare-settlement-send
-  "Complete the server FX boundary with one authoritative settlement.
+  "Complete the trusted authority operation and prepare its settlement send.
 
-   Returns a prepared value containing:
-     :execution   choreography execution waiting at its server->browser send
-     :action      exact projected send action/payload
-     :settlement  normalized semantic settlement
-     :canonical   raw authoritative Hiccup root
+   The authority projection is advanced only with the one declared settlement
+   semantic value. The returned participant message is validated by the
+   projected Choreo send contract. The HTTP adapter may serialize :settlement
+   with protocol/settlement->wire and should call complete-settlement-send only
+   after accepting/performing the direct settlement send.
 
-   The send payload is checked against the semantic settlement so execution-id,
-   scope, outcome, command-applied?, revision, reason, canonical content, and
-   optional consistency token all come from one construction path."
-  [execution settlement canonical-node]
-  (when-not (machine/waiting-fx? execution)
-    (throw
-     (ex "Optimistic server execution is not waiting for FX completion."
-         {:execution execution})))
-  (let [settlement' (ensure-settlement settlement)
-        protocol-result (settlement-protocol-result
-                         execution
-                         settlement'
-                         canonical-node)
-        execution' (machine/complete-fx execution protocol-result)
-        action (machine/pending-action execution')]
-    (when-not (machine/waiting-send? execution')
-      (throw
-       (ex "Projected optimistic server endpoint did not reach its settlement send boundary."
-           {:execution execution'})))
-    (when-not (and (= :send (:kind action))
-                   (= optimistic-choreo/browser-role (:to action))
-                   (= protocol/settlement-event (:event action))
-                   (= :http (:via action)))
-      (throw
-       (ex "Projected optimistic server endpoint produced an unexpected settlement send."
-           {:action action})))
-    {:gesso.live.optimistic.server/type prepared-server-send-type
-     :execution execution'
-     :action action
-     :settlement settlement'
-     :canonical canonical-node}))
+   Failure to deliver this prepared settlement does not rewrite the settlement
+   or the already-completed authoritative operation as :failed. A later
+   authoritative reread may supersede the browser's provisional trajectory."
+  [boundary result]
+  (when-not (command-boundary? boundary)
+    (server-error
+     :invalid-command-boundary
+     "Settlement preparation requires an active authoritative command boundary."
+     {:boundary boundary}))
+  (let [settlement
+        (settlement-from-result boundary result)
+        execution1
+        (machine/complete-authoritative
+         (:execution boundary)
+         {optimistic-choreo/settlement-value-key
+          (optimistic-choreo/settlement-value settlement)})
+        payload
+        (optimistic-choreo/settlement-message-values settlement)
+        message
+        (machine/pending-message execution1 payload)]
+    (when-not (machine/waiting-send? execution1)
+      (server-error
+       :settlement-send-not-reached
+       "Trusted optimistic authority projection did not reach settlement send."
+       {:execution (machine/explain execution1)
+        :settlement settlement}))
+    {:gesso.live.optimistic.server/type prepared-send-type
+     :principal (:principal boundary)
+     :operation (:operation (:operation-entry boundary))
+     :command (:command boundary)
+     :settlement settlement
+     :settlement-wire (protocol/settlement->wire settlement)
+     :message message
+     :payload payload
+     :execution execution1}))
 
-(defn prepared-server-send?
-  [x]
-  (and (map? x)
-       (= prepared-server-send-type
-          (:gesso.live.optimistic.server/type x))
-       (machine/waiting-send? (:execution x))))
+(defn prepared-send?
+  [value]
+  (and (map? value)
+       (= prepared-send-type
+          (:gesso.live.optimistic.server/type value))
+       (machine/waiting-send?
+        (:execution value))))
 
 (defn complete-settlement-send
-  "Mark the projected server send boundary complete.
+  "Record successful direct settlement-send handoff in the authority projection.
 
-   Call this when the adapter considers the HTTP settlement response handed off.
-   The built-in server projection should then be terminal."
+   This is transport completion only. It never changes the already-established
+   protocol settlement or authoritative model result."
   [prepared]
-  (when-not (prepared-server-send? prepared)
-    (throw
-     (ex "Expected a prepared optimistic server settlement send."
-         {:prepared prepared})))
-  (let [execution' (machine/complete-send (:execution prepared))]
-    (when-not (machine/completed? execution')
-      (throw
-       (ex "Optimistic server endpoint did not terminate after settlement send."
-           {:execution execution'})))
-    (assoc prepared :execution execution')))
+  (when-not (prepared-send? prepared)
+    (server-error
+     :invalid-prepared-send
+     "Expected a prepared optimistic settlement send."
+     {:prepared prepared}))
+  (let [{:keys [execution message]}
+        (machine/complete-send
+         (:execution prepared)
+         (:payload prepared))]
+    (when-not (machine/completed? execution)
+      (server-error
+       :authority-execution-not-completed
+       "Trusted optimistic authority projection did not terminate after settlement send."
+       {:execution (machine/explain execution)}))
+    (when-not (= (:message prepared) message)
+      (server-error
+       :settlement-message-changed
+       "Completing optimistic settlement send produced a message different from the prepared transport envelope."
+       {:prepared-message (:message prepared)
+        :completed-message message}))
+    (-> prepared
+        (assoc :gesso.live.optimistic.server/type completed-send-type)
+        (assoc :execution execution))))
 
-(defn prepared-response-hiccup
-  "Render marker + canonical root for a prepared server send.
+(defn completed-send?
+  [value]
+  (and (map? value)
+       (= completed-send-type
+          (:gesso.live.optimistic.server/type value))
+       (machine/completed?
+        (:execution value))))
 
-   Optional additional nodes are appended after the authoritative root."
-  [prepared & nodes]
-  (when-not (prepared-server-send? prepared)
-    (throw
-     (ex "Expected a prepared optimistic server settlement send."
-         {:prepared prepared})))
-  (apply with-settlement
-         (:settlement prepared)
-         (:canonical prepared)
-         nodes))
+;; =============================================================================
+;; End-to-end trusted helpers
+;; =============================================================================
 
 (defn run-command
-  "Run one optimistic command through the projected server endpoint and Biff FX.
+  "Execute one already-decoded protocol-v3 command through the trusted registry.
 
-   Arguments:
-     ctx      ordinary Ring/Biff context
-     command  map accepted by command-payload
-     opts
-       :fx-machine  required Biff FX machine function
-       :settle   required (fn [biff-fx-ctx fx-result] ...)
+   The registered operation is invoked exactly once with operation-context. Its
+   return value must explicitly classify the semantic resolution.
 
-   settle must return a map containing:
-     :outcome    semantic settlement outcome
-     :canonical  exactly one rooted authoritative Hiccup element
+   IMPORTANT: arbitrary operation exceptions are deliberately allowed to escape.
+   This function never catches an unknown exception and manufactures a :failed
+   settlement, because the exception may represent work that failed *after* an
+   authoritative commit. The model/Live layer must distinguish pre-commit
+   failure from post-commit delivery failure at its own boundary."
+  [prepared-server ctx command]
+  (let [boundary
+        (begin-command prepared-server ctx command)
+        execute!
+        (get-in boundary [:operation-entry :execute!])
+        result
+        (execute! (operation-context boundary))]
+    (prepare-settlement-send boundary result)))
 
-   It may also return:
-     :revision
-     :reason
-     :consistency-token
-
-   The settlement's execution-id and semantic scope are derived from the command
-   boundary, not trusted from settle. The returned value is a prepared server
-   send; callers can render it with prepared-response-hiccup and then call
-   complete-settlement-send when the response has been handed off."
-  [ctx command {:keys [fx-machine settle]}]
-  (require-callable! :fx-machine fx-machine)
-  (require-callable! :settle settle)
-  (let [execution (begin-command ctx command)
-        fx-ctx (biff-fx-context ctx execution)
-        fx-result (fx-machine fx-ctx)
-        settlement-result (settle fx-ctx fx-result)
-        _ (require-map! :settle-result settlement-result)
-        canonical-node (require-present!
-                        :canonical
-                        (:canonical settlement-result))
-        semantic-scope (normalize-semantic-scope (:scope command))
-        settlement (->settlement
-                    (merge
-                     (select-keys settlement-result
-                                  [:outcome
-                                   :revision
-                                   :reason
-                                   :consistency-token])
-                     {:execution-id (:execution-id execution)
-                      :scope semantic-scope}))]
-    (prepare-settlement-send
-     execution
-     settlement
-     canonical-node)))
+(defn run-wire-command
+  "Decode one browser wire command and execute it through run-command."
+  [prepared-server ctx wire-command]
+  (run-command
+   prepared-server
+   ctx
+   (decode-command wire-command)))

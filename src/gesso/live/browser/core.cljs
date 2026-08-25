@@ -72,6 +72,15 @@
 (def invalidated-event-name
   "gesso:live-invalidated")
 
+(def invalidation-listener-attribute
+  "data-gesso-live-invalidation")
+
+(def sse-before-message-event-name
+  "htmx:sseBeforeMessage")
+
+(def sse-open-event-name
+  "htmx:sseOpen")
+
 (def managed-request-marker
   "gesso-live-managed-request")
 
@@ -96,6 +105,8 @@
    ["htmx:timeout" :request-failed]
    ["htmx:abort" :request-failed]
    ["htmx:beforeCleanupElement" :before-cleanup]
+   [sse-before-message-event-name :sse-before-message]
+   [sse-open-event-name :sse-open]
    [invalidated-event-name :invalidated]])
 
 (def option-keys
@@ -117,7 +128,10 @@
     :htmx/allow-request
     :htmx/cancel-request
     :htmx/allow-swap
-    :htmx/cancel-swap})
+    :htmx/cancel-swap
+    :continuity/capture
+    :continuity/restore
+    :continuity/release})
 
 ;; =============================================================================
 ;; Errors / validation
@@ -279,6 +293,31 @@
   (boolean
    (and (node-element? element)
         (some? (fragment-id-from-root element)))))
+
+(defn managed-fragment-root?
+  "Return true when root is a Gesso-managed fragment whose HTMX request path
+   is owned by the adapter.
+
+   Managed server markup deliberately gives the stable root one request trigger:
+   gesso:live-refresh. Legacy fragments with direct sse:* triggers therefore do
+   not enter this path while migration is in progress."
+  [root]
+  (boolean
+   (and (fragment-root? root)
+        (= refresh-event-name
+           (some-> (element-attr root "hx-trigger")
+                   str
+                   str/trim)))))
+
+(defn invalidation-listener?
+  "Return true when element is the non-swapping SSE listener owned by one
+   managed fragment. The attribute value is the logical fragment id."
+  [element]
+  (boolean
+   (and (node-element? element)
+        (some-> (element-attr element invalidation-listener-attribute)
+                str
+                not-empty))))
 
 (defn fragment-root-from-element
   "Return the nearest stable Gesso Live fragment root for element."
@@ -652,7 +691,9 @@
 
      :handlers
        Additional shell effect handlers for machine/transport/etc. Framework
-       HTMX disposition handlers may not be overridden.
+       HTMX and continuity handlers may not be overridden here. Extend
+       continuity through :continuity-options, continuity-runtime/register-box!,
+       or the explicit :continuity-*-! seams below.
 
      :continuity-options
        Options passed to continuity/create for this core runtime. This is the
@@ -697,7 +738,7 @@
              (throw
               (core-error
                :protected-handler-override
-               "Application handlers may not replace framework-owned HTMX effect handlers."
+               "Application handlers may not replace framework-owned HTMX or continuity effect handlers."
                {:effect-kinds (set collisions)})))
          shell-options (or (:shell-options options) {})
          _ (require-map! "Browser core :shell-options" shell-options)
@@ -809,6 +850,61 @@
            requirement-present?
            (assoc :requirement requirement))]
      (shell/dispatch! (:shell runtime) event))))
+
+(defn on-sse-before-message!
+  "Normalize one managed HTMX SSE message into a fragment invalidation.
+
+   Server markup registers the configured SSE event on a dedicated descendant
+   carrying data-gesso-live-invalidation=<fragment-id>. The descendant exists
+   only to make htmx-ext-sse subscribe to the named EventSource event; it is not
+   allowed to swap SSE payload data into the DOM.
+
+   This handler therefore prevents the SSE extension's direct swap path first,
+   then notifies the adapter. Legacy sse:* request triggers are ignored because
+   they do not carry the invalidation-listener marker.
+
+   SSE payload parsing is intentionally not performed here. Authoritative
+   progression metadata belongs to the explicit normalized invalidation contract
+   and will be wired separately rather than inferred from arbitrary SSE bytes."
+  [runtime event]
+  (let [listener (detail-field event "elt")]
+    (when (invalidation-listener? listener)
+      ;; A Gesso invalidation listener must never become a second DOM mutation
+      ;; path, even if its defensive hx-swap=none markup is accidentally changed.
+      (prevent-event! event)
+      (let [root (fragment-root-from-element listener)
+            listener-id (some-> (element-attr listener
+                                              invalidation-listener-attribute)
+                                str
+                                not-empty)
+            fragment-id (fragment-id-from-root root)]
+        (when-not (and (managed-fragment-root? root)
+                       fragment-id
+                       (= fragment-id listener-id))
+          (throw
+           (core-error
+            :invalid-sse-invalidation-listener
+            "Managed SSE invalidation listener must belong to the matching managed fragment root."
+            {:listener-fragment-id listener-id
+             :root-fragment-id fragment-id
+             :managed-root? (managed-fragment-root? root)})))
+        (notify-fragment! runtime fragment-id))))
+  true)
+
+(defn on-sse-open!
+  "Treat opening or reopening a managed fragment's EventSource as an
+   invalidation.
+
+   Reconnect can follow a period in which advisory invalidations were missed, so
+   the safe response is to ask the adapter for one coordinated authoritative
+   refresh. Legacy direct-SSE fragments are ignored during migration."
+  [runtime event]
+  (when-let [root (some-> (detail-field event "elt")
+                          fragment-root-from-element)]
+    (when (managed-fragment-root? root)
+      (when-let [fragment-id (fragment-id-from-root root)]
+        (notify-fragment! runtime fragment-id))))
+  true)
 
 (defn on-invalidated!
   "Normalize one explicit DOM invalidation event.
@@ -1029,6 +1125,8 @@
     :after-request #(on-after-request! runtime %)
     :request-failed #(on-request-failed! runtime %)
     :before-cleanup #(on-before-cleanup! runtime %)
+    :sse-before-message #(on-sse-before-message! runtime %)
+    :sse-open #(on-sse-open! runtime %)
     :invalidated #(on-invalidated! runtime %)))
 
 (defn start!

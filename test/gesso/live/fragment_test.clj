@@ -736,8 +736,9 @@
           "store-1"
           {:fragment-url "/stores/store-1/fragment"})))))
 
-(deftest fragment-runtime-fragment-passes-generic-ui-options-test
+(deftest fragment-runtime-fragment-passes-managed-ui-options-test
   (let [compiled (compiled-live-model)
+        continuity-config {:preserve {:inputs true}}
         runtime (fragment/fragment->runtime-fragment
                  compiled
                  :store-panel
@@ -752,8 +753,7 @@
                                  :hx-include "#store-board-state"
                                  :hx-indicator "#spinner"}
                   :event :store-updated
-                  :trigger "load, gesso:live-connected from:body"
-                  :jitter-delay-ms 25})]
+                  :client-continuity continuity-config})]
     (is (= "store-panel-store-1" (:id runtime)))
     (is (= "/stores/store-1/fragment" (:src runtime)))
     (is (= "/stores/store-1/stream" (:stream-url runtime)))
@@ -768,11 +768,34 @@
             :hx-indicator "#spinner"}
            (:target-attrs runtime)))
     (is (= :store-updated (:event runtime)))
-    (is (= "load, gesso:live-connected from:body"
-           (:trigger runtime)))
-    (is (= 25 (:jitter-delay-ms runtime)))))
+    (is (= continuity-config (:client-continuity runtime)))
+    (is (not (contains? runtime :trigger)))
+    (is (not (contains? runtime :jitter-ms)))
+    (is (not (contains? runtime :jitter-delay-ms)))))
 
-(deftest model-fragment-panel-renders-generic-passthrough-attrs-test
+(deftest fragment-runtime-fragment-rejects-unmanaged-refresh-options-test
+  (let [compiled (compiled-live-model)
+        base-opts {:fragment-url "/stores/store-1/fragment"
+                   :stream-url "/stores/store-1/stream"}]
+    (doseq [[option value] [[:trigger "load"]
+                            [:jitter-ms 250]
+                            [:jitter-delay-ms 25]]]
+      (let [error (try
+                    (fragment/fragment->runtime-fragment
+                     compiled
+                     :store-panel
+                     "store-1"
+                     (assoc base-opts option value))
+                    nil
+                    (catch clojure.lang.ExceptionInfo e
+                      e))]
+        (is (some? error))
+        (is (re-find #"no longer accept direct HTMX refresh trigger/jitter options"
+                     (ex-message error)))
+        (is (= {option value}
+               (:unsupported-options (ex-data error))))))))
+
+(deftest model-fragment-panel-renders-managed-refresh-markup-test
   (let [compiled (compiled-live-model)
         panel (fragment/model-fragment-panel
                compiled
@@ -781,29 +804,28 @@
                {:fragment-url "/stores/store-1/fragment"
                 :stream-url "/stores/store-1/stream"
 
-                ;; In this UI shape, the stable/root node owns the live request
-                ;; attrs, so request-affecting attrs such as hx-include belong
-                ;; here.
+                ;; The stable root owns request-affecting attrs that do not
+                ;; create an alternate request path.
                 :root-attrs {:data-root "root"
                              :hx-ext "path-deps"
                              :hx-include "#store-board-state"
                              :hx-indicator "#spinner"}
 
-                ;; The target attrs belong to the replaceable placeholder node.
+                ;; The target remains a replaceable presentation node.
                 :target-attrs {:data-target "target"}
 
-                :event :store-updated
-                :trigger "load, gesso:live-connected from:body"
-                :jitter-delay-ms 25})
+                :event :store-updated})
         root-attrs (attrs panel)
         target (find-by-id panel "store-panel-store-1")
         target-attrs (attrs target)
-        request-node (some
-                      (fn [node]
-                        (when (:hx-get (attrs node))
-                          node))
-                      (hiccup-nodes panel))
-        request-attrs (attrs request-node)]
+        invalidation-node
+        (some
+         (fn [node]
+           (when (= "store-panel-store-1"
+                    (:data-gesso-live-invalidation (attrs node)))
+             node))
+         (hiccup-nodes panel))
+        invalidation-attrs (attrs invalidation-node)]
     (is (= :div (first panel)))
     (is (= "store-panel-store-1"
            (:data-gesso-live-fragment root-attrs)))
@@ -813,18 +835,29 @@
     (is (str/includes? (:hx-ext root-attrs) "path-deps"))
     (is (= "root" (:data-root root-attrs)))
 
+    ;; The stable root is the only HTMX request owner, and the adapter-authorized
+    ;; custom event is the only trigger for that GET.
+    (is (= "/stores/store-1/fragment" (:hx-get root-attrs)))
+    (is (= "gesso:live-refresh" (:hx-trigger root-attrs)))
+    (is (= "#store-panel-store-1" (:hx-target root-attrs)))
+    (is (= "outerHTML" (:hx-swap root-attrs)))
+    (is (= "#store-board-state" (:hx-include root-attrs)))
+    (is (= "#spinner" (:hx-indicator root-attrs)))
+    (is (not (str/includes? (:hx-trigger root-attrs) "sse:")))
+
+    ;; The stable SSE listener subscribes to the named event but cannot itself
+    ;; issue a request or swap advisory payload bytes into application markup.
+    (is (some? invalidation-node))
+    (is (= "store-updated" (:sse-swap invalidation-attrs)))
+    (is (= "none" (:hx-swap invalidation-attrs)))
+    (is (= "true" (:aria-hidden invalidation-attrs)))
+    (is (nil? (:hx-get invalidation-attrs)))
+    (is (nil? (:hx-trigger invalidation-attrs)))
+
     (is (some? target))
     (is (= :div (first target)))
     (is (= "store-panel-store-1" (:id target-attrs)))
     (is (= "target" (:data-target target-attrs)))
-
-    (is (some? request-node))
-    (is (= "/stores/store-1/fragment" (:hx-get request-attrs)))
-    (is (= "outerHTML" (:hx-swap request-attrs)))
-    (is (= "#store-board-state" (:hx-include request-attrs)))
-    (is (= "#spinner" (:hx-indicator request-attrs)))
-    (is (str/includes? (:hx-trigger request-attrs) "load"))
-    (is (str/includes? (:hx-trigger request-attrs)
-                       "gesso:live-connected from:body"))
-    (is (str/includes? (:hx-trigger request-attrs)
-                       "sse:store-updated delay:25ms"))))
+    (is (nil? (:hx-get target-attrs)))
+    (is (nil? (:hx-trigger target-attrs)))
+    (is (nil? (:sse-swap target-attrs)))))

@@ -21,18 +21,19 @@
    interprets authoritative bases, manages timers, or stores browser resources.
 
    Optimism is intentionally absent from this composition root for now. The
-   gesso.live.optimistic rewrite will later attach its policy/effects to this
+   gesso.live.optimistic rewrite will later attach policy/effects to this
    already-stable browser composition rather than rebuilding browser ownership."
   (:require
    [gesso.live.browser.choreo :as choreo]
-   [gesso.live.browser.core :as core]))
+   [gesso.live.browser.core :as core]
+   [gesso.live.browser.shell :as shell]))
 
 ;; =============================================================================
 ;; Identity / options
 ;; =============================================================================
 
 (def runtime-version
-  "1.0.0-dev")
+  "1.1.0-dev")
 
 (def runtime-type
   :gesso.live.browser.runtime/runtime)
@@ -162,6 +163,248 @@
   (= :stopped
      (lifecycle runtime)))
 
+;; =============================================================================
+;; Composition invariants
+;; =============================================================================
+
+(defn- choreo-handler-ownership-errors
+  [choreo-runtime shell-runtime]
+  (let [installed-handlers
+        @(:installed-handlers choreo-runtime)
+
+        shell-handlers
+        (shell/handlers shell-runtime)]
+
+    (reduce
+     (fn [errors effect-kind]
+       (let [installed?
+             (contains? installed-handlers effect-kind)
+
+             shell-installed?
+             (contains? shell-handlers effect-kind)
+
+             expected-handler
+             (get installed-handlers effect-kind)
+
+             actual-handler
+             (get shell-handlers effect-kind)]
+
+         (cond
+           (not installed?)
+           (conj
+            errors
+            {:invariant :choreo-handler-ownership
+             :effect-kind effect-kind
+             :status :not-recorded})
+
+           (not shell-installed?)
+           (conj
+            errors
+            {:invariant :choreo-handler-ownership
+             :effect-kind effect-kind
+             :status :missing-from-shell})
+
+           (not
+            (identical?
+             expected-handler
+             actual-handler))
+           (conj
+            errors
+            {:invariant :choreo-handler-ownership
+             :effect-kind effect-kind
+             :status :replaced-in-shell})
+
+           :else
+           errors)))
+     []
+     choreo/owned-effect-kinds)))
+
+(defn invariant-errors
+  "Return read-only composition invariant violations.
+
+   These checks deliberately observe only lifecycle/configuration facts. They do
+   not participate in adapter semantics and therefore cannot alter the behavior
+   of the executable browser state machine.
+
+   The expected lifecycle shapes are:
+
+     :created
+       core listeners absent, shell open, Choreo handlers attached and owned
+
+     :started
+       core listeners installed, shell open, Choreo handlers attached and owned
+
+     :stopped
+       core listeners absent, shell closed, Choreo handlers detached
+
+   For active compositions, handler attachment means more than matching effect
+   keys: every Choreo-owned shell slot must still contain the exact function
+   installed by this Choreo runtime. This catches direct unregister/replacement
+   that Choreo bookkeeping alone cannot observe. No handler functions are ever
+   returned in diagnostics.
+
+   The one-shared-shell check is repeated here even though runtime? structurally
+   requires it because diagnostics should explain composition damage without
+   requiring callers to infer it from nested child diagnostics."
+  [runtime]
+  (let [runtime
+        (require-runtime! runtime)
+
+        core-runtime
+        (:core runtime)
+
+        choreo-runtime
+        (:choreo runtime)
+
+        core-shell
+        (core/shell-runtime core-runtime)
+
+        choreo-shell
+        (choreo/shell-runtime choreo-runtime)
+
+        lifecycle-value
+        @(:lifecycle runtime)
+
+        core-diagnostics
+        (core/diagnostics core-runtime)
+
+        choreo-diagnostics
+        (choreo/diagnostics choreo-runtime)
+
+        core-started?
+        (true? (:started? core-diagnostics))
+
+        shell-closed?
+        (shell/closed? core-shell)
+
+        attached-effect-kinds
+        (:attached-effect-kinds choreo-diagnostics)
+
+        expected-attached
+        choreo/owned-effect-kinds
+
+        active-handler-ownership-errors
+        (when
+         (contains? #{:created :started} lifecycle-value)
+          (choreo-handler-ownership-errors
+           choreo-runtime
+           core-shell))
+
+        base-errors
+        (cond-> []
+      (not
+       (identical?
+        core-shell
+        choreo-shell))
+      (conj
+       {:invariant :one-shared-shell
+        :message "Core and Choreo must share the exact same browser shell."})
+
+      (not
+       (contains?
+        lifecycle-states
+        lifecycle-value))
+      (conj
+       {:invariant :known-lifecycle
+        :lifecycle lifecycle-value
+        :allowed lifecycle-states})
+
+      (and
+       (= :created lifecycle-value)
+       core-started?)
+      (conj
+       {:invariant :created-core-not-started
+        :lifecycle lifecycle-value})
+
+      (and
+       (= :created lifecycle-value)
+       shell-closed?)
+      (conj
+       {:invariant :created-shell-open
+        :lifecycle lifecycle-value})
+
+      (and
+       (= :created lifecycle-value)
+       (not=
+        expected-attached
+        attached-effect-kinds))
+      (conj
+       {:invariant :created-choreo-attached
+        :expected expected-attached
+        :actual attached-effect-kinds})
+
+      (and
+       (= :started lifecycle-value)
+       (not core-started?))
+      (conj
+       {:invariant :started-core-started
+        :lifecycle lifecycle-value})
+
+      (and
+       (= :started lifecycle-value)
+       shell-closed?)
+      (conj
+       {:invariant :started-shell-open
+        :lifecycle lifecycle-value})
+
+      (and
+       (= :started lifecycle-value)
+       (not=
+        expected-attached
+        attached-effect-kinds))
+      (conj
+       {:invariant :started-choreo-attached
+        :expected expected-attached
+        :actual attached-effect-kinds})
+
+      (and
+       (= :stopped lifecycle-value)
+       core-started?)
+      (conj
+       {:invariant :stopped-core-not-started
+        :lifecycle lifecycle-value})
+
+      (and
+       (= :stopped lifecycle-value)
+       (not shell-closed?))
+      (conj
+       {:invariant :stopped-shell-closed
+        :lifecycle lifecycle-value})
+
+      (and
+       (= :stopped lifecycle-value)
+       (seq attached-effect-kinds))
+      (conj
+       {:invariant :stopped-choreo-detached
+        :actual attached-effect-kinds}))]
+
+    (into
+     base-errors
+     active-handler-ownership-errors)))
+
+(defn invariant-clean?
+  [runtime]
+  (empty?
+   (invariant-errors runtime)))
+
+(defn- require-clean-composition!
+  [runtime operation]
+  (let [errors
+        (invariant-errors runtime)]
+    (when
+     (seq errors)
+      (throw
+       (runtime-error
+        :invalid-composition
+        "Gesso Live browser composition invariants are violated."
+        {:operation operation
+         :invariant-errors errors}))))
+  runtime)
+
+;; =============================================================================
+;; Runtime construction
+;; =============================================================================
+
 (defn create
   "Create one composed browser runtime without installing document listeners.
 
@@ -178,8 +421,8 @@
      1. core creates continuity plus the single shell/AdapterState owner;
      2. Choreo attaches its physical effect handlers to that existing shell.
 
-   If Choreo attachment fails, the newly created core shell is shut down before
-   the construction error is rethrown."
+   If Choreo attachment or composition validation fails, the newly created core
+   shell is shut down before the construction error is rethrown."
   ([]
    (create nil))
   ([options]
@@ -223,25 +466,32 @@
        (let [choreo-runtime
              (choreo/create
               (core/shell-runtime core-runtime)
-              choreo-options)]
+              choreo-options)
 
-         {:gesso.live.browser.runtime/type
-          runtime-type
+             runtime
+             {:gesso.live.browser.runtime/type
+              runtime-type
 
-          :gesso.live.browser.runtime/version
-          runtime-version
+              :gesso.live.browser.runtime/version
+              runtime-version
 
-          :core
-          core-runtime
+              :core
+              core-runtime
 
-          :choreo
-          choreo-runtime
+              :choreo
+              choreo-runtime
 
-          :lifecycle
-          (atom :created)
+              :lifecycle
+              (atom :created)
 
-          :public-api
-          (atom nil)})
+              :public-api
+              (atom nil)}]
+
+         (require-clean-composition!
+          runtime
+          :create)
+
+         runtime)
 
        (catch :default error
          (try
@@ -255,11 +505,43 @@
 ;; Lifecycle
 ;; =============================================================================
 
+(defn- best-effort-detach-choreo!
+  [runtime]
+  (try
+    (choreo/detach!
+     (:choreo runtime))
+    (catch :default _
+      nil)))
+
+(defn- best-effort-stop-core!
+  [runtime]
+  (try
+    (core/stop!
+     (:core runtime))
+    (catch :default _
+      nil)))
+
+(defn- retire-broken-composition!
+  [runtime]
+  ;; Invalidate composition ownership first. Physical cleanup is deliberately
+  ;; best effort and is not a prerequisite for preventing later restart.
+  (reset!
+   (:lifecycle runtime)
+   :stopped)
+  (best-effort-stop-core! runtime)
+  (best-effort-detach-choreo! runtime)
+  :stopped)
+
 (defn start!
   "Install the composed runtime's document/HTMX listeners exactly once.
 
    Choreo physical handlers are already attached during create. Starting does
    not create another shell or AdapterState.
+
+   Before acquiring document listeners, the runtime verifies that the created
+   composition still has one open shared shell and its Choreo handlers attached.
+   This prevents direct manipulation of a child runtime from producing a zombie
+   composition that merely looks started at the top level.
 
    A failed core start retires/shuts down the shell and detaches Choreo before
    propagating the error. Such a partially-started runtime becomes :stopped and
@@ -285,6 +567,10 @@
 
       :created
       (try
+        (require-clean-composition!
+         runtime
+         :start)
+
         (core/start!
          (:core runtime))
 
@@ -292,27 +578,15 @@
          lifecycle*
          :started)
 
+        (require-clean-composition!
+         runtime
+         :started)
+
         runtime
 
         (catch :default error
-          ;; Make ownership invalid immediately before best-effort physical
-          ;; teardown. No caller may retry a partially-started composition.
-          (reset!
-           lifecycle*
-           :stopped)
-
-          (try
-            (core/stop!
-             (:core runtime))
-            (catch :default _
-              nil))
-
-          (try
-            (choreo/detach!
-             (:choreo runtime))
-            (catch :default _
-              nil))
-
+          (retire-broken-composition!
+           runtime)
           (throw error)))
 
       (throw
@@ -335,7 +609,8 @@
      3. only after semantic shutdown do we detach Choreo's physical handlers.
 
    Detaching first would risk removing physical effect handlers while semantic
-   retirement is still in progress."
+   retirement is still in progress. If core shutdown reports an error, Choreo
+   detachment still runs in finally and the runtime remains permanently stopped."
   [runtime]
   (let [runtime
         (require-runtime!
@@ -357,11 +632,8 @@
         (core/stop!
          (:core runtime))
         (finally
-          (try
-            (choreo/detach!
-             (:choreo runtime))
-            (catch :default _
-              nil)))))
+          (best-effort-detach-choreo!
+           runtime))))
 
     :stopped))
 
@@ -382,7 +654,11 @@
     requirement)))
 
 (defn diagnostics
-  "Return host-resource-free diagnostics for the composition and its children."
+  "Return host-resource-free, read-only diagnostics for the composition.
+
+   Diagnostic observation does not participate in adapter transitions. The
+   result intentionally contains no DOM nodes, XHRs, timers, captured continuity
+   values, or transport handles."
   [runtime]
   (let [runtime
         (require-runtime!
@@ -395,6 +671,9 @@
 
      :lifecycle
      @(:lifecycle runtime)
+
+     :invariant-errors
+     (invariant-errors runtime)
 
      :core
      (core/diagnostics
@@ -419,15 +698,23 @@
 
 (defn- install-public-api!
   [runtime]
-  (let [api
+  (let [diagnostics-fn
+        (fn []
+          (clj->js
+           (diagnostics runtime)))
+
+        api
         #js
         {:version
          runtime-version
 
+         ;; Preserve the existing small public spelling while making its actual
+         ;; diagnostic nature explicit through the additional alias below.
          :state
-         (fn []
-           (clj->js
-            (diagnostics runtime)))
+         diagnostics-fn
+
+         :diagnostics
+         diagnostics-fn
 
          :notifyFragment
          (fn
@@ -514,7 +801,9 @@
 
    The public window.gessoLive object is removed only when it is still the exact
    API object installed by this runtime; unrelated replacement by application
-   code is not overwritten."
+   code is not overwritten. Public API removal is performed even if shutdown
+   unexpectedly reports an error, because the composition is already logically
+   retired and must not leave a callable stale handle behind."
   []
   (when-let [runtime
              @default-runtime*]
@@ -523,28 +812,30 @@
      default-runtime*
      nil)
 
-    (stop!
-     runtime)
-
     (let [installed-api
-          @(:public-api runtime)
+          @(:public-api runtime)]
 
-          current-api
-          (aget
-           js/window
-           "gessoLive")]
+      (try
+        (stop!
+         runtime)
 
-      (reset!
-       (:public-api runtime)
-       nil)
+        (finally
+          (let [current-api
+                (aget
+                 js/window
+                 "gessoLive")]
 
-      (when
-       (and installed-api
-            (identical?
-             installed-api
-             current-api))
-        (js-delete
-         js/window
-         "gessoLive"))))
+            (reset!
+             (:public-api runtime)
+             nil)
+
+            (when
+             (and installed-api
+                  (identical?
+                   installed-api
+                   current-api))
+              (js-delete
+               js/window
+               "gessoLive")))))))
 
   :stopped)

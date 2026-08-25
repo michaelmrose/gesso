@@ -121,6 +121,23 @@
      :done
      (choreo/return :done)}}))
 
+
+(defn- receive-once-choreography
+  []
+  (choreo/->choreography
+   {:initial :receive
+    :states
+    {:receive
+     (choreo/communicate
+      :server
+      :browser
+      :server/settlement
+      :done
+      {:via :http})
+
+     :done
+     (choreo/return :done)}}))
+
 (defn- receive-twice-choreography
   []
   (choreo/->choreography
@@ -454,6 +471,360 @@
             (machine-execution
              (browser-authoritative-choreography)
              :browser))))))
+
+
+;; =============================================================================
+;; Adapter-owned optimistic effect scopes
+;; =============================================================================
+
+(defn- optimistic-config
+  ([rollback-eligible?]
+   (optimistic-config rollback-eligible? 15000))
+  ([rollback-eligible? timeout-ms]
+   {:command-id :command-1
+    :provisional {:authority :provisional
+                  :projection {:status :pending}}
+    :rollback-eligible? rollback-eligible?
+    :timeout-ms timeout-ms}))
+
+(deftest optimistic-start-establishes-target-and-timeout-before-machine-effects-test
+  (let [[state effects]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (local-once-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true 2500)})
+        generation (adapter/execution-generation state "execution-1")
+        scope (adapter/optimistic-scope state "execution-1")
+        install (effect-data :optimistic/install-provisional effects)
+        timeout (effect-data :optimistic/timeout-start effects)]
+    (is (= [:optimistic/install-provisional
+            :optimistic/timeout-start
+            :machine/local]
+           (mapv first effects)))
+    (is (= {:execution-id "execution-1"
+            :generation generation}
+           (adapter/target-owner state :card)))
+    (is (= generation (:execution-generation scope)))
+    (is (= :command-1 (:command-id scope)))
+    (is (= :card (:target-id scope)))
+    (is (= :provisional (:status scope)))
+    (is (= 2500 (:timeout-ms scope)))
+    (is (= (:timeout-generation scope)
+           (:timeout-generation timeout)))
+    (is (= generation (:generation install)))
+    (is (= (:provisional scope) (:provisional install)))
+    (is (= 2500 (:delay-ms timeout)))))
+
+(deftest optimistic-start-requires-one-logical-target-test
+  (is (= :optimistic-target-required
+         (error-kind
+          #(start
+            (adapter/initial-state)
+            "execution-1"
+            (machine-execution (receive-once-choreography) :browser)
+            nil
+            {:optimistic (optimistic-config true)})))))
+
+(deftest optimistic-settlement-cancels-timeout-and-is-idempotent-only-for-identical-observation-test
+  (let [[state-a _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (receive-once-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})
+        generation (adapter/execution-generation state-a "execution-1")
+        timeout-generation (:timeout-generation
+                            (adapter/optimistic-scope state-a "execution-1"))
+        settlement {:resolution :confirmed
+                    :authoritative {:presence :present
+                                    :basis :basis-2}}
+        event {:event :optimistic/settlement-observed
+               :execution-id "execution-1"
+               :generation generation
+               :resolution :confirmed
+               :settlement settlement}
+        [state-b effects-b] (adapter/step state-a event)
+        scope-b (adapter/optimistic-scope state-b "execution-1")
+        [state-c effects-c] (adapter/step state-b event)]
+    (is (= [:optimistic/timeout-cancel]
+           (mapv first effects-b)))
+    (is (= timeout-generation
+           (:timeout-generation
+            (effect-data :optimistic/timeout-cancel effects-b))))
+    (is (= :settlement-observed (:status scope-b)))
+    (is (= :confirmed (:resolution scope-b)))
+    (is (= settlement (:settlement scope-b)))
+    (is (nil? (:timeout-generation scope-b)))
+    (is (= state-b state-c))
+    (is (= :duplicate-optimistic-settlement
+           (ignored-reason effects-c)))
+    (is (= :conflicting-optimistic-settlement
+           (error-kind
+            #(adapter/step
+              state-b
+              (assoc event
+                     :settlement (assoc settlement :extra :different))))))))
+
+(deftest confirmed-optimistic-completion-awaits-authority-test
+  (let [[state-a _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (receive-once-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})
+        generation (adapter/execution-generation state-a "execution-1")
+        settlement {:resolution :confirmed
+                    :authoritative {:presence :present
+                                    :basis :basis-2}}
+        [state-b _]
+        (adapter/step
+         state-a
+         {:event :optimistic/settlement-observed
+          :execution-id "execution-1"
+          :generation generation
+          :resolution :confirmed
+          :settlement settlement})
+        [state-c effects-c]
+        (adapter/step
+         state-b
+         {:event :machine/message
+          :execution-id "execution-1"
+          :generation generation
+          :message-id :settlement-1
+          :envelope (settlement-envelope)})
+        finish (effect-data :optimistic/finish effects-c)]
+    (is (nil? (adapter/execution state-c "execution-1")))
+    (is (nil? (adapter/optimistic-scope state-c "execution-1")))
+    (is (nil? (adapter/target-owner state-c :card)))
+    (is (= [:optimistic/finish :execution/completed]
+           (mapv first effects-c)))
+    (is (= :confirmed (:resolution finish)))
+    (is (= :await-authority (:disposition finish)))
+    (is (= settlement (:settlement finish)))
+    (is (= 0 (count (effects-of :optimistic/timeout-cancel effects-c)))
+        "Settlement observation already relinquished timeout ownership.")))
+
+(deftest rejected-and-failed-settlements-use-adapter-owned-rollback-policy-test
+  (doseq [[resolution rollback-eligible? expected-disposition]
+          [[:rejected true :rollback]
+           [:rejected false :refresh-authority]
+           [:failed true :rollback]
+           [:failed false :refresh-authority]]]
+    (testing (str resolution " rollback? " rollback-eligible?)
+      (let [[state-a _]
+            (start
+             (adapter/initial-state)
+             "execution-1"
+             (machine-execution (receive-once-choreography) :browser)
+             :card
+             {:optimistic (optimistic-config rollback-eligible?)})
+            generation (adapter/execution-generation state-a "execution-1")
+            settlement {:resolution resolution}
+            [state-b _]
+            (adapter/step
+             state-a
+             {:event :optimistic/settlement-observed
+              :execution-id "execution-1"
+              :generation generation
+              :resolution resolution
+              :settlement settlement})
+            [_ effects]
+            (adapter/step
+             state-b
+             {:event :machine/message
+              :execution-id "execution-1"
+              :generation generation
+              :message-id :settlement-1
+              :envelope (settlement-envelope)})
+            finish (effect-data :optimistic/finish effects)]
+        (is (= resolution (:resolution finish)))
+        (is (= expected-disposition (:disposition finish)))))))
+
+(deftest current-timeout-retires-optimistic-execution-without-redundant-cancel-test
+  (doseq [[rollback-eligible? expected-disposition]
+          [[true :rollback-and-refresh]
+           [false :refresh-authority]]]
+    (testing (str "rollback? " rollback-eligible?)
+      (let [[state-a _]
+            (start
+             (adapter/initial-state)
+             "execution-1"
+             (machine-execution (receive-once-choreography) :browser)
+             :card
+             {:optimistic (optimistic-config rollback-eligible? 100)})
+            generation (adapter/execution-generation state-a "execution-1")
+            timeout-generation (:timeout-generation
+                                (adapter/optimistic-scope state-a "execution-1"))
+            [state-b effects-b]
+            (adapter/step
+             state-a
+             {:event :optimistic/timeout-fired
+              :execution-id "execution-1"
+              :generation generation
+              :timeout-generation timeout-generation})
+            finish (effect-data :optimistic/finish effects-b)]
+        (is (nil? (adapter/execution state-b "execution-1")))
+        (is (nil? (adapter/optimistic-scope state-b "execution-1")))
+        (is (= [:optimistic/finish :execution/retired]
+               (mapv first effects-b)))
+        (is (= :timeout (:resolution finish)))
+        (is (= expected-disposition (:disposition finish)))
+        (is (= 0 (count (effects-of :optimistic/timeout-cancel effects-b)))
+            "A timer that has already fired no longer needs cancellation.")))))
+
+(deftest stale-optimistic-timeout-is-powerless-test
+  (let [[state-a _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (receive-once-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true 100)})
+        generation (adapter/execution-generation state-a "execution-1")
+        current-timeout (:timeout-generation
+                         (adapter/optimistic-scope state-a "execution-1"))
+        [state-b effects-b]
+        (adapter/step
+         state-a
+         {:event :optimistic/timeout-fired
+          :execution-id "execution-1"
+          :generation generation
+          :timeout-generation (inc current-timeout)})]
+    (is (= state-a state-b))
+    (is (= :stale-optimistic-timeout
+           (ignored-reason effects-b)))
+    (is (some? (adapter/optimistic-scope state-b "execution-1")))))
+
+(deftest optimistic-network-failure-does-not-fabricate-trusted-settlement-test
+  (let [[state-a effects-a]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (send-once-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})
+        generation (adapter/execution-generation state-a "execution-1")
+        selection-generation (:effect-generation
+                              (effect-data :machine/send effects-a))
+        [state-b effects-b]
+        (adapter/step
+         state-a
+         {:event :machine/send-requested
+          :execution-id "execution-1"
+          :generation generation
+          :effect-generation selection-generation
+          :payload {}})
+        transport-generation (:effect-generation
+                              (effect-data :transport/send effects-b))
+        [state-c effects-c]
+        (adapter/step
+         state-b
+         {:event :transport/failed
+          :execution-id "execution-1"
+          :generation generation
+          :effect-generation transport-generation
+          :reason :network-down})
+        finish (effect-data :optimistic/finish effects-c)]
+    (is (nil? (adapter/execution state-c "execution-1")))
+    (is (= [:optimistic/timeout-cancel
+            :optimistic/finish
+            :execution/retired]
+           (mapv first effects-c)))
+    (is (= :network-failed (:resolution finish)))
+    (is (= :rollback-and-refresh (:disposition finish)))
+    (is (not (contains? finish :settlement))
+        "Transport uncertainty cannot manufacture a trusted protocol settlement.")
+    (is (= :optimistic-network-failed
+           (get-in (effect-of :execution/retired effects-c) [1 :reason])))))
+
+(deftest authoritative-supersession-wins-and-retires-old-optimistic-generation-test
+  (let [[state-a _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (receive-once-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})
+        generation (adapter/execution-generation state-a "execution-1")
+        authoritative {:presence :present
+                       :basis :basis-9
+                       :projection {:status :canonical}}
+        [state-b effects-b]
+        (adapter/step
+         state-a
+         {:event :optimistic/authoritative-superseded
+          :execution-id "execution-1"
+          :generation generation
+          :authoritative authoritative})
+        finish (effect-data :optimistic/finish effects-b)]
+    (is (nil? (adapter/execution state-b "execution-1")))
+    (is (nil? (adapter/optimistic-scope state-b "execution-1")))
+    (is (= [:optimistic/timeout-cancel
+            :optimistic/finish
+            :execution/retired]
+           (mapv first effects-b)))
+    (is (= :superseded (:resolution finish)))
+    (is (= :authoritative (:disposition finish)))
+    (is (= authoritative (:authoritative finish)))
+    (is (= :authoritative-superseded
+           (get-in (effect-of :execution/retired effects-b) [1 :reason])))))
+
+(deftest explicit-retirement-releases-optimistic-ownership-without-rollback-test
+  (let [[state-a _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (receive-once-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})
+        generation (adapter/execution-generation state-a "execution-1")
+        [state-b effects-b]
+        (adapter/step
+         state-a
+         {:event :execution/retire
+          :execution-id "execution-1"
+          :generation generation
+          :reason :page-detached})
+        finish (effect-data :optimistic/finish effects-b)]
+    (is (nil? (adapter/optimistic-scope state-b "execution-1")))
+    (is (= :retired (:resolution finish)))
+    (is (= :release-only (:disposition finish)))
+    (is (= :page-detached (:reason finish)))))
+
+(deftest replacing-target-retires-old-optimistic-scope-before-new-install-test
+  (let [[state-a _]
+        (start
+         (adapter/initial-state)
+         "execution-a"
+         (machine-execution (receive-once-choreography) :browser)
+         :card
+         {:optimistic (assoc (optimistic-config true) :command-id :command-a)})
+        [state-b effects-b]
+        (start
+         state-a
+         "execution-b"
+         (machine-execution (receive-once-choreography) :browser)
+         :card
+         {:replace-owner? true
+          :optimistic (assoc (optimistic-config true) :command-id :command-b)})
+        old-finish (effect-data :optimistic/finish effects-b)
+        new-install (effect-data :optimistic/install-provisional effects-b)]
+    (is (nil? (adapter/execution state-b "execution-a")))
+    (is (nil? (adapter/optimistic-scope state-b "execution-a")))
+    (is (some? (adapter/execution state-b "execution-b")))
+    (is (= "execution-b"
+           (:execution-id (adapter/target-owner state-b :card))))
+    (is (= :retired (:resolution old-finish)))
+    (is (= :release-only (:disposition old-finish)))
+    (is (= :target-replaced (:reason old-finish)))
+    (is (= :command-b (:command-id new-install)))
+    (is (< (.indexOf (mapv first effects-b) :optimistic/finish)
+           (.indexOf (mapv first effects-b) :optimistic/install-provisional))
+        "Old optimistic ownership retires before the replacement projection is installed.")))
 
 ;; =============================================================================
 ;; Send / transport boundary
@@ -995,6 +1366,204 @@
         "Capture is not completion authority; the slot remains live until restore is issued.")
     (is (= :continuity-restore-not-issued
            (ignored-reason completion-effects)))))
+
+(deftest continuity-failure-retires-current-restoring-slot-test
+  (let [{state-a :state generation :generation}
+        (begin-fragment (adapter/initial-state) :panel)
+        [state-b _] (bind-request state-a :panel generation :xhr-1)
+        [state-c effects-c]
+        (before-swap
+         state-b
+         :panel
+         generation
+         :xhr-1
+         {:scope :request-1
+          :basis :basis-1})
+        slot (effect-data :continuity/capture effects-c)
+        [state-d _]
+        (adapter/step
+         state-c
+         {:event :htmx/after-swap
+          :fragment-id :panel
+          :request-generation generation
+          :request-id :xhr-1})
+        frontier-before (adapter/authoritative-frontier state-d :request-1)
+        [state-e failure-effects]
+        (adapter/step
+         state-d
+         {:event :continuity/failed
+          :slot-id (:slot-id slot)
+          :slot-generation (:slot-generation slot)
+          :reason :application-restore-rejected})
+        release (effect-data :continuity/release failure-effects)]
+    (is (nil? (get-in state-e [:continuity (:slot-id slot)]))
+        "A current restore failure retires exactly the failed continuity slot.")
+    (is (= 1 (count (effects-of :continuity/release failure-effects))))
+    (is (= (:slot-id slot) (:slot-id release)))
+    (is (= (:slot-generation slot) (:slot-generation release)))
+    (is (= :panel (:fragment-id release)))
+    (is (= generation (:request-generation release)))
+    (is (= :application-restore-rejected (:reason release)))
+    (is (= frontier-before
+           (adapter/authoritative-frontier state-e :request-1))
+        "Continuity failure cannot roll back or reinterpret authoritative state.")))
+
+(deftest continuity-failure-is-generation-gated-test
+  (let [{state-a :state generation :generation}
+        (begin-fragment (adapter/initial-state) :panel)
+        [state-b _] (bind-request state-a :panel generation :xhr-1)
+        [state-c effects-c] (before-swap state-b :panel generation :xhr-1)
+        slot (effect-data :continuity/capture effects-c)
+        [state-d _]
+        (adapter/step
+         state-c
+         {:event :htmx/after-swap
+          :fragment-id :panel
+          :request-generation generation
+          :request-id :xhr-1})
+        [state-e stale-effects]
+        (adapter/step
+         state-d
+         {:event :continuity/failed
+          :slot-id (:slot-id slot)
+          :slot-generation (inc (:slot-generation slot))
+          :reason :late-rejection})]
+    (is (= state-d state-e)
+        "A failure for another slot generation is semantically inert.")
+    (is (= :stale-continuity-failure
+           (ignored-reason stale-effects)))
+    (is (= 0 (count (effects-of :continuity/release stale-effects))))))
+
+(deftest continuity-cannot-fail-before-restore-has-been-issued-test
+  ;; Capture allocates a physical resource but does not authorize failure to
+  ;; retire its semantic slot. Only a restore that has actually been issued may
+  ;; later succeed or fail for that slot generation.
+  (let [{state-a :state generation :generation}
+        (begin-fragment (adapter/initial-state) :panel)
+        [state-b _] (bind-request state-a :panel generation :xhr-1)
+        [state-c effects-c] (before-swap state-b :panel generation :xhr-1)
+        slot (effect-data :continuity/capture effects-c)
+        [state-d failure-effects]
+        (adapter/step
+         state-c
+         {:event :continuity/failed
+          :slot-id (:slot-id slot)
+          :slot-generation (:slot-generation slot)
+          :reason :premature-rejection})]
+    (is (= state-c state-d)
+        "Capture alone is not authority to retire a continuity slot as failed.")
+    (is (= :continuity-restore-not-issued
+           (ignored-reason failure-effects)))
+    (is (= 0 (count (effects-of :continuity/release failure-effects))))))
+
+(deftest newer-fragment-swap-releases-older-continuity-before-capture-and-allow-test
+  ;; Keep generation A's restore outstanding, then let a queued invalidation
+  ;; produce generation B. B may replace the fragment only after A has lost
+  ;; physical mutation authority.
+  (let [{state-a :state gen-1 :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _] (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c effects-c] (before-swap state-b :panel gen-1 :xhr-1)
+        old-slot (effect-data :continuity/capture effects-c)
+        [state-d _]
+        (adapter/step
+         state-c
+         {:event :htmx/after-swap
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1})
+        [state-e _] (adapter/step state-d (invalidation :panel :basis-2))
+        [state-f effects-f]
+        (adapter/step
+         state-e
+         {:event :htmx/after-request
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1})
+        gen-2 (:request-generation (effect-data :fragment/refresh effects-f))
+        [state-g _] (bind-request state-f :panel gen-2 :xhr-2)
+        [state-h effects-h] (before-swap state-g :panel gen-2 :xhr-2)
+        release (effect-data :continuity/release effects-h)
+        new-slot (effect-data :continuity/capture effects-h)]
+    (is (not= gen-1 gen-2))
+    (is (= [:continuity/release
+            :continuity/capture
+            :htmx/allow-swap]
+           (mapv first effects-h))
+        "The old physical resource must be revoked before capture and swap authority for the newer representation.")
+    (is (= (:slot-id old-slot) (:slot-id release)))
+    (is (= (:slot-generation old-slot) (:slot-generation release)))
+    (is (= :newer-fragment-swap (:reason release)))
+    (is (nil? (get-in state-h [:continuity (:slot-id old-slot)])))
+    (is (= [:panel gen-2] (:slot-id new-slot)))
+    (is (some? (get-in state-h [:continuity (:slot-id new-slot)])))
+    (is (= 1 (count (effects-of :continuity/release effects-h))))
+    (is (= 1 (count (effects-of :continuity/capture effects-h))))
+    (is (= 1 (count (effects-of :htmx/allow-swap effects-h))))))
+
+(deftest duplicate-before-swap-does-not-revoke-current-continuity-test
+  (let [{state-a :state generation :generation}
+        (begin-fragment (adapter/initial-state) :panel)
+        [state-b _] (bind-request state-a :panel generation :xhr-1)
+        [state-c effects-c] (before-swap state-b :panel generation :xhr-1)
+        slot (effect-data :continuity/capture effects-c)
+        [state-d effects-d] (before-swap state-c :panel generation :xhr-1)]
+    (is (= state-c state-d))
+    (is (= 0 (count (effects-of :continuity/release effects-d)))
+        "A duplicate lifecycle observation for the same request generation cannot revoke its own slot.")
+    (is (= 0 (count (effects-of :continuity/capture effects-d))))
+    (is (= 1 (count (effects-of :htmx/allow-swap effects-d))))
+    (let [current-slot (get-in state-d [:continuity (:slot-id slot)])]
+      (is (= (:slot-id slot) (:slot-id current-slot)))
+      (is (= (:slot-generation slot) (:generation current-slot)))
+      (is (= generation (:request-generation current-slot)))
+      (is (false? (:restore-issued? current-slot))
+          "The duplicate beforeSwap does not advance continuity lifecycle state."))))
+
+(deftest rejected-newer-swap-does-not-revoke-existing-continuity-test
+  ;; A non-monotone authoritative candidate never reaches the replacement
+  ;; boundary, so it must not revoke continuity belonging to the representation
+  ;; that remains installed.
+  (let [{state-a :state gen-1 :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _] (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c effects-c]
+        (before-swap
+         state-b :panel gen-1 :xhr-1
+         {:scope :request-1 :basis :basis-1})
+        old-slot (effect-data :continuity/capture effects-c)
+        [state-d _]
+        (adapter/step
+         state-c
+         {:event :htmx/after-swap
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1})
+        [state-e _] (adapter/step state-d (invalidation :panel :basis-2))
+        [state-f effects-f]
+        (adapter/step
+         state-e
+         {:event :htmx/after-request
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1})
+        gen-2 (:request-generation (effect-data :fragment/refresh effects-f))
+        [state-g _] (bind-request state-f :panel gen-2 :xhr-2)
+        [state-h denied-effects]
+        (before-swap
+         state-g :panel gen-2 :xhr-2
+         {:scope :request-1 :basis :basis-2})]
+    (is (= state-g state-h)
+        "Rejecting the newer representation cannot disturb the currently installed continuity generation.")
+    (is (= 1 (count (effects-of :htmx/cancel-swap denied-effects))))
+    (is (= :non-monotone-authoritative-install
+           (get-in (effect-of :htmx/cancel-swap denied-effects) [1 :reason])))
+    (is (= 0 (count (effects-of :continuity/release denied-effects))))
+    (is (= 0 (count (effects-of :continuity/capture denied-effects))))
+    (is (= 0 (count (effects-of :htmx/allow-swap denied-effects))))
+    (is (some? (get-in state-h [:continuity (:slot-id old-slot)])))
+    (is (= {:basis :basis-1}
+           (adapter/authoritative-frontier state-h :request-1)))))
 
 (deftest fragment-retirement-releases-continuity-and-cancels-bound-request-test
   (let [{state-a :state generation :generation}

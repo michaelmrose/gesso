@@ -9,22 +9,24 @@
    - fragment-panel
    - live-script
    - post-form
-   - post-button (including built-in optimistic rendering)
+   - post-button
    - anti-forgery-token
    - anti-forgery-input
 
-   Optimistic markup is delegated to gesso.live.optimistic.server. Optimistic
-   wire vocabulary is owned by gesso.live.optimistic.protocol, and continuity
-   metadata is owned by gesso.live.continuity.
+   Continuity metadata is owned by gesso.live.continuity.
+
+   Protocol-v3 optimism deliberately is not rendered here yet. The old
+   protocol-v2 attribute/template realization has been removed; the replacement
+   will be supplied by gesso.live.browser.optimistic over the shared browser
+   adapter. Until that realization exists, passing :optimistic to post-button
+   fails explicitly instead of emitting stale protocol-v2 markup.
 
    It intentionally does not depend on gesso.live.core. Core can safely require
    this namespace and re-export its public helpers."
   (:require
    [clojure.string :as str]
    [gesso.live.continuity :as continuity]
-   [gesso.live.htmx :as htmx]
-   [gesso.live.optimistic.protocol :as optimistic.protocol]
-   [gesso.live.optimistic.server :as optimistic]))
+   [gesso.live.htmx :as htmx]))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
@@ -154,6 +156,29 @@
                        (:inner-attrs m))}
     m))
 
+(def ^:private unmanaged-fragment-refresh-option-keys
+  [:trigger :jitter-ms :jitter-delay-ms])
+
+(defn- reject-unmanaged-fragment-refresh-options!
+  [fragment]
+  (let [unsupported
+        (into {}
+              (keep
+               (fn [k]
+                 (let [value (get fragment k)]
+                   (when (some? value)
+                     [k value]))))
+              unmanaged-fragment-refresh-option-keys)]
+    (when (seq unsupported)
+      (throw
+       (ex
+        (str
+         "gesso.live UI managed fragments no longer accept direct HTMX "
+         "refresh trigger/jitter options. Refresh intent must enter the "
+         "browser adapter before HTMX requests are emitted.")
+        {:unsupported-options unsupported})))
+    fragment))
+
 (defn- compact-map
   [m]
   (into {}
@@ -202,24 +227,24 @@
 ;; -----------------------------------------------------------------------------
 
 (defn ->fragment
-  "Create a live fragment descriptor.
+  "Create an adapter-managed live fragment descriptor.
 
    Preferred shape:
 
      (live/->fragment
-      {:id 'simple-shared-counter-fragment'
-       :src '/app/demo/simple-shared-counter/fragment'
+      {:id \"simple-shared-counter-fragment\"
+       :src \"/app/demo/simple-shared-counter/fragment\"
        :subscription {:topic :demo-counter
-                      :id 'global-shared-counter'}
-       :stream-url '/app/gesso/live/stream?subscription=shared-counter'
-       :swap :innerHTML})
+                      :id \"global-shared-counter\"}
+       :stream-url \"/app/gesso/live/stream?subscription=shared-counter\"
+       :swap \"outerHTML\"})
 
    Legacy config maps are also accepted for migration:
 
-     {:subscription/token 'shared-counter'
-      :fragment/id 'simple-shared-counter-fragment'
-      :fragment/src '/app/demo/simple-shared-counter/fragment'
-      :fragment/swap 'innerHTML'}
+     {:subscription/token \"shared-counter\"
+      :fragment/id \"simple-shared-counter-fragment\"
+      :fragment/src \"/app/demo/simple-shared-counter/fragment\"
+      :fragment/swap \"outerHTML\"}
 
    Required:
      :id
@@ -230,27 +255,42 @@
      :stream-base-url
      :event
      :swap
-     :trigger
      :include
      :client-continuity
-     :jitter-ms
-     :jitter-delay-ms
      :attrs / :root-attrs
      :target-attrs / :inner-attrs
+
+   Legacy :trigger, :jitter-ms, and :jitter-delay-ms options are rejected for
+   managed fragments. Those options allowed HTMX request timing to bypass the
+   browser adapter. Refresh intent now enters the adapter first and only an
+   admitted :fragment/refresh effect may trigger the fragment GET.
+
+   :event names the advisory SSE event to subscribe to. Its payload is not
+   installed as fragment HTML. fragment-panel renders a stable, non-swapping
+   invalidation listener that turns the named SSE message into an adapter
+   invalidation.
 
    :client-continuity is app-facing, Clojure/data-first configuration for
    preserving browser interaction context across fragment refreshes. Examples
    include scroll anchoring, focus/caret restoration, preserved DOM islands, and
    custom capture/restore boxes. This namespace stores the config on the
-   fragment descriptor and delegates continuity metadata construction to gesso.live.continuity.
+   fragment descriptor and delegates continuity metadata construction to
+   gesso.live.continuity.
 
    Markup model:
-     fragment-panel renders a stable outer live wrapper and a replaceable inner
-     target. The outer wrapper owns SSE, hx-get, hx-trigger, hx-target, hx-swap,
-     hx-include, and client-continuity attrs. The inner target owns only the
-     replaceable DOM id plus target attrs."
+     stable outer root
+       owns one EventSource, managed HTMX request attrs, fragment identity,
+       and optional client-continuity metadata;
+
+     stable invalidation listener
+       subscribes to the named SSE event without owning an EventSource or GET;
+
+     replaceable inner target
+       owns only the canonical fragment DOM id plus target attrs."
   [fragment]
-  (let [fragment'   (canonical-fragment-map fragment)
+  (let [fragment'   (-> fragment
+                        canonical-fragment-map
+                        reject-unmanaged-fragment-refresh-options!)
         id'         (require-present! :id (:id fragment'))
         src'        (require-present! :src (:src fragment'))
         token       (or (:subscription/token fragment')
@@ -273,15 +313,12 @@
       :subscription/token token
       :event (or (:event fragment') htmx/default-event)
       :swap (or (:swap fragment') default-fragment-swap)
-      :trigger (or (:trigger fragment') htmx/default-fragment-trigger)
       :attrs {}
       :root-attrs {}
       :target-attrs {}}
      (compact-map
       {:include (:include fragment')
        :client-continuity (:client-continuity fragment')
-       :jitter-ms (:jitter-ms fragment')
-       :jitter-delay-ms (:jitter-delay-ms fragment')
        :attrs (:attrs fragment')
        :root-attrs (:root-attrs fragment')
        :target-attrs (:target-attrs fragment')}))))
@@ -302,87 +339,111 @@
 ;; -----------------------------------------------------------------------------
 
 (defn fragment-root-attrs
-  "Build attrs for the stable outer live fragment wrapper.
+  "Build attrs for the stable outer adapter-managed live-fragment wrapper.
 
-   The outer wrapper owns both the SSE connection and the HTMX refresh request.
-   This keeps hx-get/hx-trigger stable even when the replaceable inner target is
-   swapped with outerHTML.
+   The outer wrapper owns:
+     - the one SSE connection for this fragment;
+     - the logical fragment identity;
+     - the adapter-authorized HTMX refresh request;
+     - optional hx-include and client-continuity metadata.
 
-   Client-continuity attrs also belong on this stable outer wrapper, since it is
-   the element that survives the inner target replacement."
+   Its HTMX request trigger is always gesso:live-refresh. SSE events therefore
+   cannot issue the GET directly; they are observed by the stable invalidation
+   listener rendered by fragment-panel and normalized through
+   gesso.live.browser.adapter first.
+
+   Caller :attrs / :root-attrs remain useful for ordinary decoration and extra
+   HTMX extensions, but they cannot replace the managed SSE connection, logical
+   fragment identity, or hx-get/hx-trigger/hx-target/hx-swap ownership."
   [fragment]
   (let [{:keys [stream-url
                 src
-                event
                 swap
-                trigger
                 include
                 client-continuity
-                jitter-ms
-                jitter-delay-ms
                 id
                 attrs
                 root-attrs]} (ensure-fragment fragment)]
     (htmx/merge-attrs
-     (htmx/fragment-root-attrs
-      {:stream-url stream-url})
-     {:data-gesso-live-fragment id
-      :hx-get src
-      :hx-trigger (htmx/fragment-trigger
-                   {:event event
-                    :trigger trigger
-                    :jitter-ms jitter-ms
-                    :jitter-delay-ms jitter-delay-ms})
-      :hx-target (htmx/normalize-target id)
-      :hx-swap swap}
+     ;; Compose raw caller attrs first, then restore framework-owned SSE
+     ;; connection identity. merge-sse-attrs preserves any additional hx-ext
+     ;; values while guaranteeing the sse extension remains installed.
+     (htmx/merge-sse-attrs
+      attrs
+      root-attrs
+      {:sse-connect stream-url})
      (when include
        {:hx-include include})
      (when client-continuity
        (continuity/client-continuity-attrs
         {:fragment-id id
          :client-continuity client-continuity}))
-     attrs
-     root-attrs)))
+     {:data-gesso-live-fragment id}
+     ;; Request ownership comes last so raw attrs cannot recreate an alternate
+     ;; trigger, target, swap, or source around the adapter.
+     (htmx/managed-fragment-refresh-attrs
+      {:src src
+       :target id
+       :swap swap}))))
+
+(defn fragment-invalidation-listener-attrs
+  "Build attrs for the stable, non-swapping SSE invalidation listener.
+
+   The listener is a sibling of the replaceable fragment target. Its sole job
+   is to make htmx-ext-sse subscribe to the configured named event.
+   gesso.live.browser.core intercepts htmx:sseBeforeMessage for this marked
+   element, prevents the direct SSE swap path, and notifies the adapter.
+
+   hx-swap=none is defensive fallback behavior if the browser runtime is absent:
+   advisory SSE payload bytes still must not become fragment HTML. The listener
+   deliberately does not own sse-connect, so fragment-panel creates exactly one
+   EventSource on the stable root."
+  [fragment]
+  (let [{:keys [id event]} (ensure-fragment fragment)]
+    {:data-gesso-live-invalidation id
+     :sse-swap (htmx/event-name event)
+     :hx-swap "none"
+     :aria-hidden "true"}))
 
 (defn fragment-target-attrs
   "Build attrs for the replaceable inner fragment target.
 
-   The target intentionally does not own hx-get, hx-trigger, or
-   client-continuity attrs. Those attrs live on the stable outer wrapper rendered
-   by fragment-panel."
+   The target intentionally does not own hx-get, hx-trigger, SSE, or
+   client-continuity attrs. Its :id is framework-owned because that physical id
+   must match the stable root's logical fragment identity and managed hx-target.
+   Caller :target-attrs may decorate the target but cannot rename it."
   [fragment]
   (let [{:keys [id target-attrs]} (ensure-fragment fragment)]
     (htmx/clean-attrs
      (merge
-      {:id id}
-      target-attrs))))
+      target-attrs
+      {:id id}))))
 
 (defn fragment-panel
-  "Render a standard live fragment panel.
+  "Render one adapter-managed live fragment panel.
 
-   The outer element is stable and owns:
-     - hx-ext='sse'
-     - sse-connect
-     - hx-get
-     - hx-trigger
-     - hx-target
-     - hx-swap
-     - optional hx-include
-     - optional client-continuity attrs
+   Stable outer root:
+     - owns hx-ext=sse and sse-connect;
+     - owns data-gesso-live-fragment;
+     - owns the managed gesso:live-refresh -> hx-get path;
+     - owns optional client-continuity metadata.
 
-   The inner element owns only the replaceable fragment id and optional
-   target-attrs.
+   Stable invalidation listener:
+     - subscribes to the configured named SSE event with sse-swap;
+     - is marked data-gesso-live-invalidation=<fragment-id>;
+     - never owns an EventSource or an HTTP request;
+     - uses hx-swap=none as fail-safe non-rendering behavior.
 
-   This prevents the common outerHTML failure mode where a swapped fragment
-   response replaces the element that used to own hx-get/hx-trigger, causing
-   later SSE events to arrive without triggering a follow-up fetch.
+   Replaceable inner target:
+     - owns only the canonical fragment DOM id plus target attrs.
 
-   It also gives client-continuity code a stable root from which it can capture
-   state before the inner target is replaced and restore state after HTMX
-   settles."
+   This shape makes the browser adapter the only path from advisory wakeup to
+   fragment GET while keeping both the EventSource and invalidation listener
+   stable across outerHTML replacement of the inner target."
   [fragment]
   (let [fragment' (ensure-fragment fragment)]
     [:div (fragment-root-attrs fragment')
+     [:div (fragment-invalidation-listener-attrs fragment')]
      [:div (fragment-target-attrs fragment')]]))
 
 ;; -----------------------------------------------------------------------------
@@ -500,20 +561,6 @@
        fragment])
     [(or fragment-or-opts {}) nil]))
 
-(def ^:private optimistic-protocol-attrs
-  "Protocol-owned attrs must be merged after app/button attrs.
-
-   The vocabulary itself is centralized in gesso.live.optimistic.protocol; UI
-   only uses the set to preserve merge precedence."
-  optimistic.protocol/reserved-attrs)
-
-(defn- split-optimistic-source-attrs
-  [source-attrs]
-  {:request-attrs
-   (apply dissoc source-attrs optimistic-protocol-attrs)
-   :protocol-attrs
-   (select-keys source-attrs optimistic-protocol-attrs)})
-
 (defn- post-button-attrs
   [{:keys [to
            target
@@ -563,68 +610,16 @@
    ctx
    opts))
 
-(defn- strip-optimistic-protocol-attrs
-  [attrs]
-  (when attrs
-    (apply dissoc
-           attrs
-           optimistic-protocol-attrs)))
-
-(defn- normalize-optimistic-config
-  [opts]
-  (let [value (:optimistic opts)]
-    (cond
-      (optimistic/optimistic? value)
-      value
-
-      (map? value)
-      (cond-> value
-        (and (not (contains? value :target))
-             (some? (:target opts)))
-        (assoc :target (:target opts)))
-
-      :else
-      (throw
-       (ex
-        "gesso.live UI :optimistic must be a raw options map or prepared optimistic descriptor."
-        {:optimistic value})))))
-
-(defn- render-optimistic-post-button
-  [ctx opts]
-  (let [optimistic-config
-        (normalize-optimistic-config opts)
-        {:keys [source-attrs
-                template
-                sync]}
-        (optimistic/render-parts
-         optimistic-config)
-        {:keys [request-attrs
-                protocol-attrs]}
-        (split-optimistic-source-attrs
-         source-attrs)
-        effective-sync
-        (if (contains?
-             opts
-             :sync)
-          (:sync opts)
-          sync)
-        opts'
-        (-> opts
-            (dissoc :optimistic)
-            (update :button-attrs
-                    strip-optimistic-protocol-attrs)
-            (assoc
-             :sync effective-sync
-             :request-attrs request-attrs
-             :protocol-attrs protocol-attrs))]
-    [:<>
-     (render-post-button
-      ctx
-      opts')
-     template]))
+(defn- reject-retired-optimistic-ui!
+  [value]
+  (throw
+   (ex
+    "gesso.live.ui protocol-v2 optimistic rendering has been retired. Protocol-v3 browser optimism must be realized through gesso.live.browser.optimistic."
+    {:error/type :gesso.live.ui/optimistic-realization-unavailable
+     :optimistic value})))
 
 (defn post-button
-  "Render a tiny HTMX POST button, optionally with built-in optimistic rendering.
+  "Render a tiny HTMX POST button.
 
    Supported call shapes:
 
@@ -639,24 +634,6 @@
       fragment
       {:to \"/increment\"
        :label \"+\"})
-
-   Optimistic use is the same helper:
-
-     (post-button
-      ctx
-      {:to \"/requests/claim\"
-       :target \"closest [data-request-card]\"
-       :label \"Claim\"
-       :optimistic
-       {:transition :request/claim
-        :scope [:request request-id]
-        :base-revision revision
-        :content projected-card}})
-
-   The actual clicked button owns hx-post and all optimistic protocol attrs.
-   The lightweight wrapper form owns anti-forgery and app-supplied hidden
-   inputs only. This avoids native submit fallback and keeps optimistic request
-   correlation on the real HTMX source element.
 
    Options:
 
@@ -677,10 +654,9 @@
        \"innerHTML\".
 
      :sync
-       HTMX request synchronization. For ordinary buttons, defaults to
-       \"closest [data-gesso-live-fragment]:drop\". For optimistic buttons,
-       omission uses the descriptor's target-scoped sync value. Explicit nil or
-       false disables hx-sync.
+       HTMX request synchronization. Defaults to
+       \"closest [data-gesso-live-fragment]:drop\". Explicit nil or false
+       disables hx-sync.
 
      :include
        One additional hx-include selector, or a sequential collection of
@@ -694,11 +670,13 @@
        Extra attrs merged into button attrs.
 
      :optimistic
-       Optional prepared gesso.live.optimistic.server descriptor or raw options map.
-       When present, post-button renders the matched hidden projection template
-       beside the button and puts optimistic protocol attrs on the actual request owner.
+       Protocol-v2 optimistic rendering has been retired. Until the
+       protocol-v3 browser realization is installed, any truthy value is
+       rejected explicitly rather than emitting obsolete wire attrs/templates.
 
-   Gesso's optimistic protocol attrs always win over conflicting button attrs."
+   The clicked button owns hx-post. The lightweight wrapper form owns
+   anti-forgery and app-supplied hidden inputs only, avoiding native-submit
+   fallback if HTMX does not intercept the click."
   ([ctx opts]
    (post-button
     ctx
@@ -715,7 +693,6 @@
              (false? optimistic-value))
        (render-ordinary-post-button
         ctx
-        opts)
-       (render-optimistic-post-button
-        ctx
-        opts)))))
+        (dissoc opts :optimistic))
+       (reject-retired-optimistic-ui!
+        optimistic-value)))))

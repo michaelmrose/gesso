@@ -78,9 +78,12 @@
 ;; =============================================================================
 
 (defn- make-element
-  [{:keys [fragment-id closest-root nested]}]
+  [{:keys [fragment-id closest-root nested attrs]}]
   (let [element (js-obj)
-        nested (vec (or nested []))]
+        nested (vec (or nested []))
+        attrs (cond-> (or attrs {})
+                fragment-id
+                (assoc core/fragment-attribute fragment-id))]
     (aset element "nodeType" 1)
     ;; browser.dom/continuity legitimately inspect children on a real Element.
     ;; This fake host supplies the corresponding empty collection.
@@ -88,9 +91,7 @@
     (aset element
           "getAttribute"
           (fn [name]
-            (when (and (= name core/fragment-attribute)
-                       fragment-id)
-              fragment-id)))
+            (get attrs name)))
     (aset element
           "closest"
           (fn [selector]
@@ -111,6 +112,24 @@
   ([fragment-id nested]
    (make-element {:fragment-id fragment-id
                   :nested nested})))
+
+(defn- make-managed-root
+  ([fragment-id]
+   (make-managed-root fragment-id []))
+  ([fragment-id nested]
+   (make-element {:fragment-id fragment-id
+                  :nested nested
+                  :attrs {"hx-trigger" core/refresh-event-name}})))
+
+(defn- make-legacy-sse-root
+  [fragment-id event-name]
+  (make-element {:fragment-id fragment-id
+                 :attrs {"hx-trigger" (str "sse:" event-name)}}))
+
+(defn- make-invalidation-listener
+  [root fragment-id]
+  (make-element {:closest-root root
+                 :attrs {core/invalidation-listener-attribute fragment-id}}))
 
 (defn- make-child
   [root]
@@ -312,6 +331,109 @@
                  :htmx htmx
                  :handlers {kind (fn [_] nil)}})))))))
 
+(deftest generic-handlers-cannot-replace-continuity-ownership-test
+  (let [root (make-root "f")
+        document (:document (make-document [root]))
+        htmx (:htmx (make-htmx))
+        continuity-kinds
+        #{:continuity/capture
+          :continuity/restore
+          :continuity/release}
+        error
+        (thrown
+         #(core/create
+           {:document document
+            :htmx htmx
+            :handlers
+            (into {}
+                  (map (fn [kind]
+                         [kind (fn [_] :application-handler)]))
+                  continuity-kinds)}))]
+    (is (= :protected-handler-override
+           (some-> error ex-data :error/kind)))
+    (is (= continuity-kinds
+           (some-> error ex-data :effect-kinds)))
+    (is (every? core/protected-handler-kinds continuity-kinds))))
+
+(deftest dedicated-continuity-handler-seams-remain-extensible-test
+  (let [capture-resource (js-obj)
+        captures (atom [])
+        restores (atom [])
+        releases (atom [])
+        {:keys [runtime root]}
+        (runtime-fixture
+         "fragment-1"
+         {:continuity-capture!
+          (fn [context]
+            (swap! captures conj context)
+            capture-resource)
+          :continuity-restore!
+          (fn [context]
+            (swap! restores conj context)
+            true)
+          :continuity-release!
+          (fn [context]
+            (swap! releases conj context)
+            true)})
+        {xhr :xhr} (make-xhr 200)]
+    (begin-refresh! runtime "fragment-1")
+    (bind-request! runtime root xhr)
+    (let [fixture (before-swap! runtime root xhr)]
+      (is (false? @(:prevented? fixture)))
+      (is (= 1 (count @captures)))
+      (is (= 1 (:continuity
+                (shell/resource-counts (core/shell-runtime runtime))))))
+    (after-swap! runtime root xhr)
+    (is (= 1 (count @restores)))
+    (is (identical? capture-resource
+                    (:resource (first @restores))))
+    (is (empty? @releases))
+    (is (= 0 (:continuity
+              (shell/resource-counts (core/shell-runtime runtime)))))
+
+    ;; The dedicated release seam is also application-extensible, but release
+    ;; remains adapter-authorized. Retiring a captured fragment requests exactly
+    ;; one physical release of the opaque application resource.
+    (let [release-resource (js-obj)
+          release-captures (atom [])
+          release-restores (atom [])
+          release-calls (atom [])
+          {release-runtime :runtime release-root :root}
+          (runtime-fixture
+           "fragment-2"
+           {:continuity-capture!
+            (fn [context]
+              (swap! release-captures conj context)
+              release-resource)
+            :continuity-restore!
+            (fn [context]
+              (swap! release-restores conj context)
+              true)
+            :continuity-release!
+            (fn [context]
+              (swap! release-calls conj context)
+              true)})
+          {release-xhr :xhr} (make-xhr 200)]
+      (begin-refresh! release-runtime "fragment-2")
+      (bind-request! release-runtime release-root release-xhr)
+      (let [fixture (before-swap! release-runtime release-root release-xhr)]
+        (is (false? @(:prevented? fixture))))
+      (core/on-before-cleanup!
+       release-runtime
+       (:event
+        (make-event
+         "htmx:beforeCleanupElement"
+         {:elt release-root
+          :target release-root})))
+      (is (= 1 (count @release-captures)))
+      (is (empty? @release-restores))
+      (is (= 1 (count @release-calls)))
+      (is (identical? release-resource
+                      (:resource (first @release-calls))))
+      (is (= 0 (:continuity
+                (shell/resource-counts
+                 (core/shell-runtime release-runtime))))))))
+
 (deftest nested-shell-handler-map-is-rejected-test
   (let [{:keys [document]} (make-document [])
         {:keys [htmx]} (make-htmx)]
@@ -470,6 +592,151 @@
     (is (true? (core/on-invalidated! runtime event)))
     (is (= #{nil}
            (:requirements (core/pending-refresh runtime root))))))
+
+;; =============================================================================
+;; Managed SSE wakeup -> adapter invalidation -> HTMX-owned refresh
+;; =============================================================================
+
+(deftest managed-fragment-root-recognition-is-explicit-test
+  (let [managed (make-managed-root "managed")
+        spaced (make-element {:fragment-id "spaced"
+                              :attrs {"hx-trigger"
+                                      (str "  " core/refresh-event-name "  ")}})
+        legacy (make-legacy-sse-root "legacy" "live-update")
+        unrelated (make-root "plain")]
+    (is (true? (core/managed-fragment-root? managed)))
+    (is (true? (core/managed-fragment-root? spaced)))
+    (is (false? (core/managed-fragment-root? legacy)))
+    (is (false? (core/managed-fragment-root? unrelated)))))
+
+(deftest managed-sse-message-is-cancelled-and-normalized-through-adapter-test
+  (let [root (make-managed-root "fragment-1")
+        listener (make-invalidation-listener root "fragment-1")
+        document-fixture (make-document [root])
+        htmx-fixture (make-htmx)
+        runtime
+        (core/create
+         {:document (:document document-fixture)
+          :htmx (:htmx htmx-fixture)
+          :request-id-fn (id-generator "request-1")})
+        fixture
+        (make-event
+         core/sse-before-message-event-name
+         {:elt listener
+          :target listener})]
+    (is (true? (core/on-sse-before-message! runtime (:event fixture))))
+    (is (true? @(:prevented? fixture)))
+    (let [pending (core/pending-refresh runtime root)
+          calls @(:calls htmx-fixture)]
+      (is (= "fragment-1" (:fragment-id pending)))
+      (is (= #{} (:requirements pending)))
+      (is (= 1 (count calls)))
+      (is (identical? root (:root (first calls))))
+      (is (= core/refresh-event-name (:name (first calls)))))))
+
+(deftest repeated-managed-sse-wakeups-coalesce-before-request-start-test
+  (let [root (make-managed-root "fragment-1")
+        listener (make-invalidation-listener root "fragment-1")
+        document-fixture (make-document [root])
+        htmx-fixture (make-htmx)
+        runtime
+        (core/create
+         {:document (:document document-fixture)
+          :htmx (:htmx htmx-fixture)})]
+    (dotimes [_ 3]
+      (core/on-sse-before-message!
+       runtime
+       (:event
+        (make-event
+         core/sse-before-message-event-name
+         {:elt listener
+          :target listener}))))
+    ;; No physical request has begun yet. Adapter owns the pending generation, so
+    ;; duplicate wakeups cannot issue duplicate HTMX triggers around it.
+    (is (= 1 (count @(:calls htmx-fixture))))
+    (is (some? (core/pending-refresh runtime root)))))
+
+(deftest mismatched-managed-sse-listener-fails-closed-before-refresh-test
+  (let [root (make-managed-root "fragment-1")
+        listener (make-invalidation-listener root "fragment-2")
+        document-fixture (make-document [root])
+        htmx-fixture (make-htmx)
+        runtime
+        (core/create
+         {:document (:document document-fixture)
+          :htmx (:htmx htmx-fixture)})
+        fixture
+        (make-event
+         core/sse-before-message-event-name
+         {:elt listener
+          :target listener})]
+    (is (= :invalid-sse-invalidation-listener
+           (error-kind #(core/on-sse-before-message! runtime (:event fixture)))))
+    ;; The direct SSE mutation path is cancelled before identity validation. Even
+    ;; malformed managed markup therefore cannot fall back to swapping payload.
+    (is (true? @(:prevented? fixture)))
+    (is (empty? @(:calls htmx-fixture)))
+    (is (nil? (core/pending-refresh runtime root)))))
+
+(deftest unmarked-legacy-sse-message-remains-outside-managed-path-test
+  (let [root (make-legacy-sse-root "fragment-1" "live-update")
+        child (make-child root)
+        document-fixture (make-document [root])
+        htmx-fixture (make-htmx)
+        runtime
+        (core/create
+         {:document (:document document-fixture)
+          :htmx (:htmx htmx-fixture)})
+        fixture
+        (make-event
+         core/sse-before-message-event-name
+         {:elt child
+          :target child})]
+    (is (true? (core/on-sse-before-message! runtime (:event fixture))))
+    (is (false? @(:prevented? fixture)))
+    (is (empty? @(:calls htmx-fixture)))
+    (is (nil? (core/pending-refresh runtime root)))))
+
+(deftest sse-open-refreshes-managed-root-and-ignores-legacy-root-test
+  (let [managed-root (make-managed-root "managed")
+        legacy-root (make-legacy-sse-root "legacy" "live-update")
+        document-fixture (make-document [managed-root legacy-root])
+        htmx-fixture (make-htmx)
+        runtime
+        (core/create
+         {:document (:document document-fixture)
+          :htmx (:htmx htmx-fixture)})]
+    (is (true?
+         (core/on-sse-open!
+          runtime
+          (:event
+           (make-event
+            core/sse-open-event-name
+            {:elt managed-root
+             :target managed-root})))))
+    (is (= 1 (count @(:calls htmx-fixture))))
+    (is (some? (core/pending-refresh runtime managed-root)))
+
+    ;; Reopening before the pending request starts is another advisory wakeup,
+    ;; not permission to create a second physical request.
+    (core/on-sse-open!
+     runtime
+     (:event
+      (make-event
+       core/sse-open-event-name
+       {:elt managed-root
+        :target managed-root})))
+    (is (= 1 (count @(:calls htmx-fixture))))
+
+    (core/on-sse-open!
+     runtime
+     (:event
+      (make-event
+       core/sse-open-event-name
+       {:elt legacy-root
+        :target legacy-root})))
+    (is (= 1 (count @(:calls htmx-fixture))))
+    (is (nil? (core/pending-refresh runtime legacy-root)))))
 
 ;; =============================================================================
 ;; Managed / unmanaged request binding

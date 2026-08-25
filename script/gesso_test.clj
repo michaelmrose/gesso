@@ -124,29 +124,29 @@
        sort
        vec))
 
-;; Every CLJS/CLJC test is run in Chromium. These host-independent suites
-;; additionally run under Node so accidental browser dependencies and
-;; host-specific semantic drift are caught early.
-(def node-test-namespaces
+;; Every CLJS/CLJC test is run in Chromium. The browser-side suites below
+;; are additionally required to run under Node so accidental DOM dependencies
+;; in the semantic/browser core are caught early. Every portable gesso.choreo
+;; CLJS/CLJC test is discovered automatically and also run under Node so the
+;; portable choreography corpus is exercised on JVM Clojure, Node CLJS, and
+;; Chromium CLJS as required by the choreography design.
+(def required-node-browser-test-namespaces
   '#{gesso.live.browser.adapter-test
      gesso.live.browser.adapter-property-test
      gesso.live.browser.choreo-test
      gesso.live.browser.core-test
      gesso.live.browser.fx-conformance-test
      gesso.live.browser.fx-test
+     gesso.live.browser.runtime-test
      gesso.live.browser.shell-test})
 
-(defn existing-node-test-namespaces
-  []
-  (let [all-tests
-        (set
-         (cljs-test-namespaces))]
+(defn portable-choreo-test-namespace?
+  [test-ns]
+  (str/starts-with?
+   (str
+    test-ns)
+   "gesso.choreo."))
 
-    (->> node-test-namespaces
-         (filter
-          all-tests)
-         sort
-         vec)))
 
 (defn deps-edn
   []
@@ -223,13 +223,42 @@
        test-ns))
     namespaces)))
 
+(defn node-runner-name
+  [group-id]
+  (str
+   "test_node_"
+   (name
+    group-id)
+   "_runner"))
+
+(defn node-runner-namespace
+  [group-id]
+  (symbol
+   (str
+    "gesso."
+    (str/replace
+     (node-runner-name
+      group-id)
+     "_"
+     "-"))))
+
 (defn write-node-runner!
-  [namespaces]
-  (let [path
+  [group-id namespaces]
+  (let [runner-name
+        (node-runner-name
+         group-id)
+
+        runner-ns
+        (node-runner-namespace
+         group-id)
+
+        path
         (fs/path
          generated-test-src
          "gesso"
-         "test_all_node_runner.cljs")]
+         (str
+          runner-name
+          ".cljs"))]
 
     (fs/create-dirs
      (fs/parent
@@ -239,7 +268,7 @@
      (str
       path)
      (str
-      "(ns gesso.test-all-node-runner\n"
+      "(ns " runner-ns "\n"
       "  (:require\n"
       "   [cljs.test :as t]\n"
       (require-lines
@@ -260,7 +289,11 @@
       "))\n\n"
       "(main)\n"))
 
-    path))
+    {:namespace
+     runner-ns
+
+     :path
+     path}))
 
 (defn write-browser-runner!
   [namespaces]
@@ -368,14 +401,60 @@
    ["clojure"
     "-M:test"]))
 
-(defn run-node-tests!
+(defn node-test-plan
   []
+  (let [all-tests
+        (cljs-test-namespaces)
+
+        all-test-set
+        (set
+         all-tests)
+
+        missing-required
+        (->> required-node-browser-test-namespaces
+             (remove
+              all-test-set)
+             sort
+             vec)
+
+        portable-choreo-tests
+        (->> all-tests
+             (filter
+              portable-choreo-test-namespace?)
+             sort
+             vec)]
+
+    (when
+     (seq
+      missing-required)
+      (fail!
+       "Required Node-compatible browser tests are missing."
+       {:missing-namespaces
+        missing-required}))
+
+    (when
+     (empty?
+      portable-choreo-tests)
+      (fail!
+       "No portable gesso.choreo CLJS/CLJC tests were discovered for Node."
+       {}))
+
+    {:browser
+     (->> required-node-browser-test-namespaces
+          sort
+          vec)
+
+     :choreo
+     portable-choreo-tests}))
+
+(defn run-node-test-groups!
+  [group-ids]
   (println)
   (println
    "== CLJS / Node tests ==")
 
-  (let [namespaces
-        (existing-node-test-namespaces)
+  (let [plan
+        (node-test-plan)
 
         node-dir
         (str
@@ -385,24 +464,7 @@
         output-dir
         (str
          node-dir
-         "/out")
-
-        output-to
-        (str
-         node-dir
-         "/tests.js")]
-
-    (when
-     (empty?
-      namespaces)
-      (fail!
-       "No Node-compatible CLJS tests were discovered."
-       {}))
-
-    (println
-     "Namespaces:"
-     (count
-      namespaces))
+         "/out")]
 
     (delete-tree-if-exists!
      node-dir)
@@ -410,23 +472,89 @@
     (fs/create-dirs
      node-dir)
 
-    (write-node-runner!
-     namespaces)
+    (doseq [group-id
+            group-ids]
+      (let [namespaces
+            (get
+             plan
+             group-id)
 
-    (run-command!
-     (cljs-main-command
-      "-co"
-      (pr-str
-       {:target :nodejs
-        :optimizations :simple
-        :output-dir output-dir
-        :output-to output-to})
-      "-c"
-      "gesso.test-all-node-runner"))
+            _
+            (when-not
+             (seq
+              namespaces)
+              (fail!
+               "Unknown or empty Node test group."
+               {:group-id
+                group-id}))
 
-    (run-command!
-     ["node"
-      output-to])))
+            {:keys [namespace]}
+            (write-node-runner!
+             group-id
+             namespaces)
+
+            output-to
+            (str
+             node-dir
+             "/"
+             (name
+              group-id)
+             "-tests.js")]
+
+        (println)
+        (println
+         (case
+          group-id
+
+          :browser
+          "Node browser-semantic suites"
+
+          :choreo
+          "Portable Choreo suites"
+
+          (str
+           "Node group "
+           group-id)))
+        (println
+         "Namespaces:"
+         (count
+          namespaces))
+
+        ;; Node is a semantic host-conformance gate, not an optimization gate.
+        ;; :none keeps the portable corpus fast enough for routine execution;
+        ;; production Closure optimization is verified separately by
+        ;; run-advanced-compile!.
+        (run-command!
+         (cljs-main-command
+          "-co"
+          (pr-str
+           {:target :nodejs
+            :optimizations :none
+            :output-dir output-dir
+            :output-to output-to})
+          "-c"
+          (str
+           namespace)))
+
+        (run-command!
+         ["node"
+          output-to])))))
+
+(defn run-node-browser-tests!
+  []
+  (run-node-test-groups!
+   [:browser]))
+
+(defn run-node-choreo-tests!
+  []
+  (run-node-test-groups!
+   [:choreo]))
+
+(defn run-node-tests!
+  []
+  (run-node-test-groups!
+   [:choreo
+    :browser]))
 
 (defn browser-html
   [output-to]
@@ -642,7 +770,7 @@
        advanced-dir
        "/gesso-live.js")
       "-c"
-      "gesso.live.browser.core"])))
+      "gesso.live.browser.runtime"])))
 
 (defn run-theme-build!
   []
@@ -704,7 +832,7 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|jvm|cljs|node|browser|advanced|themes]")
+   "Usage: bb script/gesso_test.clj [all|jvm|cljs|node|node:choreo|node:browser|browser|advanced|themes]")
   (System/exit
    2))
 
@@ -729,6 +857,12 @@
 
     "node"
     (run-node-tests!)
+
+    "node:choreo"
+    (run-node-choreo-tests!)
+
+    "node:browser"
+    (run-node-browser-tests!)
 
     "browser"
     (run-browser-tests!)

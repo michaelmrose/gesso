@@ -1,8 +1,8 @@
 {:paths ["src" "resources"]
 
  :tasks
- {optimistic
-  {:doc "Generate the Gesso Live browser runtime."
+ {runtime
+  {:doc "Generate the composed Gesso Live browser runtime."
    :task
    (shell "clojure"
           "-M:dev"
@@ -10,7 +10,7 @@
           "-O" "advanced"
           "-co" "{:output-dir \"target/gesso-live-cljs\"}"
           "-o" "resources/public/js/gesso-live.js"
-          "-c" "gesso.live.browser.core")}
+          "-c" "gesso.live.browser.runtime")}
 
   themes
   {:doc "Build theme CSS."
@@ -38,9 +38,19 @@
    (shell "bb" "script/gesso_test.clj" "cljs")}
 
   test:node
-  {:doc "Run host-independent CLJS tests under Node."
+  {:doc "Run all host-independent CLJS tests under Node."
    :task
    (shell "bb" "script/gesso_test.clj" "node")}
+
+  test:node:choreo
+  {:doc "Run the portable Choreo CLJS/CLJC corpus under Node."
+   :task
+   (shell "bb" "script/gesso_test.clj" "node:choreo")}
+
+  test:node:browser
+  {:doc "Run host-independent browser semantic tests under Node."
+   :task
+   (shell "bb" "script/gesso_test.clj" "node:browser")}
 
   test:browser
   {:doc "Run every CLJS/CLJC test in headless Chromium."
@@ -48,7 +58,7 @@
    (shell "bb" "script/gesso_test.clj" "browser")}
 
   test:advanced
-  {:doc "Verify the production browser runtime advanced-compiles."
+  {:doc "Verify the composed production browser runtime advanced-compiles."
    :task
    (shell "bb" "script/gesso_test.clj" "advanced")}
 

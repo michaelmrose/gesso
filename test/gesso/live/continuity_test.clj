@@ -121,7 +121,29 @@
             :selector "[data-row]"}
            (continuity/event
             :selected-row
-            {:selector "[data-row]"})))))
+            {:selector "[data-row]"}))))
+
+  (testing "event constructor owns both type and name"
+    (doseq [[opts owned]
+            [[{:type "js"} #{:type}]
+             [{:name "different"} #{:name}]
+             [{:type "js" :name "different"} #{:type :name}]]]
+      (let [error (try
+                    (continuity/event :selected-row opts)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e
+                      e))]
+        (is (some? error))
+        (is (re-find #"cannot override constructor-owned keys"
+                     (ex-message error)))
+        (is (= owned
+               (:owned-keys (ex-data error)))))))
+
+  (testing "event opts must be a map"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"event opts must be a map"
+         (continuity/event :selected-row [:not :a :map])))))
 
 (deftest hyperscript-box-test
   (testing "hyperscript-backed box"
@@ -137,7 +159,22 @@
            (continuity/hyperscript
             :selected-row
             {:capture "capture hs"
-             :restore "restore hs"})))))
+             :restore "restore hs"}))))
+
+  (testing "hyperscript constructor owns both type and name"
+    (doseq [[opts owned]
+            [[{:type "event"} #{:type}]
+             [{:name "different"} #{:name}]]]
+      (let [error (try
+                    (continuity/hyperscript :selected-row opts)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e
+                      e))]
+        (is (some? error))
+        (is (re-find #"cannot override constructor-owned keys"
+                     (ex-message error)))
+        (is (= owned
+               (:owned-keys (ex-data error))))))))
 
 (deftest js-box-test
   (testing "js-backed box"
@@ -178,6 +215,27 @@
            (continuity/box
             'custom.widget
             {:foo "bar"}))))
+
+  (testing "unforeseen application box types remain open-ended"
+    (is (= {:type "future-widget-that-gesso-does-not-know"
+            :mode :special
+            :nested {:application/data [1 2 3]}}
+           (continuity/box
+            "future-widget-that-gesso-does-not-know"
+            {:mode :special
+             :nested {:application/data [1 2 3]}}))))
+
+  (testing "constructor-owned type cannot be replaced through generic options"
+    (let [error (try
+                  (continuity/box :focus {:type "js"})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (some? error))
+      (is (re-find #"cannot override constructor-owned keys"
+                   (ex-message error)))
+      (is (= #{:type}
+             (:owned-keys (ex-data error))))))
 
   (testing "box opts must be a map"
     (is (thrown-with-msg?
@@ -237,8 +295,10 @@
             nil
             (continuity/focus)))))
 
-  (testing "with-boxes can start from true"
+  (testing "with-boxes preserves the continuity policy represented by true"
     (is (= {:enabled true
+            :preserve {:scroll true
+                       :focus true}
             :boxes [{:type "focus"}]}
            (continuity/with-boxes
             true

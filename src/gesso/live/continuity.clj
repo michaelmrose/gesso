@@ -5,9 +5,15 @@
    preservation constructors, app-facing normalization, deterministic JSON wire
    encoding, the continuity data-attribute vocabulary, and hx-preserve helpers.
 
-   It does not own HTMX request mechanics, DOM capture/restore, optimistic
-   lifecycle policy, or browser event listeners. gesso.live.browser.continuity
-   is the single implementation that captures and restores browser-local state."
+   It does not own HTMX request mechanics, DOM capture/restore, continuity
+   slot/generation identity, optimistic lifecycle policy, authoritative basis,
+   or browser event listeners. gesso.live.browser.adapter owns semantic slot
+   generations and gesso.live.browser.continuity is the single implementation
+   that captures and restores browser-local state.
+
+   Unknown application metadata may pass through this wire description, but it
+   remains presentation metadata. It cannot establish authority, generation
+   ownership, Choreo knowledge, optimistic settlement, or application truth."
   (:require
    [clojure.string :as str]))
 
@@ -70,6 +76,19 @@
          {:value value})))
   value)
 
+(defn- reject-owned-keys!
+  [label opts owned-keys]
+  (let [present (->> owned-keys
+                     (filter #(contains? opts %))
+                     set)]
+    (when (seq present)
+      (throw
+       (ex (str "gesso.live continuity " label
+                " cannot override constructor-owned keys.")
+           {:owned-keys present
+            :opts opts}))))
+  opts)
+
 (defn- normalize-name
   [x]
   (cond
@@ -128,18 +147,21 @@
 (defn box
   "Build a generic client-continuity box.
 
-   `type` is normalized to the unqualified browser-runtime key. For example,
-   :anchor-scroll becomes \"anchor-scroll\" in the emitted JSON.
+   `type` is normalized to the browser-runtime registry key. For example,
+   :anchor-scroll becomes \"anchor-scroll\" in the emitted JSON. Applications
+   may use arbitrary string types for continuity behavior Gesso does not know.
 
    `opts` should be plain Clojure data that can be JSON-encoded by
-   gesso.live.htmx/client-continuity-attrs."
+   client-continuity-attrs. `:type` is constructor-owned and must not also be
+   supplied in opts; this prevents option-merging from silently selecting a
+   different browser implementation than the constructor names."
   ([type]
    (box type nil))
   ([type opts]
-   (let [opts' (or opts {})]
-     (require-map! "box opts" opts')
-     (merge {:type (normalize-box-type type)}
-            opts'))))
+   (let [opts' (->> (or opts {})
+                    (require-map! "box opts"))]
+     (reject-owned-keys! "box opts" opts' #{:type})
+     (assoc opts' :type (normalize-box-type type)))))
 
 (defn anchor-scroll
   "Preserve scroll position by anchoring to a stable element inside the
@@ -245,11 +267,12 @@
   ([name]
    (event name nil))
   ([name opts]
-   (let [name' (normalize-name name)]
+   (let [name' (normalize-name name)
+         opts' (require-map! "event opts" (or opts {}))]
      (require-present! :name name')
+     (reject-owned-keys! "event opts" opts' #{:name :type})
      (box :event
-          (assoc (or opts {})
-                 :name name')))))
+          (assoc opts' :name name')))))
 
 (defn hyperscript
   "Create a Hyperscript-friendly custom box.
@@ -269,11 +292,12 @@
   ([name]
    (hyperscript name nil))
   ([name opts]
-   (let [name' (normalize-name name)]
+   (let [name' (normalize-name name)
+         opts' (require-map! "hyperscript opts" (or opts {}))]
      (require-present! :name name')
+     (reject-owned-keys! "hyperscript opts" opts' #{:name :type})
      (box :hyperscript
-          (assoc (or opts {})
-                 :name name')))))
+          (assoc opts' :name name')))))
 
 (defn js
   "Create a JavaScript-backed custom box.
@@ -352,14 +376,20 @@
       (seq boxes') (assoc :boxes (vec boxes')))))
 
 (defn with-boxes
-  "Add explicit boxes to an existing :client-continuity config."
+  "Add explicit boxes to an existing :client-continuity config.
+
+   This is additive. In particular, starting from true retains the same basic
+   scroll+focus policy that normalize-client-continuity assigns to true instead
+   of silently weakening that policy when boxes are appended."
   [client-continuity & boxes]
   (let [client-continuity' (cond
                              (nil? client-continuity)
                              {:enabled true}
 
                              (true? client-continuity)
-                             {:enabled true}
+                             {:enabled true
+                              :preserve {:scroll true
+                                         :focus true}}
 
                              (map? client-continuity)
                              client-continuity

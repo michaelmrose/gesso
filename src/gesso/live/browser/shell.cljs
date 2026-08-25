@@ -47,7 +47,18 @@
    by the :continuity/capture handler is stored only in this shell, keyed by the
    adapter-issued slot identity/generation. :continuity/restore receives that
    opaque value as :resource and may complete synchronously or asynchronously.
-   Only successful restoration produces :continuity/completed.
+   Successful restoration produces :continuity/completed. Failed restoration
+   produces :continuity/failed with the exact slot identity/generation; the
+   adapter then decides whether the failure is current and, when appropriate,
+   emits :continuity/release for best-effort physical cleanup.
+
+   Optimistic physical state follows the same ownership discipline. The adapter
+   decides target ownership, timeout identity, settlement interpretation, and
+   terminal disposition. This shell only stores the opaque value returned by
+   :optimistic/install-provisional, owns the exact physical timeout handle, and
+   passes the opaque value back to :optimistic/finish. Provisional install and
+   finish handlers must be synchronous so an older physical generation cannot
+   continue mutating a newer target after adapter ownership has moved on.
 
    HTMX remains HTMX-owned. This shell does not issue requests, perform swaps,
    parse responses, or know HTMX event shapes. browser/core.cljs will normalize
@@ -276,7 +287,9 @@
       :handlers (atom handlers)
       :resources (atom {:timers {}
                         :transports {}
-                        :continuity {}})
+                        :continuity {}
+                        :optimistic {}
+                        :optimistic-timeouts {}})
       :closed? (atom false)
       :on-error on-error
       :on-transition on-transition
@@ -330,11 +343,13 @@
 
 (defn resource-counts
   [runtime]
-  (let [{:keys [timers transports continuity]}
+  (let [{:keys [timers transports continuity optimistic optimistic-timeouts]}
         (resources runtime)]
     {:timers (count timers)
      :transports (count transports)
-     :continuity (count continuity)}))
+     :continuity (count continuity)
+     :optimistic (count optimistic)
+     :optimistic-timeouts (count optimistic-timeouts)}))
 
 ;; =============================================================================
 ;; Handler registration (physical implementation only)
@@ -411,6 +426,14 @@
 (defn- continuity-resource-key
   [{:keys [slot-id slot-generation]}]
   [slot-id slot-generation])
+
+(defn- optimistic-resource-key
+  [{:keys [execution-id generation]}]
+  [execution-id generation])
+
+(defn- optimistic-timeout-resource-key
+  [{:keys [execution-id generation timeout-generation]}]
+  [execution-id generation timeout-generation])
 
 ;; =============================================================================
 ;; Handler invocation
@@ -516,6 +539,21 @@
    {:event :continuity/completed
     :slot-id (:slot-id effect-data)
     :slot-generation (:slot-generation effect-data)}))
+
+(defn- continuity-failed!
+  [runtime effect-data error]
+  (report-error!
+   runtime
+   :continuity-restore-failed
+   :continuity/restore
+   effect-data
+   error)
+  (dispatch!
+   runtime
+   {:event :continuity/failed
+    :slot-id (:slot-id effect-data)
+    :slot-generation (:slot-generation effect-data)
+    :reason (physical-failure-reason :continuity/restore error)}))
 
 ;; =============================================================================
 ;; Async result settlement
@@ -737,19 +775,17 @@
                   update :continuity dissoc resource-key)
            (continuity-completed! runtime effect-data))
          (fn [error]
-           (report-error!
-            runtime
-            :continuity-restore-failed
-            :continuity/restore
-            effect-data
-            error))))
+           ;; Do not remove the opaque resource here. :continuity/failed is a
+           ;; generation-correlated semantic event; if the adapter accepts it,
+           ;; the resulting :continuity/release effect owns physical cleanup.
+           ;; If the callback is stale, leaving the resource untouched avoids a
+           ;; late callback deleting a newer generation's resource.
+           (continuity-failed! runtime effect-data error))))
       (catch :default error
-        (report-error!
-         runtime
-         :continuity-restore-failed
-         :continuity/restore
-         effect-data
-         error)
+        ;; Synchronous restore failure follows the same adapter-owned path as a
+        ;; rejected Promise. The authoritative swap has already happened; this
+        ;; reports only browser-local continuity failure.
+        (continuity-failed! runtime effect-data error)
         :failed))))
 
 (defn- interpret-continuity-release!
@@ -772,6 +808,162 @@
            effect-data
            error))))
     :released))
+
+
+;; =============================================================================
+;; Optimistic physical resources
+;; =============================================================================
+
+(defn- remove-optimistic-resource!
+  [runtime resource-key]
+  (swap! (:resources runtime)
+         update :optimistic dissoc resource-key))
+
+(defn- remove-optimistic-timeout-resource!
+  [runtime resource-key]
+  (swap! (:resources runtime)
+         update :optimistic-timeouts dissoc resource-key))
+
+(defn- report-optimistic-physical-failure!
+  [runtime phase effect-kind effect-data error]
+  (report-error!
+   runtime
+   phase
+   effect-kind
+   effect-data
+   error)
+  :failed)
+
+(defn- interpret-optimistic-install-provisional!
+  [runtime effect-data physical]
+  (let [resource-key (optimistic-resource-key effect-data)]
+    (try
+      (if-let [handler (effect-handler runtime :optimistic/install-provisional)]
+        (let [resource (handler {:effect effect-data
+                                 :physical physical
+                                 :resource nil})]
+          (when (promise-like? resource)
+            (throw
+             (shell-error
+              :async-optimistic-install
+              "Optimistic provisional installation must complete synchronously."
+              {:effect-data effect-data})))
+          (swap! (:resources runtime)
+                 assoc-in [:optimistic resource-key]
+                 resource)
+          :installed)
+        (do
+          (report-error!
+           runtime
+           :missing-optimistic-install-handler
+           :optimistic/install-provisional
+           effect-data
+           (shell-error
+            :missing-effect-handler
+            "Browser shell has no physical handler for optimistic provisional installation."
+            {:effect-kind :optimistic/install-provisional}))
+          :unavailable))
+      (catch :default error
+        ;; Optimistic presentation is not authoritative command execution. A
+        ;; failed local projection must not be converted into command failure or
+        ;; prevent the trusted server operation from continuing.
+        (report-optimistic-physical-failure!
+         runtime
+         :optimistic-install-failed
+         :optimistic/install-provisional
+         effect-data
+         error)))))
+
+(defn- interpret-optimistic-timeout-start!
+  [runtime effect-data]
+  (let [resource-key (optimistic-timeout-resource-key effect-data)
+        callback
+        (fn []
+          (remove-optimistic-timeout-resource! runtime resource-key)
+          (when-not (closed? runtime)
+            (dispatch!
+             runtime
+             {:event :optimistic/timeout-fired
+              :execution-id (:execution-id effect-data)
+              :generation (:generation effect-data)
+              :timeout-generation (:timeout-generation effect-data)})))]
+    (try
+      (let [handle ((:set-timeout! runtime)
+                    callback
+                    (:delay-ms effect-data))]
+        (swap! (:resources runtime)
+               assoc-in [:optimistic-timeouts resource-key]
+               {:handle handle})
+        :started)
+      (catch :default error
+        ;; Timer allocation is a browser-host failure, not evidence that the
+        ;; semantic command failed. Preserve the active execution and report the
+        ;; lost local timeout protection explicitly.
+        (report-optimistic-physical-failure!
+         runtime
+         :optimistic-timeout-start-failed
+         :optimistic/timeout-start
+         effect-data
+         error)))))
+
+(defn- interpret-optimistic-timeout-cancel!
+  [runtime effect-data]
+  (let [resource-key (optimistic-timeout-resource-key effect-data)
+        resource (get-in @(:resources runtime)
+                         [:optimistic-timeouts resource-key])]
+    (remove-optimistic-timeout-resource! runtime resource-key)
+    (when (contains? resource :handle)
+      (try
+        ((:clear-timeout! runtime) (:handle resource))
+        (catch :default error
+          (report-error!
+           runtime
+           :optimistic-timeout-cancel-failed
+           :optimistic/timeout-cancel
+           effect-data
+           error))))
+    :cancelled))
+
+(defn- interpret-optimistic-finish!
+  [runtime effect-data physical]
+  (let [resource-key (optimistic-resource-key effect-data)
+        resource (get-in @(:resources runtime)
+                         [:optimistic resource-key])]
+    ;; Semantic ownership has already ended when this effect is emitted. Remove
+    ;; the opaque resource from shell ownership before invoking best-effort
+    ;; physical cleanup so a re-entrant/new generation cannot observe the old
+    ;; resource as current.
+    (remove-optimistic-resource! runtime resource-key)
+    (if-let [handler (effect-handler runtime :optimistic/finish)]
+      (try
+        (let [result (handler {:effect effect-data
+                               :physical physical
+                               :resource resource})]
+          (when (promise-like? result)
+            (throw
+             (shell-error
+              :async-optimistic-finish
+              "Optimistic terminal physical handling must complete synchronously."
+              {:effect-data effect-data})))
+          :finished)
+        (catch :default error
+          (report-optimistic-physical-failure!
+           runtime
+           :optimistic-finish-failed
+           :optimistic/finish
+           effect-data
+           error)))
+      (do
+        (report-error!
+         runtime
+         :missing-optimistic-finish-handler
+         :optimistic/finish
+         effect-data
+         (shell-error
+          :missing-effect-handler
+          "Browser shell has no physical handler for optimistic terminal disposition."
+          {:effect-kind :optimistic/finish}))
+        :unavailable))))
 
 ;; =============================================================================
 ;; Delegated one-way effects
@@ -890,6 +1082,18 @@
       :continuity/release
       (interpret-continuity-release! runtime effect-data physical)
 
+      :optimistic/install-provisional
+      (interpret-optimistic-install-provisional! runtime effect-data physical)
+
+      :optimistic/timeout-start
+      (interpret-optimistic-timeout-start! runtime effect-data)
+
+      :optimistic/timeout-cancel
+      (interpret-optimistic-timeout-cancel! runtime effect-data)
+
+      :optimistic/finish
+      (interpret-optimistic-finish! runtime effect-data physical)
+
       :diagnostic/ignored
       (do
         (observe-diagnostic! runtime effect-data)
@@ -1000,7 +1204,7 @@
 
 (defn- best-effort-clear-orphan-resources!
   [runtime]
-  (let [{:keys [timers transports]}
+  (let [{:keys [timers transports optimistic-timeouts]}
         @(:resources runtime)]
     (doseq [[_ {:keys [handle]}] timers]
       (try
@@ -1010,6 +1214,16 @@
            runtime
            :shutdown-timer-cancel-failed
            :timer/cancel
+           {}
+           error))))
+    (doseq [[_ {:keys [handle]}] optimistic-timeouts]
+      (try
+        ((:clear-timeout! runtime) handle)
+        (catch :default error
+          (report-error!
+           runtime
+           :shutdown-optimistic-timeout-cancel-failed
+           :optimistic/timeout-cancel
            {}
            error))))
     (doseq [[_ {:keys [cancel!]}] transports
@@ -1026,7 +1240,9 @@
     (reset! (:resources runtime)
             {:timers {}
              :transports {}
-             :continuity {}})))
+             :continuity {}
+             :optimistic {}
+             :optimistic-timeouts {}})))
 
 (defn shutdown!
   "Semantically retire current adapter-owned work, then tear down any leftover

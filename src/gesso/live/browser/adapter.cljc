@@ -32,6 +32,9 @@
    - coalesced queued fragment requirements without guessing basis ordering
    - request-generation gating of HTMX request/swap callbacks
    - continuity-slot generations distinct from request generations
+   - newer approved fragment swaps revoke older continuity slots before DOM mutation
+   - one adapter-owned optimistic effect scope per optimistic execution
+   - optimistic provisional derivation/install, settlement, timeout, supersession, and rollback disposition
    - monotone authoritative installation at the HTMX swap gate
 
    `gesso.choreo.machine` remains the owner of portable choreography protocol
@@ -90,7 +93,11 @@
     :htmx/after-swap
     :htmx/after-request
     :http/failed
-    :continuity/completed})
+    :continuity/completed
+    :continuity/failed
+    :optimistic/settlement-observed
+    :optimistic/timeout-fired
+    :optimistic/authoritative-superseded})
 
 (def semantic-effect-kinds
   #{:machine/local
@@ -110,6 +117,10 @@
     :continuity/capture
     :continuity/restore
     :continuity/release
+    :optimistic/install-provisional
+    :optimistic/timeout-start
+    :optimistic/timeout-cancel
+    :optimistic/finish
     :authoritative/installed})
 
 (def diagnostic-effect-kinds
@@ -224,7 +235,7 @@
 (def ^:private event-allowed-keys
   {:execution/start
    #{:event :execution-id :execution :target-id
-     :replace-owner? :replace-execution?}
+     :replace-owner? :replace-execution? :optimistic}
 
    :execution/retire
    #{:event :execution-id :generation :reason}
@@ -281,7 +292,19 @@
    #{:event :fragment-id :request-generation :request-id :reason}
 
    :continuity/completed
-   #{:event :slot-id :slot-generation}})
+   #{:event :slot-id :slot-generation}
+
+   :continuity/failed
+   #{:event :slot-id :slot-generation :reason}
+
+   :optimistic/settlement-observed
+   #{:event :execution-id :generation :resolution :settlement}
+
+   :optimistic/timeout-fired
+   #{:event :execution-id :generation :timeout-generation}
+
+   :optimistic/authoritative-superseded
+   #{:event :execution-id :generation :authoritative}})
 
 (defn- require-event!
   [event]
@@ -324,6 +347,7 @@
    :timers {}
    :fragments {}
    :continuity {}
+   :optimistic {}
    :authoritative {}})
 
 (defn- execution-record?
@@ -384,6 +408,95 @@
    (positive-integer? (:request-generation value))
    (or (true? (:restore-issued? value))
        (false? (:restore-issued? value)))))
+
+(def optimistic-direct-resolutions
+  "Protocol-v3 direct settlement outcomes understood by the generic browser
+   adapter. Application/model outcome remains opaque and is not interpreted
+   here."
+  #{:confirmed
+    :reconciled
+    :rejected
+    :already-incorporated
+    :failed})
+
+(def optimistic-terminal-resolutions
+  (into optimistic-direct-resolutions
+        #{:superseded :timeout :network-failed :retired}))
+
+(def optimistic-dispositions
+  "Physical realization dispositions emitted by the pure adapter. The shell may
+   realize these, but it must not choose among them."
+  #{:await-authority
+    :rollback
+    :rollback-and-refresh
+    :refresh-authority
+    :authoritative
+    :release-only})
+
+(defn- optimistic-start-config!
+  [value]
+  (require-map! "Execution :optimistic configuration" value)
+  (let [allowed #{:command-id :provisional-key :rollback-eligible? :timeout-ms}
+        required #{:command-id :provisional-key :rollback-eligible?}
+        ks (set (keys value))
+        missing (set (remove ks required))
+        unknown (set (remove allowed ks))]
+    (when (seq missing)
+      (adapter-error
+       :missing-optimistic-fields
+       "Optimistic execution configuration is missing required fields."
+       {:missing missing :required required :value value}))
+    (when (seq unknown)
+      (adapter-error
+       :unknown-optimistic-fields
+       "Optimistic execution configuration contains unsupported fields."
+       {:unknown unknown :allowed allowed :value value})))
+  (require-non-nil! "Optimistic command id" (:command-id value))
+  (when-not (keyword? (:provisional-key value))
+    (adapter-error
+     :invalid-optimistic-provisional-key
+     "Optimistic :provisional-key must be a semantic FactKey keyword."
+     {:provisional-key (:provisional-key value)}))
+  (require-boolean! ":rollback-eligible?" (:rollback-eligible? value))
+  (when (contains? value :timeout-ms)
+    (require-nonnegative-integer! "Optimistic timeout" (:timeout-ms value)))
+  value)
+
+(defn- optimistic-record?
+  [value]
+  (and
+   (map? value)
+   (some? (:execution-id value))
+   (positive-integer? (:execution-generation value))
+   (some? (:command-id value))
+   (some? (:target-id value))
+   (keyword? (:provisional-key value))
+   (boolean? (:rollback-eligible? value))
+   (contains? #{:awaiting-provisional :provisional :settlement-observed}
+              (:status value))
+   (or (nil? (:timeout-ms value))
+       (and (integer? (:timeout-ms value))
+            (<= 0 (:timeout-ms value))))
+   (or (nil? (:timeout-generation value))
+       (positive-integer? (:timeout-generation value)))
+   (case (:status value)
+     :awaiting-provisional
+     (and (nil? (:provisional value))
+          (nil? (:timeout-generation value))
+          (nil? (:resolution value))
+          (nil? (:settlement value)))
+
+     :provisional
+     (and (map? (:provisional value))
+          (nil? (:resolution value))
+          (nil? (:settlement value)))
+
+     :settlement-observed
+     (and (map? (:provisional value))
+          (contains? optimistic-direct-resolutions (:resolution value))
+          (map? (:settlement value)))
+
+     false)))
 
 (defn invariant-errors
   "Return deterministic adapter invariant violations.
@@ -471,6 +584,29 @@
                   {:slot-id slot-id
                    :record-slot-id (:slot-id slot)})))
 
+        (doseq [[execution-id optimistic] (:optimistic state)]
+          (when-not (optimistic-record? optimistic)
+            (add! :invalid-optimistic-record
+                  {:execution-id execution-id
+                   :record optimistic}))
+          (let [execution-record (get-in state [:executions execution-id])
+                target-owner (get-in state [:targets (:target-id optimistic)])]
+            (when-not (and
+                       execution-record
+                       (= execution-id (:execution-id optimistic))
+                       (= (:generation execution-record)
+                          (:execution-generation optimistic))
+                       (= (:target-id execution-record)
+                          (:target-id optimistic))
+                       (= {:execution-id execution-id
+                           :generation (:generation execution-record)}
+                          target-owner))
+              (add! :orphan-optimistic-scope
+                    {:execution-id execution-id
+                     :record optimistic
+                     :execution execution-record
+                     :target-owner target-owner}))))
+
         (doseq [[scope frontier] (:authoritative state)]
           (when (nil? (:basis frontier))
             (add! :invalid-authoritative-frontier
@@ -524,6 +660,12 @@
   (get-in (require-state! state)
           [:targets target-id]))
 
+(defn optimistic-scope
+  "Return the active adapter-owned optimistic effect scope for execution-id, or nil."
+  [state execution-id]
+  (get-in (require-state! state)
+          [:optimistic execution-id]))
+
 (defn active-execution?
   "True when execution-id/generation still names the current active execution."
   [state execution-id generation]
@@ -554,6 +696,119 @@
 
       :else
       {:record record})))
+
+(defn- optimistic-disposition
+  [resolution rollback-eligible?]
+  (case resolution
+    (:confirmed :reconciled :already-incorporated)
+    :await-authority
+
+    (:rejected :failed)
+    (if rollback-eligible?
+      :rollback
+      :refresh-authority)
+
+    :superseded
+    :authoritative
+
+    (:timeout :network-failed)
+    (if rollback-eligible?
+      :rollback-and-refresh
+      :refresh-authority)
+
+    :retired
+    :release-only
+
+    (adapter-error
+     :unknown-optimistic-resolution
+     "Adapter cannot choose a disposition for optimistic resolution."
+     {:resolution resolution
+      :supported optimistic-terminal-resolutions})))
+
+(defn- optimistic-timeout-cancel-effect
+  [scope reason]
+  (when-let [timeout-generation (:timeout-generation scope)]
+    (effect
+     :optimistic/timeout-cancel
+     {:execution-id (:execution-id scope)
+      :generation (:execution-generation scope)
+      :command-id (:command-id scope)
+      :timeout-generation timeout-generation
+      :reason reason})))
+
+(defn- optimistic-finish-effect
+  [scope resolution reason]
+  (let [disposition
+        (optimistic-disposition
+         resolution
+         (:rollback-eligible? scope))]
+    (effect
+     :optimistic/finish
+     (cond->
+      {:execution-id (:execution-id scope)
+       :generation (:execution-generation scope)
+       :command-id (:command-id scope)
+       :target-id (:target-id scope)
+       :provisional (:provisional scope)
+       :resolution resolution
+       :disposition disposition
+       :rollback-eligible? (:rollback-eligible? scope)}
+       (:settlement scope)
+       (assoc :settlement (:settlement scope))
+       (:superseding-authoritative scope)
+       (assoc :authoritative (:superseding-authoritative scope))
+       reason
+       (assoc :reason reason)))))
+
+(defn- completed-optimistic-resolution
+  [scope completed-result]
+  (when-not (= :settlement-observed (:status scope))
+    (adapter-error
+     :optimistic-completion-without-settlement
+     "Optimistic Choreo completed without an adapter-observed settlement."
+     {:execution-id (:execution-id scope)
+      :generation (:execution-generation scope)
+      :result completed-result
+      :scope scope}))
+  ;; Projected role-local terminal results intentionally collapse to the
+  ;; canonical Choreo completion sentinel. The protocol resolution is a
+  ;; semantic value established by the browser resolve action, and the adapter
+  ;; already observed the correlated settlement before that message was
+  ;; delivered. Therefore the adapter uses the observed settlement resolution
+  ;; rather than attempting to reinterpret the projected terminal sentinel.
+  (:resolution scope))
+
+(defn- cleanup-optimistic-scope
+  [state execution-id generation reason completed-result]
+  (if-let [scope (get-in state [:optimistic execution-id])]
+    (if-not (= generation (:execution-generation scope))
+      [state []]
+      (let [resolution
+            (cond
+              completed-result
+              (completed-optimistic-resolution scope completed-result)
+
+              (= reason :optimistic-timeout)
+              :timeout
+
+              (= reason :optimistic-network-failed)
+              :network-failed
+
+              (= reason :authoritative-superseded)
+              :superseded
+
+              :else
+              :retired)
+            timeout-cancel
+            (optimistic-timeout-cancel-effect scope reason)
+            finish
+            (when (map? (:provisional scope))
+              (optimistic-finish-effect scope resolution reason))]
+        [(update state :optimistic dissoc execution-id)
+         (cond-> []
+           timeout-cancel (conj timeout-cancel)
+           finish (conj finish))]))
+    [state []]))
 
 (defn- cleanup-execution-resources
   [state execution-id generation]
@@ -599,17 +854,20 @@
     (if-not (and record
                  (= generation (:generation record)))
       [state []]
-      (let [[state' cleanup-effects]
+      (let [[state-a optimistic-effects]
+            (cleanup-optimistic-scope
+             state execution-id generation reason completed-result)
+            [state-b cleanup-effects]
             (cleanup-execution-resources
-             state execution-id generation)
+             state-a execution-id generation)
             target-id (:target-id record)
-            state''
+            state-c
             (cond->
-             (update state' :executions dissoc execution-id)
+             (update state-b :executions dissoc execution-id)
               (and target-id
                    (= {:execution-id execution-id
                        :generation generation}
-                      (get-in state' [:targets target-id])))
+                      (get-in state-b [:targets target-id])))
               (update :targets dissoc target-id))
             terminal-effect
             (if completed-result
@@ -623,9 +881,11 @@
                {:execution-id execution-id
                 :generation generation
                 :reason reason}))]
-        [state''
-         (into [terminal-effect]
-               cleanup-effects)]))))
+        [state-c
+         (into []
+               (concat optimistic-effects
+                       [terminal-effect]
+                       cleanup-effects))]))))
 
 (defn- install-pending-effect
   [state execution-id kind]
@@ -709,12 +969,21 @@
         (:execution event)
         target-id
         (:target-id event)
+        optimistic-config
+        (:optimistic event)
         replace-owner?
         (get event :replace-owner? false)
         replace-execution?
         (get event :replace-execution? false)]
     (require-boolean! ":replace-owner?" replace-owner?)
     (require-boolean! ":replace-execution?" replace-execution?)
+    (when optimistic-config
+      (optimistic-start-config! optimistic-config)
+      (when (nil? target-id)
+        (adapter-error
+         :optimistic-target-required
+         "Optimistic execution requires one logical target-id."
+         {:execution-id execution-id})))
     (when-not (machine/execution? machine-execution)
       (adapter-error
        :invalid-machine-execution
@@ -786,12 +1055,32 @@
               (assoc-in [:targets target-id]
                         {:execution-id execution-id
                          :generation generation}))
-            [state-e drive-effects]
-            (drive-execution state-d execution-id)]
-        [state-e
+            [state-e optimistic-scope optimistic-effects]
+            (if optimistic-config
+              (let [scope
+                    {:execution-id execution-id
+                     :execution-generation generation
+                     :command-id (:command-id optimistic-config)
+                     :target-id target-id
+                     :provisional-key (:provisional-key optimistic-config)
+                     :provisional nil
+                     :rollback-eligible? (:rollback-eligible? optimistic-config)
+                     :timeout-ms (:timeout-ms optimistic-config)
+                     :timeout-generation nil
+                     :status :awaiting-provisional
+                     :resolution nil
+                     :settlement nil}]
+                [(assoc-in state-d [:optimistic execution-id] scope)
+                 scope
+                 []])
+              [state-d nil []])
+            [state-f drive-effects]
+            (drive-execution state-e execution-id)]
+        [state-f
          (into []
                (concat effects-a
                        effects-b
+                       optimistic-effects
                        drive-effects))]))))
 
 (defn- retire-execution
@@ -831,6 +1120,7 @@
               :effect-generation effect-generation
               :current-pending pending})]]
           (let [outputs (or (:outputs event) {})
+                execution-id (:execution-id event)
                 next-execution
                 (machine/complete-local
                  (:execution record)
@@ -838,14 +1128,64 @@
                 state'
                 (-> state
                     (assoc-in
-                     [:executions (:execution-id event) :execution]
+                     [:executions execution-id :execution]
                      next-execution)
                     (assoc-in
-                     [:executions (:execution-id event) :pending-effect]
-                     nil))]
-            (drive-execution
-             state'
-             (:execution-id event))))))))
+                     [:executions execution-id :pending-effect]
+                     nil))
+                scope (get-in state' [:optimistic execution-id])
+                awaiting? (= :awaiting-provisional (:status scope))
+                provisional
+                (when awaiting?
+                  (get outputs (:provisional-key scope)))
+                _
+                (when (and awaiting?
+                           (not (map? provisional)))
+                  (adapter-error
+                   :missing-derived-provisional
+                   "Optimistic derive-local completion did not establish the configured provisional value."
+                   {:execution-id execution-id
+                    :generation (:generation event)
+                    :provisional-key (:provisional-key scope)
+                    :outputs outputs}))
+                [state'' optimistic-effects]
+                (if awaiting?
+                  (let [timeout-ms (:timeout-ms scope)
+                        [state'' timeout-generation]
+                        (if (some? timeout-ms)
+                          (allocate-generation state')
+                          [state' nil])
+                        scope'
+                        (assoc scope
+                               :provisional provisional
+                               :timeout-generation timeout-generation
+                               :status :provisional)
+                        effects
+                        (cond->
+                         [(effect
+                           :optimistic/install-provisional
+                           {:execution-id execution-id
+                            :generation (:generation event)
+                            :command-id (:command-id scope')
+                            :target-id (:target-id scope')
+                            :provisional provisional
+                            :rollback-eligible? (:rollback-eligible? scope')})]
+                          timeout-generation
+                          (conj
+                           (effect
+                            :optimistic/timeout-start
+                            {:execution-id execution-id
+                             :generation (:generation event)
+                             :command-id (:command-id scope')
+                             :timeout-generation timeout-generation
+                             :delay-ms timeout-ms})))]
+                    [(assoc-in state'' [:optimistic execution-id] scope')
+                     effects])
+                  [state' []])
+                [state-final drive-effects]
+                (drive-execution state'' execution-id)]
+            [state-final
+             (into [] (concat optimistic-effects drive-effects))]))))))
 
 (defn- request-send
   [state event]
@@ -956,21 +1296,31 @@
               :generation (:generation event)
               :effect-generation effect-generation
               :current-pending pending})]]
-          ;; A transport failure does not fabricate a successful Choreo send.
-          ;; The machine remains at the same send boundary with no pending
-          ;; physical effect. Policy may explicitly retry or translate the
-          ;; failure into a modeled environment event.
-          [(assoc-in
-            state
-            [:executions (:execution-id event) :pending-effect]
-            nil)
-           [(ignored-effect
-             event
-             :transport-failed
-             {:execution-id (:execution-id event)
-              :generation (:generation event)
-              :effect-generation effect-generation
-              :transport-reason (:reason event)})]])))))
+          ;; Generic Choreo leaves transport failure retry policy to its caller.
+          ;; An adapter-owned optimistic effect scope has an explicit browser
+          ;; recovery path instead: retire semantic ownership, cancel its
+          ;; settlement timeout, and emit the adapter-selected rollback/refresh
+          ;; disposition. This does not fabricate a trusted :failed settlement.
+          (let [state'
+                (assoc-in
+                 state
+                 [:executions (:execution-id event) :pending-effect]
+                 nil)]
+            (if (get-in state' [:optimistic (:execution-id event)])
+              (retire-execution*
+               state'
+               (:execution-id event)
+               (:generation event)
+               :optimistic-network-failed
+               nil)
+              [state'
+               [(ignored-effect
+                 event
+                 :transport-failed
+                 {:execution-id (:execution-id event)
+                  :generation (:generation event)
+                  :effect-generation effect-generation
+                  :transport-reason (:reason event)})]])))))))
 
 (defn- retry-machine-boundary
   [state event]
@@ -1370,6 +1720,55 @@
        next-basis
        (:progression candidate)))))
 
+(defn- older-continuity-slots
+  "Return continuity slots for fragment-id that do not belong to keep-slot-id.
+
+   A current beforeSwap belongs to the newest request generation that HTMX is
+   about to install. Any other continuity slot for the same logical fragment is
+   therefore physically stale with respect to that impending replacement.
+
+   Results are ordered by request generation so abstract effect order is stable
+   across Clojure and ClojureScript map implementations."
+  [state fragment-id keep-slot-id]
+  (->> (:continuity state)
+       (keep
+        (fn [[slot-id slot]]
+          (when (and (= fragment-id (:fragment-id slot))
+                     (not= keep-slot-id slot-id))
+            [slot-id slot])))
+       (sort-by (fn [[_slot-id slot]]
+                  (:request-generation slot)))
+       vec))
+
+(defn- revoke-older-continuity
+  "Semantically retire continuity resources superseded by a newer swap.
+
+   State retirement happens before any release effect is interpreted. The shell
+   can therefore revoke each opaque physical resource before the subsequent
+   :continuity/capture and :htmx/allow-swap effects for the new generation run.
+   A delayed callback from an older replacement then carries an already-retired
+   slot generation and is powerless to mutate the newer DOM."
+  [state fragment-id keep-slot-id]
+  (let [older-slots (older-continuity-slots state fragment-id keep-slot-id)
+        state'
+        (reduce
+         (fn [current [slot-id _slot]]
+           (update current :continuity dissoc slot-id))
+         state
+         older-slots)
+        effects
+        (mapv
+         (fn [[slot-id slot]]
+           (effect
+            :continuity/release
+            {:slot-id slot-id
+             :slot-generation (:generation slot)
+             :fragment-id fragment-id
+             :request-generation (:request-generation slot)
+             :reason :newer-fragment-swap}))
+         older-slots)]
+    [state' effects]))
+
 (defn- before-swap
   [state event]
   (let [fragment-id (require-non-nil! "Fragment id" (:fragment-id event))
@@ -1404,12 +1803,14 @@
                       [:authoritative (:scope candidate)])
               :candidate candidate})]]
           (let [slot-id [fragment-id request-generation]
-                existing-slot (get-in state [:continuity slot-id])
-                [state' slot]
+                [state-a superseded-effects]
+                (revoke-older-continuity state fragment-id slot-id)
+                existing-slot (get-in state-a [:continuity slot-id])
+                [state-b slot]
                 (if existing-slot
-                  [state existing-slot]
+                  [state-a existing-slot]
                   (let [[allocated-state slot-generation]
-                        (allocate-generation state)
+                        (allocate-generation state-a)
                         slot
                         {:slot-id slot-id
                          :generation slot-generation
@@ -1420,32 +1821,34 @@
                                [:continuity slot-id]
                                slot)
                      slot]))
-                state''
+                state-c
                 (if candidate
                   (assoc-in
-                   state'
+                   state-b
                    [:fragments fragment-id :inflight :authoritative]
                    candidate)
-                  state')
+                  state-b)
                 effects
-                (cond-> []
-                  (nil? existing-slot)
-                  (conj
-                   (effect
-                    :continuity/capture
-                    {:slot-id slot-id
-                     :slot-generation (:generation slot)
-                     :fragment-id fragment-id
-                     :request-generation request-generation
-                     :request-id request-id}))
-                  true
-                  (conj
-                   (effect
-                    :htmx/allow-swap
-                    {:fragment-id fragment-id
-                     :request-generation request-generation
-                     :request-id request-id})))]
-            [state'' effects]))))))
+                (into
+                 superseded-effects
+                 (cond-> []
+                   (nil? existing-slot)
+                   (conj
+                    (effect
+                     :continuity/capture
+                     {:slot-id slot-id
+                      :slot-generation (:generation slot)
+                      :fragment-id fragment-id
+                      :request-generation request-generation
+                      :request-id request-id}))
+                   true
+                   (conj
+                    (effect
+                     :htmx/allow-swap
+                     {:fragment-id fragment-id
+                      :request-generation request-generation
+                      :request-id request-id}))))]
+            [state-c effects]))))))
 
 (defn- after-swap
   [state event]
@@ -1648,6 +2051,163 @@
       [(update state :continuity dissoc slot-id)
        []])))
 
+(defn- continuity-failed
+  [state event]
+  (let [slot-id (require-non-nil! "Continuity slot id" (:slot-id event))
+        slot-generation
+        (require-positive-integer!
+         "Continuity slot generation"
+         (:slot-generation event))
+        slot (get-in state [:continuity slot-id])]
+    (cond
+      (not (and slot
+                (= slot-generation (:generation slot))))
+      [state
+       [(ignored-effect
+         event
+         :stale-continuity-failure
+         {:slot-id slot-id
+          :slot-generation slot-generation
+          :current-slot-generation (:generation slot)})]]
+
+      (not (:restore-issued? slot))
+      [state
+       [(ignored-effect
+         event
+         :continuity-restore-not-issued
+         {:slot-id slot-id
+          :slot-generation slot-generation})]]
+
+      :else
+      [(update state :continuity dissoc slot-id)
+       [(effect
+         :continuity/release
+         {:slot-id slot-id
+          :slot-generation slot-generation
+          :fragment-id (:fragment-id slot)
+          :request-generation (:request-generation slot)
+          :reason (or (:reason event)
+                      :restore-failed)})]])))
+
+(defn- current-optimistic-or-ignore
+  [state event]
+  (let [{:keys [record ignored]}
+        (current-execution-or-ignore state event)]
+    (if ignored
+      {:ignored ignored}
+      (if-let [scope (get-in state [:optimistic (:execution-id event)])]
+        {:record record
+         :scope scope}
+        {:ignored
+         (ignored-effect
+          event
+          :execution-not-optimistic
+          {:execution-id (:execution-id event)
+           :generation (:generation event)})}))))
+
+(defn- optimistic-settlement-observed
+  [state event]
+  (let [{:keys [record scope ignored]}
+        (current-optimistic-or-ignore state event)]
+    (if ignored
+      [state [ignored]]
+      (let [resolution (:resolution event)
+            settlement (:settlement event)]
+        (when-not (contains? optimistic-direct-resolutions resolution)
+          (adapter-error
+           :invalid-optimistic-settlement-resolution
+           "Observed optimistic settlement uses an unsupported direct resolution."
+           {:resolution resolution
+            :supported optimistic-direct-resolutions}))
+        (require-map! "Observed optimistic settlement" settlement)
+        (when-not (machine/waiting-receive? (:execution record))
+          (adapter-error
+           :optimistic-settlement-out-of-phase
+           "Optimistic settlement may be observed only while the projected machine waits to receive it."
+           {:execution-id (:execution-id event)
+            :generation (:generation event)
+            :machine (machine/explain (:execution record))}))
+        (cond
+          (= :settlement-observed (:status scope))
+          (if (and (= resolution (:resolution scope))
+                   (= settlement (:settlement scope)))
+            [state
+             [(ignored-effect
+               event
+               :duplicate-optimistic-settlement
+               {:execution-id (:execution-id event)
+                :generation (:generation event)
+                :resolution resolution})]]
+            (adapter-error
+             :conflicting-optimistic-settlement
+             "One optimistic execution observed conflicting settlement values."
+             {:execution-id (:execution-id event)
+              :generation (:generation event)
+              :existing-resolution (:resolution scope)
+              :new-resolution resolution}))
+
+          :else
+          (let [timeout-cancel
+                (optimistic-timeout-cancel-effect scope :settlement-observed)
+                scope'
+                (assoc scope
+                       :status :settlement-observed
+                       :resolution resolution
+                       :settlement settlement
+                       :timeout-generation nil)]
+            [(assoc-in state [:optimistic (:execution-id event)] scope')
+             (cond-> []
+               timeout-cancel (conj timeout-cancel))]))))))
+
+(defn- optimistic-timeout-fired
+  [state event]
+  (let [{:keys [scope ignored]}
+        (current-optimistic-or-ignore state event)]
+    (if ignored
+      [state [ignored]]
+      (let [timeout-generation
+            (require-positive-integer!
+             "Optimistic timeout generation"
+             (:timeout-generation event))]
+        (if-not (= timeout-generation (:timeout-generation scope))
+          [state
+           [(ignored-effect
+             event
+             :stale-optimistic-timeout
+             {:execution-id (:execution-id event)
+              :generation (:generation event)
+              :timeout-generation timeout-generation
+              :current-timeout-generation (:timeout-generation scope)})]]
+          ;; The physical timer has fired, so clear its semantic ownership before
+          ;; retirement; cleanup must not issue a redundant timer cancellation.
+          (retire-execution*
+           (assoc-in state
+                     [:optimistic (:execution-id event) :timeout-generation]
+                     nil)
+           (:execution-id event)
+           (:generation event)
+           :optimistic-timeout
+           nil))))))
+
+(defn- optimistic-authoritative-superseded
+  [state event]
+  (let [{:keys [scope ignored]}
+        (current-optimistic-or-ignore state event)]
+    (if ignored
+      [state [ignored]]
+      (let [authoritative (:authoritative event)]
+        (require-map! "Optimistic authoritative supersession" authoritative)
+        ;; Keep the exact trusted observation only long enough for the terminal
+        ;; abstract effect. It remains semantic data, never a DOM attachment.
+        (retire-execution*
+         (assoc-in state
+                   [:optimistic (:execution-id event) :superseding-authoritative]
+                   authoritative)
+         (:execution-id event)
+         (:generation event)
+         :authoritative-superseded
+         nil)))))
+
 ;; =============================================================================
 ;; Public transition
 ;; =============================================================================
@@ -1724,7 +2284,19 @@
           (http-failed state' event')
 
           :continuity/completed
-          (continuity-completed state' event'))]
+          (continuity-completed state' event')
+
+          :continuity/failed
+          (continuity-failed state' event')
+
+          :optimistic/settlement-observed
+          (optimistic-settlement-observed state' event')
+
+          :optimistic/timeout-fired
+          (optimistic-timeout-fired state' event')
+
+          :optimistic/authoritative-superseded
+          (optimistic-authoritative-superseded state' event'))]
     (require-state! next-state)
     [next-state (vec effects)]))
 
@@ -1792,4 +2364,20 @@
       (:fragments state'))
      :continuity-slot-count
      (count (:continuity state'))
+     :optimistic
+     (into
+      {}
+      (map
+       (fn [[execution-id scope]]
+         [execution-id
+          (select-keys scope
+                       [:execution-generation
+                        :command-id
+                        :target-id
+                        :rollback-eligible?
+                        :timeout-ms
+                        :timeout-generation
+                        :status
+                        :resolution])]))
+      (:optimistic state'))
      :authoritative (:authoritative state')}))

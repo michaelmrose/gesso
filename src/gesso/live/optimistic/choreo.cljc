@@ -1,631 +1,636 @@
 (ns gesso.live.optimistic.choreo
-  "Built-in verified optimistic-command choreography for Gesso Live.
+  "Portable protocol-v3 choreography helpers for optimistic Gesso operations.
 
-   This namespace is the single semantic definition of the normal optimistic
-   lifecycle. It is intentionally free of DOM, HTMX, Ring, XTDB, SSE, and
-   application-domain implementation details.
+   This namespace deliberately does not own DOM targets, structural snapshots,
+   browser timers, HTMX lifecycle, continuity generations, or physical cleanup.
+   Those are browser-adapter/shell concerns.
 
-   The choreography is verified and projected on the JVM. ClojureScript should
-   consume the browser plan through browser-plan-form, which expands to literal
-   projected data so verifier/projector code does not become part of the
-   production browser bundle."
+   It also deliberately does not define one universal authoritative operation.
+   V4.5 requires an authoritative choreography state to name the public model
+   semantic operation it realizes (for example :request/claim), rather than an
+   implementation placeholder such as :optimistic/execute-command.  Callers
+   therefore build an operation-specific choreography with command-choreography.
+
+   The direct command choreography models one short execution:
+
+     browser derives explicit provisional knowledge
+       -> browser communicates semantic command
+       -> trusted authority performs the public model operation
+       -> authority communicates a typed protocol-v3 settlement
+       -> browser resolves its provisional trajectory
+       -> terminal generic settlement resolution
+
+   A lost direct settlement does not require a suspended server machine.  A
+   later authoritative reread may instead resolve the provisional trajectory
+   through a separate short supersession-recovery choreography.  This follows
+   v4.5's rule that durable waiting lives in model authority, not in arbitrary
+   in-process choreography continuations.
+
+   Shape validation here is not authorization.  The trusted authoritative
+   adapter must authenticate the principal, select/authorize the configured
+   public model operation, reread/revalidate authority, perform any atomic model
+   transition, and construct the settlement."
   (:require
+   [clojure.set :as set]
    [gesso.choreo.core :as choreo]
    [gesso.live.optimistic.protocol :as protocol]
    #?(:clj [gesso.choreo.project :as project])
    #?(:clj [gesso.choreo.verify :as verify])))
 
-;; -----------------------------------------------------------------------------
-;; Semantic identities
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Stable semantic vocabulary
+;; =============================================================================
 
-(def protocol-name
-  :gesso.live.optimistic/command)
+(def default-browser-role :browser)
+(def default-authority-role :authority)
 
-(def browser-role
-  :browser)
+(def command-event protocol/command-event)
+(def settlement-event protocol/settlement-event)
 
-(def server-role
-  :server)
+(def derive-provisional-action
+  :gesso.live.optimistic/derive-provisional)
 
-(def command-event
-  protocol/command-event)
+(def resolve-settlement-action
+  :gesso.live.optimistic/resolve-settlement)
 
-(def settlement-event
-  protocol/settlement-event)
+(def resolve-supersession-action
+  :gesso.live.optimistic/resolve-supersession)
 
-(def request-failed-event
-  :optimistic/request-failed)
+(def provisional-value-key
+  :gesso.live.optimistic/provisional)
 
-(def timeout-event
-  :optimistic/timeout)
+(def settlement-value-key
+  :gesso.live.optimistic/settlement)
 
-(def canonical-superseded-event
-  "Browser-runtime event meaning that authoritative canonical state which
-   outranks the outstanding optimistic execution has already been installed.
+(def resolution-value-key
+  :gesso.live.optimistic/resolution)
 
-   This is intentionally stronger than a raw Live invalidation or arbitrary DOM
-   replacement. The browser runtime is responsible for revision/authority
-   comparison before emitting this event."
-  :optimistic/canonical-superseded)
+(def reread-authoritative-key
+  :gesso.live.optimistic/authoritative)
 
-(def continuity-restored-event
-  "Browser-runtime event emitted only after continuity restoration has completed
-   at its required post-layout boundary."
-  :continuity/restored)
+(def reread-basis-key
+  :gesso.live.optimistic/authoritative-basis)
 
-(def target-authority-resource
-  :optimistic/target-authority)
+(def default-authoritative-observed-event
+  :gesso.live.optimistic/authoritative-observed)
 
-(def snapshot-authority-resource
-  :optimistic/snapshot-authority)
+(def semantic-command-required-keys
+  "Semantic command facts required by an optimistic choreography execution.
 
-(def settlement-outcomes
-  protocol/settlement-outcomes)
+   Protocol-v3 permits a non-optimistic command to omit :observed-basis, but an
+   optimistic projection may not.  Wire protocol version is transport metadata,
+   not a Choreo semantic fact."
+  (-> protocol/command-required-keys
+      (disj protocol/protocol-version-key)
+      (conj protocol/observed-basis-key)))
 
-(def recovery-dispositions
-  #{:recovered :canonical-wins})
-
-(def canonical-dispositions
-  #{:installed :canonical-wins})
-
-;; -----------------------------------------------------------------------------
-;; FX machine identities
-;; -----------------------------------------------------------------------------
-
-(def browser-acquire-target-machine
-  :optimistic/acquire-target)
-
-(def browser-capture-continuity-machine
-  :continuity/capture)
-
-(def browser-capture-snapshot-machine
-  :optimistic/capture-snapshot)
-
-(def browser-install-projection-machine
-  :optimistic/install-projection)
-
-(def browser-schedule-timeout-machine
-  :optimistic/schedule-timeout)
-
-(def server-execute-machine
-  :optimistic/execute-command)
-
-(def browser-install-canonical-machine
-  :optimistic/install-canonical)
-
-(def browser-discard-snapshot-machine
-  :optimistic/discard-snapshot)
-
-(def browser-recover-snapshot-machine
-  :optimistic/recover)
-
-(def browser-restore-continuity-machine
-  :continuity/restore)
-
-(def browser-cancel-timeout-machine
-  :optimistic/cancel-timeout)
-
-(def browser-clear-pending-machine
-  :optimistic/clear-pending)
-
-(def browser-release-target-machine
-  :optimistic/release-target)
-
-;; -----------------------------------------------------------------------------
-;; Context / payload keys
-;; -----------------------------------------------------------------------------
-
-(def execution-id-key
-  protocol/execution-id-key)
-
-(def transition-key
-  protocol/transition-key)
-
-(def scope-key
-  protocol/scope-key)
-
-(def base-revision-key
-  protocol/base-revision-key)
-
-(def consistency-token-key
-  protocol/consistency-token-key)
-
-(def outcome-key
-  protocol/outcome-key)
-
-(def command-applied-key
-  protocol/command-applied-key)
-
-(def revision-key
-  protocol/revision-key)
-
-(def canonical-key
-  protocol/canonical-key)
-
-(def reason-key
-  protocol/reason-key)
-
-(def recovery-disposition-key
-  :recovery-disposition)
-
-(def canonical-disposition-key
-  :canonical-disposition)
-
-(def command-required-keys
-  protocol/command-required-keys)
-
-(def command-optional-keys
-  protocol/command-optional-keys)
+(def semantic-command-optional-keys
+  "Optional semantic command facts that may cross to the authority role."
+  (-> protocol/command-optional-keys
+      (disj protocol/observed-basis-key)))
 
 (def command-correlation-keys
-  protocol/command-correlation-keys)
-
-(def settlement-required-keys
-  protocol/settlement-required-keys)
-
-(def settlement-optional-keys
-  protocol/settlement-optional-keys)
-
-(def settlement-correlation-keys
-  protocol/settlement-correlation-keys)
-
-;; -----------------------------------------------------------------------------
-;; Choreography definition
-;; -----------------------------------------------------------------------------
-
-(def optimistic-command
-  "Global optimistic-command choreography.
-
-   Important authority rules encoded by the graph:
-
-   - The browser holds target authority for the entire provisional execution.
-   - Snapshot authority is separately linear and must be consumed on every
-     terminal path.
-   - Semantic settlement always carries authoritative canonical content.
-   - Request failure and timeout recover through the snapshot only when the DOM
-     FX machine confirms that canonical authority has not already superseded it.
-   - A canonical-superseded event means the authoritative replacement is already
-     installed; the old execution only cleans up and terminates.
-   - Settlement canonical installation may itself discover that newer canonical
-     state already wins. In that case the execution cleans up without restoring
-     stale pre-projection continuity over the newer replacement."
-  (choreo/->choreography
-   {:name protocol-name
-    :roles #{browser-role server-role}
-    :initial :browser/acquire-target-authority
-    :environment-events
-    #{request-failed-event
-      timeout-event
-      canonical-superseded-event
-      continuity-restored-event}
-    :resources
-    {target-authority-resource
-     (choreo/resource
-      {:owner browser-role
-       :linear? true
-       :terminal-release? true})
-
-     snapshot-authority-resource
-     (choreo/resource
-      {:owner browser-role
-       :linear? true
-       :terminal-release? true})}
-    :states
-    {;; Browser prepares one provisional execution.
-     :browser/acquire-target-authority
-     (choreo/acquire
-      browser-role
-      target-authority-resource
-      :browser/acquire-target)
-
-     :browser/acquire-target
-     (choreo/fx
-      browser-role
-      browser-acquire-target-machine
-      :browser/capture-continuity)
-
-     :browser/capture-continuity
-     (choreo/fx
-      browser-role
-      browser-capture-continuity-machine
-      :browser/acquire-snapshot-authority)
-
-     :browser/acquire-snapshot-authority
-     (choreo/acquire
-      browser-role
-      snapshot-authority-resource
-      :browser/capture-snapshot)
-
-     :browser/capture-snapshot
-     (choreo/fx
-      browser-role
-      browser-capture-snapshot-machine
-      :browser/install-projection)
-
-     :browser/install-projection
-     (choreo/fx
-      browser-role
-      browser-install-projection-machine
-      :browser/schedule-timeout)
-
-     :browser/schedule-timeout
-     (choreo/fx
-      browser-role
-      browser-schedule-timeout-machine
-      :browser/send-command)
-
-     ;; The command crosses to the server. Interrupts are terminal alternatives
-     ;; to the outstanding command/settlement interaction.
-     :browser/send-command
-     (choreo/send
-      browser-role
-      server-role
-      command-event
-      :server/receive-command
-      {:via :http
-       :required command-required-keys
-       :optional command-optional-keys
-       :correlation command-correlation-keys
-       :interrupts
-       {request-failed-event :browser/recover-request-failed
-        timeout-event :browser/recover-timeout
-        canonical-superseded-event :browser/discard-superseded-snapshot}})
-
-     :server/receive-command
-     (choreo/receive
-      browser-role
-      server-role
-      command-event
-      :server/execute-command
-      {:via :http
-       :bind :command})
-
-     :server/execute-command
-     (choreo/fx
-      server-role
-      server-execute-machine
-      :server/validate-outcome)
-
-     ;; This choice validates that application execution produced one supported
-     ;; semantic settlement outcome. Every outcome then uses the same settlement
-     ;; message contract; the outcome value itself is carried in the payload.
-     :server/validate-outcome
-     (choreo/choice
-      server-role
-      outcome-key
-      {:confirmed :server/send-settlement
-       :reconciled :server/send-settlement
-       :rejected :server/send-settlement
-       :failed :server/send-settlement})
-
-     :server/send-settlement
-     (choreo/send
-      server-role
-      browser-role
-      settlement-event
-      :browser/receive-settlement
-      {:via :http
-       :required settlement-required-keys
-       :optional settlement-optional-keys
-       :correlation settlement-correlation-keys})
-
-     :browser/receive-settlement
-     (choreo/receive
-      server-role
-      browser-role
-      settlement-event
-      :browser/install-canonical
-      {:via :http
-       :bind :settlement})
-
-     ;; install-canonical is the trusted DOM authority check. It either installs
-     ;; this settlement's canonical rendering or reports that already-installed
-     ;; canonical state wins.
-     :browser/install-canonical
-     (choreo/fx
-      browser-role
-      browser-install-canonical-machine
-      :browser/canonical-disposition)
-
-     :browser/canonical-disposition
-     (choreo/choice
-      browser-role
-      canonical-disposition-key
-      {:installed :browser/discard-settled-snapshot
-       :canonical-wins :browser/discard-superseded-snapshot})
-
-     ;; Successful authoritative installation: the old structural snapshot is no
-     ;; longer valid, then the continuity captured for this optimistic execution
-     ;; is restored across the replacement.
-     :browser/discard-settled-snapshot
-     (choreo/fx
-      browser-role
-      browser-discard-snapshot-machine
-      :browser/release-settled-snapshot-authority)
-
-     :browser/release-settled-snapshot-authority
-     (choreo/release
-      browser-role
-      snapshot-authority-resource
-      :browser/restore-settled-continuity)
-
-     :browser/restore-settled-continuity
-     (choreo/fx
-      browser-role
-      browser-restore-continuity-machine
-      :browser/await-settled-continuity)
-
-     :browser/await-settled-continuity
-     (choreo/await
-      browser-role
-      {continuity-restored-event :browser/cancel-settled-timeout})
-
-     :browser/cancel-settled-timeout
-     (choreo/fx
-      browser-role
-      browser-cancel-timeout-machine
-      :browser/clear-settled-pending)
-
-     :browser/clear-settled-pending
-     (choreo/fx
-      browser-role
-      browser-clear-pending-machine
-      :browser/release-settled-target)
-
-     :browser/release-settled-target
-     (choreo/fx
-      browser-role
-      browser-release-target-machine
-      :browser/release-settled-target-authority)
-
-     :browser/release-settled-target-authority
-     (choreo/release
-      browser-role
-      target-authority-resource
-      :browser/settled-outcome)
-
-     :browser/settled-outcome
-     (choreo/choice
-      browser-role
-      outcome-key
-      {:confirmed :browser/return-confirmed
-       :reconciled :browser/return-reconciled
-       :rejected :browser/return-rejected
-       :failed :browser/return-failed})
-
-     :browser/return-confirmed
-     (choreo/return browser-role :confirmed)
-
-     :browser/return-reconciled
-     (choreo/return browser-role :reconciled)
-
-     :browser/return-rejected
-     (choreo/return browser-role :rejected)
-
-     :browser/return-failed
-     (choreo/return browser-role :failed)
-
-     ;; Request failure and timeout share the same safe recovery primitive. The
-     ;; primitive may discover a canonical replacement that won the race; that
-     ;; distinction decides whether the original optimistic continuity should be
-     ;; restored.
-     :browser/recover-request-failed
-     (choreo/fx
-      browser-role
-      browser-recover-snapshot-machine
-      :browser/request-failed-recovery-disposition)
-
-     :browser/request-failed-recovery-disposition
-     (choreo/choice
-      browser-role
-      recovery-disposition-key
-      {:recovered :browser/discard-request-failed-snapshot
-       :canonical-wins :browser/discard-superseded-snapshot})
-
-     :browser/discard-request-failed-snapshot
-     (choreo/fx
-      browser-role
-      browser-discard-snapshot-machine
-      :browser/release-request-failed-snapshot-authority)
-
-     :browser/release-request-failed-snapshot-authority
-     (choreo/release
-      browser-role
-      snapshot-authority-resource
-      :browser/restore-request-failed-continuity)
-
-     :browser/restore-request-failed-continuity
-     (choreo/fx
-      browser-role
-      browser-restore-continuity-machine
-      :browser/await-request-failed-continuity)
-
-     :browser/await-request-failed-continuity
-     (choreo/await
-      browser-role
-      {continuity-restored-event :browser/cancel-request-failed-timeout})
-
-     :browser/cancel-request-failed-timeout
-     (choreo/fx
-      browser-role
-      browser-cancel-timeout-machine
-      :browser/clear-request-failed-pending)
-
-     :browser/clear-request-failed-pending
-     (choreo/fx
-      browser-role
-      browser-clear-pending-machine
-      :browser/release-request-failed-target)
-
-     :browser/release-request-failed-target
-     (choreo/fx
-      browser-role
-      browser-release-target-machine
-      :browser/release-request-failed-target-authority)
-
-     :browser/release-request-failed-target-authority
-     (choreo/release
-      browser-role
-      target-authority-resource
-      :browser/return-request-failed)
-
-     :browser/return-request-failed
-     (choreo/return browser-role :request-failed)
-
-     :browser/recover-timeout
-     (choreo/fx
-      browser-role
-      browser-recover-snapshot-machine
-      :browser/timeout-recovery-disposition)
-
-     :browser/timeout-recovery-disposition
-     (choreo/choice
-      browser-role
-      recovery-disposition-key
-      {:recovered :browser/discard-timeout-snapshot
-       :canonical-wins :browser/discard-superseded-snapshot})
-
-     :browser/discard-timeout-snapshot
-     (choreo/fx
-      browser-role
-      browser-discard-snapshot-machine
-      :browser/release-timeout-snapshot-authority)
-
-     :browser/release-timeout-snapshot-authority
-     (choreo/release
-      browser-role
-      snapshot-authority-resource
-      :browser/restore-timeout-continuity)
-
-     :browser/restore-timeout-continuity
-     (choreo/fx
-      browser-role
-      browser-restore-continuity-machine
-      :browser/await-timeout-continuity)
-
-     :browser/await-timeout-continuity
-     (choreo/await
-      browser-role
-      {continuity-restored-event :browser/cancel-timeout-after-timeout})
-
-     :browser/cancel-timeout-after-timeout
-     (choreo/fx
-      browser-role
-      browser-cancel-timeout-machine
-      :browser/clear-timeout-pending)
-
-     :browser/clear-timeout-pending
-     (choreo/fx
-      browser-role
-      browser-clear-pending-machine
-      :browser/release-timeout-target)
-
-     :browser/release-timeout-target
-     (choreo/fx
-      browser-role
-      browser-release-target-machine
-      :browser/release-timeout-target-authority)
-
-     :browser/release-timeout-target-authority
-     (choreo/release
-      browser-role
-      target-authority-resource
-      :browser/return-timeout)
-
-     :browser/return-timeout
-     (choreo/return browser-role :timeout)
-
-     ;; Canonical state already won. Do not restore the stale continuity capture
-     ;; from before the optimistic projection; the canonical swap used the shared
-     ;; continuity engine at the time it actually happened.
-     :browser/discard-superseded-snapshot
-     (choreo/fx
-      browser-role
-      browser-discard-snapshot-machine
-      :browser/release-superseded-snapshot-authority)
-
-     :browser/release-superseded-snapshot-authority
-     (choreo/release
-      browser-role
-      snapshot-authority-resource
-      :browser/cancel-superseded-timeout)
-
-     :browser/cancel-superseded-timeout
-     (choreo/fx
-      browser-role
-      browser-cancel-timeout-machine
-      :browser/clear-superseded-pending)
-
-     :browser/clear-superseded-pending
-     (choreo/fx
-      browser-role
-      browser-clear-pending-machine
-      :browser/release-superseded-target)
-
-     :browser/release-superseded-target
-     (choreo/fx
-      browser-role
-      browser-release-target-machine
-      :browser/release-superseded-target-authority)
-
-     :browser/release-superseded-target-authority
-     (choreo/release
-      browser-role
-      target-authority-resource
-      :browser/return-superseded)
-
-     :browser/return-superseded
-     (choreo/return browser-role :superseded)}}))
-
-;; -----------------------------------------------------------------------------
-;; Compiler products
-;; -----------------------------------------------------------------------------
+  #{protocol/command-id-key
+    protocol/execution-id-key})
+
+(def settlement-message-required-keys
+  "The authority sends the two top-level correlation identities plus one closed
+   protocol-v3 settlement value.  The settlement value itself is validated by
+   gesso.live.optimistic.protocol; duplicating the two identity facts at the
+   Choreo message boundary lets projected machines enforce correlation without
+   inspecting nested maps."
+  #{protocol/command-id-key
+    protocol/execution-id-key
+    settlement-value-key})
+
+(def direct-terminal-resolutions
+  protocol/settlement-resolutions)
+
+;; =============================================================================
+;; Errors / configuration
+;; =============================================================================
+
+(defn- choreo-error
+  [kind message data]
+  (throw
+   (ex-info
+    message
+    (merge
+     {:error/type :gesso.live.optimistic.choreo/error
+      :error/kind kind}
+     data))))
+
+(defn- require-map!
+  [label value]
+  (when-not (map? value)
+    (choreo-error
+     :invalid-shape
+     (str label " must be a map.")
+     {:label label
+      :value value}))
+  value)
+
+(defn- require-keyword!
+  [label value]
+  (when-not (keyword? value)
+    (choreo-error
+     :invalid-keyword
+     (str label " must be a keyword.")
+     {:label label
+      :value value}))
+  value)
+
+(defn- require-closed-options!
+  [label options allowed]
+  (let [options' (require-map! label (or options {}))
+        unknown (set/difference (set (keys options')) allowed)]
+    (when (seq unknown)
+      (choreo-error
+       :unknown-option
+       (str label " contains unknown options.")
+       {:label label
+        :unknown unknown
+        :allowed allowed}))
+    options'))
+
+(def ^:private command-option-keys
+  #{:name
+    :browser-role
+    :authority-role
+    :operation
+    :derive-provisional-action
+    :resolve-settlement-action})
+
+(defn- normalize-command-options
+  [options]
+  (let [options'
+        (require-closed-options!
+         "Optimistic command choreography options"
+         options
+         command-option-keys)
+
+        {:keys [name
+                browser-role
+                authority-role
+                operation
+                derive-provisional-action
+                resolve-settlement-action]
+         :or {browser-role default-browser-role
+              authority-role default-authority-role
+              derive-provisional-action derive-provisional-action
+              resolve-settlement-action resolve-settlement-action}}
+        options']
+
+    (when (= browser-role authority-role)
+      (choreo-error
+       :same-role
+       "Optimistic browser and authority roles must be distinct."
+       {:browser-role browser-role
+        :authority-role authority-role}))
+
+    {:name
+     (require-keyword! "Optimistic choreography :name" name)
+
+     :browser-role
+     (require-keyword! "Optimistic choreography :browser-role" browser-role)
+
+     :authority-role
+     (require-keyword! "Optimistic choreography :authority-role" authority-role)
+
+     :operation
+     (require-keyword! "Optimistic choreography :operation" operation)
+
+     :derive-provisional-action
+     (require-keyword!
+      "Optimistic choreography :derive-provisional-action"
+      derive-provisional-action)
+
+     :resolve-settlement-action
+     (require-keyword!
+      "Optimistic choreography :resolve-settlement-action"
+      resolve-settlement-action)}))
+
+;; =============================================================================
+;; Protocol/runtime value helpers
+;; =============================================================================
+
+(defn command-values
+  "Validate one protocol-v3 optimistic command and return exactly the semantic
+   facts consumed by command-choreography.
+
+   Unlike protocol/command, this helper requires :observed-basis because a
+   command entering an optimistic trajectory must justify its provisional
+   projection from known authority."
+  [command-envelope]
+  (let [command'
+        (protocol/command
+         (dissoc command-envelope protocol/protocol-version-key))]
+    (when-not (contains? command' protocol/observed-basis-key)
+      (choreo-error
+       :missing-observed-basis
+       "An optimistic choreography command requires :observed-basis."
+       {:command command'}))
+    (select-keys
+     command'
+     (set/union
+      semantic-command-required-keys
+      semantic-command-optional-keys))))
+
+(defn require-operation
+  "Validate command-envelope and require that its semantic :operation matches
+   the public authoritative operation configured for this choreography.
+
+   This is a correlation check, not authorization.  The trusted server must
+   still select and authorize the operation independently of browser claims."
+  [operation command-envelope]
+  (let [operation' (require-keyword! "Public authoritative operation" operation)
+        command' (command-values command-envelope)]
+    (when-not (= (protocol/qualified-name operation')
+                 (protocol/qualified-name
+                  (get command' protocol/operation-key)))
+      (choreo-error
+       :operation-mismatch
+       "Optimistic command operation does not match this choreography's public authoritative operation."
+       {:expected-operation operation'
+        :expected-wire-name (protocol/qualified-name operation')
+        :actual-operation (get command' protocol/operation-key)}))
+    command'))
+
+(defn provisional-value
+  "Validate command/provisional correlation and return the closed provisional
+   value stored as one browser-local semantic fact.
+
+   Choreo still requires the command's individual identity/basis facts before
+   the derive-provisional action may run.  The nested provisional envelope is a
+   convenient portable value for the later resolution action, not a substitute
+   for those explicit knowledge requirements."
+  [command-envelope provisional-envelope]
+  (:provisional
+   (protocol/command-provisional-pair
+    command-envelope
+    provisional-envelope)))
+
+(defn settlement-value
+  "Validate and return one closed protocol-v3 settlement value."
+  [settlement-envelope]
+  (protocol/settlement
+   (dissoc settlement-envelope protocol/protocol-version-key)))
+
+(defn settlement-message-values
+  "Validate one settlement and expose the exact semantic message payload used
+   by the authority projection.
+
+   The top-level identity copies are deliberate: projected-machine correlation
+   remains explicit rather than requiring Choreo to understand nested protocol
+   envelope structure."
+  [settlement-envelope]
+  (let [settlement' (settlement-value settlement-envelope)]
+    {protocol/command-id-key
+     (get settlement' protocol/command-id-key)
+
+     protocol/execution-id-key
+     (get settlement' protocol/execution-id-key)
+
+     settlement-value-key
+     settlement'}))
+
+(defn settlement-resolution
+  "Validate a provisional/settlement pair and return the generic direct
+   settlement resolution for the browser-local resolve action."
+  [provisional-envelope settlement-envelope]
+  (let [provisional'
+        (protocol/provisional
+         (dissoc provisional-envelope
+                 protocol/protocol-version-key
+                 protocol/authority-key))
+
+        settlement'
+        (settlement-value settlement-envelope)]
+    (doseq [key [protocol/command-id-key
+                 protocol/execution-id-key]]
+      (when-not (= (get provisional' key)
+                   (get settlement' key))
+        (choreo-error
+         :settlement-correlation-mismatch
+         "Optimistic settlement does not correlate with the provisional trajectory."
+         {:key key
+          :provisional (get provisional' key)
+          :settlement (get settlement' key)})))
+    (get settlement' protocol/resolution-key)))
+
+;; =============================================================================
+;; Direct command choreography
+;; =============================================================================
+
+(defn command-choreography
+  "Build one operation-specific direct optimistic command choreography.
+
+   Required options:
+
+     :name
+       Semantic choreography name.
+
+     :operation
+       Public authoritative model operation, for example :request/claim.  This
+       becomes the actual Choreo :authoritative operation identity.
+
+   Optional role/action names exist for embedding into applications with a more
+   specific vocabulary; defaults remain generic and portable.
+
+   The browser must start with semantic-command-required-keys as input knowledge
+   (plus any optional command fields it intends to send).  Its first local
+   action must return exactly {provisional-value-key <protocol provisional>}.
+
+   The trusted authority action receives the communicated command facts and must
+   return exactly {settlement-value-key <protocol settlement>}.  The browser's
+   final local action validates provisional/settlement correlation and returns
+   exactly {resolution-value-key <generic resolution>}.
+
+   No DOM/snapshot/timer/continuity resource appears in this graph."
+  [options]
+  (let [{:keys [name
+                browser-role
+                authority-role
+                operation
+                derive-provisional-action
+                resolve-settlement-action]}
+        (normalize-command-options options)
+
+        terminal-state
+        (fn [resolution]
+          (keyword
+           "gesso.live.optimistic.terminal"
+           (clojure.core/name resolution)))
+
+        resolution-cases
+        (into {}
+              (map (fn [resolution]
+                     [resolution (terminal-state resolution)]))
+              (sort-by clojure.core/name direct-terminal-resolutions))
+
+        terminal-states
+        (into {}
+              (map (fn [resolution]
+                     [(terminal-state resolution)
+                      (choreo/return resolution)]))
+              (sort-by clojure.core/name direct-terminal-resolutions))]
+
+    (choreo/->choreography
+     {:name name
+      :initial :gesso.live.optimistic/derive-provisional
+      :states
+      (merge
+       {:gesso.live.optimistic/derive-provisional
+        (choreo/local
+         browser-role
+         derive-provisional-action
+         :gesso.live.optimistic/send-command
+         {:requires semantic-command-required-keys
+          :outputs #{provisional-value-key}})
+
+        :gesso.live.optimistic/send-command
+        (choreo/communicate
+         browser-role
+         authority-role
+         command-event
+         :gesso.live.optimistic/execute-authoritative
+         {:via :http
+          :required semantic-command-required-keys
+          :optional semantic-command-optional-keys
+          :correlation command-correlation-keys})
+
+        :gesso.live.optimistic/execute-authoritative
+        (choreo/authoritative
+         authority-role
+         operation
+         :gesso.live.optimistic/send-settlement
+         {:requires semantic-command-required-keys
+          :outputs #{settlement-value-key}})
+
+        :gesso.live.optimistic/send-settlement
+        (choreo/communicate
+         authority-role
+         browser-role
+         settlement-event
+         :gesso.live.optimistic/resolve-settlement
+         {:via :http
+          :required settlement-message-required-keys
+          :correlation command-correlation-keys})
+
+        :gesso.live.optimistic/resolve-settlement
+        (choreo/local
+         browser-role
+         resolve-settlement-action
+         :gesso.live.optimistic/branch-resolution
+         {:requires #{provisional-value-key
+                      settlement-value-key}
+          :outputs #{resolution-value-key}})
+
+        :gesso.live.optimistic/branch-resolution
+        (choreo/branch
+         browser-role
+         resolution-value-key
+         resolution-cases)}
+       terminal-states)})))
+
+(defn command-entry-knowledge
+  "Return the precise verifier entry-knowledge assumptions for a direct command
+   choreography built with options.  Only the browser initially knows the
+   semantic command facts; the authority learns them through communication."
+  [options]
+  (let [{:keys [browser-role]}
+        (normalize-command-options options)]
+    {browser-role semantic-command-required-keys}))
 
 #?(:clj
-   (def verified-optimistic-command
-     "Verified compiler representation of optimistic-command. Namespace loading
-      fails immediately if the built-in protocol violates choreography rules."
-     (verify/verify! optimistic-command)))
+   (defn verified-command
+     "Build and verify one operation-specific direct optimistic choreography."
+     [options]
+     (verify/verify!
+      (command-choreography options)
+      {:entry-knowledge
+       (command-entry-knowledge options)})))
 
 #?(:clj
-   (def browser-plan
-     "Projected browser plan used by JVM tests and compiler tooling. Production
-      CLJS should obtain the same data through browser-plan-form."
-     (project/project
-      verified-optimistic-command
-      browser-role)))
+   (defn command-plans
+     "Return role -> canonical ExecutablePlan for one verified direct optimistic
+      choreography."
+     [options]
+     (project/project-all
+      (verified-command options))))
 
 #?(:clj
-   (def server-plan
-     "Projected server plan consumed by the JVM optimistic adapter."
-     (project/project
-      verified-optimistic-command
-      server-role)))
+   (defn command-plan
+     "Return one canonical role-local ExecutablePlan for a direct optimistic
+      choreography."
+     [options role]
+     (let [role' (require-keyword! "Projected optimistic role" role)
+           plans (command-plans options)]
+       (or (get plans role')
+           (choreo-error
+            :unknown-role
+            "Requested role is not present in optimistic choreography."
+            {:role role'
+             :roles (set (keys plans))})))))
+
+;; =============================================================================
+;; Authoritative-reread supersession recovery
+;; =============================================================================
+
+(def ^:private supersession-option-keys
+  #{:name
+    :browser-role
+    :event
+    :authority
+    :observation
+    :resolve-supersession-action})
+
+(defn- normalize-supersession-options
+  [options]
+  (let [options'
+        (require-closed-options!
+         "Optimistic supersession choreography options"
+         options
+         supersession-option-keys)
+
+        {:keys [name
+                browser-role
+                event
+                authority
+                observation
+                resolve-supersession-action]
+         :or {browser-role default-browser-role
+              event default-authoritative-observed-event
+              resolve-supersession-action resolve-supersession-action}}
+        options']
+    {:name (require-keyword! "Supersession choreography :name" name)
+     :browser-role (require-keyword! "Supersession choreography :browser-role" browser-role)
+     :event (require-keyword! "Supersession choreography :event" event)
+     :authority (require-keyword! "Supersession choreography :authority" authority)
+     :observation (require-keyword! "Supersession choreography :observation" observation)
+     :resolve-supersession-action
+     (require-keyword!
+      "Supersession choreography :resolve-supersession-action"
+      resolve-supersession-action)}))
+
+(defn supersession-choreography
+  "Build one short browser recovery choreography for authoritative reread.
+
+   This choreography is intentionally separate from command-choreography.  A
+   browser that lost the direct settlement may later obtain current authority
+   through Live/refetch and resolve the old provisional trajectory without a
+   durable suspended server execution.
+
+   The trusted browser adapter supplies event data:
+
+     reread-authoritative-key  closed protocol-v3 authoritative observation
+     reread-basis-key          the same opaque authoritative basis
+
+   Choreo records those declared fields with authoritative-observation
+   provenance under the configured authority/observation scope.  The adapter
+   must validate that the nested protocol observation carries the same basis;
+   merely dispatching a browser event cannot manufacture authority."
+  [options]
+  (let [{:keys [name
+                browser-role
+                event
+                authority
+                observation
+                resolve-supersession-action]}
+        (normalize-supersession-options options)]
+    (choreo/->choreography
+     {:name name
+      :initial :gesso.live.optimistic/await-authoritative-reread
+      :states
+      {:gesso.live.optimistic/await-authoritative-reread
+       (choreo/await
+        browser-role
+        {event :gesso.live.optimistic/resolve-supersession}
+        {:event-contracts
+         {event
+          {:required #{reread-authoritative-key
+                       reread-basis-key}
+           :authoritative-observation
+           {:authority authority
+            :observation observation
+            :basis-key reread-basis-key}}}})
+
+       :gesso.live.optimistic/resolve-supersession
+       (choreo/local
+        browser-role
+        resolve-supersession-action
+        :gesso.live.optimistic/branch-supersession
+        {:requires #{provisional-value-key
+                     reread-authoritative-key
+                     reread-basis-key}
+         :outputs #{resolution-value-key}})
+
+       :gesso.live.optimistic/branch-supersession
+       (choreo/branch
+        browser-role
+        resolution-value-key
+        {:superseded :gesso.live.optimistic/return-superseded})
+
+       :gesso.live.optimistic/return-superseded
+       (choreo/return :superseded)}})))
+
+(defn supersession-entry-knowledge
+  "Return verifier entry knowledge for supersession recovery.  The browser
+   starts with the existing provisional value; the authoritative reread facts
+   are acquired only through the declared trusted observation event."
+  [options]
+  (let [{:keys [browser-role]}
+        (normalize-supersession-options options)]
+    {browser-role #{provisional-value-key}}))
+
+(defn authoritative-reread-data
+  "Validate one protocol-v3 authoritative observation and return the exact
+   semantic event data expected by supersession-choreography.
+
+   The basis is duplicated at the top level solely because Choreo's
+   authoritative-observation proof machinery needs an explicit semantic
+   :basis-key.  This helper guarantees the duplicate equals the nested protocol
+   observation basis."
+  [authoritative-observation]
+  (let [authoritative'
+        (protocol/authoritative
+         (dissoc authoritative-observation protocol/authority-key))]
+    {reread-authoritative-key authoritative'
+     reread-basis-key (get authoritative' protocol/basis-key)}))
 
 #?(:clj
-   (defmacro browser-plan-form
-     "Expand to the verified browser plan as literal data.
-
-      Requiring this macro from CLJS keeps verify/project compiler machinery on
-      the JVM side of compilation instead of making it reachable from the
-      browser runtime."
-     []
-     browser-plan))
-
-#?(:clj
-   (defmacro server-plan-form
-     "Expand to the verified server plan as literal data. Primarily useful for
-      compile-time assertions or generated adapters."
-     []
-     server-plan))
+   (defn verified-supersession
+     "Build and verify one authoritative-reread supersession recovery."
+     [options]
+     (verify/verify!
+      (supersession-choreography options)
+      {:entry-knowledge
+       (supersession-entry-knowledge options)})))
 
 #?(:clj
-   (defn explain
-     "Return compact compiler-facing information about the built-in optimistic
-      choreography and both endpoint projections."
-     []
-     {:choreography (choreo/explain optimistic-command)
-      :verification (verify/explain verified-optimistic-command)
-      :browser (project/explain browser-plan)
-      :server (project/explain server-plan)}))
+   (defn supersession-plan
+     "Return the browser ExecutablePlan for one verified supersession recovery."
+     [options]
+     (let [{:keys [browser-role]}
+           (normalize-supersession-options options)]
+       (project/project
+        (verified-supersession options)
+        browser-role))))
+
+;; =============================================================================
+;; Diagnostics
+;; =============================================================================
+
+#?(:clj
+   (defn explain-command
+     "Return compact compiler-facing diagnostics for a direct optimistic command
+      choreography without placing diagnostics in runtime semantics."
+     [options]
+     (let [verified (verified-command options)
+           plans (project/project-all verified)]
+       {:choreography (choreo/explain (:choreography verified))
+        :verification (verify/explain verified)
+        :plans (into {}
+                     (map (fn [[role plan]]
+                            [role (project/explain plan)]))
+                     plans)})))

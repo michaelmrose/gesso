@@ -648,6 +648,35 @@
              {:captured 7}]]
            @seen))))
 
+(deftest captured-box-freezes-restore-implementation-test
+  (let [seen (atom [])
+        rt (runtime)
+        root #js {}
+        target #js {}]
+    (continuity/register-box!
+     rt
+     :custom
+     {:capture (fn [_runtime _root _target _box]
+                 {:producer :a})
+      :restore (fn [_runtime _root _target _box state]
+                 (swap! seen conj [:a state]))})
+    (let [captured-a (continuity/capture-box
+                      rt root target {:type "custom"})]
+      (continuity/register-box!
+       rt
+       :custom
+       {:capture (fn [_runtime _root _target _box]
+                   {:producer :b})
+        :restore (fn [_runtime _root _target _box state]
+                   (swap! seen conj [:b state]))})
+      (let [captured-b (continuity/capture-box
+                        rt root target {:type "custom"})]
+        (continuity/restore-box! rt root target captured-a)
+        (continuity/restore-box! rt root target captured-b)
+        (is (= [[:a {:producer :a}]
+                [:b {:producer :b}]]
+               @seen))))))
+
 (deftest unknown-and-throwing-boxes-are-nonfatal-test
   (with-sandbox*
     (fn [root]
@@ -812,6 +841,35 @@
           (is (= 1 @seen))
           (is (= "" (.-minHeight (.-style root)))))))))
 
+(deftest height-lock-release-is-idempotent-and-non-clobbering-test
+  (let [style #js {:minHeight "12px"}
+        root #js {:style style
+                  :offsetHeight 80
+                  :getBoundingClientRect
+                  (fn []
+                    #js {:height 64})}
+        target #js {}
+        height-lock (continuity/lock-height! root target)]
+    (is (= {:height 80
+            :applied "80px"
+            :previous "12px"}
+           height-lock))
+    (is (= "80px" (.-minHeight style)))
+
+    (continuity/release-height-lock! root height-lock)
+    (is (= "12px" (.-minHeight style)))
+
+    ;; Releasing the same physical resource again must not reacquire ownership.
+    (continuity/release-height-lock! root height-lock)
+    (is (= "12px" (.-minHeight style)))
+
+    ;; If another browser owner changes min-height after capture, stale cleanup
+    ;; must not overwrite that newer physical state with the captured previous
+    ;; value.
+    (set! (.-minHeight style) "144px")
+    (continuity/release-height-lock! root height-lock)
+    (is (= "144px" (.-minHeight style)))))
+
 (deftest restore-invalid-or-disabled-resource-resolves-successfully-test
   (async done
     (with-sandbox*
@@ -916,6 +974,117 @@
                (is (= "captured" (.-value latest-input)))
                (is (not (.-isConnected initial-target)))
                (.remove sandbox-root)))))))))
+
+(deftest release-revokes-delayed-restore-before-any-late-mutation-test
+  (async done
+    (let [sandbox-root (sandbox)
+          frames (atom [])
+          diagnostics (atom [])
+          application-restores (atom [])
+          lifecycle-events (atom [])
+          rt (runtime
+              {:request-animation-frame!
+               (fn [f]
+                 (swap! frames conj f)
+                 (count @frames))
+               :on-diagnostic #(swap! diagnostics conj %)
+               :boxes
+               {:application
+                {:capture (fn [_runtime _root _target _box]
+                            {:value :captured-by-application})
+                 :restore (fn [_runtime _root _target _box state]
+                            (swap! application-restores conj state))}}})
+          {:keys [root target]}
+          (continuity-tree
+           sandbox-root
+           {:enabled true
+            :preserve {:inputs true}
+            :boxes [{:type "application"}]})
+          old-input (append! target (element "input" {:id "query"}))]
+      (set! (.-value old-input) "old-user-state")
+      (.addEventListener root "gesso:live-continuity:restored"
+                         (fn [_]
+                           (swap! lifecycle-events conj :restored)))
+      (.addEventListener root "gesso:live-continuity:released"
+                         (fn [_]
+                           (swap! lifecycle-events conj :released)))
+      (let [resource (continuity/capture!
+                      rt {:physical {:fragment-root root}})
+            new-target (replacement-target "continuity-target")
+            new-input (append! new-target (element "input" {:id "query"}))]
+        (set! (.-value new-input) "canonical-server-state")
+        (replace-target! target new-target)
+        (let [promise (continuity/restore! rt {:resource resource})]
+          ;; Restore has acquired its first layout callback but has not yet been
+          ;; granted final physical mutation authority.
+          (is (= 1 (count @frames)))
+          (is (= [] @application-restores))
+
+          ;; Semantic retirement releases the exact opaque resource. Any queued
+          ;; callback may still physically execute later, but it must now be
+          ;; unable to mutate either built-in continuity state or application-
+          ;; supplied continuity state.
+          (continuity/release! rt {:resource resource})
+          (is (= [:released] @lifecycle-events))
+
+          ;; Simulate a newer browser generation taking ownership after release.
+          ;; The old callback must not clobber this state when it finally runs.
+          (set! (.-value new-input) "newer-generation-state")
+
+          ((first @frames))
+          (is (= 2 (count @frames)))
+          ((second @frames))
+
+          (promise->done!
+           promise done
+           (fn [value]
+             (is (= true value))
+             (is (= "newer-generation-state" (.-value new-input)))
+             (is (= [] @application-restores))
+             (is (= [:released] @lifecycle-events))
+             (is (contains? (set (map :kind @diagnostics))
+                            :restore-suppressed-after-release))
+             (.remove sandbox-root))))))))
+
+(deftest restore-after-release-is-an-immediate-no-op-test
+  (async done
+    (let [sandbox-root (sandbox)
+          frames (atom [])
+          application-restores (atom 0)
+          rt (runtime
+              {:request-animation-frame!
+               (fn [f]
+                 (swap! frames conj f)
+                 (count @frames))
+               :boxes
+               {:application
+                {:capture (fn [& _] :captured)
+                 :restore (fn [& _]
+                            (swap! application-restores inc))}}})
+          {:keys [root target]}
+          (continuity-tree
+           sandbox-root
+           {:enabled true
+            :preserve {:inputs true}
+            :boxes [{:type "application"}]})
+          old-input (append! target (element "input" {:id "query"}))]
+      (set! (.-value old-input) "captured")
+      (let [resource (continuity/capture!
+                      rt {:physical {:fragment-root root}})
+            new-target (replacement-target "continuity-target")
+            new-input (append! new-target (element "input" {:id "query"}))]
+        (set! (.-value new-input) "canonical")
+        (replace-target! target new-target)
+        (continuity/release! rt {:resource resource})
+        (promise->done!
+         (continuity/restore! rt {:resource resource})
+         done
+         (fn [value]
+           (is (= true value))
+           (is (= 0 (count @frames)))
+           (is (= "canonical" (.-value new-input)))
+           (is (zero? @application-restores))
+           (.remove sandbox-root)))))))
 
 (deftest captured-and-restored-events-bracket-resource-lifecycle-test
   (async done

@@ -14,6 +14,8 @@
    - execution-private transitions cannot mutate another execution's slice;
    - authoritative installation advances only through the declared equality /
      explicit-progression classes;
+   - continuity completion/failure is browser-local: it cannot mutate
+     authoritative, fragment, execution, target, or timer semantics;
    - terminal completion revokes semantic resource ownership immediately;
    - adapter machine-boundary transitions refine the public portable Choreo
      machine operations they delegate to.
@@ -35,7 +37,7 @@
    [gesso.choreo.project :as project]
    [gesso.live.browser.adapter :as adapter]))
 
-(def proof-checker-version 1)
+(def proof-checker-version 2)
 (def fragment-exploration-depth 6)
 
 (def proof-classification
@@ -456,18 +458,57 @@
          :slot-id [:fragment/stale 1]
          :slot-generation (:next-generation state)}))]
 
+   [:continuity-failed-current
+    (fn [state]
+      (when-let [[slot-id slot] (first (:continuity state))]
+        {:event :continuity/failed
+         :slot-id slot-id
+         :slot-generation (:generation slot)
+         :reason :proof/restore-failed}))]
+
+   [:continuity-failed-stale
+    (fn [state]
+      (if-let [[slot-id _slot] (first (:continuity state))]
+        {:event :continuity/failed
+         :slot-id slot-id
+         :slot-generation (:next-generation state)
+         :reason :proof/stale-restore-failed}
+        {:event :continuity/failed
+         :slot-id [:fragment/stale 1]
+         :slot-generation (:next-generation state)
+         :reason :proof/stale-restore-failed}))]
+
    [:retire-fragment
     (fn [_state]
       {:event :fragment/retire
        :fragment-id proof-fragment-id
        :reason :proof/retire})]])
 
+(defn- continuity-event?
+  [event]
+  (contains? #{:continuity/completed :continuity/failed}
+             (:event event)))
+
+(defn- semantic-state-without-continuity
+  [state]
+  (dissoc state :continuity))
+
+(defn- effect-kinds
+  [effects]
+  (mapv first effects))
+
 (defn- fragment-proof-errors
-  [next-state effects]
+  [state event next-state effects]
   (let [fragment (adapter/fragment-state next-state proof-fragment-id)
         active-request-count (if (:inflight fragment) 1 0)
         queued-refresh-count (if (seq (:queued-requirements fragment)) 1 0)
-        refresh-effects (effects-of :fragment/refresh effects)]
+        refresh-effects (effects-of :fragment/refresh effects)
+        continuity? (continuity-event? event)
+        failure? (= :continuity/failed (:event event))
+        allowed-continuity-effects
+        (if failure?
+          #{:continuity/release :diagnostic/ignored}
+          #{:diagnostic/ignored})]
     (cond-> []
       (seq (adapter/invariant-errors next-state))
       (conj {:kind :adapter-invariant
@@ -488,7 +529,26 @@
 
       (> (count refresh-effects) 1)
       (conj {:kind :multiple-refresh-effects-in-one-transition
-             :effects refresh-effects}))))
+             :effects refresh-effects})
+
+      (and continuity?
+           (not= (semantic-state-without-continuity state)
+                 (semantic-state-without-continuity next-state)))
+      (conj {:kind :continuity-mutated-noncontinuity-semantics
+             :event event})
+
+      (and continuity?
+           (not-every? allowed-continuity-effects
+                       (effect-kinds effects)))
+      (conj {:kind :unexpected-continuity-effect
+             :event event
+             :effects effects})
+
+      (and failure?
+           (> (count (effects-of :continuity/release effects)) 1))
+      (conj {:kind :multiple-continuity-releases
+             :event event
+             :effects effects}))))
 
 (defn- explore-fragment-transition-system
   []
@@ -514,7 +574,7 @@
                           (let [[next-state effects]
                                 (adapter/step state event)
                                 errors
-                                (fragment-proof-errors next-state effects)]
+                                (fragment-proof-errors state event next-state effects)]
                             (swap! stats update :successful-transitions inc)
                             (if (seq errors)
                               (reset! failure
@@ -1113,7 +1173,7 @@
              (:error/kind data))))))
 
 (deftest proof-checker-classification-is-explicit-test
-  (is (= 1 proof-checker-version))
+  (is (= 2 proof-checker-version))
   (is (= :bounded-executable-transition-check
          proof-classification))
   (is (= 6 fragment-exploration-depth))

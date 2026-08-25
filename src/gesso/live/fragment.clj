@@ -680,12 +680,37 @@
 ;; Model-backed fragment adapters
 ;; -----------------------------------------------------------------------------
 
+(def ^:private unmanaged-runtime-fragment-refresh-option-keys
+  [:trigger :jitter-ms :jitter-delay-ms])
+
+(defn- reject-unmanaged-runtime-fragment-refresh-options!
+  [opts]
+  (let [unsupported
+        (into {}
+              (keep
+               (fn [k]
+                 (let [value (get opts k)]
+                   (when (some? value)
+                     [k value]))))
+              unmanaged-runtime-fragment-refresh-option-keys)]
+    (when (seq unsupported)
+      (throw
+       (ex-info
+        (str
+         "gesso.live model-backed fragments no longer accept direct HTMX "
+         "refresh trigger/jitter options. Refresh intent must enter the "
+         "browser adapter before HTMX requests are emitted.")
+        {:unsupported-options unsupported})))
+    opts))
+
 (defn- runtime-fragment-extra-options
-  "Generic passthrough options accepted by gesso.live.ui/->fragment.
+  "Generic managed-fragment passthrough options accepted by
+   gesso.live.ui/->fragment.
 
    These are intentionally domain-neutral. App-specific needs such as
-   {:target-attrs {:hx-include \"#some-form\"}} belong in the app layer; this
-   adapter merely preserves and forwards the caller's generic UI fragment opts.
+   {:root-attrs {:hx-include \"#some-form\"}} belong in the app layer; this
+   adapter merely preserves and forwards generic UI fragment opts that do not
+   create an independent refresh path.
 
    Client continuity is passed through here as runtime UI metadata, but the
    capture/restore mechanics belong to gesso.live.ui / gesso.live.htmx and the
@@ -696,9 +721,6 @@
                 :root-attrs
                 :target-attrs
                 :event
-                :trigger
-                :jitter-ms
-                :jitter-delay-ms
                 :client-continuity]))
 
 (defn- normalize-fragment-swap
@@ -719,18 +741,19 @@
      :fragment-url
      :stream-url
 
-   Generic UI passthrough opts:
+   Generic managed-fragment passthrough opts:
      :attrs
      :root-attrs
      :target-attrs
      :event
-     :trigger
-     :jitter-ms
-     :jitter-delay-ms
      :client-continuity
 
    :swap may be supplied by opts to override the compiled fragment descriptor's
    :swap value.
+
+   Direct refresh :trigger / jitter options are rejected. Adapter-managed
+   fragments obtain refresh intent through the browser adapter and only issue an
+   HTMX GET when that adapter emits gesso:live-refresh.
 
    Note: :request-policy and :consistency remain model metadata. They are not
    passed to ui/->fragment here. Client continuity is runtime UI metadata and is
@@ -739,6 +762,7 @@
                                      stream-url
                                      swap]
                               :as opts}]
+  (reject-unmanaged-runtime-fragment-refresh-options! opts)
   (when-not (model/present? fragment-url)
     (throw
      (ex-info

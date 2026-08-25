@@ -196,7 +196,8 @@
     [2 (gen/return :htmx/after-swap)]
     [2 (gen/return :htmx/after-request)]
     [2 (gen/return :http/failed)]
-    [2 (gen/return :continuity/completed)]]))
+    [2 (gen/return :continuity/completed)]
+    [2 (gen/return :continuity/failed)]]))
 
 (def operation-gen
   (gen/let [op operation-kind-gen
@@ -524,7 +525,17 @@
         {:event :continuity/completed
          :slot-id slot-id
          :slot-generation
-         (choose-generation state (:generation slot) stale?)}))))
+         (choose-generation state (:generation slot) stale?)})
+
+      :continuity/failed
+      (let [[slot-id slot]
+            (or (continuity-slot-for-fragment state fragment-id')
+                [[fragment-id' selected-request-generation] nil])]
+        {:event :continuity/failed
+         :slot-id slot-id
+         :slot-generation
+         (choose-generation state (:generation slot) stale?)
+         :reason :generated-continuity-failure}))))
 
 (defn- attempt-step
   [state event]

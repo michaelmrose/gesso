@@ -12,7 +12,7 @@
    - fragment render protection
    - app-facing XTDB2 consistency helpers
    - app-facing HTMX/UI helpers
-   - optimistic rendering/settlement facade
+   - protocol-v3 optimistic trusted-server facade
 
    It intentionally stays thin. The specialized namespaces still own their own
    behavior:
@@ -50,8 +50,8 @@
        owns Hiccup convenience helpers for live fragments and POST controls
 
      gesso.live.optimistic.server
-       owns the JVM-facing optimistic protocol-v2 rendering, settlement, and
-       projected server-command edge"
+       owns the trusted protocol-v3 optimistic command boundary, operation
+       registry, authority projection, and settlement-send preparation"
   (:require
    [gesso.live.consistency.xtdb :as live.xtdb]
    [gesso.live.dispatch :as dispatch]
@@ -632,101 +632,113 @@
 
 
 ;; -----------------------------------------------------------------------------
-;; Optimistic protocol-v2 facade
+;; Optimistic protocol-v3 trusted-server facade
 ;; -----------------------------------------------------------------------------
 
-(def ->optimistic
-  "Prepare one optimistic rendering descriptor.
+(def optimistic-operation
+  "Construct one trusted optimistic-operation registry entry.
 
-   Re-export of gesso.live.optimistic.server/->optimistic."
-  optimistic.server/->optimistic)
+   Re-export of gesso.live.optimistic.server/operation."
+  optimistic.server/operation)
 
-(def optimistic?
-  "Return true for a prepared optimistic protocol-v2 descriptor.
+(def optimistic-operation?
+  "Return true for a trusted optimistic-operation registry entry.
 
-   Re-export of gesso.live.optimistic.server/optimistic?."
-  optimistic.server/optimistic?)
+   Re-export of gesso.live.optimistic.server/operation?."
+  optimistic.server/operation?)
 
-(def canonical
-  "Mark one rooted Hiccup element explicitly authoritative for a semantic scope
-   and optional revision.
+(def optimistic-server
+  "Construct one trusted optimistic protocol-v3 server boundary.
 
-   Re-export of gesso.live.optimistic.server/canonical."
-  optimistic.server/canonical)
+   Re-export of gesso.live.optimistic.server/server."
+  optimistic.server/server)
 
-(def canonical-attrs
-  "Build explicit canonical protocol attrs for a semantic scope/revision.
+(def optimistic-server?
+  "Return true for a trusted optimistic protocol-v3 server boundary.
 
-   Prefer canonical when rendering a complete authoritative Hiccup root.
-   Re-export of gesso.live.optimistic.server/canonical-attrs."
-  optimistic.server/canonical-attrs)
+   Re-export of gesso.live.optimistic.server/server?."
+  optimistic.server/server?)
 
-(def request-execution-id
-  "Read the browser-generated optimistic execution id from request context.
+(def decode-optimistic-command
+  "Decode and validate one protocol-v3 optimistic command wire value.
 
-   Re-export of gesso.live.optimistic.server/request-execution-id."
-  optimistic.server/request-execution-id)
+   Re-export of gesso.live.optimistic.server/decode-command."
+  optimistic.server/decode-command)
 
-(def ->settlement
-  "Prepare one semantic optimistic settlement descriptor.
+(def normalize-optimistic-command
+  "Normalize and validate one protocol-v3 optimistic command value.
 
-   Re-export of gesso.live.optimistic.server/->settlement."
-  optimistic.server/->settlement)
+   Re-export of gesso.live.optimistic.server/normalize-command."
+  optimistic.server/normalize-command)
 
-(def settlement?
-  "Return true for a prepared optimistic protocol-v2 settlement.
+(def begin-optimistic-command
+  "Bind a validated command to trusted principal and operation state.
 
-   Re-export of gesso.live.optimistic.server/settlement?."
-  optimistic.server/settlement?)
+   Re-export of gesso.live.optimistic.server/begin-command."
+  optimistic.server/begin-command)
 
-(def settlement-for-request
-  "Prepare a settlement using the optimistic execution id carried by request ctx.
+(def optimistic-command-boundary?
+  "Return true for a trusted protocol-v3 command boundary.
 
-   Re-export of gesso.live.optimistic.server/settlement-for-request."
-  optimistic.server/settlement-for-request)
+   Re-export of gesso.live.optimistic.server/command-boundary?."
+  optimistic.server/command-boundary?)
 
-(def settlement-marker
-  "Render the inert semantic settlement marker.
+(def optimistic-operation-context
+  "Build the trusted context passed to a registered public model operation.
 
-   Normal response code should prefer with-settlement, which also marks the
-   authoritative root from the same settlement scope/revision.
-   Re-export of gesso.live.optimistic.server/settlement-marker."
-  optimistic.server/settlement-marker)
+   Re-export of gesso.live.optimistic.server/operation-context."
+  optimistic.server/operation-context)
 
-(def with-settlement
-  "Render a settlement marker plus canonical authoritative content.
+(def optimistic-settlement-from-result
+  "Construct a protocol-v3 settlement from a trusted model-operation result.
 
-   Re-export of gesso.live.optimistic.server/with-settlement."
-  optimistic.server/with-settlement)
+   Command and execution identities are copied from the trusted command
+   boundary; operation results cannot choose them.
+
+   Re-export of gesso.live.optimistic.server/settlement-from-result."
+  optimistic.server/settlement-from-result)
+
+(def prepare-optimistic-settlement-send
+  "Advance the trusted authority projection to its settlement-send boundary.
+
+   Re-export of gesso.live.optimistic.server/prepare-settlement-send."
+  optimistic.server/prepare-settlement-send)
+
+(def optimistic-prepared-send?
+  "Return true for a prepared optimistic settlement send.
+
+   Re-export of gesso.live.optimistic.server/prepared-send?."
+  optimistic.server/prepared-send?)
+
+(def complete-optimistic-send
+  "Complete a prepared optimistic settlement-send boundary after transport
+   handoff.
+
+   This completes only the projected Choreo send boundary. It does not classify
+   arbitrary HTTP, invalidation, or post-commit delivery failures as mutation
+   failure.
+
+   Re-export of gesso.live.optimistic.server/complete-settlement-send."
+  optimistic.server/complete-settlement-send)
+
+(def optimistic-completed-send?
+  "Return true for a completed optimistic settlement send.
+
+   Re-export of gesso.live.optimistic.server/completed-send?."
+  optimistic.server/completed-send?)
 
 (def run-optimistic-command
-  "Run one optimistic command through the projected server endpoint and the
-   application Biff FX machine.
-
-   Returns a prepared optimistic server send. Render it with
-   optimistic-response-hiccup, then call complete-optimistic-send when the HTTP
-   settlement response has been handed off.
+  "Run one validated protocol-v3 optimistic command through the trusted server
+   boundary and registered public model operation.
 
    Re-export of gesso.live.optimistic.server/run-command."
   optimistic.server/run-command)
 
-(def optimistic-response-hiccup
-  "Render the settlement marker and authoritative canonical root for a prepared
-   optimistic server send. Additional nodes may be appended after the canonical
-   root.
+(def run-optimistic-wire-command
+  "Decode one command wire value and run it through the trusted server boundary.
 
-   Re-export of gesso.live.optimistic.server/prepared-response-hiccup."
-  optimistic.server/prepared-response-hiccup)
-
-(def complete-optimistic-send
-  "Mark a prepared optimistic server settlement send complete after the HTTP
-   response has been handed off.
-
-   This completes the projected choreography send boundary; it does not own the
-   broader Ring/Aleph response lifecycle.
-
-   Re-export of gesso.live.optimistic.server/complete-settlement-send."
-  optimistic.server/complete-settlement-send)
+   Re-export of gesso.live.optimistic.server/run-wire-command."
+  optimistic.server/run-wire-command)
 
 ;; -----------------------------------------------------------------------------
 ;; Model-backed fragment UI facade
