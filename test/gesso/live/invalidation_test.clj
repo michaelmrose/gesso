@@ -1,7 +1,8 @@
 (ns gesso.live.invalidation-test
   (:require
    [clojure.test :refer [deftest is]]
-   [gesso.live.invalidation :as invalidation]))
+   [gesso.live.invalidation :as invalidation]
+   [gesso.live.progression :as progression]))
 
 ;; -----------------------------------------------------------------------------
 ;; Fixtures
@@ -53,6 +54,23 @@
 
 (def ctx
   {:app/name :test})
+
+(def basis-a
+  {:source :test
+   :tx-id "41"})
+
+(def basis-b
+  {:source :test
+   :tx-id "42"})
+
+(def progression-a
+  (progression/requirement basis-a))
+
+(def progression-b
+  (progression/requirement basis-b))
+
+(def progressing-request-change
+  (assoc request-change :progression progression-a))
 
 ;; -----------------------------------------------------------------------------
 ;; Rule compilation
@@ -189,6 +207,115 @@
     (is (= rule (:rule (ex-data ex))))
     (is (= request-change (:change (ex-data ex))))
     (is (= :gesso.live/invalidation (:schema-key (ex-data ex))))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative progression preservation
+;; -----------------------------------------------------------------------------
+
+(deftest expand-attaches-primary-progression-to-every-derived-invalidation-test
+  (let [result (invalidation/expand [request-rule] ctx progressing-request-change)]
+    (is (= [(assoc request-invalidation :progression progression-a)
+            (assoc store-invalidation :progression progression-a)]
+           result))
+    (is (every? #(= progression-a (:progression %)) result))))
+
+(deftest expand-allows-rule-to-repeat-the-exact-primary-progression-test
+  (let [rule {:when-topic :request
+              :expand (fn [_ctx _change]
+                        [(assoc store-invalidation
+                                :progression progression-a)])}
+        result (invalidation/expand [rule] ctx progressing-request-change)]
+    (is (= [(assoc store-invalidation :progression progression-a)]
+           result))))
+
+(deftest expand-rejects-rule-that-invents-progression-test
+  (let [rule {:when-topic :request
+              :expand (fn [_ctx _change]
+                        [(assoc store-invalidation
+                                :progression progression-a)])}
+        ex (try
+             (invalidation/expand [rule] ctx request-change)
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               e))]
+    (is (some? ex))
+    (is (= :invented-progression (:reason (ex-data ex))))
+    (is (= progression-a (:progression (ex-data ex))))))
+
+(deftest validate-false-does-not-allow-rule-to-invent-progression-test
+  (let [rule {:when-topic :request
+              :expand (fn [_ctx _change]
+                        [(assoc store-invalidation
+                                :progression progression-a)])}
+        ex (try
+             (invalidation/expand [rule] ctx request-change
+                                  {:validate? false})
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               e))]
+    (is (some? ex))
+    (is (= :invented-progression (:reason (ex-data ex))))))
+
+(deftest expand-rejects-rule-that-replaces-primary-progression-test
+  (let [rule {:when-topic :request
+              :expand (fn [_ctx _change]
+                        [(assoc store-invalidation
+                                :progression progression-b)])}
+        ex (try
+             (invalidation/expand [rule] ctx progressing-request-change)
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               e))]
+    (is (some? ex))
+    (is (= :replaced-progression (:reason (ex-data ex))))
+    (is (= progression-a (:expected-progression (ex-data ex))))
+    (is (= progression-b (:actual-progression (ex-data ex))))))
+
+(deftest validate-false-does-not-allow-rule-to-replace-primary-progression-test
+  (let [rule {:when-topic :request
+              :expand (fn [_ctx _change]
+                        [(assoc store-invalidation
+                                :progression progression-b)])}
+        ex (try
+             (invalidation/expand [rule] ctx progressing-request-change
+                                  {:validate? false})
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               e))]
+    (is (some? ex))
+    (is (= :replaced-progression (:reason (ex-data ex))))))
+
+(deftest progressing-change-cannot-expand-to-non-map-even-with-validation-disabled-test
+  (let [rule {:when-topic :request
+              :expand (fn [_ctx _change]
+                        [42])}
+        ex (try
+             (invalidation/expand [rule] ctx progressing-request-change
+                                  {:validate? false})
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               e))]
+    (is (some? ex))
+    (is (= :cannot-preserve-primary-progression
+           (:reason (ex-data ex))))))
+
+(deftest unmatched-keep-preserves-primary-progression-test
+  (let [result (invalidation/expand [] ctx progressing-request-change)]
+    (is (= [progressing-request-change] result))))
+
+(deftest expand-many-does-not-collapse-distinct-progression-requirements-test
+  (let [rule {:when-topic :request
+              :expand (fn [_ctx _change]
+                        [store-invalidation])}
+        change-a (assoc request-change :progression progression-a)
+        change-b (assoc request-change :id "req-2"
+                        :progression progression-b)
+        result (invalidation/expand-many [rule] ctx [change-a change-b])]
+    (is (= [(assoc store-invalidation :progression progression-a)
+            (assoc store-invalidation :progression progression-b)]
+           result))
+    (is (= #{progression-a progression-b}
+           (set (map :progression result))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Unmatched changes

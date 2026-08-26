@@ -1,6 +1,8 @@
 (ns gesso.live.transport.sse-test
   (:require
-   [clojure.test :refer [deftest is]]
+   [clojure.edn :as edn]
+   [clojure.test :refer [deftest is testing]]
+   [gesso.live.progression :as progression]
    [gesso.live.transport.sse :as sse]
    [manifold.stream :as s]
    [missionary.core :as m]))
@@ -19,6 +21,21 @@
 (def live-event
   {:event "live-update"
    :invalidation request-invalidation})
+
+(def progression-basis
+  {:authority :xtdb
+   :database "xtdb"
+   :tx-id "42"
+   :snapshot-token "opaque-snapshot-token"})
+
+(def progression-requirement
+  (progression/requirement progression-basis))
+
+(def progression-live-event
+  {:event "live-update"
+   :progression progression-requirement
+   :invalidation (assoc request-invalidation
+                        :progression progression-requirement)})
 
 (def client-oob-event
   {:event :client-oob
@@ -192,6 +209,73 @@
        clojure.lang.ExceptionInfo
        #"Invalid gesso.live value"
        (sse/live-event-frame {:event "live-update"}))))
+
+(deftest live-event-payload-encodes-progression-at-transport-boundary-test
+  (let [wire (progression/requirement->wire progression-requirement)
+        payload (sse/live-event-payload progression-live-event)]
+    (is (= wire (:progression payload)))
+    (is (= wire (get-in payload [:invalidation :progression])))
+    (is (= request-invalidation
+           (dissoc (:invalidation payload) :progression)))
+    (is (not (progression/requirement? (:progression payload))))
+    (is (= progression-requirement
+           (progression/wire->requirement (:progression payload))))
+    (is (= progression-requirement
+           (progression/wire->requirement
+            (get-in payload [:invalidation :progression]))))))
+
+(deftest live-event-payload-does-not-mutate-internal-live-event-test
+  (let [before progression-live-event]
+    (sse/live-event-payload progression-live-event)
+    (is (= before progression-live-event))
+    (is (progression/requirement? (:progression progression-live-event)))
+    (is (progression/requirement?
+         (get-in progression-live-event [:invalidation :progression])))))
+
+(deftest live-event-frame-custom-encoder-receives-versioned-progression-wire-test
+  (let [seen (atom nil)
+        wire (progression/requirement->wire progression-requirement)
+        frame (sse/live-event-frame
+               progression-live-event
+               {:encoder (fn [payload]
+                           (reset! seen payload)
+                           "encoded")})]
+    (is (= "event: live-update\ndata: encoded\n\n" frame))
+    (is (= wire (:progression @seen)))
+    (is (= wire (get-in @seen [:invalidation :progression])))
+    (is (= progression-requirement
+           (progression/wire->requirement (:progression @seen))))))
+
+(deftest default-edn-frame-carries-round-trippable-progression-wire-test
+  (let [frame (sse/live-event-frame progression-live-event)
+        data-line (->> (clojure.string/split-lines frame)
+                       (filter #(clojure.string/starts-with? % "data: "))
+                       first)
+        payload (edn/read-string (subs data-line (count "data: ")))]
+    (is (= "event: live-update"
+           (first (clojure.string/split-lines frame))))
+    (is (= progression-requirement
+           (progression/wire->requirement (:progression payload))))
+    (is (= progression-requirement
+           (progression/wire->requirement
+            (get-in payload [:invalidation :progression]))))))
+
+(deftest live-event-frame-rejects-wire-progression-as-internal-state-test
+  (let [wire (progression/requirement->wire progression-requirement)]
+    (testing "top-level wire form cannot bypass the internal normalized schema"
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Invalid gesso.live value"
+           (sse/live-event-frame
+            (assoc progression-live-event :progression wire)))))
+    (testing "nested wire form cannot bypass the internal normalized schema"
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Invalid gesso.live value"
+           (sse/live-event-frame
+            (assoc-in progression-live-event
+                      [:invalidation :progression]
+                      wire)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Flow/frame transformation

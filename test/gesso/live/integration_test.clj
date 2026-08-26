@@ -6,11 +6,14 @@
    [gesso.live.flow :as flow]
    [gesso.live.fragment :as fragment]
    [gesso.live.invalidation :as invalidation]
+   [gesso.live.progression :as progression]
    [gesso.live.source :as source]
    [gesso.live.core :as live]
    [manifold.stream :as s]
    [gesso.live.transport.sse :as sse]
-   [missionary.core :as m]))
+   [missionary.core :as m])
+  (:import
+   [java.time Instant]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
@@ -1191,6 +1194,7 @@
 (deftest xtdb-write-consistency-feeds-live-wakeup-and-fragment-key-test
   (let [ctx {:biff/conn :stale-request-conn
              :biff/node :shared-node}
+        system-time (Instant/parse "2026-08-25T12:00:42Z")
         system (live/create {:rules (request-rules)
                              :dispatch-options {:threads 1
                                                 :queue-size 8
@@ -1209,10 +1213,13 @@
         (fn [connectable tx-ops opts]
           (reset! seen-tx [connectable tx-ops opts])
           {:tx-id 42
-           :system-time :system-time-42})
+           :system-time system-time})
         (fn []
-          (let [{:keys [consistency] :as tx-result}
+          (let [{:keys [consistency progression] :as tx-result}
                 (xtdb-live/execute-tx-from! ctx sample-xtdb-tx)
+
+                required-basis
+                (first (:bases progression))
 
                 key
                 (request-panel-key-from-consistency consistency)]
@@ -1220,12 +1227,27 @@
             (is (= [:stale-request-conn sample-xtdb-tx {}]
                    @seen-tx))
 
-            (is (= {:tx-result {:tx-id 42
-                                :system-time :system-time-42}
-                    :consistency {:tx-id 42
-                                  :system-time :system-time-42
-                                  :snapshot-time :system-time-42}}
-                   tx-result))
+            (is (= {:tx-id 42
+                    :system-time system-time}
+                   (:tx-result tx-result)))
+
+            (is (= {:tx-id 42
+                    :system-time system-time
+                    :snapshot-time system-time}
+                   consistency))
+
+            ;; The low-level XTDB stub must model a real execute-tx result.
+            ;; Complete committed metadata now also establishes a portable
+            ;; authoritative progression requirement.
+            (is (progression/requirement? progression))
+            (is (= 1 (count (:bases progression))))
+            (is (xtdb-live/xtdb-basis? required-basis))
+            (is (= 42
+                   (xtdb-live/basis-tx-id required-basis)))
+            (is (= "xtdb"
+                   (xtdb-live/basis-database required-basis)))
+            (is (= system-time
+                   (xtdb-live/basis-system-time required-basis)))
 
             (live/submit-expanded! system ctx request-change)
 

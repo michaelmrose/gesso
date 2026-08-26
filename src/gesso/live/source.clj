@@ -23,9 +23,12 @@
    Source-level coalescing happens before fanout when :coalesce-window-ms is a
    positive integer. The source uses leading-edge + trailing-edge per-scope
    throttling: the first invalidation for a scope is delivered immediately,
-   repeated invalidations during the cooldown are collapsed to the latest value,
-   and one trailing invalidation is delivered when the cooldown expires."
+   repeated invalidations during the cooldown are collapsed to the latest
+   descriptive value while their authoritative progression requirements are
+   composed conservatively, and one trailing invalidation is delivered when the
+   cooldown expires."
   (:require
+   [gesso.live.progression :as progression]
    [gesso.live.schema :as schema]
    [manifold.deferred :as d]
    [manifold.stream :as s])
@@ -107,6 +110,29 @@
 (defn- validate-invalidation!
   [invalidation]
   (schema/validate-invalidation! invalidation))
+
+(defn- coalesce-pending-invalidation
+  "Collapse two already-validated invalidations for the same source scope.
+
+   The newer invalidation owns ordinary descriptive payload fields because source
+   coalescing has historically been latest-value for those fields. Authoritative
+   progression is different: it is a refresh requirement, so dropping an older
+   distinct requirement would weaken the eventual trailing wakeup. Compose the
+   two optional requirements conservatively and attach the result to the newer
+   invalidation.
+
+   This function intentionally does not compare opaque bases or use arrival order
+   as authority ordering; gesso.live.progression/compose is orderless set union."
+  [pending incoming]
+  (let [requirement
+        (progression/compose (:progression pending)
+                             (:progression incoming))]
+    (cond-> incoming
+      requirement
+      (assoc :progression requirement)
+
+      (nil? requirement)
+      (dissoc :progression))))
 
 (defn scope-key
   "Return the default source routing/coalescing key for a subscription or
@@ -317,9 +343,10 @@
        Optional positive integer. When set, source delivery uses leading-edge +
        trailing-edge per-scope throttling. The first invalidation for a scope is
        delivered immediately. Repeated invalidations for that scope during the
-       cooldown window are suppressed and collapsed to the latest pending value.
-       If anything changed during the cooldown, one trailing invalidation is
-       delivered when the window expires.
+       cooldown window are suppressed and collapsed to the latest pending
+       descriptive value while progression requirements are composed. If anything
+       changed during the cooldown, one trailing invalidation is delivered when
+       the window expires.
 
        nil or 0 disables source-level coalescing/throttling.
 
@@ -559,7 +586,12 @@
           (if (nil? (.putIfAbsent ^ConcurrentHashMap (:cooldowns source) k Boolean/TRUE))
             :leading
             (do
-              (.put ^ConcurrentHashMap (:pending source) k invalidation)
+              (let [pending-map ^ConcurrentHashMap (:pending source)
+                    pending (.get pending-map k)
+                    coalesced (if pending
+                                (coalesce-pending-invalidation pending invalidation)
+                                invalidation)]
+                (.put pending-map k coalesced))
               :suppressed)))]
     (case action
       :leading
@@ -602,8 +634,9 @@
    With :coalesce-window-ms, delivery uses leading-edge + trailing-edge
    per-scope throttling. The first invalidation for a scope is delivered
    immediately. Later invalidations for that scope during the cooldown window
-   are suppressed and collapsed to the latest value; one trailing fanout is
-   delivered when the cooldown expires if anything changed.
+   are suppressed and collapsed to the latest descriptive value while
+   authoritative progression requirements are composed conservatively; one
+   trailing fanout is delivered when the cooldown expires if anything changed.
 
    Manifold put! is asynchronous. The returned :attempted count means the source
    attempted to put the invalidation onto open consumer streams. It does not

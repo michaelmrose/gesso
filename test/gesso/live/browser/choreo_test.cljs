@@ -84,6 +84,12 @@
   [runtime]
   (empty? (adapter/invariant-errors (choreo/state runtime))))
 
+(defn- incompatible-browser-plan
+  [choreography]
+  (assoc (project/project choreography :browser)
+         :gesso.choreo/version
+         (inc project/executable-plan-version)))
+
 ;; =============================================================================
 ;; Identity / construction / ownership
 ;; =============================================================================
@@ -531,6 +537,172 @@
                (browser-execution (await-once))
                {:metadata {}})))))
     (is (= #{} (choreo/active-execution-ids runtime)))))
+
+
+(deftest incompatible-plan-retires-before-authoritative-recovery-test
+  (let [seen (atom nil)
+        runtime (choreo/create (shell/create))
+        _
+        (choreo/set-incompatible-plan-recovery-handler!
+         runtime
+         (fn [context]
+           (reset! seen
+                   {:context context
+                    :active? (choreo/active? runtime :execution/stale)
+                    :execution-ref (choreo/execution-ref runtime :execution/stale)})
+           :reconstructed))
+        _
+        (choreo/start-execution!
+         runtime
+         :execution/stale
+         (browser-execution (await-once)))
+        stale-ref (choreo/execution-ref runtime :execution/stale)
+        stale-plan (incompatible-browser-plan (await-once))
+        result (choreo/start-plan! runtime :execution/stale stale-plan)]
+    (is (choreo/execution-ref? stale-ref))
+    (is (= :incompatible-plan (:status result)))
+    (is (= :retired (get-in result [:retirement :status])))
+    (is (= stale-ref (get-in result [:retirement :execution-ref])))
+    (is (= :reconstructed (:recovery-result result)))
+    (is (= project/incompatible-executable-plan-status
+           (get-in result [:format-status :status])))
+    (is (= :incompatible-plan (get-in @seen [:context :reason])))
+    (is (= :execution/stale (get-in @seen [:context :execution-id])))
+    (is (= stale-ref (get-in @seen [:context :retirement :execution-ref])))
+    (is (false? (:active? @seen)))
+    (is (nil? (:execution-ref @seen)))
+    (is (false? (choreo/active? runtime :execution/stale)))
+    (is (invariant-clean? runtime))))
+
+(deftest malformed-plan-remains-hard-error-and-does-not-retire-current-generation-test
+  (let [recoveries (atom [])
+        runtime
+        (choreo/create
+         (shell/create)
+         {:recover-incompatible-plan #(swap! recoveries conj %)})
+        _
+        (choreo/start-execution!
+         runtime
+         :execution/malformed
+         (browser-execution (await-once)))
+        active-ref (choreo/execution-ref runtime :execution/malformed)
+        malformed-plan
+        (assoc (project/project (await-once) :browser)
+               :diagnostic-only
+               true)
+        data
+        (thrown-data
+         #(choreo/start-plan!
+           runtime
+           :execution/malformed
+           malformed-plan))]
+    (is (= :invalid-plan (:error/kind data)))
+    (is (= project/invalid-executable-plan-status
+           (get-in data [:format-status :status])))
+    (is (= malformed-plan (:plan data)))
+    (is (empty? @recoveries))
+    (is (= active-ref (choreo/execution-ref runtime :execution/malformed)))
+    (is (choreo/active? runtime :execution/malformed))
+    (is (invariant-clean? runtime))))
+
+(deftest incompatible-plan-recovery-failure-cannot-restore-retired-generation-test
+  (let [cause (ex-info "recovery failed" {:test/cause true})
+        recovery-context (atom nil)
+        runtime
+        (choreo/create
+         (shell/create)
+         {:recover-incompatible-plan
+          (fn [context]
+            (reset! recovery-context context)
+            (throw cause))})
+        _
+        (choreo/start-execution!
+         runtime
+         :execution/recovery-failure
+         (browser-execution (await-once)))
+        old-ref (choreo/execution-ref runtime :execution/recovery-failure)
+        error
+        (thrown
+         #(choreo/start-plan!
+           runtime
+           :execution/recovery-failure
+           (incompatible-browser-plan (await-once))))
+        data (ex-data error)]
+    (is (= :incompatible-plan-recovery-failed (:error/kind data)))
+    (is (identical? cause (ex-cause error)))
+    (is (= :retired (get-in data [:retirement :status])))
+    (is (= old-ref (get-in data [:retirement :execution-ref])))
+    (is (= :incompatible-plan (:reason @recovery-context)))
+    (is (false? (choreo/active? runtime :execution/recovery-failure)))
+    (is (nil? (choreo/execution-ref runtime :execution/recovery-failure)))
+    (is (invariant-clean? runtime))))
+
+(deftest incompatible-plan-recovery-proceeds-after-best-effort-cleanup-failure-test
+  (let [recovered (atom nil)
+        physical-errors (atom [])
+        shell-runtime
+        (shell/create
+         {:on-error #(swap! physical-errors conj %)
+          :set-timeout! (fn [_callback _delay-ms] :timer/physical)
+          :clear-timeout!
+          (fn [_handle]
+            (throw (ex-info "cleanup failed" {:test/cleanup true})))})
+        runtime (choreo/create shell-runtime)
+        _
+        (choreo/set-incompatible-plan-recovery-handler!
+         runtime
+         (fn [context]
+           (reset! recovered
+                   {:context context
+                    :active? (choreo/active? runtime :execution/cleanup-failure)})
+           :recovered))
+        start
+        (choreo/start-execution!
+         runtime
+         :execution/cleanup-failure
+         (browser-execution (await-timeout)))
+        ref (:execution-ref start)
+        envelope (machine/environment-event :browser :browser/timeout)
+        _ (choreo/schedule! runtime ref :timer/stale 100 envelope)
+        result
+        (choreo/start-plan!
+         runtime
+         :execution/cleanup-failure
+         (incompatible-browser-plan (await-timeout)))]
+    (is (= :incompatible-plan (:status result)))
+    ;; shell owns physical timer cleanup and reports clearTimeout failure
+    ;; diagnostically instead of rethrowing it through semantic dispatch.
+    (is (= :retired (get-in result [:retirement :status])))
+    (is (= :timer-cancel-failed (:phase (last @physical-errors))))
+    (is (= :timer/cancel (:effect (last @physical-errors))))
+    (is (= :recovered (:recovery-result result)))
+    (is (false? (:active? @recovered)))
+    (is (false? (choreo/active? runtime :execution/cleanup-failure)))
+    (is (nil? (choreo/execution-ref runtime :execution/cleanup-failure)))
+    (is (invariant-clean? runtime))))
+
+(deftest nil-incompatible-plan-recovery-handler-restores-conservative-default-test
+  ;; The production default requests a full-page reload when a browser location
+  ;; exists. The required Node host intentionally has no browser location, so we
+  ;; can exercise the same default handler without navigating the Chromium test
+  ;; page. Real reload behavior belongs to the eventual real-browser/HTTP harness.
+  (when (exists? js/process)
+    (let [runtime
+          (choreo/create
+           (shell/create)
+           {:recover-incompatible-plan (fn [_] :custom)})]
+      (is (true?
+           (choreo/set-incompatible-plan-recovery-handler! runtime nil)))
+      (let [result
+            (choreo/start-plan!
+             runtime
+             :execution/default-recovery
+             (incompatible-browser-plan (await-once)))]
+        (is (= :incompatible-plan (:status result)))
+        (is (= :not-active (get-in result [:retirement :status])))
+        (is (= :reload-unavailable (:recovery-result result)))
+        (is (false? (choreo/active? runtime :execution/default-recovery)))
+        (is (invariant-clean? runtime))))))
 
 (deftest retire-submits-generation-bound-retirement-test
   (let [runtime (choreo/create (shell/create))

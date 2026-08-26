@@ -2,19 +2,21 @@
   "Composition-root tests for gesso.live.browser.runtime.
 
    The runtime namespace is intentionally thin: it composes one Core, one Choreo
-   realization, and optionally one protocol-v3 optimistic realization over the
-   exact same shell/AdapterState. It owns aggregate lifecycle only and must not
+   realization, optionally one protocol-v3 optimistic realization, and optionally
+   one optimistic HTMX transport bridge over the exact same Core/Choreo/shell.
+   It owns aggregate lifecycle only and must not
    create a competing semantic state machine.
 
    These tests concentrate on composition and lifecycle properties:
 
    - one shared shell and AdapterState owner;
    - optional optimism attaches to that exact Choreo runtime and shell;
+   - optional optimistic HTMX attaches to the exact Core, optimism, Choreo, and shell;
    - created/started/stopped invariant shapes;
    - exactly-once document-listener ownership;
-   - exact ownership of Choreo and optimistic physical handler/action slots;
+   - exact ownership of Choreo/optimistic handler slots and bridge observers/wrappers;
    - fail-closed detection of removed or replaced integration handlers;
-   - semantic shell shutdown before optimistic/Choreo physical detachment;
+   - semantic shell shutdown before bridge/optimistic/Choreo physical detachment;
    - permanent retirement after stop or failed start;
    - delegation through the shared Core/adapter path;
    - host-resource-free diagnostics;
@@ -30,6 +32,7 @@
    [gesso.live.browser.choreo :as choreo]
    [gesso.live.browser.core :as core]
    [gesso.live.browser.optimistic :as optimistic]
+   [gesso.live.browser.optimistic-htmx :as optimistic-htmx]
    [gesso.live.browser.runtime :as runtime]
    [gesso.live.browser.shell :as shell]
    [gesso.live.optimistic.choreo :as optimistic-choreo]))
@@ -185,7 +188,8 @@
                  document-options
                  core-options
                  choreo-options
-                 optimistic-options]}
+                 optimistic-options
+                 optimistic-htmx-options]}
          options
 
          document-fixture
@@ -208,7 +212,10 @@
            (assoc :choreo-options choreo-options)
 
            (contains? options :optimistic-options)
-           (assoc :optimistic-options optimistic-options))
+           (assoc :optimistic-options optimistic-options)
+
+           (contains? options :optimistic-htmx-options)
+           (assoc :optimistic-htmx-options optimistic-htmx-options))
 
          composed-runtime
          (runtime/create create-options)]
@@ -223,6 +230,24 @@
    (fixture
     {:optimistic-options
      (default-optimistic-options overrides)})))
+
+(defn- default-optimistic-htmx-options
+  ([]
+   (default-optimistic-htmx-options nil))
+  ([overrides]
+   (merge
+    {:plan-for (fn [_] nil)}
+    overrides)))
+
+(defn- optimistic-htmx-fixture
+  ([]
+   (optimistic-htmx-fixture nil))
+  ([bridge-overrides]
+   (fixture
+    {:optimistic-options
+     (default-optimistic-options)
+     :optimistic-htmx-options
+     (default-optimistic-htmx-options bridge-overrides)})))
 
 (defn- listener-names
   [registrations]
@@ -267,6 +292,25 @@
        error))
    (runtime/invariant-errors composed-runtime)))
 
+(defn- optimistic-htmx-observer-ownership-error
+  [composed-runtime event-name]
+  (some
+   (fn [error]
+     (when
+      (and
+       (= :optimistic-htmx-observer-ownership
+          (:invariant error))
+       (= event-name
+          (:event-name error)))
+       error))
+   (runtime/invariant-errors composed-runtime)))
+
+(defn- invariant-error
+  [composed-runtime invariant]
+  (some
+   #(when (= invariant (:invariant %)) %)
+   (runtime/invariant-errors composed-runtime)))
+
 (def expected-listener-names
   (mapv first core/listener-specs))
 
@@ -294,7 +338,7 @@
 
 (deftest runtime-identity-test
   (let [{:keys [runtime]} (fixture)]
-    (is (= "1.2.0-dev" runtime/runtime-version))
+    (is (= "1.3.0-dev" runtime/runtime-version))
     (is (= :gesso.live.browser.runtime/runtime
            runtime/runtime-type))
     (is (runtime/runtime? runtime))
@@ -303,6 +347,7 @@
     (is (false? (runtime/started? runtime)))
     (is (false? (runtime/stopped? runtime)))
     (is (nil? (runtime/optimistic-runtime runtime)))
+    (is (nil? (runtime/optimistic-htmx-runtime runtime)))
     (runtime/stop! runtime)))
 
 (deftest create-composes-one-exact-shared-shell-test
@@ -347,6 +392,32 @@
     (is (runtime/invariant-clean? runtime))
     (runtime/stop! runtime)))
 
+(deftest create-composes-optimistic-htmx-on-the-exact-existing-layers-test
+  (let [{:keys [runtime]} (optimistic-htmx-fixture)
+        core-runtime (runtime/core-runtime runtime)
+        choreo-runtime (runtime/choreo-runtime runtime)
+        optimistic-runtime (runtime/optimistic-runtime runtime)
+        bridge-runtime (runtime/optimistic-htmx-runtime runtime)
+        shared-shell (runtime/shell-runtime runtime)]
+    (is (optimistic-htmx/runtime? bridge-runtime))
+    (is (identical? core-runtime
+                    (optimistic-htmx/core-runtime bridge-runtime)))
+    (is (identical? optimistic-runtime
+                    (optimistic-htmx/optimistic-runtime bridge-runtime)))
+    (is (identical? choreo-runtime
+                    (optimistic-htmx/choreo-runtime bridge-runtime)))
+    (is (identical? shared-shell
+                    (optimistic/shell-runtime optimistic-runtime)))
+    (is (= (set optimistic-htmx/observed-events)
+           (:observed-events
+            (optimistic-htmx/diagnostics bridge-runtime))))
+    (is (identical? @(:send-payload-wrapper bridge-runtime)
+                    (choreo/send-payload-handler choreo-runtime)))
+    (is (identical? @(:transport-wrapper bridge-runtime)
+                    (choreo/transport-handler choreo-runtime)))
+    (is (runtime/invariant-clean? runtime))
+    (runtime/stop! runtime)))
+
 (deftest create-forwards-physical-configuration-without-adding-semantic-state-test
   (let [local-handler (fn [_] {:value :ok})
         {:keys [runtime]}
@@ -355,7 +426,9 @@
           {:local-actions
            {:browser/work local-handler}}
           :optimistic-options
-          (default-optimistic-options)})
+          (default-optimistic-options)
+          :optimistic-htmx-options
+          (default-optimistic-htmx-options)})
         diagnostics (runtime/diagnostics runtime)]
     (is (= #{:browser/work
              optimistic-choreo/derive-provisional-action
@@ -382,7 +455,14 @@
   (is (= :invalid-map
          (error-kind #(runtime/create {:choreo-options [:not :a-map]}))))
   (is (= :invalid-map
-         (error-kind #(runtime/create {:optimistic-options [:not :a-map]})))))
+         (error-kind #(runtime/create {:optimistic-options [:not :a-map]}))))
+  (is (= :invalid-map
+         (error-kind #(runtime/create {:optimistic-htmx-options [:not :a-map]}))))
+  (is (= :optimistic-htmx-requires-optimism
+         (error-kind
+          #(runtime/create
+            {:optimistic-htmx-options
+             (default-optimistic-htmx-options)})))))
 
 (deftest collapsed-optimistic-local-action-ids-are-rejected-test
   (let [{:keys [document]} (make-document)
@@ -402,6 +482,57 @@
 ;; =============================================================================
 ;; Lifecycle ownership
 ;; =============================================================================
+
+(deftest start-installs-core-listeners-exactly-once-with-optimistic-htmx-attached-test
+  (let [{:keys [runtime document-fixture]} (optimistic-htmx-fixture)
+        bridge-runtime (runtime/optimistic-htmx-runtime runtime)]
+    (is (true? (:attached? (optimistic-htmx/diagnostics bridge-runtime))))
+    (is (identical? runtime (runtime/start! runtime)))
+    (is (= :started (runtime/lifecycle runtime)))
+    (is (= expected-listener-names
+           (listener-names @(:added document-fixture))))
+    (is (= (set optimistic-htmx/observed-events)
+           (set (keys (core/event-observers
+                       (runtime/core-runtime runtime))))))
+    (is (runtime/invariant-clean? runtime))
+
+    (testing "repeated start does not acquire a second listener set"
+      (is (identical? runtime (runtime/start! runtime)))
+      (is (= expected-listener-names
+             (listener-names @(:added document-fixture)))))
+
+    (runtime/stop! runtime)))
+
+(deftest stop-detaches-optimistic-htmx-and-restores-previous-choreo-transport-handlers-test
+  (let [base-send (fn [_] {:base :send})
+        base-transport (fn [_] :base-transport)
+        {:keys [runtime document-fixture]}
+        (fixture
+         {:choreo-options
+          {:send-payload base-send
+           :transport-send base-transport}
+          :optimistic-options
+          (default-optimistic-options)
+          :optimistic-htmx-options
+          (default-optimistic-htmx-options)})
+        choreo-runtime (runtime/choreo-runtime runtime)
+        bridge-runtime (runtime/optimistic-htmx-runtime runtime)]
+    (is (not (identical? base-send
+                         (choreo/send-payload-handler choreo-runtime))))
+    (is (not (identical? base-transport
+                         (choreo/transport-handler choreo-runtime))))
+
+    (runtime/start! runtime)
+    (is (= :stopped (runtime/stop! runtime)))
+    (is (= expected-listener-names
+           (listener-names @(:removed document-fixture))))
+    (is (false? (:attached? (optimistic-htmx/diagnostics bridge-runtime))))
+    (is (empty? (core/event-observers (runtime/core-runtime runtime))))
+    (is (identical? base-send
+                    (choreo/send-payload-handler choreo-runtime)))
+    (is (identical? base-transport
+                    (choreo/transport-handler choreo-runtime)))
+    (is (runtime/invariant-clean? runtime))))
 
 (deftest start-installs-core-listeners-exactly-once-with-optimism-attached-test
   (let [{:keys [runtime document-fixture]} (optimistic-fixture)
@@ -637,6 +768,82 @@
         "optimistic detachment must not clobber a foreign replacement")
     (is (runtime/invariant-clean? runtime))))
 
+(deftest removed-optimistic-htmx-observer-is-detected-and-start-fails-closed-test
+  (let [{:keys [runtime document-fixture]} (optimistic-htmx-fixture)
+        core-runtime (runtime/core-runtime runtime)
+        bridge-runtime (runtime/optimistic-htmx-runtime runtime)
+        event-name "htmx:beforeSend"
+        installed-handler (get @(:observer-handlers bridge-runtime) event-name)]
+    (is (fn? installed-handler))
+    (core/unregister-event-observer!
+     core-runtime event-name optimistic-htmx/observer-id)
+
+    (is (= {:invariant :optimistic-htmx-observer-ownership
+            :event-name event-name
+            :status :missing-from-core}
+           (optimistic-htmx-observer-ownership-error runtime event-name)))
+    (is (not (runtime/invariant-clean? runtime)))
+    (is (not (deep-identical? (runtime/diagnostics runtime) installed-handler)))
+
+    (is (= :invalid-composition
+           (error-kind #(runtime/start! runtime))))
+    (is (empty? @(:added document-fixture)))
+    (is (= :stopped (runtime/lifecycle runtime)))
+    (is (false? (:attached? (optimistic-htmx/diagnostics bridge-runtime))))
+    (is (runtime/invariant-clean? runtime))))
+
+(deftest replaced-optimistic-htmx-observer-is-detected-and-foreign-observer-survives-detach-test
+  (let [{:keys [runtime document-fixture]} (optimistic-htmx-fixture)
+        core-runtime (runtime/core-runtime runtime)
+        event-name "htmx:beforeRequest"
+        replacement (fn [_] :foreign)]
+    (core/register-event-observer!
+     core-runtime event-name optimistic-htmx/observer-id replacement)
+
+    (is (= {:invariant :optimistic-htmx-observer-ownership
+            :event-name event-name
+            :status :replaced-in-core}
+           (optimistic-htmx-observer-ownership-error runtime event-name)))
+    (is (= :invalid-composition
+           (error-kind #(runtime/start! runtime))))
+    (is (empty? @(:added document-fixture)))
+    (is (identical? replacement
+                    (get-in @(:event-observers core-runtime)
+                            [event-name optimistic-htmx/observer-id])))
+    (is (runtime/invariant-clean? runtime))))
+
+(deftest replaced-optimistic-htmx-send-wrapper-is-detected-and-foreign-handler-survives-detach-test
+  (let [{:keys [runtime document-fixture]} (optimistic-htmx-fixture)
+        choreo-runtime (runtime/choreo-runtime runtime)
+        replacement (fn [_] :foreign-send)]
+    (choreo/set-send-payload-handler! choreo-runtime replacement)
+
+    (is (= {:invariant :optimistic-htmx-send-wrapper-ownership
+            :status :replaced-in-choreo}
+           (invariant-error runtime
+                            :optimistic-htmx-send-wrapper-ownership)))
+    (is (= :invalid-composition
+           (error-kind #(runtime/start! runtime))))
+    (is (empty? @(:added document-fixture)))
+    (is (identical? replacement
+                    (choreo/send-payload-handler choreo-runtime)))
+    (is (runtime/invariant-clean? runtime))))
+
+(deftest removed-optimistic-htmx-transport-wrapper-is-detected-and-start-fails-closed-test
+  (let [{:keys [runtime document-fixture]} (optimistic-htmx-fixture)
+        choreo-runtime (runtime/choreo-runtime runtime)]
+    (choreo/set-transport-handler! choreo-runtime nil)
+
+    (is (= {:invariant :optimistic-htmx-transport-wrapper-ownership
+            :status :missing-from-choreo}
+           (invariant-error runtime
+                            :optimistic-htmx-transport-wrapper-ownership)))
+    (is (= :invalid-composition
+           (error-kind #(runtime/start! runtime))))
+    (is (empty? @(:added document-fixture)))
+    (is (nil? (choreo/transport-handler choreo-runtime)))
+    (is (runtime/invariant-clean? runtime))))
+
 (deftest failed-core-start-permanently-retires-the-entire-optimistic-composition-test
   (let [document-fixture
         (make-document {:fail-after-add 1})
@@ -695,7 +902,9 @@
                       shared-shell (runtime/shell-runtime current-runtime)
                       choreo-runtime (runtime/choreo-runtime current-runtime)
                       optimistic-runtime
-                      (runtime/optimistic-runtime current-runtime)]
+                      (runtime/optimistic-runtime current-runtime)
+                      bridge-runtime
+                      (runtime/optimistic-htmx-runtime current-runtime)]
                   (reset!
                    observed
                    {:effects
@@ -704,9 +913,22 @@
                     (set (keys (choreo/local-actions choreo-runtime)))
                     :optimistic-actions
                     #{(:derive-action optimistic-runtime)
-                      (:resolve-action optimistic-runtime)}}))))}}
+                      (:resolve-action optimistic-runtime)}
+                    :bridge-attached?
+                    (:attached? (optimistic-htmx/diagnostics bridge-runtime))
+                    :bridge-observer-events
+                    (set (keys (core/event-observers
+                                (runtime/core-runtime current-runtime))))
+                    :bridge-send-wrapper?
+                    (identical? @(:send-payload-wrapper bridge-runtime)
+                                (choreo/send-payload-handler choreo-runtime))
+                    :bridge-transport-wrapper?
+                    (identical? @(:transport-wrapper bridge-runtime)
+                                (choreo/transport-handler choreo-runtime))}))))}}
           :optimistic-options
-          (default-optimistic-options)})
+          (default-optimistic-options)
+          :optimistic-htmx-options
+          (default-optimistic-htmx-options)})
         shared-shell (runtime/shell-runtime composed-runtime)
         choreo-runtime (runtime/choreo-runtime composed-runtime)]
     (reset! runtime* composed-runtime)
@@ -734,6 +956,15 @@
     (is (every? #(contains? (:actions @observed) %)
                 (:optimistic-actions @observed))
         "semantic retirement must run while optimistic local actions are attached")
+    (is (true? (:bridge-attached? @observed))
+        "semantic retirement must run while the HTMX bridge is still attached")
+    (is (= (set optimistic-htmx/observed-events)
+           (:bridge-observer-events @observed))
+        "semantic retirement must run while bridge observers remain registered")
+    (is (true? (:bridge-send-wrapper? @observed))
+        "semantic retirement must run while the bridge send wrapper is installed")
+    (is (true? (:bridge-transport-wrapper? @observed))
+        "semantic retirement must run while the bridge transport wrapper is installed")
     (is (= 0
            (:active-executions
             (shell/diagnostics shared-shell))))
@@ -750,6 +981,7 @@
 (deftest runtime-without-optimism-remains-a-valid-composition-test
   (let [{:keys [runtime]} (fixture)]
     (is (nil? (runtime/optimistic-runtime runtime)))
+    (is (nil? (runtime/optimistic-htmx-runtime runtime)))
     (is (runtime/invariant-clean? runtime))
     (runtime/start! runtime)
     (is (runtime/invariant-clean? runtime))
@@ -782,16 +1014,20 @@
 
 (deftest diagnostics-are-read-only-and-exclude-host-resources-and-callbacks-test
   (let [{:keys [runtime document-fixture htmx-fixture]}
-        (optimistic-fixture)
+        (optimistic-htmx-fixture)
         document (:document document-fixture)
         htmx (:htmx htmx-fixture)
         shared-shell (runtime/shell-runtime runtime)
         choreo-runtime (runtime/choreo-runtime runtime)
         optimistic-runtime (runtime/optimistic-runtime runtime)
+        bridge-runtime (runtime/optimistic-htmx-runtime runtime)
         host-functions
         (concat
          (vals (shell/handlers shared-shell))
-         (vals (choreo/local-actions choreo-runtime)))
+         (vals (choreo/local-actions choreo-runtime))
+         (vals @(:observer-handlers bridge-runtime))
+         [@(:send-payload-wrapper bridge-runtime)
+          @(:transport-wrapper bridge-runtime)])
         diagnostics-before (runtime/diagnostics runtime)
         state-before (runtime/state runtime)
         diagnostics-after (runtime/diagnostics runtime)
@@ -810,5 +1046,10 @@
     (is (= expected-actions
            (get-in diagnostics-before
                    [:optimistic :attached-local-actions])))
+    (is (= (set optimistic-htmx/observed-events)
+           (get-in diagnostics-before
+                   [:optimistic-htmx :observed-events])))
+    (is (true? (get-in diagnostics-before
+                       [:optimistic-htmx :attached?])))
     (is (= [] (:invariant-errors diagnostics-before)))
     (runtime/stop! runtime)))

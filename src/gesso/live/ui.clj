@@ -28,6 +28,7 @@
    [clojure.string :as str]
    [gesso.live.continuity :as continuity]
    [gesso.live.htmx :as htmx]
+   [gesso.live.optimistic.capability :as optimistic.capability]
    [gesso.live.optimistic.protocol :as optimistic.protocol]))
 
 ;; -----------------------------------------------------------------------------
@@ -321,18 +322,27 @@
 (defn optimistic-action
   "Validate and normalize one protocol-v3 optimistic action annotation.
 
-   This is presentation/request binding data, not a command and not an
-   authorization capability. In particular it does not contain command-id,
-   execution-id, principal, authority, or settlement fields. The browser bridge
-   allocates protocol identities at request time and the trusted server
-   re-authenticates/re-authorizes the operation.
+   One-arity accepts the low-level inert action map. This remains useful for
+   framework code, tests, and staged migration.
 
-   Required:
+   Two-arity accepts a canonical gesso.live.optimistic.capability operation
+   capability plus per-render binding data. This is the preferred application
+   path: model/choreography code owns operation identity and browser policy,
+   while the view supplies only arguments, observed authoritative basis, scope,
+   fact versions, and logical target identity.
+
+   Neither call shape creates a command or grants authorization. In particular
+   the resulting action does not contain command-id, execution-id, principal,
+   authority, or settlement fields. The browser bridge allocates protocol
+   identities at request time and the trusted server re-authenticates and
+   re-authorizes the operation.
+
+   Low-level action required fields:
      :operation
      :arguments
      :observed-basis
 
-   Optional:
+   Low-level action optional fields:
      :scope
      :fact-versions
      :target-id
@@ -341,78 +351,80 @@
      :timeout-ms
      :replace-owner?
      :replace-execution?"
-  [action]
-  (let [action (require-optimistic-closed-map! action)
-        operation (:operation action)
-        arguments (:arguments action)]
-    (when-not (keyword? operation)
-      (optimistic-ui-error
-       :invalid-operation
-       "gesso.live UI optimistic :operation must be a keyword."
-       {:operation operation}))
-    (when-not (map? arguments)
-      (optimistic-ui-error
-       :invalid-arguments
-       "gesso.live UI optimistic :arguments must be a map."
-       {:arguments arguments}))
-    (when (contains? action :target-id)
-      (let [target-id (:target-id action)]
-        (when-not (and (string? target-id)
-                       (not (str/blank? target-id)))
-          (optimistic-ui-error
-           :invalid-action-option
-           "gesso.live UI optimistic :target-id must be a non-blank string."
-           {:key :target-id
-            :value target-id}))))
-    (when (contains? action :plan-key)
-      (when (nil? (:plan-key action))
-        (optimistic-ui-error
-         :invalid-action-option
-         "gesso.live UI optimistic :plan-key must not be nil when supplied."
-         {:key :plan-key
-          :value nil})))
-    (doseq [k [:rollback-eligible?
-               :replace-owner?
-               :replace-execution?]]
-      (when (contains? action k)
-        (require-optimistic-boolean! k (get action k))))
-    (when (contains? action :timeout-ms)
-      (require-optimistic-timeout! (:timeout-ms action)))
-    (cond->
-     {:operation operation
-      :arguments arguments
-      :observed-basis
-      (optimistic.protocol/normalize-basis
+  ([action]
+   (let [action (require-optimistic-closed-map! action)
+         operation (:operation action)
+         arguments (:arguments action)]
+     (when-not (keyword? operation)
+       (optimistic-ui-error
+        :invalid-operation
+        "gesso.live UI optimistic :operation must be a keyword."
+        {:operation operation}))
+     (when-not (map? arguments)
+       (optimistic-ui-error
+        :invalid-arguments
+        "gesso.live UI optimistic :arguments must be a map."
+        {:arguments arguments}))
+     (when (contains? action :target-id)
+       (let [target-id (:target-id action)]
+         (when-not (and (string? target-id)
+                        (not (str/blank? target-id)))
+           (optimistic-ui-error
+            :invalid-action-option
+            "gesso.live UI optimistic :target-id must be a non-blank string."
+            {:key :target-id
+             :value target-id}))))
+     (when (contains? action :plan-key)
+       (when (nil? (:plan-key action))
+         (optimistic-ui-error
+          :invalid-action-option
+          "gesso.live UI optimistic :plan-key must not be nil when supplied."
+          {:key :plan-key
+           :value nil})))
+     (doseq [k [:rollback-eligible?
+                :replace-owner?
+                :replace-execution?]]
+       (when (contains? action k)
+         (require-optimistic-boolean! k (get action k))))
+     (when (contains? action :timeout-ms)
+       (require-optimistic-timeout! (:timeout-ms action)))
+     (cond->
+      {:operation operation
+       :arguments arguments
        :observed-basis
-       (:observed-basis action))}
-      (contains? action :scope)
-      (assoc :scope
-             (optimistic.protocol/normalize-scope
-              (:scope action)))
+       (optimistic.protocol/normalize-basis
+        :observed-basis
+        (:observed-basis action))}
+       (contains? action :scope)
+       (assoc :scope
+              (optimistic.protocol/normalize-scope
+               (:scope action)))
 
-      (contains? action :fact-versions)
-      (assoc :fact-versions
-             (optimistic.protocol/normalize-fact-versions
-              (:fact-versions action)))
+       (contains? action :fact-versions)
+       (assoc :fact-versions
+              (optimistic.protocol/normalize-fact-versions
+               (:fact-versions action)))
 
-      (contains? action :target-id)
-      (assoc :target-id (:target-id action))
+       (contains? action :target-id)
+       (assoc :target-id (:target-id action))
 
-      (contains? action :plan-key)
-      (assoc :plan-key (:plan-key action))
+       (contains? action :plan-key)
+       (assoc :plan-key (:plan-key action))
 
-      (contains? action :rollback-eligible?)
-      (assoc :rollback-eligible? (:rollback-eligible? action))
+       (contains? action :rollback-eligible?)
+       (assoc :rollback-eligible? (:rollback-eligible? action))
 
-      (contains? action :timeout-ms)
-      (assoc :timeout-ms (:timeout-ms action))
+       (contains? action :timeout-ms)
+       (assoc :timeout-ms (:timeout-ms action))
 
-      (contains? action :replace-owner?)
-      (assoc :replace-owner? (:replace-owner? action))
+       (contains? action :replace-owner?)
+       (assoc :replace-owner? (:replace-owner? action))
 
-      (contains? action :replace-execution?)
-      (assoc :replace-execution? (:replace-execution? action)))))
-
+       (contains? action :replace-execution?)
+       (assoc :replace-execution? (:replace-execution? action)))))
+  ([capability binding]
+   (optimistic-action
+    (optimistic.capability/bind capability binding))))
 (defn- encode-portable-edn
   [label value]
   (let [encoded (pr-str value)]
@@ -434,14 +446,18 @@
 (defn optimistic-action-attrs
   "Return inert HTML attrs for one protocol-v3 optimistic action.
 
-   The EDN value is read by gesso.live.browser.optimistic-htmx. It contains no
-   trusted principal or browser-generated correlation identity."
-  [action]
-  {optimistic-action-attr
-   (encode-portable-edn
-    "gesso.live UI optimistic action"
-    (optimistic-action action))})
-
+   One-arity accepts a low-level action map. Two-arity accepts an operation
+   capability plus its per-render binding. The encoded EDN is read by
+   gesso.live.browser.optimistic-htmx and contains no trusted principal or
+   browser-generated correlation identity."
+  ([action]
+   {optimistic-action-attr
+    (encode-portable-edn
+     "gesso.live UI optimistic action"
+     (optimistic-action action))})
+  ([capability binding]
+   (optimistic-action-attrs
+    (optimistic-action capability binding))))
 (defn optimistic-settlement-marker
   "Render an inert protocol-v3 settlement marker for an HTMX response.
 
@@ -847,6 +863,47 @@
    ctx
    opts))
 
+(defn- capability-shaped?
+  [value]
+  (and (map? value)
+       (contains? value optimistic.capability/capability-type-key)))
+
+(defn- resolve-post-button-optimistic
+  [opts]
+  (let [optimistic-value (:optimistic opts)
+        binding-present? (contains? opts :optimistic-binding)
+        binding (:optimistic-binding opts)]
+    (cond
+      (or (nil? optimistic-value)
+          (false? optimistic-value))
+      (do
+        (when binding-present?
+          (optimistic-ui-error
+           :orphan-optimistic-binding
+           "gesso.live UI :optimistic-binding requires an optimistic operation capability."
+           {:optimistic optimistic-value
+            :optimistic-binding binding}))
+        nil)
+
+      (capability-shaped? optimistic-value)
+      (do
+        (when-not binding-present?
+          (optimistic-ui-error
+           :missing-optimistic-binding
+           "gesso.live UI optimistic operation capability requires :optimistic-binding."
+           {:optimistic optimistic-value}))
+        (optimistic-action optimistic-value binding))
+
+      binding-present?
+      (optimistic-ui-error
+       :unexpected-optimistic-binding
+       "gesso.live UI :optimistic-binding is accepted only with an optimistic operation capability."
+       {:optimistic optimistic-value
+        :optimistic-binding binding})
+
+      :else
+      (optimistic-action optimistic-value))))
+
 (defn post-button
   "Render a tiny HTMX POST button.
 
@@ -899,10 +956,20 @@
        Extra attrs merged into button attrs.
 
      :optimistic
-       Optional protocol-v3 optimistic action map. The helper emits only an
-       inert data-gesso-live-optimistic EDN annotation. The browser bridge
-       allocates command/execution identities and realizes optimism through the
-       shared adapter; this helper does not render provisional templates.
+       Optional protocol-v3 optimistic action map, or a canonical
+       gesso.live.optimistic.capability operation capability. The capability
+       form is preferred for application views because operation identity and
+       browser execution policy stay with model/choreography configuration.
+
+     :optimistic-binding
+       Required when :optimistic is an operation capability and rejected with
+       a raw action map. Supplies only per-render arguments, observed basis,
+       scope/fact versions, and target identity.
+
+       Both forms emit the same inert data-gesso-live-optimistic EDN annotation.
+       The browser bridge allocates command/execution identities and realizes
+       optimism through the shared adapter; this helper does not render
+       provisional templates or grant server authority.
 
    The clicked button owns hx-post. The lightweight wrapper form owns
    anti-forgery and app-supplied hidden inputs only, avoiding native-submit
@@ -917,19 +984,19 @@
          (post-button-args
           fragment-or-opts
           maybe-opts)
-         optimistic-value
-         (:optimistic opts)]
-     (if (or (nil? optimistic-value)
-             (false? optimistic-value))
+         optimistic-action'
+         (resolve-post-button-optimistic opts)
+         opts'
+         (dissoc opts :optimistic :optimistic-binding)]
+     (if (nil? optimistic-action')
        (render-ordinary-post-button
         ctx
-        (dissoc opts :optimistic))
+        opts')
        (render-post-button
         ctx
-        (-> opts
-            (dissoc :optimistic)
-            (assoc :protocol-attrs
-                   (htmx/merge-attrs
-                    (:protocol-attrs opts)
-                    (optimistic-action-attrs
-                     optimistic-value)))))))))
+        (assoc opts'
+               :protocol-attrs
+               (htmx/merge-attrs
+                (:protocol-attrs opts')
+                (optimistic-action-attrs
+                 optimistic-action'))))))))

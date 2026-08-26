@@ -4815,6 +4815,114 @@
                (error-kind
                 #(machine/start lookalike))))))))
 
+(deftest machine-executable-plan-format-status-delegates-to-project-contract
+  (let [plan
+        (integrity-machine-plan)
+
+        incompatible-plan
+        (assoc plan
+               :gesso.choreo/version
+               (inc project/executable-plan-version))
+
+        malformed-current-plan
+        (assoc plan
+               :diagnostic-only
+               true)]
+
+    (doseq [[label candidate]
+            {:compatible plan
+             :incompatible incompatible-plan
+             :invalid malformed-current-plan}]
+      (testing (name label)
+        (is (= (project/executable-plan-format-status candidate)
+               (machine/executable-plan-format-status candidate)))
+        (is (= (project/executable-plan-compatible? candidate)
+               (machine/executable-plan-compatible? candidate)))
+        (is (= (project/executable-plan-incompatible? candidate)
+               (machine/executable-plan-incompatible? candidate)))))))
+
+(deftest machine-start-classifies-version-incompatibility-separately-from-malformation
+  (let [plan
+        (integrity-machine-plan)
+
+        unsupported-version
+        (inc project/executable-plan-version)
+
+        incompatible-plan
+        (assoc plan
+               :gesso.choreo/version
+               unsupported-version)
+
+        malformed-plan
+        (assoc plan
+               :diagnostic-only
+               true)
+
+        incompatible-error
+        (error-data
+         #(machine/start incompatible-plan))]
+
+    (testing "a recognizable unsupported plan format is a stale-plan recovery condition"
+      (is (= :incompatible-plan
+             (:error/kind incompatible-error)))
+      (is (= unsupported-version
+             (:version incompatible-error)))
+      (is (= machine/executable-plan-version
+             (:supported-version incompatible-error)))
+      (is (= project/incompatible-executable-plan-status
+             (get-in incompatible-error
+                     [:format-status :status])))
+      (is (= incompatible-plan
+             (:plan incompatible-error))))
+
+    (testing "a malformed current-version plan remains an ordinary invalid-plan error"
+      (let [invalid-error
+            (error-data
+             #(machine/start malformed-plan))]
+        (is (= :invalid-plan
+               (:error/kind invalid-error)))
+        (is (= project/invalid-executable-plan-status
+               (get-in invalid-error
+                       [:format-status :status])))
+        (is (= malformed-plan
+               (:plan invalid-error)))))))
+
+(deftest machine-does-not-mistake-arbitrary-version-data-for-a-stale-plan
+  (let [plan
+        (integrity-machine-plan)
+
+        future-version
+        (inc project/executable-plan-version)]
+
+    (doseq [[label candidate]
+            {:missing-type
+             (dissoc
+              (assoc plan
+                     :gesso.choreo/version future-version)
+              :gesso.choreo/type)
+
+             :wrong-type
+             (assoc plan
+                    :gesso.choreo/type :example/not-an-executable-plan
+                    :gesso.choreo/version future-version)
+
+             :non-integer-version
+             (assoc plan
+                    :gesso.choreo/version "future")
+
+             :negative-version
+             (assoc plan
+                    :gesso.choreo/version -1)}]
+      (testing (name label)
+        (is (= project/invalid-executable-plan-status
+               (:status
+                (machine/executable-plan-format-status candidate))))
+        (is (false?
+             (machine/executable-plan-incompatible? candidate)))
+        (is (= :invalid-plan
+               (error-kind
+                #(machine/start candidate))))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Canonical execution-record integrity
 ;; -----------------------------------------------------------------------------

@@ -10,8 +10,9 @@
    - per-client flow construction
    - SSE transport startup
    - fragment render protection
-   - app-facing XTDB2 consistency helpers
+   - app-facing XTDB2 consistency/progression helpers
    - app-facing HTMX/UI helpers
+   - protocol-v3 optimistic capability/UI facade
    - protocol-v3 optimistic trusted-server facade
 
    It intentionally stays thin. The specialized namespaces still own their own
@@ -43,11 +44,19 @@
      gesso.live.consistency.xtdb
        owns XTDB2 query/transaction consistency helpers
 
+     gesso.live.progression.http
+       owns browser-to-server progression HTTP encoding/decoding and request
+       context binding
+
      gesso.live.htmx
        owns browser-facing raw HTMX attribute builders
 
      gesso.live.ui
        owns Hiccup convenience helpers for live fragments and POST controls
+
+     gesso.live.optimistic.capability
+       owns portable typed operation capabilities for optimistic UI
+       composition
 
      gesso.live.optimistic.server
        owns the trusted protocol-v3 optimistic command boundary, operation
@@ -60,7 +69,10 @@
    [gesso.live.htmx :as htmx]
    [gesso.live.invalidation :as invalidation]
    [gesso.live.model :as model]
+   [gesso.live.optimistic.capability :as optimistic.capability]
    [gesso.live.optimistic.server :as optimistic.server]
+   [gesso.live.progression :as progression]
+   [gesso.live.progression.http :as progression.http]
    [gesso.live.source :as source]
    [gesso.live.synced :as synced]
    [gesso.live.transport.sse :as sse]
@@ -459,23 +471,67 @@
    Re-export of gesso.live.model/fragment-scope-instance."
   model/fragment-scope-instance)
 
-(def query-fragment
-  "Run a model fragment query.
+(defn bind-request-progression
+  "Decode and bind the optional browser refresh progression requirement from a
+   Ring/Biff request context.
 
-   Re-export of gesso.live.model/query-fragment."
-  model/query-fragment)
+   This is the app-facing server request boundary for the progression carrier.
+   The browser-supplied requirement is only a minimum-read requirement; it does
+   not establish authority. Any pre-existing trusted canonical progression on
+   ctx is conservatively composed with the request requirement.
 
-(def render-fragment-node
-  "Render a model fragment to a Hiccup/HTML node.
+   Standard query-fragment, render-fragment-node, and render-fragment-response
+   calls bind automatically. Custom fragment handlers should call this once at
+   their request boundary before using progression-aware read helpers such as q."
+  [ctx]
+  (progression.http/bind-request-progression ctx))
 
-   Re-export of gesso.live.model/render-fragment-node."
-  model/render-fragment-node)
+(defn query-fragment
+  "Run a model fragment query with request progression bound into ctx.
 
-(def render-fragment-response
+   If ctx carries the canonical Gesso Live progression HTTP header, decode it at
+   this server boundary and install the normalized requirement under
+   :gesso.live/progression before the model query runs. The model layer remains
+   HTTP-agnostic."
+  [compiled ctx fragment-name id]
+  (model/query-fragment
+   compiled
+   (bind-request-progression ctx)
+   fragment-name
+   id))
+
+(defn render-fragment-node
+  "Render a model fragment to a Hiccup/HTML node with request progression bound.
+
+   The request transport is decoded before the fragment query executes so
+   progression-aware reads cannot accidentally ignore the invalidating basis."
+  [compiled ctx fragment-name id]
+  (model/render-fragment-node
+   compiled
+   (bind-request-progression ctx)
+   fragment-name
+   id))
+
+(defn render-fragment-response
   "Render a model fragment and wrap it in a Ring response.
 
-   Re-export of gesso.live.model/render-fragment-response."
-  model/render-fragment-response)
+   Browser refresh progression is decoded and installed into canonical request
+   context before authorization and query/render. This keeps HTTP concerns out
+   of gesso.live.model while making the standard app-facing fragment response
+   path progression-safe."
+  ([compiled ctx fragment-name id]
+   (model/render-fragment-response
+    compiled
+    (bind-request-progression ctx)
+    fragment-name
+    id))
+  ([compiled ctx fragment-name id opts]
+   (model/render-fragment-response
+    compiled
+    (bind-request-progression ctx)
+    fragment-name
+    id
+    opts)))
 
 (def explain-live-app
   "Return an inspectable summary of a compiled live app model.
@@ -484,7 +540,7 @@
   model/explain-live-app)
 
 ;; -----------------------------------------------------------------------------
-;; XTDB2 consistency facade
+;; XTDB2 consistency/progression facade
 ;; -----------------------------------------------------------------------------
 
 (defn consistency
@@ -494,6 +550,15 @@
    inspect or mutate shared XTDB node/DataSource state."
   [ctx]
   (live.xtdb/consistency-from ctx))
+
+(defn progression
+  "Return optional normalized authoritative progression from ctx.
+
+   :gesso.live/progression is canonical. The XTDB adapter also accepts the
+   narrow request-local :progression convenience key while callers migrate.
+   This facade does not compare opaque bases."
+  [ctx]
+  (live.xtdb/progression-from ctx))
 
 (defn with-consistency
   "Assoc explicit consistency onto ctx.
@@ -505,6 +570,19 @@
   (assoc ctx
          :gesso.live/consistency
          (live.xtdb/normalize-consistency consistency)))
+
+(defn with-progression
+  "Assoc one normalized authoritative progression requirement onto ctx.
+
+   The canonical request/read-context key is :gesso.live/progression. nil means
+   no requirement and removes that canonical key. This helper replaces the
+   canonical value; callers that need conservative accumulation should compose
+   requirements explicitly with gesso.live.progression/compose."
+  [ctx progression-value]
+  (if-some [progression'
+            (progression/normalize-requirement progression-value)]
+    (assoc ctx :gesso.live/progression progression')
+    (dissoc ctx :gesso.live/progression)))
 
 (defn attach-consistency
   "Attach explicit consistency to a change/invalidation map.
@@ -519,12 +597,54 @@
       (assoc change :gesso.live/consistency consistency')
       change)))
 
+(defn attach-progression
+  "Attach one normalized authoritative progression requirement to a primary
+   change/invalidation map.
+
+   Live schemas own the unqualified :progression field. A pre-existing equal
+   requirement is accepted; a different one fails closed instead of silently
+   replacing authority metadata. nil leaves the map unchanged."
+  [change progression-value]
+  (if-some [progression'
+            (progression/normalize-requirement progression-value)]
+    (if (contains? change :progression)
+      (let [existing
+            (progression/normalize-requirement (:progression change))]
+        (when-not (= existing progression')
+          (throw
+           (ex "Primary change progression conflicts with authoritative transaction progression."
+               {:existing-progression existing
+                :authoritative-progression progression'
+                :change change})))
+        change)
+      (assoc change :progression progression'))
+    change))
+
+(defn- bind-transaction-progression!
+  "Bind progression established by this XTDB transaction to one primary change.
+
+   A caller-supplied :progression cannot stand in for missing transaction
+   evidence. When transaction progression exists, attach-progression enforces
+   exact agreement with any repeated value already on the change."
+  [change transaction-progression]
+  (if-some [transaction-progression'
+            (progression/normalize-requirement transaction-progression)]
+    (attach-progression change transaction-progression')
+    (do
+      (when (contains? change :progression)
+        (throw
+         (ex "Primary change may not supply progression when the transaction established none."
+             {:progression (:progression change)
+              :change change})))
+      change)))
+
 (defn q
   "App-facing XTDB2 read helper.
 
-   Uses the ctx-aware, consistency-aware read path. Prefer this for live fragment
-   reads so a ctx carrying :gesso.live/consistency, :xtdb/consistency, or
-   :consistency automatically applies that read basis to the individual query."
+   Uses the ctx-aware consistency/progression-aware read path. Prefer this for
+   live fragment reads so a ctx carrying :gesso.live/progression cannot be read
+   from an XTDB snapshot older than the authoritative refresh requirement.
+   Explicit consistency remains supported through the XTDB adapter."
   ([ctx query]
    (live.xtdb/q-consistent-from ctx query))
   ([ctx query opts]
@@ -536,11 +656,13 @@
    Returns the result from gesso.live.consistency.xtdb/execute-tx-from!:
 
      {:tx-result ...
-      :consistency ...}
+      :consistency ...
+      :progression ...} ; when complete authoritative basis data is available
 
    execute-tx! is preferred for write paths that need immediate live
    read-after-write consistency because XTDB2 execute-tx returns tx-id and
-   system-time, from which the XTDB helper derives :snapshot-time."
+   system-time, from which the XTDB helper derives both per-query consistency
+   and a portable authoritative progression requirement."
   ([ctx tx-ops]
    (live.xtdb/execute-tx-from! ctx tx-ops))
   ([ctx tx-ops opts]
@@ -630,6 +752,39 @@
    Re-export of gesso.live.ui/anti-forgery-input."
   live.ui/anti-forgery-input)
 
+;; -----------------------------------------------------------------------------
+;; Optimistic protocol-v3 capability facade
+;; -----------------------------------------------------------------------------
+
+(def optimistic-capability
+  "Construct one portable optimistic operation capability.
+
+   A capability binds application-owned operation identity and browser execution
+   policy for later view rendering.  It is inert configuration, not authority or
+   durable authorization.
+
+   Re-export of gesso.live.optimistic.capability/operation-capability."
+  optimistic.capability/operation-capability)
+
+(def optimistic-capability?
+  "Return true for a canonical optimistic operation capability.
+
+   This checks only local capability shape.  Trusted server registration,
+   authentication, and authorization remain separate concerns.
+
+   Re-export of gesso.live.optimistic.capability/operation-capability?."
+  optimistic.capability/operation-capability?)
+
+(def bind-optimistic-capability
+  "Bind one optimistic operation capability to per-render arguments, basis,
+   scope/fact versions, and target identity.
+
+   The result is the inert protocol-v3 action-data shape consumed by post-button
+   and gesso.live.ui/optimistic-action.  Binding does not create command or
+   execution identity and cannot confer authority.
+
+   Re-export of gesso.live.optimistic.capability/bind."
+  optimistic.capability/bind)
 
 ;; -----------------------------------------------------------------------------
 ;; Optimistic protocol-v3 trusted-server facade
@@ -838,16 +993,109 @@
        :at (now-ms)})
      (dispatch/submit! (:dispatcher system) entry'))))
 
+(def post-commit-delivery-failure-type
+  "Error type used when an XTDB transaction committed successfully but the
+   subsequent Live invalidation delivery/submission step failed.
+
+   The exception always carries :commit/status :committed and
+   :failure/stage :post-commit-delivery so callers cannot mistake it for a
+   failed authoritative mutation."
+  ::post-commit-delivery-failure)
+
+(defn post-commit-delivery-failure?
+  "Return true when value is a classified Gesso Live post-commit delivery
+   failure.
+
+   These failures mean the authoritative XTDB transaction committed. They do
+   not mean the mutation rolled back. Callers may inspect ex-data for the
+   committed transaction metadata, completed delivery results, and the exact
+   delivery that failed."
+  [value]
+  (and (instance? Throwable value)
+       (= post-commit-delivery-failure-type
+          (:error/type (ex-data value)))
+       (= :committed
+          (:commit/status (ex-data value)))
+       (= :post-commit-delivery
+          (:failure/stage (ex-data value)))))
+
+(defn- post-commit-delivery-error
+  [cause
+   tx-result-map
+   ctx
+   changes
+   emit-mode
+   delivery-index
+   change
+   completed-results]
+  (ex
+   "XTDB transaction committed, but Gesso Live post-commit invalidation delivery failed."
+   (cond->
+    {:error/type post-commit-delivery-failure-type
+     :failure/stage :post-commit-delivery
+     :commit/status :committed
+     :tx-result (:tx-result tx-result-map)
+     :consistency (:consistency tx-result-map)
+     :ctx ctx
+     :changes changes
+     :emit emit-mode
+     :delivery/index delivery-index
+     :delivery/change change
+     :delivery/completed-results completed-results}
+
+    (:progression tx-result-map)
+    (assoc :progression (:progression tx-result-map)))
+   cause))
+
+(defn- deliver-post-commit!
+  "Run delivery-fn once for each attached change after a successful commit.
+
+   A failure is rethrown as an explicitly classified post-commit delivery
+   failure. Results from earlier successful deliveries are retained in ex-data
+   because synchronous emission and async queue submission can both be
+   partially complete when a later change fails."
+  [tx-result-map ctx changes emit-mode delivery-fn]
+  (loop [index 0
+         remaining changes
+         completed []]
+    (if-let [change (first remaining)]
+      (let [result
+            (try
+              (delivery-fn change)
+              (catch Throwable cause
+                (throw
+                 (post-commit-delivery-error
+                  cause
+                  tx-result-map
+                  ctx
+                  changes
+                  emit-mode
+                  index
+                  change
+                  completed))))]
+        (recur (inc index)
+               (next remaining)
+               (conj completed result)))
+      completed)))
+
 (defn transact-and-notify!
   "Common XTDB2 write + live invalidation workflow.
 
    Steps:
      1. execute XTDB2 tx ops with execute-tx!
-     2. capture returned consistency
-     3. assoc consistency onto ctx
-     4. attach consistency to change maps
+     2. capture returned consistency and authoritative progression
+     3. assoc consistency onto ctx and conservatively compose ctx progression
+     4. attach consistency plus transaction-established progression to changes
      5. optionally emit or submit expanded invalidations
-     6. return tx/ctx/change/emission metadata
+     6. classify any failure in step 5 as post-commit delivery failure
+     7. return tx/ctx/change/emission metadata
+
+   The transaction result is the authority for progression attached to emitted
+   primary changes. Caller-supplied change progression may only repeat that exact
+   requirement; it cannot replace it or fabricate progression when execute-tx!
+   established none. Existing request-context progression is retained in the
+   returned ctx by conservative composition, but it is not substituted for the
+   transaction's commit requirement on invalidations.
 
    Arguments:
      system
@@ -882,13 +1130,22 @@
        :entry-fn
          Optional function of attached change -> dispatch entry metadata.
 
-   Returns:
+   Returns on successful commit and delivery:
      {:tx-result ...
       :consistency ...
+      :progression ... ; when execute-tx! established it
       :ctx ...
       :changes ...
       :emit ...
-      :emit-results ...}"
+      :emit-results ...}
+
+   If XTDB execution fails, the original pre-commit exception escapes. If a
+   synchronous invalidation emission or asynchronous dispatch submission fails
+   *after* execute-tx! returned, throws a classified exception satisfying
+   post-commit-delivery-failure?. Its ex-data contains :commit/status
+   :committed plus committed transaction metadata and any earlier completed
+   delivery results. Such an exception must never be interpreted as mutation
+   rollback."
   [system ctx {:keys [tx-ops tx-options emit entry entry-fn] :as options}]
   (when-not tx-ops
     (throw
@@ -896,36 +1153,61 @@
          {:options options})))
   (let [debug-fn (get-in system [:options :debug-fn])
         emit-mode (normalize-emit-mode emit)
+        changes (normalize-changes options)
         tx-result-map (execute-tx! ctx tx-ops tx-options)
         consistency' (:consistency tx-result-map)
-        ctx' (with-consistency ctx consistency')
-        changes' (mapv #(attach-consistency % consistency')
-                       (normalize-changes options))
+        transaction-progression (:progression tx-result-map)
+        ctx-progression (progression/compose
+                         (progression ctx)
+                         transaction-progression)
+        ctx' (-> ctx
+                 (with-consistency consistency')
+                 (with-progression ctx-progression))
+        changes' (mapv (fn [change]
+                         (-> change
+                             (attach-consistency consistency')
+                             (bind-transaction-progression!
+                              transaction-progression)))
+                       changes)
         emit-results
         (case emit-mode
           false
           []
 
           :sync
-          (mapv #(emit-expanded! system ctx' %) changes')
+          (deliver-post-commit!
+           tx-result-map
+           ctx'
+           changes'
+           emit-mode
+           #(emit-expanded! system ctx' %))
 
           :async
-          (mapv (fn [change]
-                  (submit-expanded!
-                   system
-                   ctx'
-                   change
-                   (dispatch-entry-for entry entry-fn change)))
-                changes'))]
-    (debug!
+          (deliver-post-commit!
+           tx-result-map
+           ctx'
+           changes'
+           emit-mode
+           (fn [change]
+             (submit-expanded!
+              system
+              ctx'
+              change
+              (dispatch-entry-for entry entry-fn change)))))]
+    ;; Debugging is observational. A broken debug hook after commit/delivery must
+    ;; not turn a committed mutation into an apparent operation failure.
+    (call-safely
      debug-fn
-     :gesso.live.core/transact-and-notify
-     {:tx-result (:tx-result tx-result-map)
-      :consistency consistency'
-      :change-count (count changes')
-      :emit emit-mode
-      :emit-result-count (count emit-results)
-      :at (now-ms)})
+     (assoc
+      (cond-> {:tx-result (:tx-result tx-result-map)
+               :consistency consistency'
+               :change-count (count changes')
+               :emit emit-mode
+               :emit-result-count (count emit-results)
+               :at (now-ms)}
+        transaction-progression
+        (assoc :progression transaction-progression))
+      :event :gesso.live.core/transact-and-notify))
     (merge tx-result-map
            {:ctx ctx'
             :changes changes'

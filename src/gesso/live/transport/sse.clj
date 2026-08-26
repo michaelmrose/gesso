@@ -26,6 +26,7 @@
    [gesso.live.flow :as flow]
    [gesso.live.htmx :as htmx]
    [gesso.live.model :as model]
+   [gesso.live.progression :as progression]
    [gesso.live.schema :as schema]
    [manifold.deferred :as d]
    [manifold.stream :as s]
@@ -221,14 +222,31 @@
    (data-lines (or data ""))
    "\n"))
 
-(defn live-event-payload
-  "Return the payload serialized into the SSE data field.
+(defn- wire-progression
+  [value]
+  (when (some? value)
+    (progression/requirement->wire value)))
 
-   The event name itself is excluded because it becomes the SSE event field."
+(defn live-event-payload
+  "Return the portable payload serialized into the SSE data field.
+
+   The event name itself is excluded because it becomes the SSE event field.
+
+   Internal progression requirements are converted to their explicit versioned
+   wire representation at this transport boundary. The conversion is performed
+   for both the top-level LiveEvent requirement and the copy carried by its
+   nested invalidation. SSE does not compare bases or otherwise interpret
+   progression semantics."
   [live-event]
-  (let [payload (dissoc live-event :event)]
-    (if (seq payload)
-      payload
+  (let [payload (dissoc live-event :event)
+        payload' (cond-> payload
+                   (contains? payload :progression)
+                   (update :progression wire-progression)
+
+                   (contains? (:invalidation payload) :progression)
+                   (update-in [:invalidation :progression] wire-progression))]
+    (if (seq payload')
+      payload'
       {})))
 
 (defn- live-event-frame*

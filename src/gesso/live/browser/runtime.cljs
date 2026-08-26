@@ -18,6 +18,10 @@
        protocol-v3 optimistic projection/settlement realization attached to the
        exact same Choreo runtime and shell
 
+     gesso.live.browser.optimistic-htmx (optional)
+       HTMX lifecycle/transport bridge attached to the exact same Core,
+       optimistic runtime, Choreo runtime, and shell
+
    AdapterState remains owned exclusively by gesso.live.browser.shell through
    gesso.live.browser.adapter. This namespace never advances portable Choreo,
    interprets authoritative bases, chooses optimistic settlement policy, manages
@@ -26,6 +30,7 @@
    [gesso.live.browser.choreo :as choreo]
    [gesso.live.browser.core :as core]
    [gesso.live.browser.optimistic :as optimistic]
+   [gesso.live.browser.optimistic-htmx :as optimistic-htmx]
    [gesso.live.browser.shell :as shell]))
 
 ;; =============================================================================
@@ -33,7 +38,7 @@
 ;; =============================================================================
 
 (def runtime-version
-  "1.2.0-dev")
+  "1.3.0-dev")
 
 (def runtime-type
   :gesso.live.browser.runtime/runtime)
@@ -41,7 +46,8 @@
 (def option-keys
   #{:core-options
     :choreo-options
-    :optimistic-options})
+    :optimistic-options
+    :optimistic-htmx-options})
 
 (def lifecycle-states
   #{:created
@@ -119,6 +125,20 @@
      (identical?
       (core/shell-runtime (:core value))
       (optimistic/shell-runtime (:optimistic value)))))
+   (or
+    (nil? (:optimistic-htmx value))
+    (and
+     (:optimistic value)
+     (optimistic-htmx/runtime? (:optimistic-htmx value))
+     (identical?
+      (:core value)
+      (optimistic-htmx/core-runtime (:optimistic-htmx value)))
+     (identical?
+      (:optimistic value)
+      (optimistic-htmx/optimistic-runtime (:optimistic-htmx value)))
+     (identical?
+      (:choreo value)
+      (optimistic-htmx/choreo-runtime (:optimistic-htmx value)))))
    (some? (:lifecycle value))
    (some? (:public-api value))))
 
@@ -147,6 +167,12 @@
   "Return the optional protocol-v3 optimistic browser binding."
   [runtime]
   (:optimistic
+   (require-runtime! runtime)))
+
+(defn optimistic-htmx-runtime
+  "Return the optional HTMX transport bridge for protocol-v3 optimism."
+  [runtime]
+  (:optimistic-htmx
    (require-runtime! runtime)))
 
 (defn shell-runtime
@@ -310,6 +336,58 @@
                [])))
          expected-actions))))))
 
+(defn- optimistic-htmx-ownership-errors
+  [bridge-runtime core-runtime choreo-runtime]
+  (when bridge-runtime
+    (let [recorded-observers @(:observer-handlers bridge-runtime)
+          core-observers @(:event-observers core-runtime)
+          expected-events (set optimistic-htmx/observed-events)
+          recorded-events (set (keys recorded-observers))
+          send-wrapper @(:send-payload-wrapper bridge-runtime)
+          transport-wrapper @(:transport-wrapper bridge-runtime)
+          current-send (choreo/send-payload-handler choreo-runtime)
+          current-transport (choreo/transport-handler choreo-runtime)]
+      (into
+       []
+       (concat
+        (when (not= expected-events recorded-events)
+          [{:invariant :optimistic-htmx-observer-set
+            :expected expected-events
+            :actual recorded-events}])
+
+        (mapcat
+         (fn [event-name]
+           (let [expected-handler (get recorded-observers event-name)
+                 actual-handler (get-in core-observers
+                                        [event-name optimistic-htmx/observer-id])]
+             (cond
+               (nil? expected-handler)
+               [{:invariant :optimistic-htmx-observer-ownership
+                 :event-name event-name
+                 :status :not-recorded}]
+
+               (nil? actual-handler)
+               [{:invariant :optimistic-htmx-observer-ownership
+                 :event-name event-name
+                 :status :missing-from-core}]
+
+               (not (identical? expected-handler actual-handler))
+               [{:invariant :optimistic-htmx-observer-ownership
+                 :event-name event-name
+                 :status :replaced-in-core}]
+
+               :else
+               [])))
+         expected-events)
+
+        (when-not (identical? send-wrapper current-send)
+          [{:invariant :optimistic-htmx-send-wrapper-ownership
+            :status (if current-send :replaced-in-choreo :missing-from-choreo)}])
+
+        (when-not (identical? transport-wrapper current-transport)
+          [{:invariant :optimistic-htmx-transport-wrapper-ownership
+            :status (if current-transport :replaced-in-choreo :missing-from-choreo)}]))))))
+
 (defn invariant-errors
   "Return read-only composition invariant violations.
 
@@ -320,15 +398,15 @@
    Expected lifecycle shapes:
 
      :created
-       core listeners absent; shell open; Choreo attached; optional optimism
-       attached to the exact Choreo runtime and shell
+       core listeners absent; shell open; Choreo attached; optional optimism and
+       optional optimistic HTMX bridge attached to their exact dependencies
 
      :started
-       core listeners installed; shell open; Choreo and optional optimism still
-       attached through the exact functions they registered
+       core listeners installed; shell open; Choreo, optional optimism, and the
+       optional HTMX bridge still own the exact functions they registered
 
      :stopped
-       core listeners absent; shell closed; Choreo and optimism detached
+       core listeners absent; shell closed; bridge, optimism, and Choreo detached
 
    Active ownership checks compare the physical registries with the exact
    handler functions recorded by each integration runtime. Diagnostics never
@@ -346,6 +424,9 @@
         optimistic-runtime
         (:optimistic runtime)
 
+        optimistic-htmx-runtime
+        (:optimistic-htmx runtime)
+
         core-shell
         (core/shell-runtime core-runtime)
 
@@ -360,6 +441,18 @@
         (when optimistic-runtime
           (optimistic/choreo-runtime optimistic-runtime))
 
+        bridge-core
+        (when optimistic-htmx-runtime
+          (optimistic-htmx/core-runtime optimistic-htmx-runtime))
+
+        bridge-optimistic
+        (when optimistic-htmx-runtime
+          (optimistic-htmx/optimistic-runtime optimistic-htmx-runtime))
+
+        bridge-choreo
+        (when optimistic-htmx-runtime
+          (optimistic-htmx/choreo-runtime optimistic-htmx-runtime))
+
         lifecycle-value
         @(:lifecycle runtime)
 
@@ -372,6 +465,10 @@
         optimistic-diagnostics
         (when optimistic-runtime
           (optimistic/diagnostics optimistic-runtime))
+
+        optimistic-htmx-diagnostics
+        (when optimistic-htmx-runtime
+          (optimistic-htmx/diagnostics optimistic-htmx-runtime))
 
         core-started?
         (true? (:started? core-diagnostics))
@@ -393,6 +490,9 @@
           #{(:derive-action optimistic-runtime)
             (:resolve-action optimistic-runtime)})
 
+        optimistic-htmx-attached?
+        (true? (:attached? optimistic-htmx-diagnostics))
+
         active-choreo-ownership-errors
         (when (contains? #{:created :started} lifecycle-value)
           (choreo-handler-ownership-errors
@@ -405,6 +505,14 @@
           (optimistic-ownership-errors
            optimistic-runtime
            core-shell
+           choreo-runtime))
+
+        active-optimistic-htmx-ownership-errors
+        (when (and optimistic-htmx-runtime
+                   (contains? #{:created :started} lifecycle-value))
+          (optimistic-htmx-ownership-errors
+           optimistic-htmx-runtime
+           core-runtime
            choreo-runtime))
 
         base-errors
@@ -425,6 +533,30 @@
           (conj
            {:invariant :optimistic-shared-choreo
             :message "Optimism must attach to the exact composed Choreo runtime."})
+
+          (and optimistic-htmx-runtime
+               (nil? optimistic-runtime))
+          (conj
+           {:invariant :optimistic-htmx-requires-optimism
+            :message "The optimistic HTMX bridge requires the composed optimistic runtime."})
+
+          (and optimistic-htmx-runtime
+               (not (identical? core-runtime bridge-core)))
+          (conj
+           {:invariant :optimistic-htmx-shared-core
+            :message "The optimistic HTMX bridge must attach to the exact composed Core runtime."})
+
+          (and optimistic-htmx-runtime
+               (not (identical? optimistic-runtime bridge-optimistic)))
+          (conj
+           {:invariant :optimistic-htmx-shared-optimism
+            :message "The optimistic HTMX bridge must attach to the exact composed optimistic runtime."})
+
+          (and optimistic-htmx-runtime
+               (not (identical? choreo-runtime bridge-choreo)))
+          (conj
+           {:invariant :optimistic-htmx-shared-choreo
+            :message "The optimistic HTMX bridge must use the exact composed Choreo runtime."})
 
           (not (contains? lifecycle-states lifecycle-value))
           (conj
@@ -497,6 +629,13 @@
             :expected expected-optimistic-actions
             :actual optimistic-attached-actions})
 
+          (and optimistic-htmx-runtime
+               (contains? #{:created :started} lifecycle-value)
+               (not optimistic-htmx-attached?))
+          (conj
+           {:invariant :optimistic-htmx-attached
+            :lifecycle lifecycle-value})
+
           (and (= :stopped lifecycle-value)
                core-started?)
           (conj
@@ -522,12 +661,19 @@
           (conj
            {:invariant :stopped-optimistic-detached
             :attached-effect-kinds optimistic-attached-effects
-            :attached-local-actions optimistic-attached-actions}))]
+            :attached-local-actions optimistic-attached-actions})
+
+          (and optimistic-htmx-runtime
+               (= :stopped lifecycle-value)
+               optimistic-htmx-attached?)
+          (conj
+           {:invariant :stopped-optimistic-htmx-detached}))]
 
     (into
      base-errors
      (concat active-choreo-ownership-errors
-             active-optimistic-ownership-errors))))
+             active-optimistic-ownership-errors
+             active-optimistic-htmx-ownership-errors))))
 
 (defn invariant-clean?
   [runtime]
@@ -568,12 +714,19 @@
        This is the application realization seam for provisional projection,
        provisional rendering, and canonical-authority refresh.
 
+     :optimistic-htmx-options
+       Optional. When present, :optimistic-options must also be present. Passed
+       to gesso.live.browser.optimistic-htmx/create. This owns only the HTMX
+       command/settlement carrier and preverified plan lookup seam.
+
    Construction order is deliberate:
 
      1. Core creates continuity plus the single shell/AdapterState owner;
      2. Choreo attaches physical machine handlers to that shell;
      3. optional optimism attaches its physical handlers/local actions to that
-        exact Choreo runtime and shell.
+        exact Choreo runtime and shell;
+     4. optional optimistic HTMX wraps Choreo transport selection and registers
+        observers through Core's existing listener seam.
 
    If a later stage fails, already-created stages are retired/detached in reverse
    dependency order before the original construction error is rethrown."
@@ -601,6 +754,9 @@
          optimistic-options
          (:optimistic-options options)
 
+         optimistic-htmx-options
+         (:optimistic-htmx-options options)
+
          _
          (require-map!
           "Browser runtime :core-options"
@@ -617,6 +773,21 @@
             "Browser runtime :optimistic-options"
             optimistic-options))
 
+         _
+         (when (some? optimistic-htmx-options)
+           (require-map!
+            "Browser runtime :optimistic-htmx-options"
+            optimistic-htmx-options))
+
+         _
+         (when (and (some? optimistic-htmx-options)
+                    (nil? optimistic-options))
+           (throw
+            (runtime-error
+             :optimistic-htmx-requires-optimism
+             "Browser runtime :optimistic-htmx-options requires :optimistic-options."
+             {})))
+
          core-runtime
          (core/create core-options)
 
@@ -624,6 +795,9 @@
          (atom nil)
 
          optimistic-runtime*
+         (atom nil)
+
+         optimistic-htmx-runtime*
          (atom nil)]
 
      (try
@@ -644,12 +818,23 @@
              _
              (reset! optimistic-runtime* optimistic-runtime)
 
+             optimistic-htmx-runtime
+             (when (some? optimistic-htmx-options)
+               (optimistic-htmx/create
+                core-runtime
+                optimistic-runtime
+                optimistic-htmx-options))
+
+             _
+             (reset! optimistic-htmx-runtime* optimistic-htmx-runtime)
+
              runtime
              {:gesso.live.browser.runtime/type runtime-type
               :gesso.live.browser.runtime/version runtime-version
               :core core-runtime
               :choreo choreo-runtime
               :optimistic optimistic-runtime
+              :optimistic-htmx optimistic-htmx-runtime
               :lifecycle (atom :created)
               :public-api (atom nil)}]
 
@@ -660,6 +845,12 @@
          runtime)
 
        (catch :default error
+         (when-let [optimistic-htmx-runtime @optimistic-htmx-runtime*]
+           (try
+             (optimistic-htmx/detach! optimistic-htmx-runtime)
+             (catch :default _
+               nil)))
+
          (when-let [optimistic-runtime @optimistic-runtime*]
            (try
              (optimistic/detach! optimistic-runtime)
@@ -682,6 +873,14 @@
 ;; =============================================================================
 ;; Lifecycle
 ;; =============================================================================
+
+(defn- best-effort-detach-optimistic-htmx!
+  [runtime]
+  (when-let [bridge-runtime (:optimistic-htmx runtime)]
+    (try
+      (optimistic-htmx/detach! bridge-runtime)
+      (catch :default _
+        nil))))
 
 (defn- best-effort-detach-optimistic!
   [runtime]
@@ -714,9 +913,10 @@
   (reset!
    (:lifecycle runtime)
    :stopped)
-  ;; Semantic shell shutdown must happen while both physical integration layers
+  ;; Semantic shell shutdown must happen while all physical integration layers
   ;; remain attached. Detachment happens only after semantic ownership is gone.
   (best-effort-stop-core! runtime)
+  (best-effort-detach-optimistic-htmx! runtime)
   (best-effort-detach-optimistic! runtime)
   (best-effort-detach-choreo! runtime)
   :stopped)
@@ -724,16 +924,17 @@
 (defn start!
   "Install the composed runtime's document/HTMX listeners exactly once.
 
-   Choreo and optional optimism physical bindings are already attached during
-   create. Starting does not create another shell or AdapterState.
+   Choreo, optional optimism, and optional optimistic HTMX physical bindings
+   are already attached during create. Starting does not create another shell or
+   AdapterState.
 
    Before acquiring document listeners, the runtime verifies the full created
-   composition: one open shared shell, exact Choreo handler ownership, and—when
-   configured—exact optimistic handler/local-action ownership.
+   composition: one open shared shell plus exact Choreo, optimistic, and bridge
+   handler/observer/wrapper ownership.
 
    A failed start semantically retires/shuts down the shell before detaching the
-   optimistic and Choreo physical bindings. The partially-started runtime becomes
-   permanently :stopped."
+   bridge, optimism, and Choreo physical bindings. The partially-started runtime
+   becomes permanently :stopped."
   [runtime]
   (let [runtime
         (require-runtime!
@@ -794,8 +995,9 @@
      1. mark the composition stopped so no reentrant caller can restart it;
      2. core/stop! removes listeners and shell/shutdown! semantically retires
         adapter-owned executions/fragments while all physical handlers remain;
-     3. detach optimism's physical effect handlers and Choreo local actions;
-     4. detach Choreo's physical machine handlers last.
+     3. detach the optimistic HTMX observers/transport wrappers;
+     4. detach optimism's physical effect handlers and Choreo local actions;
+     5. detach Choreo's physical machine handlers last.
 
    Semantic retirement must precede physical detachment. Cleanup failures remain
    best-effort browser debt and cannot restore semantic ownership."
@@ -815,6 +1017,7 @@
       (try
         (core/stop! (:core runtime))
         (finally
+          (best-effort-detach-optimistic-htmx! runtime)
           (best-effort-detach-optimistic! runtime)
           (best-effort-detach-choreo! runtime))))
 
@@ -853,7 +1056,10 @@
      :choreo (choreo/diagnostics (:choreo runtime))
      :optimistic
      (when-let [optimistic-runtime (:optimistic runtime)]
-       (optimistic/diagnostics optimistic-runtime))}))
+       (optimistic/diagnostics optimistic-runtime))
+     :optimistic-htmx
+     (when-let [bridge-runtime (:optimistic-htmx runtime)]
+       (optimistic-htmx/diagnostics bridge-runtime))}))
 
 ;; =============================================================================
 ;; Browser-global production entry point
@@ -962,7 +1168,7 @@
 
         (do
           ;; Another initializer won. This newly-created composition owns its
-          ;; own shell/Choreo/optional-optimism attachment and must be torn down.
+          ;; own shell/Choreo/optional-optimism/optional-bridge attachment and must be torn down.
           (stop!
            runtime)
 

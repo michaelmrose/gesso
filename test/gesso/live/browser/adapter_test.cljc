@@ -804,6 +804,43 @@
         (is (= 0 (count (effects-of :optimistic/timeout-cancel effects-b)))
             "A timer that has already fired no longer needs cancellation.")))))
 
+(deftest incompatible-protocol-retirement-uses-authority-reconstruction-policy-test
+  (doseq [[rollback-eligible? expected-disposition]
+          [[true :rollback-and-refresh]
+           [false :refresh-authority]]]
+    (testing (str "rollback? " rollback-eligible?)
+      (let [[state-start _]
+            (start
+             (adapter/initial-state)
+             "execution-1"
+             (machine-execution (optimistic-receive-choreography) :browser)
+             :card
+             {:optimistic (optimistic-config rollback-eligible?)})
+            [state-a _] (establish-provisional state-start "execution-1")
+            generation (adapter/execution-generation state-a "execution-1")
+            [state-b effects-b]
+            (adapter/step
+             state-a
+             {:event :execution/retire
+              :execution-id "execution-1"
+              :generation generation
+              :reason :optimistic-incompatible-protocol})
+            finish (effect-data :optimistic/finish effects-b)]
+        (is (nil? (adapter/execution state-b "execution-1")))
+        (is (nil? (adapter/optimistic-scope state-b "execution-1")))
+        (is (nil? (adapter/target-owner state-b :card)))
+        (is (= [:optimistic/timeout-cancel
+                :optimistic/finish
+                :execution/retired]
+               (mapv first effects-b)))
+        (is (= :incompatible-protocol (:resolution finish)))
+        (is (= expected-disposition (:disposition finish)))
+        (is (= :optimistic-incompatible-protocol (:reason finish)))
+        (is (= :optimistic-incompatible-protocol
+               (get-in (effect-of :execution/retired effects-b) [1 :reason])))
+        (is (not (contains? finish :settlement))
+            "Protocol incompatibility cannot manufacture a trusted settlement.")))))
+
 (deftest stale-optimistic-timeout-is-powerless-test
   (let [[state-start _]
         (start

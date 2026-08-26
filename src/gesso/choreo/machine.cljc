@@ -763,14 +763,59 @@
   [x]
   (project/executable-plan? x))
 
+(defn executable-plan-format-status
+  "Delegate ExecutablePlan format classification to gesso.choreo.project.
+
+   This keeps the machine from growing a shadow plan-format contract while still
+   exposing the distinction runtime callers need between a compatible plan, an
+   incompatible recognizable plan, and malformed/noncanonical input."
+  [x]
+  (project/executable-plan-format-status x))
+
+(defn executable-plan-compatible?
+  "True exactly when x is executable by this machine's current plan format."
+  [x]
+  (project/executable-plan-compatible? x))
+
+(defn executable-plan-incompatible?
+  "True exactly when x is a recognizable Gesso ExecutablePlan whose explicit
+   format version is unsupported by this machine runtime.
+
+   This is the portable stale-plan recovery condition. It does not imply that
+   authoritative model state is invalid and it does not authorize transparent
+   migration of suspended execution state."
+  [x]
+  (project/executable-plan-incompatible? x))
+
 (defn- require-executable-plan!
   [plan]
-  (when-not (project/executable-plan? plan)
-    (machine-error
-     :invalid-plan
-     "Expected a canonical Gesso Choreo ExecutablePlan."
-     {:plan plan}))
-  plan)
+  (let [{:keys [status] :as format-status}
+        (project/executable-plan-format-status plan)]
+    (case status
+      :compatible
+      plan
+
+      :incompatible
+      (machine-error
+       :incompatible-plan
+       "ExecutablePlan format is incompatible with this Gesso Choreo machine runtime."
+       {:plan plan
+        :format-status format-status
+        :version (:gesso.choreo/version plan)
+        :supported-version executable-plan-version})
+
+      :invalid
+      (machine-error
+       :invalid-plan
+       "Expected a canonical Gesso Choreo ExecutablePlan."
+       {:plan plan
+        :format-status format-status})
+
+      (machine-error
+       :invalid-plan-status
+       "ExecutablePlan format classifier returned an unknown status."
+       {:plan plan
+        :format-status format-status}))))
 
 ;; -----------------------------------------------------------------------------
 ;; External envelopes

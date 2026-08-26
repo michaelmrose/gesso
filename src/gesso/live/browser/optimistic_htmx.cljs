@@ -944,6 +944,48 @@
        runtime record (core/failure-reason event))))
   true)
 
+(defn- incompatible-protocol-error?
+  [error]
+  (let [data (ex-data error)]
+    (and (= :gesso.live.optimistic.protocol/error
+            (:error/type data))
+         (= :unsupported-version
+            (:error/kind data))
+         (= :incompatible
+            (get-in data [:protocol/version-status :status])))))
+
+(defn- retire-incompatible-protocol!
+  [runtime record error]
+  (report-error!
+   runtime
+   :settlement-protocol-incompatible
+   error
+   (merge
+    (record-error-data record)
+    {:protocol/version-status
+     (:protocol/version-status (ex-data error))}))
+  (when-let [execution-ref @(:execution-ref record)]
+    (try
+      ;; The adapter owns the semantic recovery policy.  This bridge only
+      ;; classifies the trusted response boundary and supplies the distinct
+      ;; terminal reason.  In particular, do not fabricate a :failed
+      ;; settlement merely because browser/server wire versions disagree.
+      (optimistic/retire!
+       (:optimistic runtime)
+       execution-ref
+       :optimistic-incompatible-protocol)
+      (catch :default retire-error
+        ;; Semantic retirement is attempted before the physical HTTP
+        ;; correlation is forgotten.  Any failure here is diagnostic; this
+        ;; bridge must still release its host-object correlation below rather
+        ;; than leaving an XHR record capable of replaying the stale response.
+        (report-error!
+         runtime
+         :incompatible-protocol-retire
+         retire-error
+         (record-error-data record)))))
+  true)
+
 (defn- settle-successful-request!
   [runtime event record]
   (try
@@ -956,15 +998,17 @@
          execution-ref
          settlement)))
     (catch :default error
-      ;; A malformed or conflicting response cannot manufacture a semantic
-      ;; outcome. Leave the optimistic execution alive so timeout or a trusted
-      ;; authoritative reread can recover it, and surface the physical protocol
-      ;; failure diagnostically.
-      (report-error!
-       runtime
-       :settlement-response
-       error
-       (record-error-data record))))
+      (if (incompatible-protocol-error? error)
+        (retire-incompatible-protocol! runtime record error)
+        ;; A malformed or conflicting response cannot manufacture a semantic
+        ;; outcome. Leave the optimistic execution alive so timeout or a trusted
+        ;; authoritative reread can recover it, and surface the physical protocol
+        ;; failure diagnostically.
+        (report-error!
+         runtime
+         :settlement-response
+         error
+         (record-error-data record)))))
   true)
 
 (defn on-after-request!

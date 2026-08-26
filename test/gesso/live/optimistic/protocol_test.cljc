@@ -124,6 +124,84 @@
   (is (= #{:command-id :execution-id}
          protocol/settlement-correlation-keys)))
 
+(deftest protocol-version-compatibility-is-explicit-and-narrow
+  (let [compatible {:protocol-version protocol/version}
+        incompatible {:protocol-version "4"}
+        malformed-values [nil
+                          ""
+                          "   "
+                          4
+                          :v4
+                          []
+                          {}]]
+    (testing "the current wire version is compatible without implying envelope validity"
+      (is (= {:status :compatible
+              :supported protocol/version
+              :encountered protocol/version}
+             (protocol/protocol-version-status compatible)))
+      (is (true? (protocol/protocol-compatible? compatible)))
+      (is (false? (protocol/protocol-incompatible? compatible))))
+
+    (testing "another recognizable textual version is an explicit incompatibility"
+      (is (= {:status :incompatible
+              :supported protocol/version
+              :encountered "4"}
+             (protocol/protocol-version-status incompatible)))
+      (is (false? (protocol/protocol-compatible? incompatible)))
+      (is (true? (protocol/protocol-incompatible? incompatible))))
+
+    (testing "missing and malformed versions are invalid, not stale-protocol signals"
+      (is (= {:status :invalid
+              :reason :not-map
+              :supported protocol/version
+              :encountered nil}
+             (protocol/protocol-version-status nil)))
+      (is (= {:status :invalid
+              :reason :missing-version
+              :supported protocol/version
+              :encountered nil}
+             (protocol/protocol-version-status {})))
+      (doseq [value malformed-values]
+        (let [status (protocol/protocol-version-status
+                      {:protocol-version value})]
+          (is (= :invalid (:status status)))
+          (is (= :malformed-version (:reason status)))
+          (is (= protocol/version (:supported status)))
+          (is (= value (:encountered status)))
+          (is (false?
+               (protocol/protocol-compatible?
+                {:protocol-version value})))
+          (is (false?
+               (protocol/protocol-incompatible?
+                {:protocol-version value}))))))))
+
+(deftest protocol-decoders-preserve-incompatible-versus-invalid-version-errors
+  (let [wire (protocol/command->wire (command-envelope))]
+    (testing "recognizable unsupported versions remain recovery-class incompatibility"
+      (let [data (error-data
+                  #(protocol/wire->command
+                    (assoc wire :protocol-version "future-v9")))]
+        (is (= :unsupported-version (:error/kind data)))
+        (is (= protocol/version (:expected data)))
+        (is (= "future-v9" (:actual data)))
+        (is (= {:status :incompatible
+                :supported protocol/version
+                :encountered "future-v9"}
+               (:protocol/version-status data)))))
+
+    (testing "malformed versions remain protocol errors rather than compatibility recovery"
+      (doseq [value [nil 4 :v4 "   "]]
+        (let [data (error-data
+                    #(protocol/wire->command
+                      (assoc wire :protocol-version value)))]
+          (is (= :invalid-protocol-version (:error/kind data)))
+          (is (= protocol/version (:expected data)))
+          (is (= value (:actual data)))
+          (is (= :invalid
+                 (get-in data [:protocol/version-status :status])))
+          (is (= :malformed-version
+                 (get-in data [:protocol/version-status :reason]))))))))
+
 (deftest semantic-names-remain-portable-without-becoming-authority
   (is (= "request/claim"
          (protocol/qualified-name :request/claim)))

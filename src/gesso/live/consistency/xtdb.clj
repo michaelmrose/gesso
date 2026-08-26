@@ -9,6 +9,8 @@
    - explicit read-consistency/query option helpers
    - thin q/plan-q task wrappers
    - thin submit-tx/execute-tx task wrappers
+   - portable XTDB-backed authoritative progression bases/requirements
+   - trusted XTDB progression comparison and query-option translation
    - fragment-key consistency dimensions
    - small tx-op constructors
 
@@ -42,9 +44,13 @@
    currently :tx-id. That is useful metadata, but not a complete per-query read
    basis by itself."
   (:require
+   [clojure.string :as str]
+   [gesso.live.progression :as progression]
    [missionary.core :as m]
-   [xtdb.api :as xt])
+   [xtdb.api :as xt]
+   [xtdb.basis :as xt.basis])
   (:import
+   [java.time Instant]
    [xtdb.api TransactionKey]))
 
 ;; -----------------------------------------------------------------------------
@@ -118,6 +124,28 @@
 
 (def default-options
   {:debug-fn nil})
+
+;; -----------------------------------------------------------------------------
+;; XTDB-backed authoritative progression
+;; -----------------------------------------------------------------------------
+
+(def xtdb-basis-version 1)
+
+(def xtdb-basis-type
+  :gesso.live.consistency.xtdb/basis)
+
+(def default-database-name
+  "XTDB's default database name used by basis/snapshot-token construction."
+  "xtdb")
+
+(def xtdb-basis-keys
+  #{:gesso.live.consistency.xtdb/type
+    :gesso.live.consistency.xtdb/version
+    :database
+    :tx-id
+    :snapshot-token})
+
+(declare normalize-consistency tx-result-consistency consistent-query-opts)
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -200,6 +228,348 @@
 
     :else
     {}))
+
+;; -----------------------------------------------------------------------------
+;; Portable XTDB authoritative bases
+;; -----------------------------------------------------------------------------
+
+(defn- normalize-database-name
+  [database]
+  (cond
+    (nil? database)
+    default-database-name
+
+    (keyword? database)
+    (name database)
+
+    (and (string? database)
+         (not (str/blank? database)))
+    database
+
+    :else
+    (throw
+     (ex "XTDB progression database identity must be a keyword or non-blank string."
+         {:database database}))))
+
+(defn- tx-id->wire
+  [value]
+  (when-not (and (integer? value)
+                 (<= 0 value))
+    (throw
+     (ex "XTDB progression tx-id must be a non-negative integer."
+         {:tx-id value})))
+  (str (long value)))
+
+(defn- wire->tx-id
+  [value]
+  (when-not (string? value)
+    (throw
+     (ex "XTDB progression wire tx-id must be a decimal string."
+         {:tx-id value})))
+  (try
+    (let [tx-id (Long/parseLong value)]
+      (when (neg? tx-id)
+        (throw
+         (ex "XTDB progression wire tx-id must be non-negative."
+             {:tx-id value})))
+      tx-id)
+    (catch clojure.lang.ExceptionInfo e
+      (throw e))
+    (catch Throwable e
+      (throw
+       (ex "Invalid XTDB progression wire tx-id."
+           {:tx-id value}
+           e)))))
+
+(defn- snapshot-token-for
+  [database-name system-time]
+  (when-not (instance? Instant system-time)
+    (throw
+     (ex "XTDB progression system-time must be java.time.Instant."
+         {:system-time system-time})))
+  (xt.basis/->time-basis-str
+   {database-name [system-time]}))
+
+(defn- snapshot-token-system-time
+  [database-name snapshot-token]
+  (when-not (and (string? snapshot-token)
+                 (not (str/blank? snapshot-token)))
+    (throw
+     (ex "XTDB progression snapshot-token must be a non-blank string."
+         {:snapshot-token snapshot-token})))
+  (try
+    (let [decoded (xt.basis/<-time-basis-str snapshot-token)
+          expected-keys #{database-name}
+          actual-keys (set (keys decoded))
+          times (get decoded database-name)]
+      (when-not (= expected-keys actual-keys)
+        (throw
+         (ex "XTDB progression snapshot-token must identify exactly one database."
+             {:database database-name
+              :token-databases actual-keys})))
+      (when-not (and (= 1 (count times))
+                     (instance? Instant (first times)))
+        (throw
+         (ex "XTDB progression snapshot-token has an invalid time basis."
+             {:database database-name
+              :times times})))
+      (first times))
+    (catch clojure.lang.ExceptionInfo e
+      (throw e))
+    (catch Throwable e
+      (throw
+       (ex "Invalid XTDB progression snapshot-token."
+           {:database database-name
+            :snapshot-token snapshot-token}
+           e)))))
+
+(defn xtdb-basis?
+  "True for the closed portable XTDB basis representation owned here.
+
+   tx-id is encoded as decimal text so a CLJS carrier cannot lose 64-bit
+   precision. snapshot-token is XTDB's own portable time-basis token. Generic
+   progression/browser code treats the whole basis map as opaque."
+  [value]
+  (and
+   (map? value)
+   (= xtdb-basis-keys (set (keys value)))
+   (= xtdb-basis-type
+      (:gesso.live.consistency.xtdb/type value))
+   (= xtdb-basis-version
+      (:gesso.live.consistency.xtdb/version value))
+   (string? (:database value))
+   (try
+     (wire->tx-id (:tx-id value))
+     (snapshot-token-system-time
+      (:database value)
+      (:snapshot-token value))
+     true
+     (catch Throwable _
+       false))))
+
+(defn require-xtdb-basis!
+  [value]
+  (when-not (xtdb-basis? value)
+    (throw
+     (ex "Expected a closed portable XTDB authoritative basis."
+         {:basis value})))
+  value)
+
+(defn basis
+  "Construct one portable XTDB AuthoritativeBasis from committed tx metadata.
+
+   TransactionKey/Instant remain server-side. The resulting map contains only
+   portable text plus closed type/version identity."
+  ([tx-id system-time]
+   (basis nil tx-id system-time))
+  ([database tx-id system-time]
+   (let [database-name (normalize-database-name database)]
+     {:gesso.live.consistency.xtdb/type xtdb-basis-type
+      :gesso.live.consistency.xtdb/version xtdb-basis-version
+      :database database-name
+      :tx-id (tx-id->wire tx-id)
+      :snapshot-token (snapshot-token-for database-name system-time)})))
+
+(defn basis-tx-id
+  "Return the JVM long transaction id encoded by basis-value."
+  [basis-value]
+  (wire->tx-id (:tx-id (require-xtdb-basis! basis-value))))
+
+(defn basis-database
+  [basis-value]
+  (:database (require-xtdb-basis! basis-value)))
+
+(defn basis-snapshot-token
+  [basis-value]
+  (:snapshot-token (require-xtdb-basis! basis-value)))
+
+(defn basis-system-time
+  "Decode the XTDB snapshot token back to its single database system-time."
+  [basis-value]
+  (let [basis' (require-xtdb-basis! basis-value)]
+    (snapshot-token-system-time
+     (:database basis')
+     (:snapshot-token basis'))))
+
+(defn consistency->basis
+  "Translate complete XTDB consistency metadata into a portable basis.
+
+   Returns nil for incomplete consistency. A basis requires both :tx-id and a
+   transaction/snapshot time. tx-id alone (the public submit-tx result) cannot
+   establish a query requirement this adapter can later honor."
+  ([consistency]
+   (consistency->basis consistency nil))
+  ([consistency database]
+   (let [{:keys [tx-id system-time snapshot-time]}
+         (normalize-consistency consistency)
+         time (or system-time snapshot-time)]
+     (when (and (some? tx-id)
+                (some? time))
+       (basis database tx-id time)))))
+
+(defn tx-result-basis
+  "Translate a complete public XTDB tx result into a portable basis, or nil.
+
+   execute-tx TransactionKey results are complete. submit-tx's tx-id-only map
+   intentionally returns nil."
+  ([tx-result]
+   (tx-result-basis tx-result nil))
+  ([tx-result database]
+   (consistency->basis
+    (tx-result-consistency tx-result)
+    database)))
+
+(defn tx-result-progression
+  "Return a singleton generic progression requirement established by tx-result,
+   or nil when the public XTDB result lacks enough basis data."
+  ([tx-result]
+   (tx-result-progression tx-result nil))
+  ([tx-result database]
+   (some-> (tx-result-basis tx-result database)
+           progression/requirement)))
+
+(defn- same-database!
+  [left right]
+  (let [left-db (basis-database left)
+        right-db (basis-database right)]
+    (when-not (= left-db right-db)
+      (throw
+       (ex "XTDB progression bases from different databases are incomparable."
+           {:left-database left-db
+            :right-database right-db
+            :left left
+            :right right})))
+    left-db))
+
+(defn compare-bases
+  "Trusted XTDB comparison for portable bases from one database.
+
+   XTDB 2.2.0-beta1 TransactionKey Comparable ordering is tx-id ordering. This
+   adapter is the trusted storage-specific layer allowed to use that fact.
+   Equal tx-id with different basis payload is rejected as conflicting evidence."
+  [left right]
+  (require-xtdb-basis! left)
+  (require-xtdb-basis! right)
+  (same-database! left right)
+  (let [comparison (compare (basis-tx-id left)
+                            (basis-tx-id right))]
+    (when (and (zero? comparison)
+               (not= left right))
+      (throw
+       (ex "Conflicting XTDB progression bases share one tx-id."
+           {:left left
+            :right right})))
+    comparison))
+
+(defn basis-advances?
+  "True when right is strictly later than left in the same XTDB transaction log."
+  [left right]
+  (neg? (compare-bases left right)))
+
+(defn progression-witness
+  "Return trusted generic :advances evidence for left -> right.
+
+   Equal bases need no witness and return nil. Backward movement is rejected."
+  [left right]
+  (let [comparison (compare-bases left right)]
+    (cond
+      (neg? comparison)
+      (progression/advance left right)
+
+      (zero? comparison)
+      nil
+
+      :else
+      (throw
+       (ex "XTDB progression cannot witness a backward basis transition."
+           {:from left
+            :to right})))))
+
+(defn strongest-required-basis
+  "Collapse one generic requirement using trusted XTDB tx ordering.
+
+   Generic Live preserves incomparable bases. Once the requirement reaches this
+   XTDB adapter, bases from one database are safely reducible to the greatest
+   transaction id. Mixed/non-XTDB bases fail closed."
+  [requirement-value]
+  (when-some [requirement'
+              (progression/normalize-requirement requirement-value)]
+    (reduce
+     (fn [strongest candidate]
+       (require-xtdb-basis! candidate)
+       (if (nil? strongest)
+         candidate
+         (if (neg? (compare-bases strongest candidate))
+           candidate
+           strongest)))
+     nil
+     (progression/required-bases requirement'))))
+
+(defn progression-consistency
+  "Translate a generic XTDB progression requirement into explicit consistency."
+  [requirement-value]
+  (when-some [required (strongest-required-basis requirement-value)]
+    (let [system-time (basis-system-time required)]
+      {:tx-id (basis-tx-id required)
+       :system-time system-time
+       :snapshot-time system-time
+       :snapshot-token (basis-snapshot-token required)})))
+
+(defn progression-query-opts
+  "Translate progression into XTDB query opts using XTDB's snapshot token.
+
+   The token fixes the read to a basis known to include the strongest required
+   transaction. Non-default database identity is carried explicitly."
+  [requirement-value]
+  (when-some [required (strongest-required-basis requirement-value)]
+    (cond-> {:snapshot-token (basis-snapshot-token required)}
+      (not= default-database-name (basis-database required))
+      (assoc :database (basis-database required)))))
+
+(defn- enforce-progression-query-opts
+  [opts requirement-value]
+  (if-some [required (strongest-required-basis requirement-value)]
+    (let [required-db (basis-database required)
+          explicit-db (when (contains? opts :database)
+                        (normalize-database-name (:database opts)))]
+      (when (and explicit-db
+                 (not= explicit-db required-db))
+        (throw
+         (ex "Explicit XTDB query database conflicts with authoritative progression."
+             {:explicit-database (:database opts)
+              :required-database required-db})))
+      ;; Progression is a correctness requirement, not an ordinary preference.
+      ;; Remove caller snapshot coordinates and install the exact required XTDB
+      ;; token. Preserve a compatible explicit database representation; otherwise
+      ;; add the required non-default database.
+      (cond-> (-> opts
+                  (dissoc :snapshot-time :snapshot-token)
+                  (assoc :snapshot-token (basis-snapshot-token required)))
+        (and (not explicit-db)
+             (not= default-database-name required-db))
+        (assoc :database required-db)))
+    opts))
+
+(defn progression-from
+  "Return optional generic progression from a request/context map.
+
+   :gesso.live/progression is canonical. :progression is accepted as a narrow
+   request-local convenience while the public Live facade is migrated."
+  [x]
+  (when (map? x)
+    (progression/normalize-requirement
+     (or (:gesso.live/progression x)
+         (:progression x)))))
+
+(defn read-query-opts
+  "Build query opts from explicit consistency, optional authoritative progression,
+   and caller opts. Progression constraints are applied last and cannot be
+   weakened by caller query options."
+  ([consistency progression-value]
+   (read-query-opts consistency progression-value nil))
+  ([consistency progression-value opts]
+   (-> (consistent-query-opts consistency opts)
+       (enforce-progression-query-opts progression-value))))
 
 ;; -----------------------------------------------------------------------------
 ;; Context helpers
@@ -401,18 +771,21 @@
         (consistent-query-opts consistency opts))))
 
 (defn q-consistent-from
-  "Run q-consistent against a raw connectable or context map.
+  "Run a request-scoped consistency/progression-aware XTDB2 query.
 
-   Uses read-connectable-from and consistency-from."
+   Explicit consistency remains supported. When ctx carries
+   :gesso.live/progression, the XTDB adapter translates it into a required
+   snapshot/database and applies that requirement after ordinary query opts so
+   callers cannot weaken an authoritative refresh requirement."
   ([ctx-or-connectable query]
-   (q-consistent (read-connectable-from ctx-or-connectable)
-                 query
-                 (consistency-from ctx-or-connectable)))
+   (q-consistent-from ctx-or-connectable query nil))
   ([ctx-or-connectable query opts]
-   (q-consistent (read-connectable-from ctx-or-connectable)
-                 query
-                 (consistency-from ctx-or-connectable)
-                 opts)))
+   (*q* (require-connectable! (read-connectable-from ctx-or-connectable))
+        query
+        (read-query-opts
+         (consistency-from ctx-or-connectable)
+         (progression-from ctx-or-connectable)
+         opts))))
 
 (defn q-task
   "Return a Missionary task that runs plain q on m/blk."
@@ -470,18 +843,16 @@
              (consistent-query-opts consistency opts))))
 
 (defn plan-q-consistent-from
-  "Run plan-q-consistent against a raw connectable or context map.
-
-   Uses read-connectable-from and consistency-from."
+  "Run request-scoped plan-q with explicit consistency and optional progression."
   ([ctx-or-connectable query]
-   (plan-q-consistent (read-connectable-from ctx-or-connectable)
-                      query
-                      (consistency-from ctx-or-connectable)))
+   (plan-q-consistent-from ctx-or-connectable query nil))
   ([ctx-or-connectable query opts]
-   (plan-q-consistent (read-connectable-from ctx-or-connectable)
-                      query
-                      (consistency-from ctx-or-connectable)
-                      opts)))
+   (*plan-q* (require-connectable! (read-connectable-from ctx-or-connectable))
+             query
+             (read-query-opts
+              (consistency-from ctx-or-connectable)
+              (progression-from ctx-or-connectable)
+              opts))))
 
 ;; -----------------------------------------------------------------------------
 ;; Transaction result normalization
@@ -550,15 +921,21 @@
        :at (now-ms)})
      (try
        (let [tx-result   (*submit-tx* connectable' tx-ops tx-options)
-             consistency (tx-consistency tx-result)]
+             consistency (tx-consistency tx-result)
+             progression-value
+             (tx-result-progression tx-result (:database tx-options))]
          (debug!
           debug-fn
           :gesso.live.xtdb/submit-tx-succeeded
-          {:tx-result tx-result
-           :consistency consistency
-           :at (now-ms)})
-         {:tx-result tx-result
-          :consistency consistency})
+          (cond-> {:tx-result tx-result
+                   :consistency consistency
+                   :at (now-ms)}
+            progression-value
+            (assoc :progression progression-value)))
+         (cond-> {:tx-result tx-result
+                  :consistency consistency}
+           progression-value
+           (assoc :progression progression-value)))
        (catch Throwable e
          (debug!
           debug-fn
@@ -585,7 +962,8 @@
    Returns:
 
      {:tx-result ...
-      :consistency ...}
+      :consistency ...
+      :progression ...} ; when complete basis data is available
 
    XTDB public execute-tx returns a TransactionKey containing tx-id and
    system-time. The returned consistency includes:
@@ -618,15 +996,21 @@
        :at (now-ms)})
      (try
        (let [tx-result   (*execute-tx* connectable' tx-ops tx-options)
-             consistency (tx-consistency tx-result)]
+             consistency (tx-consistency tx-result)
+             progression-value
+             (tx-result-progression tx-result (:database tx-options))]
          (debug!
           debug-fn
           :gesso.live.xtdb/execute-tx-succeeded
-          {:tx-result tx-result
-           :consistency consistency
-           :at (now-ms)})
-         {:tx-result tx-result
-          :consistency consistency})
+          (cond-> {:tx-result tx-result
+                   :consistency consistency
+                   :at (now-ms)}
+            progression-value
+            (assoc :progression progression-value)))
+         (cond-> {:tx-result tx-result
+                  :consistency consistency}
+           progression-value
+           (assoc :progression progression-value)))
        (catch Throwable e
          (debug!
           debug-fn

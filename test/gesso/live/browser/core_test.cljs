@@ -10,6 +10,7 @@
    - synchronous re-entry when HTMX trigger immediately begins a request
    - fail-closed request/swap behavior at the FFI boundary
    - authoritative metadata remaining plain carrier data until adapter judgment
+   - adapter-approved progression requirements returning through HTMX request headers
    - explicit invalidation and fragment retirement
    - listener ownership and teardown
    - diagnostics excluding raw DOM/XHR/HTMX objects
@@ -22,7 +23,9 @@
    [gesso.live.browser.adapter :as adapter]
    [gesso.live.browser.continuity :as continuity]
    [gesso.live.browser.core :as core]
-   [gesso.live.browser.shell :as shell]))
+   [gesso.live.browser.shell :as shell]
+   [gesso.live.progression :as progression]
+   [gesso.live.progression.http :as progression.http]))
 
 ;; =============================================================================
 ;; Generic helpers
@@ -594,6 +597,73 @@
            (:requirements (core/pending-refresh runtime root))))))
 
 ;; =============================================================================
+;; Adapter-approved refresh progression -> HTMX request header
+;; =============================================================================
+
+(deftest config-request-carries-pending-progression-requirement-test
+  (let [{:keys [runtime root]}
+        (runtime-fixture "fragment-1")
+        basis-a {:tx-id 41
+                 :system-time "2026-08-25T20:00:41Z"}
+        basis-b {:tx-id 42
+                 :system-time "2026-08-25T20:00:42Z"}
+        requirement
+        (progression/compose
+         (progression/requirement basis-a)
+         (progression/requirement basis-b))
+        headers (js-obj)
+        fixture
+        (make-event
+         "htmx:configRequest"
+         {:elt root
+          :target root
+          :extra-detail {:headers headers}})]
+    (begin-refresh! runtime "fragment-1" requirement)
+    (let [pending-before (core/pending-refresh runtime root)]
+      (is (true? (core/on-config-request! runtime (:event fixture))))
+      (is (= requirement
+             (progression.http/decode-request-progression
+              (aget headers progression.http/request-header-name))))
+      (is (= pending-before
+             (core/pending-refresh runtime root))
+          "configRequest must carry but not consume the pending generation."))))
+
+(deftest config-request-without-progression-does-not-invent-header-test
+  (let [{:keys [runtime root]}
+        (runtime-fixture "fragment-1")
+        headers (js-obj)
+        fixture
+        (make-event
+         "htmx:configRequest"
+         {:elt root
+          :target root
+          :extra-detail {:headers headers}})]
+    (begin-refresh! runtime "fragment-1")
+    (is (true? (core/on-config-request! runtime (:event fixture))))
+    (is (nil? (aget headers progression.http/request-header-name)))
+    (is (some? (core/pending-refresh runtime root)))))
+
+(deftest config-request-progression-fails-closed-when-headers-are-unavailable-test
+  (let [{:keys [runtime root]}
+        (runtime-fixture "fragment-1")
+        requirement
+        (progression/requirement
+         {:tx-id 42
+          :system-time "2026-08-25T20:00:42Z"})
+        fixture
+        (make-event
+         "htmx:configRequest"
+         {:elt root
+          :target root})]
+    (begin-refresh! runtime "fragment-1" requirement)
+    (is (= :missing-config-request-headers
+           (error-kind
+            #(core/on-config-request! runtime (:event fixture)))))
+    (is (true? @(:prevented? fixture)))
+    (is (some? (core/pending-refresh runtime root))
+        "A failed physical configuration must not consume semantic ownership.")))
+
+;; =============================================================================
 ;; Managed SSE wakeup -> adapter invalidation -> HTMX-owned refresh
 ;; =============================================================================
 
@@ -633,6 +703,146 @@
       (is (= 1 (count calls)))
       (is (identical? root (:root (first calls))))
       (is (= core/refresh-event-name (:name (first calls)))))))
+
+(deftest managed-sse-progression-wire-is-decoded-before-adapter-invalidation-test
+  (let [basis {:tx-id 42
+               :system-time "2026-08-25T20:00:42Z"}
+        requirement (progression/requirement basis)
+        wire (progression/requirement->wire requirement)
+        root (make-managed-root "fragment-1")
+        listener (make-invalidation-listener root "fragment-1")
+        document-fixture (make-document [root])
+        htmx-fixture (make-htmx)
+        runtime
+        (core/create
+         {:document (:document document-fixture)
+          :htmx (:htmx htmx-fixture)})
+        fixture
+        (make-event
+         core/sse-before-message-event-name
+         {:elt listener
+          :target listener
+          :extra-detail
+          {:data
+           (pr-str
+            {:progression wire
+             :invalidation {:progression wire}})}})]
+    (is (true? (core/on-sse-before-message! runtime (:event fixture))))
+    (is (true? @(:prevented? fixture)))
+    (is (= #{requirement}
+           (:requirements (core/pending-refresh runtime root))))
+    (is (= 1 (count @(:calls htmx-fixture))))
+    (is (= requirement
+           (first (:requirements (core/pending-refresh runtime root)))))
+    (is (not= wire
+              (first (:requirements (core/pending-refresh runtime root))))
+        "Wire representation must not leak past browser Core into AdapterState.")))
+
+(deftest managed-sse-progression-copies-must-both-be-present-and-agree-test
+  (let [basis-a {:basis :a}
+        basis-b {:basis :b}
+        wire-a (progression/requirement->wire
+                (progression/requirement basis-a))
+        wire-b (progression/requirement->wire
+                (progression/requirement basis-b))]
+    (doseq [[label payload]
+            [["top-level only"
+              {:progression wire-a
+               :invalidation {}}]
+             ["nested only"
+              {:invalidation {:progression wire-a}}]
+             ["disagreeing copies"
+              {:progression wire-a
+               :invalidation {:progression wire-b}}]]]
+      (testing label
+        (let [root (make-managed-root "fragment-1")
+              listener (make-invalidation-listener root "fragment-1")
+              document-fixture (make-document [root])
+              htmx-fixture (make-htmx)
+              runtime
+              (core/create
+               {:document (:document document-fixture)
+                :htmx (:htmx htmx-fixture)})
+              fixture
+              (make-event
+               core/sse-before-message-event-name
+               {:elt listener
+                :target listener
+                :extra-detail {:data (pr-str payload)}})]
+          (is (= :inconsistent-sse-progression
+                 (error-kind
+                  #(core/on-sse-before-message! runtime (:event fixture)))))
+          (is (true? @(:prevented? fixture)))
+          (is (empty? @(:calls htmx-fixture)))
+          (is (nil? (core/pending-refresh runtime root))))))))
+
+(deftest malformed-or-unsupported-managed-sse-progression-fails-before-refresh-test
+  (let [valid-wire
+        (progression/requirement->wire
+         (progression/requirement {:basis :valid}))
+        unsupported-wire
+        (assoc valid-wire
+               :gesso.live.progression/version
+               (inc progression/progression-version))]
+    (doseq [[label payload]
+            [["unsupported version"
+              {:progression unsupported-wire
+               :invalidation {:progression unsupported-wire}}]
+             ["wrong wire type"
+              {:progression
+               (assoc valid-wire
+                      :gesso.live.progression/type :forged/type)
+               :invalidation
+               {:progression
+                (assoc valid-wire
+                       :gesso.live.progression/type :forged/type)}}]]]
+      (testing label
+        (let [root (make-managed-root "fragment-1")
+              listener (make-invalidation-listener root "fragment-1")
+              document-fixture (make-document [root])
+              htmx-fixture (make-htmx)
+              runtime
+              (core/create
+               {:document (:document document-fixture)
+                :htmx (:htmx htmx-fixture)})
+              fixture
+              (make-event
+               core/sse-before-message-event-name
+               {:elt listener
+                :target listener
+                :extra-detail {:data (pr-str payload)}})]
+          (is (= :invalid-sse-progression
+                 (error-kind
+                  #(core/on-sse-before-message! runtime (:event fixture)))))
+          (is (true? @(:prevented? fixture)))
+          (is (empty? @(:calls htmx-fixture)))
+          (is (nil? (core/pending-refresh runtime root))))))))
+
+(deftest malformed-managed-sse-payload-fails-before-refresh-test
+  (doseq [[label data]
+          [["unreadable EDN" "{:progression"]
+           ["non-map EDN" "[:not :a :live-event]"]]]
+    (testing label
+      (let [root (make-managed-root "fragment-1")
+            listener (make-invalidation-listener root "fragment-1")
+            document-fixture (make-document [root])
+            htmx-fixture (make-htmx)
+            runtime
+            (core/create
+             {:document (:document document-fixture)
+              :htmx (:htmx htmx-fixture)})
+            fixture
+            (make-event
+             core/sse-before-message-event-name
+             {:elt listener
+              :target listener
+              :extra-detail {:data data}})]
+        (is (= :invalid-sse-payload
+               (error-kind
+                #(core/on-sse-before-message! runtime (:event fixture)))))
+        (is (true? @(:prevented? fixture)))
+        (is (empty? @(:calls htmx-fixture)))
+        (is (nil? (core/pending-refresh runtime root)))))))
 
 (deftest repeated-managed-sse-wakeups-coalesce-before-request-start-test
   (let [root (make-managed-root "fragment-1")
@@ -1060,6 +1270,76 @@
     (bind-request! runtime root xhr-b)
     (is (= "request-2"
            (:request-id (core/active-request runtime root))))))
+
+(deftest queued-progression-requirements-become-next-config-request-header-test
+  (let [{:keys [runtime root]}
+        (runtime-fixture "fragment-1")
+        basis-a {:tx-id 101
+                 :system-time "2026-08-26T08:00:01Z"}
+        basis-b {:tx-id 102
+                 :system-time "2026-08-26T08:00:02Z"}
+        basis-c {:tx-id 103
+                 :system-time "2026-08-26T08:00:03Z"}
+        requirement-a (progression/requirement basis-a)
+        requirement-b (progression/requirement basis-b)
+        requirement-c (progression/requirement basis-c)
+        {xhr-a :xhr} (make-xhr 200)
+        headers-a (js-obj)
+        headers-b (js-obj)]
+    ;; Generation A owns only requirement A, and configRequest carries exactly A.
+    (begin-refresh! runtime "fragment-1" requirement-a)
+    (is (true?
+         (core/on-config-request!
+          runtime
+          (:event
+           (make-event
+            "htmx:configRequest"
+            {:elt root
+             :target root
+             :extra-detail {:headers headers-a}})))))
+    (is (= requirement-a
+           (progression.http/decode-request-progression
+            (aget headers-a progression.http/request-header-name))))
+    (bind-request! runtime root xhr-a)
+
+    ;; B and C arrive while A is active. They must remain queued, and must not
+    ;; leak backward into A's already-configured physical request.
+    (begin-refresh! runtime "fragment-1" requirement-b)
+    (begin-refresh! runtime "fragment-1" requirement-c)
+    (is (nil? (core/pending-refresh runtime root)))
+    (is (= #{requirement-b requirement-c}
+           (get-in (core/state runtime)
+                   [:fragments "fragment-1" :queued-requirements])))
+    (is (= requirement-a
+           (progression.http/decode-request-progression
+            (aget headers-a progression.http/request-header-name))))
+
+    ;; Completing A promotes the complete queued set into one new generation.
+    ;; The next configRequest must therefore carry exactly B+C, preserving
+    ;; incomparability rather than weakening the requirement or reusing A.
+    (after-request! runtime root xhr-a true)
+    (let [pending-b (core/pending-refresh runtime root)
+          expected (progression/compose requirement-b requirement-c)]
+      (is (= #{requirement-b requirement-c}
+             (:requirements pending-b)))
+      (is (true?
+           (core/on-config-request!
+            runtime
+            (:event
+             (make-event
+              "htmx:configRequest"
+              {:elt root
+               :target root
+               :extra-detail {:headers headers-b}})))))
+      (is (= expected
+             (progression.http/decode-request-progression
+              (aget headers-b progression.http/request-header-name))))
+      (is (= #{basis-b basis-c}
+             (:bases
+              (progression.http/decode-request-progression
+               (aget headers-b progression.http/request-header-name)))))
+      (is (= pending-b (core/pending-refresh runtime root))
+          "Configuring the next physical request must not consume generation B."))))
 
 (deftest late-xhr-callback-from-request-a-cannot-fail-newer-request-b-on-same-root-test
   (let [{:keys [runtime root]}

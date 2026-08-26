@@ -3,6 +3,7 @@
    [clojure.edn :as edn]
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.identity :as identity]
+   [gesso.live.optimistic.capability :as capability]
    [gesso.live.optimistic.protocol :as protocol]
    [gesso.live.ui :as ui]))
 
@@ -36,6 +37,22 @@
    :timeout-ms 5000
    :replace-owner? true
    :replace-execution? false})
+
+(def claim-capability
+  (capability/operation-capability
+   {:operation :request/claim
+    :plan-key :request/claim
+    :rollback-eligible? true
+    :timeout-ms 5000
+    :replace-owner? true
+    :replace-execution? false}))
+
+(def optimistic-binding
+  {:arguments {:request-id "request-1"}
+   :observed-basis basis
+   :scope request-scope
+   :fact-versions {:request/status 9}
+   :target-id "request-card-request-1"})
 
 (def command-id
   (identity/command-id "command-42"))
@@ -163,6 +180,105 @@
 ;; -----------------------------------------------------------------------------
 ;; Protocol-v3 action annotation
 ;; -----------------------------------------------------------------------------
+
+(deftest optimistic-capability-path-produces-the-same-v3-action-test
+  (let [bound (capability/bind claim-capability optimistic-binding)]
+    (is (= optimistic-action bound))
+    (is (= bound
+           (ui/optimistic-action claim-capability optimistic-binding)))
+    (is (= (ui/optimistic-action optimistic-action)
+           (ui/optimistic-action claim-capability optimistic-binding)))
+    (is (= (ui/optimistic-action-attrs optimistic-action)
+           (ui/optimistic-action-attrs claim-capability optimistic-binding)))))
+
+(deftest post-button-capability-path-is-render-equivalent-to-bound-action-test
+  (let [raw
+        (ui/post-button
+         ctx
+         {:to "/claim"
+          :target "request-card-request-1"
+          :swap "outerHTML"
+          :include "#request-board-state"
+          :label "Claim"
+          :optimistic optimistic-action})
+        bound
+        (ui/post-button
+         ctx
+         {:to "/claim"
+          :target "request-card-request-1"
+          :swap "outerHTML"
+          :include "#request-board-state"
+          :label "Claim"
+          :optimistic claim-capability
+          :optimistic-binding optimistic-binding})]
+    (is (= raw bound))
+    (is (= optimistic-action (decoded-action bound)))
+    (is (nil? (direct-child-by-tag bound :template)))))
+
+(deftest post-button-capability-binding-ownership-is-unambiguous-test
+  (testing "a capability must be accompanied by per-render binding data"
+    (is (= :missing-optimistic-binding
+           (error-kind
+            #(ui/post-button
+              ctx
+              {:to "/claim"
+               :label "Claim"
+               :optimistic claim-capability})))))
+
+  (testing "binding data cannot be supplied without a capability"
+    (doseq [optimistic-value [nil false]]
+      (is (= :orphan-optimistic-binding
+             (error-kind
+              #(ui/post-button
+                ctx
+                {:to "/claim"
+                 :label "Claim"
+                 :optimistic optimistic-value
+                 :optimistic-binding optimistic-binding}))))))
+
+  (testing "raw action maps cannot be mixed with capability binding data"
+    (is (= :unexpected-optimistic-binding
+           (error-kind
+            #(ui/post-button
+              ctx
+              {:to "/claim"
+               :label "Claim"
+               :optimistic optimistic-action
+               :optimistic-binding optimistic-binding})))))
+
+  (testing "a tagged but tampered capability is rejected by the capability owner"
+    (let [data
+          (error-data
+           #(ui/post-button
+             ctx
+             {:to "/claim"
+              :label "Claim"
+              :optimistic (assoc claim-capability :operation "request/claim")
+              :optimistic-binding optimistic-binding}))]
+      (is (= :gesso.live.optimistic.capability/error
+             (:error/type data)))
+      (is (= :invalid-capability
+             (:error/kind data))))))
+
+(deftest fragment-call-shape-supports-capability-binding-test
+  (let [fragment
+        (ui/->fragment
+         {:id "request-list"
+          :src "/app/fragments/requests"
+          :stream-url "/app/streams/requests"
+          :swap "outerHTML"})
+        markup
+        (ui/post-button
+         ctx
+         fragment
+         {:to "/claim"
+          :label "Claim"
+          :optimistic claim-capability
+          :optimistic-binding optimistic-binding})
+        attrs (optimistic-attrs markup)]
+    (is (= "#request-list" (:hx-target attrs)))
+    (is (= "outerHTML" (:hx-swap attrs)))
+    (is (= optimistic-action (decoded-action markup)))))
 
 (deftest optimistic-action-normalizes-the-closed-v3-binding-test
   (is (= optimistic-action

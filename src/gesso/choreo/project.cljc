@@ -435,16 +435,127 @@
    (map? (:states x))
    (canonical-runtime-layout? x)))
 
+(def compatible-executable-plan-status
+  :compatible)
+
+(def incompatible-executable-plan-status
+  :incompatible)
+
+(def invalid-executable-plan-status
+  :invalid)
+
+(defn executable-plan-format-status
+  "Classify value at the portable ExecutablePlan format boundary.
+
+   Returns one of three closed status classes:
+
+     :compatible
+       value is a canonical ExecutablePlan for the current runtime format.
+
+     :incompatible
+       value explicitly identifies itself as a Gesso ExecutablePlan and carries
+       a well-formed but unsupported ExecutablePlan version.  This is the
+       representation-level stale-plan case used by deployment recovery; it is
+       not treated as malformed application data.
+
+     :invalid
+       value is not a canonical current plan and cannot safely be classified as
+       an otherwise recognizable plan from another format version.
+
+   This deliberately answers only the ExecutablePlan representation dimension.
+   Semantic-operation, wire-protocol, deployment, and application compatibility
+   remain independent dimensions under gesso.choreo.type and must not be
+   collapsed into this version check."
+  [value]
+  (cond
+    (executable-plan? value)
+    {:status compatible-executable-plan-status
+     :compatibility
+     (type/compatibility-identity
+      :executable-plan
+      executable-plan-version)}
+
+    (and
+     (map? value)
+     (= executable-plan-type
+        (:gesso.choreo/type value))
+     (nat-int? (:gesso.choreo/version value))
+     (not= executable-plan-version
+           (:gesso.choreo/version value)))
+    {:status incompatible-executable-plan-status
+     :reason :unsupported-version
+     :compatibility
+     (type/compatibility-identity
+      :executable-plan
+      (:gesso.choreo/version value))
+     :supported-compatibility
+     (type/compatibility-identity
+      :executable-plan
+      executable-plan-version)}
+
+    :else
+    {:status invalid-executable-plan-status
+     :reason :malformed-or-noncanonical}))
+
+(defn executable-plan-compatible?
+  "True exactly when value is a canonical plan for this ExecutablePlan format.
+
+   Unlike executable-plan?, this predicate is phrased for callers performing a
+   compatibility decision and therefore pairs with executable-plan-format-status.
+   It does not claim compatibility across semantic-operation, wire-protocol, or
+   deployment dimensions."
+  [value]
+  (= compatible-executable-plan-status
+     (:status
+      (executable-plan-format-status value))))
+
+(defn executable-plan-incompatible?
+  "True exactly when value is a recognizable Gesso ExecutablePlan whose explicit
+   format version is unsupported by this runtime.
+
+   Malformed/current-version lookalikes return false; they are invalid, not a
+   stale-plan recovery condition."
+  [value]
+  (= incompatible-executable-plan-status
+     (:status
+      (executable-plan-format-status value))))
+
 (defn ensure-executable-plan
-  "Return x when it is a canonical current ExecutablePlan; otherwise throw a
-   deterministic projection error."
-  [x]
-  (when-not (executable-plan? x)
-    (projection-error
-     :invalid-executable-plan
-     "Expected a canonical Gesso Choreo ExecutablePlan."
-     {:value x}))
-  x)
+  "Return value when it is a canonical current ExecutablePlan.
+
+   A recognizable Gesso ExecutablePlan carrying another well-formed format
+   version is rejected as :unsupported-executable-plan-version so browser and
+   deployment layers can distinguish stale compatibility recovery from malformed
+   artifact data.  All other noncanonical values retain the historical
+   :invalid-executable-plan classification."
+  [value]
+  (let [{:keys [status] :as format-status}
+        (executable-plan-format-status value)]
+    (case status
+      :compatible
+      value
+
+      :incompatible
+      (projection-error
+       :unsupported-executable-plan-version
+       "ExecutablePlan format version is incompatible with this Gesso Choreo runtime."
+       {:value value
+        :format-status format-status
+        :version (:gesso.choreo/version value)
+        :supported-version executable-plan-version})
+
+      :invalid
+      (projection-error
+       :invalid-executable-plan
+       "Expected a canonical Gesso Choreo ExecutablePlan."
+       {:value value
+        :format-status format-status})
+
+      (projection-error
+       :invalid-executable-plan-status
+       "ExecutablePlan format classifier returned an unknown status."
+       {:value value
+        :format-status format-status}))))
 
 (defn projected-plan?
   "Transitional alias predicate for executable-plan?."

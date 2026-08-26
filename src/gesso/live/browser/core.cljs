@@ -46,16 +46,19 @@
    adapter/shell. Applications may configure the physical runtime or replace
    individual continuity handler seams without changing the adapter protocol."
   (:require
+   [cljs.reader :as reader]
    [clojure.string :as str]
    [gesso.live.browser.continuity :as continuity]
-   [gesso.live.browser.shell :as shell]))
+   [gesso.live.browser.shell :as shell]
+   [gesso.live.progression :as progression]
+   [gesso.live.progression.http :as progression.http]))
 
 ;; =============================================================================
 ;; Public identity / browser vocabulary
 ;; =============================================================================
 
 (def runtime-version
-  "3.1.0-dev")
+  "3.2.0-dev")
 
 (def runtime-type
   :gesso.live.browser.core/runtime)
@@ -99,7 +102,7 @@
    Observers receive raw browser events only at this physical integration
    boundary; they do not enter AdapterState and cannot replace Core's protected
    fragment/continuity handlers."
-  [["htmx:configRequest" :observe-only]
+  [["htmx:configRequest" :config-request]
    ["htmx:beforeRequest" :before-request]
    ["htmx:beforeSend" :observe-only]
    ["htmx:beforeSwap" :before-swap]
@@ -910,6 +913,100 @@
 ;; Explicit invalidation boundary
 ;; =============================================================================
 
+(defn- read-managed-sse-payload
+  "Decode one managed Gesso Live SSE payload from HTMX's MessageEvent detail.
+
+   nil data is treated as an advisory invalidation with no progression. This
+   preserves compatibility with older servers/tests that emitted wakeups only.
+   When data is present it must be EDN representing a map; malformed payloads
+   fail closed before any refresh is admitted."
+  [event]
+  (let [data (detail-field event "data")]
+    (when (some? data)
+      (when-not (string? data)
+        (throw
+         (core-error
+          :invalid-sse-payload
+          "Managed Gesso Live SSE payload data must be an EDN string."
+          {:data data})))
+      (let [payload
+            (try
+              (reader/read-string data)
+              (catch :default error
+                (throw
+                 (core-error
+                  :invalid-sse-payload
+                  "Managed Gesso Live SSE payload is not readable EDN."
+                  {:data data}
+                  error))))]
+        (when-not (map? payload)
+          (throw
+           (core-error
+            :invalid-sse-payload
+            "Managed Gesso Live SSE payload must decode to a map."
+            {:data data
+             :payload payload})))
+        payload))))
+
+(defn- decode-progression-wire!
+  [wire location]
+  (try
+    (progression/wire->requirement wire)
+    (catch :default error
+      (throw
+       (core-error
+        :invalid-sse-progression
+        "Managed Gesso Live SSE payload contains invalid progression wire data."
+        {:location location
+         :wire wire}
+        error)))))
+
+(defn- payload-progression
+  "Return {:present? boolean :requirement normalized-or-nil} for one decoded
+   managed LiveEvent payload.
+
+   Current server transport writes progression at both the LiveEvent top level
+   and inside :invalidation. If either copy is present, both must be present and
+   decode to the same normalized requirement. Core validates correlation only;
+   it never compares opaque bases or decides which basis is stronger."
+  [payload]
+  (if (nil? payload)
+    {:present? false
+     :requirement nil}
+    (let [top-present? (contains? payload :progression)
+          invalidation (:invalidation payload)
+          nested-present? (and (map? invalidation)
+                               (contains? invalidation :progression))]
+      (cond
+        (and (not top-present?)
+             (not nested-present?))
+        {:present? false
+         :requirement nil}
+
+        (not= top-present? nested-present?)
+        (throw
+         (core-error
+          :inconsistent-sse-progression
+          "Managed Gesso Live SSE progression must be present at both transport locations or neither."
+          {:top-level-present? top-present?
+           :nested-present? nested-present?
+           :payload payload}))
+
+        :else
+        (let [top (decode-progression-wire! (:progression payload) :event)
+              nested (decode-progression-wire!
+                      (:progression invalidation)
+                      :invalidation)]
+          (when-not (= top nested)
+            (throw
+             (core-error
+              :inconsistent-sse-progression
+              "Managed Gesso Live SSE progression copies disagree."
+              {:event-progression top
+               :invalidation-progression nested})))
+          {:present? true
+           :requirement top})))))
+
 (defn notify-fragment!
   "Notify the pure adapter that a logical Live fragment must refresh.
 
@@ -944,9 +1041,10 @@
    then notifies the adapter. Legacy sse:* request triggers are ignored because
    they do not carry the invalidation-listener marker.
 
-   SSE payload parsing is intentionally not performed here. Authoritative
-   progression metadata belongs to the explicit normalized invalidation contract
-   and will be wired separately rather than inferred from arbitrary SSE bytes."
+   Managed Gesso Live payloads are EDN maps produced by the SSE transport. Core
+   decodes only the explicit versioned progression wire field and validates that
+   the top-level and nested invalidation copies agree. It does not infer
+   progression from arrival order or arbitrary payload fields."
   [runtime event]
   (let [listener (detail-field event "elt")]
     (when (invalidation-listener? listener)
@@ -969,7 +1067,11 @@
             {:listener-fragment-id listener-id
              :root-fragment-id fragment-id
              :managed-root? (managed-fragment-root? root)})))
-        (notify-fragment! runtime fragment-id))))
+        (let [{:keys [present? requirement]}
+              (payload-progression (read-managed-sse-payload event))]
+          (if present?
+            (notify-fragment! runtime fragment-id requirement)
+            (notify-fragment! runtime fragment-id))))))
   true)
 
 (defn on-sse-open!
@@ -1020,6 +1122,61 @@
 ;; =============================================================================
 ;; HTMX lifecycle normalization
 ;; =============================================================================
+
+(defn- compose-refresh-requirements
+  [requirements]
+  (apply progression/compose requirements))
+
+(defn- request-headers-from-event
+  [event]
+  (some-> (event-detail event)
+          (aget "headers")))
+
+(defn on-config-request!
+  "Attach the adapter-approved authoritative progression requirement to one
+   managed HTMX fragment refresh.
+
+   HTMX exposes mutable request headers at htmx:configRequest. Core uses only
+   the pending adapter-issued refresh correlation for the matching stable
+   fragment root; unrelated HTMX requests are ignored. Multiple opaque
+   requirements are conservatively composed through gesso.live.progression
+   before the shared HTTP codec serializes them.
+
+   This header is a minimum-read request, not browser authority. The trusted
+   server boundary must decode it, compose it with any server-established
+   requirement, authenticate/authorize the read, and interpret bases through
+   the authority-specific consistency adapter.
+
+   A managed request with an unsendable requirement fails closed before HTMX
+   reaches the network."
+  [runtime event]
+  (let [runtime (require-core! runtime)
+        root (fragment-root-from-event event)
+        pending (and root
+                     (weak-get (:pending-refreshes runtime) root))]
+    (when pending
+      (try
+        (when-some [requirement
+                    (compose-refresh-requirements (:requirements pending))]
+          (let [headers (request-headers-from-event event)]
+            (when-not headers
+              (throw
+               (core-error
+                :missing-config-request-headers
+                "Managed HTMX configRequest did not expose mutable request headers."
+                {:fragment-id (:fragment-id pending)
+                 :request-generation (:request-generation pending)})))
+            (aset headers
+                  progression.http/request-header-name
+                  (progression.http/encode-request-progression requirement))))
+        (catch :default error
+          ;; configRequest is the last documented request-configuration boundary
+          ;; before HTMX proceeds toward beforeRequest/send. Never allow a
+          ;; managed refresh whose authoritative minimum-read requirement could
+          ;; not be represented on the request.
+          (prevent-event! event)
+          (throw error)))))
+  true)
 
 (defn on-before-request!
   "Bind the adapter-issued request generation to one physical HTMX request.
@@ -1201,6 +1358,7 @@
   [runtime handler-id]
   (case handler-id
     :observe-only nil
+    :config-request #(on-config-request! runtime %)
     :before-request #(on-before-request! runtime %)
     :before-swap #(on-before-swap! runtime %)
     :after-swap #(on-after-swap! runtime %)

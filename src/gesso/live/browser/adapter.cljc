@@ -34,7 +34,7 @@
    - continuity-slot generations distinct from request generations
    - newer approved fragment swaps revoke older continuity slots before DOM mutation
    - one adapter-owned optimistic effect scope per optimistic execution
-   - optimistic provisional derivation/install, settlement, timeout, supersession, and rollback disposition
+   - optimistic provisional derivation/install, settlement, timeout, protocol incompatibility, supersession, and rollback disposition
    - monotone authoritative installation at the HTMX swap gate
 
    `gesso.choreo.machine` remains the owner of portable choreography protocol
@@ -421,7 +421,11 @@
 
 (def optimistic-terminal-resolutions
   (into optimistic-direct-resolutions
-        #{:superseded :timeout :network-failed :retired}))
+        #{:superseded
+          :timeout
+          :network-failed
+          :incompatible-protocol
+          :retired}))
 
 (def optimistic-dispositions
   "Physical realization dispositions emitted by the pure adapter. The shell may
@@ -711,7 +715,7 @@
     :superseded
     :authoritative
 
-    (:timeout :network-failed)
+    (:timeout :network-failed :incompatible-protocol)
     (if rollback-eligible?
       :rollback-and-refresh
       :refresh-authority)
@@ -793,6 +797,9 @@
 
               (= reason :optimistic-network-failed)
               :network-failed
+
+              (= reason :optimistic-incompatible-protocol)
+              :incompatible-protocol
 
               (= reason :authoritative-superseded)
               :superseded

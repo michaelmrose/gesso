@@ -210,21 +210,104 @@
         :value value})))
   value)
 
-(defn- require-version!
-  [envelope]
-  (let [actual (get envelope protocol-version-key)]
-    (when-not (= version actual)
-      (protocol-error
-       :unsupported-version
-       "Unsupported Gesso optimistic protocol version."
-       {:expected version
-        :actual actual})))
-  envelope)
-
 (defn- non-blank-string?
   [value]
   (and (string? value)
        (not (str/blank? value))))
+
+(defn protocol-version-status
+  "Classify the optimistic wire-protocol version carried by one envelope.
+
+   The result deliberately answers only the wire/protocol compatibility
+   dimension from the v4.5 design.  It does not establish that the rest of the
+   envelope is structurally valid, that a semantic operation is compatible,
+   that a deployment generation matches, or that any browser-supplied value is
+   authoritative.
+
+   :compatible
+     The envelope is a map and carries the current protocol version.
+
+   :incompatible
+     The envelope is a map and carries another recognizable non-blank textual
+     protocol version.  This is a recovery condition at browser/server
+     integration boundaries, not evidence that authoritative application state
+     is invalid.
+
+   :invalid
+     The envelope is not a map, omits :protocol-version, or carries a malformed
+     version value.
+
+   Structural envelope validation remains the responsibility of the concrete
+   command/provisional/settlement decoder after a compatible version has been
+   established."
+  [envelope]
+  (cond
+    (not (map? envelope))
+    {:status :invalid
+     :reason :not-map
+     :supported version
+     :encountered nil}
+
+    (not (contains? envelope protocol-version-key))
+    {:status :invalid
+     :reason :missing-version
+     :supported version
+     :encountered nil}
+
+    (= version (get envelope protocol-version-key))
+    {:status :compatible
+     :supported version
+     :encountered version}
+
+    (non-blank-string? (get envelope protocol-version-key))
+    {:status :incompatible
+     :supported version
+     :encountered (get envelope protocol-version-key)}
+
+    :else
+    {:status :invalid
+     :reason :malformed-version
+     :supported version
+     :encountered (get envelope protocol-version-key)}))
+
+(defn protocol-compatible?
+  "True when envelope carries the current optimistic wire-protocol version.
+
+   This predicate intentionally does not validate the envelope's remaining
+   fields."
+  [envelope]
+  (= :compatible (:status (protocol-version-status envelope))))
+
+(defn protocol-incompatible?
+  "True when envelope carries a recognizable but unsupported optimistic
+   wire-protocol version."
+  [envelope]
+  (= :incompatible (:status (protocol-version-status envelope))))
+
+(defn- require-version!
+  [envelope]
+  (let [{:keys [status supported encountered reason] :as version-status}
+        (protocol-version-status envelope)]
+    (case status
+      :compatible
+      envelope
+
+      :incompatible
+      (protocol-error
+       :unsupported-version
+       "Unsupported Gesso optimistic protocol version."
+       {:expected supported
+        :actual encountered
+        :protocol/version-status version-status})
+
+      :invalid
+      (protocol-error
+       :invalid-protocol-version
+       "Invalid Gesso optimistic protocol version."
+       {:expected supported
+        :actual encountered
+        :reason reason
+        :protocol/version-status version-status}))))
 
 (defn qualified-name
   "Return a stable textual semantic name while preserving keyword namespaces."

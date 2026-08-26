@@ -3,9 +3,11 @@
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.identity :as identity]
    [gesso.choreo.machine :as machine]
+   [gesso.live.core :as live]
    [gesso.live.optimistic.choreo :as optimistic-choreo]
    [gesso.live.optimistic.protocol :as protocol]
-   [gesso.live.optimistic.server :as server]))
+   [gesso.live.optimistic.server :as server]
+   [gesso.live.progression :as progression]))
 
 ;; =============================================================================
 ;; Fixtures / helpers
@@ -437,6 +439,59 @@
     (is (true? @committed?)
         "The trusted boundary must not pretend the committed mutation rolled back.")))
 
+(deftest classified-live-post-commit-failure-escapes-unchanged
+  (let [delivery-cause
+        (ex-info
+         "post-commit invalidation submission failed"
+         {:delivery :async})
+        system {:options {}}
+        tx-ctx {:xtdb/connectable :node}
+        operation-called? (atom false)
+        prepared-server
+        (base-server
+         (fn [_]
+           (reset! operation-called? true)
+           (with-redefs [live/execute-tx!
+                         (fn [_ctx _tx-ops _tx-options]
+                           {:tx-result {:tx-id 73}
+                            :consistency {:after-tx 73}
+                            :progression (progression/requirement :basis/commit-73)})
+
+                         live/submit-expanded!
+                         (fn [_system _ctx _change _entry]
+                           (throw delivery-cause))]
+             (live/transact-and-notify!
+              system
+              tx-ctx
+              {:tx-ops [[:synthetic/committed-tx]]
+               :change {:topic :request
+                        :id "request-1"}}))))
+        actual
+        (try
+          (server/run-command
+           prepared-server
+           trusted-ctx
+           (command-envelope))
+          nil
+          (catch Throwable error
+            error))
+        data (ex-data actual)]
+    (is (true? @operation-called?))
+    (is (live/post-commit-delivery-failure? actual)
+        "the optimistic boundary must preserve Live's committed/delivery-failed classification")
+    (is (= :committed (:commit/status data)))
+    (is (= :post-commit-delivery (:failure/stage data)))
+    (is (= :async (:emit data)))
+    (is (= 0 (:delivery/index data)))
+    (is (= {:topic :request
+            :id "request-1"
+            :progression (progression/requirement :basis/commit-73)}
+           (:delivery/change data)))
+    (is (= [] (:delivery/completed-results data)))
+    (is (identical? delivery-cause (.getCause ^Throwable actual)))
+    (is (nil? (:settlement data))
+        "post-commit delivery failure must not be converted into a semantic :failed settlement")))
+
 (deftest malformed-operation-result-fails-without-inventing-settlement
   (let [prepared-server
         (base-server
@@ -451,21 +506,91 @@
               trusted-ctx
               (command-envelope)))))))
 
-(deftest malformed-wire-command-is-rejected-before-authenticated-operation-runs
-  (let [called? (atom false)
+(deftest incompatible-wire-command-is-rejected-before-trusted-boundary-runs
+  (let [principal-called? (atom false)
+        operation-called? (atom false)
         prepared-server
         (base-server
          (fn [_]
-           (reset! called? true)
-           (confirmed-result)))
+           (reset! operation-called? true)
+           (confirmed-result))
+         {:principal-fn
+          (fn [_]
+            (reset! principal-called? true)
+            trusted-principal)})
         wire
         (assoc (protocol/command->wire (command-envelope))
-               :protocol-version "999")]
-    (is (= :unsupported-version
-           (:error/kind
-            (error-data
-             #(server/run-wire-command
-               prepared-server
-               trusted-ctx
-               wire)))))
-    (is (false? @called?))))
+               :protocol-version "999")
+        data
+        (error-data
+         #(server/run-wire-command
+           prepared-server
+           trusted-ctx
+           wire))]
+    (is (= :unsupported-version (:error/kind data)))
+    (is (= {:status :incompatible
+            :supported protocol/version
+            :encountered "999"}
+           (:protocol/version-status data)))
+    (is (false? @principal-called?)
+        "Protocol incompatibility must be rejected before trusted principal derivation.")
+    (is (false? @operation-called?)
+        "Protocol incompatibility must be rejected before public operation execution.")))
+
+(deftest malformed-wire-version-is-not-misclassified-as-incompatible
+  (let [principal-called? (atom false)
+        operation-called? (atom false)
+        prepared-server
+        (base-server
+         (fn [_]
+           (reset! operation-called? true)
+           (confirmed-result))
+         {:principal-fn
+          (fn [_]
+            (reset! principal-called? true)
+            trusted-principal)})
+        wire
+        (assoc (protocol/command->wire (command-envelope))
+               :protocol-version 999)
+        data
+        (error-data
+         #(server/run-wire-command
+           prepared-server
+           trusted-ctx
+           wire))]
+    (is (= :invalid-protocol-version (:error/kind data)))
+    (is (= :invalid
+           (get-in data [:protocol/version-status :status])))
+    (is (= :malformed-version
+           (get-in data [:protocol/version-status :reason])))
+    (is (false? @principal-called?))
+    (is (false? @operation-called?))))
+
+(deftest malformed-future-looking-wire-command-remains-structural-error
+  (let [principal-called? (atom false)
+        operation-called? (atom false)
+        prepared-server
+        (base-server
+         (fn [_]
+           (reset! operation-called? true)
+           (confirmed-result))
+         {:principal-fn
+          (fn [_]
+            (reset! principal-called? true)
+            trusted-principal)})
+        wire
+        (assoc (protocol/command->wire (command-envelope))
+               :protocol-version "999"
+               :forged-authority :authority)
+        data
+        (error-data
+         #(server/run-wire-command
+           prepared-server
+           trusted-ctx
+           wire))]
+    (is (= :unknown-fields (:error/kind data))
+        "A version-looking malformed envelope is not a recognizable stale protocol command.")
+    (is (nil? (:protocol/version-status data))
+        "Structural rejection happens before protocol-version recovery classification.")
+    (is (false? @principal-called?))
+    (is (false? @operation-called?))))

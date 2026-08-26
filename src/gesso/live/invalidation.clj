@@ -13,7 +13,12 @@
 
    Writers declare primary changes.
    App rules declare what those changes imply.
-   This namespace applies those rules."
+   This namespace applies those rules.
+
+   Authoritative progression is metadata on the primary change, not policy owned
+   by expansion rules. Every invalidation derived from a progressing primary
+   change therefore carries exactly that same progression requirement. Rules may
+   omit it, but may not invent or replace it."
   (:require
    [gesso.live.schema :as schema]))
 
@@ -120,6 +125,62 @@
     (validate-invalidation-with-context! invalidation context)
     invalidation))
 
+(defn- preserve-primary-progression
+  "Carry authoritative progression from a primary change to one derived
+   invalidation.
+
+   Expansion rules own semantic scope expansion only. They may omit progression
+   and let Gesso attach it, or repeat the exact same normalized requirement for
+   convenience/debugging. They may not invent progression when the primary
+   change has none, and may not replace a primary change's requirement with a
+   different one.
+
+   This invariant is independent of :validate? because disabling Malli boundary
+   validation must not allow an expansion rule to fabricate or weaken authority."
+  [change invalidation context]
+  (let [change-has-progression?       (contains? change :progression)
+        invalidation-is-map?          (map? invalidation)
+        invalidation-has-progression? (and invalidation-is-map?
+                                           (contains? invalidation :progression))
+        change-progression            (:progression change)
+        invalidation-progression      (when invalidation-has-progression?
+                                        (:progression invalidation))]
+    (cond
+      (and change-has-progression?
+           (not invalidation-is-map?))
+      (throw
+       (ex "Progressing primary change must expand to invalidation maps."
+           (merge context
+                  {:reason :cannot-preserve-primary-progression
+                   :invalidation invalidation
+                   :progression change-progression})))
+
+      (and (not change-has-progression?)
+           invalidation-has-progression?)
+      (throw
+       (ex "Invalidation expansion rule may not invent authoritative progression."
+           (merge context
+                  {:reason :invented-progression
+                   :invalidation invalidation
+                   :progression invalidation-progression})))
+
+      (and change-has-progression?
+           invalidation-has-progression?
+           (not= change-progression invalidation-progression))
+      (throw
+       (ex "Invalidation expansion rule may not replace authoritative progression."
+           (merge context
+                  {:reason :replaced-progression
+                   :invalidation invalidation
+                   :expected-progression change-progression
+                   :actual-progression invalidation-progression})))
+
+      change-has-progression?
+      (assoc invalidation :progression change-progression)
+
+      :else
+      invalidation)))
+
 (defn- topic-matches?
   [rule change]
   (if (contains? rule :when-topic)
@@ -189,12 +250,15 @@
                              e))))
         raw    (normalize-expansion-output rule change output)]
     (mapv (fn [invalidation]
-            (maybe-validate-invalidation!
-             validate?
-             invalidation
-             {:rule rule
-              :change change
-              :output output}))
+            (let [context {:rule rule
+                           :change change
+                           :output output}
+                  invalidation'
+                  (preserve-primary-progression change invalidation context)]
+              (maybe-validate-invalidation!
+               validate?
+               invalidation'
+               context)))
           raw)))
 
 (defn- keep-unmatched
@@ -289,7 +353,11 @@
 
    :on-unmatched :keep means the primary change is reused as an invalidation.
    Therefore the primary change must also satisfy the invalidation schema. In
-   practice that means it needs at least :topic and :id."
+   practice that means it needs at least :topic and :id.
+
+   If the primary change carries :progression, every expanded invalidation is
+   given that exact requirement even when the expansion rule omits it. Expansion
+   rules may not invent or replace authoritative progression."
   ([rules ctx change]
    (expand rules ctx change nil))
   ([rules ctx change options]

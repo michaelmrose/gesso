@@ -1,6 +1,7 @@
 (ns gesso.live.schema-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [gesso.live.progression :as progression]
    [gesso.live.schema :as schema]))
 
 ;; -----------------------------------------------------------------------------
@@ -12,6 +13,8 @@
     (is (some? (schema/schema :gesso.live/primary-change)))
     (is (some? (schema/schema :gesso.live/invalidation)))
     (is (some? (schema/schema :gesso.live/subscription)))
+    (is (some? (schema/schema :gesso.live/live-event)))
+    (is (some? (schema/schema :gesso.live/progression)))
     (is (some? (schema/schema :gesso.live/fragment-config))))
 
   (testing "unknown schema keys throw useful errors"
@@ -61,6 +64,38 @@
     (is (not (schema/validate :gesso.live/scopes {:user "u1"})))))
 
 ;; -----------------------------------------------------------------------------
+;; Authoritative progression
+;; -----------------------------------------------------------------------------
+
+(deftest progression-requirement-schema-test
+  (let [basis {:authority :xtdb
+               :tx-id "42"}
+        requirement (progression/requirement basis)
+        wire (progression/requirement->wire requirement)]
+    (testing "normalized internal progression requirements validate"
+      (is (schema/validate :gesso.live/progression requirement))
+      (is (= requirement
+             (schema/validate! :gesso.live/progression requirement))))
+
+    (testing "wire progression is not accepted at the internal schema boundary"
+      (is (not (schema/validate :gesso.live/progression wire))))
+
+    (testing "raw bases and malformed requirement-like maps do not validate"
+      (is (not (schema/validate :gesso.live/progression basis)))
+      (is (not
+           (schema/validate
+            :gesso.live/progression
+            {:gesso.live.progression/type progression/requirement-type
+             :gesso.live.progression/version progression/progression-version
+             :bases [basis]})))
+      (is (not
+           (schema/validate
+            :gesso.live/progression
+            {:gesso.live.progression/type progression/requirement-type
+             :gesso.live.progression/version progression/progression-version
+             :bases #{}}))))))
+
+;; -----------------------------------------------------------------------------
 ;; Core live data
 ;; -----------------------------------------------------------------------------
 
@@ -85,6 +120,21 @@
           :change/kind :updated
           :request {:xt/id "req-1"
                     :request/status :done}})))
+
+  (testing "primary changes may carry normalized progression"
+    (let [requirement (progression/requirement {:authority :xtdb
+                                                :tx-id "42"})]
+      (is (schema/validate
+           :gesso.live/primary-change
+           {:topic :request
+            :id "req-1"
+            :progression requirement}))
+      (is (not
+           (schema/validate
+            :gesso.live/primary-change
+            {:topic :request
+             :id "req-1"
+             :progression (progression/requirement->wire requirement)})))))
 
   (testing "primary changes require a topic"
     (is (not
@@ -114,6 +164,21 @@
          :gesso.live/invalidation
          {:topic :store-queue
           :id "store-1"})))
+
+  (testing "invalidations may carry normalized progression"
+    (let [requirement (progression/requirement {:authority :xtdb
+                                                :tx-id "42"})]
+      (is (schema/validate
+           :gesso.live/invalidation
+           {:topic :store-queue
+            :id "store-1"
+            :progression requirement}))
+      (is (not
+           (schema/validate
+            :gesso.live/invalidation
+            {:topic :store-queue
+             :id "store-1"
+             :progression (progression/requirement->wire requirement)})))))
 
   (testing "expanded invalidations require id"
     (is (not
@@ -175,6 +240,24 @@
                          :change/kind :updated}
           :data {:reason :test}
           :consistency-token "token-1"})))
+
+  (testing "live events may carry normalized progression"
+    (let [requirement (progression/requirement {:authority :xtdb
+                                                :tx-id "42"})]
+      (is (schema/validate
+           :gesso.live/live-event
+           {:event "live-update"
+            :invalidation {:topic :demo-counter
+                           :id "global-shared-counter"
+                           :progression requirement}
+            :progression requirement}))
+      (is (not
+           (schema/validate
+            :gesso.live/live-event
+            {:event "live-update"
+             :invalidation {:topic :demo-counter
+                            :id "global-shared-counter"}
+             :progression (progression/requirement->wire requirement)})))))
 
   (testing "live event event names must be normalized strings"
     (is (not
@@ -550,6 +633,19 @@
       (is (not
            (valid-invalidation?
             {:topic :demo-counter})))))
+
+  (testing "hot-path validators and explainers are compiled once and reused"
+    (doseq [schema-key [:gesso.live/primary-change
+                        :gesso.live/invalidation
+                        :gesso.live/subscription
+                        :gesso.live/live-event
+                        :gesso.live/fragment-config]]
+      (is (identical? (schema/validator schema-key)
+                      (schema/validator schema-key))
+          (str "validator should be reused for " schema-key))
+      (is (identical? (schema/explainer schema-key)
+                      (schema/explainer schema-key))
+          (str "explainer should be reused for " schema-key))))
 
   (testing "explainer returns a reusable explainer"
     (let [explain-invalidation (schema/explainer :gesso.live/invalidation)]

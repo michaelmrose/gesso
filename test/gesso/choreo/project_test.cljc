@@ -2268,6 +2268,126 @@
                 #(project/ensure-executable-plan
                   lookalike))))))))
 
+(deftest executable-plan-format-status-distinguishes-compatible-incompatible-and-invalid
+  (let [plan
+        (integrity-executable-plan)
+
+        incompatible-plan
+        (assoc plan
+               :gesso.choreo/version
+               (inc project/executable-plan-version))
+
+        malformed-current-plan
+        (assoc plan
+               :diagnostic-only
+               true)]
+
+    (testing "a canonical current ExecutablePlan is compatible"
+      (is (= project/compatible-executable-plan-status
+             (:status
+              (project/executable-plan-format-status plan))))
+      (is (project/executable-plan-compatible? plan))
+      (is (false?
+           (project/executable-plan-incompatible? plan))))
+
+    (testing "a recognizable plan with another well-formed format version is incompatible"
+      (is (= project/incompatible-executable-plan-status
+             (:status
+              (project/executable-plan-format-status
+               incompatible-plan))))
+      (is (false?
+           (project/executable-plan? incompatible-plan)))
+      (is (false?
+           (project/executable-plan-compatible? incompatible-plan)))
+      (is (project/executable-plan-incompatible? incompatible-plan)))
+
+    (testing "a malformed current-version lookalike is invalid, not stale"
+      (is (= project/invalid-executable-plan-status
+             (:status
+              (project/executable-plan-format-status
+               malformed-current-plan))))
+      (is (false?
+           (project/executable-plan-compatible? malformed-current-plan)))
+      (is (false?
+           (project/executable-plan-incompatible? malformed-current-plan))))))
+
+(deftest executable-plan-format-status-does-not-mistake-arbitrary-version-data-for-a-stale-plan
+  (let [plan
+        (integrity-executable-plan)]
+
+    (doseq [[label candidate]
+            {:missing-type
+             (dissoc
+              (assoc plan
+                     :gesso.choreo/version
+                     (inc project/executable-plan-version))
+              :gesso.choreo/type)
+
+             :wrong-type
+             (assoc plan
+                    :gesso.choreo/type :example/not-an-executable-plan
+                    :gesso.choreo/version
+                    (inc project/executable-plan-version))
+
+             :non-integer-version
+             (assoc plan
+                    :gesso.choreo/version "future")
+
+             :negative-version
+             (assoc plan
+                    :gesso.choreo/version -1)}]
+      (testing (name label)
+        (is (= project/invalid-executable-plan-status
+               (:status
+                (project/executable-plan-format-status candidate))))
+        (is (false?
+             (project/executable-plan-incompatible? candidate)))))))
+
+(deftest ensure-executable-plan-classifies-version-incompatibility-separately-from-malformation
+  (let [plan
+        (integrity-executable-plan)
+
+        unsupported-version
+        (inc project/executable-plan-version)
+
+        incompatible-plan
+        (assoc plan
+               :gesso.choreo/version
+               unsupported-version)
+
+        caught
+        (try
+          (project/ensure-executable-plan
+           incompatible-plan)
+          nil
+          (catch #?(:clj clojure.lang.ExceptionInfo
+                    :cljs cljs.core.ExceptionInfo) e
+            e))]
+
+    (is caught)
+    (is (= :unsupported-executable-plan-version
+           (:error/kind
+            (ex-data caught))))
+    (is (= unsupported-version
+           (:version
+            (ex-data caught))))
+    (is (= project/executable-plan-version
+           (:supported-version
+            (ex-data caught))))
+    (is (= project/incompatible-executable-plan-status
+           (get-in
+            (ex-data caught)
+            [:format-status :status])))
+
+    (testing "the same payload is still invalid when it claims the current format version"
+      (let [malformed
+            (assoc plan
+                   :diagnostic-only true)]
+        (is (= :invalid-executable-plan
+               (error-kind
+                #(project/ensure-executable-plan
+                  malformed))))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Shared portable type vocabulary at the ExecutablePlan boundary
 ;; -----------------------------------------------------------------------------

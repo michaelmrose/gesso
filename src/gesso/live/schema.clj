@@ -8,6 +8,7 @@
    They should not make the internal implementation noisy."
   (:require
    [clojure.string :as str]
+   [gesso.live.progression :as progression]
    [malli.core :as m]
    [malli.error :as me]))
 
@@ -78,6 +79,16 @@
    [:set any?]
    [:sequential any?]])
 
+(def ProgressionRequirement
+  "One normalized authoritative refresh-progression requirement.
+
+   The schema layer validates only the portable requirement shape owned by
+   gesso.live.progression. It does not compare opaque bases, infer ordering, or
+   accept the distinct wire representation used at transport boundaries."
+  [:fn
+   {:error/message "must be a normalized Gesso Live progression requirement"}
+   progression/requirement?])
+
 ;; -----------------------------------------------------------------------------
 ;; Core live data
 ;; -----------------------------------------------------------------------------
@@ -90,7 +101,8 @@
   [:map
    [:topic Topic]
    [:id {:optional true} Id]
-   [:change/kind {:optional true} ChangeKind]])
+   [:change/kind {:optional true} ChangeKind]
+   [:progression {:optional true} ProgressionRequirement]])
 
 (def Invalidation
   "An expanded invalidation.
@@ -102,7 +114,8 @@
   [:map
    [:topic Topic]
    [:id Id]
-   [:change/kind {:optional true} ChangeKind]])
+   [:change/kind {:optional true} ChangeKind]
+   [:progression {:optional true} ProgressionRequirement]])
 
 (def Subscription
   "A reader interest.
@@ -118,6 +131,7 @@
    [:event EventName]
    [:invalidation Invalidation]
    [:data {:optional true} any?]
+   [:progression {:optional true} ProgressionRequirement]
    [:consistency-token {:optional true} any?]])
 
 ;; -----------------------------------------------------------------------------
@@ -338,6 +352,7 @@
    :gesso.live/milliseconds Milliseconds
    :gesso.live/positive-milliseconds PositiveMilliseconds
    :gesso.live/scopes Scopes
+   :gesso.live/progression ProgressionRequirement
 
    :gesso.live/primary-change PrimaryChange
    :gesso.live/invalidation Invalidation
@@ -371,6 +386,30 @@
    :gesso.live/oob-target OobTarget
    :gesso.live/oob-send-options OobSendOptions})
 
+(def ^:private hot-schema-keys
+  "Schemas validated on ordinary Live hot paths.
+
+   Their Malli validators/explainers are compiled once at namespace load.
+   Calling validator/explainer repeatedly for one of these named schemas returns
+   the same compiled function instead of recompiling the schema."
+  #{:gesso.live/primary-change
+    :gesso.live/invalidation
+    :gesso.live/subscription
+    :gesso.live/live-event
+    :gesso.live/fragment-config})
+
+(def ^:private compiled-validators
+  (into {}
+        (map (fn [schema-key]
+               [schema-key (m/validator (get schemas schema-key))]))
+        hot-schema-keys))
+
+(def ^:private compiled-explainers
+  (into {}
+        (map (fn [schema-key]
+               [schema-key (m/explainer (get schemas schema-key))]))
+        hot-schema-keys))
+
 ;; -----------------------------------------------------------------------------
 ;; Lookup and validation helpers
 ;; -----------------------------------------------------------------------------
@@ -390,14 +429,26 @@
     schema-or-key))
 
 (defn validate
-  "Return true if value conforms to schema-or-key."
+  "Return true if value conforms to schema-or-key.
+
+   Named hot-path schemas reuse their precompiled Malli validators."
   [schema-or-key value]
-  (m/validate (schema schema-or-key) value))
+  (let [schema' (schema schema-or-key)]
+    (if-let [validate-fn (and (keyword? schema-or-key)
+                              (get compiled-validators schema-or-key))]
+      (validate-fn value)
+      (m/validate schema' value))))
 
 (defn explain-data
-  "Return raw Malli explanation data for value."
+  "Return raw Malli explanation data for value.
+
+   Named hot-path schemas reuse their precompiled Malli explainers."
   [schema-or-key value]
-  (m/explain (schema schema-or-key) value))
+  (let [schema' (schema schema-or-key)]
+    (if-let [explain-fn (and (keyword? schema-or-key)
+                             (get compiled-explainers schema-or-key))]
+      (explain-fn value)
+      (m/explain schema' value))))
 
 (defn humanize
   "Return a humanized Malli explanation for value."
@@ -425,16 +476,24 @@
                  :humanized (me/humanize explanation)})))))
 
 (defn validator
-  "Return a predicate function for schema-or-key."
+  "Return a predicate function for schema-or-key.
+
+   Named hot-path schemas return their namespace-load compiled validator."
   [schema-or-key]
   (let [schema' (schema schema-or-key)]
-    (m/validator schema')))
+    (or (and (keyword? schema-or-key)
+             (get compiled-validators schema-or-key))
+        (m/validator schema'))))
 
 (defn explainer
-  "Return an explainer function for schema-or-key."
+  "Return an explainer function for schema-or-key.
+
+   Named hot-path schemas return their namespace-load compiled explainer."
   [schema-or-key]
   (let [schema' (schema schema-or-key)]
-    (m/explainer schema')))
+    (or (and (keyword? schema-or-key)
+             (get compiled-explainers schema-or-key))
+        (m/explainer schema'))))
 
 ;; -----------------------------------------------------------------------------
 ;; Convenience validators

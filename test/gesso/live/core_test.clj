@@ -6,6 +6,8 @@
    [gesso.live.fragment :as fragment]
    [gesso.live.htmx :as htmx]
    [gesso.live.optimistic.server :as optimistic.server]
+   [gesso.live.progression :as progression]
+   [gesso.live.progression.http :as progression.http]
    [gesso.live.source :as source]))
 
 ;; -----------------------------------------------------------------------------
@@ -32,6 +34,15 @@
   {:tx-id 42
    :system-time :system-time-42
    :snapshot-time :system-time-42})
+
+(def sample-request-progression
+  (progression/requirement :basis/request))
+
+(def sample-commit-progression
+  (progression/requirement :basis/commit))
+
+(def sample-other-progression
+  (progression/requirement :basis/other))
 
 (defn start-task
   [task]
@@ -282,6 +293,228 @@
          (live/attach-consistency request-change {:ignored true}))))
 
 ;; -----------------------------------------------------------------------------
+;; Progression ctx/change helpers
+;; -----------------------------------------------------------------------------
+
+(deftest progression-reads-normalized-authoritative-requirement-from-ctx-test
+  (testing "canonical request/read-context key"
+    (is (= sample-request-progression
+           (live/progression
+            {:gesso.live/progression sample-request-progression}))))
+
+  (testing "narrow request-local convenience key remains readable"
+    (is (= sample-request-progression
+           (live/progression
+            {:progression sample-request-progression}))))
+
+  (testing "absence remains absence"
+    (is (nil?
+         (live/progression
+          {:biff/node :shared-node})))))
+
+(deftest with-progression-owns-canonical-context-key-test
+  (is (= {:app/name :demo
+          :gesso.live/progression sample-request-progression}
+         (live/with-progression
+          {:app/name :demo}
+          sample-request-progression)))
+
+  (testing "nil removes only the canonical progression key"
+    (is (= {:app/name :demo
+            :progression sample-other-progression}
+           (live/with-progression
+            {:app/name :demo
+             :gesso.live/progression sample-request-progression
+             :progression sample-other-progression}
+            nil)))))
+
+(deftest attach-progression-preserves-or-attaches-exact-authority-test
+  (is (= (assoc request-change
+                :progression sample-commit-progression)
+         (live/attach-progression
+          request-change
+          sample-commit-progression)))
+
+  (testing "an exact repeated requirement is idempotent"
+    (let [change (assoc request-change
+                        :progression sample-commit-progression)]
+      (is (identical? change
+                      (live/attach-progression
+                       change
+                       sample-commit-progression)))))
+
+  (testing "nil cannot erase an existing requirement"
+    (let [change (assoc request-change
+                        :progression sample-commit-progression)]
+      (is (identical? change
+                      (live/attach-progression change nil))))))
+
+(deftest attach-progression-rejects-conflicting-authority-test
+  (let [error
+        (try
+          (live/attach-progression
+           (assoc request-change
+                  :progression sample-other-progression)
+           sample-commit-progression)
+          nil
+          (catch clojure.lang.ExceptionInfo e
+            e))]
+    (is (some? error))
+    (is (= sample-other-progression
+           (:existing-progression (ex-data error))))
+    (is (= sample-commit-progression
+           (:authoritative-progression (ex-data error))))))
+
+;; -----------------------------------------------------------------------------
+;; HTTP progression request boundary
+;; -----------------------------------------------------------------------------
+
+(defn progression-header
+  [requirement-value]
+  {progression.http/request-header-name
+   (progression.http/encode-request-progression requirement-value)})
+
+(defn progression-fragment-app
+  [seen]
+  (live/compile-live-app
+   {:response (fn [node]
+                {:status 200
+                 :headers {"content-type" "text/html; charset=utf-8"}
+                 :body node})
+    :scopes
+    {:request
+     {:topic :request
+      :id-key :request/id
+      :authorized?
+      (fn [ctx id]
+        (swap! seen assoc
+               :authorize/id id
+               :authorize/progression (live/progression ctx))
+        true)}}
+    :graph {}
+    :fragments
+    {:request-panel
+     {:scope :request
+      :query
+      (fn [ctx id]
+        (swap! seen assoc
+               :query/id id
+               :query/progression (live/progression ctx))
+        {:fragment/id (str "request-panel-" id)
+         :request/id id
+         :progression (live/progression ctx)})
+      :render
+      (fn [{:keys [fragment/id progression]}]
+        [:section {:id id
+                   :data-progression (pr-str progression)}
+         "Request"])}}}))
+
+(deftest bind-request-progression-decodes-ring-and-biff-contexts-test
+  (testing "raw Ring request fields bind into canonical progression"
+    (let [ctx {:app/name :demo
+               :headers (progression-header sample-request-progression)}
+          bound (live/bind-request-progression ctx)]
+      (is (= sample-request-progression
+             (live/progression bound)))
+      (is (= :demo (:app/name bound)))
+      (is (= (:headers ctx) (:headers bound)))))
+
+  (testing "nested Biff-style :request is decoded while the outer ctx is preserved"
+    (let [ctx {:app/name :demo
+               :request {:request-method :get
+                         :headers (progression-header sample-request-progression)}}
+          bound (live/bind-request-progression ctx)]
+      (is (= sample-request-progression
+             (live/progression bound)))
+      (is (= (:request ctx) (:request bound)))
+      (is (= :demo (:app/name bound)))))
+
+  (testing "absence is a true no-op"
+    (let [ctx {:app/name :demo
+               :headers {"accept" "text/html"}}]
+      (is (identical? ctx
+                      (live/bind-request-progression ctx))))))
+
+(deftest bind-request-progression-composes-with-trusted-server-requirement-test
+  (let [ctx {:gesso.live/progression sample-other-progression
+             :headers (progression-header sample-request-progression)}
+        bound (live/bind-request-progression ctx)]
+    (is (= (progression/compose
+            sample-other-progression
+            sample-request-progression)
+           (live/progression bound)))
+    (is (= (:headers ctx) (:headers bound)))))
+
+(deftest bind-request-progression-fails-closed-on-malformed-header-test
+  (let [error
+        (try
+          (live/bind-request-progression
+           {:headers {progression.http/request-header-name "%not-valid"}})
+          nil
+          (catch clojure.lang.ExceptionInfo e
+            e))]
+    (is (some? error))
+    (is (= :gesso.live.progression.http/error
+           (:error/type (ex-data error))))
+    (is (= :invalid-header-encoding
+           (:error/kind (ex-data error))))))
+
+(deftest standard-fragment-entry-points-bind-request-progression-test
+  (let [seen (atom {})
+        compiled (progression-fragment-app seen)
+        ctx {:request {:headers (progression-header
+                                 sample-request-progression)}}]
+    (testing "query-fragment binds before the model query"
+      (reset! seen {})
+      (let [data (live/query-fragment compiled ctx :request-panel "req-1")]
+        (is (= sample-request-progression (:progression data)))
+        (is (= "req-1" (:query/id @seen)))
+        (is (= sample-request-progression
+               (:query/progression @seen)))))
+
+    (testing "render-fragment-node binds before query/render"
+      (reset! seen {})
+      (let [node (live/render-fragment-node
+                  compiled ctx :request-panel "req-2")]
+        (is (= :section (first node)))
+        (is (= "req-2" (:query/id @seen)))
+        (is (= sample-request-progression
+               (:query/progression @seen)))))
+
+    (testing "render-fragment-response binds before authorization and query"
+      (reset! seen {})
+      (let [response (live/render-fragment-response
+                      compiled ctx :request-panel "req-3")]
+        (is (= 200 (:status response)))
+        (is (= "req-3" (:authorize/id @seen)))
+        (is (= sample-request-progression
+               (:authorize/progression @seen)))
+        (is (= "req-3" (:query/id @seen)))
+        (is (= sample-request-progression
+               (:query/progression @seen)))))))
+
+(deftest render-fragment-response-rejects-malformed-progression-before-model-work-test
+  (let [seen (atom {})
+        compiled (progression-fragment-app seen)
+        error
+        (try
+          (live/render-fragment-response
+           compiled
+           {:headers {progression.http/request-header-name "%not-valid"}}
+           :request-panel
+           "req-bad")
+          nil
+          (catch clojure.lang.ExceptionInfo e
+            e))]
+    (is (some? error))
+    (is (= :gesso.live.progression.http/error
+           (:error/type (ex-data error))))
+    (is (= :invalid-header-encoding
+           (:error/kind (ex-data error))))
+    (is (= {} @seen)
+        "Malformed browser progression must fail before authorization/query/render.")))
+
+;; -----------------------------------------------------------------------------
 ;; HTMX facade
 ;; -----------------------------------------------------------------------------
 
@@ -381,6 +614,140 @@
         {:tx-ops sample-tx
          :change request-change
          :emit :banana}))))
+
+(deftest transact-and-notify-binds-transaction-progression-to-context-and-changes-test
+  (let [system {:options {}}
+        ctx {:xtdb/connectable :node
+             :gesso.live/progression sample-request-progression}
+        expected-context-progression
+        (progression/compose
+         sample-request-progression
+         sample-commit-progression)]
+    (with-xtdb-stub
+      'execute-tx-from!
+      (fn [ctx' tx-ops opts]
+        (is (= ctx ctx'))
+        (is (= sample-tx tx-ops))
+        (is (nil? opts))
+        {:tx-result {:tx-id 42}
+         :consistency sample-consistency
+         :progression sample-commit-progression})
+      (fn []
+        (let [result
+              (live/transact-and-notify!
+               system
+               ctx
+               {:tx-ops sample-tx
+                :change request-change
+                :emit false})
+              change' (first (:changes result))]
+          (is (= sample-commit-progression
+                 (:progression result)))
+          (is (= expected-context-progression
+                 (live/progression (:ctx result))))
+          (is (= sample-commit-progression
+                 (:progression change')))
+          (is (= sample-consistency
+                 (:gesso.live/consistency change')))
+          (is (= false (:emit result)))
+          (is (= [] (:emit-results result))))))))
+
+(deftest transact-and-notify-change-progression-is-transaction-owned-test
+  (let [system {:options {}}
+        ctx {:xtdb/connectable :node}]
+    (testing "caller may repeat exactly the transaction-established requirement"
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [change (assoc request-change
+                              :progression sample-commit-progression)
+                result
+                (live/transact-and-notify!
+                 system
+                 ctx
+                 {:tx-ops sample-tx
+                  :change change
+                  :emit false})]
+            (is (= sample-commit-progression
+                   (:progression (first (:changes result)))))))))
+
+    (testing "caller cannot replace transaction-established progression"
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [error
+                (try
+                  (live/transact-and-notify!
+                   system
+                   ctx
+                   {:tx-ops sample-tx
+                    :change (assoc request-change
+                                   :progression sample-other-progression)
+                    :emit false})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+            (is (some? error))
+            (is (= sample-other-progression
+                   (:existing-progression (ex-data error))))
+            (is (= sample-commit-progression
+                   (:authoritative-progression (ex-data error))))))))))
+
+(deftest transact-and-notify-rejects-fabricated-change-progression-test
+  (let [system {:options {}}
+        ctx {:xtdb/connectable :node}]
+    (with-xtdb-stub
+      'execute-tx-from!
+      (fn [_ctx _tx-ops _opts]
+        {:tx-result {:tx-id 42}
+         :consistency sample-consistency})
+      (fn []
+        (let [error
+              (try
+                (live/transact-and-notify!
+                 system
+                 ctx
+                 {:tx-ops sample-tx
+                  :change (assoc request-change
+                                 :progression sample-other-progression)
+                  :emit false})
+                nil
+                (catch clojure.lang.ExceptionInfo e
+                  e))]
+          (is (some? error))
+          (is (= sample-other-progression
+                 (:progression (ex-data error)))))))))
+
+(deftest transact-and-notify-context-progression-never-substitutes-for-commit-evidence-test
+  (let [system {:options {}}
+        ctx {:xtdb/connectable :node
+             :gesso.live/progression sample-request-progression}]
+    (with-xtdb-stub
+      'execute-tx-from!
+      (fn [_ctx _tx-ops _opts]
+        {:tx-result {:tx-id 42}
+         :consistency sample-consistency})
+      (fn []
+        (let [result
+              (live/transact-and-notify!
+               system
+               ctx
+               {:tx-ops sample-tx
+                :change request-change
+                :emit false})]
+          (is (= sample-request-progression
+                 (live/progression (:ctx result))))
+          (is (not (contains? (first (:changes result))
+                              :progression)))
+          (is (not (contains? result :progression))))))))
 
 (deftest transact-and-notify-emit-false-executes-tx-and-returns-metadata-test
   (let [seen-tx (atom nil)
@@ -609,3 +976,197 @@
                   system
                   ctx
                   {:tx-ops sample-tx}))))))))
+
+(deftest transact-and-notify-precommit-failure-preserves-original-exception-test
+  (let [cause (ex-info "XTDB failed before commit."
+                       {:phase :execute-tx})
+        submitted? (atom false)
+        system {:options {}}
+        ctx {:xtdb/connectable :node}]
+    (with-redefs [live/submit-expanded!
+                  (fn [& _]
+                    (reset! submitted? true)
+                    {:status :submitted})]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          (throw cause))
+        (fn []
+          (let [error
+                (try
+                  (live/transact-and-notify!
+                   system
+                   ctx
+                   {:tx-ops sample-tx
+                    :change request-change})
+                  nil
+                  (catch Throwable t
+                    t))]
+            (is (identical? cause error)
+                "pre-commit XTDB failure must escape unchanged")
+            (is (false? @submitted?)
+                "no post-commit delivery may begin when the transaction failed")
+            (is (false? (live/post-commit-delivery-failure? error))
+                "pre-commit failures must never be classified as committed")))))))
+
+(deftest transact-and-notify-sync-delivery-failure-is-classified-after-commit-test
+  (let [cause (ex-info "second synchronous invalidation failed"
+                       {:delivery :sync})
+        seen-emits (atom [])
+        system {:options {}}
+        ctx {:xtdb/connectable :node}
+        expected-ctx (-> ctx
+                         (assoc :gesso.live/consistency sample-consistency)
+                         (assoc :gesso.live/progression sample-commit-progression))
+        expected-changes
+        [(assoc request-change
+                :gesso.live/consistency sample-consistency
+                :progression sample-commit-progression)
+         (assoc other-request-change
+                :gesso.live/consistency sample-consistency
+                :progression sample-commit-progression)]]
+    (with-redefs [live/emit-expanded!
+                  (fn [system' ctx' change']
+                    (swap! seen-emits conj [system' ctx' change'])
+                    (if (= "req-2" (:id change'))
+                      (throw cause)
+                      {:status :emitted
+                       :change-id (:id change')}))]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [error
+                (try
+                  (live/transact-and-notify!
+                   system
+                   ctx
+                   {:tx-ops sample-tx
+                    :changes [request-change other-request-change]
+                    :emit :sync})
+                  nil
+                  (catch Throwable t
+                    t))
+                data (ex-data error)]
+            (is (live/post-commit-delivery-failure? error))
+            (is (identical? cause (.getCause ^Throwable error)))
+            (is (= live/post-commit-delivery-failure-type
+                   (:error/type data)))
+            (is (= :post-commit-delivery
+                   (:failure/stage data)))
+            (is (= :committed
+                   (:commit/status data)))
+            (is (= {:tx-id 42}
+                   (:tx-result data)))
+            (is (= sample-consistency
+                   (:consistency data)))
+            (is (= sample-commit-progression
+                   (:progression data)))
+            (is (= expected-ctx
+                   (:ctx data)))
+            (is (= expected-changes
+                   (:changes data)))
+            (is (= :sync
+                   (:emit data)))
+            (is (= 1
+                   (:delivery/index data)))
+            (is (= (second expected-changes)
+                   (:delivery/change data)))
+            (is (= [{:status :emitted
+                     :change-id "req-1"}]
+                   (:delivery/completed-results data))
+                "completed delivery results must survive a later failure")
+            (is (= [[system expected-ctx (first expected-changes)]
+                    [system expected-ctx (second expected-changes)]]
+                   @seen-emits)
+                "delivery stops exactly at the failing change")))))))
+
+(deftest transact-and-notify-async-submission-failure-is-classified-after-commit-test
+  (let [cause (ex-info "second dispatcher submission failed"
+                       {:delivery :async})
+        seen-submits (atom [])
+        system {:options {}}
+        ctx {:xtdb/connectable :node}
+        entry {:priority :normal}]
+    (with-redefs [live/submit-expanded!
+                  (fn [system' ctx' change' entry']
+                    (swap! seen-submits conj [system' ctx' change' entry'])
+                    (if (= "req-2" (:id change'))
+                      (throw cause)
+                      {:status :submitted
+                       :job-id (:id change')}))]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency})
+        (fn []
+          (let [error
+                (try
+                  (live/transact-and-notify!
+                   system
+                   ctx
+                   {:tx-ops sample-tx
+                    :changes [request-change other-request-change]
+                    :entry entry})
+                  nil
+                  (catch Throwable t
+                    t))
+                data (ex-data error)]
+            (is (live/post-commit-delivery-failure? error))
+            (is (identical? cause (.getCause ^Throwable error)))
+            (is (= :committed (:commit/status data)))
+            (is (= :post-commit-delivery (:failure/stage data)))
+            (is (= :async (:emit data)))
+            (is (= 1 (:delivery/index data)))
+            (is (= "req-2" (get-in data [:delivery/change :id])))
+            (is (= [{:status :submitted
+                     :job-id "req-1"}]
+                   (:delivery/completed-results data)))
+            (is (= 2 (count @seen-submits)))
+            (is (= [entry entry]
+                   (mapv #(nth % 3) @seen-submits)))))))))
+
+(deftest transact-and-notify-post-commit-debug-failure-is-observational-test
+  (let [debug-calls (atom [])
+        system {:options
+                {:debug-fn
+                 (fn [event]
+                   (swap! debug-calls conj event)
+                   (throw
+                    (ex-info "debug sink failed"
+                             {:debug true})))}}
+        ctx {:xtdb/connectable :node}]
+    (with-redefs [live/submit-expanded!
+                  (fn [_system _ctx change _entry]
+                    {:status :submitted
+                     :change-id (:id change)})]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [result
+                (live/transact-and-notify!
+                 system
+                 ctx
+                 {:tx-ops sample-tx
+                  :change request-change})]
+            (is (= {:tx-id 42}
+                   (:tx-result result)))
+            (is (= :async
+                   (:emit result)))
+            (is (= [{:status :submitted
+                     :change-id "req-1"}]
+                   (:emit-results result)))
+            (is (= 1 (count @debug-calls))
+                "the post-commit debug hook still runs")
+            (is (= :gesso.live.core/transact-and-notify
+                   (:event (first @debug-calls)))
+                "debug failure is swallowed only after the event is offered")))))))
+

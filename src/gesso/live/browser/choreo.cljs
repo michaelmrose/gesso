@@ -64,7 +64,8 @@
   #{:local-actions
     :fx-handlers
     :send-payload
-    :transport-send})
+    :transport-send
+    :recover-incompatible-plan})
 
 (def owned-effect-kinds
   #{:machine/local
@@ -183,6 +184,7 @@
    (some? (:fx-handlers value))
    (some? (:send-payload value))
    (some? (:transport-send value))
+   (some? (:recover-incompatible-plan value))
    (some? (:installed-handlers value))))
 
 (defn require-runtime!
@@ -340,6 +342,47 @@
   [runtime]
   @(:transport-send (require-runtime! runtime)))
 
+(defn- default-incompatible-plan-recovery!
+  [_context]
+  ;; A full-page reload is the conservative browser default for an incompatible
+  ;; projected plan. It reconstructs transport/authentication/application state
+  ;; from current authority instead of attempting to migrate suspended machine
+  ;; state. Node-based semantic tests do not provide a browser location; in that
+  ;; host the semantic retirement still stands and the caller can observe that a
+  ;; physical reload was unavailable.
+  (let [location (.-location js/globalThis)
+        reload (when location (.-reload location))]
+    (if (fn? reload)
+      (do
+        (.call reload location)
+        :reload-requested)
+      :reload-unavailable)))
+
+(defn set-incompatible-plan-recovery-handler!
+  "Install the browser/application recovery action for stale ExecutablePlans.
+
+   Handler shape is context -> result. The context is delivered only *after*
+   any active execution with the same logical execution-id has been
+   semantically retired (or an attempted retirement has at least installed its
+   adapter transition). The default handler requests a full page reload when a
+   browser location is available.
+
+   This is a physical recovery seam, not portable Choreo semantics. A handler
+   must reconstruct current authority; it must not resume or migrate the stale
+   machine execution."
+  [runtime handler]
+  (let [runtime (require-runtime! runtime)]
+    (require-optional-callable!
+     "Browser Choreo incompatible-plan recovery handler" handler)
+    (reset!
+     (:recover-incompatible-plan runtime)
+     (or handler default-incompatible-plan-recovery!))
+    true))
+
+(defn incompatible-plan-recovery-handler
+  [runtime]
+  @(:recover-incompatible-plan (require-runtime! runtime)))
+
 ;; =============================================================================
 ;; Physical effect realization
 ;; =============================================================================
@@ -456,7 +499,11 @@
        generic send-boundary payload constructor
 
      :transport-send
-       participant-message physical transport handler"
+       participant-message physical transport handler
+
+     :recover-incompatible-plan
+       optional browser/application recovery action invoked after stale semantic
+       ownership is revoked. Defaults to a full-page reload when available."
   ([shell-runtime]
    (create shell-runtime nil))
   ([shell-runtime options]
@@ -473,6 +520,9 @@
                                        (:send-payload options))
          _ (require-optional-callable! "Browser Choreo :transport-send"
                                        (:transport-send options))
+         _ (require-optional-callable!
+            "Browser Choreo :recover-incompatible-plan"
+            (:recover-incompatible-plan options))
          runtime
          {:gesso.live.browser.choreo/type runtime-type
           :gesso.live.browser.choreo/version runtime-version
@@ -481,6 +531,10 @@
           :fx-handlers (atom fx-handlers)
           :send-payload (atom (:send-payload options))
           :transport-send (atom (:transport-send options))
+          :recover-incompatible-plan
+          (atom
+           (or (:recover-incompatible-plan options)
+               default-incompatible-plan-recovery!))
           :installed-handlers (atom {})}
          handlers (physical-handlers runtime)]
      (doseq [[effect-kind handler] handlers]
@@ -554,20 +608,6 @@
        (assoc dispatch-result
               :execution-ref (execution-ref runtime execution-id))))))
 
-(defn start-plan!
-  "Create a portable machine execution from executable-plan and submit it.
-
-   :machine-options are passed only to gesso.choreo.machine/start.
-   :adapter-options are passed only to start-execution!."
-  ([runtime execution-id executable-plan]
-   (start-plan! runtime execution-id executable-plan nil nil))
-  ([runtime execution-id executable-plan machine-options adapter-options]
-   (start-execution!
-    runtime
-    execution-id
-    (machine/start executable-plan (or machine-options {}))
-    adapter-options)))
-
 (defn retire!
   [runtime execution-ref reason]
   (let [runtime (require-runtime! runtime)
@@ -579,6 +619,95 @@
       :execution-id execution-id
       :generation generation
       :reason reason})))
+
+(defn- stale-plan-retirement!
+  [runtime execution-id]
+  (if-let [stale-ref (execution-ref runtime execution-id)]
+    (try
+      (retire! runtime stale-ref :incompatible-plan)
+      {:status :retired
+       :execution-ref stale-ref}
+      (catch :default error
+        ;; shell/dispatch! installs the pure AdapterState transition before it
+        ;; interprets physical cleanup effects. A timer/XHR cancellation failure
+        ;; therefore must not block stale-plan recovery once semantic ownership
+        ;; has already disappeared. Preserve the physical failure diagnostically
+        ;; and let authoritative reconstruction proceed.
+        {:status (if (active? runtime execution-id)
+                   :retirement-failed
+                   :retired-with-cleanup-error)
+         :execution-ref stale-ref
+         :error error}))
+    {:status :not-active
+     :execution-ref nil}))
+
+(defn- recover-incompatible-plan!
+  [runtime execution-id format-status]
+  (let [retirement (stale-plan-retirement! runtime execution-id)
+        context {:reason :incompatible-plan
+                 :execution-id execution-id
+                 :format-status format-status
+                 :retirement retirement}
+        handler @(:recover-incompatible-plan runtime)]
+    (try
+      {:status :incompatible-plan
+       :execution-id execution-id
+       :execution-ref nil
+       :format-status format-status
+       :retirement retirement
+       :recovery-result (handler context)}
+      (catch :default error
+        ;; Recovery failure cannot restore a generation that was already
+        ;; semantically revoked. Surface the physical failure explicitly so the
+        ;; caller/runtime can escalate while the stale execution stays powerless.
+        (throw
+         (choreo-error
+          :incompatible-plan-recovery-failed
+          "Browser recovery from an incompatible ExecutablePlan failed after stale semantic retirement."
+          {:execution-id execution-id
+           :format-status format-status
+           :retirement retirement}
+          error))))))
+
+(defn start-plan!
+  "Create a portable machine execution from executable-plan and submit it.
+
+   :machine-options are passed only to gesso.choreo.machine/start.
+   :adapter-options are passed only to start-execution!.
+
+   A recognizable but incompatible ExecutablePlan is a browser recovery
+   condition rather than a malformed-plan error. The runtime first semantically
+   retires any currently active generation with execution-id, then invokes the
+   configured authoritative reconstruction action. It never attempts to migrate
+   or continue suspended state from the incompatible plan.
+
+   Malformed/noncanonical plans still flow through machine/start and fail hard."
+  ([runtime execution-id executable-plan]
+   (start-plan! runtime execution-id executable-plan nil nil))
+  ([runtime execution-id executable-plan machine-options adapter-options]
+   (let [runtime (require-runtime! runtime)
+         _ (require-non-nil! "Browser Choreo execution id" execution-id)
+         {:keys [status] :as format-status}
+         (machine/executable-plan-format-status executable-plan)]
+     (case status
+       :incompatible
+       (recover-incompatible-plan! runtime execution-id format-status)
+
+       :compatible
+       (start-execution!
+        runtime
+        execution-id
+        (machine/start executable-plan (or machine-options {}))
+        adapter-options)
+
+       ;; Delegate malformed-plan and impossible-classifier behavior to the
+       ;; portable machine so this browser layer does not grow a second format
+       ;; validator or error taxonomy.
+       (start-execution!
+        runtime
+        execution-id
+        (machine/start executable-plan (or machine-options {}))
+        adapter-options)))))
 
 (defn deliver-message!
   "Submit one participant message using the generation captured by its callback."
@@ -668,5 +797,7 @@
      :registered-fx-handlers (set (keys @(:fx-handlers runtime)))
      :send-payload-handler? (boolean @(:send-payload runtime))
      :transport-handler? (boolean @(:transport-send runtime))
+     :incompatible-plan-recovery-handler?
+     (boolean @(:recover-incompatible-plan runtime))
      :attached-effect-kinds (set (keys @(:installed-handlers runtime)))
      :shell (shell/diagnostics (:shell runtime))}))

@@ -1,7 +1,8 @@
 (ns gesso.live.consistency.xtdb-test
   (:require
    [clojure.test :refer [deftest is testing]]
-   [gesso.live.consistency.xtdb :as xtdb-live])
+   [gesso.live.consistency.xtdb :as xtdb-live]
+   [gesso.live.progression :as progression])
   (:import
    [java.time Instant]
    [xtdb.api TransactionKey]))
@@ -292,6 +293,36 @@
         (is (= [[:read sample-query {:snapshot-token "snap"}]]
                @calls))))))
 
+(deftest q-consistent-from-enforces-progression-after-caller-options-test
+  (let [calls (atom [])
+        t (Instant/parse "2026-01-03T00:00:00Z")
+        required-basis (xtdb-live/basis :analytics 80 t)
+        ctx {:xtdb/read-connectable :read
+             :consistency {:snapshot-token "ordinary-token"
+                           :await-token "await"}
+             :gesso.live/progression (progression/requirement required-basis)}]
+    (with-xtdb-stub
+      '*q*
+      (fn [connectable query opts]
+        (swap! calls conj [connectable query opts])
+        [{:ok true}])
+      (fn []
+        (is (= [{:ok true}]
+               (xtdb-live/q-consistent-from
+                ctx
+                sample-query
+                {:snapshot-token "caller-token"
+                 :snapshot-time (Instant/parse "2025-01-01T00:00:00Z")
+                 :database :analytics
+                 :key-fn :kebab-case-keyword})))
+        (is (= [[:read
+                 sample-query
+                 {:await-token "await"
+                  :database :analytics
+                  :key-fn :kebab-case-keyword
+                  :snapshot-token (xtdb-live/basis-snapshot-token required-basis)}]]
+               @calls))))))
+
 (deftest plan-q-consistent-applies-consistency-as-query-opts-test
   (let [calls (atom [])
         planned ::planned]
@@ -331,6 +362,174 @@
 (deftest tx-consistency-is-single-arity-test
   (is (= {:tx-id 100}
          (xtdb-live/tx-consistency {:tx-id 100}))))
+
+(deftest portable-xtdb-basis-is-closed-and-lossless-test
+  (let [t (Instant/parse "2026-01-01T00:00:00.123456789Z")
+        large-tx-id 9007199254740993
+        basis (xtdb-live/basis :analytics large-tx-id t)]
+    (is (xtdb-live/xtdb-basis? basis))
+    (is (= :gesso.live.consistency.xtdb/basis
+           (:gesso.live.consistency.xtdb/type basis)))
+    (is (= 1 (:gesso.live.consistency.xtdb/version basis)))
+    (is (= "analytics" (:database basis)))
+    ;; Decimal text must survive a CLJS/browser carrier without IEEE-754 loss.
+    (is (= "9007199254740993" (:tx-id basis)))
+    (is (string? (:snapshot-token basis)))
+    (is (= large-tx-id (xtdb-live/basis-tx-id basis)))
+    (is (= "analytics" (xtdb-live/basis-database basis)))
+    (is (= (:snapshot-token basis)
+           (xtdb-live/basis-snapshot-token basis)))
+    (is (= t (xtdb-live/basis-system-time basis)))
+    (is (not (xtdb-live/xtdb-basis? (assoc basis :extra true))))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"closed portable XTDB"
+         (xtdb-live/require-xtdb-basis! (assoc basis :extra true))))))
+
+(deftest consistency-to-basis-requires-complete-authoritative-basis-test
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")]
+    (is (nil? (xtdb-live/consistency->basis {:tx-id 7})))
+    (is (nil? (xtdb-live/consistency->basis {:system-time t})))
+    (is (= (xtdb-live/basis :xtdb 7 t)
+           (xtdb-live/consistency->basis
+            {:tx-id 7 :system-time t}
+            :xtdb)))
+    (is (= (xtdb-live/basis :analytics 8 t)
+           (xtdb-live/consistency->basis
+            {:tx-id 8 :snapshot-time t}
+            :analytics)))))
+
+(deftest tx-result-progression-needs-complete-public-result-test
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")
+        result (tx-key 9 t)
+        expected-basis (xtdb-live/basis :xtdb 9 t)]
+    (is (= expected-basis
+           (xtdb-live/tx-result-basis result :xtdb)))
+    (is (= (progression/requirement expected-basis)
+           (xtdb-live/tx-result-progression result :xtdb)))
+    ;; submit-tx's public tx-id-only result is not enough to construct the
+    ;; snapshot token required for an authoritative reread.
+    (is (nil? (xtdb-live/tx-result-basis {:tx-id 9} :xtdb)))
+    (is (nil? (xtdb-live/tx-result-progression {:tx-id 9} :xtdb)))))
+
+(deftest xtdb-basis-comparison-is-storage-specific-and-database-scoped-test
+  (let [t1 (Instant/parse "2026-01-01T00:00:00Z")
+        t2 (Instant/parse "2026-01-02T00:00:00Z")
+        b1 (xtdb-live/basis :xtdb 10 t1)
+        b2 (xtdb-live/basis :xtdb 11 t2)
+        conflicting (xtdb-live/basis :xtdb 10 t2)
+        other-db (xtdb-live/basis :analytics 11 t2)]
+    (is (neg? (xtdb-live/compare-bases b1 b2)))
+    (is (pos? (xtdb-live/compare-bases b2 b1)))
+    (is (zero? (xtdb-live/compare-bases b1 b1)))
+    (is (xtdb-live/basis-advances? b1 b2))
+    (is (not (xtdb-live/basis-advances? b2 b1)))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"different databases"
+         (xtdb-live/compare-bases b1 other-db)))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Conflicting XTDB progression bases"
+         (xtdb-live/compare-bases b1 conflicting)))))
+
+(deftest progression-witness-is-explicit-and-never-backward-test
+  (let [t1 (Instant/parse "2026-01-01T00:00:00Z")
+        t2 (Instant/parse "2026-01-02T00:00:00Z")
+        b1 (xtdb-live/basis 20 t1)
+        b2 (xtdb-live/basis 21 t2)]
+    (is (= (progression/advance b1 b2)
+           (xtdb-live/progression-witness b1 b2)))
+    (is (nil? (xtdb-live/progression-witness b1 b1)))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"cannot witness a backward"
+         (xtdb-live/progression-witness b2 b1)))))
+
+(deftest strongest-required-basis-is-order-independent-test
+  (let [t1 (Instant/parse "2026-01-01T00:00:00Z")
+        t2 (Instant/parse "2026-01-02T00:00:00Z")
+        t3 (Instant/parse "2026-01-03T00:00:00Z")
+        b1 (xtdb-live/basis 30 t1)
+        b2 (xtdb-live/basis 31 t2)
+        b3 (xtdb-live/basis 32 t3)
+        forward (progression/requirement-from-bases [b1 b2 b3])
+        reverse (progression/requirement-from-bases [b3 b2 b1])]
+    (is (= b3 (xtdb-live/strongest-required-basis forward)))
+    (is (= b3 (xtdb-live/strongest-required-basis reverse)))
+    (is (= (xtdb-live/progression-consistency forward)
+           (xtdb-live/progression-consistency reverse)))
+    (is (= (xtdb-live/progression-query-opts forward)
+           (xtdb-live/progression-query-opts reverse)))))
+
+(deftest strongest-required-basis-fails-closed-for-incomparable-requirements-test
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")
+        default-basis (xtdb-live/basis :xtdb 40 t)
+        other-db-basis (xtdb-live/basis :analytics 41 t)]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"different databases"
+         (xtdb-live/strongest-required-basis
+          (progression/requirement-from-bases
+           [default-basis other-db-basis]))))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"closed portable XTDB"
+         (xtdb-live/strongest-required-basis
+          (progression/requirement {:opaque/basis 1}))))))
+
+(deftest progression-query-opts-carry-exact-required-snapshot-test
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")
+        default-basis (xtdb-live/basis :xtdb 50 t)
+        analytics-basis (xtdb-live/basis :analytics 51 t)]
+    (is (= {:snapshot-token (xtdb-live/basis-snapshot-token default-basis)}
+           (xtdb-live/progression-query-opts
+            (progression/requirement default-basis))))
+    (is (= {:snapshot-token (xtdb-live/basis-snapshot-token analytics-basis)
+            :database "analytics"}
+           (xtdb-live/progression-query-opts
+            (progression/requirement analytics-basis))))))
+
+(deftest read-query-opts-cannot-be-weakened-by-caller-test
+  (let [old-time (Instant/parse "2025-12-01T00:00:00Z")
+        caller-time (Instant/parse "2025-12-15T00:00:00Z")
+        required-time (Instant/parse "2026-01-01T00:00:00Z")
+        required-basis (xtdb-live/basis :analytics 60 required-time)
+        requirement (progression/requirement required-basis)]
+    (is (= {:await-token "await"
+            :key-fn :kebab-case-keyword
+            :database :analytics
+            :snapshot-token (xtdb-live/basis-snapshot-token required-basis)}
+           (xtdb-live/read-query-opts
+            {:snapshot-time old-time
+             :snapshot-token "old-token"
+             :await-token "await"}
+            requirement
+            {:snapshot-time caller-time
+             :snapshot-token "caller-token"
+             :database :analytics
+             :key-fn :kebab-case-keyword})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"database conflicts with authoritative progression"
+         (xtdb-live/read-query-opts
+          {}
+          requirement
+          {:database :xtdb})))))
+
+(deftest progression-from-prefers-canonical-context-key-test
+  (let [t1 (Instant/parse "2026-01-01T00:00:00Z")
+        t2 (Instant/parse "2026-01-02T00:00:00Z")
+        canonical (progression/requirement (xtdb-live/basis 70 t1))
+        convenience (progression/requirement (xtdb-live/basis 71 t2))]
+    (is (= canonical
+           (xtdb-live/progression-from
+            {:gesso.live/progression canonical
+             :progression convenience})))
+    (is (= convenience
+           (xtdb-live/progression-from
+            {:progression convenience})))
+    (is (nil? (xtdb-live/progression-from :not-a-context)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Transaction wrappers
@@ -393,7 +592,9 @@
         (is (= {:tx-result result-tx-key
                 :consistency {:tx-id 2
                               :system-time t
-                              :snapshot-time t}}
+                              :snapshot-time t}
+                :progression (progression/requirement
+                              (xtdb-live/basis :xtdb 2 t))}
                (xtdb-live/execute-tx!
                 :conn
                 sample-tx
@@ -421,7 +622,9 @@
         (is (= {:tx-result result-tx-key
                 :consistency {:tx-id 3
                               :system-time t
-                              :snapshot-time t}}
+                              :snapshot-time t}
+                :progression (progression/requirement
+                              (xtdb-live/basis :xtdb 3 t))}
                (xtdb-live/execute-tx-from!
                 {:xtdb/connectable :connectable
                  :xtdb/conn :conn}
@@ -482,7 +685,9 @@
                 :value {:tx-result result-tx-key
                         :consistency {:tx-id 10
                                       :system-time t
-                                      :snapshot-time t}}}
+                                      :snapshot-time t}
+                        :progression (progression/requirement
+                                      (xtdb-live/basis :xtdb 10 t))}}
                (run-task
                 (xtdb-live/execute-tx-task :conn sample-tx))))))))
 
@@ -534,7 +739,9 @@
         (is (= {:tx-result result-tx-key
                 :consistency {:tx-id 11
                               :system-time t
-                              :snapshot-time t}}
+                              :snapshot-time t}
+                :progression (progression/requirement
+                              (xtdb-live/basis :xtdb 11 t))}
                (xtdb-live/put-doc!
                 :conn
                 :users
@@ -556,7 +763,9 @@
         (is (= {:tx-result result-tx-key
                 :consistency {:tx-id 12
                               :system-time t
-                              :snapshot-time t}}
+                              :snapshot-time t}
+                :progression (progression/requirement
+                              (xtdb-live/basis :xtdb 12 t))}
                (xtdb-live/put-doc-from!
                 {:xtdb/connectable :connectable}
                 :users
