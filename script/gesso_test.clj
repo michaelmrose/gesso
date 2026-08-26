@@ -18,6 +18,12 @@
 (def generated-runtime-artifact
   "resources/public/js/gesso-live.js")
 
+(def browser-wall-clock-timeout-ms
+  180000)
+
+(def browser-test-namespaces-env
+  "GESSO_BROWSER_TEST_NAMESPACES")
+
 (defn fail!
   [message data]
   (throw
@@ -61,6 +67,27 @@
      path))
   nil)
 
+(defn monotonic-nanos
+  []
+  (System/nanoTime))
+
+(defn elapsed-seconds
+  [started-at]
+  (/ (double
+      (-
+       (monotonic-nanos)
+       started-at))
+     1000000000.0))
+
+(defn print-stage-pass!
+  [label started-at]
+  (println
+   (format
+    "%s: PASS (%.2fs)"
+    label
+    (elapsed-seconds
+     started-at))))
+
 (defn run-command!
   [command]
   (let [result
@@ -80,39 +107,115 @@
 
     result))
 
-(defn run-command-captured!
-  [command]
-  (let [result
-        @(process/process
-          command
-          {:in :inherit
-           :out :string
-           :err :string})]
+(defn process-descendants
+  [java-process]
+  (with-open
+   [stream
+    (.descendants
+     (.toHandle
+      java-process))]
+    (vec
+     (iterator-seq
+      (.iterator
+       stream)))))
 
-    (when-not
-     (zero?
-      (:exit result))
+(defn terminate-process-tree!
+  [java-process]
+  ;; Chromium is multi-process. Killing only its top-level process can leave a
+  ;; renderer holding stdout/stderr open, which in turn can leave the harness
+  ;; blocked even after the nominal timeout. Retire descendants first, then the
+  ;; parent, and wait for the parent to become reaped.
+  (doseq [process-handle
+          (process-descendants
+           java-process)]
+    (when
+     (.isAlive
+      process-handle)
+      (.destroyForcibly
+       process-handle)))
+
+  (when
+   (.isAlive
+    java-process)
+    (.destroyForcibly
+     java-process))
+
+  (.waitFor
+   java-process)
+
+  nil)
+
+(defn print-captured-output!
+  [result]
+  (when
+   (seq
+    (:out result))
+    (print
+     (:out result)))
+
+  (when
+   (seq
+    (:err result))
+    (binding
+     [*out* *err*]
+      (print
+       (:err result))))
+
+  nil)
+
+(defn run-command-captured-with-timeout!
+  [command timeout-ms]
+  (let [process-result
+        (process/process
+         command
+         {:in :inherit
+          :out :string
+          :err :string})
+
+        java-process
+        (:proc
+         process-result)
+
+        completed?
+        (.waitFor
+         java-process
+         timeout-ms
+         java.util.concurrent.TimeUnit/MILLISECONDS)]
+
+    (if
+     completed?
+
+      (let [result
+            @process-result]
+
+        (when-not
+         (zero?
+          (:exit result))
+          (print-captured-output!
+           result)
+
+          (gate-failure!
+           "External test command failed."
+           {:command command
+            :exit (:exit result)}))
+
+        result)
+
       (do
-        (when
-         (seq
-          (:out result))
-          (print
-           (:out result)))
+        (terminate-process-tree!
+         java-process)
 
-        (when
-         (seq
-          (:err result))
-          (binding
-           [*out* *err*]
-            (print
-             (:err result))))
+        (let [result
+              @process-result]
 
-        (gate-failure!
-         "External test command failed."
-         {:command command
-          :exit (:exit result)})))
+          (print-captured-output!
+           result)
 
-    result))
+          (gate-failure!
+           "External test command exceeded its wall-clock timeout."
+           {:command command
+            :exit (:exit result)
+            :timeout-ms timeout-ms}))))))
 
 (defn test-namespace
   [path]
@@ -145,6 +248,73 @@
        distinct
        sort
        vec))
+
+(defn requested-browser-test-namespaces
+  []
+  (let [raw
+        (System/getenv
+         browser-test-namespaces-env)]
+
+    (when-not
+     (str/blank?
+      raw)
+      (->> (str/split
+            raw
+            #",")
+           (map
+            str/trim)
+           (remove
+            str/blank?)
+           (map
+            symbol)
+           distinct
+           vec))))
+
+(defn browser-test-namespaces
+  []
+  (let [all-tests
+        (cljs-test-namespaces)
+
+        requested
+        (requested-browser-test-namespaces)]
+
+    (if-not
+     (seq
+      requested)
+      all-tests
+
+      (let [all-test-set
+            (set
+             all-tests)
+
+            unknown
+            (->> requested
+                 (remove
+                  all-test-set)
+                 vec)]
+
+        (when
+         (seq
+          unknown)
+          (fail!
+           "Requested Chromium test namespaces were not discovered."
+           {:environment-variable
+            browser-test-namespaces-env
+
+            :unknown-namespaces
+            unknown
+
+            :available-namespaces
+            all-tests}))
+
+        (let [requested-set
+              (set
+               requested)]
+
+          (->> all-tests
+               (filter
+                requested-set)
+               vec))))))
 
 ;; Every CLJS/CLJC test is run in Chromium. The browser-side suites below
 ;; are additionally required to run under Node so accidental DOM dependencies
@@ -597,7 +767,7 @@
    "== CLJS / Chromium tests ==")
 
   (let [namespaces
-        (cljs-test-namespaces)
+        (browser-test-namespaces)
 
         browser-dir
         (str
@@ -636,6 +806,16 @@
      (count
       namespaces))
 
+    (when
+     (requested-browser-test-namespaces)
+      (println
+       "Chromium namespace selection:"
+       (str/join
+        ", "
+        (map
+         str
+         namespaces))))
+
     (delete-tree-if-exists!
      browser-dir)
 
@@ -647,16 +827,26 @@
 
     ;; :simple deliberately produces a self-contained browser program. This
     ;; avoids depending on the Closure development loader over file:// URLs.
-    (run-command!
-     (cljs-main-command
-      "-co"
-      (pr-str
-       {:target :browser
-        :optimizations :simple
-        :output-dir output-dir
-        :output-to output-to})
-      "-c"
-      "gesso.test-all-browser-runner"))
+    (let [started-at
+          (monotonic-nanos)]
+
+      (println
+       "Chromium bundle compile: START")
+
+      (run-command!
+       (cljs-main-command
+        "-co"
+        (pr-str
+         {:target :browser
+          :optimizations :simple
+          :output-dir output-dir
+          :output-to output-to})
+        "-c"
+        "gesso.test-all-browser-runner"))
+
+      (print-stage-pass!
+       "Chromium bundle compile"
+       started-at))
 
     (spit
      html
@@ -695,9 +885,27 @@
            (conj
             url))
 
+          started-at
+          (monotonic-nanos)
+
+          _
+          (println
+           "Chromium execution: START"
+           (str
+            "(wall timeout "
+            (/ browser-wall-clock-timeout-ms
+               1000)
+            "s)"))
+
           result
-          (run-command-captured!
-           command)
+          (run-command-captured-with-timeout!
+           command
+           browser-wall-clock-timeout-ms)
+
+          _
+          (print-stage-pass!
+           "Chromium execution"
+           started-at)
 
           dumped-dom
           (:out result)]
