@@ -1,25 +1,27 @@
 (ns gesso.live.browser.runtime-test
   "Composition-root tests for gesso.live.browser.runtime.
 
-   The runtime namespace is intentionally thin: it must compose one Core and one
-   Choreo binding over the exact same shell/AdapterState, own their aggregate
-   lifecycle, and add no competing semantic state machine.
+   The runtime namespace is intentionally thin: it composes one Core, one Choreo
+   realization, and optionally one protocol-v3 optimistic realization over the
+   exact same shell/AdapterState. It owns aggregate lifecycle only and must not
+   create a competing semantic state machine.
 
-   These tests therefore concentrate on composition and lifecycle properties:
+   These tests concentrate on composition and lifecycle properties:
 
    - one shared shell and AdapterState owner;
+   - optional optimism attaches to that exact Choreo runtime and shell;
    - created/started/stopped invariant shapes;
    - exactly-once document-listener ownership;
-   - exact ownership of Choreo-installed shell handler slots;
-   - fail-closed detection of removed/replaced Choreo handlers;
-   - semantic shell shutdown before Choreo physical detachment;
+   - exact ownership of Choreo and optimistic physical handler/action slots;
+   - fail-closed detection of removed or replaced integration handlers;
+   - semantic shell shutdown before optimistic/Choreo physical detachment;
    - permanent retirement after stop or failed start;
    - delegation through the shared Core/adapter path;
-   - host-resource-free diagnostics.
+   - host-resource-free diagnostics;
+   - no second optimistic execution/target/timer registry at composition root.
 
-   Browser-global init!/shutdown! is deliberately left to real-browser
-   integration tests. This namespace remains host-independent so it can run
-   under both Node and Chromium."
+   Browser-global init!/shutdown! remains a real-browser integration concern.
+   This namespace stays host-independent so it can run under Node and Chromium."
   (:require
    [cljs.test :refer-macros [deftest is testing]]
    [gesso.choreo.core :as c]
@@ -27,8 +29,10 @@
    [gesso.choreo.project :as project]
    [gesso.live.browser.choreo :as choreo]
    [gesso.live.browser.core :as core]
+   [gesso.live.browser.optimistic :as optimistic]
    [gesso.live.browser.runtime :as runtime]
-   [gesso.live.browser.shell :as shell]))
+   [gesso.live.browser.shell :as shell]
+   [gesso.live.optimistic.choreo :as optimistic-choreo]))
 
 ;; =============================================================================
 ;; Generic helpers
@@ -147,11 +151,44 @@
     {:htmx htmx
      :calls calls}))
 
+(defn- default-optimistic-options
+  ([]
+   (default-optimistic-options nil))
+  ([overrides]
+   (merge
+    {:project-provisional
+     (fn [_]
+       {:projection :pending})
+
+     :render-provisional
+     (fn [& _]
+       nil)
+
+     :refresh-authority
+     (fn [& _]
+       nil)
+
+     :resolve-target
+     (fn [_]
+       nil)
+
+     :process-element
+     (fn [_]
+       nil)}
+    overrides)))
+
 (defn- fixture
   ([]
-   (fixture nil))
-  ([{:keys [roots document-options core-options choreo-options]}]
-   (let [document-fixture
+   (fixture {}))
+  ([options]
+   (let [{:keys [roots
+                 document-options
+                 core-options
+                 choreo-options
+                 optimistic-options]}
+         options
+
+         document-fixture
          (make-document
           (merge
            {:roots roots}
@@ -160,26 +197,39 @@
          htmx-fixture
          (make-htmx)
 
-         runtime
-         (runtime/create
-          (cond->
-           {:core-options
-            (merge
-             {:document (:document document-fixture)
-              :htmx (:htmx htmx-fixture)}
-             core-options)}
-            choreo-options
-            (assoc :choreo-options choreo-options)))]
-     {:runtime runtime
+         create-options
+         (cond->
+          {:core-options
+           (merge
+            {:document (:document document-fixture)
+             :htmx (:htmx htmx-fixture)}
+            core-options)}
+           (contains? options :choreo-options)
+           (assoc :choreo-options choreo-options)
+
+           (contains? options :optimistic-options)
+           (assoc :optimistic-options optimistic-options))
+
+         composed-runtime
+         (runtime/create create-options)]
+     {:runtime composed-runtime
       :document-fixture document-fixture
       :htmx-fixture htmx-fixture})))
+
+(defn- optimistic-fixture
+  ([]
+   (optimistic-fixture nil))
+  ([overrides]
+   (fixture
+    {:optimistic-options
+     (default-optimistic-options overrides)})))
 
 (defn- listener-names
   [registrations]
   (mapv first registrations))
 
 (defn- choreo-handler-ownership-error
-  [runtime effect-kind]
+  [composed-runtime effect-kind]
   (some
    (fn [error]
      (when
@@ -189,7 +239,33 @@
        (= effect-kind
           (:effect-kind error)))
        error))
-   (runtime/invariant-errors runtime)))
+   (runtime/invariant-errors composed-runtime)))
+
+(defn- optimistic-handler-ownership-error
+  [composed-runtime effect-kind]
+  (some
+   (fn [error]
+     (when
+      (and
+       (= :optimistic-handler-ownership
+          (:invariant error))
+       (= effect-kind
+          (:effect-kind error)))
+       error))
+   (runtime/invariant-errors composed-runtime)))
+
+(defn- optimistic-action-ownership-error
+  [composed-runtime action-id]
+  (some
+   (fn [error]
+     (when
+      (and
+       (= :optimistic-action-ownership
+          (:invariant error))
+       (= action-id
+          (:action-id error)))
+       error))
+   (runtime/invariant-errors composed-runtime)))
 
 (def expected-listener-names
   (mapv first core/listener-specs))
@@ -218,7 +294,7 @@
 
 (deftest runtime-identity-test
   (let [{:keys [runtime]} (fixture)]
-    (is (= "1.1.0-dev" runtime/runtime-version))
+    (is (= "1.2.0-dev" runtime/runtime-version))
     (is (= :gesso.live.browser.runtime/runtime
            runtime/runtime-type))
     (is (runtime/runtime? runtime))
@@ -226,6 +302,7 @@
     (is (= :created (runtime/lifecycle runtime)))
     (is (false? (runtime/started? runtime)))
     (is (false? (runtime/stopped? runtime)))
+    (is (nil? (runtime/optimistic-runtime runtime)))
     (runtime/stop! runtime)))
 
 (deftest create-composes-one-exact-shared-shell-test
@@ -246,15 +323,43 @@
     (is (runtime/invariant-clean? runtime))
     (runtime/stop! runtime)))
 
+(deftest create-composes-optimism-on-the-exact-existing-choreo-and-shell-test
+  (let [{:keys [runtime]} (optimistic-fixture)
+        optimistic-runtime (runtime/optimistic-runtime runtime)
+        choreo-runtime (runtime/choreo-runtime runtime)
+        shared-shell (runtime/shell-runtime runtime)
+        expected-actions
+        #{(:derive-action optimistic-runtime)
+          (:resolve-action optimistic-runtime)}]
+    (is (optimistic/runtime? optimistic-runtime))
+    (is (identical? choreo-runtime
+                    (optimistic/choreo-runtime optimistic-runtime)))
+    (is (identical? shared-shell
+                    (optimistic/shell-runtime optimistic-runtime)))
+    (is (= optimistic/owned-effect-kinds
+           (set (keys @(:installed-handlers optimistic-runtime)))))
+    (is (= expected-actions
+           (set (keys @(:installed-actions optimistic-runtime)))))
+    (is (every? #(contains? (shell/handlers shared-shell) %)
+                optimistic/owned-effect-kinds))
+    (is (every? #(contains? (choreo/local-actions choreo-runtime) %)
+                expected-actions))
+    (is (runtime/invariant-clean? runtime))
+    (runtime/stop! runtime)))
+
 (deftest create-forwards-physical-configuration-without-adding-semantic-state-test
   (let [local-handler (fn [_] {:value :ok})
         {:keys [runtime]}
         (fixture
          {:choreo-options
           {:local-actions
-           {:browser/work local-handler}}})
+           {:browser/work local-handler}}
+          :optimistic-options
+          (default-optimistic-options)})
         diagnostics (runtime/diagnostics runtime)]
-    (is (= #{:browser/work}
+    (is (= #{:browser/work
+             optimistic-choreo/derive-provisional-action
+             optimistic-choreo/resolve-settlement-action}
            (get-in diagnostics
                    [:choreo :registered-local-actions])))
     (is (= :created (:lifecycle diagnostics)))
@@ -262,6 +367,9 @@
     (is (not (contains? runtime :targets)))
     (is (not (contains? runtime :timers)))
     (is (not (contains? runtime :continuity)))
+    (is (not (contains? runtime :optimistic-executions)))
+    (is (not (contains? runtime :optimistic-targets)))
+    (is (not (contains? runtime :optimistic-timers)))
     (runtime/stop! runtime)))
 
 (deftest create-validates-composition-options-test
@@ -272,19 +380,40 @@
   (is (= :invalid-map
          (error-kind #(runtime/create {:core-options [:not :a-map]}))))
   (is (= :invalid-map
-         (error-kind #(runtime/create {:choreo-options [:not :a-map]})))))
+         (error-kind #(runtime/create {:choreo-options [:not :a-map]}))))
+  (is (= :invalid-map
+         (error-kind #(runtime/create {:optimistic-options [:not :a-map]})))))
+
+(deftest collapsed-optimistic-local-action-ids-are-rejected-test
+  (let [{:keys [document]} (make-document)
+        htmx (:htmx (make-htmx))
+        action-id :optimistic/collapsed]
+    (is (= :invalid-composition
+           (error-kind
+            #(runtime/create
+              {:core-options
+               {:document document
+                :htmx htmx}
+               :optimistic-options
+               (default-optimistic-options
+                {:derive-action action-id
+                 :resolve-action action-id})}))))))
 
 ;; =============================================================================
 ;; Lifecycle ownership
 ;; =============================================================================
 
-(deftest start-installs-core-listeners-exactly-once-test
-  (let [{:keys [runtime document-fixture]} (fixture)]
+(deftest start-installs-core-listeners-exactly-once-with-optimism-attached-test
+  (let [{:keys [runtime document-fixture]} (optimistic-fixture)
+        optimistic-runtime (runtime/optimistic-runtime runtime)]
     (is (identical? runtime (runtime/start! runtime)))
     (is (= :started (runtime/lifecycle runtime)))
     (is (runtime/started? runtime))
     (is (= expected-listener-names
            (listener-names @(:added document-fixture))))
+    (is (= optimistic/owned-effect-kinds
+           (:attached-effect-kinds
+            (optimistic/diagnostics optimistic-runtime))))
     (is (runtime/invariant-clean? runtime))
 
     (testing "repeated start is idempotent"
@@ -294,9 +423,14 @@
 
     (runtime/stop! runtime)))
 
-(deftest stop-from-started-removes-listeners-closes-shell-and-detaches-choreo-test
-  (let [{:keys [runtime document-fixture]} (fixture)
-        shared-shell (runtime/shell-runtime runtime)]
+(deftest stop-from-started-removes-listeners-closes-shell-and-detaches-both-integrations-test
+  (let [{:keys [runtime document-fixture]} (optimistic-fixture)
+        shared-shell (runtime/shell-runtime runtime)
+        choreo-runtime (runtime/choreo-runtime runtime)
+        optimistic-runtime (runtime/optimistic-runtime runtime)
+        optimistic-actions
+        #{(:derive-action optimistic-runtime)
+          (:resolve-action optimistic-runtime)}]
     (runtime/start! runtime)
     (is (= :stopped (runtime/stop! runtime)))
     (is (= :stopped (runtime/lifecycle runtime)))
@@ -307,10 +441,19 @@
     (is (shell/closed? shared-shell))
     (is (not-any? #(contains? (shell/handlers shared-shell) %)
                   choreo/owned-effect-kinds))
+    (is (not-any? #(contains? (shell/handlers shared-shell) %)
+                  optimistic/owned-effect-kinds))
+    (is (not-any? #(contains? (choreo/local-actions choreo-runtime) %)
+                  optimistic-actions))
     (is (empty?
          (:attached-effect-kinds
-          (choreo/diagnostics
-           (runtime/choreo-runtime runtime)))))
+          (choreo/diagnostics choreo-runtime))))
+    (is (empty?
+         (:attached-effect-kinds
+          (optimistic/diagnostics optimistic-runtime))))
+    (is (empty?
+         (:attached-local-actions
+          (optimistic/diagnostics optimistic-runtime))))
     (is (runtime/invariant-clean? runtime))
 
     (testing "repeated stop performs no second physical teardown"
@@ -320,18 +463,25 @@
                (count @(:removed document-fixture))))))))
 
 (deftest stop-from-created-retires-without-ever-acquiring-document-listeners-test
-  (let [{:keys [runtime document-fixture]} (fixture)
-        shared-shell (runtime/shell-runtime runtime)]
+  (let [{:keys [runtime document-fixture]} (optimistic-fixture)
+        shared-shell (runtime/shell-runtime runtime)
+        optimistic-runtime (runtime/optimistic-runtime runtime)]
     (is (= :stopped (runtime/stop! runtime)))
     (is (empty? @(:added document-fixture)))
     (is (empty? @(:removed document-fixture)))
     (is (shell/closed? shared-shell))
     (is (not-any? #(contains? (shell/handlers shared-shell) %)
                   choreo/owned-effect-kinds))
+    (is (not-any? #(contains? (shell/handlers shared-shell) %)
+                  optimistic/owned-effect-kinds))
+    (is (empty? (:attached-effect-kinds
+                 (optimistic/diagnostics optimistic-runtime))))
+    (is (empty? (:attached-local-actions
+                 (optimistic/diagnostics optimistic-runtime))))
     (is (runtime/invariant-clean? runtime))))
 
 (deftest stopped-runtime-cannot-be-restarted-test
-  (let [{:keys [runtime]} (fixture)]
+  (let [{:keys [runtime]} (optimistic-fixture)]
     (runtime/stop! runtime)
     (is (= :already-stopped
            (error-kind #(runtime/start! runtime))))
@@ -339,7 +489,7 @@
     (is (runtime/invariant-clean? runtime))))
 
 (deftest externally-stopped-child-is-detected-before-start-test
-  (let [{:keys [runtime]} (fixture)
+  (let [{:keys [runtime]} (optimistic-fixture)
         shared-shell (runtime/shell-runtime runtime)]
     ;; Direct child manipulation is unsupported, but the composition root must
     ;; fail closed rather than acquire listeners around a closed semantic shell.
@@ -351,10 +501,12 @@
     (is (shell/closed? shared-shell))
     (is (not-any? #(contains? (shell/handlers shared-shell) %)
                   choreo/owned-effect-kinds))
+    (is (not-any? #(contains? (shell/handlers shared-shell) %)
+                  optimistic/owned-effect-kinds))
     (is (runtime/invariant-clean? runtime))))
 
 (deftest removed-choreo-shell-handler-is-detected-and-start-fails-closed-test
-  (let [{:keys [runtime document-fixture]} (fixture)
+  (let [{:keys [runtime document-fixture]} (optimistic-fixture)
         shared-shell (runtime/shell-runtime runtime)
         effect-kind :machine/local
         installed-handler (get (shell/handlers shared-shell) effect-kind)]
@@ -382,10 +534,12 @@
       (is (shell/closed? shared-shell))
       (is (not-any? #(contains? (shell/handlers shared-shell) %)
                     choreo/owned-effect-kinds))
+      (is (not-any? #(contains? (shell/handlers shared-shell) %)
+                    optimistic/owned-effect-kinds))
       (is (runtime/invariant-clean? runtime)))))
 
 (deftest replaced-choreo-shell-handler-is-detected-and-start-fails-closed-test
-  (let [{:keys [runtime document-fixture]} (fixture)
+  (let [{:keys [runtime document-fixture]} (optimistic-fixture)
         shared-shell (runtime/shell-runtime runtime)
         effect-kind :machine/send
         installed-handler (get (shell/handlers shared-shell) effect-kind)
@@ -418,47 +572,117 @@
           "detachment must not delete a foreign replacement it does not own")
       (is (not-any? #(contains? (shell/handlers shared-shell) %)
                     (disj choreo/owned-effect-kinds effect-kind)))
+      (is (not-any? #(contains? (shell/handlers shared-shell) %)
+                    optimistic/owned-effect-kinds))
       (is (empty?
            (:attached-effect-kinds
             (choreo/diagnostics
              (runtime/choreo-runtime runtime)))))
       (is (runtime/invariant-clean? runtime)))))
 
-(deftest failed-core-start-permanently-retires-partial-composition-test
+(deftest removed-optimistic-shell-handler-is-detected-and-start-fails-closed-test
+  (let [{:keys [runtime document-fixture]} (optimistic-fixture)
+        shared-shell (runtime/shell-runtime runtime)
+        effect-kind :optimistic/install-provisional
+        installed-handler (get (shell/handlers shared-shell) effect-kind)]
+    (is (fn? installed-handler))
+    (shell/unregister-handler! shared-shell effect-kind)
+
+    (is (= {:invariant :optimistic-handler-ownership
+            :effect-kind effect-kind
+            :status :missing-from-shell}
+           (optimistic-handler-ownership-error runtime effect-kind)))
+    (is (not (runtime/invariant-clean? runtime)))
+    (is (not (deep-identical? (runtime/diagnostics runtime)
+                              installed-handler)))
+
+    (is (= :invalid-composition
+           (error-kind #(runtime/start! runtime))))
+    (is (empty? @(:added document-fixture)))
+    (is (= :stopped (runtime/lifecycle runtime)))
+    (is (shell/closed? shared-shell))
+    (is (runtime/invariant-clean? runtime))))
+
+(deftest replaced-optimistic-local-action-is-detected-and-foreign-handler-survives-detach-test
+  (let [{:keys [runtime document-fixture]} (optimistic-fixture)
+        optimistic-runtime (runtime/optimistic-runtime runtime)
+        choreo-runtime (runtime/choreo-runtime runtime)
+        action-id (:derive-action optimistic-runtime)
+        installed-action (get (choreo/local-actions choreo-runtime) action-id)
+        replacement-action (fn [_] :foreign)]
+    (is (fn? installed-action))
+    (is (not (identical? installed-action replacement-action)))
+
+    (choreo/register-local-action!
+     choreo-runtime
+     action-id
+     replacement-action)
+
+    (is (= {:invariant :optimistic-action-ownership
+            :action-id action-id
+            :status :replaced-in-choreo}
+           (optimistic-action-ownership-error runtime action-id)))
+    (is (not (runtime/invariant-clean? runtime)))
+    (is (not (deep-identical? (runtime/diagnostics runtime)
+                              installed-action)))
+    (is (not (deep-identical? (runtime/diagnostics runtime)
+                              replacement-action)))
+
+    (is (= :invalid-composition
+           (error-kind #(runtime/start! runtime))))
+    (is (empty? @(:added document-fixture)))
+    (is (= :stopped (runtime/lifecycle runtime)))
+    (is (identical? replacement-action
+                    (get (choreo/local-actions choreo-runtime) action-id))
+        "optimistic detachment must not clobber a foreign replacement")
+    (is (runtime/invariant-clean? runtime))))
+
+(deftest failed-core-start-permanently-retires-the-entire-optimistic-composition-test
   (let [document-fixture
         (make-document {:fail-after-add 1})
         htmx-fixture
         (make-htmx)
-        runtime
+        composed-runtime
         (runtime/create
          {:core-options
           {:document (:document document-fixture)
-           :htmx (:htmx htmx-fixture)}})
-        shared-shell (runtime/shell-runtime runtime)
-        error (thrown #(runtime/start! runtime))]
+           :htmx (:htmx htmx-fixture)}
+          :optimistic-options
+          (default-optimistic-options)})
+        shared-shell (runtime/shell-runtime composed-runtime)
+        choreo-runtime (runtime/choreo-runtime composed-runtime)
+        optimistic-runtime (runtime/optimistic-runtime composed-runtime)
+        optimistic-actions
+        #{(:derive-action optimistic-runtime)
+          (:resolve-action optimistic-runtime)}
+        error (thrown #(runtime/start! composed-runtime))]
     (is (some? error))
     (is (= "synthetic addEventListener failure"
            (.-message error)))
-    (is (= :stopped (runtime/lifecycle runtime)))
+    (is (= :stopped (runtime/lifecycle composed-runtime)))
     (is (= 1 (count @(:added document-fixture))))
     (is (= 1 (count @(:removed document-fixture))))
     (is (shell/closed? shared-shell))
     (is (not-any? #(contains? (shell/handlers shared-shell) %)
                   choreo/owned-effect-kinds))
-    (is (runtime/invariant-clean? runtime))
+    (is (not-any? #(contains? (shell/handlers shared-shell) %)
+                  optimistic/owned-effect-kinds))
+    (is (not-any? #(contains? (choreo/local-actions choreo-runtime) %)
+                  optimistic-actions))
+    (is (runtime/invariant-clean? composed-runtime))
     (is (= :already-stopped
-           (error-kind #(runtime/start! runtime))))))
+           (error-kind #(runtime/start! composed-runtime))))))
 
 ;; =============================================================================
 ;; Semantic retirement ordering
 ;; =============================================================================
 
-(deftest semantic-shutdown-precedes-choreo-physical-detachment-test
-  (let [shell-runtime* (atom nil)
-        handlers-seen-during-retirement (atom nil)
+(deftest semantic-shutdown-precedes-optimistic-and-choreo-physical-detachment-test
+  (let [runtime* (atom nil)
+        observed (atom nil)
         document-fixture (make-document)
         htmx-fixture (make-htmx)
-        runtime
+        composed-runtime
         (runtime/create
          {:core-options
           {:document (:document document-fixture)
@@ -467,15 +691,25 @@
            {:on-transition
             (fn [{:keys [event]}]
               (when (= :execution/retire (:event event))
-                (reset!
-                 handlers-seen-during-retirement
-                 (set
-                  (keys
-                   (shell/handlers
-                    @shell-runtime*))))))}}})
-        shared-shell (runtime/shell-runtime runtime)
-        choreo-runtime (runtime/choreo-runtime runtime)]
-    (reset! shell-runtime* shared-shell)
+                (let [current-runtime @runtime*
+                      shared-shell (runtime/shell-runtime current-runtime)
+                      choreo-runtime (runtime/choreo-runtime current-runtime)
+                      optimistic-runtime
+                      (runtime/optimistic-runtime current-runtime)]
+                  (reset!
+                   observed
+                   {:effects
+                    (set (keys (shell/handlers shared-shell)))
+                    :actions
+                    (set (keys (choreo/local-actions choreo-runtime)))
+                    :optimistic-actions
+                    #{(:derive-action optimistic-runtime)
+                      (:resolve-action optimistic-runtime)}}))))}}
+          :optimistic-options
+          (default-optimistic-options)})
+        shared-shell (runtime/shell-runtime composed-runtime)
+        choreo-runtime (runtime/choreo-runtime composed-runtime)]
+    (reset! runtime* composed-runtime)
 
     (let [start-result
           (choreo/start-execution!
@@ -489,21 +723,38 @@
            (:active-executions
             (shell/diagnostics shared-shell))))
 
-    (runtime/stop! runtime)
+    (runtime/stop! composed-runtime)
 
-    (is (every? #(contains? @handlers-seen-during-retirement %)
+    (is (every? #(contains? (:effects @observed) %)
                 choreo/owned-effect-kinds)
-        "semantic retirement must run while Choreo physical handlers are still attached")
+        "semantic retirement must run while Choreo physical handlers are attached")
+    (is (every? #(contains? (:effects @observed) %)
+                optimistic/owned-effect-kinds)
+        "semantic retirement must run while optimistic physical handlers are attached")
+    (is (every? #(contains? (:actions @observed) %)
+                (:optimistic-actions @observed))
+        "semantic retirement must run while optimistic local actions are attached")
     (is (= 0
            (:active-executions
             (shell/diagnostics shared-shell))))
     (is (not-any? #(contains? (shell/handlers shared-shell) %)
                   choreo/owned-effect-kinds))
-    (is (runtime/invariant-clean? runtime))))
+    (is (not-any? #(contains? (shell/handlers shared-shell) %)
+                  optimistic/owned-effect-kinds))
+    (is (runtime/invariant-clean? composed-runtime))))
 
 ;; =============================================================================
 ;; Delegation / diagnostics
 ;; =============================================================================
+
+(deftest runtime-without-optimism-remains-a-valid-composition-test
+  (let [{:keys [runtime]} (fixture)]
+    (is (nil? (runtime/optimistic-runtime runtime)))
+    (is (runtime/invariant-clean? runtime))
+    (runtime/start! runtime)
+    (is (runtime/invariant-clean? runtime))
+    (runtime/stop! runtime)
+    (is (runtime/invariant-clean? runtime))))
 
 (deftest notify-fragment-delegates-through-the-shared-core-and-adapter-test
   (let [root (make-root "request-list")
@@ -529,16 +780,35 @@
       (is (number? (.-requestGeneration detail))))
     (runtime/stop! runtime)))
 
-(deftest diagnostics-are-read-only-and-exclude-host-resources-test
-  (let [{:keys [runtime document-fixture htmx-fixture]} (fixture)
+(deftest diagnostics-are-read-only-and-exclude-host-resources-and-callbacks-test
+  (let [{:keys [runtime document-fixture htmx-fixture]}
+        (optimistic-fixture)
         document (:document document-fixture)
         htmx (:htmx htmx-fixture)
+        shared-shell (runtime/shell-runtime runtime)
+        choreo-runtime (runtime/choreo-runtime runtime)
+        optimistic-runtime (runtime/optimistic-runtime runtime)
+        host-functions
+        (concat
+         (vals (shell/handlers shared-shell))
+         (vals (choreo/local-actions choreo-runtime)))
         diagnostics-before (runtime/diagnostics runtime)
         state-before (runtime/state runtime)
-        diagnostics-after (runtime/diagnostics runtime)]
+        diagnostics-after (runtime/diagnostics runtime)
+        expected-actions
+        #{(:derive-action optimistic-runtime)
+          (:resolve-action optimistic-runtime)}]
     (is (= diagnostics-before diagnostics-after))
     (is (= state-before (runtime/state runtime)))
     (is (not (deep-identical? diagnostics-before document)))
     (is (not (deep-identical? diagnostics-before htmx)))
+    (is (every? #(not (deep-identical? diagnostics-before %))
+                host-functions))
+    (is (= optimistic/owned-effect-kinds
+           (get-in diagnostics-before
+                   [:optimistic :attached-effect-kinds])))
+    (is (= expected-actions
+           (get-in diagnostics-before
+                   [:optimistic :attached-local-actions])))
     (is (= [] (:invariant-errors diagnostics-before)))
     (runtime/stop! runtime)))

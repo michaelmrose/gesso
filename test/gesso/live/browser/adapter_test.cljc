@@ -477,45 +477,125 @@
 ;; Adapter-owned optimistic effect scopes
 ;; =============================================================================
 
+(def ^:private provisional-key
+  :gesso.live.optimistic/provisional)
+
+(def ^:private provisional-value
+  {:authority :provisional
+   :projection {:status :pending}})
+
 (defn- optimistic-config
   ([rollback-eligible?]
    (optimistic-config rollback-eligible? 15000))
   ([rollback-eligible? timeout-ms]
    {:command-id :command-1
-    :provisional {:authority :provisional
-                  :projection {:status :pending}}
+    :provisional-key provisional-key
     :rollback-eligible? rollback-eligible?
     :timeout-ms timeout-ms}))
 
-(deftest optimistic-start-establishes-target-and-timeout-before-machine-effects-test
-  (let [[state effects]
+(defn- optimistic-receive-choreography
+  []
+  (choreo/->choreography
+   {:initial :local
+    :states
+    {:local
+     (choreo/local
+      :browser
+      :browser/derive-provisional
+      :receive
+      {:outputs #{provisional-key}})
+
+     :receive
+     (choreo/communicate
+      :server
+      :browser
+      :server/settlement
+      :done
+      {:via :http})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- local-then-send-choreography
+  []
+  (choreo/->choreography
+   {:initial :local
+    :states
+    {:local
+     (choreo/local
+      :browser
+      :browser/derive-provisional
+      :send
+      {:outputs #{provisional-key}})
+
+     :send
+     (choreo/communicate
+      :browser
+      :server
+      :browser/command
+      :done
+      {:via :http
+       :open-payload? true})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- pending-local-generation
+  [state execution-id]
+  (get-in (adapter/execution state execution-id)
+          [:pending-effect :generation]))
+
+(defn- establish-provisional
+  ([state execution-id]
+   (establish-provisional state execution-id provisional-value))
+  ([state execution-id provisional]
+   (adapter/step
+    state
+    {:event :machine/local-completed
+     :execution-id execution-id
+     :generation (adapter/execution-generation state execution-id)
+     :effect-generation (pending-local-generation state execution-id)
+     :outputs {provisional-key provisional}})))
+
+(deftest optimistic-start-awaits-derived-provisional-before-install-and-timeout-test
+  (let [[state-a effects-a]
         (start
          (adapter/initial-state)
          "execution-1"
-         (machine-execution (local-once-choreography) :browser)
+         (machine-execution (optimistic-receive-choreography) :browser)
          :card
          {:optimistic (optimistic-config true 2500)})
-        generation (adapter/execution-generation state "execution-1")
-        scope (adapter/optimistic-scope state "execution-1")
-        install (effect-data :optimistic/install-provisional effects)
-        timeout (effect-data :optimistic/timeout-start effects)]
-    (is (= [:optimistic/install-provisional
-            :optimistic/timeout-start
-            :machine/local]
-           (mapv first effects)))
-    (is (= {:execution-id "execution-1"
-            :generation generation}
-           (adapter/target-owner state :card)))
-    (is (= generation (:execution-generation scope)))
-    (is (= :command-1 (:command-id scope)))
-    (is (= :card (:target-id scope)))
-    (is (= :provisional (:status scope)))
-    (is (= 2500 (:timeout-ms scope)))
-    (is (= (:timeout-generation scope)
-           (:timeout-generation timeout)))
-    (is (= generation (:generation install)))
-    (is (= (:provisional scope) (:provisional install)))
-    (is (= 2500 (:delay-ms timeout)))))
+        generation (adapter/execution-generation state-a "execution-1")
+        scope-a (adapter/optimistic-scope state-a "execution-1")
+        [state-b effects-b] (establish-provisional state-a "execution-1")
+        scope-b (adapter/optimistic-scope state-b "execution-1")
+        install (effect-data :optimistic/install-provisional effects-b)
+        timeout (effect-data :optimistic/timeout-start effects-b)]
+    (testing "start establishes semantic ownership but no physical optimism yet"
+      (is (= [:machine/local] (mapv first effects-a)))
+      (is (= {:execution-id "execution-1"
+              :generation generation}
+             (adapter/target-owner state-a :card)))
+      (is (= generation (:execution-generation scope-a)))
+      (is (= :command-1 (:command-id scope-a)))
+      (is (= :card (:target-id scope-a)))
+      (is (= provisional-key (:provisional-key scope-a)))
+      (is (= :awaiting-provisional (:status scope-a)))
+      (is (nil? (:provisional scope-a)))
+      (is (nil? (:timeout-generation scope-a)))
+      (is (= 2500 (:timeout-ms scope-a))))
+
+    (testing "derived semantic provisional is installed before timeout ownership begins"
+      (is (= [:optimistic/install-provisional
+              :optimistic/timeout-start]
+             (mapv first effects-b)))
+      (is (= :provisional (:status scope-b)))
+      (is (= provisional-value (:provisional scope-b)))
+      (is (= (:timeout-generation scope-b)
+             (:timeout-generation timeout)))
+      (is (= generation (:generation install)))
+      (is (= provisional-value (:provisional install)))
+      (is (= 2500 (:delay-ms timeout))))))
 
 (deftest optimistic-start-requires-one-logical-target-test
   (is (= :optimistic-target-required
@@ -523,18 +603,61 @@
           #(start
             (adapter/initial-state)
             "execution-1"
-            (machine-execution (receive-once-choreography) :browser)
+            (machine-execution (optimistic-receive-choreography) :browser)
             nil
             {:optimistic (optimistic-config true)})))))
 
-(deftest optimistic-settlement-cancels-timeout-and-is-idempotent-only-for-identical-observation-test
+(deftest optimistic-start-rejects-precomputed-provisional-input-test
+  (is (= :missing-optimistic-fields
+         (error-kind
+          #(start
+            (adapter/initial-state)
+            "execution-1"
+            (machine-execution (optimistic-receive-choreography) :browser)
+            :card
+            {:optimistic
+             {:command-id :command-1
+              :provisional provisional-value
+              :rollback-eligible? true
+              :timeout-ms 100}}))))
+  (is (= :unknown-optimistic-fields
+         (error-kind
+          #(start
+            (adapter/initial-state)
+            "execution-1"
+            (machine-execution (optimistic-receive-choreography) :browser)
+            :card
+            {:optimistic
+             {:command-id :command-1
+              :provisional-key provisional-key
+              :provisional provisional-value
+              :rollback-eligible? true
+              :timeout-ms 100}})))))
+
+(deftest optimistic-derived-provisional-must-be-a-map-test
   (let [[state-a _]
         (start
          (adapter/initial-state)
          "execution-1"
-         (machine-execution (receive-once-choreography) :browser)
+         (machine-execution (optimistic-receive-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})]
+    (is (= :missing-derived-provisional
+           (error-kind
+            #(establish-provisional state-a "execution-1" nil))))
+    (is (= :missing-derived-provisional
+           (error-kind
+            #(establish-provisional state-a "execution-1" :not-a-map))))))
+
+(deftest optimistic-settlement-cancels-timeout-and-is-idempotent-only-for-identical-observation-test
+  (let [[state-start _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (optimistic-receive-choreography) :browser)
          :card
          {:optimistic (optimistic-config true)})
+        [state-a _] (establish-provisional state-start "execution-1")
         generation (adapter/execution-generation state-a "execution-1")
         timeout-generation (:timeout-generation
                             (adapter/optimistic-scope state-a "execution-1"))
@@ -568,45 +691,48 @@
               (assoc event
                      :settlement (assoc settlement :extra :different))))))))
 
-(deftest confirmed-optimistic-completion-awaits-authority-test
-  (let [[state-a _]
-        (start
-         (adapter/initial-state)
-         "execution-1"
-         (machine-execution (receive-once-choreography) :browser)
-         :card
-         {:optimistic (optimistic-config true)})
-        generation (adapter/execution-generation state-a "execution-1")
-        settlement {:resolution :confirmed
-                    :authoritative {:presence :present
-                                    :basis :basis-2}}
-        [state-b _]
-        (adapter/step
-         state-a
-         {:event :optimistic/settlement-observed
-          :execution-id "execution-1"
-          :generation generation
-          :resolution :confirmed
-          :settlement settlement})
-        [state-c effects-c]
-        (adapter/step
-         state-b
-         {:event :machine/message
-          :execution-id "execution-1"
-          :generation generation
-          :message-id :settlement-1
-          :envelope (settlement-envelope)})
-        finish (effect-data :optimistic/finish effects-c)]
-    (is (nil? (adapter/execution state-c "execution-1")))
-    (is (nil? (adapter/optimistic-scope state-c "execution-1")))
-    (is (nil? (adapter/target-owner state-c :card)))
-    (is (= [:optimistic/finish :execution/completed]
-           (mapv first effects-c)))
-    (is (= :confirmed (:resolution finish)))
-    (is (= :await-authority (:disposition finish)))
-    (is (= settlement (:settlement finish)))
-    (is (= 0 (count (effects-of :optimistic/timeout-cancel effects-c)))
-        "Settlement observation already relinquished timeout ownership.")))
+(deftest successful-optimistic-completion-awaits-authority-test
+  (doseq [resolution [:confirmed :reconciled :already-incorporated]]
+    (testing (name resolution)
+      (let [[state-start _]
+            (start
+             (adapter/initial-state)
+             "execution-1"
+             (machine-execution (optimistic-receive-choreography) :browser)
+             :card
+             {:optimistic (optimistic-config true)})
+            [state-a _] (establish-provisional state-start "execution-1")
+            generation (adapter/execution-generation state-a "execution-1")
+            settlement {:resolution resolution
+                        :authoritative {:presence :present
+                                        :basis :basis-2}}
+            [state-b _]
+            (adapter/step
+             state-a
+             {:event :optimistic/settlement-observed
+              :execution-id "execution-1"
+              :generation generation
+              :resolution resolution
+              :settlement settlement})
+            [state-c effects-c]
+            (adapter/step
+             state-b
+             {:event :machine/message
+              :execution-id "execution-1"
+              :generation generation
+              :message-id :settlement-1
+              :envelope (settlement-envelope)})
+            finish (effect-data :optimistic/finish effects-c)]
+        (is (nil? (adapter/execution state-c "execution-1")))
+        (is (nil? (adapter/optimistic-scope state-c "execution-1")))
+        (is (nil? (adapter/target-owner state-c :card)))
+        (is (= [:optimistic/finish :execution/completed]
+               (mapv first effects-c)))
+        (is (= resolution (:resolution finish)))
+        (is (= :await-authority (:disposition finish)))
+        (is (= settlement (:settlement finish)))
+        (is (= 0 (count (effects-of :optimistic/timeout-cancel effects-c)))
+            "Settlement observation already relinquished timeout ownership.")))))
 
 (deftest rejected-and-failed-settlements-use-adapter-owned-rollback-policy-test
   (doseq [[resolution rollback-eligible? expected-disposition]
@@ -615,13 +741,14 @@
            [:failed true :rollback]
            [:failed false :refresh-authority]]]
     (testing (str resolution " rollback? " rollback-eligible?)
-      (let [[state-a _]
+      (let [[state-start _]
             (start
              (adapter/initial-state)
              "execution-1"
-             (machine-execution (receive-once-choreography) :browser)
+             (machine-execution (optimistic-receive-choreography) :browser)
              :card
              {:optimistic (optimistic-config rollback-eligible?)})
+            [state-a _] (establish-provisional state-start "execution-1")
             generation (adapter/execution-generation state-a "execution-1")
             settlement {:resolution resolution}
             [state-b _]
@@ -649,13 +776,14 @@
           [[true :rollback-and-refresh]
            [false :refresh-authority]]]
     (testing (str "rollback? " rollback-eligible?)
-      (let [[state-a _]
+      (let [[state-start _]
             (start
              (adapter/initial-state)
              "execution-1"
-             (machine-execution (receive-once-choreography) :browser)
+             (machine-execution (optimistic-receive-choreography) :browser)
              :card
              {:optimistic (optimistic-config rollback-eligible? 100)})
+            [state-a _] (establish-provisional state-start "execution-1")
             generation (adapter/execution-generation state-a "execution-1")
             timeout-generation (:timeout-generation
                                 (adapter/optimistic-scope state-a "execution-1"))
@@ -677,13 +805,14 @@
             "A timer that has already fired no longer needs cancellation.")))))
 
 (deftest stale-optimistic-timeout-is-powerless-test
-  (let [[state-a _]
+  (let [[state-start _]
         (start
          (adapter/initial-state)
          "execution-1"
-         (machine-execution (receive-once-choreography) :browser)
+         (machine-execution (optimistic-receive-choreography) :browser)
          :card
          {:optimistic (optimistic-config true 100)})
+        [state-a _] (establish-provisional state-start "execution-1")
         generation (adapter/execution-generation state-a "execution-1")
         current-timeout (:timeout-generation
                          (adapter/optimistic-scope state-a "execution-1"))
@@ -700,13 +829,14 @@
     (is (some? (adapter/optimistic-scope state-b "execution-1")))))
 
 (deftest optimistic-network-failure-does-not-fabricate-trusted-settlement-test
-  (let [[state-a effects-a]
+  (let [[state-start _]
         (start
          (adapter/initial-state)
          "execution-1"
-         (machine-execution (send-once-choreography) :browser)
+         (machine-execution (local-then-send-choreography) :browser)
          :card
          {:optimistic (optimistic-config true)})
+        [state-a effects-a] (establish-provisional state-start "execution-1")
         generation (adapter/execution-generation state-a "execution-1")
         selection-generation (:effect-generation
                               (effect-data :machine/send effects-a))
@@ -742,13 +872,14 @@
            (get-in (effect-of :execution/retired effects-c) [1 :reason])))))
 
 (deftest authoritative-supersession-wins-and-retires-old-optimistic-generation-test
-  (let [[state-a _]
+  (let [[state-start _]
         (start
          (adapter/initial-state)
          "execution-1"
-         (machine-execution (receive-once-choreography) :browser)
+         (machine-execution (optimistic-receive-choreography) :browser)
          :card
          {:optimistic (optimistic-config true)})
+        [state-a _] (establish-provisional state-start "execution-1")
         generation (adapter/execution-generation state-a "execution-1")
         authoritative {:presence :present
                        :basis :basis-9
@@ -773,14 +904,35 @@
     (is (= :authoritative-superseded
            (get-in (effect-of :execution/retired effects-b) [1 :reason])))))
 
-(deftest explicit-retirement-releases-optimistic-ownership-without-rollback-test
+(deftest explicit-retirement-before-provisional-derivation-needs-no-physical-finish-test
   (let [[state-a _]
         (start
          (adapter/initial-state)
          "execution-1"
-         (machine-execution (receive-once-choreography) :browser)
+         (machine-execution (optimistic-receive-choreography) :browser)
          :card
          {:optimistic (optimistic-config true)})
+        generation (adapter/execution-generation state-a "execution-1")
+        [state-b effects-b]
+        (adapter/step
+         state-a
+         {:event :execution/retire
+          :execution-id "execution-1"
+          :generation generation
+          :reason :page-detached})]
+    (is (nil? (adapter/optimistic-scope state-b "execution-1")))
+    (is (= [:execution/retired] (mapv first effects-b))
+        "No physical provisional or timer existed, so there is nothing optimistic to finish.")))
+
+(deftest explicit-retirement-releases-established-optimistic-ownership-without-rollback-test
+  (let [[state-start _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (optimistic-receive-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})
+        [state-a _] (establish-provisional state-start "execution-1")
         generation (adapter/execution-generation state-a "execution-1")
         [state-b effects-b]
         (adapter/step
@@ -791,28 +943,33 @@
           :reason :page-detached})
         finish (effect-data :optimistic/finish effects-b)]
     (is (nil? (adapter/optimistic-scope state-b "execution-1")))
+    (is (= [:optimistic/timeout-cancel
+            :optimistic/finish
+            :execution/retired]
+           (mapv first effects-b)))
     (is (= :retired (:resolution finish)))
     (is (= :release-only (:disposition finish)))
     (is (= :page-detached (:reason finish)))))
 
-(deftest replacing-target-retires-old-optimistic-scope-before-new-install-test
-  (let [[state-a _]
+(deftest replacing-target-retires-old-optimistic-scope-before-new-derivation-test
+  (let [[state-start-a _]
         (start
          (adapter/initial-state)
          "execution-a"
-         (machine-execution (receive-once-choreography) :browser)
+         (machine-execution (optimistic-receive-choreography) :browser)
          :card
          {:optimistic (assoc (optimistic-config true) :command-id :command-a)})
+        [state-a _] (establish-provisional state-start-a "execution-a")
         [state-b effects-b]
         (start
          state-a
          "execution-b"
-         (machine-execution (receive-once-choreography) :browser)
+         (machine-execution (optimistic-receive-choreography) :browser)
          :card
          {:replace-owner? true
           :optimistic (assoc (optimistic-config true) :command-id :command-b)})
         old-finish (effect-data :optimistic/finish effects-b)
-        new-install (effect-data :optimistic/install-provisional effects-b)]
+        scope-b (adapter/optimistic-scope state-b "execution-b")]
     (is (nil? (adapter/execution state-b "execution-a")))
     (is (nil? (adapter/optimistic-scope state-b "execution-a")))
     (is (some? (adapter/execution state-b "execution-b")))
@@ -821,10 +978,48 @@
     (is (= :retired (:resolution old-finish)))
     (is (= :release-only (:disposition old-finish)))
     (is (= :target-replaced (:reason old-finish)))
-    (is (= :command-b (:command-id new-install)))
+    (is (= :awaiting-provisional (:status scope-b)))
+    (is (= [:optimistic/timeout-cancel
+            :optimistic/finish
+            :execution/retired
+            :machine/local]
+           (mapv first effects-b)))
+    (is (= 0 (count (effects-of :optimistic/install-provisional effects-b)))
+        "Replacement cannot install provisional state until its own Choreo derivation completes.")
     (is (< (.indexOf (mapv first effects-b) :optimistic/finish)
-           (.indexOf (mapv first effects-b) :optimistic/install-provisional))
-        "Old optimistic ownership retires before the replacement projection is installed.")))
+           (.indexOf (mapv first effects-b) :machine/local))
+        "Old optimistic ownership retires before replacement derivation begins.")))
+
+(deftest replacing-same-execution-id-allocates-fresh-awaiting-provisional-generation-test
+  (let [[state-start-a _]
+        (start
+         (adapter/initial-state)
+         "execution-1"
+         (machine-execution (optimistic-receive-choreography) :browser)
+         :card
+         {:optimistic (optimistic-config true)})
+        [state-a _] (establish-provisional state-start-a "execution-1")
+        generation-a (adapter/execution-generation state-a "execution-1")
+        [state-b effects-b]
+        (start
+         state-a
+         "execution-1"
+         (machine-execution (optimistic-receive-choreography) :browser)
+         :card
+         {:replace-execution? true
+          :optimistic (optimistic-config true)})
+        generation-b (adapter/execution-generation state-b "execution-1")
+        scope-b (adapter/optimistic-scope state-b "execution-1")]
+    (is (not= generation-a generation-b))
+    (is (= generation-b (:execution-generation scope-b)))
+    (is (= :awaiting-provisional (:status scope-b)))
+    (is (nil? (:provisional scope-b)))
+    (is (nil? (:timeout-generation scope-b)))
+    (is (= [:optimistic/timeout-cancel
+            :optimistic/finish
+            :execution/retired
+            :machine/local]
+           (mapv first effects-b)))))
 
 ;; =============================================================================
 ;; Send / transport boundary

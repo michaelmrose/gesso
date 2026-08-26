@@ -296,48 +296,67 @@
                   live/post-form-attrs)))
 
 ;; -----------------------------------------------------------------------------
-;; Optimistic protocol-v2 facade
+;; Optimistic protocol-v3 trusted-server facade
 ;; -----------------------------------------------------------------------------
 
-(deftest optimistic-rendering-and-settlement-facades-test
-  (testing "descriptor and canonical rendering APIs come from optimistic.server"
-    (is (identical? optimistic.server/->optimistic
-                    live/->optimistic))
-    (is (identical? optimistic.server/optimistic?
-                    live/optimistic?))
-    (is (identical? optimistic.server/canonical
-                    live/canonical))
-    (is (identical? optimistic.server/canonical-attrs
-                    live/canonical-attrs)))
+(deftest optimistic-registry-facades-test
+  (testing "core exposes the trusted protocol-v3 registry constructors"
+    (is (identical? optimistic.server/operation
+                    live/optimistic-operation))
+    (is (identical? optimistic.server/operation?
+                    live/optimistic-operation?))
+    (is (identical? optimistic.server/server
+                    live/optimistic-server))
+    (is (identical? optimistic.server/server?
+                    live/optimistic-server?))))
 
-  (testing "execution identity and semantic settlement APIs come from optimistic.server"
-    (is (identical? optimistic.server/request-execution-id
-                    live/request-execution-id))
-    (is (identical? optimistic.server/->settlement
-                    live/->settlement))
-    (is (identical? optimistic.server/settlement?
-                    live/settlement?))
-    (is (identical? optimistic.server/settlement-for-request
-                    live/settlement-for-request))
-    (is (identical? optimistic.server/settlement-marker
-                    live/settlement-marker))
-    (is (identical? optimistic.server/with-settlement
-                    live/with-settlement))))
+(deftest optimistic-command-boundary-facades-test
+  (testing "core exposes the trusted command decode/normalization boundary"
+    (is (identical? optimistic.server/decode-command
+                    live/decode-optimistic-command))
+    (is (identical? optimistic.server/normalize-command
+                    live/normalize-optimistic-command))
+    (is (identical? optimistic.server/begin-command
+                    live/begin-optimistic-command))
+    (is (identical? optimistic.server/command-boundary?
+                    live/optimistic-command-boundary?))
+    (is (identical? optimistic.server/operation-context
+                    live/optimistic-operation-context))))
 
-(deftest optimistic-server-command-facades-test
-  (testing "core exposes only the high-level projected server-command edge"
+(deftest optimistic-settlement-send-facades-test
+  (testing "core exposes the trusted settlement/send lifecycle"
+    (is (identical? optimistic.server/settlement-from-result
+                    live/optimistic-settlement-from-result))
+    (is (identical? optimistic.server/prepare-settlement-send
+                    live/prepare-optimistic-settlement-send))
+    (is (identical? optimistic.server/prepared-send?
+                    live/optimistic-prepared-send?))
+    (is (identical? optimistic.server/complete-settlement-send
+                    live/complete-optimistic-send))
+    (is (identical? optimistic.server/completed-send?
+                    live/optimistic-completed-send?))
     (is (identical? optimistic.server/run-command
                     live/run-optimistic-command))
-    (is (identical? optimistic.server/prepared-response-hiccup
-                    live/optimistic-response-hiccup))
-    (is (identical? optimistic.server/complete-settlement-send
-                    live/complete-optimistic-send))))
+    (is (identical? optimistic.server/run-wire-command
+                    live/run-optimistic-wire-command))))
 
-(deftest obsolete-optimistic-post-button-core-alias-is-gone-test
-  (testing "post-button with :optimistic is the public UI path; no compatibility alias remains"
-    (is (nil?
-         (ns-resolve 'gesso.live.core
-                     'optimistic-post-button)))))
+(deftest obsolete-protocol-v2-core-facades-are-gone-test
+  (testing "removed protocol-v2 descriptor/rendering/settlement APIs stay removed"
+    (doseq [sym '[->optimistic
+                  optimistic?
+                  canonical
+                  canonical-attrs
+                  request-execution-id
+                  ->settlement
+                  settlement?
+                  settlement-for-request
+                  settlement-marker
+                  with-settlement
+                  optimistic-response-hiccup
+                  optimistic-post-button]]
+      (is (nil?
+           (ns-resolve 'gesso.live.core sym))
+          (str "obsolete protocol-v2 facade must remain absent: " sym)))))
 
 ;; -----------------------------------------------------------------------------
 ;; transact-and-notify!

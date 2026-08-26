@@ -23,46 +23,46 @@
      (println "done"))}
 
   test
-  {:doc "Run every Gesso test and build verification gate."
+  {:doc "Full gate: JVM + all CLJS hosts + advanced compile + theme verification."
    :task
    (shell "bb" "script/gesso_test.clj" "all")}
 
   test:jvm
-  {:doc "Run all JVM tests."
+  {:doc "Run all JVM tests. Included by `bb test`."
    :task
    (shell "bb" "script/gesso_test.clj" "jvm")}
 
   test:cljs
-  {:doc "Run Node and Chromium CLJS tests."
+  {:doc "Run all CLJS tests: Node groups + full Chromium suite. Included by `bb test`."
    :task
    (shell "bb" "script/gesso_test.clj" "cljs")}
 
   test:node
-  {:doc "Run all host-independent CLJS tests under Node."
+  {:doc "Run all Node CLJS tests: portable Choreo + browser semantics. Included by `bb test:cljs`."
    :task
    (shell "bb" "script/gesso_test.clj" "node")}
 
   test:node:choreo
-  {:doc "Run the portable Choreo CLJS/CLJC corpus under Node."
+  {:doc "Run the portable Choreo CLJS/CLJC corpus under Node. Included by `bb test:node`."
    :task
    (shell "bb" "script/gesso_test.clj" "node:choreo")}
 
   test:node:browser
-  {:doc "Run host-independent browser semantic tests under Node."
+  {:doc "Run host-independent browser semantic tests under Node. Included by `bb test:node`."
    :task
    (shell "bb" "script/gesso_test.clj" "node:browser")}
 
   test:browser
-  {:doc "Run every CLJS/CLJC test in headless Chromium."
+  {:doc "Run every CLJS/CLJC test in real headless Chromium. Included by `bb test:cljs`."
    :task
    (shell "bb" "script/gesso_test.clj" "browser")}
 
   test:advanced
-  {:doc "Verify the composed production browser runtime advanced-compiles."
+  {:doc "Verify the composed production browser runtime advanced-compiles. Included by `bb test`."
    :task
    (shell "bb" "script/gesso_test.clj" "advanced")}
 
   test:themes
-  {:doc "Verify the theme build without overwriting the checked-in CSS."
+  {:doc "Verify the theme build without overwriting checked-in CSS. Included by `bb test`."
    :task
    (shell "bb" "script/gesso_test.clj" "themes")}}}

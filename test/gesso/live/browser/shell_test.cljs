@@ -106,6 +106,42 @@
      :done
      (choreo/return :done)}}))
 
+(defn- optimistic-await-choreography
+  []
+  (choreo/->choreography
+   {:initial :derive
+    :states
+    {:derive
+     (choreo/local
+      :browser
+      :browser/derive-provisional
+      :wait
+      {:outputs #{:ui/provisional}})
+
+     :wait
+     (choreo/await
+      :browser
+      {:browser/timeout :done})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- optimistic-start-event
+  ([execution-id]
+   (optimistic-start-event execution-id nil))
+  ([execution-id opts]
+   (start-event
+    execution-id
+    (machine-execution (optimistic-await-choreography) :browser)
+    :request-card
+    (merge
+     {:optimistic
+      {:command-id (str "command-" execution-id)
+       :provisional-key :ui/provisional
+       :rollback-eligible? true
+       :timeout-ms 1000}}
+     opts))))
+
 (defn- timeout-envelope
   []
   (machine/environment-event
@@ -230,7 +266,9 @@
     (is (adapter/state? (shell/state a)))
     (is (= {:timers 0
             :transports 0
-            :continuity 0}
+            :continuity 0
+            :optimistic 0
+            :optimistic-timeouts 0}
            (shell/resource-counts a)))
     (is (false? (shell/closed? a)))))
 
@@ -396,7 +434,8 @@
            (:payload (first @sent))))
     (is (nil? (adapter/execution (shell/state runtime) "execution-1")))
     (is (= 1 (count @completed)))
-    (is (= {:timers 0 :transports 0 :continuity 0}
+    (is (= {:timers 0 :transports 0 :continuity 0
+            :optimistic 0 :optimistic-timeouts 0}
            (shell/resource-counts runtime)))))
 
 (deftest transport-cancellation-is-keyed-by-exact-adapter-generation-test
@@ -970,6 +1009,250 @@
     (is (= [] (adapter/invariant-errors (shell/state runtime))))))
 
 ;; =============================================================================
+;; Optimistic physical resources
+;; =============================================================================
+
+(deftest optimistic-install-and-retirement-use-exact-opaque-resource-and-timeout-test
+  (let [opaque (js-obj "snapshot" "opaque")
+        installed (atom [])
+        finished (atom [])
+        next-handle (atom 0)
+        callbacks (atom {})
+        cleared (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:machine/local
+           (fn [{:keys [effect]}]
+             (is (= :browser/derive-provisional
+                    (get-in effect [:action :action])))
+             {:ui/provisional {:projection :pending}})
+           :optimistic/install-provisional
+           (fn [{:keys [effect physical resource]}]
+             (swap! installed conj [effect physical resource])
+             opaque)
+           :optimistic/finish
+           (fn [{:keys [effect physical resource]}]
+             (swap! finished conj [effect physical resource])
+             :finished)}
+          :set-timeout!
+          (fn [callback delay-ms]
+            (let [handle (swap! next-handle inc)]
+              (swap! callbacks assoc handle {:callback callback
+                                             :delay-ms delay-ms})
+              handle))
+          :clear-timeout! #(swap! cleared conj %)})
+        physical (js-obj "source" "start")]
+    (shell/dispatch!
+     runtime
+     (optimistic-start-event "execution-1")
+     physical)
+    (let [generation
+          (adapter/execution-generation (shell/state runtime) "execution-1")]
+      (is (= {:timers 0
+              :transports 0
+              :continuity 0
+              :optimistic 1
+              :optimistic-timeouts 1}
+             (shell/resource-counts runtime)))
+      (is (= 1000 (get-in @callbacks [1 :delay-ms])))
+      (is (= {:projection :pending}
+             (get-in @installed [0 0 :provisional])))
+      ;; The local completion is a re-entrant normalized event, so the physical
+      ;; context from the outer start dispatch is intentionally not retained.
+      (is (nil? (get-in @installed [0 1])))
+      (is (nil? (get-in @installed [0 2])))
+      (is (not (deep-identical? (shell/state runtime) opaque)))
+
+      (shell/dispatch!
+       runtime
+       {:event :execution/retire
+        :execution-id "execution-1"
+        :generation generation
+        :reason :test-retirement})
+
+      (is (= {:timers 0
+              :transports 0
+              :continuity 0
+              :optimistic 0
+              :optimistic-timeouts 0}
+             (shell/resource-counts runtime)))
+      (is (= [1] @cleared))
+      (is (= 1 (count @finished)))
+      (is (= :release-only (get-in @finished [0 0 :disposition])))
+      (is (nil? (get-in @finished [0 1])))
+      (is (identical? opaque (get-in @finished [0 2])))
+      (is (= [] (adapter/invariant-errors (shell/state runtime)))))))
+
+(deftest optimistic-install-must-be-synchronous-but-failure-does-not-become-command-failure-test
+  (let [errors (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:machine/local
+           (fn [_]
+             {:ui/provisional {:projection :pending}})
+           :optimistic/install-provisional
+           (fn [_]
+             (js/Promise.resolve (js-obj "late" true)))}
+          :on-error #(swap! errors conj %)})]
+    (shell/dispatch! runtime (optimistic-start-event "execution-1"))
+    (is (= :optimistic-install-failed (:phase (first @errors))))
+    (is (= :optimistic/install-provisional (:effect (first @errors))))
+    (is (= 0 (:optimistic (shell/resource-counts runtime))))
+    ;; Physical presentation failure is not evidence that the trusted command
+    ;; failed; the adapter execution and its timeout protection remain active.
+    (is (= 1 (:optimistic-timeouts (shell/resource-counts runtime))))
+    (is (some? (adapter/execution (shell/state runtime) "execution-1")))
+    (is (= :provisional
+           (:status
+            (adapter/optimistic-scope
+             (shell/state runtime)
+             "execution-1"))))
+    (is (= [] (adapter/invariant-errors (shell/state runtime))))))
+
+(deftest missing-optimistic-install-handler-is-diagnostic-and-does-not-retire-command-test
+  (let [errors (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:machine/local
+           (fn [_]
+             {:ui/provisional {:projection :pending}})}
+          :on-error #(swap! errors conj %)})]
+    (shell/dispatch! runtime (optimistic-start-event "execution-1"))
+    (is (= :missing-optimistic-install-handler
+           (:phase (first @errors))))
+    (is (= 0 (:optimistic (shell/resource-counts runtime))))
+    (is (= 1 (:optimistic-timeouts (shell/resource-counts runtime))))
+    (is (some? (adapter/execution (shell/state runtime) "execution-1")))
+    (is (= [] (adapter/invariant-errors (shell/state runtime))))))
+
+(deftest optimistic-finish-removes-resource-before-handler-and-rejects-async-cleanup-test
+  (let [opaque (js-obj "snapshot" "opaque")
+        errors (atom [])
+        resource-visible-during-finish? (atom nil)
+        runtime-holder (atom nil)
+        runtime
+        (shell/create
+         {:handlers
+          {:machine/local
+           (fn [_]
+             {:ui/provisional {:projection :pending}})
+           :optimistic/install-provisional
+           (fn [_] opaque)
+           :optimistic/finish
+           (fn [{:keys [resource]}]
+             (reset! resource-visible-during-finish?
+                     (pos? (:optimistic
+                            (shell/resource-counts @runtime-holder))))
+             (is (identical? opaque resource))
+             (js/Promise.resolve :too-late))}
+          :on-error #(swap! errors conj %)})]
+    (reset! runtime-holder runtime)
+    (shell/dispatch! runtime (optimistic-start-event "execution-1"))
+    (let [generation
+          (adapter/execution-generation (shell/state runtime) "execution-1")]
+      (shell/dispatch!
+       runtime
+       {:event :execution/retire
+        :execution-id "execution-1"
+        :generation generation
+        :reason :test-retirement}))
+    (is (false? @resource-visible-during-finish?))
+    (is (= :optimistic-finish-failed (:phase (last @errors))))
+    (is (= :optimistic/finish (:effect (last @errors))))
+    (is (= 0 (:optimistic (shell/resource-counts runtime))))
+    (is (= 0 (:optimistic-timeouts (shell/resource-counts runtime))))
+    (is (nil? (adapter/execution (shell/state runtime) "execution-1")))
+    (is (= [] (adapter/invariant-errors (shell/state runtime))))))
+
+(deftest replacing-same-optimistic-execution-revokes-old-physical-generation-first-test
+  (let [next-handle (atom 0)
+        callbacks (atom {})
+        cleared (atom [])
+        installed (atom [])
+        finished (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:machine/local
+           (fn [_]
+             {:ui/provisional {:projection :pending}})
+           :optimistic/install-provisional
+           (fn [{:keys [effect]}]
+             (let [resource (js-obj "generation" (:generation effect))]
+               (swap! installed conj [(:generation effect) resource])
+               resource))
+           :optimistic/finish
+           (fn [{:keys [effect resource]}]
+             (swap! finished conj [(:generation effect) resource])
+             :finished)}
+          :set-timeout!
+          (fn [callback _]
+            (let [handle (swap! next-handle inc)]
+              (swap! callbacks assoc handle callback)
+              handle))
+          :clear-timeout! #(swap! cleared conj %)})]
+    (shell/dispatch! runtime (optimistic-start-event "same"))
+    (let [first-generation
+          (adapter/execution-generation (shell/state runtime) "same")
+          first-callback (get @callbacks 1)]
+      (shell/dispatch!
+       runtime
+       (optimistic-start-event "same" {:replace-execution? true}))
+      (let [second-generation
+            (adapter/execution-generation (shell/state runtime) "same")]
+        (is (not= first-generation second-generation))
+        (is (= [1] @cleared))
+        (is (= 2 (count @installed)))
+        (is (= 1 (count @finished)))
+        (is (= first-generation (ffirst @finished)))
+        (is (identical? (second (first @installed))
+                        (second (first @finished))))
+        (is (= {:timers 0
+                :transports 0
+                :continuity 0
+                :optimistic 1
+                :optimistic-timeouts 1}
+               (shell/resource-counts runtime)))
+
+        ;; Simulate a host timeout callback that escaped clearTimeout. Its
+        ;; exact old timeout generation cannot remove or retire the replacement.
+        (let [before (shell/state runtime)]
+          (first-callback)
+          (is (= before (shell/state runtime)))
+          (is (= 1 (:optimistic (shell/resource-counts runtime))))
+          (is (= 1 (:optimistic-timeouts
+                    (shell/resource-counts runtime))))
+          (is (= second-generation
+                 (adapter/execution-generation
+                  (shell/state runtime)
+                  "same"))))))))
+
+(deftest optimistic-timeout-allocation-failure-is-diagnostic-and-keeps-command-active-test
+  (let [errors (atom [])
+        runtime
+        (shell/create
+         {:handlers
+          {:machine/local
+           (fn [_]
+             {:ui/provisional {:projection :pending}})
+           :optimistic/install-provisional
+           (fn [_] (js-obj "snapshot" true))}
+          :set-timeout!
+          (fn [_ _]
+            (throw (js/Error. "timer allocation failed")))
+          :on-error #(swap! errors conj %)})]
+    (shell/dispatch! runtime (optimistic-start-event "execution-1"))
+    (is (= :optimistic-timeout-start-failed (:phase (last @errors))))
+    (is (= :optimistic/timeout-start (:effect (last @errors))))
+    (is (= 1 (:optimistic (shell/resource-counts runtime))))
+    (is (= 0 (:optimistic-timeouts (shell/resource-counts runtime))))
+    (is (some? (adapter/execution (shell/state runtime) "execution-1")))
+    (is (= [] (adapter/invariant-errors (shell/state runtime))))))
+
+;; =============================================================================
 ;; Observer noninterference and diagnostics
 ;; =============================================================================
 
@@ -1077,12 +1360,14 @@
       (bind-request! runtime :request-card generation "xhr-1" nil)
       (before-swap! runtime :request-card generation "xhr-1" nil))
 
-    (is (= {:timers 1 :transports 1 :continuity 1}
+    (is (= {:timers 1 :transports 1 :continuity 1
+            :optimistic 0 :optimistic-timeouts 0}
            (shell/resource-counts runtime)))
 
     (is (= :closed (shell/shutdown! runtime)))
     (is (shell/closed? runtime))
-    (is (= {:timers 0 :transports 0 :continuity 0}
+    (is (= {:timers 0 :transports 0 :continuity 0
+            :optimistic 0 :optimistic-timeouts 0}
            (shell/resource-counts runtime)))
     (is (= 1 @transport-cancelled))
     (is (= [1] @cleared))

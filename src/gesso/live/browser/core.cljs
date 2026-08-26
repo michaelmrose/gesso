@@ -55,7 +55,7 @@
 ;; =============================================================================
 
 (def runtime-version
-  "3.0.0-dev")
+  "3.1.0-dev")
 
 (def runtime-type
   :gesso.live.browser.core/runtime)
@@ -91,12 +91,17 @@
     "htmx:abort"})
 
 (def listener-specs
-  "Documented lifecycle events observed by the first pure-adapter browser core.
+  "Documented lifecycle events observed by the browser core.
 
-   Optimistic command correlation and SSE payload parsing are intentionally not
-   hidden here. They will be layered onto this same normalized boundary when
-   their new contracts are implemented."
-  [["htmx:beforeRequest" :before-request]
+   Core remains the single owner of document/HTMX listener registration.
+   Higher browser realizations may register read/write event observers through
+   register-event-observer! without installing competing document listeners.
+   Observers receive raw browser events only at this physical integration
+   boundary; they do not enter AdapterState and cannot replace Core's protected
+   fragment/continuity handlers."
+  [["htmx:configRequest" :observe-only]
+   ["htmx:beforeRequest" :before-request]
+   ["htmx:beforeSend" :observe-only]
    ["htmx:beforeSwap" :before-swap]
    ["htmx:afterSwap" :after-swap]
    ["htmx:afterRequest" :after-request]
@@ -433,6 +438,8 @@
   [runtime]
   (shell/state (shell-runtime runtime)))
 
+(declare event-observers)
+
 (defn diagnostics
   "Plain diagnostics. WeakMap/XHR/DOM resources are deliberately absent."
   [runtime]
@@ -440,8 +447,81 @@
     {:gesso.live.browser.core/type runtime-type
      :gesso.live.browser.core/version runtime-version
      :started? @(:started? runtime)
+     :event-observers (event-observers runtime)
      :continuity (continuity/diagnostics (:continuity runtime))
      :shell (shell/diagnostics (:shell runtime))}))
+
+;; =============================================================================
+;; Shared document-event observation seam
+;; =============================================================================
+
+(defn event-observers
+  "Return event-name -> observer-id set for registered physical observers.
+
+   Observer functions themselves are intentionally omitted so diagnostics and
+   callers never acquire host callbacks accidentally."
+  [runtime]
+  (let [runtime (require-core! runtime)]
+    (into {}
+          (keep (fn [[event-name observers]]
+                  (when (seq observers)
+                    [event-name (set (keys observers))])))
+          @(:event-observers runtime))))
+
+(defn register-event-observer!
+  "Register one observer on an event already owned by Core's listener set.
+
+   event-name must be one of listener-specs. observer-id is a keyword used for
+   exact ownership and replacement-safe cleanup. handler receives the raw DOM
+   event and may perform only physical integration work; semantic decisions must
+   still enter the adapter/Choreo boundary through their public dispatch APIs.
+
+   Registering the same [event-name observer-id] replaces that observer only.
+   Core itself remains the sole document listener owner."
+  [runtime event-name observer-id handler]
+  (let [runtime (require-core! runtime)
+        event-name (require-nonblank-string! "Browser core observed event name" event-name)
+        supported (set (map first listener-specs))]
+    (when-not (contains? supported event-name)
+      (throw
+       (core-error
+        :unsupported-observed-event
+        "Browser core observer event is not part of the supported listener contract."
+        {:event-name event-name
+         :supported-events supported})))
+    (when-not (keyword? observer-id)
+      (throw
+       (core-error
+        :invalid-observer-id
+        "Browser core observer id must be a keyword."
+        {:observer-id observer-id})))
+    (require-callable! "Browser core event observer" handler)
+    (swap! (:event-observers runtime)
+           update event-name
+           (fnil assoc {})
+           observer-id
+           handler)
+    observer-id))
+
+(defn unregister-event-observer!
+  "Remove exactly one observer owned by observer-id from event-name."
+  [runtime event-name observer-id]
+  (let [runtime (require-core! runtime)]
+    (swap! (:event-observers runtime)
+           (fn [observers]
+             (let [event-observers' (dissoc (get observers event-name {}) observer-id)]
+               (if (seq event-observers')
+                 (assoc observers event-name event-observers')
+                 (dissoc observers event-name)))))
+    observer-id))
+
+(defn- notify-event-observers!
+  [runtime event-name event]
+  ;; Snapshot the observer map before invocation. Registration/removal during a
+  ;; callback affects only later browser events and cannot perturb this delivery.
+  (doseq [[_ handler] (get @(:event-observers runtime) event-name {})]
+    (handler event))
+  true)
 
 (defn- option-document
   [options]
@@ -759,6 +839,7 @@
           :active-requests (js/WeakMap.)
           :requests-by-xhr (js/WeakMap.)
           :listeners (atom [])
+          :event-observers (atom {})
           :started? (atom false)}
          built-ins (built-in-handlers runtime-base options)
          handlers (merge built-ins custom-handlers)
@@ -1116,9 +1197,10 @@
   (.removeEventListener document name handler capture?)
   true)
 
-(defn- handler-for
+(defn- built-in-handler-for
   [runtime handler-id]
   (case handler-id
+    :observe-only nil
     :before-request #(on-before-request! runtime %)
     :before-swap #(on-before-swap! runtime %)
     :after-swap #(on-after-swap! runtime %)
@@ -1128,6 +1210,20 @@
     :sse-before-message #(on-sse-before-message! runtime %)
     :sse-open #(on-sse-open! runtime %)
     :invalidated #(on-invalidated! runtime %)))
+
+(defn- handler-for
+  [runtime event-name handler-id]
+  (let [built-in (built-in-handler-for runtime handler-id)]
+    (fn [event]
+      ;; Framework observers are invoked first. For pre-request hooks this lets
+      ;; a protocol realization establish correlation before Core observes the
+      ;; same HTMX lifecycle boundary. Observers that must fail a physical event
+      ;; closed are responsible for invoking the documented HTMX/DOM cancellation
+      ;; hook before rethrowing.
+      (notify-event-observers! runtime event-name event)
+      (when built-in
+        (built-in event))
+      true)))
 
 (defn start!
   "Install the first pure-adapter HTMX integration listeners exactly once for
@@ -1144,7 +1240,7 @@
             "Browser core requires a document to install lifecycle listeners."
             {})))
         (doseq [[name handler-id] listener-specs]
-          (let [handler (handler-for runtime handler-id)
+          (let [handler (handler-for runtime name handler-id)
                 registration (add-document-listener!
                               document name handler false)]
             (swap! (:listeners runtime) conj registration)))))

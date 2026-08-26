@@ -1213,3 +1213,208 @@
                                   [:continuity :registered-box-types]))
                      "diagnostic-only-name"))
       (is (adapter/state? (core/state runtime))))))
+
+;; =============================================================================
+;; Shared document-event observation seam
+;; =============================================================================
+
+(defn- installed-listener
+  [document-fixture event-name]
+  (some (fn [[name handler capture? :as registration]]
+          (when (= event-name name)
+            {:handler handler
+             :capture? capture?
+             :registration registration}))
+        @(:added document-fixture)))
+
+(deftest event-observer-seam-uses-only-core-owned-document-listeners-test
+  (let [document-fixture (make-document [])
+        htmx-fixture (make-htmx)
+        runtime (core/create {:document (:document document-fixture)
+                              :htmx (:htmx htmx-fixture)})
+        seen (atom [])]
+    (is (= :optimistic/config
+           (core/register-event-observer!
+            runtime
+            "htmx:configRequest"
+            :optimistic/config
+            #(swap! seen conj %))))
+    (is (= {"htmx:configRequest" #{:optimistic/config}}
+           (core/event-observers runtime)))
+    (is (empty? @(:added document-fixture))
+        "Registering a physical observer must not acquire a document listener.")
+
+    (core/start! runtime)
+    (is (= (count core/listener-specs)
+           (count @(:added document-fixture))))
+    (let [{:keys [handler capture?]}
+          (installed-listener document-fixture "htmx:configRequest")
+          event (js-obj)]
+      (is (fn? handler))
+      (is (false? capture?))
+      (is (true? (handler event)))
+      (is (= 1 (count @seen)))
+      (is (identical? event (first @seen))))
+
+    (is (= :optimistic/config
+           (core/unregister-event-observer!
+            runtime
+            "htmx:configRequest"
+            :optimistic/config)))
+    (is (empty? (core/event-observers runtime)))
+    (is (= (count core/listener-specs)
+           (count @(:added document-fixture)))
+        "Removing an observer must not alter Core's document-listener ownership.")
+    (core/stop! runtime)))
+
+(deftest observer-replacement-is-exactly-keyed-by-event-and-owner-test
+  (let [document-fixture (make-document [])
+        htmx-fixture (make-htmx)
+        runtime (core/create {:document (:document document-fixture)
+                              :htmx (:htmx htmx-fixture)})
+        seen (atom [])
+        old-handler #(swap! seen conj [:old %])
+        new-handler #(swap! seen conj [:new %])]
+    (core/register-event-observer!
+     runtime "htmx:beforeSend" :optimistic/send old-handler)
+    (core/register-event-observer!
+     runtime "htmx:beforeSend" :optimistic/send new-handler)
+    (core/register-event-observer!
+     runtime "htmx:configRequest" :optimistic/send old-handler)
+    (is (= {"htmx:beforeSend" #{:optimistic/send}
+            "htmx:configRequest" #{:optimistic/send}}
+           (core/event-observers runtime)))
+
+    (core/start! runtime)
+    (let [event (js-obj)]
+      ((:handler (installed-listener document-fixture "htmx:beforeSend")) event)
+      (is (= 1 (count @seen)))
+      (is (= :new (ffirst @seen)))
+      (is (identical? event (second (first @seen)))))
+
+    (core/unregister-event-observer!
+     runtime "htmx:beforeSend" :optimistic/send)
+    (is (= {"htmx:configRequest" #{:optimistic/send}}
+           (core/event-observers runtime))
+        "Removing one event/owner pair must not remove the same owner from another event.")
+    (core/stop! runtime)))
+
+(deftest observer-delivery-snapshots-registration-for-the-current-browser-event-test
+  (let [document-fixture (make-document [])
+        htmx-fixture (make-htmx)
+        runtime (core/create {:document (:document document-fixture)
+                              :htmx (:htmx htmx-fixture)})
+        calls (atom {:a 0 :b 0 :c 0})
+        c-handler (fn [_] (swap! calls update :c inc))]
+    (core/register-event-observer!
+     runtime
+     "htmx:beforeSend"
+     :a
+     (fn [_]
+       (swap! calls update :a inc)
+       (core/unregister-event-observer! runtime "htmx:beforeSend" :b)
+       (core/register-event-observer! runtime "htmx:beforeSend" :c c-handler)))
+    (core/register-event-observer!
+     runtime "htmx:beforeSend" :b
+     (fn [_] (swap! calls update :b inc)))
+
+    (core/start! runtime)
+    (let [handler (:handler (installed-listener document-fixture "htmx:beforeSend"))]
+      (handler (js-obj))
+      (is (= {:a 1 :b 1 :c 0} @calls)
+          "Observer mutation during delivery must affect only later browser events.")
+      (is (= {"htmx:beforeSend" #{:a :c}}
+             (core/event-observers runtime)))
+
+      (handler (js-obj))
+      (is (= {:a 2 :b 1 :c 1} @calls)))
+    (core/stop! runtime)))
+
+(deftest observers-run-before-core-request-normalization-test
+  (let [{:keys [runtime root document-fixture]} (runtime-fixture "fragment-1")
+        {xhr :xhr} (make-xhr 200)
+        observed (atom nil)]
+    (begin-refresh! runtime "fragment-1")
+    (let [generation (request-generation runtime root)]
+      (core/register-event-observer!
+       runtime
+       "htmx:beforeRequest"
+       :optimistic/correlation
+       (fn [event]
+         (reset! observed
+                 {:same-event? (identical? event event)
+                  :pending (core/pending-refresh runtime root)
+                  :active (core/active-request runtime root)})))
+      (core/start! runtime)
+      (let [fixture (make-event "htmx:beforeRequest"
+                                {:elt root
+                                 :target root
+                                 :xhr xhr})]
+        (is (true?
+             ((:handler (installed-listener document-fixture "htmx:beforeRequest"))
+              (:event fixture))))
+        (is (= generation
+               (get-in @observed [:pending :request-generation])))
+        (is (nil? (:active @observed))
+            "The observer must run before Core consumes the pending refresh.")
+        (is (nil? (core/pending-refresh runtime root)))
+        (is (= generation
+               (:request-generation (core/active-request runtime root))))))
+    (core/stop! runtime)))
+
+(deftest observer-exception-fails-before-core-built-in-normalization-test
+  (let [{:keys [runtime root document-fixture]} (runtime-fixture "fragment-1")
+        {xhr :xhr} (make-xhr 200)
+        fixture (make-event "htmx:beforeRequest"
+                            {:elt root
+                             :target root
+                             :xhr xhr})]
+    (begin-refresh! runtime "fragment-1")
+    (let [generation (request-generation runtime root)]
+      (core/register-event-observer!
+       runtime
+       "htmx:beforeRequest"
+       :failing/integration
+       (fn [event]
+         (.preventDefault event)
+         (throw (ex-info "observer failed" {:owner :failing/integration}))))
+      (core/start! runtime)
+      (is (some?
+           (thrown
+            #((:handler (installed-listener document-fixture "htmx:beforeRequest"))
+              (:event fixture)))))
+      (is (true? @(:prevented? fixture)))
+      (is (= generation
+             (:request-generation (core/pending-refresh runtime root)))
+          "Core built-in request normalization must not run after an observer failure.")
+      (is (nil? (core/active-request runtime root))))
+    (core/stop! runtime)))
+
+(deftest event-observer-diagnostics-expose-identities-not-callbacks-test
+  (let [{:keys [runtime]} (runtime-fixture "fragment-1")
+        handler-a (fn [_] :a)
+        handler-b (fn [_] :b)]
+    (core/register-event-observer!
+     runtime "htmx:configRequest" :optimistic/config handler-a)
+    (core/register-event-observer!
+     runtime "htmx:beforeSend" :optimistic/send handler-b)
+    (let [diagnostics (core/diagnostics runtime)]
+      (is (= {"htmx:configRequest" #{:optimistic/config}
+              "htmx:beforeSend" #{:optimistic/send}}
+             (:event-observers diagnostics)))
+      (is (false? (deep-identical? diagnostics handler-a)))
+      (is (false? (deep-identical? diagnostics handler-b))))))
+
+(deftest event-observer-registration-validates-the-owned-listener-contract-test
+  (let [{:keys [runtime]} (runtime-fixture "fragment-1")]
+    (is (= :unsupported-observed-event
+           (error-kind
+            #(core/register-event-observer! runtime "click" :x identity))))
+    (is (= :invalid-observer-id
+           (error-kind
+            #(core/register-event-observer!
+              runtime "htmx:configRequest" "x" identity))))
+    (is (= :invalid-callable
+           (error-kind
+            #(core/register-event-observer!
+              runtime "htmx:configRequest" :x :not-a-function))))))

@@ -1,11 +1,10 @@
 (ns gesso.live.ui-test
   (:require
+   [clojure.edn :as edn]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [gesso.live.continuity :as continuity]
    [gesso.live.htmx :as htmx]
-   [gesso.live.optimistic.protocol :as protocol]
-   [gesso.live.optimistic.server :as optimistic]
    [gesso.live.ui :as ui]))
 
 ;; -----------------------------------------------------------------------------
@@ -141,49 +140,20 @@
   (let [fragment
         (ui/->fragment
          fragment-spec)]
-
-    (is (ui/fragment?
-         fragment))
-
+    (is (ui/fragment? fragment))
     (is (= :gesso.live.ui/fragment
-           (:gesso.live.ui/type
-            fragment)))
-
-    (is (= "request-list"
-           (:id
-            fragment)))
-
-    (is (= "/app/requests/fragment"
-           (:src
-            fragment)))
-
-    (is (= "/app/requests/stream"
-           (:stream-url
-            fragment)))
-
-    (is (= htmx/default-event
-           (:event
-            fragment)))
-
-    (is (= ui/default-fragment-swap
-           (:swap
-            fragment)))
-
-    (is (= htmx/default-fragment-trigger
-           (:trigger
-            fragment)))
-
-    (is (= {}
-           (:attrs
-            fragment)))
-
-    (is (= {}
-           (:root-attrs
-            fragment)))
-
-    (is (= {}
-           (:target-attrs
-            fragment)))))
+           (:gesso.live.ui/type fragment)))
+    (is (= "request-list" (:id fragment)))
+    (is (= "/app/requests/fragment" (:src fragment)))
+    (is (= "/app/requests/stream" (:stream-url fragment)))
+    (is (= htmx/default-event (:event fragment)))
+    (is (= ui/default-fragment-swap (:swap fragment)))
+    (is (not (contains? fragment :trigger)))
+    (is (not (contains? fragment :jitter-ms)))
+    (is (not (contains? fragment :jitter-delay-ms)))
+    (is (= {} (:attrs fragment)))
+    (is (= {} (:root-attrs fragment)))
+    (is (= {} (:target-attrs fragment)))))
 
 (deftest fragment-predicate-is-marker-based-test
   (is (ui/fragment?
@@ -221,88 +191,25 @@
 
 (deftest fragment-explicit-options-test
   (let [continuity-config
-        {:preserve
-         {:inputs true}}
-
+        {:preserve {:inputs true}}
         fragment
         (ui/->fragment
          (merge
           fragment-spec
-          {:event
-           "board-updated"
-
-           :swap
-           "innerHTML"
-
-           :trigger
-           "load"
-
-           :include
-           "#board-state"
-
-           :client-continuity
-           continuity-config
-
-           :jitter-ms
-           250
-
-           :jitter-delay-ms
-           100
-
-           :attrs
-           {:class
-            "base"}
-
-           :root-attrs
-           {:data-root
-            true}
-
-           :target-attrs
-           {:class
-            "target"}}))]
-
-    (is (= "board-updated"
-           (:event
-            fragment)))
-
-    (is (= "innerHTML"
-           (:swap
-            fragment)))
-
-    (is (= "load"
-           (:trigger
-            fragment)))
-
-    (is (= "#board-state"
-           (:include
-            fragment)))
-
-    (is (= continuity-config
-           (:client-continuity
-            fragment)))
-
-    (is (= 250
-           (:jitter-ms
-            fragment)))
-
-    (is (= 100
-           (:jitter-delay-ms
-            fragment)))
-
-    (is (= {:class
-            "base"}
-           (:attrs
-            fragment)))
-
-    (is (= {:data-root
-            true}
-           (:root-attrs
-            fragment)))
-
-    (is (= {:class
-            "target"}
-           (:target-attrs
-            fragment)))))
+          {:event "board-updated"
+           :swap "innerHTML"
+           :include "#board-state"
+           :client-continuity continuity-config
+           :attrs {:class "base"}
+           :root-attrs {:data-root true}
+           :target-attrs {:class "target"}}))]
+    (is (= "board-updated" (:event fragment)))
+    (is (= "innerHTML" (:swap fragment)))
+    (is (= "#board-state" (:include fragment)))
+    (is (= continuity-config (:client-continuity fragment)))
+    (is (= {:class "base"} (:attrs fragment)))
+    (is (= {:data-root true} (:root-attrs fragment)))
+    (is (= {:class "target"} (:target-attrs fragment)))))
 
 (deftest fragment-subscription-string-generates-stream-url-test
   (is (= "/app/gesso/live/stream?subscription=requests"
@@ -557,76 +464,25 @@
 (deftest fragment-legacy-shape-test
   (let [fragment
         (ui/->fragment
-         {:fragment/id
-          "legacy-fragment"
-
-          :fragment/src
-          "/legacy/fragment"
-
-          :fragment/swap
-          "innerHTML"
-
-          :subscription/token
-          "legacy-token"
-
-          :stream/base-url
-          "/legacy/stream"
-
-          :event
-          "legacy-event"
-
-          :trigger
-          "load"
-
-          :include
-          "#legacy-state"
-
-          :client-continuity
-          {:preserve
-           {:inputs true}}
-
-          :jitter-ms
-          100
-
-          :jitter-delay-ms
-          25
-
-          :attrs
-          {:class
-           "legacy-root"}
-
-          :root-attrs
-          {:data-root
-           "legacy"}
-
-          :inner-attrs
-          {:class
-           "legacy-target"}})]
-
-    (is (= "legacy-fragment"
-           (:id
-            fragment)))
-
-    (is (= "/legacy/fragment"
-           (:src
-            fragment)))
-
-    (is (= "innerHTML"
-           (:swap
-            fragment)))
-
-    (is (= "legacy-token"
-           (:subscription/token
-            fragment)))
-
+         {:fragment/id "legacy-fragment"
+          :fragment/src "/legacy/fragment"
+          :fragment/swap "innerHTML"
+          :subscription/token "legacy-token"
+          :stream/base-url "/legacy/stream"
+          :event "legacy-event"
+          :include "#legacy-state"
+          :client-continuity {:preserve {:inputs true}}
+          :attrs {:class "legacy-root"}
+          :root-attrs {:data-root "legacy"}
+          :inner-attrs {:class "legacy-target"}})]
+    (is (= "legacy-fragment" (:id fragment)))
+    (is (= "/legacy/fragment" (:src fragment)))
+    (is (= "innerHTML" (:swap fragment)))
+    (is (= "legacy-token" (:subscription/token fragment)))
     (is (= "/legacy/stream?subscription=legacy-token"
-           (:stream-url
-            fragment)))
-
-    (is (= {:class
-            "legacy-target"}
-           (:target-attrs
-            fragment)))))
+           (:stream-url fragment)))
+    (is (= {:class "legacy-target"}
+           (:target-attrs fragment)))))
 
 (deftest fragment-legacy-map-is-canonicalized-not-merged-with-modern-keys-test
   (let [fragment
@@ -669,44 +525,14 @@
   (let [attrs
         (ui/fragment-root-attrs
          fragment-spec)]
-
-    (is (= "sse"
-           (:hx-ext
-            attrs)))
-
-    (is (= "/app/requests/stream"
-           (:sse-connect
-            attrs)))
-
-    (is (= "request-list"
-           (:data-gesso-live-fragment
-            attrs)))
-
-    (is (= "/app/requests/fragment"
-           (:hx-get
-            attrs)))
-
-    (is (= "#request-list"
-           (:hx-target
-            attrs)))
-
-    (is (= ui/default-fragment-swap
-           (:hx-swap
-            attrs)))
-
-    (is (str/includes?
-         (:hx-trigger
-          attrs)
-         "sse:live-update"))
-
-    (is (str/includes?
-         (:hx-trigger
-          attrs)
-         "load"))
-
-    (is (str/includes?
-         (:_ attrs)
-         "gesso:live-connected"))))
+    (is (= "sse" (:hx-ext attrs)))
+    (is (= "/app/requests/stream" (:sse-connect attrs)))
+    (is (= "request-list" (:data-gesso-live-fragment attrs)))
+    (is (= "/app/requests/fragment" (:hx-get attrs)))
+    (is (= "#request-list" (:hx-target attrs)))
+    (is (= ui/default-fragment-swap (:hx-swap attrs)))
+    (is (= "gesso:live-refresh" (:hx-trigger attrs)))
+    (is (not (contains? attrs :_)))))
 
 (deftest fragment-root-owns-include-test
   (is (= "#board-state"
@@ -772,61 +598,36 @@
         (ui/fragment-root-attrs
          (merge
           fragment-spec
-          {:attrs
-           {:class
-            "attrs-class"
+          {:attrs {:class "attrs-class"
+                   :hx-get "/attrs-get"
+                   :data-shared "attrs"}
+           :root-attrs {:class "root-class"
+                        :data-shared "root"}}))]
+    (testing "ordinary root attrs retain caller merge order"
+      (is (= "root-class" (:class attrs)))
+      (is (= "root" (:data-shared attrs))))
+    (testing "managed request ownership wins over caller attrs"
+      (is (= "/app/requests/fragment" (:hx-get attrs)))
+      (is (= "gesso:live-refresh" (:hx-trigger attrs)))
+      (is (= "#request-list" (:hx-target attrs)))
+      (is (= ui/default-fragment-swap (:hx-swap attrs))))))
 
-            :hx-get
-            "/attrs-get"
-
-            :data-shared
-            "attrs"}
-
-           :root-attrs
-           {:class
-            "root-class"
-
-            :data-shared
-            "root"}}))]
-
-    (is (= "/attrs-get"
-           (:hx-get
-            attrs)))
-
-    (is (= "root-class"
-           (:class
-            attrs)))
-
-    (is (= "root"
-           (:data-shared
-            attrs)))))
-
-(deftest fragment-root-caller-may-override-generated-framework-attrs-test
+(deftest fragment-root-caller-cannot-override-managed-request-attrs-test
   (let [attrs
         (ui/fragment-root-attrs
          (merge
           fragment-spec
           {:root-attrs
-           {:hx-get
-            "/override"
-
-            :hx-target
-            "#other"
-
-            :hx-swap
-            "none"}}))]
-
-    (is (= "/override"
-           (:hx-get
-            attrs)))
-
-    (is (= "#other"
-           (:hx-target
-            attrs)))
-
-    (is (= "none"
-           (:hx-swap
-            attrs)))))
+           {:hx-get "/override"
+            :hx-trigger "load"
+            :hx-target "#other"
+            :hx-swap "none"
+            :sse-connect "/wrong-stream"}}))]
+    (is (= "/app/requests/fragment" (:hx-get attrs)))
+    (is (= "gesso:live-refresh" (:hx-trigger attrs)))
+    (is (= "#request-list" (:hx-target attrs)))
+    (is (= ui/default-fragment-swap (:hx-swap attrs)))
+    (is (= "/app/requests/stream" (:sse-connect attrs)))))
 
 (deftest fragment-root-composes-extra-hx-extension-test
   (let [attrs
@@ -841,55 +642,41 @@
            (:hx-ext
             attrs)))))
 
-(deftest fragment-root-custom-event-trigger-test
-  (let [attrs
-        (ui/fragment-root-attrs
-         (assoc
-          fragment-spec
-          :event
-          "request-updated"))]
+(deftest fragment-custom-event-is-owned-by-invalidation-listener-test
+  (let [fragment
+        (assoc fragment-spec :event "request-updated")
+        root-attrs
+        (ui/fragment-root-attrs fragment)
+        listener-attrs
+        (ui/fragment-invalidation-listener-attrs fragment)]
+    (is (= "gesso:live-refresh" (:hx-trigger root-attrs)))
+    (is (= "request-updated" (:sse-swap listener-attrs)))
+    (is (= "request-list"
+           (:data-gesso-live-invalidation listener-attrs)))
+    (is (= "none" (:hx-swap listener-attrs)))))
 
-    (is (str/includes?
-         (:hx-trigger
-          attrs)
-         "sse:request-updated"))
+(deftest fragment-direct-trigger-is-rejected-test
+  (let [error
+        (thrown
+         #(ui/fragment-root-attrs
+           (assoc fragment-spec
+                  :trigger "load, custom-event from:body")))]
+    (is (instance? clojure.lang.ExceptionInfo error))
+    (is (= {:trigger "load, custom-event from:body"}
+           (:unsupported-options (ex-data error))))))
 
-    (is (not
-         (str/includes?
-          (:hx-trigger
-           attrs)
-          "sse:live-update")))))
-
-(deftest fragment-root-custom-trigger-test
-  (let [attrs
-        (ui/fragment-root-attrs
-         (assoc
-          fragment-spec
-          :trigger
-          "load, custom-event from:body"))]
-
-    (is (str/starts-with?
-         (:hx-trigger
-          attrs)
-         "load, custom-event from:body"))
-
-    (is (str/includes?
-         (:hx-trigger
-          attrs)
-         "sse:live-update"))))
-
-(deftest fragment-root-deterministic-jitter-test
-  (let [attrs
-        (ui/fragment-root-attrs
-         (assoc
-          fragment-spec
-          :jitter-delay-ms
-          250))]
-
-    (is (str/includes?
-         (:hx-trigger
-          attrs)
-         "sse:live-update delay:250ms"))))
+(deftest fragment-direct-jitter-is-rejected-test
+  (doseq [opts [{:jitter-ms 250}
+                {:jitter-delay-ms 250}
+                {:jitter-ms 250
+                 :jitter-delay-ms 100}]]
+    (let [error
+          (thrown
+           #(ui/fragment-root-attrs
+             (merge fragment-spec opts)))]
+      (is (instance? clojure.lang.ExceptionInfo error))
+      (is (= opts
+             (:unsupported-options (ex-data error)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Replaceable target attrs
@@ -926,15 +713,15 @@
             :data-target
             true})))))
 
-(deftest fragment-target-id-may-be-overridden-by-target-attrs-test
-  (is (= "other-id"
-         (:id
-          (ui/fragment-target-attrs
-           (assoc
-            fragment-spec
-            :target-attrs
-            {:id
-             "other-id"}))))))
+(deftest fragment-target-id-is-framework-owned-test
+  (let [attrs
+        (ui/fragment-target-attrs
+         (assoc fragment-spec
+                :target-attrs
+                {:id "other-id"
+                 :class "target"}))]
+    (is (= "request-list" (:id attrs)))
+    (is (= "target" (:class attrs)))))
 
 (deftest fragment-target-attrs-clean-nil-values-test
   (let [attrs
@@ -994,61 +781,49 @@
   (let [panel
         (ui/fragment-panel
          fragment-spec)]
-
-    (is (= :div
-           (first
-            panel)))
-
-    (is (= :div
-           (get-in
-            panel
-            [2
-             0])))
-
+    (is (= :div (first panel)))
     (is (= "request-list"
-           (get-in
-            panel
-            [1
-             :data-gesso-live-fragment])))
-
+           (get-in panel [1 :data-gesso-live-fragment])))
+    (is (= :div (get-in panel [2 0])))
     (is (= "request-list"
-           (get-in
-            panel
-            [2
-             1
-             :id])))))
+           (get-in panel [2 1 :data-gesso-live-invalidation])))
+    (is (= "live-update"
+           (get-in panel [2 1 :sse-swap])))
+    (is (= :div (get-in panel [3 0])))
+    (is (= "request-list"
+           (get-in panel [3 1 :id])))))
 
 (deftest fragment-panel-stable-root-owns-behavior-test
   (let [panel
         (ui/fragment-panel
          fragment-spec)
+        root-attrs (second panel)
+        listener-attrs (get-in panel [2 1])
+        target-attrs (get-in panel [3 1])]
+    (doseq [key [:hx-ext
+                 :sse-connect
+                 :hx-get
+                 :hx-trigger
+                 :hx-target
+                 :hx-swap]]
+      (is (contains? root-attrs key)))
 
-        root-attrs
-        (second
-         panel)
+    (testing "the invalidation listener owns only advisory SSE observation"
+      (is (= "live-update" (:sse-swap listener-attrs)))
+      (is (= "none" (:hx-swap listener-attrs)))
+      (is (not (contains? listener-attrs :sse-connect)))
+      (is (not (contains? listener-attrs :hx-get)))
+      (is (not (contains? listener-attrs :hx-trigger))))
 
-        target-attrs
-        (get-in
-         panel
-         [2
-          1])]
-
-    (doseq [key
-            [:hx-ext
-             :sse-connect
-             :hx-get
-             :hx-trigger
-             :hx-target
-             :hx-swap]]
-
-      (is (contains?
-           root-attrs
-           key))
-
-      (is (not
-           (contains?
-            target-attrs
-            key))))))
+    (testing "the replaceable target owns no request or SSE behavior"
+      (doseq [key [:hx-ext
+                   :sse-connect
+                   :sse-swap
+                   :hx-get
+                   :hx-trigger
+                   :hx-target
+                   :hx-swap]]
+        (is (not (contains? target-attrs key)))))))
 
 (deftest fragment-panel-accepts-prepared-descriptor-test
   (let [fragment
@@ -2144,122 +1919,49 @@
              :hx-swap])))))
 
 ;; -----------------------------------------------------------------------------
-;; Optimistic UI delegation — non-structural public contract
+;; Protocol-v3 optimistic UI delegation — general integration contract
 ;;
-;; Structural sibling/template assertions intentionally remain in
-;; gesso.live.ui-optimistic-test. That suite already exposes the known current
-;; production bug where the projection template is nested in the wrapper form.
+;; Detailed validation and settlement-marker coverage belongs in
+;; gesso.live.ui-optimistic-test. This suite keeps only the post-button
+;; composition expectations that interact with the rest of gesso.live.ui.
 ;; -----------------------------------------------------------------------------
 
-(def optimistic-config
-  {:template-name
-   "request-1-claim"
+(def optimistic-action
+  {:operation :request/claim
+   :arguments {:request-id "request-1"}
+   :observed-basis {:tx-id 42
+                    :system-time "2026-08-25T01:00:00Z"}
+   :scope [:request "request-1"]
+   :target-id "request-card-request-1"
+   :rollback-eligible? true
+   :timeout-ms 5000})
 
-   :transition
-   :request/claim
+(defn- decoded-optimistic-action
+  [markup]
+  (some-> (button-node markup)
+          second
+          (get ui/optimistic-action-attr)
+          edn/read-string))
 
-   :scope
-   [:request
-    "request-1"]
-
-   :base-revision
-   7
-
-   :target
-   "closest [data-request-card]"
-
-   :pending-label
-   "Claiming…"
-
-   :content
-   [:details
-    {:data-request-card
-     "request-1"}
-    [:summary
-     "Claiming…"]]})
-
-(deftest optimistic-post-button-puts-protocol-on-clicked-button-test
-  (let [button-attrs
-        (second
-         (button-node
-          (ui/post-button
-           ctx
-           {:to
-            "/claim"
-
-            :swap
-            "none"
-
-            :label
-            "Claim"
-
-            :optimistic
-            optimistic-config})))]
-
-    (is (= protocol/version
-           (get
-            button-attrs
-            protocol/protocol-attr)))
-
-    (is (= "request/claim"
-           (get
-            button-attrs
-            protocol/transition-attr)))
-
-    (is (= "request-1-claim"
-           (get
-            button-attrs
-            protocol/template-attr)))
-
-    (is (= "closest [data-request-card]"
-           (get
-            button-attrs
-            protocol/target-attr)))
-
-    (is (= (protocol/wire-scope
-            [:request
-             "request-1"])
-           (get
-            button-attrs
-            protocol/scope-attr)))
-
-    (is (= "i:7"
-           (get
-            button-attrs
-            protocol/base-revision-attr)))
-
-    (is (= "Claiming…"
-           (get
-            button-attrs
-            protocol/pending-label-attr)))
-
-    (is (= "provisional"
-           (get
-            button-attrs
-            protocol/projection-mode-attr)))))
-
-(deftest optimistic-post-button-wrapper-does-not-own-protocol-test
-  (let [form-attrs
-        (second
-         (form-node
-          (ui/post-button
-           ctx
-           {:to
-            "/claim"
-
-            :label
-            "Claim"
-
-            :optimistic
-            optimistic-config})))]
-
-    (doseq [key
-            protocol/reserved-attrs]
-
-      (is (not
-           (contains?
-            form-attrs
-            key))))))
+(deftest optimistic-post-button-binds-v3-action-to-clicked-button-test
+  (let [markup
+        (ui/post-button
+         ctx
+         {:to "/claim"
+          :swap "none"
+          :label "Claim"
+          :optimistic optimistic-action})
+        button-attrs
+        (second (button-node markup))
+        form-attrs
+        (second (form-node markup))]
+    (is (= optimistic-action
+           (decoded-optimistic-action markup)))
+    (is (contains? button-attrs
+                   ui/optimistic-action-attr))
+    (is (not (contains? form-attrs
+                        ui/optimistic-action-attr)))
+    (is (nil? (template-node markup)))))
 
 (deftest optimistic-post-button-preserves-ordinary-request-mechanics-test
   (let [button-attrs
@@ -2267,273 +1969,78 @@
          (button-node
           (ui/post-button
            ctx
-           {:to
-            "/claim"
-
-            :target
-            "request-list"
-
-            :swap
-            "none"
-
-            :include
-            "#board-state"
-
-            :label
-            "Claim"
-
-            :optimistic
-            optimistic-config})))]
-
-    (is (= "/claim"
-           (:hx-post
-            button-attrs)))
-
-    (is (= "#request-list"
-           (:hx-target
-            button-attrs)))
-
-    (is (= "none"
-           (:hx-swap
-            button-attrs)))
-
+           {:to "/claim"
+            :target "request-list"
+            :swap "none"
+            :include "#board-state"
+            :sync "this:abort"
+            :label "Claim"
+            :optimistic optimistic-action})))]
+    (is (= "/claim" (:hx-post button-attrs)))
+    (is (= "#request-list" (:hx-target button-attrs)))
+    (is (= "none" (:hx-swap button-attrs)))
     (is (= "closest [data-gesso-live-post], #board-state"
-           (:hx-include
-            button-attrs)))))
+           (:hx-include button-attrs)))
+    (is (= "this:abort" (:hx-sync button-attrs)))
+    (is (= optimistic-action
+           (-> button-attrs
+               (get ui/optimistic-action-attr)
+               edn/read-string)))))
 
-(deftest optimistic-post-button-uses-target-scoped-sync-by-default-test
-  (is (= "closest [data-request-card]:drop"
-         (get-in
-          (button-node
-           (ui/post-button
-            ctx
-            {:to
-             "/claim"
-
-             :label
-             "Claim"
-
-             :optimistic
-             optimistic-config}))
-          [1
-           :hx-sync]))))
-
-(deftest optimistic-post-button-explicit-sync-wins-test
-  (doseq [[sync expected]
-          [["this:abort"
-            "this:abort"]
-
-           [nil
-            nil]
-
-           [false
-            nil]]]
-
-    (is (= expected
-           (get-in
-            (button-node
-             (ui/post-button
-              ctx
-              {:to
-               "/claim"
-
-               :label
-               "Claim"
-
-               :sync
-               sync
-
-               :optimistic
-               optimistic-config}))
-            [1
-             :hx-sync])))))
-
-(deftest optimistic-post-button-top-level-target-is-inherited-when-config-omits-target-test
-  (let [config
-        (dissoc
-         optimistic-config
-         :target)
-
+(deftest optimistic-post-button-three-arity-keeps-fragment-target-authoritative-test
+  (let [fragment
+        (ui/->fragment
+         (assoc fragment-spec
+                :swap "outerHTML"))
         button-attrs
         (second
          (button-node
           (ui/post-button
            ctx
-           {:to
-            "/claim"
-
-            :target
-            "closest [data-request-card]"
-
-            :label
-            "Claim"
-
+           fragment
+           {:to "/claim"
+            :label "Claim"
             :optimistic
-            config})))]
-
-    (is (= "closest [data-request-card]"
-           (:hx-target
-            button-attrs)))
-
-    (is (= "closest [data-request-card]"
-           (get
-            button-attrs
-            protocol/target-attr)))))
-
-(deftest optimistic-post-button-distinct-authoritative-and-projection-targets-test
-  (let [button-attrs
-        (second
-         (button-node
-          (ui/post-button
-           ctx
-           {:to
-            "/claim"
-
-            :target
-            "request-list"
-
-            :label
-            "Claim"
-
-            :optimistic
-            optimistic-config})))]
-
-    (is (= "#request-list"
-           (:hx-target
-            button-attrs)))
-
-    (is (= "closest [data-request-card]"
-           (get
-            button-attrs
-            protocol/target-attr)))))
-
-(deftest optimistic-post-button-accepts-prepared-descriptor-test
-  (let [prepared
-        (optimistic/->optimistic
-         optimistic-config)
-
-        button-attrs
-        (second
-         (button-node
-          (ui/post-button
-           ctx
-           {:to
-            "/claim"
-
-            :label
-            "Claim"
-
-            :optimistic
-            prepared})))]
-
-    (is (= "request-1-claim"
-           (get
-            button-attrs
-            protocol/template-attr)))))
-
-(deftest optimistic-post-button-invalid-value-test
-  (doseq [invalid
-          [true
-           1
-           "yes"
-           [:not
-            :a-map]]]
-
-    (is (instance?
-         clojure.lang.ExceptionInfo
-         (thrown
-          #(ui/post-button
-            ctx
-            {:to
-             "/claim"
-
-             :label
-             "Claim"
-
-             :optimistic
-             invalid}))))))
+            (dissoc optimistic-action :target-id)})))]
+    (is (= "#request-list" (:hx-target button-attrs)))
+    (is (= "outerHTML" (:hx-swap button-attrs)))
+    (is (= (dissoc optimistic-action :target-id)
+           (-> button-attrs
+               (get ui/optimistic-action-attr)
+               edn/read-string)))))
 
 (deftest optimistic-post-button-nil-and-false-remain-ordinary-test
-  (doseq [value
-          [nil
-           false]]
-
+  (doseq [value [nil false]]
     (let [markup
           (ui/post-button
            ctx
-           {:to
-            "/claim"
-
-            :label
-            "Claim"
-
-            :optimistic
-            value})
-
+           {:to "/claim"
+            :label "Claim"
+            :optimistic value})
           button-attrs
-          (second
-           (button-node
-            markup))]
+          (second (button-node markup))]
+      (is (not (contains? button-attrs
+                          ui/optimistic-action-attr)))
+      (is (nil? (template-node markup))))))
 
-      (is (nil?
-           (get
-            button-attrs
-            protocol/protocol-attr)))
-
-      (is (nil?
-           (template-node
-            markup))))))
-
-(deftest optimistic-protocol-attrs-win-over-conflicting-button-attrs-test
+(deftest optimistic-post-button-protects-framework-action-annotation-test
   (let [button-attrs
         (second
          (button-node
           (ui/post-button
            ctx
-           {:to
-            "/claim"
-
-            :label
-            "Claim"
-
+           {:to "/claim"
+            :label "Claim"
             :button-attrs
-            (zipmap
-             protocol/reserved-attrs
-             (repeat
-              "wrong"))
-
-            :optimistic
-            optimistic-config})))]
-
-    (is (= protocol/version
-           (get
-            button-attrs
-            protocol/protocol-attr)))
-
-    (is (= "request/claim"
-           (get
-            button-attrs
-            protocol/transition-attr)))
-
-    (is (= (protocol/wire-scope
-            [:request
-             "request-1"])
-           (get
-            button-attrs
-            protocol/scope-attr)))
-
-    (doseq [key
-            [protocol/settlement-attr
-             protocol/execution-attr
-             protocol/outcome-attr
-             protocol/command-applied-attr
-             protocol/reason-attr
-             protocol/canonical-attr]]
-
-      (is (not
-           (contains?
-            button-attrs
-            key))))))
+            {ui/optimistic-action-attr
+             "{:operation :attacker/forged}"
+             :data-app-owned "kept"}
+            :optimistic optimistic-action})))]
+    (is (= "kept" (:data-app-owned button-attrs)))
+    (is (= optimistic-action
+           (-> button-attrs
+               (get ui/optimistic-action-attr)
+               edn/read-string)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Composition invariants

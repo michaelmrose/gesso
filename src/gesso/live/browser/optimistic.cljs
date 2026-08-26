@@ -1,1536 +1,990 @@
 (ns gesso.live.browser.optimistic
-  "Browser implementation of the built-in Gesso Live optimistic choreography.
+  "Physical browser realization for protocol-v3 optimism.
 
-   This namespace is the browser policy adapter for the built-in optimistic
-   choreography. The semantic lifecycle lives in gesso.live.optimistic.choreo
-   and is projected at compile time. gesso.choreo.machine owns protocol position;
-   gesso.live.browser.choreo owns the long-lived browser execution process; this
-   namespace binds the optimistic protocol to trusted browser FX.
+   This namespace is deliberately subordinate to the portable optimistic
+   choreography, the pure browser adapter, and the browser shell.
 
-   Owned here:
+   It owns only integration and physical-realization concerns:
 
-   - optimistic source/target/template resolution
-   - target single-flight ownership
-   - structural snapshot capture and authorized recovery
-   - projection installation
-   - settlement parsing and correlated delivery
-   - canonical authority/revision checks
-   - pending UI markers
-   - timeout scheduling/cancellation
-   - canonical-supersession observation
+   - realize the optimistic Choreo local actions through application callbacks;
+   - render an adapter-derived provisional value into one logical DOM target;
+   - hold an opaque structural snapshot only in the browser shell;
+   - realize the terminal disposition already selected by the adapter;
+   - request canonical authority through an injected Live/HTMX refresh hook;
+   - normalize trusted settlement/supersession observations back into AdapterState.
 
-   Not owned here:
+   It does NOT own command semantics, settlement semantics, target ownership,
+   execution generations, timeout ownership, rollback eligibility, terminal
+   disposition selection, continuity generations, authoritative progression,
+   participant transport, or a second optimistic execution registry.
 
-   - continuity mechanics (gesso.live.browser.continuity)
-   - generic DOM mechanics (gesso.live.browser.dom)
-   - generic choreography execution (gesso.live.browser.choreo)
-   - HTMX/SSE listener registration (gesso.live.browser.core)
-   - server/domain transition policy
+   A structural snapshot is never itself proof of authority.  When a new
+   provisional installation begins on DOM already marked provisional, the old
+   DOM may be used only to compensate a failed *physical installation*.  It is
+   never retained as a terminal rollback baseline.  This prevents one retired
+   provisional generation from being resurrected by a later command.
 
-   A projection is never canonical. A snapshot is never allowed to overwrite
-   explicitly canonical state. Distinct opaque revisions are never ordered."
+   Likewise, semantic retirement does not make provisional DOM authoritative.
+   Provisional markers remain until canonical markup replaces them or a safe
+   rollback restores the pre-provisional structural baseline."
   (:require
-   [clojure.string :as str]
+   [clojure.set :as set]
    [gesso.choreo.machine :as machine]
-   [gesso.live.optimistic.choreo :as optimistic
-    :include-macros true]
-   [gesso.live.optimistic.protocol :as protocol]
-   [gesso.live.browser.choreo :as runtime]
-   [gesso.live.browser.continuity :as continuity]
-   [gesso.live.browser.fx :as fx]
-   [gesso.live.browser.dom :as dom]))
+   [gesso.live.browser.adapter :as adapter]
+   [gesso.live.browser.choreo :as browser-choreo]
+   [gesso.live.browser.dom :as dom]
+   [gesso.live.browser.shell :as shell]
+   [gesso.live.optimistic.choreo :as optimistic-choreo]
+   [gesso.live.optimistic.protocol :as protocol]))
 
-;; -----------------------------------------------------------------------------
-;; Compiled protocol product
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Identity / public constants
+;; =============================================================================
 
-(def browser-plan
-  "Verified browser projection emitted at CLJS compile time.
+(def runtime-version 3)
 
-   The verifier and global projector stay on the JVM side of compilation."
-  (optimistic/browser-plan-form))
-
-;; -----------------------------------------------------------------------------
-;; Browser-only runtime attributes
-;; -----------------------------------------------------------------------------
+(def runtime-type
+  :gesso.live.browser.optimistic/runtime)
 
 (def active-attr
   "data-gesso-optimistic-active")
 
-(def pending-attr
-  "data-gesso-optimistic-pending")
+(def command-attr
+  "data-gesso-optimistic-command")
 
-(def locked-attr
-  "data-gesso-optimistic-locked")
+(def provisional-attr
+  "data-gesso-optimistic-provisional")
 
-(def pending-source-attr
-  "data-gesso-optimistic-source-pending")
-
-(def default-settlement-timeout-ms
+(def default-timeout-ms
   15000)
 
-(def settlement-timer-key
-  :optimistic/settlement-timeout)
+(def owned-effect-kinds
+  #{:optimistic/install-provisional
+    :optimistic/finish})
 
-(def optimistic-event-prefix
-  "gesso:optimistic:")
+(def option-keys
+  #{:project-provisional
+    :render-provisional
+    :refresh-authority
+    :resolve-target
+    :process-element
+    :browser-role
+    :authority-role
+    :derive-action
+    :resolve-action})
 
-;; -----------------------------------------------------------------------------
-;; Private execution-context keys
-;; -----------------------------------------------------------------------------
+(def start-option-keys
+  #{:plan
+    :command
+    :target-id
+    :rollback-eligible?
+    :timeout-ms
+    :replace-owner?
+    :replace-execution?})
 
-(def ^:private source-key
-  ::source)
+(def ^:private command-fact-keys
+  (set/union
+   optimistic-choreo/semantic-command-required-keys
+   optimistic-choreo/semantic-command-optional-keys))
 
-(def ^:private target-key
-  ::target)
+;; =============================================================================
+;; Errors / validation
+;; =============================================================================
 
-(def ^:private target-id-key
-  ::target-id)
+(defn- optimistic-error
+  ([kind message data]
+   (optimistic-error kind message data nil))
+  ([kind message data cause]
+   (ex-info
+    message
+    (merge
+     {:error/type :gesso.live.browser.optimistic/error
+      :error/kind kind}
+     data)
+    cause)))
 
-(def ^:private descriptor-key
-  ::descriptor)
+(defn- require-map!
+  [label value]
+  (when-not (map? value)
+    (throw
+     (optimistic-error
+      :invalid-map
+      (str label " must be a map.")
+      {:label label
+       :value value})))
+  value)
 
-(def ^:private root-key
-  ::root)
+(defn- require-callable!
+  [label value]
+  (when-not (fn? value)
+    (throw
+     (optimistic-error
+      :invalid-callable
+      (str label " must be callable.")
+      {:label label
+       :value value})))
+  value)
 
-(def ^:private snapshot-key
-  ::snapshot)
+(defn- require-keyword!
+  [label value]
+  (when-not (keyword? value)
+    (throw
+     (optimistic-error
+      :invalid-keyword
+      (str label " must be a keyword.")
+      {:label label
+       :value value})))
+  value)
 
-(def ^:private continuity-slot-key
-  ::continuity-slot)
+(defn- require-non-nil!
+  [label value]
+  (when (nil? value)
+    (throw
+     (optimistic-error
+      :missing-value
+      (str label " must be non-nil.")
+      {:label label})))
+  value)
 
-(def ^:private projection-key
-  ::projection)
+(defn- require-boolean!
+  [label value]
+  (when-not (boolean? value)
+    (throw
+     (optimistic-error
+      :invalid-boolean
+      (str label " must be boolean.")
+      {:label label
+       :value value})))
+  value)
 
-(def ^:private pending-source-state-key
-  ::pending-source-state)
+(defn- require-nonnegative-integer!
+  [label value]
+  (when-not (and (integer? value)
+                 (<= 0 value))
+    (throw
+     (optimistic-error
+      :invalid-nonnegative-integer
+      (str label " must be a non-negative integer.")
+      {:label label
+       :value value})))
+  value)
 
-(def ^:private canonical-source-key
-  ::canonical-source)
+(defn- check-keys!
+  [label allowed value]
+  (require-map! label value)
+  (let [unknown (seq (remove allowed (keys value)))]
+    (when unknown
+      (throw
+       (optimistic-error
+        :unknown-options
+        (str label " contains unsupported keys.")
+        {:label label
+         :unknown-keys (set unknown)
+         :allowed-keys allowed}))))
+  value)
 
-;; -----------------------------------------------------------------------------
-;; Runtime ownership
-;; -----------------------------------------------------------------------------
+(defn- promise-like?
+  [value]
+  (boolean
+   (and value
+        (fn? (.-then value)))))
 
-;; Opaque optimistic scope -> {:execution-id ... :target ... :target-id ...}.
-;; Scope is the logical lock key rather than DOM-node identity, so ownership
-;; survives canonical replacement of the target while the command is pending.
-(defonce target-locks
-  (atom {}))
+(defn- require-synchronous!
+  [label value]
+  (when (promise-like? value)
+    (throw
+     (optimistic-error
+      :async-physical-realization
+      (str label " must complete synchronously.")
+      {:label label})))
+  value)
 
-;; DOM source uid -> active execution id. Used only to correlate HTMX lifecycle
-;; events that retain the source element but not our request header.
-(defonce executions-by-source
-  (atom {}))
+;; =============================================================================
+;; Small host helpers
+;; =============================================================================
 
-;; Execution id -> projected optimistic command send action. The HTMX adapter
-;; consumes this exact choreography-produced action/payload.
-(defonce outgoing-actions
-  (atom {}))
+(defn- default-resolve-target
+  [target-id]
+  (dom/by-id (str target-id)))
 
-;; -----------------------------------------------------------------------------
-;; Small browser helpers
-;; -----------------------------------------------------------------------------
-
-(defn now-ms
-  []
-  (.getTime (js/Date.)))
-
-(defn custom-event
-  [name detail]
-  (try
-    (js/CustomEvent.
-     name
-     #js {:bubbles true
-          :cancelable false
-          :detail detail})
-    (catch :default _
-      (let [event
-            (.createEvent
-             js/document
-             "CustomEvent")]
-        (.initCustomEvent
-         event
-         name
-         true
-         false
-         detail)
-        event))))
-
-(defn emit!
-  [target name detail]
-  (let [target
-        (or target
-            (.-documentElement js/document))]
-    (when (and target
-               (.-dispatchEvent target))
-      (try
-        (.dispatchEvent
-         target
-         (custom-event
-          (str optimistic-event-prefix name)
-          detail))
-        (catch :default _
-          nil))))
-  detail)
-
-(defn htmx-process!
-  "Ask HTMX to process newly installed markup when HTMX is present."
+(defn- default-process-element
   [element]
   (when (and element
              (.-htmx js/window)
-             (.-process
-              (.-htmx js/window)))
-    (.process
-     (.-htmx js/window)
-     element))
+             (.-process (.-htmx js/window)))
+    (.process (.-htmx js/window) element))
   element)
 
-(defn- node-uid
-  [element]
-  (when element
-    (or
-     (aget element
-           "__gessoLiveOptimisticUid")
-     (let [uid
-           (str
-            "gesso-node-"
-            (random-uuid))]
-       (aset element
-             "__gessoLiveOptimisticUid"
-             uid)
-       uid))))
+(defn- command-wire
+  [command-id]
+  (pr-str
+   (protocol/command-id->wire command-id)))
 
-(defn execution-id
-  []
-  (str
-   "gesso-optimistic-"
-   (random-uuid)))
+(defn- ownership-token
+  [{:keys [execution-id generation]}]
+  ;; This is opaque physical correlation, not semantic identity reconstruction.
+  ;; The exact adapter-issued generation is deliberately part of the token so a
+  ;; replacement generation using the same execution-id cannot inherit physical
+  ;; ownership accidentally.
+  (pr-str
+   {:execution (protocol/execution-id->wire execution-id)
+    :generation generation}))
 
-(defn- non-blank?
-  [x]
-  (and (string? x)
-       (not (str/blank? x))))
+(defn- optimistic-marked?
+  [target]
+  (boolean
+   (and target
+        (or (dom/has-attr? target active-attr)
+            (dom/has-attr? target command-attr)
+            (dom/has-attr? target provisional-attr)))))
 
-(defn- attr-name
-  [protocol-attr]
-  (dom/attr-name
-   protocol-attr))
+(defn- mark-provisional!
+  [target effect-data]
+  (dom/set-attr! target active-attr
+                 (ownership-token effect-data))
+  (dom/set-attr! target command-attr
+                 (command-wire (:command-id effect-data)))
+  (dom/set-attr! target provisional-attr "true")
+  (dom/set-attr! target "aria-busy" "true")
+  target)
 
-;; -----------------------------------------------------------------------------
-;; Descriptor / source resolution
-;; -----------------------------------------------------------------------------
+(defn- physically-owned?
+  [target effect-data resource]
+  (and target
+       resource
+       (= (:ownership-token resource)
+          (ownership-token effect-data))
+       (= (:ownership-token resource)
+          (dom/attr target active-attr))))
 
-(def optimistic-source-selector
-  (str "["
-       (attr-name
-        protocol/protocol-attr)
-       "]["
-       (attr-name
-        protocol/transition-attr)
-       "]["
-       (attr-name
-        protocol/template-attr)
-       "]["
-       (attr-name
-        protocol/target-attr)
-       "]["
-       (attr-name
-        protocol/scope-attr)
-       "]"))
+(defn- safe-rollback-baseline?
+  [target]
+  ;; Absence of optimistic markers is not a proof of arbitrary application
+  ;; authority.  It only establishes the narrow fact required here: this
+  ;; snapshot is not itself a known Gesso provisional generation.  The normal
+  ;; Live/HTMX authority path remains responsible for canonical progression.
+  (not (optimistic-marked? target)))
 
-(defn optimistic-source
-  "Return nearest element that owns one optimistic command."
-  [element]
+(defn- restore-install-snapshot!
+  [runtime target snapshot]
+  (dom/copy-element-into!
+   target
+   (dom/snapshot-node snapshot))
+  ((:process-element runtime) target)
+  target)
+
+(defn- rethrow-install-failure!
+  [runtime target install-snapshot error]
+  ;; Installation is a physical effect.  If the renderer mutated the target
+  ;; before failing, compensate back to the exact pre-install DOM.  This is not
+  ;; semantic rollback and is safe even when that pre-install DOM was itself an
+  ;; older marked provisional representation.
+  (try
+    (restore-install-snapshot! runtime target install-snapshot)
+    (catch :default compensation-error
+      (throw
+       (optimistic-error
+        :provisional-install-compensation-failed
+        "Optimistic provisional installation failed and physical compensation also failed."
+        {:original-message (or (.-message error) (str error))
+         :compensation-message (or (.-message compensation-error)
+                                   (str compensation-error))}
+        error))))
+  (throw error))
+
+;; =============================================================================
+;; Runtime structure
+;; =============================================================================
+
+(defn runtime?
+  [value]
+  (and
+   (map? value)
+   (= runtime-type
+      (:gesso.live.browser.optimistic/type value))
+   (= runtime-version
+      (:gesso.live.browser.optimistic/version value))
+   (browser-choreo/runtime? (:choreo value))
+   (shell/shell? (:shell value))
+   (identical?
+    (:shell value)
+    (browser-choreo/shell-runtime (:choreo value)))
+   (some? (:installed-handlers value))
+   (some? (:installed-actions value))))
+
+(defn require-runtime!
+  [value]
+  (when-not (runtime? value)
+    (throw
+     (optimistic-error
+      :invalid-runtime
+      "Expected a Gesso Live browser optimistic runtime."
+      {:value value})))
+  value)
+
+(defn shell-runtime
+  [runtime]
+  (:shell (require-runtime! runtime)))
+
+(defn choreo-runtime
+  [runtime]
+  (:choreo (require-runtime! runtime)))
+
+(defn state
+  "Return the one shared pure AdapterState."
+  [runtime]
+  (shell/state (shell-runtime runtime)))
+
+(defn- require-unclaimed-effect-slots!
+  [shell-runtime]
+  (let [existing (shell/handlers shell-runtime)
+        collisions (set (filter #(contains? existing %) owned-effect-kinds))]
+    (when (seq collisions)
+      (throw
+       (optimistic-error
+        :effect-handler-collision
+        "Browser optimism cannot attach because its shell effect slots are already occupied."
+        {:effect-kinds collisions}))))
+  shell-runtime)
+
+(defn- require-unclaimed-local-actions!
+  [choreo-runtime action-ids]
+  (let [existing (browser-choreo/local-actions choreo-runtime)
+        collisions (set (filter #(contains? existing %) action-ids))]
+    (when (seq collisions)
+      (throw
+       (optimistic-error
+        :local-action-collision
+        "Browser optimism cannot attach because its Choreo local action ids are already occupied."
+        {:action-ids collisions}))))
+  choreo-runtime)
+
+;; =============================================================================
+;; Protocol-v3 local actions
+;; =============================================================================
+
+(defn- command-from-local-context
+  [ctx]
+  (protocol/command
+   (select-keys ctx command-fact-keys)))
+
+(defn- provisional-from-projection
+  [command projection]
+  (protocol/provisional
+   (cond->
+    {:command-id (get command protocol/command-id-key)
+     :execution-id (get command protocol/execution-id-key)
+     :observed-basis (get command protocol/observed-basis-key)
+     :projection projection}
+     (contains? command protocol/scope-key)
+     (assoc :scope (get command protocol/scope-key))
+
+     (contains? command protocol/fact-versions-key)
+     (assoc :fact-versions (get command protocol/fact-versions-key)))))
+
+(defn- derive-provisional-handler
+  [runtime]
+  (fn [ctx]
+    (let [command (command-from-local-context ctx)
+          projector (:project-provisional runtime)
+          result
+          (projector
+           {:command command
+            :arguments (get command protocol/arguments-key)
+            :observed-basis (get command protocol/observed-basis-key)
+            :scope (get command protocol/scope-key)})
+          ->outputs
+          (fn [projection]
+            {optimistic-choreo/provisional-value-key
+             (provisional-from-projection command projection)})]
+      (if (promise-like? result)
+        (.then result ->outputs)
+        (->outputs result)))))
+
+(defn- resolve-settlement-handler
+  [_runtime]
+  (fn [ctx]
+    {optimistic-choreo/resolution-value-key
+     (optimistic-choreo/settlement-resolution
+      (get ctx optimistic-choreo/provisional-value-key)
+      (get ctx optimistic-choreo/settlement-value-key))}))
+
+;; =============================================================================
+;; Physical provisional installation / finish
+;; =============================================================================
+
+(defn- resolve-target!
+  [runtime target-id]
+  (let [target ((:resolve-target runtime) target-id)]
+    (dom/require-connected!
+     target
+     {:operation :optimistic/resolve-target
+      :target-id target-id})
+    target))
+
+(defn- install-provisional-handler
+  [runtime]
+  (fn [{:keys [effect]}]
+    (let [target (resolve-target! runtime (:target-id effect))
+          install-snapshot (dom/snapshot target)
+          rollback-safe? (safe-rollback-baseline? target)]
+      (try
+        (let [provisional (:provisional effect)
+              projection (get provisional protocol/projection-key)
+              rendered
+              ((:render-provisional runtime)
+               {:target target
+                :target-id (:target-id effect)
+                :provisional provisional
+                :projection projection
+                :command-id (:command-id effect)
+                :execution-id (:execution-id effect)
+                :generation (:generation effect)})
+              _ (require-synchronous!
+                 "Optimistic provisional renderer"
+                 rendered)]
+          (when (and rendered
+                     (not (dom/element? rendered)))
+            (throw
+             (optimistic-error
+              :invalid-rendered-provisional
+              "Optimistic provisional renderer must return nil or one DOM element."
+              {:rendered rendered
+               :target-id (:target-id effect)})))
+          (when (and rendered
+                     (not (identical? rendered target)))
+            ;; Preserve the existing physical target object.  HTMX or other
+            ;; browser code may already hold it while this command is running.
+            (dom/copy-element-into! target rendered))
+          (mark-provisional! target effect)
+          ((:process-element runtime) target)
+          {:gesso.live.browser.optimistic/resource true
+           :target-id (:target-id effect)
+           :execution-id (:execution-id effect)
+           :generation (:generation effect)
+           :ownership-token (ownership-token effect)
+           ;; Always retain the pre-install snapshot for *installation failure*
+           ;; compensation while this function is executing.  Once installation
+           ;; succeeds, only a non-provisional baseline may be used for terminal
+           ;; rollback.
+           :rollback-snapshot
+           (when rollback-safe?
+             install-snapshot)
+           :rollback-baseline
+           (if rollback-safe?
+             :non-provisional
+             :provisional)})
+        (catch :default error
+          (rethrow-install-failure!
+           runtime target install-snapshot error))))))
+
+(defn- optional-target
+  [runtime target-id]
+  (try
+    ((:resolve-target runtime) target-id)
+    (catch :default _
+      nil)))
+
+(defn- refresh-authority!
+  ([runtime effect resource target reason]
+   (refresh-authority! runtime effect resource target reason nil))
+  ([runtime effect resource target reason details]
+   (let [result
+         ((:refresh-authority runtime)
+          (merge
+           {:effect effect
+            :resource resource
+            :target target
+            :target-id (:target-id effect)
+            :reason reason}
+           (or details {})))]
+     (require-synchronous! "Optimistic authoritative refresh" result)
+     :requested)))
+
+(defn- rollback!
+  [runtime effect resource target]
   (cond
-    (dom/matches?
-     element
-     optimistic-source-selector)
-    element
+    (nil? resource)
+    :missing-resource
 
-    (dom/element? element)
-    (dom/closest
-     element
-     optimistic-source-selector)
+    (not (physically-owned? target effect resource))
+    :ownership-lost
+
+    (nil? (:rollback-snapshot resource))
+    :unsafe-baseline
 
     :else
-    nil))
+    (do
+      (dom/copy-element-into!
+       target
+       (dom/snapshot-node (:rollback-snapshot resource)))
+      ((:process-element runtime) target)
+      :rolled-back)))
 
-(defn source-descriptor
-  "Decode one server-rendered optimistic source descriptor.
+(defn- recover-authority-after-unavailable-rollback!
+  [runtime effect resource target rollback-result]
+  ;; The adapter has already selected a rollback disposition.  This branch does
+  ;; not reinterpret that semantic decision; it is conservative recovery when
+  ;; the requested physical rollback cannot be realized safely because the
+  ;; target was replaced, the install resource is missing, or the only captured
+  ;; baseline was itself provisional.
+  (let [reason
+        (case rollback-result
+          :ownership-lost :rollback-ownership-lost
+          :unsafe-baseline :rollback-unsafe-baseline
+          :missing-resource :rollback-resource-missing
+          :rollback-unavailable)]
+    (refresh-authority!
+     runtime effect resource target reason
+     {:rollback-result rollback-result})))
 
-   Scope remains its opaque wire identity. Revisions are decoded into the shared
-   typed representation so numeric and opaque string revisions remain distinct."
-  [source]
-  (when source
-    (let [protocol-version
-          (dom/attr
-           source
-           protocol/protocol-attr)
-          transition
-          (dom/attr
-           source
-           protocol/transition-attr)
-          template-name
-          (dom/attr
-           source
-           protocol/template-attr)
-          target
-          (dom/attr
-           source
-           protocol/target-attr)
-          scope
-          (dom/attr
-           source
-           protocol/scope-attr)
-          base-wire
-          (dom/attr
-           source
-           protocol/base-revision-attr)
-          pending-label
-          (dom/attr
-           source
-           protocol/pending-label-attr)
-          projection-mode-wire
-          (dom/attr
-           source
-           protocol/projection-mode-attr)
-          projection-mode
-          (when projection-mode-wire
-            (protocol/wire->projection-mode
-             projection-mode-wire))]
-      (when-not (= protocol/version
-                   protocol-version)
+(defn- finish-handler
+  [runtime]
+  (fn [{:keys [effect resource]}]
+    (let [target (optional-target runtime (:target-id effect))
+          disposition (:disposition effect)]
+      (case disposition
+        :rollback
+        (let [result (rollback! runtime effect resource target)]
+          (when-not (= :rolled-back result)
+            (recover-authority-after-unavailable-rollback!
+             runtime effect resource target result)))
+
+        :rollback-and-refresh
+        (let [result (rollback! runtime effect resource target)]
+          (refresh-authority!
+           runtime effect resource target
+           :rollback-and-refresh
+           {:rollback-result result}))
+
+        :refresh-authority
+        ;; Keep the provisional marker in place.  Semantic retirement does not
+        ;; make provisional DOM authoritative while the canonical refresh is in
+        ;; flight.
+        (refresh-authority!
+         runtime effect resource target :refresh-authority)
+
+        :await-authority
+        ;; Direct settlement established a semantic resolution, not canonical
+        ;; DOM.  The provisional representation remains explicitly provisional
+        ;; until the ordinary Live/HTMX authority path replaces it.
+        (refresh-authority!
+         runtime effect resource target :await-authority)
+
+        :authoritative
+        ;; A trusted authoritative observation has semantically superseded this
+        ;; execution.  Physical canonical installation belongs to the normal
+        ;; Live/HTMX path that established/observed that authority.  If the old
+        ;; provisional node is still present, leave its marker intact rather
+        ;; than silently upgrading it.
+        nil
+
+        :release-only
+        ;; Semantic ownership has ended.  Physical remnants are cleanup debt.
+        ;; Do not erase the provisional marker or restore a snapshot merely to
+        ;; make retired DOM look canonical.
+        nil
+
         (throw
-         (ex-info
-          "Unsupported Gesso Live optimistic protocol version."
-          {:error/type
-           :gesso.live.optimistic/unsupported-protocol
-           :expected
-           protocol/version
-           :actual protocol-version})))
-      (doseq [[field value]
-              [[:transition transition]
-               [:template template-name]
-               [:target target]
-               [:scope scope]]]
-        (when-not (non-blank? value)
-          (throw
-           (ex-info
-            "Gesso Live optimistic source descriptor is incomplete."
-            {:error/type
-             :gesso.live.optimistic/incomplete-descriptor
-             :field field
-             :value value
-             :source source}))))
-      {:protocol-version protocol-version
-       :transition transition
-       :template-name template-name
-       :target target
-       :scope scope
-       :base-revision
-       (when base-wire
-         (protocol/wire->revision
-          base-wire))
-       :pending-label pending-label
-       :projection-mode
-       (or projection-mode
-           :provisional)})))
+         (optimistic-error
+          :unknown-disposition
+          "Browser optimism received an unsupported adapter disposition."
+          {:disposition disposition
+           :effect effect})))
+      :finished)))
 
-(defn- following-sibling
-  [source selector direction]
-  (loop [candidate
-         (direction source)]
-    (cond
-      (nil? candidate)
-      nil
+;; =============================================================================
+;; Construction / detachment
+;; =============================================================================
 
-      (dom/matches?
-       candidate
-       selector)
-      candidate
+(defn create
+  "Attach protocol-v3 optimism to one existing browser Choreo runtime.
 
-      :else
-      (recur
-       (direction candidate)))))
+   Required options:
 
-(defn resolve-extended-selector
-  "Resolve the small HTMX-style selector vocabulary Gesso uses for optimistic
-   targets."
-  [source selector]
-  (let [selector
-        (str/trim
-         (or selector ""))]
-    (cond
-      (= selector "this")
-      source
+     :project-provisional
+       Application semantic projector called from the Choreo local derive
+       boundary. Receives {:command ... :arguments ... :observed-basis ...
+       :scope ...} and returns the semantic provisional projection. It may
+       return a Promise; browser.choreo/shell correlate async completion through
+       adapter effect generations.
 
-      (str/starts-with?
-       selector
-       "closest ")
-      (dom/closest
-       source
-       (subs selector 8))
+     :render-provisional
+       Synchronous physical renderer. Receives the resolved DOM target plus the
+       closed protocol-v3 provisional value and projection. It may mutate target
+       directly and return nil/target, or return a same-root DOM element that
+       Gesso copies into the existing target object.
 
-      (str/starts-with?
-       selector
-       "find ")
-      (dom/query-one
-       source
-       (subs selector 5))
+     :refresh-authority
+       Synchronous request to the ordinary Live authoritative-refresh path. It
+       does not choose whether refresh is semantically required; the adapter has
+       already selected the terminal disposition. The callback may initiate an
+       asynchronous HTMX request but must return synchronously.
 
-      (str/starts-with?
-       selector
-       "next ")
-      (following-sibling
-       source
-       (subs selector 5)
-       #(.-nextElementSibling %))
+   Optional options customize target resolution, HTMX processing, role names,
+   and the two optimistic Choreo local-action ids."
+  ([choreo-runtime options]
+   (browser-choreo/require-runtime! choreo-runtime)
+   (let [options
+         (check-keys!
+          "Browser optimistic options"
+          option-keys
+          (or options {}))
+         project-provisional
+         (require-callable!
+          "Browser optimistic :project-provisional"
+          (:project-provisional options))
+         render-provisional
+         (require-callable!
+          "Browser optimistic :render-provisional"
+          (:render-provisional options))
+         refresh-authority
+         (require-callable!
+          "Browser optimistic :refresh-authority"
+          (:refresh-authority options))
+         resolve-target
+         (or (:resolve-target options) default-resolve-target)
+         process-element
+         (or (:process-element options) default-process-element)
+         browser-role
+         (or (:browser-role options)
+             optimistic-choreo/default-browser-role)
+         authority-role
+         (or (:authority-role options)
+             optimistic-choreo/default-authority-role)
+         derive-action
+         (or (:derive-action options)
+             optimistic-choreo/derive-provisional-action)
+         resolve-action
+         (or (:resolve-action options)
+             optimistic-choreo/resolve-settlement-action)
+         _ (require-callable!
+            "Browser optimistic :resolve-target"
+            resolve-target)
+         _ (require-callable!
+            "Browser optimistic :process-element"
+            process-element)
+         _ (require-keyword!
+            "Browser optimistic :browser-role"
+            browser-role)
+         _ (require-keyword!
+            "Browser optimistic :authority-role"
+            authority-role)
+         _ (require-keyword!
+            "Browser optimistic :derive-action"
+            derive-action)
+         _ (require-keyword!
+            "Browser optimistic :resolve-action"
+            resolve-action)
+         shell-runtime (browser-choreo/shell-runtime choreo-runtime)
+         _ (require-unclaimed-effect-slots! shell-runtime)
+         _ (require-unclaimed-local-actions!
+            choreo-runtime #{derive-action resolve-action})
+         runtime
+         {:gesso.live.browser.optimistic/type runtime-type
+          :gesso.live.browser.optimistic/version runtime-version
+          :choreo choreo-runtime
+          :shell shell-runtime
+          :project-provisional project-provisional
+          :render-provisional render-provisional
+          :refresh-authority refresh-authority
+          :resolve-target resolve-target
+          :process-element process-element
+          :browser-role browser-role
+          :authority-role authority-role
+          :derive-action derive-action
+          :resolve-action resolve-action
+          :installed-handlers (atom {})
+          :installed-actions (atom {})}
+         handlers
+         {:optimistic/install-provisional
+          (install-provisional-handler runtime)
 
-      (str/starts-with?
-       selector
-       "previous ")
-      (following-sibling
-       source
-       (subs selector 9)
-       #(.-previousElementSibling %))
+          :optimistic/finish
+          (finish-handler runtime)}
+         actions
+         {derive-action (derive-provisional-handler runtime)
+          resolve-action (resolve-settlement-handler runtime)}]
+     (doseq [[effect-kind handler] handlers]
+       (shell/register-handler! shell-runtime effect-kind handler))
+     (doseq [[action-id handler] actions]
+       (browser-choreo/register-local-action!
+        choreo-runtime action-id handler))
+     (reset! (:installed-handlers runtime) handlers)
+     (reset! (:installed-actions runtime) actions)
+     runtime)))
 
-      :else
-      (dom/query-one
-       js/document
-       selector))))
+(defn detach!
+  "Detach only physical handlers/actions still owned by this optimistic runtime.
 
-(defn resolve-target
-  [source descriptor]
-  (resolve-extended-selector
-   source
-   (:target descriptor)))
+   Active semantic executions are not retired here. The enclosing composed
+   runtime must retire/close semantic work before physical detachment."
+  [runtime]
+  (let [runtime (require-runtime! runtime)
+        shell-runtime (:shell runtime)
+        choreo-runtime (:choreo runtime)]
+    (doseq [[effect-kind handler] @(:installed-handlers runtime)]
+      (when (identical? handler
+                        (get (shell/handlers shell-runtime) effect-kind))
+        (shell/unregister-handler! shell-runtime effect-kind)))
+    (doseq [[action-id handler] @(:installed-actions runtime)]
+      (when (identical? handler
+                        (get (browser-choreo/local-actions choreo-runtime)
+                             action-id))
+        (browser-choreo/unregister-local-action!
+         choreo-runtime action-id)))
+    (reset! (:installed-handlers runtime) {})
+    (reset! (:installed-actions runtime) {})
+    :detached))
 
-(defn- template-in
-  [root template-name]
-  (when (and root
-             template-name)
-    (some
-     (fn [template]
-       (when (= template-name
-                (dom/attr
-                 template
-                 protocol/template-attr))
-         template))
-     (dom/templates root))))
+;; =============================================================================
+;; Starting one optimistic execution
+;; =============================================================================
 
-(defn resolve-template
-  "Resolve exactly one projection template in the natural local-to-global search
-   order."
-  [source target descriptor]
-  (let [template-name
-        (:template-name descriptor)]
-    (or
-     (template-in
-      (.-parentElement source)
-      template-name)
-     (template-in
-      (continuity/root source)
-      template-name)
-     (template-in
-      (continuity/root target)
-      template-name)
-     (template-in
-      js/document
-      template-name))))
-
-(defn prepare
-  "Resolve and validate browser objects needed to start an execution."
-  [source explicit-target]
-  (let [descriptor
-        (source-descriptor source)
-        target
-        (or explicit-target
-            (resolve-target
-             source
-             descriptor))
-        template
-        (resolve-template
-         source
-         target
-         descriptor)
-        projection
-        (when template
-          (dom/template-root
-           template))
-        root
-        (or
-         (continuity/root source)
-         (continuity/root target))]
-    (when-not target
-      (throw
-       (ex-info
-        "Gesso Live optimistic target could not be resolved."
-        {:error/type
-         :gesso.live.optimistic/no-target
-         :descriptor descriptor})))
-    (when-not template
-      (throw
-       (ex-info
-        "Gesso Live optimistic projection template could not be resolved."
-        {:error/type
-         :gesso.live.optimistic/no-template
-         :descriptor descriptor})))
-    (dom/assert-compatible-root!
-     target
-     projection)
-    (dom/assert-stable-identity!
-     target
-     projection)
-    {:source source
-     :descriptor descriptor
-     :target target
-     :target-id
-     (not-empty
-      (.-id target))
-     :template template
-     :projection projection
-     :root root}))
-
-;; -----------------------------------------------------------------------------
-;; Logical target ownership
-;; -----------------------------------------------------------------------------
-
-(defn current-lock
-  [scope]
-  (get @target-locks scope))
-
-(defn execution-lock
-  [execution-id]
-  (some
-   (fn [[scope lock]]
-     (when (= execution-id
-              (:execution-id lock))
-       (assoc lock
-              :scope scope)))
-   @target-locks))
-
-(defn reserve-target!
-  [scope execution-id target target-id]
-  (let [existing
-        (current-lock scope)]
-    (cond
-      (nil? existing)
-      (do
-        (swap!
-         target-locks
-         assoc
-         scope
-         {:execution-id execution-id
-          :target target
-          :target-id target-id})
-        true)
-
-      (= execution-id
-         (:execution-id existing))
-      true
-
-      :else
-      false)))
-
-(defn release-target!
-  [scope execution-id]
-  (swap!
-   target-locks
-   (fn [locks]
-     (if (= execution-id
-            (get-in locks
-                    [scope :execution-id]))
-       (dissoc locks
-               scope)
-       locks)))
-  true)
-
-(defn- current-target
-  "Resolve the current DOM target for one active execution.
-
-   Stable id is preferred when the original target was replaced. The original
-   node is used only while connected."
-  [ctx]
-  (let [target
-        (get ctx target-key)
-        target-id
-        (get ctx target-id-key)
-        source
-        (get ctx source-key)
-        descriptor
-        (get ctx descriptor-key)]
-    (or
-     (when (dom/connected? target)
-       target)
-     (when target-id
-       (dom/by-id target-id))
-     (when (and source
-                (dom/connected? source)
-                descriptor)
-       (resolve-target
-        source
-        descriptor)))))
-
-;; -----------------------------------------------------------------------------
-;; Pending source UI
-;; -----------------------------------------------------------------------------
-
-(defn- label-element
-  [source]
-  (or
-   (dom/query-one
-    source
-    "[data-gesso-button-label]")
-   (dom/query-one
-    source
-    "[data-gesso-optimistic-label-target]")
-   (when (and
-          (= "INPUT"
-             (dom/tag-name source))
-          (#{"submit" "button"}
-           (some->
-            (.-type source)
-            str/lower-case)))
-     source)))
-
-(defn- mark-source-pending!
-  [source descriptor execution-id]
-  (let [label
-        (label-element source)
-        state
-        {:source source
-         :disabled
-         (when (some?
-                (.-disabled source))
-           (boolean
-            (.-disabled source)))
-         :aria-disabled
-         (dom/attr
-          source
-          "aria-disabled")
-         :aria-busy
-         (dom/attr
-          source
-          "aria-busy")
-         :label-element label
-         :label
-         (when label
-           (if (= "INPUT"
-                  (dom/tag-name label))
-             (.-value label)
-             (.-textContent label)))}]
-    (dom/set-attr!
-     source
-     protocol/execution-attr
-     execution-id)
-    (dom/set-attr!
-     source
-     pending-source-attr
-     "true")
-    (dom/set-attr!
-     source
-     "aria-busy"
-     "true")
-    (dom/set-attr!
-     source
-     "aria-disabled"
-     "true")
-    ;; At configRequest/request-start time the click has already been accepted by
-    ;; HTMX, so native disabling can now safely prevent duplicate activation.
-    (when (some?
-           (.-disabled source))
-      (set!
-       (.-disabled source)
-       true))
-    (when-some [pending-label
-                (:pending-label descriptor)]
-      (when label
-        (if (= "INPUT"
-               (dom/tag-name label))
-          (set! (.-value label)
-                pending-label)
-          (set! (.-textContent label)
-                pending-label))))
-    state))
-
-(defn- clear-source-pending!
-  [state]
-  (when-some [source
-              (:source state)]
-    (dom/remove-attr!
-     source
-     protocol/execution-attr)
-    (dom/remove-attr!
-     source
-     pending-source-attr)
-    (if (nil?
-         (:aria-busy state))
-      (dom/remove-attr!
-       source
-       "aria-busy")
-      (dom/set-attr!
-       source
-       "aria-busy"
-       (:aria-busy state)))
-    (if (nil?
-         (:aria-disabled state))
-      (dom/remove-attr!
-       source
-       "aria-disabled")
-      (dom/set-attr!
-       source
-       "aria-disabled"
-       (:aria-disabled state)))
-    (when (some?
-           (:disabled state))
-      (set!
-       (.-disabled source)
-       (:disabled state)))
-    (when-some [label
-                (:label-element state)]
-      (when (dom/connected? label)
-        (if (= "INPUT"
-               (dom/tag-name label))
-          (set! (.-value label)
-                (:label state))
-          (set! (.-textContent label)
-                (:label state))))))
-  true)
-
-;; -----------------------------------------------------------------------------
-;; Browser FX operations
-;; -----------------------------------------------------------------------------
-
-(defn acquire-target!
-  [ctx]
-  (let [execution-id (get ctx optimistic/execution-id-key)
-        scope (get ctx optimistic/scope-key)
-        target (get ctx target-key)
-        target-id (get ctx target-id-key)]
-    (when-not (reserve-target! scope execution-id target target-id)
-      (throw
-       (ex-info
-        "Gesso Live optimistic target is already owned by another execution."
-        {:error/type :gesso.live.optimistic/target-busy
-         :execution-id execution-id
-         :scope scope
-         :owner (:execution-id (current-lock scope))})))
-    {:optimistic/target-acquired? true}))
-
-(defn capture-continuity!
-  [ctx]
-  (let [root (get ctx root-key)
-        source (get ctx source-key)
-        slot (when root
-               (continuity/capture! root source))]
-    {continuity-slot-key slot}))
-
-(defn capture-snapshot!
-  [ctx]
-  (let [target (current-target ctx)]
-    (when-not target
-      (throw
-       (ex-info
-        "Gesso Live optimistic snapshot target disappeared before projection."
-        {:error/type :gesso.live.optimistic/no-snapshot-target
-         :execution-id (get ctx optimistic/execution-id-key)})))
-    {snapshot-key (dom/snapshot target)}))
-
-(defn install-projection!
-  [ctx]
-  (let [target (current-target ctx)
-        projection (get ctx projection-key)
-        descriptor (get ctx descriptor-key)
-        source (get ctx source-key)
-        execution-id (get ctx optimistic/execution-id-key)]
-    (when-not target
-      (throw
-       (ex-info
-        "Gesso Live optimistic target disappeared before projection installation."
-        {:error/type :gesso.live.optimistic/no-projection-target
-         :execution-id execution-id})))
-    ;; Keep the existing target object alive: HTMX may already retain it for the
-    ;; request currently being configured.
-    (dom/copy-element-into! target projection)
-    ;; Projection authority is always explicitly non-canonical.
-    (dom/remove-attr! target protocol/canonical-attr)
-    (dom/set-attr! target protocol/scope-attr (:scope descriptor))
-    (dom/set-attr! target active-attr execution-id)
-    (dom/set-attr! target pending-attr "true")
-    (dom/set-attr! target locked-attr "true")
-    (dom/set-attr! target "aria-busy" "true")
-    (htmx-process! target)
-    {pending-source-state-key
-     (mark-source-pending! source descriptor execution-id)}))
-
-(defn schedule-timeout!
-  [ctx]
-  (let [execution-id (get ctx optimistic/execution-id-key)]
-    (runtime/schedule-event!
-     execution-id
-     settlement-timer-key
-     default-settlement-timeout-ms
-     optimistic/timeout-event
-     {optimistic/reason-key :settlement-timeout})
-    {:optimistic/timeout-scheduled? true}))
-
-(defn- canonical-scope!
-  [canonical expected-scope]
-  (when-not (dom/canonical? canonical)
-    (throw
-     (ex-info
-      "Optimistic settlement canonical payload is not explicitly canonical."
-      {:error/type :gesso.live.optimistic/noncanonical-settlement
-       :canonical canonical})))
-  (when-not (= expected-scope (dom/scope canonical))
-    (throw
-     (ex-info
-      "Optimistic settlement canonical scope does not match execution scope."
-      {:error/type :gesso.live.optimistic/canonical-scope-mismatch
-       :expected expected-scope
-       :actual (dom/scope canonical)})))
-  canonical)
-
-(defn- installed-canonical-disposition
-  "Decide whether detached settlement canonical may replace current target.
-
-   Existing explicit canonical state wins on equal, older, or incomparable
-   incoming revisions. This prevents a correlated POST response from overwriting
-   authoritative canonical state that reached the browser first."
-  [target incoming]
-  (if-not (dom/canonical? target)
-    :install
-    (case (protocol/compare-revisions
-           (dom/revision incoming)
-           (dom/revision target))
-      :newer :install
-      :same :canonical-wins
-      :older :canonical-wins
-      :incomparable :canonical-wins)))
-
-(defn install-canonical!
-  [ctx]
-  (let [execution-id (get ctx optimistic/execution-id-key)
-        scope (get ctx optimistic/scope-key)
-        canonical (canonical-scope!
-                   (get ctx optimistic/canonical-key)
-                   scope)
-        target (current-target ctx)]
-    (when-not target
-      (throw
-       (ex-info
-        "Gesso Live cannot reconcile optimistic execution because its target no longer exists."
-        {:error/type :gesso.live.optimistic/no-canonical-target
-         :execution-id execution-id
-         :scope scope})))
-    (case (installed-canonical-disposition target canonical)
-      :install
-      (do
-        (dom/copy-canonical-into! target (.cloneNode canonical true))
-        (htmx-process! target)
-        {optimistic/canonical-disposition-key :installed
-         canonical-source-key :settlement})
-
-      :canonical-wins
-      {optimistic/canonical-disposition-key :canonical-wins
-       canonical-source-key :already-installed})))
-
-(defn discard-snapshot!
-  [_ctx]
-  ;; Explicit nil revokes recovery authority in the accumulated choreography
-  ;; context even though the former snapshot may remain in diagnostics/trace.
-  {snapshot-key nil})
-
-(defn recover-snapshot!
-  [ctx]
-  (let [execution-id (get ctx optimistic/execution-id-key)
-        snapshot (get ctx snapshot-key)
-        target (current-target ctx)]
-    (cond
-      ;; A missing target is not evidence that canonical won. It is a trusted
-      ;; runtime/DOM failure and must remain visible as such.
-      (nil? target)
-      (throw
-       (ex-info
-        "Gesso Live optimistic recovery target no longer exists."
-        {:error/type :gesso.live.optimistic/no-recovery-target
-         :execution-id execution-id}))
-
-      ;; Explicit canonical state always outranks the old structural snapshot.
-      (dom/canonical? target)
-      {optimistic/recovery-disposition-key :canonical-wins}
-
-      (nil? snapshot)
-      (throw
-       (ex-info
-        "Optimistic recovery has no authorized structural snapshot."
-        {:error/type :gesso.live.optimistic/no-recovery-snapshot
-         :execution-id execution-id}))
-
-      ;; Only this execution's still-provisional target may be rolled back.
-      (not= execution-id (dom/attr target active-attr))
-      (throw
-       (ex-info
-        "Optimistic recovery target is neither canonical nor owned by this execution."
-        {:error/type :gesso.live.optimistic/recovery-authority-lost
-         :execution-id execution-id
-         :active (dom/attr target active-attr)}))
-
-      :else
-      (do
-        (dom/copy-element-into! target (dom/snapshot-node snapshot))
-        (htmx-process! target)
-        {optimistic/recovery-disposition-key :recovered}))))
-
-(defn restore-continuity!
-  [ctx]
-  (let [execution-id (get ctx optimistic/execution-id-key)
-        scope (get ctx optimistic/scope-key)
-        root (get ctx root-key)
-        complete!
-        (fn [detail]
-          ;; This callback runs after the continuity two-frame layout boundary.
-          ;; Late delivery after retirement is harmless in browser.choreo.
-          (runtime/resume-event!
-           execution-id
-           optimistic/continuity-restored-event
-           {:scope scope
-            :continuity detail}))]
-    (if root
-      (continuity/restore! root complete!)
-      ;; There is no configured continuity root, but the choreography still owns
-      ;; an explicit restoration barrier. Preserve the same post-layout timing.
-      (continuity/after-layout!
-       #(complete! {:root nil
-                    :target nil
-                    :slot nil})))
-    {:optimistic/continuity-restore-scheduled? true}))
-
-(defn cancel-timeout!
-  [ctx]
-  (runtime/cancel-timer!
-   (get ctx optimistic/execution-id-key)
-   settlement-timer-key)
-  {:optimistic/timeout-cancelled? true})
-
-(defn clear-pending!
-  [ctx]
-  (let [execution-id (get ctx optimistic/execution-id-key)
-        target (current-target ctx)
-        source-state (get ctx pending-source-state-key)]
-    (when (and target
-               (= execution-id (dom/attr target active-attr)))
-      (dom/remove-attr! target active-attr)
-      (dom/remove-attr! target pending-attr)
-      (dom/remove-attr! target locked-attr)
-      (dom/remove-attr! target "aria-busy"))
-    (clear-source-pending! source-state)
-    (swap! outgoing-actions dissoc execution-id)
-    (when-some [source (get ctx source-key)]
-      (swap! executions-by-source dissoc (node-uid source)))
-    {:optimistic/pending-cleared? true}))
-
-(defn release-target-operation!
-  [ctx]
-  (release-target!
-   (get ctx optimistic/scope-key)
-   (get ctx optimistic/execution-id-key))
-  {:optimistic/target-released? true})
-
-;; One choreography :fx state names a whole participant-local FX machine. These
-;; machines are intentionally tiny wrappers around the trusted operation
-;; handlers above; browser.fx provides the Biff-compatible local execution
-;; semantics while choreography remains responsible for async boundaries.
-(def ^:private fx-result-key
-  ::fx-result)
-
-(defn- operation-machine
-  [machine-id]
-  (fx/machine
-   machine-id
-   :start
-   (fn [_ctx]
-     {fx-result-key [machine-id]
-      fx/next-key :return})
-   :return
-   (fn [ctx]
-     {fx/return-key (get ctx fx-result-key)})))
-
-(def browser-machine-handlers
-  {optimistic/browser-acquire-target-machine acquire-target!
-   optimistic/browser-capture-continuity-machine capture-continuity!
-   optimistic/browser-capture-snapshot-machine capture-snapshot!
-   optimistic/browser-install-projection-machine install-projection!
-   optimistic/browser-schedule-timeout-machine schedule-timeout!
-   optimistic/browser-install-canonical-machine install-canonical!
-   optimistic/browser-discard-snapshot-machine discard-snapshot!
-   optimistic/browser-recover-snapshot-machine recover-snapshot!
-   optimistic/browser-restore-continuity-machine restore-continuity!
-   optimistic/browser-cancel-timeout-machine cancel-timeout!
-   optimistic/browser-clear-pending-machine clear-pending!
-   optimistic/browser-release-target-machine release-target-operation!})
-
-(defn install-fx!
-  "Register the optimistic choreography's browser-local FX machines and their
-   trusted effect handlers."
-  []
-  (doseq [[machine-id handler] browser-machine-handlers]
-    (runtime/register-fx-handler! machine-id handler)
-    (runtime/register-fx-machine! machine-id (operation-machine machine-id)))
-  true)
-
-(defn- record-command-send!
-  [action execution]
-  (when-not (and (= :send (:kind action))
-                 (= optimistic/browser-role (:from action))
-                 (= optimistic/server-role (:to action))
-                 (= protocol/command-event (:event action)))
-    (throw
-     (ex-info
-      "Optimistic browser choreography produced an unexpected send boundary."
-      {:error/type :gesso.live.optimistic/unexpected-send
-       :action action
-       :execution-id (:execution-id execution)})))
-  (swap! outgoing-actions assoc (:execution-id action) action)
-  true)
-
-(defn install-transport-handoff!
-  "Install the optimistic command handoff used by the surrounding HTMX adapter."
-  []
-  (runtime/set-send-handler! record-command-send!)
-  true)
-
-;; -----------------------------------------------------------------------------
-;; Starting an optimistic execution
-;; -----------------------------------------------------------------------------
-
-(defn- initial-context
-  [prepared execution-id consistency-token]
-  (let [{:keys
-         [source
-          target
-          target-id
-          descriptor
-          projection
-          root]}
-        prepared]
-    (cond->
-        {optimistic/execution-id-key
-         execution-id
-
-         optimistic/transition-key
-         (:transition descriptor)
-
-         optimistic/scope-key
-         (:scope descriptor)
-
-         source-key source
-         target-key target
-         target-id-key target-id
-         descriptor-key descriptor
-         projection-key projection
-         root-key root}
-
-      (some?
-       (:base-revision descriptor))
-      (assoc
-       optimistic/base-revision-key
-       (:base-revision descriptor))
-
-      (some? consistency-token)
-      (assoc
-       optimistic/consistency-token-key
-       consistency-token))))
+(defn- normalize-command
+  [command]
+  (protocol/command
+   (dissoc
+    (require-map! "Optimistic command" command)
+    protocol/protocol-version-key)))
 
 (defn start!
-  "Start one browser optimistic execution.
+  "Start one protocol-v3 optimistic browser projection.
 
-   Required:
-     source - actual HTMX request owner
+   The caller supplies a preverified browser ExecutablePlan. This namespace does
+   not verify/project at runtime and therefore cannot manufacture a different
+   semantic plan in the browser.
 
-   Options:
-     :execution-id       caller-provided id; otherwise generated
-     :consistency-token  optional DB visibility token already associated with
-                         the request
+   Provisional state is NOT supplied here. The portable Choreo local derive step
+   establishes it, after which the adapter emits :optimistic/install-provisional,
+   then starts any settlement timeout, then continues toward transport.
 
-   Returns the execution id, suspended endpoint execution, and the exact
-   choreography-produced command send action recorded by the transport handoff."
-  ([source]
-   (start! source nil))
-  ([source {:keys [execution-id consistency-token]}]
-   (let [execution-id (or execution-id
-                          (gesso.live.browser.optimistic/execution-id))
-         prepared (prepare source nil)
-         source-uid (node-uid source)
-         execution
-         (runtime/start!
-          browser-plan
-          {:execution-id execution-id
-           :context
-           (initial-context prepared execution-id consistency-token)
-           :metadata
-           {:kind :optimistic
-            :source source-uid}})
-         command (get @outgoing-actions execution-id)]
-     (when-not command
-       (throw
-        (ex-info
-         "Optimistic browser choreography reached suspension without handing off its command send."
-         {:error/type :gesso.live.optimistic/missing-command-handoff
+   Returns the shell dispatch result with :execution-ref when the execution
+   remains active after synchronous initial effects."
+  [runtime options]
+  (let [runtime (require-runtime! runtime)
+        options
+        (check-keys!
+         "Optimistic start options"
+         start-option-keys
+         options)
+        plan
+        (require-non-nil!
+         "Optimistic browser ExecutablePlan"
+         (:plan options))
+        command (normalize-command (:command options))
+        command-values (optimistic-choreo/command-values command)
+        target-id
+        (require-non-nil!
+         "Optimistic target id"
+         (:target-id options))
+        rollback-eligible?
+        (get options :rollback-eligible? true)
+        timeout-ms
+        (if (contains? options :timeout-ms)
+          (:timeout-ms options)
+          default-timeout-ms)
+        replace-owner? (get options :replace-owner? false)
+        replace-execution? (get options :replace-execution? false)
+        _ (require-boolean! ":rollback-eligible?" rollback-eligible?)
+        _ (when (some? timeout-ms)
+            (require-nonnegative-integer! ":timeout-ms" timeout-ms))
+        _ (require-boolean! ":replace-owner?" replace-owner?)
+        _ (require-boolean! ":replace-execution?" replace-execution?)
+        command-id (get command protocol/command-id-key)
+        execution-id (get command protocol/execution-id-key)
+        _
+        (when-not (= (:browser-role runtime) (:role plan))
+          (throw
+           (optimistic-error
+            :wrong-plan-role
+            "Optimistic browser runtime requires the configured browser-role ExecutablePlan."
+            {:expected-role (:browser-role runtime)
+             :actual-role (:role plan)})))
+        machine-execution
+        (machine/start
+         plan
+         {:command-id command-id
           :execution-id execution-id
-          :state (:state execution)})))
-     (when (machine/suspended? execution)
-       (swap! executions-by-source assoc source-uid execution-id))
-     (let [ctx (machine/execution-context execution)]
-       (emit!
-        (:root prepared)
-        "started"
-        #js {:executionId execution-id
-             :transition (get ctx optimistic/transition-key)
-             :scope (get ctx optimistic/scope-key)})
-       {:execution-id execution-id
-        :execution execution
-        :command command}))))
+          :values command-values})
+        optimistic-config
+        (cond->
+         {:command-id command-id
+          :provisional-key optimistic-choreo/provisional-value-key
+          :rollback-eligible? rollback-eligible?}
+          (some? timeout-ms)
+          (assoc :timeout-ms timeout-ms))
+        event
+        {:event :execution/start
+         :execution-id execution-id
+         :execution machine-execution
+         :target-id target-id
+         :replace-owner? replace-owner?
+         :replace-execution? replace-execution?
+         :optimistic optimistic-config}
+        dispatch-result
+        (shell/dispatch! (:shell runtime) event)]
+    (assoc dispatch-result
+           :command command
+           :execution-ref
+           (browser-choreo/execution-ref
+            (:choreo runtime)
+            execution-id))))
 
-;; -----------------------------------------------------------------------------
-;; Settlement response parsing
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Settlement / supersession normalization
+;; =============================================================================
 
-(defn settlement-marker?
-  [element]
-  (and
-   (dom/template? element)
-   (dom/truthy-attr?
-    element
-    protocol/settlement-attr)))
+(defn- current-scope
+  [runtime execution-ref]
+  (let [{:keys [execution-id generation]}
+        (browser-choreo/require-execution-ref! execution-ref)
+        scope (adapter/optimistic-scope (state runtime) execution-id)]
+    (when (and scope
+               (= generation (:execution-generation scope)))
+      scope)))
 
-(defn marker->settlement
-  "Strictly decode one inert settlement marker.
-
-   Missing/malformed command-applied metadata is an error, and the flag must
-   agree with the semantic outcome. Canonical content is attached separately
-   after explicit authority selection."
-  [marker]
-  (when (settlement-marker? marker)
-    (let [version (dom/attr marker protocol/protocol-attr)
-          execution-id (dom/attr marker protocol/execution-attr)
-          scope (dom/attr marker protocol/scope-attr)
-          outcome
-          (protocol/wire->settlement-outcome
-           (dom/attr marker protocol/outcome-attr))
-          command-applied?
-          (protocol/wire->command-applied
-           (dom/attr marker protocol/command-applied-attr))
-          revision-wire (dom/attr marker protocol/revision-attr)]
-      (when-not (= protocol/version version)
-        (throw
-         (ex-info
-          "Optimistic settlement marker uses an unsupported protocol version."
-          {:error/type :gesso.live.optimistic/unsupported-settlement-protocol
-           :expected protocol/version
-           :actual version
-           :execution-id execution-id})))
-      (doseq [[field value] [[:execution-id execution-id]
-                             [:scope scope]]]
-        (when-not (non-blank? value)
-          (throw
-           (ex-info
-            "Optimistic settlement marker is missing required correlation metadata."
-            {:error/type :gesso.live.optimistic/incomplete-settlement
-             :field field
-             :value value}))))
-      (protocol/assert-settlement-consistent! outcome command-applied?)
-      {optimistic/execution-id-key execution-id
-       optimistic/scope-key scope
-       optimistic/outcome-key outcome
-       optimistic/command-applied-key command-applied?
-       optimistic/revision-key
-       (when revision-wire
-         (protocol/wire->revision revision-wire))
-       optimistic/reason-key
-       (dom/attr marker protocol/reason-attr)})))
-
-(defn- settlement-markers
-  [root]
-  (let [selector
-        (str "template["
-             (attr-name
-              protocol/settlement-attr)
-             "]")]
-    (cond-> (dom/query-all
-             root
-             selector)
-      (and (dom/template? root)
-           (settlement-marker? root))
-      (conj root))))
-
-(defn- marker-for-execution
-  [root expected-execution-id]
-  (let [matches
-        (->> (settlement-markers root)
-             (filter
-              #(=
-                expected-execution-id
-                (dom/attr
-                 %
-                 protocol/execution-attr)))
-             vec)]
-    (case (count matches)
-      0
-      nil
-
-      1
-      (first matches)
-
+(defn- require-settlement-correlation!
+  [execution-ref scope settlement]
+  (let [{:keys [execution-id]}
+        (browser-choreo/require-execution-ref! execution-ref)
+        settlement-execution-id
+        (get settlement protocol/execution-id-key)]
+    (when-not (= execution-id settlement-execution-id)
       (throw
-       (ex-info
-        "HTMX response contains multiple settlement markers for one optimistic execution."
-        {:error/type
-         :gesso.live.optimistic/duplicate-settlement
-         :execution-id expected-execution-id
-         :count (count matches)})))))
-
-(defn- canonical-from-response
-  [root scope]
-  (let [selection
-        (dom/newest-canonical
-         (dom/canonical-elements
-          root
-          scope))]
-    (case (:status selection)
-      :selected
-      (:element selection)
-
-      :none
-      nil
-
-      :ambiguous
+       (optimistic-error
+        :settlement-correlation-mismatch
+        "Optimistic settlement does not correlate with the supplied execution reference."
+        {:execution-id execution-id
+         :settlement-execution-id settlement-execution-id})))
+    (when (and scope
+               (not= (:command-id scope)
+                     (get settlement protocol/command-id-key)))
       (throw
-       (ex-info
-        "Optimistic settlement response contains ambiguous canonical state."
-        {:error/type
-         :gesso.live.optimistic/ambiguous-canonical
-         :scope scope
-         :reason
-         (:reason selection)})))))
-
-(defn settlement-from-root
-  "Extract one complete authoritative settlement from detached response markup.
-
-   The marker and canonical root must agree exactly on scope and revision wire
-   identity. A matching marker without authoritative canonical content is a
-   protocol error, never an implicit success/failure fallback."
-  [root expected-execution-id]
-  (when-some [marker (marker-for-execution root expected-execution-id)]
-    (let [settlement (marker->settlement marker)
-          scope (get settlement optimistic/scope-key)
-          canonical (canonical-from-response root scope)]
-      (when-not canonical
-        (throw
-         (ex-info
-          "Optimistic settlement response does not contain explicitly canonical content for its scope."
-          {:error/type :gesso.live.optimistic/missing-canonical
-           :execution-id expected-execution-id
-           :scope scope})))
-      (when-not (= protocol/version
-                   (dom/attr canonical protocol/protocol-attr))
-        (throw
-         (ex-info
-          "Optimistic canonical response root uses an unsupported protocol version."
-          {:error/type :gesso.live.optimistic/unsupported-canonical-protocol
-           :execution-id expected-execution-id
-           :expected protocol/version
-           :actual (dom/attr canonical protocol/protocol-attr)})))
-      (when-not (= scope (dom/scope canonical))
-        (throw
-         (ex-info
-          "Optimistic settlement marker scope disagrees with canonical root scope."
-          {:error/type :gesso.live.optimistic/settlement-scope-mismatch
-           :execution-id expected-execution-id
-           :marker-scope scope
-           :canonical-scope (dom/scope canonical)})))
-      (let [marker-revision-wire
-            (dom/attr marker protocol/revision-attr)
-            canonical-revision-wire
-            (dom/revision-wire canonical)]
-        (when-not (= marker-revision-wire canonical-revision-wire)
-          (throw
-           (ex-info
-            "Optimistic settlement marker revision disagrees with canonical root revision."
-            {:error/type :gesso.live.optimistic/settlement-revision-mismatch
-             :execution-id expected-execution-id
-             :scope scope
-             :marker-revision marker-revision-wire
-             :canonical-revision canonical-revision-wire}))))
-      (assoc settlement optimistic/canonical-key canonical))))
-
-(defn response-root
-  "Parse an HTMX XHR response into a detached DocumentFragment."
-  [xhr]
-  (let [text
-        (when xhr
-          (.-responseText xhr))]
-    (when (and
-           (string? text)
-           (not
-            (str/blank? text)))
-      (let [template
-            (.createElement
-             js/document
-             "template")]
-        (set!
-         (.-innerHTML template)
-         text)
-        (.-content template)))))
-
-;; -----------------------------------------------------------------------------
-;; Correlated protocol delivery
-;; -----------------------------------------------------------------------------
-
-(def settlement-message-descriptor
-  {:from optimistic/server-role
-   :to optimistic/browser-role
-   :event optimistic/settlement-event
-   :via :http})
+       (optimistic-error
+        :settlement-correlation-mismatch
+        "Optimistic settlement command-id does not match the current optimistic scope."
+        {:execution-id execution-id
+         :expected-command-id (:command-id scope)
+         :settlement-command-id
+         (get settlement protocol/command-id-key)})))
+    settlement))
 
 (defn settle!
-  "Deliver one already-parsed authoritative settlement to its execution."
-  [settlement]
-  (let [execution-id
-        (get settlement
-             optimistic/execution-id-key)]
-    (runtime/resume-message!
-     execution-id
-     settlement-message-descriptor
-     settlement)))
+  "Observe one trusted protocol-v3 settlement and, when the referenced
+   generation is still current, deliver its participant message to the projected
+   browser machine.
 
-(defn settle-from-xhr!
-  "Parse and deliver settlement for expected execution from one XHR response.
+   Stale/retired execution references are submitted to the adapter unchanged so
+   the adapter generation gate can classify them as stale instead of this
+   integration layer throwing merely because a late callback arrived.
 
-   Returns nil when the response has no marker for this execution. A malformed
-   matching settlement throws rather than being silently interpreted as success."
-  [expected-execution-id xhr]
-  (when-some [root
-              (response-root xhr)]
-    (when-some [settlement
-                (settlement-from-root
-                 root
-                 expected-execution-id)]
-      (settle!
-       settlement))))
+   Returns the settlement-observation dispatch result with :message-dispatch set
+   to the subsequent machine-message dispatch when one was required."
+  ([runtime execution-ref settlement]
+   (settle! runtime execution-ref settlement nil))
+  ([runtime execution-ref settlement message-id]
+   (let [runtime (require-runtime! runtime)
+         {:keys [execution-id generation]}
+         (browser-choreo/require-execution-ref! execution-ref)
+         scope-before (current-scope runtime execution-ref)
+         settlement'
+         (protocol/settlement
+          (dissoc
+           (require-map! "Optimistic settlement" settlement)
+           protocol/protocol-version-key))
+         _ (require-settlement-correlation!
+            execution-ref scope-before settlement')
+         resolution
+         (if (map? (:provisional scope-before))
+           (optimistic-choreo/settlement-resolution
+            (:provisional scope-before)
+            settlement')
+           (get settlement' protocol/resolution-key))
+         already-observed?
+         (= :settlement-observed (:status scope-before))
+         settlement-dispatch
+         (shell/dispatch!
+          (:shell runtime)
+          {:event :optimistic/settlement-observed
+           :execution-id execution-id
+           :generation generation
+           :resolution resolution
+           :settlement settlement'})
+         message-dispatch
+         (when (and scope-before
+                    (not already-observed?))
+           (let [envelope
+                 (machine/message
+                  (:authority-role runtime)
+                  (:browser-role runtime)
+                  protocol/settlement-event
+                  (optimistic-choreo/settlement-message-values settlement')
+                  {:via :http})
+                 message-id'
+                 (or message-id
+                     (str "gesso-optimistic-settlement-"
+                          (random-uuid)))]
+             (browser-choreo/deliver-message!
+              (:choreo runtime)
+              execution-ref
+              message-id'
+              envelope)))]
+     (assoc settlement-dispatch
+            :message-dispatch message-dispatch))))
 
-(defn request-failed!
-  "Deliver environmental request failure.
+(defn supersede!
+  "Submit one trusted authoritative supersession observation.
 
-   This is not semantic :failed settlement. With no authoritative response, the
-   choreography follows its guarded snapshot-recovery path."
-  ([execution-id]
-   (request-failed!
-    execution-id
-    nil))
-  ([execution-id reason]
-   (runtime/resume-event!
-    execution-id
-    optimistic/request-failed-event
-    {optimistic/reason-key
-     reason})))
+   The caller must already have established through the trusted Live/authority
+   path that this observation supersedes the provisional trajectory. Merely
+   constructing protocol-shaped browser data does not establish progression.
 
-;; -----------------------------------------------------------------------------
-;; Canonical supersession
-;; -----------------------------------------------------------------------------
+   Stale execution references are still submitted to the adapter so its
+   generation gate, not mutable DOM coincidence, decides whether the event can
+   affect semantic state. Physical canonical installation remains the normal
+   Live/HTMX path's responsibility."
+  [runtime execution-ref authoritative-observation]
+  (let [runtime (require-runtime! runtime)
+        {:keys [execution-id generation]}
+        (browser-choreo/require-execution-ref! execution-ref)
+        authoritative'
+        (protocol/authoritative
+         (dissoc
+          (require-map!
+           "Optimistic authoritative observation"
+           authoritative-observation)
+          protocol/authority-key))]
+    (shell/dispatch!
+     (:shell runtime)
+     {:event :optimistic/authoritative-superseded
+      :execution-id execution-id
+      :generation generation
+      :authoritative authoritative'})))
 
-(defn- execution-superseded-by?
-  [execution canonical]
-  (let [ctx
-        (machine/execution-context
-         execution)
-        scope
-        (get ctx
-             optimistic/scope-key)
-        base-revision
-        (get ctx
-             optimistic/base-revision-key)]
-    (and
-     (dom/canonical? canonical)
-     (= scope
-        (dom/scope canonical))
-     ;; Without a base revision there is no proof that an unrelated canonical
-     ;; render outranks the in-flight command.
-     (some? base-revision)
-     (= :newer
-        (protocol/compare-revisions
-         (dom/revision canonical)
-         base-revision)))))
-
-(defn canonical-installed!
-  "Observe newly installed canonical DOM and notify any pending optimistic
-   execution it provably supersedes.
-
-   Only explicit canonical state with a strictly newer comparable revision than
-   the execution's base revision can emit canonical-superseded. Equality,
-   older revisions, distinct opaque revisions, and missing revisions do not
-   guess authority order."
-  [canonical]
-  (when (dom/canonical? canonical)
-    (doseq [execution-id
-            (runtime/active-execution-ids)
-            :let [execution
-                  (runtime/execution
-                   execution-id)]
-            :when
-            (and execution
-                 (runtime/accepts-event?
-                  execution-id
-                  optimistic/canonical-superseded-event)
-                 (execution-superseded-by?
-                  execution
-                  canonical))]
-      (runtime/resume-event!
-       execution-id
-       optimistic/canonical-superseded-event
-       {optimistic/revision-key
-        (dom/revision canonical)
-        optimistic/scope-key
-        (dom/scope canonical)})))
-  canonical)
-
-(defn observe-canonical-tree!
-  "Observe every explicit canonical element at or beneath root."
-  [root]
-  (doseq [canonical
-          (dom/canonical-elements root)]
-    (canonical-installed!
-     canonical))
-  root)
-
-;; -----------------------------------------------------------------------------
-;; Request/source correlation helpers
-;; -----------------------------------------------------------------------------
-
-(defn execution-for-source
-  [source]
-  (get @executions-by-source
-       (node-uid source)))
-
-(defn forget-source!
-  [source]
-  (when-some [uid
-              (node-uid source)]
-    (swap!
-     executions-by-source
-     dissoc
-     uid))
-  true)
-
-(defn request-header
-  "HTTP header name/value pair for the optimistic execution correlation id.
-
-   The name is emitted in ordinary HTTP spelling; Ring receives the lower-case
-   name declared in gesso.live.protocol."
-  [execution-id]
-  ["Gesso-Optimistic-Execution"
-   execution-id])
-
-(defn command-action
-  "Return the projected optimistic command send action for execution-id."
-  [execution-id]
-  (get @outgoing-actions execution-id))
-
-(defn command-payload
-  "Return the exact command payload produced by choreography projection."
-  [execution-id]
-  (some-> (command-action execution-id)
-          :payload))
-
-;; -----------------------------------------------------------------------------
-;; Completion/cleanup observations
-;; -----------------------------------------------------------------------------
-
-(defn active?
-  [execution-id]
-  (runtime/active?
-   execution-id))
-
-(defn scope-busy?
-  [scope]
-  (boolean
-   (current-lock scope)))
-
-(defn cleanup-source-if-terminal!
-  "Drop source correlation after generic runtime retirement.
-
-   Target/pending cleanup itself is choreography-owned and has already happened
-   before a normal terminal return."
-  [source]
-  (let [execution-id
-        (execution-for-source source)]
-    (when (and execution-id
-               (not
-                (runtime/active?
-                 execution-id)))
-      (forget-source!
-       source))
-    true))
-
-(defn abort!
-  "Whole-browser teardown escape hatch.
-
-   Normal network/timeout/canonical races must use modeled events. This function
-   is only for cases where the browser object graph itself is being destroyed."
-  [execution-id reason]
-  (when-some [lock
-              (execution-lock
-               execution-id)]
-    (release-target!
-     (:scope lock)
-     execution-id))
-  (runtime/cancel-all-timers!
-   execution-id)
-  (swap! outgoing-actions dissoc execution-id)
-  (swap!
-   executions-by-source
-   (fn [by-source]
-     (into {}
-           (remove (fn [[_source-id active-id]]
-                     (= execution-id active-id)))
-           by-source)))
-  (runtime/abort!
-   execution-id
+(defn retire!
+  [runtime execution-ref reason]
+  (browser-choreo/retire!
+   (:choreo (require-runtime! runtime))
+   execution-ref
    reason))
 
-;; -----------------------------------------------------------------------------
-;; Initialization / diagnostics
-;; -----------------------------------------------------------------------------
-
-(defn initialize!
-  "Register optimistic browser FX and the command transport handoff.
-
-   Global HTMX/SSE listener registration belongs to gesso.live.browser.core.
-   Repeated initialization is safe."
-  []
-  (install-fx!)
-  (install-transport-handoff!)
-  true)
+;; =============================================================================
+;; Diagnostics
+;; =============================================================================
 
 (defn diagnostics
-  []
-  {:active-scopes
-   (into {}
-         (map
-          (fn [[scope lock]]
-            [scope
-             (select-keys
-              lock
-              [:execution-id
-               :target-id])]))
-         @target-locks)
-   :source-correlations
-   (count @executions-by-source)
-   :browser-plan
-   {:name (:name browser-plan)
-    :role (:role browser-plan)
-    :state-count
-    (count
-     (:states browser-plan))}})
+  "Return host-resource-free optimistic integration diagnostics."
+  [runtime]
+  (let [runtime (require-runtime! runtime)]
+    {:runtime-version runtime-version
+     :browser-role (:browser-role runtime)
+     :authority-role (:authority-role runtime)
+     :derive-action (:derive-action runtime)
+     :resolve-action (:resolve-action runtime)
+     :attached-effect-kinds
+     (set (keys @(:installed-handlers runtime)))
+     :attached-local-actions
+     (set (keys @(:installed-actions runtime)))
+     :active-optimistic-executions
+     (set (keys (:optimistic (state runtime))))}))

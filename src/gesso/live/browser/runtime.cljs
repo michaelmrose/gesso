@@ -1,31 +1,31 @@
 (ns gesso.live.browser.runtime
   "Top-level composition root for the Gesso Live browser runtime.
 
-   This namespace owns composition and lifecycle only. It does not introduce a
-   second semantic runtime.
+   This namespace owns composition and aggregate lifecycle only. It does not
+   introduce a second semantic runtime.
 
    One composed runtime contains:
 
      gesso.live.browser.core
-       HTMX/document lifecycle normalization and one shared shell
-
-     gesso.live.browser.continuity
-       the per-core physical continuity implementation
+       HTMX/document lifecycle normalization, continuity, and the one shared
+       shell/AdapterState owner
 
      gesso.live.browser.choreo
        physical realization of portable Choreo effects attached to that exact
        same shell
 
+     gesso.live.browser.optimistic (optional)
+       protocol-v3 optimistic projection/settlement realization attached to the
+       exact same Choreo runtime and shell
+
    AdapterState remains owned exclusively by gesso.live.browser.shell through
    gesso.live.browser.adapter. This namespace never advances portable Choreo,
-   interprets authoritative bases, manages timers, or stores browser resources.
-
-   Optimism is intentionally absent from this composition root for now. The
-   gesso.live.optimistic rewrite will later attach policy/effects to this
-   already-stable browser composition rather than rebuilding browser ownership."
+   interprets authoritative bases, chooses optimistic settlement policy, manages
+   timers, stores browser resources, or creates another optimistic registry."
   (:require
    [gesso.live.browser.choreo :as choreo]
    [gesso.live.browser.core :as core]
+   [gesso.live.browser.optimistic :as optimistic]
    [gesso.live.browser.shell :as shell]))
 
 ;; =============================================================================
@@ -33,14 +33,15 @@
 ;; =============================================================================
 
 (def runtime-version
-  "1.1.0-dev")
+  "1.2.0-dev")
 
 (def runtime-type
   :gesso.live.browser.runtime/runtime)
 
 (def option-keys
   #{:core-options
-    :choreo-options})
+    :choreo-options
+    :optimistic-options})
 
 (def lifecycle-states
   #{:created
@@ -104,9 +105,20 @@
       (:gesso.live.browser.runtime/version value))
    (core/core? (:core value))
    (choreo/runtime? (:choreo value))
+   (or (nil? (:optimistic value))
+       (optimistic/runtime? (:optimistic value)))
    (identical?
     (core/shell-runtime (:core value))
     (choreo/shell-runtime (:choreo value)))
+   (or
+    (nil? (:optimistic value))
+    (and
+     (identical?
+      (:choreo value)
+      (optimistic/choreo-runtime (:optimistic value)))
+     (identical?
+      (core/shell-runtime (:core value))
+      (optimistic/shell-runtime (:optimistic value)))))
    (some? (:lifecycle value))
    (some? (:public-api value))))
 
@@ -129,6 +141,12 @@
 (defn choreo-runtime
   [runtime]
   (:choreo
+   (require-runtime! runtime)))
+
+(defn optimistic-runtime
+  "Return the optional protocol-v3 optimistic browser binding."
+  [runtime]
+  (:optimistic
    (require-runtime! runtime)))
 
 (defn shell-runtime
@@ -219,33 +237,102 @@
      []
      choreo/owned-effect-kinds)))
 
+(defn- optimistic-ownership-errors
+  [optimistic-runtime shell-runtime choreo-runtime]
+  (when optimistic-runtime
+    (let [installed-handlers
+          @(:installed-handlers optimistic-runtime)
+
+          installed-actions
+          @(:installed-actions optimistic-runtime)
+
+          shell-handlers
+          (shell/handlers shell-runtime)
+
+          choreo-actions
+          (choreo/local-actions choreo-runtime)
+
+          expected-actions
+          #{(:derive-action optimistic-runtime)
+            (:resolve-action optimistic-runtime)}]
+      (into
+       []
+       (concat
+        (mapcat
+         (fn [effect-kind]
+           (let [recorded? (contains? installed-handlers effect-kind)
+                 shell-installed? (contains? shell-handlers effect-kind)
+                 expected-handler (get installed-handlers effect-kind)
+                 actual-handler (get shell-handlers effect-kind)]
+             (cond
+               (not recorded?)
+               [{:invariant :optimistic-handler-ownership
+                 :effect-kind effect-kind
+                 :status :not-recorded}]
+
+               (not shell-installed?)
+               [{:invariant :optimistic-handler-ownership
+                 :effect-kind effect-kind
+                 :status :missing-from-shell}]
+
+               (not (identical? expected-handler actual-handler))
+               [{:invariant :optimistic-handler-ownership
+                 :effect-kind effect-kind
+                 :status :replaced-in-shell}]
+
+               :else
+               [])))
+         optimistic/owned-effect-kinds)
+
+        (mapcat
+         (fn [action-id]
+           (let [recorded? (contains? installed-actions action-id)
+                 choreo-installed? (contains? choreo-actions action-id)
+                 expected-handler (get installed-actions action-id)
+                 actual-handler (get choreo-actions action-id)]
+             (cond
+               (not recorded?)
+               [{:invariant :optimistic-action-ownership
+                 :action-id action-id
+                 :status :not-recorded}]
+
+               (not choreo-installed?)
+               [{:invariant :optimistic-action-ownership
+                 :action-id action-id
+                 :status :missing-from-choreo}]
+
+               (not (identical? expected-handler actual-handler))
+               [{:invariant :optimistic-action-ownership
+                 :action-id action-id
+                 :status :replaced-in-choreo}]
+
+               :else
+               [])))
+         expected-actions))))))
+
 (defn invariant-errors
   "Return read-only composition invariant violations.
 
-   These checks deliberately observe only lifecycle/configuration facts. They do
-   not participate in adapter semantics and therefore cannot alter the behavior
-   of the executable browser state machine.
+   These checks observe lifecycle/configuration ownership only. They do not
+   participate in adapter semantics and therefore cannot change the behavior of
+   the executable browser state machine.
 
-   The expected lifecycle shapes are:
+   Expected lifecycle shapes:
 
      :created
-       core listeners absent, shell open, Choreo handlers attached and owned
+       core listeners absent; shell open; Choreo attached; optional optimism
+       attached to the exact Choreo runtime and shell
 
      :started
-       core listeners installed, shell open, Choreo handlers attached and owned
+       core listeners installed; shell open; Choreo and optional optimism still
+       attached through the exact functions they registered
 
      :stopped
-       core listeners absent, shell closed, Choreo handlers detached
+       core listeners absent; shell closed; Choreo and optimism detached
 
-   For active compositions, handler attachment means more than matching effect
-   keys: every Choreo-owned shell slot must still contain the exact function
-   installed by this Choreo runtime. This catches direct unregister/replacement
-   that Choreo bookkeeping alone cannot observe. No handler functions are ever
-   returned in diagnostics.
-
-   The one-shared-shell check is repeated here even though runtime? structurally
-   requires it because diagnostics should explain composition damage without
-   requiring callers to infer it from nested child diagnostics."
+   Active ownership checks compare the physical registries with the exact
+   handler functions recorded by each integration runtime. Diagnostics never
+   return those functions."
   [runtime]
   (let [runtime
         (require-runtime! runtime)
@@ -256,11 +343,22 @@
         choreo-runtime
         (:choreo runtime)
 
+        optimistic-runtime
+        (:optimistic runtime)
+
         core-shell
         (core/shell-runtime core-runtime)
 
         choreo-shell
         (choreo/shell-runtime choreo-runtime)
+
+        optimistic-shell
+        (when optimistic-runtime
+          (optimistic/shell-runtime optimistic-runtime))
+
+        optimistic-choreo
+        (when optimistic-runtime
+          (optimistic/choreo-runtime optimistic-runtime))
 
         lifecycle-value
         @(:lifecycle runtime)
@@ -271,116 +369,165 @@
         choreo-diagnostics
         (choreo/diagnostics choreo-runtime)
 
+        optimistic-diagnostics
+        (when optimistic-runtime
+          (optimistic/diagnostics optimistic-runtime))
+
         core-started?
         (true? (:started? core-diagnostics))
 
         shell-closed?
         (shell/closed? core-shell)
 
-        attached-effect-kinds
+        choreo-attached-effects
         (:attached-effect-kinds choreo-diagnostics)
 
-        expected-attached
-        choreo/owned-effect-kinds
+        optimistic-attached-effects
+        (:attached-effect-kinds optimistic-diagnostics)
 
-        active-handler-ownership-errors
-        (when
-         (contains? #{:created :started} lifecycle-value)
+        optimistic-attached-actions
+        (:attached-local-actions optimistic-diagnostics)
+
+        expected-optimistic-actions
+        (when optimistic-runtime
+          #{(:derive-action optimistic-runtime)
+            (:resolve-action optimistic-runtime)})
+
+        active-choreo-ownership-errors
+        (when (contains? #{:created :started} lifecycle-value)
           (choreo-handler-ownership-errors
            choreo-runtime
            core-shell))
 
+        active-optimistic-ownership-errors
+        (when (and optimistic-runtime
+                   (contains? #{:created :started} lifecycle-value))
+          (optimistic-ownership-errors
+           optimistic-runtime
+           core-shell
+           choreo-runtime))
+
         base-errors
         (cond-> []
-      (not
-       (identical?
-        core-shell
-        choreo-shell))
-      (conj
-       {:invariant :one-shared-shell
-        :message "Core and Choreo must share the exact same browser shell."})
+          (not (identical? core-shell choreo-shell))
+          (conj
+           {:invariant :one-shared-shell
+            :message "Core and Choreo must share the exact same browser shell."})
 
-      (not
-       (contains?
-        lifecycle-states
-        lifecycle-value))
-      (conj
-       {:invariant :known-lifecycle
-        :lifecycle lifecycle-value
-        :allowed lifecycle-states})
+          (and optimistic-runtime
+               (not (identical? core-shell optimistic-shell)))
+          (conj
+           {:invariant :optimistic-shared-shell
+            :message "Optimism must share the exact composed browser shell."})
 
-      (and
-       (= :created lifecycle-value)
-       core-started?)
-      (conj
-       {:invariant :created-core-not-started
-        :lifecycle lifecycle-value})
+          (and optimistic-runtime
+               (not (identical? choreo-runtime optimistic-choreo)))
+          (conj
+           {:invariant :optimistic-shared-choreo
+            :message "Optimism must attach to the exact composed Choreo runtime."})
 
-      (and
-       (= :created lifecycle-value)
-       shell-closed?)
-      (conj
-       {:invariant :created-shell-open
-        :lifecycle lifecycle-value})
+          (not (contains? lifecycle-states lifecycle-value))
+          (conj
+           {:invariant :known-lifecycle
+            :lifecycle lifecycle-value
+            :allowed lifecycle-states})
 
-      (and
-       (= :created lifecycle-value)
-       (not=
-        expected-attached
-        attached-effect-kinds))
-      (conj
-       {:invariant :created-choreo-attached
-        :expected expected-attached
-        :actual attached-effect-kinds})
+          (and (= :created lifecycle-value)
+               core-started?)
+          (conj
+           {:invariant :created-core-not-started
+            :lifecycle lifecycle-value})
 
-      (and
-       (= :started lifecycle-value)
-       (not core-started?))
-      (conj
-       {:invariant :started-core-started
-        :lifecycle lifecycle-value})
+          (and (= :created lifecycle-value)
+               shell-closed?)
+          (conj
+           {:invariant :created-shell-open
+            :lifecycle lifecycle-value})
 
-      (and
-       (= :started lifecycle-value)
-       shell-closed?)
-      (conj
-       {:invariant :started-shell-open
-        :lifecycle lifecycle-value})
+          (and (= :created lifecycle-value)
+               (not= choreo/owned-effect-kinds choreo-attached-effects))
+          (conj
+           {:invariant :created-choreo-attached
+            :expected choreo/owned-effect-kinds
+            :actual choreo-attached-effects})
 
-      (and
-       (= :started lifecycle-value)
-       (not=
-        expected-attached
-        attached-effect-kinds))
-      (conj
-       {:invariant :started-choreo-attached
-        :expected expected-attached
-        :actual attached-effect-kinds})
+          (and (= :started lifecycle-value)
+               (not core-started?))
+          (conj
+           {:invariant :started-core-started
+            :lifecycle lifecycle-value})
 
-      (and
-       (= :stopped lifecycle-value)
-       core-started?)
-      (conj
-       {:invariant :stopped-core-not-started
-        :lifecycle lifecycle-value})
+          (and (= :started lifecycle-value)
+               shell-closed?)
+          (conj
+           {:invariant :started-shell-open
+            :lifecycle lifecycle-value})
 
-      (and
-       (= :stopped lifecycle-value)
-       (not shell-closed?))
-      (conj
-       {:invariant :stopped-shell-closed
-        :lifecycle lifecycle-value})
+          (and (= :started lifecycle-value)
+               (not= choreo/owned-effect-kinds choreo-attached-effects))
+          (conj
+           {:invariant :started-choreo-attached
+            :expected choreo/owned-effect-kinds
+            :actual choreo-attached-effects})
 
-      (and
-       (= :stopped lifecycle-value)
-       (seq attached-effect-kinds))
-      (conj
-       {:invariant :stopped-choreo-detached
-        :actual attached-effect-kinds}))]
+          (and optimistic-runtime
+               (not= 2 (count expected-optimistic-actions)))
+          (conj
+           {:invariant :optimistic-distinct-local-actions
+            :actual expected-optimistic-actions
+            :message "Optimistic derive and settlement local actions must be distinct."})
+
+          (and optimistic-runtime
+               (contains? #{:created :started} lifecycle-value)
+               (not= optimistic/owned-effect-kinds
+                     optimistic-attached-effects))
+          (conj
+           {:invariant :optimistic-effects-attached
+            :lifecycle lifecycle-value
+            :expected optimistic/owned-effect-kinds
+            :actual optimistic-attached-effects})
+
+          (and optimistic-runtime
+               (contains? #{:created :started} lifecycle-value)
+               (not= expected-optimistic-actions
+                     optimistic-attached-actions))
+          (conj
+           {:invariant :optimistic-actions-attached
+            :lifecycle lifecycle-value
+            :expected expected-optimistic-actions
+            :actual optimistic-attached-actions})
+
+          (and (= :stopped lifecycle-value)
+               core-started?)
+          (conj
+           {:invariant :stopped-core-not-started
+            :lifecycle lifecycle-value})
+
+          (and (= :stopped lifecycle-value)
+               (not shell-closed?))
+          (conj
+           {:invariant :stopped-shell-closed
+            :lifecycle lifecycle-value})
+
+          (and (= :stopped lifecycle-value)
+               (seq choreo-attached-effects))
+          (conj
+           {:invariant :stopped-choreo-detached
+            :actual choreo-attached-effects})
+
+          (and optimistic-runtime
+               (= :stopped lifecycle-value)
+               (or (seq optimistic-attached-effects)
+                   (seq optimistic-attached-actions)))
+          (conj
+           {:invariant :stopped-optimistic-detached
+            :attached-effect-kinds optimistic-attached-effects
+            :attached-local-actions optimistic-attached-actions}))]
 
     (into
      base-errors
-     active-handler-ownership-errors)))
+     (concat active-choreo-ownership-errors
+             active-optimistic-ownership-errors))))
 
 (defn invariant-clean?
   [runtime]
@@ -416,13 +563,20 @@
      :choreo-options
        Passed unchanged to gesso.live.browser.choreo/create.
 
+     :optimistic-options
+       Optional. When present, passed to gesso.live.browser.optimistic/create.
+       This is the application realization seam for provisional projection,
+       provisional rendering, and canonical-authority refresh.
+
    Construction order is deliberate:
 
-     1. core creates continuity plus the single shell/AdapterState owner;
-     2. Choreo attaches its physical effect handlers to that existing shell.
+     1. Core creates continuity plus the single shell/AdapterState owner;
+     2. Choreo attaches physical machine handlers to that shell;
+     3. optional optimism attaches its physical handlers/local actions to that
+        exact Choreo runtime and shell.
 
-   If Choreo attachment or composition validation fails, the newly created core
-   shell is shut down before the construction error is rethrown."
+   If a later stage fails, already-created stages are retired/detached in reverse
+   dependency order before the original construction error is rethrown."
   ([]
    (create nil))
   ([options]
@@ -439,14 +593,13 @@
           options)
 
          core-options
-         (or
-          (:core-options options)
-          {})
+         (or (:core-options options) {})
 
          choreo-options
-         (or
-          (:choreo-options options)
-          {})
+         (or (:choreo-options options) {})
+
+         optimistic-options
+         (:optimistic-options options)
 
          _
          (require-map!
@@ -458,9 +611,20 @@
           "Browser runtime :choreo-options"
           choreo-options)
 
+         _
+         (when (some? optimistic-options)
+           (require-map!
+            "Browser runtime :optimistic-options"
+            optimistic-options))
+
          core-runtime
-         (core/create
-          core-options)]
+         (core/create core-options)
+
+         choreo-runtime*
+         (atom nil)
+
+         optimistic-runtime*
+         (atom nil)]
 
      (try
        (let [choreo-runtime
@@ -468,24 +632,26 @@
               (core/shell-runtime core-runtime)
               choreo-options)
 
+             _
+             (reset! choreo-runtime* choreo-runtime)
+
+             optimistic-runtime
+             (when (some? optimistic-options)
+               (optimistic/create
+                choreo-runtime
+                optimistic-options))
+
+             _
+             (reset! optimistic-runtime* optimistic-runtime)
+
              runtime
-             {:gesso.live.browser.runtime/type
-              runtime-type
-
-              :gesso.live.browser.runtime/version
-              runtime-version
-
-              :core
-              core-runtime
-
-              :choreo
-              choreo-runtime
-
-              :lifecycle
-              (atom :created)
-
-              :public-api
-              (atom nil)}]
+             {:gesso.live.browser.runtime/type runtime-type
+              :gesso.live.browser.runtime/version runtime-version
+              :core core-runtime
+              :choreo choreo-runtime
+              :optimistic optimistic-runtime
+              :lifecycle (atom :created)
+              :public-api (atom nil)}]
 
          (require-clean-composition!
           runtime
@@ -494,16 +660,36 @@
          runtime)
 
        (catch :default error
+         (when-let [optimistic-runtime @optimistic-runtime*]
+           (try
+             (optimistic/detach! optimistic-runtime)
+             (catch :default _
+               nil)))
+
+         (when-let [choreo-runtime @choreo-runtime*]
+           (try
+             (choreo/detach! choreo-runtime)
+             (catch :default _
+               nil)))
+
          (try
-           (core/stop!
-            core-runtime)
+           (core/stop! core-runtime)
            (catch :default _
              nil))
+
          (throw error))))))
 
 ;; =============================================================================
 ;; Lifecycle
 ;; =============================================================================
+
+(defn- best-effort-detach-optimistic!
+  [runtime]
+  (when-let [optimistic-runtime (:optimistic runtime)]
+    (try
+      (optimistic/detach! optimistic-runtime)
+      (catch :default _
+        nil))))
 
 (defn- best-effort-detach-choreo!
   [runtime]
@@ -528,24 +714,26 @@
   (reset!
    (:lifecycle runtime)
    :stopped)
+  ;; Semantic shell shutdown must happen while both physical integration layers
+  ;; remain attached. Detachment happens only after semantic ownership is gone.
   (best-effort-stop-core! runtime)
+  (best-effort-detach-optimistic! runtime)
   (best-effort-detach-choreo! runtime)
   :stopped)
 
 (defn start!
   "Install the composed runtime's document/HTMX listeners exactly once.
 
-   Choreo physical handlers are already attached during create. Starting does
-   not create another shell or AdapterState.
+   Choreo and optional optimism physical bindings are already attached during
+   create. Starting does not create another shell or AdapterState.
 
-   Before acquiring document listeners, the runtime verifies that the created
-   composition still has one open shared shell and its Choreo handlers attached.
-   This prevents direct manipulation of a child runtime from producing a zombie
-   composition that merely looks started at the top level.
+   Before acquiring document listeners, the runtime verifies the full created
+   composition: one open shared shell, exact Choreo handler ownership, and—when
+   configured—exact optimistic handler/local-action ownership.
 
-   A failed core start retires/shuts down the shell and detaches Choreo before
-   propagating the error. Such a partially-started runtime becomes :stopped and
-   cannot be restarted."
+   A failed start semantically retires/shuts down the shell before detaching the
+   optimistic and Choreo physical bindings. The partially-started runtime becomes
+   permanently :stopped."
   [runtime]
   (let [runtime
         (require-runtime!
@@ -605,16 +793,15 @@
 
      1. mark the composition stopped so no reentrant caller can restart it;
      2. core/stop! removes listeners and shell/shutdown! semantically retires
-        adapter-owned executions/fragments before physical cleanup;
-     3. only after semantic shutdown do we detach Choreo's physical handlers.
+        adapter-owned executions/fragments while all physical handlers remain;
+     3. detach optimism's physical effect handlers and Choreo local actions;
+     4. detach Choreo's physical machine handlers last.
 
-   Detaching first would risk removing physical effect handlers while semantic
-   retirement is still in progress. If core shutdown reports an error, Choreo
-   detachment still runs in finally and the runtime remains permanently stopped."
+   Semantic retirement must precede physical detachment. Cleanup failures remain
+   best-effort browser debt and cannot restore semantic ownership."
   [runtime]
   (let [runtime
-        (require-runtime!
-         runtime)
+        (require-runtime! runtime)
 
         lifecycle*
         (:lifecycle runtime)
@@ -622,18 +809,14 @@
         previous
         @lifecycle*]
 
-    (when-not
-     (= :stopped previous)
-      (reset!
-       lifecycle*
-       :stopped)
+    (when-not (= :stopped previous)
+      (reset! lifecycle* :stopped)
 
       (try
-        (core/stop!
-         (:core runtime))
+        (core/stop! (:core runtime))
         (finally
-          (best-effort-detach-choreo!
-           runtime))))
+          (best-effort-detach-optimistic! runtime)
+          (best-effort-detach-choreo! runtime))))
 
     :stopped))
 
@@ -658,30 +841,19 @@
 
    Diagnostic observation does not participate in adapter transitions. The
    result intentionally contains no DOM nodes, XHRs, timers, captured continuity
-   values, or transport handles."
+   values, provisional snapshots, transport handles, or registered functions."
   [runtime]
   (let [runtime
-        (require-runtime!
-         runtime)]
-    {:gesso.live.browser.runtime/type
-     runtime-type
-
-     :gesso.live.browser.runtime/version
-     runtime-version
-
-     :lifecycle
-     @(:lifecycle runtime)
-
-     :invariant-errors
-     (invariant-errors runtime)
-
-     :core
-     (core/diagnostics
-      (:core runtime))
-
-     :choreo
-     (choreo/diagnostics
-      (:choreo runtime))}))
+        (require-runtime! runtime)]
+    {:gesso.live.browser.runtime/type runtime-type
+     :gesso.live.browser.runtime/version runtime-version
+     :lifecycle @(:lifecycle runtime)
+     :invariant-errors (invariant-errors runtime)
+     :core (core/diagnostics (:core runtime))
+     :choreo (choreo/diagnostics (:choreo runtime))
+     :optimistic
+     (when-let [optimistic-runtime (:optimistic runtime)]
+       (optimistic/diagnostics optimistic-runtime))}))
 
 ;; =============================================================================
 ;; Browser-global production entry point
@@ -789,8 +961,8 @@
             (throw error)))
 
         (do
-          ;; Another initializer won. This newly-created composition owns a
-          ;; shell/Choreo attachment of its own and must be torn down.
+          ;; Another initializer won. This newly-created composition owns its
+          ;; own shell/Choreo/optional-optimism attachment and must be torn down.
           (stop!
            runtime)
 

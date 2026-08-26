@@ -145,16 +145,38 @@
     (fn []
       (str prefix (swap! n inc)))))
 
+(defn- deliver-transition!
+  [waiter* transition]
+  (when-let [{:keys [predicate resolve]} @waiter*]
+    (when (predicate transition)
+      ;; Spend the waiter before resolving it. A re-entrant transition caused by
+      ;; the resolver therefore cannot satisfy the same logical wait twice.
+      (reset! waiter* nil)
+      (resolve transition)))
+  true)
+
 (defn- host-fixture!
   ([]
    (host-fixture! nil))
   ([options]
-   (let [sandbox-root (sandbox!)
+   (let [options (or options {})
+         sandbox-root (sandbox!)
          triggers (atom [])
          current-xhrs (atom {})
          xhr-counter (atom 0)
-         htmx (js-obj)
-         runtime* (atom nil)]
+         transition-waiter (atom nil)
+         shell-options (or (:shell-options options) {})
+         external-on-transition (:on-transition shell-options)
+         on-transition
+         (fn [transition]
+           (when external-on-transition
+             (external-on-transition transition))
+           (deliver-transition! transition-waiter transition))
+         core-options
+         (assoc options
+                :shell-options
+                (assoc shell-options :on-transition on-transition))
+         htmx (js-obj)]
      (aset htmx "trigger"
            (fn [root name detail]
              (swap! triggers conj {:root root :name name :detail detail})
@@ -186,8 +208,7 @@
                  ;; the real continuity implementation and Promise completion.
                  (f)
                  1)}}
-             options))
-           _ (reset! runtime* core-runtime)
+             core-options))
            _ (core/start! core-runtime)
            choreo-runtime (choreo/create (core/shell-runtime core-runtime))]
        {:sandbox sandbox-root
@@ -196,7 +217,8 @@
         :shell (core/shell-runtime core-runtime)
         :htmx htmx
         :triggers triggers
-        :current-xhrs current-xhrs}))))
+        :current-xhrs current-xhrs
+        :transition-waiter transition-waiter}))))
 
 (defn- cleanup-host!
   [{:keys [sandbox core choreo]}]
@@ -235,6 +257,51 @@
 (defn- invariant-clean?
   [host]
   (empty? (adapter/invariant-errors (core/state (:core host)))))
+
+(defn- await-transition!
+  "Return a Promise for the next shell transition satisfying predicate.
+
+   Tests arm this before the physical action that can produce the transition.
+   This is lifecycle synchronization, not scheduler synchronization: no timeout,
+   microtask count, RAF count, or wall-clock delay participates in correctness."
+  [host predicate]
+  (let [waiter* (:transition-waiter host)]
+    (when @waiter*
+      (throw
+       (ex-info
+        "Browser integration fixture already has a pending transition waiter."
+        {})))
+    (js/Promise.
+     (fn [resolve _reject]
+       (reset! waiter*
+               {:predicate predicate
+                :resolve resolve})))))
+
+(defn- continuity-slot-token
+  "Return the exact adapter-issued continuity slot identity/generation for the
+   current fragment request after beforeSwap has admitted the swap."
+  [host fixture]
+  (let [request-generation
+        (:request-generation
+         (request-record host (:root fixture)))
+        slot-id [(:fragment-id fixture) request-generation]
+        slot (get-in (core/state (:core host)) [:continuity slot-id])]
+    (when-not slot
+      (throw
+       (ex-info
+        "Expected beforeSwap to establish a continuity slot."
+        {:fragment-id (:fragment-id fixture)
+         :request-generation request-generation
+         :slot-id slot-id})))
+    {:slot-id slot-id
+     :slot-generation (:generation slot)}))
+
+(defn- continuity-completed-transition?
+  [{:keys [slot-id slot-generation]} transition]
+  (= {:event :continuity/completed
+      :slot-id slot-id
+      :slot-generation slot-generation}
+     (:event transition)))
 
 (defn- complete-request!
   [host fixture]
@@ -388,18 +455,27 @@
              host fixture
              {:scope "request/a"
               :basis "basis/a"})
-            replacement (replacement-target fixture "article" "new server" "server new")]
+            replacement (replacement-target fixture "article" "new server" "server new")
+            slot-token (continuity-slot-token host fixture)
+            completion
+            (await-transition!
+             host
+             #(continuity-completed-transition? slot-token %))]
         (is (false? (.-defaultPrevented event)))
         (is (true? (aget detail "shouldSwap")))
         (.replaceWith (:target fixture) (:target replacement))
         (after-swap! host fixture)
         (complete-request! host fixture)
-        ;; continuity/restore returns a Promise through shell; give that Promise
-        ;; one turn to dispatch :continuity/completed back through the adapter.
         (.then
-         (js/Promise.resolve nil)
-         (fn [_]
+         completion
+         (fn [transition]
            (try
+             ;; Synchronize on the exact adapter-issued slot generation. A late
+             ;; completion from an older replacement cannot satisfy this test.
+             (is (= {:event :continuity/completed
+                     :slot-id (:slot-id slot-token)
+                     :slot-generation (:slot-generation slot-token)}
+                    (:event transition)))
              (is (= "ARTICLE" (.-tagName (:target replacement))))
              (is (= "new server" (.-textContent (:summary replacement))))
              (is (= "user edit" (.-value (:input replacement))))
@@ -410,7 +486,14 @@
                     (adapter/authoritative-frontier
                      (core/state (:core host))
                      "request/a")))
+             ;; Shell removes the exact opaque physical resource before it
+             ;; dispatches :continuity/completed. The adapter consumes that same
+             ;; generation before on-transition observes this transition. Both
+             ;; sides of the lifecycle must therefore already be retired here.
              (is (zero? (:continuity (shell/resource-counts (:shell host)))))
+             (is (nil?
+                  (get-in (core/state (:core host))
+                          [:continuity (:slot-id slot-token)])))
              (is (invariant-clean? host))
              (finally
                (cleanup-host! host)
@@ -420,33 +503,48 @@
   (async done
     (let [host (host-fixture!)
           fixture (fragment-tree! (:sandbox host) "fragment-a")]
-      ;; First install an authoritative frontier.
+      ;; First install an authoritative frontier and synchronize on the exact
+      ;; continuity completion event rather than guessing browser scheduler
+      ;; ordering.
       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
       (before-swap! host fixture {:scope "request/a" :basis "basis/a"})
-      (after-swap! host fixture)
-      (complete-request! host fixture)
-      (.then
-       (js/Promise.resolve nil)
-       (fn [_]
-         (try
-           ;; Second request attempts a different basis without the exact
-           ;; advancement witness required by the adapter.
-           (core/notify-fragment! (:core host) "fragment-a" :basis/stale)
-           (let [{:keys [event detail]}
-                 (before-swap!
-                  host fixture
-                  {:scope "request/a"
-                   :basis "basis/stale"})]
-             (is (true? (.-defaultPrevented event)))
-             (is (false? (aget detail "shouldSwap")))
-             (is (= {:basis "basis/a"}
-                    (adapter/authoritative-frontier
-                     (core/state (:core host))
-                     "request/a")))
-             (is (invariant-clean? host)))
-           (finally
-             (cleanup-host! host)
-             (done))))))))
+      (let [slot-token (continuity-slot-token host fixture)
+            completion
+            (await-transition!
+             host
+             #(continuity-completed-transition? slot-token %))]
+        (after-swap! host fixture)
+        (complete-request! host fixture)
+        (.then
+         completion
+         (fn [transition]
+           (try
+             (is (= {:event :continuity/completed
+                     :slot-id (:slot-id slot-token)
+                     :slot-generation (:slot-generation slot-token)}
+                    (:event transition)))
+             (is (zero? (:continuity (shell/resource-counts (:shell host)))))
+             (is (nil?
+                  (get-in (core/state (:core host))
+                          [:continuity (:slot-id slot-token)])))
+             ;; Second request attempts a different basis without the exact
+             ;; advancement witness required by the adapter.
+             (core/notify-fragment! (:core host) "fragment-a" :basis/stale)
+             (let [{:keys [event detail]}
+                   (before-swap!
+                    host fixture
+                    {:scope "request/a"
+                     :basis "basis/stale"})]
+               (is (true? (.-defaultPrevented event)))
+               (is (false? (aget detail "shouldSwap")))
+               (is (= {:basis "basis/a"}
+                      (adapter/authoritative-frontier
+                       (core/state (:core host))
+                       "request/a")))
+               (is (invariant-clean? host)))
+             (finally
+               (cleanup-host! host)
+               (done)))))))))
 
 ;; =============================================================================
 ;; Request failure / disappearance

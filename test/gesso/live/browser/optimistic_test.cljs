@@ -1,1195 +1,1176 @@
 (ns gesso.live.browser.optimistic-test
+  "Protocol-v3 browser optimism integration tests.
+
+   The production namespace is intentionally a thin physical realization over
+   Choreo + AdapterState + Shell. These tests therefore exercise that vertical
+   composition rather than reconstructing an independent optimistic state
+   machine in the test suite.
+
+   The fake element host below implements only the DOM primitives used by
+   gesso.live.browser.dom structural snapshots and in-place restoration. This
+   keeps the suite runnable under Node while still testing opaque physical
+   resource ownership, marker safety, rollback, and refresh decisions."
   (:require
-   [cljs.test :refer-macros [deftest is testing]]
+   [clojure.set :as set]
+   [clojure.string :as str]
+   [cljs.test :refer-macros [async deftest is testing]]
+   [gesso.choreo.identity :as identity]
    [gesso.choreo.machine :as machine]
-   [gesso.live.browser.choreo :as runtime]
-   [gesso.live.browser.continuity :as continuity]
-   [gesso.live.browser.dom :as dom]
-   [gesso.live.browser.optimistic :as browser]
-   [gesso.live.optimistic.choreo :as optimistic
-    :include-macros true]
+   [gesso.live.browser.adapter :as adapter]
+   [gesso.live.browser.choreo :as browser-choreo]
+   [gesso.live.browser.optimistic :as optimistic]
+   [gesso.live.browser.shell :as shell]
+   [gesso.live.optimistic.choreo :as optimistic-choreo]
    [gesso.live.optimistic.protocol :as protocol]))
 
-;; -----------------------------------------------------------------------------
-;; Helpers
-;; -----------------------------------------------------------------------------
+;; =============================================================================
+;; Generic helpers
+;; =============================================================================
 
-(def source-key :gesso.live.browser.optimistic/source)
-(def target-key :gesso.live.browser.optimistic/target)
-(def target-id-key :gesso.live.browser.optimistic/target-id)
-(def descriptor-key :gesso.live.browser.optimistic/descriptor)
-(def root-key :gesso.live.browser.optimistic/root)
-(def snapshot-key :gesso.live.browser.optimistic/snapshot)
-(def projection-key :gesso.live.browser.optimistic/projection)
-(def pending-source-state-key :gesso.live.browser.optimistic/pending-source-state)
-
-(def scope-wire "e:[:request \"request-1\"]")
-(def transition-wire "request/claim")
-(def template-name "request-1-claim")
-(def target-selector "closest [data-request-card]")
-
-(defn- element
-  ([tag] (element tag nil))
-  ([tag attrs]
-   (let [node (.createElement js/document tag)]
-     (doseq [[k v] attrs :when (some? v)]
-       (.setAttribute node (dom/attr-name k) (str v)))
-     node)))
-
-(defn- append! [parent child]
-  (.appendChild parent child)
-  child)
-
-(defn- text! [node value]
-  (set! (.-textContent node) value)
-  node)
-
-(defn- thrown [f]
+(defn- thrown
+  [f]
   (try
     (f)
     nil
     (catch :default error
       error)))
 
-(defn- thrown-data [f]
-  (some-> (thrown f) ex-data))
+(defn- error-kind
+  [f]
+  (some-> (thrown f) ex-data :error/kind))
 
-(defn- reset-runtime! []
-  (runtime/reset-runtime!)
-  (reset! browser/target-locks {})
-  (reset! browser/executions-by-source {})
-  (reset! browser/outgoing-actions {})
-  (reset! continuity/slots {})
-  (continuity/register-built-in-boxes!)
-  true)
+(defn- error-type
+  [f]
+  (some-> (thrown f) ex-data :error/type))
 
-(defn- sandbox []
-  (let [root (element "div" {:data-gesso-test (str (random-uuid))})]
-    (.appendChild (.-body js/document) root)
-    root))
+;; =============================================================================
+;; Minimal Node-compatible element host
+;; =============================================================================
 
-(defn- with-sandbox* [f]
-  (let [old-htmx (.-htmx js/window)
-        root (sandbox)]
-    (reset-runtime!)
-    (try
-      (f root)
-      (finally
-        (set! (.-htmx js/window) old-htmx)
-        (reset-runtime!)
-        (.remove root)))))
+(declare fake-element)
 
-(defn- source-attrs
-  ([] (source-attrs nil))
-  ([overrides]
-   (merge
-    {protocol/protocol-attr protocol/version
-     protocol/transition-attr transition-wire
-     protocol/template-attr template-name
-     protocol/target-attr target-selector
-     protocol/scope-attr scope-wire
-     protocol/base-revision-attr "i:7"
-     protocol/pending-label-attr "Claiming…"
-     protocol/projection-mode-attr "provisional"}
-    overrides)))
+(defn- attribute-object
+  [name value]
+  (doto (js-obj)
+    (aset "name" name)
+    (aset "value" value)))
 
-(defn- canonical-attrs
-  ([revision] (canonical-attrs scope-wire revision))
-  ([scope revision]
-   {protocol/canonical-attr "true"
-    protocol/protocol-attr protocol/version
-    protocol/scope-attr scope
-    protocol/revision-attr (protocol/revision->wire revision)}))
-
-(defn- projection-template
-  ([] (projection-template {}))
-  ([{:keys [name scope tag id text]
-     :or {name template-name
-          scope scope-wire
-          tag "details"
-          id "request-1"
-          text "Claiming…"}}]
-   (let [template
-         (element
-          "template"
-          {protocol/protocol-attr protocol/version
-           protocol/transition-attr transition-wire
-           protocol/template-attr name
-           protocol/scope-attr scope
-           protocol/projection-mode-attr "provisional"})
-         projection
-         (element
-          tag
-          (merge {:data-request-card "request-1"}
-                 (when id {:id id})))]
-     (append! projection (text! (element "summary") text))
-     (.appendChild (.-content template) projection)
-     template)))
-
-(defn- command-dom!
-  ([root] (command-dom! root {}))
-  ([root {:keys [scope target-id template-name* target-selector*
-                 base-revision-wire projection-tag projection-id
-                 continuity?]
-          :or {scope scope-wire
-               target-id "request-1"
-               template-name* template-name
-               target-selector* target-selector
-               base-revision-wire "i:7"
-               projection-tag "details"
-               projection-id "request-1"
-               continuity? true}}]
-   (let [continuity-root
-         (if continuity?
-           (append!
-            root
-            (element
-             "section"
-             {continuity/continuity-attr "true"
-              continuity/continuity-fragment-attr-key target-id}))
-           root)
-         target
-         (append!
-          continuity-root
-          (element
-           "details"
-           (merge {:id target-id
-                   :data-request-card "request-1"}
-                  (canonical-attrs scope 7))))
-         _summary
-         (append! target (text! (element "summary") "Unclaimed"))
-         form
-         (append! target (element "form" {:data-gesso-live-post "true"}))
-         source
-         (append!
-          form
-          (element
-           "button"
-           (source-attrs
-            {protocol/template-attr template-name*
-             protocol/target-attr target-selector*
-             protocol/scope-attr scope
-             protocol/base-revision-attr base-revision-wire
-             :type "button"})))
-         label
-         (append!
-          source
-          (text!
-           (element "span" {:data-gesso-button-label "true"})
-           "Claim"))
-         template
-         (projection-template
-          {:name template-name*
-           :scope scope
-           :tag projection-tag
-           :id projection-id})]
-     ;; Intended corrected server shape: request form and template are siblings.
-     (append! target template)
-     {:root root
-      :continuity-root (when continuity? continuity-root)
-      :target target
-      :form form
-      :source source
-      :label label
-      :template template})))
-
-(defn- canonical-node
-  ([revision text]
-   (canonical-node scope-wire revision text "request-1"))
-  ([scope revision text id]
-   (let [node
-         (element
-          "details"
-          (merge {:id id
-                  :data-request-card id}
-                 (canonical-attrs scope revision)))]
-     (append! node (text! (element "summary") text))
+(defn- fake-element
+  ([tag]
+   (fake-element tag {}))
+  ([tag initial-attrs]
+   (let [node (js-obj)
+         attrs (atom (into {} (map (fn [[k v]] [(name k) (str v)])) initial-attrs))
+         children (atom [])
+         sync-attrs!
+         (fn []
+           (aset node "attributes"
+                 (to-array
+                  (map (fn [[k v]] (attribute-object k v)) @attrs))))
+         sync-children!
+         (fn []
+           (let [xs @children]
+             (aset node "childNodes" (to-array xs))
+             (aset node "children" (to-array xs))
+             (aset node "firstChild" (first xs))))]
+     (aset node "nodeType" 1)
+     (aset node "tagName" (str/upper-case tag))
+     (aset node "isConnected" true)
+     (aset node "getAttribute" (fn [attribute] (get @attrs attribute)))
+     (aset node "hasAttribute" (fn [attribute] (contains? @attrs attribute)))
+     (aset node "setAttribute"
+           (fn [attribute value]
+             (swap! attrs assoc attribute (str value))
+             (sync-attrs!)
+             nil))
+     (aset node "removeAttribute"
+           (fn [attribute]
+             (swap! attrs dissoc attribute)
+             (sync-attrs!)
+             nil))
+     (aset node "appendChild"
+           (fn [child]
+             (swap! children conj child)
+             (aset child "parentNode" node)
+             (sync-children!)
+             child))
+     (aset node "removeChild"
+           (fn [child]
+             (swap! children
+                    (fn [xs]
+                      (vec (remove #(identical? % child) xs))))
+             (aset child "parentNode" nil)
+             (sync-children!)
+             child))
+     (aset node "cloneNode"
+           (fn [deep?]
+             (let [clone (fake-element tag @attrs)]
+               (aset clone "isConnected" false)
+               (when deep?
+                 (doseq [child @children]
+                   (.appendChild clone (.cloneNode child true))))
+               clone)))
+     (sync-attrs!)
+     (sync-children!)
      node)))
 
-(defn- settlement-marker
-  ([execution-id outcome revision]
-   (settlement-marker execution-id scope-wire outcome revision nil))
-  ([execution-id scope outcome revision reason]
-   (element
-    "template"
-    {protocol/settlement-attr "true"
-     protocol/protocol-attr protocol/version
-     protocol/execution-attr execution-id
-     protocol/scope-attr scope
-     protocol/outcome-attr (protocol/settlement-outcome->wire outcome)
-     protocol/command-applied-attr
-     (protocol/command-applied->wire
-      (protocol/command-applied-for-outcome? outcome))
-     protocol/revision-attr
-     (when (some? revision)
-       (protocol/revision->wire revision))
-     protocol/reason-attr reason})))
-
-(defn- settlement-root
-  ([execution-id outcome revision]
-   (settlement-root execution-id scope-wire outcome revision))
-  ([execution-id scope outcome revision]
-   (let [fragment (.createDocumentFragment js/document)
-         marker (settlement-marker execution-id scope outcome revision nil)
-         canonical (canonical-node scope revision
-                                   (str "Canonical " (name outcome))
-                                   "request-1")]
-     (.appendChild fragment marker)
-     (.appendChild fragment canonical)
-     {:root fragment
-      :marker marker
-      :canonical canonical})))
-
-(defn- fragment-html [fragment]
-  (let [container (element "div")]
-    (.appendChild container (.cloneNode fragment true))
-    (.-innerHTML container)))
-
-(defn- install! []
-  (browser/initialize!))
-
-(defn- terminal [execution-id]
-  (some #(when (= execution-id (:execution-id %)) %)
-        (runtime/terminal-summaries)))
-
-;; -----------------------------------------------------------------------------
-;; Compiled product / identity
-;; -----------------------------------------------------------------------------
-
-(deftest browser-plan-test
-  (is (= optimistic/protocol-name (:name browser/browser-plan)))
-  (is (= optimistic/browser-role (:role browser/browser-plan)))
-  (is (map? (:states browser/browser-plan)))
-  (is (contains? (:states browser/browser-plan)
-                 (:initial browser/browser-plan))))
-
-(deftest runtime-constants-test
-  (is (= "data-gesso-optimistic-active" browser/active-attr))
-  (is (= "data-gesso-optimistic-pending" browser/pending-attr))
-  (is (= "data-gesso-optimistic-locked" browser/locked-attr))
-  (is (= "data-gesso-optimistic-source-pending" browser/pending-source-attr))
-  (is (= 15000 browser/default-settlement-timeout-ms))
-  (is (= :optimistic/settlement-timeout browser/settlement-timer-key)))
-
-(deftest browser-machine-handler-set-test
-  (is (= #{optimistic/browser-acquire-target-machine
-           optimistic/browser-capture-continuity-machine
-           optimistic/browser-capture-snapshot-machine
-           optimistic/browser-install-projection-machine
-           optimistic/browser-schedule-timeout-machine
-           optimistic/browser-install-canonical-machine
-           optimistic/browser-discard-snapshot-machine
-           optimistic/browser-recover-snapshot-machine
-           optimistic/browser-restore-continuity-machine
-           optimistic/browser-cancel-timeout-machine
-           optimistic/browser-clear-pending-machine
-           optimistic/browser-release-target-machine}
-         (set (keys browser/browser-machine-handlers)))))
-
-;; -----------------------------------------------------------------------------
-;; Source discovery / descriptor
-;; -----------------------------------------------------------------------------
-
-(deftest optimistic-source-test
-  (let [source (element "button" (source-attrs))
-        child (append! source (element "span"))]
-    (is (identical? source (browser/optimistic-source source)))
-    (is (identical? source (browser/optimistic-source child)))
-    (is (nil? (browser/optimistic-source (element "button"))))
-    (is (nil? (browser/optimistic-source nil)))))
-
-(deftest source-descriptor-test
-  (let [descriptor
-        (browser/source-descriptor
-         (element "button" (source-attrs)))]
-    (is (= protocol/version (:protocol-version descriptor)))
-    (is (= transition-wire (:transition descriptor)))
-    (is (= template-name (:template-name descriptor)))
-    (is (= target-selector (:target descriptor)))
-    (is (= scope-wire (:scope descriptor)))
-    (is (= 7 (:base-revision descriptor)))
-    (is (= "Claiming…" (:pending-label descriptor)))
-    (is (= :provisional (:projection-mode descriptor)))))
-
-(deftest source-descriptor-defaults-projection-mode-test
-  (let [source
-        (element
-         "button"
-         (dissoc (source-attrs) protocol/projection-mode-attr))]
-    (is (= :provisional
-           (:projection-mode (browser/source-descriptor source))))))
-
-(deftest source-descriptor-decodes-opaque-revision-test
-  (let [source
-        (element
-         "button"
-         (source-attrs {protocol/base-revision-attr "s:opaque"}))]
-    (is (= "opaque"
-           (:base-revision (browser/source-descriptor source))))))
-
-(deftest source-descriptor-rejects-unsupported-protocol-test
-  (let [source
-        (element
-         "button"
-         (source-attrs {protocol/protocol-attr "999"}))
-        data (thrown-data #(browser/source-descriptor source))]
-    (is (= :gesso.live.optimistic/unsupported-protocol (:error/type data)))
-    (is (= protocol/version (:expected data)))
-    (is (= "999" (:actual data)))))
-
-(deftest source-descriptor-requires-fields-test
-  (doseq [[attr-key field]
-          [[protocol/transition-attr :transition]
-           [protocol/template-attr :template]
-           [protocol/target-attr :target]
-           [protocol/scope-attr :scope]]]
-    (let [source (element "button" (dissoc (source-attrs) attr-key))
-          data (thrown-data #(browser/source-descriptor source))]
-      (is (= :gesso.live.optimistic/incomplete-descriptor (:error/type data)))
-      (is (= field (:field data))))))
-
-;; -----------------------------------------------------------------------------
-;; Extended target resolution
-;; -----------------------------------------------------------------------------
-
-(deftest extended-selector-test
-  (let [outer (element "details" {:data-card "request"})
-        source (append! outer (element "div"))
-        nested (append! source (element "span" {:data-found "yes"}))]
-    (is (identical? source
-                    (browser/resolve-extended-selector source "this")))
-    (is (identical? outer
-                    (browser/resolve-extended-selector
-                     source "closest [data-card]")))
-    (is (identical? nested
-                    (browser/resolve-extended-selector
-                     source "find [data-found]")))))
-
-(deftest next-and-previous-selector-test
-  (let [parent (element "div")
-        previous (append! parent (element "div" {:data-target "previous"}))
-        _skip-a (append! parent (element "span"))
-        source (append! parent (element "button"))
-        _skip-b (append! parent (element "span"))
-        next (append! parent (element "div" {:data-target "next"}))]
-    (is (identical? previous
-                    (browser/resolve-extended-selector
-                     source "previous [data-target]")))
-    (is (identical? next
-                    (browser/resolve-extended-selector
-                     source "next [data-target]")))))
-
-(deftest document-selector-test
-  (with-sandbox*
-   (fn [root]
-     (let [target (append! root (element "div" {:id "global-target"}))]
-       (is (identical?
-            target
-            (browser/resolve-extended-selector
-             (element "button") "#global-target")))))))
-
-;; -----------------------------------------------------------------------------
-;; Template / prepare
-;; -----------------------------------------------------------------------------
-
-(deftest resolve-template-prefers-local-parent-test
-  (with-sandbox*
-   (fn [root]
-     (let [parent (append! root (element "div"))
-           source (append! parent (element "button"))
-           local (append! parent (projection-template))
-           _global (append! root (projection-template))]
-       (is (identical?
-            local
-            (browser/resolve-template
-             source nil {:template-name template-name})))))))
-
-(deftest prepare-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [continuity-root target source template]}
-           (command-dom! root)
-           prepared (browser/prepare source nil)]
-       (is (identical? source (:source prepared)))
-       (is (identical? target (:target prepared)))
-       (is (= "request-1" (:target-id prepared)))
-       (is (identical? template (:template prepared)))
-       (is (= "DETAILS" (.-tagName (:projection prepared))))
-       (is (identical? continuity-root (:root prepared)))
-       (is (= scope-wire (get-in prepared [:descriptor :scope])))))))
-
-(deftest prepare-requires-target-and-template-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source template]}
-           (command-dom! root {:target-selector* "#missing"})]
-       (is (= :gesso.live.optimistic/no-target
-              (:error/type
-               (thrown-data #(browser/prepare source nil)))))
-       ;; Restore a valid target selector, remove the template.
-       (dom/set-attr! source protocol/target-attr target-selector)
-       (.remove template)
-       (is (= :gesso.live.optimistic/no-template
-              (:error/type
-               (thrown-data #(browser/prepare source nil)))))))))
-
-(deftest prepare-enforces-root-tag-and-id-test
-  (with-sandbox*
-   (fn [root]
-     (let [{source-a :source}
-           (command-dom! root {:projection-tag "div"
-                               :projection-id nil})]
-       (is (= :gesso.live.browser.dom/root-tag-mismatch
-              (:error/type
-               (thrown-data #(browser/prepare source-a nil))))))
-     (let [{source-b :source}
-           (command-dom! root {:target-id "request-2"
-                               :template-name* "template-2"
-                               :projection-id "wrong-id"})]
-       (is (= :gesso.live.browser.dom/target-id-mismatch
-              (:error/type
-               (thrown-data #(browser/prepare source-b nil)))))))))
-
-;; -----------------------------------------------------------------------------
-;; Critical regression: HTMX transport target is not semantic target authority
-;; -----------------------------------------------------------------------------
-
-(deftest transport-target-must-not-override-descriptor-target-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]}
-           (command-dom! root)
-           incidental
-           (append! root (text! (element "details") "Incidental HTMX target"))]
-       (install!)
-       (let [result
-             (browser/start!
-              source
-              {:execution-id "execution-1"
-               ;; Models event.detail.target from HTMX. Structurally compatible,
-               ;; but not the semantic optimistic object selected by descriptor.
-               :target incidental})]
-         (testing "descriptor target owns optimistic projection"
-           (is (= "execution-1" (dom/attr target browser/active-attr)))
-           (is (= "Claiming…"
-                  (.-textContent (.-firstElementChild target)))))
-         (testing "incidental transport target remains untouched"
-           (is (= "Incidental HTMX target" (.-textContent incidental)))
-           (is (nil? (dom/attr incidental browser/active-attr))))
-         (is (machine/suspended? (:execution result))))))))
-
-(deftest incompatible-transport-target-cannot-cancel-valid-semantic-start-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           incidental (append! root (element "button"))]
-       (install!)
-       (let [attempt
-             (try
-               {:result
-                (browser/start!
-                 source
-                 {:execution-id "execution-1"
-                  :target incidental})}
-               (catch :default error
-                 {:error error}))]
-         (is (nil? (:error attempt))
-             "HTMX transport target must not override a valid semantic descriptor target.")
-         (when-let [result (:result attempt)]
-           (is (machine/suspended? (:execution result)))
-           (is (= "execution-1" (dom/attr target browser/active-attr)))))))))
-
-;; -----------------------------------------------------------------------------
-;; Scope locks
-;; -----------------------------------------------------------------------------
-
-(deftest target-lock-test
-  (reset-runtime!)
-  (let [target (element "details")]
-    (is (browser/reserve-target! scope-wire "execution-1" target "request-1"))
-    (is (= "execution-1"
-           (:execution-id (browser/current-lock scope-wire))))
-    (is (= scope-wire
-           (:scope (browser/execution-lock "execution-1"))))
-    (is (browser/scope-busy? scope-wire))
-    (is (false?
-         (browser/reserve-target! scope-wire "execution-2" target "request-1")))
-    (browser/release-target! scope-wire "execution-2")
-    (is (browser/scope-busy? scope-wire))
-    (browser/release-target! scope-wire "execution-1")
-    (is (false? (browser/scope-busy? scope-wire)))))
-
-;; -----------------------------------------------------------------------------
-;; Runtime installation
-;; -----------------------------------------------------------------------------
-
-(deftest initialize-test
-  (reset-runtime!)
-  (is (true? (browser/initialize!)))
-  (is (= (set (keys browser/browser-machine-handlers))
-         (runtime/registered-fx-machines)))
-  (is (= (set (keys browser/browser-machine-handlers))
-         (runtime/registered-fx-handlers)))
-  (is (ifn? (runtime/current-send-handler)))
-  (reset-runtime!))
-
-(deftest transport-handoff-rejects-unexpected-send-test
-  (reset-runtime!)
-  (browser/install-transport-handoff!)
-  (let [handler (runtime/current-send-handler)
-        data
-        (thrown-data
-         #(handler
-           {:kind :send
-            :from :browser
-            :to :wrong
-            :event :wrong
-            :payload {}}
-           {:execution-id "execution-1"}))]
-    (is (= :gesso.live.optimistic/unexpected-send (:error/type data)))
-    (is (= "execution-1" (:execution-id data))))
-  (reset-runtime!))
-
-;; -----------------------------------------------------------------------------
-;; Start lifecycle
-;; -----------------------------------------------------------------------------
-
-(deftest start-installs-projection-and-command-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [continuity-root target source label]}
-           (command-dom! root)
-           processed (atom [])
-           started (atom nil)]
-       (set! (.-htmx js/window)
-             #js {:process (fn [node] (swap! processed conj node))})
-       (.addEventListener
-        continuity-root
-        "gesso:optimistic:started"
-        (fn [event] (reset! started (.-detail event))))
-       (install!)
-       (let [{:keys [execution-id execution command]}
-             (browser/start!
-              source
-              {:execution-id "execution-1"
-               :consistency-token "xtdb-token"})]
-         (is (= "execution-1" execution-id))
-         (is (machine/suspended? execution))
-         (is (runtime/active? execution-id))
-         (testing "projection is provisional and in-place"
-           (is (dom/connected? target))
-           (is (false? (dom/canonical? target)))
-           (is (= scope-wire (dom/scope target)))
-           (is (= "execution-1" (dom/attr target browser/active-attr)))
-           (is (= "true" (dom/attr target browser/pending-attr)))
-           (is (= "true" (dom/attr target browser/locked-attr)))
-           (is (= "Claiming…"
-                  (.-textContent (.-firstElementChild target)))))
-         (testing "initiating source carries pending UI state"
-           (is (= "execution-1" (dom/attr source protocol/execution-attr)))
-           (is (= "true" (dom/attr source browser/pending-source-attr)))
-           (is (= "true" (dom/attr source "aria-busy")))
-           (is (= "true" (dom/attr source "aria-disabled")))
-           (is (true? (.-disabled source)))
-           (is (= "Claiming…" (.-textContent label))))
-         (testing "command handoff is exact projected protocol data"
-           (is (= command (browser/command-action execution-id)))
-           (is (= (:payload command) (browser/command-payload execution-id)))
-           (is (= {:execution-id "execution-1"
-                   :transition transition-wire
-                   :scope scope-wire
-                   :base-revision 7
-                   :consistency-token "xtdb-token"}
-                  (:payload command))))
-         (is (= [target] @processed))
-         (is (browser/scope-busy? scope-wire))
-         (is (some? (runtime/timer execution-id browser/settlement-timer-key)))
-         (is (= execution-id (browser/execution-for-source source)))
-         (is (= "execution-1" (aget @started "executionId")))
-         (is (= transition-wire (aget @started "transition")))
-         (is (= scope-wire (aget @started "scope"))))))))
-
-(deftest start-without-base-revision-omits-command-field-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source]}
-           (command-dom! root {:base-revision-wire nil})]
-       (dom/remove-attr! source protocol/base-revision-attr)
-       (install!)
-       (let [payload
-             (:payload
-              (:command
-               (browser/start! source {:execution-id "execution-1"})))]
-         (is (= #{:execution-id :transition :scope}
-                (set (keys payload)))))))))
-
-(deftest second-command-for-same-scope-is-rejected-test
-  (with-sandbox*
-   (fn [root]
-     (let [{source-a :source}
-           (command-dom! root {:target-id "request-1"})
-           {source-b :source}
-           (command-dom! root {:target-id "request-2"
-                               :template-name* "request-2-claim"})]
-       (install!)
-       (browser/start! source-a {:execution-id "execution-1"})
-       (let [data
-             (thrown-data
-              #(browser/start! source-b {:execution-id "execution-2"}))]
-         (is (= :gesso.live.optimistic/target-busy (:error/type data)))
-         (is (= "execution-1" (:owner data)))
-         (is (false? (runtime/active? "execution-2"))))))))
-
-(deftest request-header-test
-  (is (= ["Gesso-Optimistic-Execution" "execution-1"]
-         (browser/request-header "execution-1"))))
-
-;; -----------------------------------------------------------------------------
-;; Settlement marker / response parsing
-;; -----------------------------------------------------------------------------
-
-(deftest marker-to-settlement-test
-  (let [settlement
-        (browser/marker->settlement
-         (settlement-marker "execution-1" scope-wire :confirmed 8 "ok"))]
-    (is (= "execution-1" (get settlement optimistic/execution-id-key)))
-    (is (= scope-wire (get settlement optimistic/scope-key)))
-    (is (= :confirmed (get settlement optimistic/outcome-key)))
-    (is (true? (get settlement optimistic/command-applied-key)))
-    (is (= 8 (get settlement optimistic/revision-key)))
-    (is (= "ok" (get settlement optimistic/reason-key)))))
-
-(deftest marker-supports-all-semantic-outcomes-test
-  (doseq [outcome protocol/settlement-outcomes]
-    (let [settlement
-          (browser/marker->settlement
-           (settlement-marker "execution-1" outcome 8))]
-      (is (= outcome (get settlement optimistic/outcome-key)))
-      (is (= (protocol/command-applied-for-outcome? outcome)
-             (get settlement optimistic/command-applied-key))))))
-
-(deftest marker-requires-version-correlation-and-consistency-test
-  (let [bad-version (settlement-marker "execution-1" :confirmed 8)]
-    (dom/set-attr! bad-version protocol/protocol-attr "999")
-    (is (= :gesso.live.optimistic/unsupported-settlement-protocol
-           (:error/type
-            (thrown-data #(browser/marker->settlement bad-version))))))
-  (let [missing-execution (settlement-marker "execution-1" :confirmed 8)]
-    (dom/remove-attr! missing-execution protocol/execution-attr)
-    (is (= :gesso.live.optimistic/incomplete-settlement
-           (:error/type
-            (thrown-data #(browser/marker->settlement missing-execution))))))
-  (let [inconsistent (settlement-marker "execution-1" :confirmed 8)]
-    (dom/set-attr! inconsistent protocol/command-applied-attr "false")
-    (is (thrown? cljs.core.ExceptionInfo
-                 (browser/marker->settlement inconsistent)))))
-
-(deftest settlement-from-root-test
-  (let [{:keys [root canonical]}
-        (settlement-root "execution-1" :confirmed 8)
-        settlement (browser/settlement-from-root root "execution-1")]
-    (is (= "execution-1" (get settlement optimistic/execution-id-key)))
-    (is (= 8 (get settlement optimistic/revision-key)))
-    (is (identical? canonical (get settlement optimistic/canonical-key)))))
-
-(deftest settlement-root-correlation-and-authority-errors-test
-  (let [{other-root :root}
-        (settlement-root "other" :confirmed 8)]
-    (is (nil? (browser/settlement-from-root other-root "execution-1"))))
-  (let [root (.createDocumentFragment js/document)]
-    (.appendChild root (settlement-marker "execution-1" :confirmed 8))
-    (is (= :gesso.live.optimistic/missing-canonical
-           (:error/type
-            (thrown-data #(browser/settlement-from-root root "execution-1"))))))
-  (let [{:keys [root]} (settlement-root "execution-1" :confirmed 8)]
-    (.appendChild root (settlement-marker "execution-1" :confirmed 8))
-    (is (= :gesso.live.optimistic/duplicate-settlement
-           (:error/type
-            (thrown-data #(browser/settlement-from-root root "execution-1")))))))
-
-(deftest settlement-revision-must-match-canonical-test
-  (let [{:keys [root canonical]}
-        (settlement-root "execution-1" :confirmed 8)]
-    (dom/set-attr! canonical protocol/revision-attr "i:9")
-    (let [data
-          (thrown-data #(browser/settlement-from-root root "execution-1"))]
-      (is (= :gesso.live.optimistic/settlement-revision-mismatch
-             (:error/type data)))
-      (is (= "i:8" (:marker-revision data)))
-      (is (= "i:9" (:canonical-revision data))))))
-
-(deftest response-root-test
-  (let [root
-        (browser/response-root
-         #js {:responseText "<div id='a'>A</div><div id='b'>B</div>"})]
-    (is (= 2 (.-childElementCount root))))
-  (is (nil? (browser/response-root #js {:responseText "  "}))))
-
-;; -----------------------------------------------------------------------------
-;; Request failure recovery
-;; -----------------------------------------------------------------------------
-
-(deftest request-failure-recovers-snapshot-through-continuity-barrier-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           callback (atom nil)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (with-redefs
-        [continuity/restore!
-         (fn [_root complete!]
-           (reset! callback complete!)
-           nil)]
-        (let [result (browser/request-failed! "execution-1" :network)]
-          (is (= :resumed (:status result)))
-          (testing "old structural snapshot is restored before post-layout continuity"
-            (is (= "Unclaimed"
-                   (.-textContent (.-firstElementChild target))))
-            (is (dom/canonical? target))
-            (is (= 7 (dom/revision target))))
-          (is (runtime/active? "execution-1"))
-          (is (browser/scope-busy? scope-wire))
-          (is (ifn? @callback))
-          ;; Callback is intentionally invoked after the first resume commits.
-          (@callback {:root nil :target target :slot nil})
-          (is (false? (runtime/active? "execution-1")))
-          (is (false? (browser/scope-busy? scope-wire)))
-          (is (nil? (browser/command-action "execution-1")))
-          (is (= {:outcome :request-failed}
-                 (:result (terminal "execution-1"))))))))))
-
-(deftest request-failure-never-overwrites-explicit-canonical-state-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           restore-count (atom 0)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (let [canonical (canonical-node 8 "New canonical")]
-         (dom/copy-canonical-into! target (.cloneNode canonical true)))
-       (with-redefs
-        [continuity/restore! (fn [& _] (swap! restore-count inc))]
-        (let [result (browser/request-failed! "execution-1" :network)]
-          (is (= :completed (:status result)))
-          (is (= {:outcome :superseded} (:result result)))
-          (is (= "New canonical"
-                 (.-textContent (.-firstElementChild target))))
-          (is (= 0 @restore-count))))))))
-
-(deftest missing-or-lost-recovery-authority-is-visible-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (.remove target)
-       (is (= :gesso.live.optimistic/no-recovery-target
-              (:error/type
-               (thrown-data
-                #(browser/request-failed! "execution-1" :network))))))))
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (dom/set-attr! target browser/active-attr "execution-2")
-       (is (= :gesso.live.optimistic/recovery-authority-lost
-              (:error/type
-               (thrown-data
-                #(browser/request-failed! "execution-1" :network)))))))))
-
-;; -----------------------------------------------------------------------------
-;; Settlement lifecycle
-;; -----------------------------------------------------------------------------
-
-(deftest confirmed-settlement-installs-canonical-before-continuity-completes-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           callback (atom nil)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (with-redefs
-        [continuity/restore!
-         (fn [_root complete!]
-           (reset! callback complete!)
-           nil)]
-        (let [{settlement-root :root}
-              (settlement-root "execution-1" :confirmed 8)
-              settlement
-              (browser/settlement-from-root settlement-root "execution-1")
-              result (browser/settle! settlement)]
-          (is (= :resumed (:status result)))
-          (is (dom/canonical? target))
-          (is (= 8 (dom/revision target)))
-          (is (= "Canonical confirmed"
-                 (.-textContent (.-firstElementChild target))))
-          (is (nil? (get (runtime/execution-context "execution-1") snapshot-key)))
-          (is (runtime/active? "execution-1"))
-          (is (ifn? @callback))
-          (@callback {:root nil :target target :slot nil})
-          (is (false? (runtime/active? "execution-1")))
-          (is (= {:outcome :confirmed}
-                 (:result (terminal "execution-1"))))))))))
-
-(deftest all-settlement-outcomes-return-semantic-outcome-test
-  (doseq [outcome protocol/settlement-outcomes]
-    (with-sandbox*
-     (fn [root]
-       (let [{:keys [source]} (command-dom! root)]
-         (install!)
-         (browser/start! source {:execution-id "execution-1"})
-         (with-redefs [continuity/restore! (fn [_ _] nil)]
-           (let [{settlement-root :root}
-                 (settlement-root "execution-1" outcome 8)
-                 result
-                 (browser/settle!
-                  (browser/settlement-from-root
-                   settlement-root "execution-1"))]
-             (is (= :resumed (:status result)))
-             (let [finished
-                   (runtime/resume-event!
-                    "execution-1"
-                    optimistic/continuity-restored-event
-                    {:test true})]
-               (is (= :completed (:status finished)))
-               (is (= {:outcome outcome} (:result finished)))))))))))
-
-(deftest already-installed-newer-canonical-wins-over-correlated-post-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           restore-count (atom 0)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (let [newer (canonical-node 10 "Live newer")]
-         (dom/copy-canonical-into! target (.cloneNode newer true)))
-       (with-redefs [continuity/restore! (fn [& _] (swap! restore-count inc))]
-         (let [{settlement-root :root}
-               (settlement-root "execution-1" :confirmed 8)
-               result
-               (browser/settle!
-                (browser/settlement-from-root
-                 settlement-root "execution-1"))]
-           (is (= :completed (:status result)))
-           (is (= {:outcome :superseded} (:result result)))
-           (is (= 10 (dom/revision target)))
-           (is (= "Live newer"
-                  (.-textContent (.-firstElementChild target))))
-           (is (= 0 @restore-count))))))))
-
-(deftest equal-or-incomparable-installed-canonical-is-not-overwritten-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (let [existing (canonical-node 8 "Already installed")]
-         (dom/copy-canonical-into! target (.cloneNode existing true)))
-       (let [{settlement-root :root}
-             (settlement-root "execution-1" :confirmed 8)
-             result
-             (browser/settle!
-              (browser/settlement-from-root
-               settlement-root "execution-1"))]
-         (is (= :completed (:status result)))
-         (is (= {:outcome :superseded} (:result result)))
-         (is (= "Already installed"
-                (.-textContent (.-firstElementChild target)))))))))
-
-;; -----------------------------------------------------------------------------
-;; Canonical supersession observation
-;; -----------------------------------------------------------------------------
-
-(deftest strictly-newer-canonical-supersedes-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           restore-count (atom 0)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (let [canonical (canonical-node 8 "Live won")]
-         (dom/copy-canonical-into! target (.cloneNode canonical true))
-         (with-redefs [continuity/restore! (fn [& _] (swap! restore-count inc))]
-           (browser/canonical-installed! canonical)))
-       (is (false? (runtime/active? "execution-1")))
-       (is (= {:outcome :superseded}
-              (:result (terminal "execution-1"))))
-       (is (= 0 @restore-count))
-       (is (false? (browser/scope-busy? scope-wire)))))))
-
-(deftest canonical-supersession-requires-proof-test
-  (doseq [[base-wire revision]
-          [["i:7" 7]
-           ["i:7" 6]
-           ["s:base" "other"]]]
-    (with-sandbox*
-     (fn [root]
-       (let [{:keys [source]}
-             (command-dom! root {:base-revision-wire base-wire})]
-         (install!)
-         (browser/start! source {:execution-id "execution-1"})
-         (browser/canonical-installed!
-          (canonical-node scope-wire revision "Not provably newer" "request-1"))
-         (is (runtime/active? "execution-1")))))))
-
-(deftest canonical-other-scope-does-not-supersede-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (browser/canonical-installed!
-        (canonical-node "other-scope" 100 "Other" "request-1"))
-       (is (runtime/active? "execution-1"))))))
-
-(deftest observe-canonical-tree-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           tree (element "div")
-           canonical (append! tree (canonical-node 8 "Nested canonical"))]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (dom/copy-canonical-into! target (.cloneNode canonical true))
-       (is (identical? tree (browser/observe-canonical-tree! tree)))
-       (is (false? (runtime/active? "execution-1")))))))
-
-;; -----------------------------------------------------------------------------
-;; Source correlation / cleanup / abort
-;; -----------------------------------------------------------------------------
-
-(deftest source-correlation-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (is (= "execution-1" (browser/execution-for-source source)))
-       (is (true? (browser/forget-source! source)))
-       (is (nil? (browser/execution-for-source source)))))))
-
-(deftest cleanup-source-only-after-terminal-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (browser/cleanup-source-if-terminal! source)
-       (is (= "execution-1" (browser/execution-for-source source)))
-       (let [canonical (canonical-node 8 "Canonical")]
-         (dom/copy-canonical-into! target (.cloneNode canonical true))
-         (browser/canonical-installed! canonical))
-       (browser/cleanup-source-if-terminal! source)
-       (is (nil? (browser/execution-for-source source)))))))
-
-(deftest abort-cleans-process-owned-runtime-state-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (is (browser/scope-busy? scope-wire))
-       (is (some? (browser/command-action "execution-1")))
-       (is (= {:status :aborted
-               :execution-id "execution-1"
-               :reason :page-destroyed}
-              (browser/abort! "execution-1" :page-destroyed)))
-       (is (false? (browser/scope-busy? scope-wire)))
-       (is (nil? (browser/command-action "execution-1")))
-       (is (nil? (browser/execution-for-source source)))
-       (is (false? (runtime/active? "execution-1")))))))
-
-;; -----------------------------------------------------------------------------
-;; Direct authority operations
-;; -----------------------------------------------------------------------------
-
-(deftest recover-snapshot-never-overwrites-canonical-test
-  (with-sandbox*
-   (fn [root]
-     (let [target (append! root (canonical-node 8 "New canonical"))
-           old (canonical-node 7 "Old")
-           snapshot (dom/snapshot old)
-           result
-           (browser/recover-snapshot!
-            {optimistic/execution-id-key "execution-1"
-             target-key target
-             target-id-key "request-1"
-             snapshot-key snapshot})]
-       (is (= :canonical-wins
-              (get result optimistic/recovery-disposition-key)))
-       (is (= "New canonical"
-              (.-textContent (.-firstElementChild target))))))))
-
-(deftest recover-snapshot-requires-owned-provisional-target-test
-  (with-sandbox*
-   (fn [root]
-     (let [target (append! root (element "details" {:id "request-1"}))
-           snapshot (dom/snapshot (canonical-node 7 "Old"))]
-       (dom/set-attr! target browser/active-attr "other")
-       (is (= :gesso.live.optimistic/recovery-authority-lost
-              (:error/type
-               (thrown-data
-                #(browser/recover-snapshot!
-                  {optimistic/execution-id-key "execution-1"
-                   target-key target
-                   target-id-key "request-1"
-                   snapshot-key snapshot})))))))))
-
-(deftest install-canonical-requires-explicit-authority-and-scope-test
-  (let [target (element "details")]
-    (is (= :gesso.live.optimistic/noncanonical-settlement
-           (:error/type
-            (thrown-data
-             #(browser/install-canonical!
-               {optimistic/execution-id-key "execution-1"
-                optimistic/scope-key scope-wire
-                target-key target
-                optimistic/canonical-key (element "details")})))))
-    (is (= :gesso.live.optimistic/canonical-scope-mismatch
-           (:error/type
-            (thrown-data
-             #(browser/install-canonical!
-               {optimistic/execution-id-key "execution-1"
-                optimistic/scope-key scope-wire
-                target-key target
-                optimistic/canonical-key
-                (canonical-node "other" 8 "Other" "request-1")})))))))
-
-;; -----------------------------------------------------------------------------
-;; Continuity barrier
-;; -----------------------------------------------------------------------------
-
-(deftest restore-continuity-emits-modeled-event-after-callback-test
-  (let [root (element "div")
-        callback (atom nil)
-        calls (atom [])]
-    (with-redefs
-     [continuity/restore!
-      (fn [_root complete!]
-        (reset! callback complete!)
-        nil)
-      runtime/resume-event!
-      (fn [execution-id event-id data]
-        (swap! calls conj [execution-id event-id data])
-        {:status :resumed})]
-      (is (= {:optimistic/continuity-restore-scheduled? true}
-             (browser/restore-continuity!
-              {optimistic/execution-id-key "execution-1"
-               optimistic/scope-key scope-wire
-               root-key root})))
-      (is (empty? @calls))
-      (@callback {:root root :target nil :slot nil})
-      (is (= "execution-1" (get-in @calls [0 0])))
-      (is (= optimistic/continuity-restored-event
-             (get-in @calls [0 1])))
-      (is (= scope-wire (get-in @calls [0 2 :scope]))))))
-
-;; -----------------------------------------------------------------------------
-;; XHR integration
-;; -----------------------------------------------------------------------------
-
-(deftest settle-from-xhr-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)
-           callback (atom nil)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (let [{settlement-fragment :root}
-             (settlement-root "execution-1" :confirmed 8)
-             xhr #js {:responseText (fragment-html settlement-fragment)}]
-         (with-redefs
-          [continuity/restore!
-           (fn [_root complete!]
-             (reset! callback complete!)
-             nil)]
-          (let [result (browser/settle-from-xhr! "execution-1" xhr)]
-            (is (= :resumed (:status result)))
-            (is (dom/canonical? target))
-            (is (= 8 (dom/revision target)))
-            (@callback {:root nil :target target :slot nil})
-            (is (= {:outcome :confirmed}
-                   (:result (terminal "execution-1")))))))))))
-
-(deftest xhr-without-marker-is-not-semantic-success-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (is (nil?
-            (browser/settle-from-xhr!
-             "execution-1"
-             #js {:responseText "<div>ordinary response</div>"})))
-       (is (runtime/active? "execution-1"))))))
-
-(deftest malformed-matching-xhr-is-visible-protocol-error-test
-  (let [fragment (.createDocumentFragment js/document)]
-    (.appendChild fragment
-                  (settlement-marker "execution-1" :failed 8))
-    (is (= :gesso.live.optimistic/missing-canonical
-           (:error/type
-            (thrown-data
-             #(browser/settle-from-xhr!
-               "execution-1"
-               #js {:responseText (fragment-html fragment)})))))))
-
-;; -----------------------------------------------------------------------------
-;; Diagnostics and authority invariants
-;; -----------------------------------------------------------------------------
-
-(deftest diagnostics-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source]} (command-dom! root)]
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (let [diagnostics (browser/diagnostics)
-             lock (get-in diagnostics [:active-scopes scope-wire])]
-         (is (= {:execution-id "execution-1"
-                 :target-id "request-1"}
-                lock))
-         (is (= 1 (:source-correlations diagnostics)))
-         (is (= optimistic/protocol-name
-                (get-in diagnostics [:browser-plan :name])))
-         (is (not (contains? lock :target))))))))
-
-(deftest projection-is-never-canonical-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source template]} (command-dom! root)
-           projection (.-firstElementChild (.-content template))]
-       ;; Even a malicious/mistaken template marker cannot grant authority.
-       (dom/set-attr! projection protocol/canonical-attr "true")
-       (install!)
-       (browser/start! source {:execution-id "execution-1"})
-       (is (false? (dom/canonical? target)))
-       (is (= "execution-1" (dom/attr target browser/active-attr)))))))
-
-(deftest command-payload-is-plain-protocol-data-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [source]} (command-dom! root)]
-       (install!)
-       (let [payload
-             (:payload
-              (:command
-               (browser/start! source {:execution-id "execution-1"})))]
-         (is (= transition-wire (:transition payload)))
-         (is (= scope-wire (:scope payload)))
-         (is (every? (fn [[_ value]] (not (dom/element? value))) payload)))))))
-
-(deftest swap-none-command-still-projects-semantic-target-test
-  (with-sandbox*
-   (fn [root]
-     (let [{:keys [target source]} (command-dom! root)]
-       (dom/set-attr! source "hx-swap" "none")
-       (dom/set-attr! source "hx-post" "/app/requests/request-1/claim")
-       (install!)
-       (let [result (browser/start! source {:execution-id "execution-1"})]
-         (is (machine/suspended? (:execution result)))
-         (is (= "execution-1" (dom/attr target browser/active-attr)))
-         (is (= "Claiming…"
-                (.-textContent (.-firstElementChild target)))))))))
+(defn- attr
+  [element name]
+  (.getAttribute element name))
+
+(defn- set-attr!
+  [element name value]
+  (.setAttribute element name value)
+  element)
+
+;; =============================================================================
+;; Deterministic timer host
+;; =============================================================================
+
+(defn- timer-host
+  []
+  (let [next-id (atom 0)
+        active (atom {})
+        cleared (atom [])]
+    {:active active
+     :cleared cleared
+     :set-timeout!
+     (fn [callback delay-ms]
+       (let [id (swap! next-id inc)]
+         (swap! active assoc id {:callback callback
+                                 :delay-ms delay-ms})
+         id))
+     :clear-timeout!
+     (fn [id]
+       (swap! cleared conj id)
+       (swap! active dissoc id)
+       nil)
+     :fire!
+     (fn [id]
+       (let [{:keys [callback]} (get @active id)]
+         (swap! active dissoc id)
+         (when callback
+           (callback))))}))
+
+(defn- only-timer-id
+  [timers]
+  (first (keys @(:active timers))))
+
+(defn- controlled-thenable
+  []
+  (let [on-success (atom nil)
+        on-failure (atom nil)
+        value (js-obj)]
+    (aset value "then"
+          (fn [success failure]
+            (reset! on-success success)
+            (reset! on-failure failure)
+            value))
+    {:value value
+     :resolve! (fn [x] (when-let [f @on-success] (f x)))
+     :reject! (fn [x] (when-let [f @on-failure] (f x)))}))
+
+(defn- deferred-promise
+  []
+  (let [resolve! (atom nil)
+        reject! (atom nil)
+        promise
+        (js/Promise.
+         (fn [resolve reject]
+           (reset! resolve! resolve)
+           (reset! reject! reject)))]
+    {:promise promise
+     :resolve! (fn [value] (@resolve! value))
+     :reject! (fn [error] (@reject! error))}))
+
+(defn- after-promises
+  [f]
+  (.then
+   (js/Promise.resolve nil)
+   (fn [_]
+     (js/setTimeout f 0))))
+
+;; =============================================================================
+;; Preverified browser ExecutablePlan fixture
+;; =============================================================================
+
+;; This is the canonical browser projection emitted by
+;; optimistic-choreo/command-plan for one direct command choreography. Production
+;; code receives such plans from the verified build artifact; browser code does
+;; not project or verify choreography at runtime.
+(def browser-plan
+  {:gesso.choreo/type :gesso.choreo/executable-plan
+   :gesso.choreo/version 1
+   :role :browser
+   :initial 0
+   :states
+   {0 {:op :local
+       :action optimistic-choreo/derive-provisional-action
+       :next 1
+       :requires #{:arguments :operation :observed-basis :execution-id :command-id}
+       :outputs #{optimistic-choreo/provisional-value-key}}
+    1 {:op :send
+       :to :authority
+       :event protocol/command-event
+       :next 2
+       :via :http
+       :required #{:arguments :operation :observed-basis :execution-id :command-id}
+       :optional #{:scope :fact-versions}
+       :correlation #{:execution-id :command-id}}
+    2 {:op :receive
+       :alternatives
+       [{:from :authority
+         :event protocol/settlement-event
+         :next 3
+         :via :http
+         :required #{optimistic-choreo/settlement-value-key
+                     :execution-id
+                     :command-id}
+         :correlation #{:execution-id :command-id}}]}
+    3 {:op :local
+       :action optimistic-choreo/resolve-settlement-action
+       :next 4
+       :requires #{optimistic-choreo/provisional-value-key
+                   optimistic-choreo/settlement-value-key}
+       :outputs #{optimistic-choreo/resolution-value-key}}
+    4 {:op :branch
+       :on optimistic-choreo/resolution-value-key
+       :cases {:already-incorporated 5
+               :confirmed 6
+               :failed 7
+               :reconciled 8
+               :rejected 9}}
+    5 {:op :return :outcome :gesso.choreo/complete}
+    6 {:op :return :outcome :gesso.choreo/complete}
+    7 {:op :return :outcome :gesso.choreo/complete}
+    8 {:op :return :outcome :gesso.choreo/complete}
+    9 {:op :return :outcome :gesso.choreo/complete}}})
+
+;; =============================================================================
+;; Protocol fixtures
+;; =============================================================================
+
+(defn- command
+  [suffix]
+  (protocol/command
+   {:command-id (identity/command-id (str "command-" suffix))
+    :execution-id (identity/execution-id (str "execution-" suffix))
+    :operation :request/claim
+    :arguments {:request-id (str "request-" suffix)}
+    :observed-basis {:tx-id 10}
+    :scope [:request (str "request-" suffix)]}))
+
+(defn- authoritative
+  [projection]
+  (protocol/authoritative
+   {:presence :present
+    :basis {:tx-id 11}
+    :projection projection}))
+
+(defn- settlement
+  ([command resolution]
+   (settlement command resolution nil))
+  ([command resolution authority]
+   (protocol/settlement
+    (cond->
+     {:command-id (get command protocol/command-id-key)
+      :execution-id (get command protocol/execution-id-key)
+      :resolution resolution}
+      authority
+      (assoc :authoritative authority)))))
+
+;; =============================================================================
+;; Full runtime fixture
+;; =============================================================================
+
+(defn- runtime-fixture
+  ([]
+   (runtime-fixture nil))
+  ([{:keys [project-provisional
+            render-provisional
+            rollback-eligible?
+            transport-send
+            resolve-target
+            process-element
+            refresh-authority]
+     :or {project-provisional
+          (fn [{:keys [arguments]}]
+            {:state :claimed
+             :request-id (:request-id arguments)})
+          render-provisional
+          (fn [{:keys [target projection]}]
+            (set-attr! target "data-state" (name (:state projection)))
+            nil)
+          rollback-eligible? true}}]
+   (let [target (fake-element "details"
+                              {"id" "request-target"
+                               "data-state" "canonical"
+                               "data-existing" "preserved"})
+         timers (timer-host)
+         sent (atom [])
+         refreshes (atom [])
+         processed (atom [])
+         transitions (atom [])
+         diagnostics (atom [])
+         errors (atom [])
+         choreo-holder (atom nil)
+         shell-runtime
+         (shell/create
+          {:set-timeout! (:set-timeout! timers)
+           :clear-timeout! (:clear-timeout! timers)
+           :on-transition #(swap! transitions conj %)
+           :on-diagnostic #(swap! diagnostics conj %)
+           :on-error #(swap! errors conj %)})
+         choreo-runtime
+         (browser-choreo/create
+          shell-runtime
+          {:send-payload
+           (fn [ctx]
+             (let [execution-id
+                   (get ctx browser-choreo/execution-id-key)
+                   execution
+                   (browser-choreo/execution @choreo-holder execution-id)
+                   action
+                   (get ctx browser-choreo/action-key)
+                   payload-keys
+                   (set/union (or (:required action) #{})
+                              (or (:optional action) #{}))]
+               (select-keys
+                (machine/execution-values execution)
+                payload-keys)))
+           :transport-send
+           (or transport-send
+               (fn [ctx]
+                 (swap! sent conj (get ctx browser-choreo/message-key))
+                 nil))})
+         _ (reset! choreo-holder choreo-runtime)
+         optimistic-runtime
+         (optimistic/create
+          choreo-runtime
+          {:project-provisional project-provisional
+           :render-provisional render-provisional
+           :refresh-authority
+           (or refresh-authority
+               (fn [ctx]
+                 (swap! refreshes conj ctx)
+                 nil))
+           :resolve-target
+           (or resolve-target
+               (fn [target-id]
+                 (when (= "request-target" (str target-id))
+                   target)))
+           :process-element
+           (or process-element
+               (fn [element]
+                 (swap! processed conj element)
+                 element))})]
+     {:target target
+      :timers timers
+      :sent sent
+      :refreshes refreshes
+      :processed processed
+      :transitions transitions
+      :diagnostics diagnostics
+      :errors errors
+      :shell shell-runtime
+      :choreo choreo-runtime
+      :optimistic optimistic-runtime
+      :rollback-eligible? rollback-eligible?})))
+
+(defn- start!
+  ([fixture command]
+   (start! fixture command nil))
+  ([fixture command opts]
+   (optimistic/start!
+    (:optimistic fixture)
+    (merge
+     {:plan browser-plan
+      :command command
+      :target-id "request-target"
+      :rollback-eligible? (:rollback-eligible? fixture)}
+     opts))))
+
+(defn- optimistic-scope
+  [fixture command]
+  (adapter/optimistic-scope
+   (optimistic/state (:optimistic fixture))
+   (get command protocol/execution-id-key)))
+
+(defn- effect-data
+  [fixture effect-kind]
+  (vec
+   (for [transition @(:transitions fixture)
+         [kind data] (:effects transition)
+         :when (= effect-kind kind)]
+     data)))
+
+(defn- last-effect-data
+  [fixture effect-kind]
+  (last (effect-data fixture effect-kind)))
+
+(defn- transition-for-event
+  [fixture event-kind]
+  (last
+   (filter #(= event-kind (get-in % [:event :event]))
+           @(:transitions fixture))))
+
+(defn- resource-values
+  [fixture resource-kind]
+  (vals (get (shell/resources (:shell fixture)) resource-kind)))
+
+;; =============================================================================
+;; Runtime identity / attachment
+;; =============================================================================
+
+(deftest create-attaches-only-its-owned-boundaries-test
+  (let [{:keys [optimistic shell choreo]} (runtime-fixture)
+        diagnostics (optimistic/diagnostics optimistic)]
+    (is (optimistic/runtime? optimistic))
+    (is (identical? shell (optimistic/shell-runtime optimistic)))
+    (is (identical? choreo (optimistic/choreo-runtime optimistic)))
+    (is (= optimistic/owned-effect-kinds
+           (:attached-effect-kinds diagnostics)))
+    (is (= #{optimistic-choreo/derive-provisional-action
+             optimistic-choreo/resolve-settlement-action}
+           (:attached-local-actions diagnostics)))
+    (is (= #{} (:active-optimistic-executions diagnostics)))
+    (is (not (contains? diagnostics :target)))
+    (is (not (contains? diagnostics :resource)))))
+
+(deftest create-validates-required-physical-seams-test
+  (let [shell-runtime (shell/create)
+        choreo-runtime (browser-choreo/create shell-runtime)]
+    (is (= :invalid-callable
+           (error-kind #(optimistic/create choreo-runtime {}))))
+    (is (= :unknown-options
+           (error-kind
+            #(optimistic/create
+              choreo-runtime
+              {:project-provisional identity
+               :render-provisional identity
+               :refresh-authority identity
+               :invented true}))))))
+
+(deftest create-refuses-effect-handler-collision-test
+  (let [shell-runtime (shell/create)
+        choreo-runtime (browser-choreo/create shell-runtime)]
+    (shell/register-handler!
+     shell-runtime :optimistic/install-provisional (fn [_] nil))
+    (is (= :effect-handler-collision
+           (error-kind
+            #(optimistic/create
+              choreo-runtime
+              {:project-provisional identity
+               :render-provisional identity
+               :refresh-authority identity}))))))
+
+(deftest create-refuses-local-action-collision-test
+  (let [shell-runtime (shell/create)
+        choreo-runtime (browser-choreo/create shell-runtime)]
+    (browser-choreo/register-local-action!
+     choreo-runtime optimistic-choreo/derive-provisional-action (fn [_] {}))
+    (is (= :local-action-collision
+           (error-kind
+            #(optimistic/create
+              choreo-runtime
+              {:project-provisional identity
+               :render-provisional identity
+               :refresh-authority identity}))))))
+
+(deftest detach-removes-only-installed-optimistic-boundaries-test
+  (let [{:keys [optimistic shell choreo]} (runtime-fixture)]
+    (is (= :detached (optimistic/detach! optimistic)))
+    (is (nil? (get (shell/handlers shell) :optimistic/install-provisional)))
+    (is (nil? (get (shell/handlers shell) :optimistic/finish)))
+    (is (nil? (get (browser-choreo/local-actions choreo)
+                   optimistic-choreo/derive-provisional-action)))
+    (is (nil? (get (browser-choreo/local-actions choreo)
+                   optimistic-choreo/resolve-settlement-action)))))
+
+;; =============================================================================
+;; Start / provisional installation
+;; =============================================================================
+
+(deftest start-derives-installs-and-sends-through-one-shared-runtime-test
+  (let [fixture (runtime-fixture)
+        command (command "start")
+        result (start! fixture command)
+        ref (:execution-ref result)
+        scope (optimistic-scope fixture command)]
+    (is (browser-choreo/execution-ref? ref))
+    (is (= :provisional (:status scope)))
+    (is (= {:state :claimed
+            :request-id "request-start"}
+           (get-in scope [:provisional protocol/projection-key])))
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))
+    (is (= "true" (attr (:target fixture) "aria-busy")))
+    (is (= 1 (:optimistic (shell/resource-counts (:shell fixture)))))
+    (is (= 1 (:optimistic-timeouts (shell/resource-counts (:shell fixture)))))
+    (is (= 1 (count @(:sent fixture))))
+    (is (= :optimistic/command (:event (first @(:sent fixture)))))
+    (is (= #{(get command protocol/execution-id-key)}
+           (:active-optimistic-executions
+            (optimistic/diagnostics (:optimistic fixture)))))))
+
+(deftest start-preserves-command-and-execution-identity-separation-test
+  (let [fixture (runtime-fixture)
+        command (command "identity")
+        result (start! fixture command)
+        scope (optimistic-scope fixture command)]
+    (is (= command (:command result)))
+    (is (= (get command protocol/command-id-key)
+           (:command-id scope)))
+    (is (= (get command protocol/execution-id-key)
+           (:execution-id scope)))
+    (is (not= (:command-id scope) (:execution-id scope)))))
+
+(deftest start-defaults-settlement-timeout-test
+  (let [fixture (runtime-fixture)
+        command (command "timeout-default")]
+    (start! fixture command)
+    (let [timer (val (first @(:active (:timers fixture))))]
+      (is (= optimistic/default-timeout-ms (:delay-ms timer))))))
+
+(deftest start-may-disable-local-settlement-timeout-test
+  (let [fixture (runtime-fixture)
+        command (command "no-timeout")]
+    (start! fixture command {:timeout-ms nil})
+    (is (empty? @(:active (:timers fixture))))
+    (is (= 0 (:optimistic-timeouts
+              (shell/resource-counts (:shell fixture)))))))
+
+(deftest start-rejects-wrong-plan-role-before-machine-start-test
+  (let [fixture (runtime-fixture)
+        command (command "wrong-role")]
+    (is (= :wrong-plan-role
+           (error-kind
+            #(start! fixture command
+                     {:plan (assoc browser-plan :role :authority)}))))))
+
+(deftest application-projector-supports-operation-specific-projection-shapes-test
+  (let [fixture
+        (runtime-fixture
+         {:project-provisional
+          (fn [{:keys [command arguments observed-basis scope]}]
+            {:invented/application-widget
+             {:command-id (get command protocol/command-id-key)
+              :request (:request-id arguments)
+              :basis observed-basis
+              :scope scope
+              :arbitrary [:future :shape]}})
+          :render-provisional
+          (fn [{:keys [target projection]}]
+            (set-attr! target "data-widget-request"
+                       (get-in projection
+                               [:invented/application-widget :request]))
+            nil)})
+        command (command "custom")]
+    (start! fixture command)
+    (is (= "request-custom"
+           (attr (:target fixture) "data-widget-request")))
+    (is (= [:future :shape]
+           (get-in (optimistic-scope fixture command)
+                   [:provisional protocol/projection-key
+                    :invented/application-widget :arbitrary])))))
+
+;; =============================================================================
+;; Trusted settlement
+;; =============================================================================
+
+(deftest confirmed-settlement-cancels-timeout-and-awaits-authority-test
+  (let [fixture (runtime-fixture)
+        command (command "confirmed")
+        ref (:execution-ref (start! fixture command))
+        timer-id (only-timer-id (:timers fixture))]
+    (optimistic/settle!
+     (:optimistic fixture)
+     ref
+     (settlement command :confirmed
+                 (authoritative {:state :claimed})))
+    (is (nil? (optimistic-scope fixture command)))
+    (is (nil? (browser-choreo/execution
+               (:choreo fixture)
+               (get command protocol/execution-id-key))))
+    (is (= 0 (:optimistic (shell/resource-counts (:shell fixture)))))
+    (is (= 0 (:optimistic-timeouts (shell/resource-counts (:shell fixture)))))
+    (is (some #{timer-id} @(:cleared (:timers fixture))))
+    ;; Settlement resolves semantics but provisional DOM is not thereby promoted
+    ;; to authority. The ordinary Live path must fetch/install canonical state.
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (string? (attr (:target fixture) optimistic/active-attr)))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))
+    (is (= [:await-authority]
+           (mapv :reason @(:refreshes fixture))))))
+
+(deftest rejected-settlement-rolls-back-when-adapter-allows-it-test
+  (let [fixture (runtime-fixture)
+        command (command "rejected")
+        ref (:execution-ref (start! fixture command))]
+    (optimistic/settle!
+     (:optimistic fixture)
+     ref
+     (settlement command :rejected))
+    (is (= "canonical" (attr (:target fixture) "data-state")))
+    (is (= "preserved" (attr (:target fixture) "data-existing")))
+    (is (nil? (attr (:target fixture) optimistic/active-attr)))
+    (is (empty? @(:refreshes fixture)))
+    (is (nil? (optimistic-scope fixture command)))))
+
+(deftest rejected-settlement-refreshes-without-rollback-when-ineligible-test
+  (let [fixture (runtime-fixture {:rollback-eligible? false})
+        command (command "rejected-refresh")
+        ref (:execution-ref (start! fixture command))]
+    (optimistic/settle!
+     (:optimistic fixture)
+     ref
+     (settlement command :rejected))
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (string? (attr (:target fixture) optimistic/active-attr)))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))
+    (is (= [:refresh-authority]
+           (mapv :reason @(:refreshes fixture))))
+    (is (nil? (optimistic-scope fixture command)))))
+
+(deftest settlement-correlation-mismatch-fails-before-adapter-delivery-test
+  (let [fixture (runtime-fixture)
+        command-a (command "correlation-a")
+        command-b (command "correlation-b")
+        ref (:execution-ref (start! fixture command-a))]
+    (is (= :settlement-correlation-mismatch
+           (error-kind
+            #(optimistic/settle!
+              (:optimistic fixture)
+              ref
+              (settlement command-b :rejected)))))
+    (is (some? (optimistic-scope fixture command-a)))))
+
+;; =============================================================================
+;; Timeout / uncertain transport failure / supersession
+;; =============================================================================
+
+(deftest timeout-rolls-back-and-requests-authoritative-refresh-test
+  (let [fixture (runtime-fixture)
+        command (command "timeout")
+        _ (start! fixture command)
+        timer-id (only-timer-id (:timers fixture))]
+    ((:fire! (:timers fixture)) timer-id)
+    (is (= "canonical" (attr (:target fixture) "data-state")))
+    (is (= [:rollback-and-refresh]
+           (mapv :reason @(:refreshes fixture))))
+    (is (nil? (optimistic-scope fixture command)))
+    (is (= 0 (:optimistic (shell/resource-counts (:shell fixture)))))
+    (is (= 0 (:optimistic-timeouts (shell/resource-counts (:shell fixture)))))))
+
+(deftest stale-timeout-callback-after-settlement-has-no-physical-authority-test
+  (let [fixture (runtime-fixture)
+        command (command "stale-timeout")
+        ref (:execution-ref (start! fixture command))
+        timer-id (only-timer-id (:timers fixture))
+        callback (:callback (get @(:active (:timers fixture)) timer-id))]
+    (optimistic/settle!
+     (:optimistic fixture)
+     ref
+     (settlement command :confirmed
+                 (authoritative {:state :claimed})))
+    (is (= 1 (count @(:refreshes fixture))))
+    ;; Simulate a hostile/late host callback even though clearTimeout ran.
+    (callback)
+    (is (= 1 (count @(:refreshes fixture))))
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (nil? (optimistic-scope fixture command)))))
+
+
+(deftest uncertain-transport-failure-uses-adapter-recovery-without-settlement-test
+  (let [transport (controlled-thenable)
+        fixture
+        (runtime-fixture
+         {:transport-send
+          (fn [_ctx]
+            {:completion (:value transport)})})
+        command (command "network-failure")
+        result (start! fixture command)]
+    (is (browser-choreo/execution-ref? (:execution-ref result)))
+    (is (some? (optimistic-scope fixture command)))
+    ((:reject! transport) (js/Error. "network disappeared"))
+    ;; The adapter classifies the local uncertainty as :network-failed and
+    ;; chooses recovery. No protocol :failed settlement is invented.
+    (is (= "canonical" (attr (:target fixture) "data-state")))
+    (is (= [:rollback-and-refresh]
+           (mapv :reason @(:refreshes fixture))))
+    (is (nil? (optimistic-scope fixture command)))
+    (is (= 0 (:transports (shell/resource-counts (:shell fixture)))))
+    (is (= 0 (:optimistic (shell/resource-counts (:shell fixture)))))
+    (is (= 0 (:optimistic-timeouts (shell/resource-counts (:shell fixture)))))))
+
+(deftest authoritative-supersession-releases-provisional-without-rollback-test
+  (let [fixture (runtime-fixture)
+        command (command "superseded")
+        ref (:execution-ref (start! fixture command))]
+    (optimistic/supersede!
+     (:optimistic fixture)
+     ref
+     (authoritative {:state :claimed-by-someone-else}))
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (string? (attr (:target fixture) optimistic/active-attr)))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))
+    (is (empty? @(:refreshes fixture)))
+    (is (nil? (optimistic-scope fixture command)))))
+
+(deftest explicit-retirement-is-release-only-test
+  (let [fixture (runtime-fixture)
+        command (command "retire")
+        ref (:execution-ref (start! fixture command))]
+    (optimistic/retire! (:optimistic fixture) ref :navigation-away)
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (string? (attr (:target fixture) optimistic/active-attr)))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))
+    (is (empty? @(:refreshes fixture)))
+    (is (nil? (optimistic-scope fixture command)))))
+
+;; =============================================================================
+;; Physical ownership safety / replacement
+;; =============================================================================
+
+(deftest rollback-refuses-to-overwrite-physically-newer-owner-test
+  (let [fixture (runtime-fixture)
+        command (command "ownership-loss")
+        ref (:execution-ref (start! fixture command))]
+    ;; Simulate a newer browser representation taking physical ownership before
+    ;; the old settlement arrives. Adapter generation ownership alone is not
+    ;; enough to authorize restoring an obsolete DOM snapshot.
+    (set-attr! (:target fixture) optimistic/active-attr "newer-owner")
+    (set-attr! (:target fixture) "data-state" "newer")
+    (optimistic/settle!
+     (:optimistic fixture)
+     ref
+     (settlement command :rejected))
+    (is (= "newer" (attr (:target fixture) "data-state")))
+    (is (= "newer-owner" (attr (:target fixture) optimistic/active-attr)))
+    (is (= [:rollback-ownership-lost]
+           (mapv :reason @(:refreshes fixture))))))
+
+(deftest replacing-target-owner-releases-old-resource-before-new-install-test
+  (let [fixture (runtime-fixture)
+        command-a (command "replace-a")
+        command-b (command "replace-b")
+        ref-a (:execution-ref (start! fixture command-a))]
+    (is (browser-choreo/execution-ref? ref-a))
+    (let [ref-b
+          (:execution-ref
+           (start! fixture command-b {:replace-owner? true}))]
+      (is (browser-choreo/execution-ref? ref-b))
+      (is (nil? (optimistic-scope fixture command-a)))
+      (is (some? (optimistic-scope fixture command-b)))
+      (is (= (get command-b protocol/execution-id-key)
+             (:execution-id
+              (adapter/target-owner
+               (optimistic/state (:optimistic fixture))
+               "request-target"))))
+      (is (= "claimed" (attr (:target fixture) "data-state")))
+      (is (= 1 (:optimistic (shell/resource-counts (:shell fixture)))))
+      (is (= 1 (:optimistic-timeouts (shell/resource-counts (:shell fixture)))))
+      ;; release-only for A must not fabricate authority refresh.
+      (is (empty? @(:refreshes fixture))))))
+
+;; =============================================================================
+;; Physical presentation failure remains non-authoritative
+;; =============================================================================
+
+(deftest provisional-render-failure-does-not-fabricate-command-failure-test
+  (let [fixture
+        (runtime-fixture
+         {:render-provisional
+          (fn [_]
+            (throw (js/Error. "paint failed")))})
+        command (command "render-failure")
+        result (start! fixture command)]
+    (is (browser-choreo/execution-ref? (:execution-ref result)))
+    ;; The command still crossed the semantic transport boundary.
+    (is (= 1 (count @(:sent fixture))))
+    (is (some? (optimistic-scope fixture command)))
+    (is (= 0 (:optimistic (shell/resource-counts (:shell fixture)))))
+    (is (= 1 (:optimistic-timeouts
+              (shell/resource-counts (:shell fixture)))))
+    (is (some #(= :optimistic-install-failed (:phase %))
+              @(:errors fixture)))))
+
+;; =============================================================================
+;; v7.222 adversarial physical-safety checks
+;; =============================================================================
+
+(deftest replacement-never-uses-retired-provisional-as-rollback-authority-test
+  (let [fixture
+        (runtime-fixture
+         {:project-provisional
+          (fn [{:keys [arguments]}]
+            {:state (:request-id arguments)})
+          :render-provisional
+          (fn [{:keys [target projection]}]
+            (set-attr! target "data-state" (:state projection))
+            nil)})
+        command-a (command "baseline-a")
+        command-b (command "baseline-b")
+        _ (start! fixture command-a)
+        ref-b (:execution-ref
+               (start! fixture command-b {:replace-owner? true}))]
+    (is (= "request-baseline-b" (attr (:target fixture) "data-state")))
+    (optimistic/settle!
+     (:optimistic fixture)
+     ref-b
+     (settlement command-b :rejected))
+    ;; A's retired provisional representation is not resurrected as B's
+    ;; rollback baseline. B remains visibly provisional until canonical refresh.
+    (is (= "request-baseline-b" (attr (:target fixture) "data-state")))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))
+    (is (= 1 (count @(:refreshes fixture))))))
+
+(deftest renderer-partial-mutation-is-compensated-before-command-continues-test
+  (let [fixture
+        (runtime-fixture
+         {:render-provisional
+          (fn [{:keys [target]}]
+            (set-attr! target "data-state" "half-painted")
+            (set-attr! target "data-half" "true")
+            (throw (js/Error. "paint failed after mutation")))})
+        command (command "partial-render")
+        result (start! fixture command)]
+    (is (browser-choreo/execution-ref? (:execution-ref result)))
+    (is (= "canonical" (attr (:target fixture) "data-state")))
+    (is (nil? (attr (:target fixture) "data-half")))
+    (is (nil? (attr (:target fixture) optimistic/active-attr)))
+    (is (nil? (attr (:target fixture) optimistic/provisional-attr)))
+    ;; Semantic command transport continues even though optional local paint failed.
+    (is (= 1 (count @(:sent fixture))))))
+
+(deftest replacement-generation-changes-physical-ownership-token-test
+  (let [fixture (runtime-fixture)
+        command (command "same-execution-generation")
+        first-ref (:execution-ref (start! fixture command))
+        first-token (attr (:target fixture) optimistic/active-attr)
+        second-ref (:execution-ref
+                    (start! fixture command {:replace-execution? true}))
+        second-token (attr (:target fixture) optimistic/active-attr)]
+    (is (= (:execution-id first-ref) (:execution-id second-ref)))
+    (is (not= (:generation first-ref) (:generation second-ref)))
+    (is (string? first-token))
+    (is (string? second-token))
+    (is (not= first-token second-token))))
+
+(deftest late-settlement-after-retirement-is-adapter-classified-not-thrown-test
+  (let [fixture (runtime-fixture)
+        command (command "late-settlement")
+        ref (:execution-ref (start! fixture command))
+        confirmed (settlement command :confirmed
+                              (authoritative {:state :claimed}))]
+    (optimistic/settle! (:optimistic fixture) ref confirmed)
+    (is (nil? (optimistic-scope fixture command)))
+    (let [late (optimistic/settle! (:optimistic fixture) ref confirmed)]
+      (is (nil? (:message-dispatch late)))
+      (is (some adapter/diagnostic-effect? (:effects late))))
+    (is (= 1 (count @(:refreshes fixture))))))
+
+;; =============================================================================
+;; Complete protocol-v3 outcome and ordering contract
+;; =============================================================================
+
+(deftest start-orders-derive-before-install-timeout-and-send-test
+  (let [fixture (runtime-fixture)
+        command (command "ordered-start")]
+    (start! fixture command)
+    (let [events (mapv #(get-in % [:event :event]) @(:transitions fixture))
+          local-completed (transition-for-event fixture :machine/local-completed)]
+      (is (= [:execution/start
+              :machine/local-completed
+              :machine/send-requested
+              :transport/succeeded]
+             events))
+      ;; The adapter exposes the physical consequences in the exact order that
+      ;; the shell realizes them. There is no timeout or transport before the
+      ;; semantic local derivation completes.
+      (is (= [:optimistic/install-provisional
+              :optimistic/timeout-start
+              :machine/send]
+             (mapv first (:effects local-completed))))
+      (is (= 1 (count (resource-values fixture :optimistic))))
+      (is (= 1 (count (resource-values fixture :optimistic-timeouts))))
+      (is (= 1 (count @(:sent fixture)))))))
+
+(deftest optimistic-runtime-has-no-independent-semantic-registry-test
+  (let [{:keys [optimistic shell]} (runtime-fixture)
+        forbidden #{:executions
+                    :execution-registry
+                    :settlements
+                    :target-locks
+                    :targets
+                    :timers
+                    :timeouts
+                    :outgoing-actions
+                    :commands
+                    :provisionals}]
+    (is (empty? (set/intersection forbidden (set (keys optimistic)))))
+    (is (identical? (optimistic/state optimistic)
+                    (shell/state shell)))
+    (is (= #{}
+           (:active-optimistic-executions
+            (optimistic/diagnostics optimistic))))))
+
+(deftest reconciled-and-already-incorporated-await-canonical-authority-test
+  (doseq [resolution [:reconciled :already-incorporated]]
+    (testing (name resolution)
+      (let [fixture (runtime-fixture)
+            command (command (name resolution))
+            ref (:execution-ref (start! fixture command))]
+        (optimistic/settle!
+         (:optimistic fixture)
+         ref
+         (settlement command resolution
+                     (authoritative {:state resolution})))
+        (is (= :await-authority
+               (:disposition
+                (last-effect-data fixture :optimistic/finish))))
+        (is (= [:await-authority]
+               (mapv :reason @(:refreshes fixture))))
+        (is (nil? (optimistic-scope fixture command)))
+        (is (= 0 (:optimistic
+                  (shell/resource-counts (:shell fixture)))))
+        (is (= 0 (:optimistic-timeouts
+                  (shell/resource-counts (:shell fixture)))))
+        ;; Resolution is semantic; canonical DOM installation has not happened.
+        (is (= "true"
+               (attr (:target fixture) optimistic/provisional-attr)))))))
+
+(deftest trusted-failed-settlement-honors-both-rollback-policies-test
+  (doseq [[rollback-eligible? expected-state expected-disposition expected-refresh]
+          [[true "canonical" :rollback []]
+           [false "claimed" :refresh-authority [:refresh-authority]]]]
+    (testing (str "rollback-eligible?=" rollback-eligible?)
+      (let [fixture (runtime-fixture {:rollback-eligible? rollback-eligible?})
+            command (command (str "failed-" rollback-eligible?))
+            ref (:execution-ref (start! fixture command))]
+        (optimistic/settle!
+         (:optimistic fixture)
+         ref
+         (settlement command :failed))
+        (is (= expected-disposition
+               (:disposition
+                (last-effect-data fixture :optimistic/finish))))
+        (is (= expected-state (attr (:target fixture) "data-state")))
+        (is (= expected-refresh
+               (mapv :reason @(:refreshes fixture))))
+        (is (nil? (optimistic-scope fixture command)))))))
+
+(deftest network-failure-without-rollback-eligibility-refreshes-only-test
+  (let [transport (controlled-thenable)
+        fixture
+        (runtime-fixture
+         {:rollback-eligible? false
+          :transport-send (fn [_] {:completion (:value transport)})})
+        command (command "network-no-rollback")]
+    (start! fixture command)
+    ((:reject! transport) (js/Error. "network disappeared"))
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (= :refresh-authority
+           (:disposition
+            (last-effect-data fixture :optimistic/finish))))
+    (is (= [:refresh-authority]
+           (mapv :reason @(:refreshes fixture))))
+    (is (nil? (optimistic-scope fixture command)))))
+
+(deftest exact-duplicate-settlement-is-diagnostic-before-machine-delivery-test
+  (let [fixture (runtime-fixture)
+        command (command "duplicate")
+        ref (:execution-ref (start! fixture command))
+        settlement' (settlement command :confirmed
+                                (authoritative {:state :claimed}))
+        {:keys [execution-id generation]} ref]
+    ;; Hold the execution between adapter settlement observation and projected
+    ;; participant-message delivery. This is the only phase in which an exact
+    ;; transport duplicate can arrive before semantic completion.
+    (shell/dispatch!
+     (:shell fixture)
+     {:event :optimistic/settlement-observed
+      :execution-id execution-id
+      :generation generation
+      :resolution :confirmed
+      :settlement settlement'})
+    (let [result (optimistic/settle! (:optimistic fixture) ref settlement')]
+      (is (nil? (:message-dispatch result)))
+      (is (= :settlement-observed
+             (:status (optimistic-scope fixture command))))
+      (is (some #(= :duplicate-optimistic-settlement (:reason %))
+                @(:diagnostics fixture)))
+      (is (= 1 (count (effect-data fixture :optimistic/timeout-cancel)))))))
+
+(deftest conflicting-settlement-fails-closed-before-machine-delivery-test
+  (let [fixture (runtime-fixture)
+        command (command "conflicting")
+        ref (:execution-ref (start! fixture command))
+        confirmed (settlement command :confirmed
+                              (authoritative {:state :claimed}))
+        rejected (settlement command :rejected)
+        {:keys [execution-id generation]} ref]
+    (shell/dispatch!
+     (:shell fixture)
+     {:event :optimistic/settlement-observed
+      :execution-id execution-id
+      :generation generation
+      :resolution :confirmed
+      :settlement confirmed})
+    (is (= :conflicting-optimistic-settlement
+           (error-kind
+            #(optimistic/settle! (:optimistic fixture) ref rejected))))
+    (is (= :confirmed (:resolution (optimistic-scope fixture command))))
+    (is (= :settlement-observed
+           (:status (optimistic-scope fixture command))))))
+
+(deftest stale-timeout-generation-is-inert-while-current-execution-remains-active-test
+  (let [fixture (runtime-fixture)
+        command (command "stale-timeout-generation")
+        ref (:execution-ref (start! fixture command))
+        scope (optimistic-scope fixture command)]
+    (shell/dispatch!
+     (:shell fixture)
+     {:event :optimistic/timeout-fired
+      :execution-id (:execution-id ref)
+      :generation (:generation ref)
+      :timeout-generation (inc (:timeout-generation scope))})
+    (is (some? (optimistic-scope fixture command)))
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (some #(= :stale-optimistic-timeout (:reason %))
+              @(:diagnostics fixture)))
+    (is (= 1 (:optimistic-timeouts
+              (shell/resource-counts (:shell fixture)))))))
+
+(deftest authoritative-supersession-cancels-timeout-and-emits-authoritative-disposition-test
+  (let [fixture (runtime-fixture)
+        command (command "supersession-disposition")
+        ref (:execution-ref (start! fixture command))
+        timer-id (only-timer-id (:timers fixture))]
+    (optimistic/supersede!
+     (:optimistic fixture)
+     ref
+     (authoritative {:state :other-authority}))
+    (is (= :authoritative
+           (:disposition
+            (last-effect-data fixture :optimistic/finish))))
+    (is (some #{timer-id} @(:cleared (:timers fixture))))
+    (is (= 0 (:optimistic-timeouts
+              (shell/resource-counts (:shell fixture)))))
+    (is (= 0 (:optimistic
+              (shell/resource-counts (:shell fixture)))))
+    ;; Supersession resolves semantic ownership but does not forge canonical DOM.
+    (is (= "claimed" (attr (:target fixture) "data-state")))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))))
+
+(deftest missing-target-during-provisional-install-is-presentation-failure-only-test
+  (let [fixture (runtime-fixture {:resolve-target (fn [_] nil)})
+        command (command "missing-target")
+        result (start! fixture command)]
+    (is (browser-choreo/execution-ref? (:execution-ref result)))
+    (is (= 1 (count @(:sent fixture))))
+    (is (some? (optimistic-scope fixture command)))
+    (is (= 0 (:optimistic (shell/resource-counts (:shell fixture)))))
+    (is (= 1 (:optimistic-timeouts
+              (shell/resource-counts (:shell fixture)))))
+    (is (some #(= :optimistic-install-failed (:phase %))
+              @(:errors fixture)))))
+
+(deftest returned-provisional-element-is-copied-into-stable-target-test
+  (let [original-target (atom nil)
+        fixture
+        (runtime-fixture
+         {:render-provisional
+          (fn [{:keys [target]}]
+            (reset! original-target target)
+            (fake-element "details"
+                          {"id" "request-target"
+                           "data-state" "replacement-render"}))})
+        command (command "returned-element")]
+    (start! fixture command)
+    (is (identical? @original-target (:target fixture)))
+    (is (= "replacement-render" (attr (:target fixture) "data-state")))
+    (is (= "true" (attr (:target fixture) optimistic/provisional-attr)))
+    (is (some #(identical? % (:target fixture)) @(:processed fixture)))))
+
+(deftest async-provisional-derivation-defers-install-timeout-and-transport-test
+  (async done
+    (let [deferred (deferred-promise)
+          fixture
+          (runtime-fixture
+           {:project-provisional (fn [_] (:promise deferred))})
+          command (command "async-derive")]
+      (start! fixture command)
+      (is (= "canonical" (attr (:target fixture) "data-state")))
+      (is (= 0 (:optimistic (shell/resource-counts (:shell fixture)))))
+      (is (= 0 (:optimistic-timeouts
+                (shell/resource-counts (:shell fixture)))))
+      (is (empty? @(:sent fixture)))
+      ((:resolve! deferred) {:state :claimed
+                             :request-id "request-async-derive"})
+      (after-promises
+       (fn []
+         (is (= "claimed" (attr (:target fixture) "data-state")))
+         (is (= 1 (:optimistic (shell/resource-counts (:shell fixture)))))
+         (is (= 1 (:optimistic-timeouts
+                   (shell/resource-counts (:shell fixture)))))
+         (is (= 1 (count @(:sent fixture))))
+         (done))))))
+
+(deftest stale-async-provisional-derivation-cannot-resume-replacement-generation-test
+  (async done
+    (let [first-deferred (deferred-promise)
+          second-deferred (deferred-promise)
+          calls (atom 0)
+          fixture
+          (runtime-fixture
+           {:project-provisional
+            (fn [_]
+              (if (= 1 (swap! calls inc))
+                (:promise first-deferred)
+                (:promise second-deferred)))
+            :render-provisional
+            (fn [{:keys [target projection]}]
+              (set-attr! target "data-state" (:state projection))
+              nil)})
+          command (command "async-replacement")
+          first-ref (:execution-ref (start! fixture command))
+          second-ref (:execution-ref
+                      (start! fixture command {:replace-execution? true}))]
+      (is (= (:execution-id first-ref) (:execution-id second-ref)))
+      (is (not= (:generation first-ref) (:generation second-ref)))
+      ((:resolve! first-deferred) {:state "stale"})
+      (after-promises
+       (fn []
+         (is (= "canonical" (attr (:target fixture) "data-state")))
+         (is (empty? @(:sent fixture)))
+         (is (some #(= :stale-execution-generation (:reason %))
+                   @(:diagnostics fixture)))
+         ((:resolve! second-deferred) {:state "current"})
+         (after-promises
+          (fn []
+            (is (= "current" (attr (:target fixture) "data-state")))
+            (is (= 1 (count @(:sent fixture))))
+            (is (= (:generation second-ref)
+                   (:execution-generation
+                    (optimistic-scope fixture command))))
+            (done))))))))
+
+(deftest projector-failure-retires-semantic-execution-before-command-send-test
+  (let [fixture
+        (runtime-fixture
+         {:project-provisional
+          (fn [_]
+            (throw (js/Error. "semantic projection failed")))})
+        command (command "projector-failure")
+        result (start! fixture command)]
+    (is (nil? (:execution-ref result)))
+    (is (empty? @(:sent fixture)))
+    (is (nil? (optimistic-scope fixture command)))
+    (is (= 0 (:optimistic (shell/resource-counts (:shell fixture)))))
+    (is (= 0 (:optimistic-timeouts
+              (shell/resource-counts (:shell fixture)))))
+    (is (some #(and (= :effect-failed (:phase %))
+                    (= :machine/local (:effect %)))
+              @(:errors fixture)))))
+
