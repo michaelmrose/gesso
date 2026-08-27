@@ -599,6 +599,32 @@
     (is (= #{}
            (:requirements (core/pending-refresh runtime root))))))
 
+(deftest supplied-refresh-requirement-must-be-canonical-progression-test
+  (doseq [invalid-requirement
+          [nil
+           :basis-a
+           {:tx 7}
+           {}]]
+    (let [{:keys [runtime htmx-fixture]}
+          (runtime-fixture "fragment-1")
+          before (core/state runtime)
+          error (thrown
+                 #(core/notify-fragment!
+                   runtime
+                   "fragment-1"
+                   invalid-requirement))
+          data (ex-data error)]
+      (testing (str "invalid supplied requirement fails before adapter admission: "
+                    (pr-str invalid-requirement))
+        (is (= :invalid-progression-requirement
+               (:error/kind data)))
+        (is (= invalid-requirement
+               (:requirement data)))
+        (is (= before (core/state runtime))
+            "Rejected progression data must not mutate AdapterState.")
+        (is (empty? @(:calls htmx-fixture))
+            "Rejected progression data must not trigger a physical HTMX refresh.")))))
+
 ;; =============================================================================
 ;; Adapter-approved refresh progression -> HTMX request header
 ;; =============================================================================
