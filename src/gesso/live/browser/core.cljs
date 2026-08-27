@@ -1007,11 +1007,30 @@
           {:present? true
            :requirement top})))))
 
+(defn- require-refresh-requirement!
+  [requirement]
+  (try
+    (progression/require-requirement! requirement)
+    (catch :default error
+      (throw
+       (core-error
+        :invalid-progression-requirement
+        "Managed fragment refresh requirement must be a canonical Gesso Live progression requirement."
+        {:requirement requirement}
+        error)))))
+
 (defn notify-fragment!
   "Notify the pure adapter that a logical Live fragment must refresh.
 
-   requirement is opaque. Core neither compares nor interprets it. Multiple
-   invalidations while a request is active are coalesced by adapter.cljc.
+   The one-arity fragment form is an advisory refresh and therefore carries no
+   authoritative minimum-read requirement.
+
+   When a requirement is supplied it must already be one canonical, normalized
+   gesso.live.progression requirement. Core validates that closed portable
+   shape before admitting the invalidation, but does not compare opaque bases or
+   decide progression ordering. Multiple requirements observed while a request
+   is active are coalesced by adapter.cljc and conservatively composed at the
+   HTMX configRequest boundary.
 
    This is the intended browser entry point for SSE wakeups and other Live
    invalidation sources."
@@ -1022,6 +1041,9 @@
   ([runtime fragment-id requirement requirement-present?]
    (let [runtime (require-core! runtime)
          fragment-id (require-nonblank-string! "Fragment id" fragment-id)
+         requirement
+         (when requirement-present?
+           (require-refresh-requirement! requirement))
          event
          (cond-> {:event :live/invalidated
                   :fragment-id fragment-id}
@@ -1093,11 +1115,13 @@
   "Normalize one explicit DOM invalidation event.
 
    Expected detail:
-     {fragmentId: \"...\", requirement: <optional opaque plain data>}
+     {fragmentId: \"...\", requirement: <optional canonical progression data>}
 
-   Core does not parse raw SSE frames here. SSE transport integration can emit
-   this event or call notify-fragment! directly once it has identified the
-   logical fragment."
+   Omitting requirement is the advisory-refresh form. If the field is present,
+   notify-fragment! validates it as a canonical normalized progression
+   requirement before AdapterState can observe it. Core does not parse raw SSE
+   frames here; SSE transport integration can emit this event or call
+   notify-fragment! directly once it has identified the logical fragment."
   [runtime event]
   (let [fragment-id (detail-field event "fragmentId")
         detail (event-detail event)
@@ -1138,9 +1162,9 @@
 
    HTMX exposes mutable request headers at htmx:configRequest. Core uses only
    the pending adapter-issued refresh correlation for the matching stable
-   fragment root; unrelated HTMX requests are ignored. Multiple opaque
-   requirements are conservatively composed through gesso.live.progression
-   before the shared HTTP codec serializes them.
+   fragment root; unrelated HTMX requests are ignored. Multiple canonical
+   progression requirements are conservatively composed through
+   gesso.live.progression before the shared HTTP codec serializes them.
 
    This header is a minimum-read request, not browser authority. The trusted
    server boundary must decode it, compose it with any server-established
