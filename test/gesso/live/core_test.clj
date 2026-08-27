@@ -5,6 +5,7 @@
    [gesso.live.core :as live]
    [gesso.live.fragment :as fragment]
    [gesso.live.htmx :as htmx]
+   [gesso.live.optimistic.capability :as optimistic.capability]
    [gesso.live.optimistic.server :as optimistic.server]
    [gesso.live.progression :as progression]
    [gesso.live.progression.http :as progression.http]
@@ -527,6 +528,73 @@
 
   (is (identical? htmx/post-form-attrs
                   live/post-form-attrs)))
+
+;; -----------------------------------------------------------------------------
+;; Optimistic protocol-v3 application capability facade
+;; -----------------------------------------------------------------------------
+
+(deftest optimistic-capability-facades-test
+  (testing "core exposes the portable application capability constructors"
+    (is (identical? optimistic.capability/operation-capability
+                    live/optimistic-capability))
+    (is (identical? optimistic.capability/operation-capability?
+                    live/optimistic-capability?))
+    (is (identical? optimistic.capability/bind
+                    live/bind-optimistic-capability))))
+
+(deftest optimistic-capability-facade-remains-separate-from-trusted-server-registry-test
+  (let [capability
+        (live/optimistic-capability
+         {:operation :request/claim
+          :plan-key :request/claim
+          :rollback-eligible? true
+          :timeout-ms 5000})
+        binding
+        {:arguments {:request-id "request-1"}
+         :observed-basis {:tx-id 42
+                          :system-time "2026-08-26T17:00:00Z"}
+         :scope [:request "request-1"]
+         :target-id "request-request-1"}
+        action
+        (live/bind-optimistic-capability capability binding)]
+    (testing "the app-facing facade preserves the capability owner's exact values"
+      (is (true? (live/optimistic-capability? capability)))
+      (is (= (optimistic.capability/operation-capability
+              {:operation :request/claim
+               :plan-key :request/claim
+               :rollback-eligible? true
+               :timeout-ms 5000})
+             capability))
+      (is (= (optimistic.capability/bind capability binding)
+             action)))
+
+    (testing "capability and bound action are not trusted server operation entries"
+      (is (false? (optimistic.server/operation? capability)))
+      (is (false? (live/optimistic-operation? capability)))
+      (is (false? (optimistic.server/operation? action)))
+      (is (false? (live/optimistic-operation? action))))
+
+    (testing "binding emits inert semantic data rather than authority or correlation"
+      (is (= :request/claim (:operation action)))
+      (is (= {:request-id "request-1"} (:arguments action)))
+      (is (= (:observed-basis binding) (:observed-basis action)))
+      (is (= (:scope binding) (:scope action)))
+      (is (= (:target-id binding) (:target-id action)))
+      (is (= :request/claim (:plan-key action)))
+      (is (true? (:rollback-eligible? action)))
+      (is (= 5000 (:timeout-ms action)))
+      (doseq [key [:principal
+                   :authority
+                   :authorities
+                   :role
+                   :roles
+                   :command-id
+                   :execution-id
+                   :settlement
+                   :resolution
+                   :authoritative]]
+        (is (not (contains? action key))
+            (str "bound application capability must remain inert: " key))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Optimistic protocol-v3 trusted-server facade
