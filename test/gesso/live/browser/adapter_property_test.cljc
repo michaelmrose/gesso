@@ -15,7 +15,7 @@
    makes generated runs useful rather than mostly malformed noise: they contain
    current callbacks, stale callbacks, replacements, duplicate deliveries,
    invalidations, request lifecycle events, timer events, continuity callbacks,
-   and failures in adversarial order.
+   optimistic settlement/timeout/supersession, and failures in adversarial order.
 
    ExceptionInfo from an impossible current transition is treated as fail-closed
    behavior for the generated runner: the runner continues from the exact input
@@ -126,6 +126,38 @@
      :done
      (choreo/return :done)}}))
 
+(def ^:private provisional-key
+  :gesso.live.optimistic/provisional)
+
+(defn- optimistic-receive-choreography
+  []
+  (choreo/->choreography
+   {:initial :local
+    :states
+    {:local
+     (choreo/local
+      :browser
+      :browser/derive-provisional
+      :receive
+      {:outputs #{provisional-key}})
+
+     :receive
+     (choreo/communicate
+      :server
+      :browser
+      :server/settlement
+      :done
+      {:via :http})
+
+     :done
+     (choreo/return :done)}}))
+
+(defn- optimistic-execution
+  []
+  (machine-execution
+   (optimistic-receive-choreography)
+   :browser))
+
 (defn- scenario-execution
   [scenario]
   (machine-execution
@@ -197,7 +229,10 @@
     [2 (gen/return :htmx/after-request)]
     [2 (gen/return :http/failed)]
     [2 (gen/return :continuity/completed)]
-    [2 (gen/return :continuity/failed)]]))
+    [2 (gen/return :continuity/failed)]
+    [3 (gen/return :optimistic/settlement-observed)]
+    [3 (gen/return :optimistic/timeout-fired)]
+    [3 (gen/return :optimistic/authoritative-superseded)]]))
 
 (def operation-gen
   (gen/let [op operation-kind-gen
@@ -206,14 +241,16 @@
             n small-natural-gen
             flag-a gen/boolean
             flag-b gen/boolean
-            stale? gen/boolean]
+            stale? gen/boolean
+            optimistic? gen/boolean]
     {:op op
      :a a
      :b b
      :n n
      :flag-a flag-a
      :flag-b flag-b
-     :stale? stale?}))
+     :stale? stale?
+     :optimistic? optimistic?}))
 
 (def mixed-script-gen
   (gen/vector operation-gen 1 80))
@@ -301,6 +338,7 @@
    (map :generation (vals (:targets state)))
    (map :generation (vals (:timers state)))
    (map :execution-generation (vals (:timers state)))
+   (keep :timeout-generation (vals (:optimistic state)))
    (keep #(get-in % [:inflight :generation])
          (vals (:fragments state)))
    (map :generation (vals (:continuity state)))
@@ -353,10 +391,28 @@
           :to basis
           :relation :advances})))))
 
+(def ^:private generated-settlement-resolutions
+  [:confirmed
+   :reconciled
+   :already-incorporated
+   :rejected
+   :failed])
+
+(defn- generated-settlement-resolution
+  [n]
+  (nth generated-settlement-resolutions
+       (mod n (count generated-settlement-resolutions))))
+
+(defn- generated-command-id
+  [a n]
+  (keyword "gesso.generated.command"
+           (str a "-" n)))
+
 (defn- resolve-operation
-  [state {:keys [op a b n flag-a flag-b stale?] :as token}]
+  [state {:keys [op a b n flag-a flag-b stale? optimistic?] :as token}]
   (let [execution-id' (execution-id a)
         record (adapter/execution state execution-id')
+        optimistic-scope (adapter/optimistic-scope state execution-id')
         execution-generation (:generation record)
         selected-execution-generation
         (choose-generation state execution-generation stale?)
@@ -365,6 +421,12 @@
         request-generation (:generation inflight)
         selected-request-generation
         (choose-generation state request-generation stale?)
+        optimistic-timeout-generation (:timeout-generation optimistic-scope)
+        selected-optimistic-timeout-generation
+        (choose-generation
+         state
+         optimistic-timeout-generation
+         stale?)
         generated-request-id (request-id n)
         selected-request-id
         (if (and (not stale?)
@@ -374,18 +436,30 @@
           generated-request-id)]
     (case op
       :execution/start
-      {:event :execution/start
-       :execution-id execution-id'
-       :execution (scenario-execution n)
-       :target-id (target-id b)
-       :replace-owner? flag-a
-       :replace-execution? flag-b}
+      (cond->
+       {:event :execution/start
+        :execution-id execution-id'
+        :execution (if optimistic?
+                     (optimistic-execution)
+                     (scenario-execution n))
+        :target-id (target-id b)
+        :replace-owner? flag-a
+        :replace-execution? flag-b}
+        optimistic?
+        (assoc
+         :optimistic
+         {:command-id (generated-command-id a n)
+          :provisional-key provisional-key
+          :rollback-eligible? (even? n)
+          :timeout-ms n}))
 
       :execution/retire
       {:event :execution/retire
        :execution-id execution-id'
        :generation selected-execution-generation
-       :reason :generated-retirement}
+       :reason (if (and optimistic-scope flag-a)
+                 :optimistic-incompatible-protocol
+                 :generated-retirement)}
 
       :machine/local-completed
       {:event :machine/local-completed
@@ -396,7 +470,12 @@
         state
         (pending-generation record :local)
         stale?)
-       :outputs {}}
+       :outputs
+       (if (= :awaiting-provisional (:status optimistic-scope))
+         {provisional-key
+          {:authority :provisional
+           :generated/value n}}
+         {})}
 
       :machine/send-requested
       {:event :machine/send-requested
@@ -535,7 +614,33 @@
          :slot-id slot-id
          :slot-generation
          (choose-generation state (:generation slot) stale?)
-         :reason :generated-continuity-failure}))))
+         :reason :generated-continuity-failure})
+
+      :optimistic/settlement-observed
+      (let [resolution (generated-settlement-resolution n)]
+        {:event :optimistic/settlement-observed
+         :execution-id execution-id'
+         :generation selected-execution-generation
+         :resolution resolution
+         :settlement
+         {:resolution resolution
+          :authoritative
+          {:presence :present
+           :basis (basis-id n)}}})
+
+      :optimistic/timeout-fired
+      {:event :optimistic/timeout-fired
+       :execution-id execution-id'
+       :generation selected-execution-generation
+       :timeout-generation selected-optimistic-timeout-generation}
+
+      :optimistic/authoritative-superseded
+      {:event :optimistic/authoritative-superseded
+       :execution-id execution-id'
+       :generation selected-execution-generation
+       :authoritative
+       {:presence :present
+        :basis (basis-id n)}})))
 
 (defn- attempt-step
   [state event]
@@ -671,6 +776,133 @@
            (= (adapter/semantic-effects (:effects clean))
               (adapter/semantic-effects (:effects noisy)))
            (adapter/state? (:state noisy)))))))))
+
+;; =============================================================================
+;; Generated optimistic terminal noninterference
+;; =============================================================================
+
+(defn- start-provisional-optimistic
+  [rollback-eligible? timeout-ms]
+  (let [execution-id "execution/generated-optimistic"
+        target-id :target/generated-optimistic
+        [started start-effects]
+        (adapter/step
+         (adapter/initial-state)
+         {:event :execution/start
+          :execution-id execution-id
+          :execution (optimistic-execution)
+          :target-id target-id
+          :optimistic
+          {:command-id :command/generated-optimistic
+           :provisional-key provisional-key
+           :rollback-eligible? rollback-eligible?
+           :timeout-ms timeout-ms}})
+        generation (adapter/execution-generation started execution-id)
+        effect-generation
+        (:effect-generation
+         (effect-data :machine/local start-effects))
+        [provisional _]
+        (adapter/step
+         started
+         {:event :machine/local-completed
+          :execution-id execution-id
+          :generation generation
+          :effect-generation effect-generation
+          :outputs
+          {provisional-key
+           {:authority :provisional
+            :generated/value timeout-ms}}})]
+    {:state provisional
+     :execution-id execution-id
+     :target-id target-id
+     :generation generation
+     :timeout-generation
+     (:timeout-generation
+      (adapter/optimistic-scope provisional execution-id))}))
+
+(defn- optimistic-terminal-event
+  [kind execution-id generation timeout-generation n]
+  (case kind
+    0
+    {:event :optimistic/timeout-fired
+     :execution-id execution-id
+     :generation generation
+     :timeout-generation timeout-generation}
+
+    1
+    {:event :optimistic/authoritative-superseded
+     :execution-id execution-id
+     :generation generation
+     :authoritative
+     {:presence :present
+      :basis (basis-id n)}}
+
+    2
+    {:event :execution/retire
+     :execution-id execution-id
+     :generation generation
+     :reason :optimistic-incompatible-protocol}))
+
+(deftest generated-optimistic-terminal-noise-cannot-resurrect-retired-ownership-test
+  (testing "timeout, authoritative supersession, and incompatible-protocol retirement remain terminal under arbitrary stale optimistic callbacks"
+    (check-property!
+     property-test-count
+     (prop/for-all*
+      [gen/boolean
+       small-index-gen
+       small-natural-gen
+       (gen/vector small-natural-gen 0 30)]
+      (fn [rollback-eligible? terminal-index basis-index noise]
+        (let [{:keys [state execution-id target-id generation timeout-generation]}
+              (start-provisional-optimistic
+               rollback-eligible?
+               (inc basis-index))
+              terminal-event
+              (optimistic-terminal-event
+               (mod terminal-index 3)
+               execution-id
+               generation
+               timeout-generation
+               basis-index)
+              [retired terminal-effects]
+              (adapter/step state terminal-event)
+              stale-generation' (+ 1000 (:next-generation retired))
+              stale-timeout-generation (+ stale-generation' 1)
+              noisy
+              (reduce
+               (fn [current n]
+                 (let [resolution
+                       (generated-settlement-resolution n)
+                       events
+                       [{:event :optimistic/settlement-observed
+                         :execution-id execution-id
+                         :generation stale-generation'
+                         :resolution resolution
+                         :settlement {:resolution resolution}}
+                        {:event :optimistic/timeout-fired
+                         :execution-id execution-id
+                         :generation stale-generation'
+                         :timeout-generation stale-timeout-generation}
+                        {:event :optimistic/authoritative-superseded
+                         :execution-id execution-id
+                         :generation stale-generation'
+                         :authoritative
+                         {:presence :present
+                          :basis (basis-id n)}}]]
+                   (reduce
+                    (fn [current-state event]
+                      (first (adapter/step current-state event)))
+                    current
+                    events)))
+               retired
+               noise)]
+          (and
+           (nil? (adapter/execution retired execution-id))
+           (nil? (adapter/optimistic-scope retired execution-id))
+           (nil? (adapter/target-owner retired target-id))
+           (seq (adapter/semantic-effects terminal-effects))
+           (= retired noisy)
+           (adapter/state? noisy))))))))
 
 ;; =============================================================================
 ;; Bounded fragment coordination
