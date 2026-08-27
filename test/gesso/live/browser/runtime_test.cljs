@@ -35,7 +35,8 @@
    [gesso.live.browser.optimistic-htmx :as optimistic-htmx]
    [gesso.live.browser.runtime :as runtime]
    [gesso.live.browser.shell :as shell]
-   [gesso.live.optimistic.choreo :as optimistic-choreo]))
+   [gesso.live.optimistic.choreo :as optimistic-choreo]
+   [gesso.live.progression :as progression]))
 
 ;; =============================================================================
 ;; Generic helpers
@@ -993,11 +994,15 @@
         {:keys [runtime htmx-fixture]}
         (fixture {:roots [root]})
         shared-shell (runtime/shell-runtime runtime)
+        requirement
+        (progression/requirement
+         {:tx-id 42
+          :system-time "2026-08-26T22:42:00Z"})
         result
         (runtime/notify-fragment!
          runtime
          "request-list"
-         {:basis 42})]
+         requirement)]
     (is (= :dispatched (:status result)))
     (is (= 1
            (:active-fragments
