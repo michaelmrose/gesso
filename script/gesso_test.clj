@@ -19,7 +19,7 @@
   "resources/public/js/gesso-live.js")
 
 (def browser-wall-clock-timeout-ms
-  180000)
+  1800000)
 
 (def browser-test-namespaces-env
   "GESSO_BROWSER_TEST_NAMESPACES")

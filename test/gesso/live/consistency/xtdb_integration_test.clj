@@ -2,6 +2,7 @@
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.live.consistency.xtdb :as xtdb-live]
+   [gesso.live.progression.http :as progression.http]
    [xtdb.api :as xt]
    [xtdb.node :as xtn])
   (:import
@@ -186,6 +187,32 @@
                         (select-user-sql id)))]
       (is (= id (row-id row)))
       (is (= name (:name row))))))
+
+(deftest http-bound-progression-forces-real-xtdb-reread-at-invalidating-basis-test
+  (testing "A browser-carried authoritative progression requirement overrides an older caller snapshot against real XTDB."
+    (let [id                 (unique-id "progression-reread")
+          old-name           "Before invalidation"
+          new-name           "After invalidation"
+          old-result         (xtdb-live/execute-tx! (node) (put-user-op id old-name))
+          old-basis          (xtdb-live/tx-result-basis (:tx-result old-result))
+          new-result         (xtdb-live/execute-tx! (node) (put-user-op id new-name))
+          required           (xtdb-live/tx-result-progression (:tx-result new-result))
+          encoded            (progression.http/encode-request-progression required)
+          bound-ctx          (progression.http/bind-request-progression
+                              {:xtdb/read-connectable (node)
+                               :headers {progression.http/request-header-name encoded}})
+          row                (only-row
+                              (xtdb-live/q-consistent-from
+                               bound-ctx
+                               (select-user-sql id)
+                               ;; Deliberately try to weaken the read back to the
+                               ;; pre-invalidation snapshot. Progression must win.
+                               {:snapshot-token
+                                (xtdb-live/basis-snapshot-token old-basis)}))]
+      (is (= required (:gesso.live/progression bound-ctx)))
+      (is (= id (row-id row)))
+      (is (= new-name (:name row)))
+      (is (not= old-name (:name row))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Query option behavior against real XTDB
