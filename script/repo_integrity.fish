@@ -5,13 +5,6 @@ function repo_integrity_fail --argument-names message
     set -g repo_integrity_failures (math "$repo_integrity_failures + 1")
 end
 
-function repo_integrity_expected_namespace --argument-names tree file
-    set -l relative_path (string replace -- "$tree/" '' "$file")
-    set relative_path (string replace -r '\.(clj|cljc|cljs)$' '' -- "$relative_path")
-    set relative_path (string replace -a '/' '.' -- "$relative_path")
-    string replace -a '_' '-' -- "$relative_path"
-end
-
 function repo_integrity_test_namespace --argument-names namespace
     if string match -q '*-test' -- "$namespace"
         return 0
@@ -24,6 +17,12 @@ function repo_integrity_test_namespace --argument-names namespace
     end
 
     return 1
+end
+
+function repo_integrity_expected_path --argument-names tree namespace extension
+    set -l namespace_path (string replace -a '.' '/' -- "$namespace")
+    set namespace_path (string replace -a '-' '_' -- "$namespace_path")
+    echo "$tree/$namespace_path.$extension"
 end
 
 set -g repo_integrity_failures 0
@@ -78,15 +77,19 @@ for file in $files
     end
 
     set -l tree (string split -m 1 '/' -- "$file")[1]
-    set -l expected_ns (repo_integrity_expected_namespace "$tree" "$file")
+    set -l extension (string replace -r '^.*\.' '' -- "$file")
+    set -l expected_path (repo_integrity_expected_path "$tree" "$actual_ns" "$extension")
 
-    if test "$actual_ns" != "$expected_ns"
-        repo_integrity_fail "namespace/path mismatch: $file declares $actual_ns; expected $expected_ns"
+    # The declared namespace is authoritative. Derive the one canonical path
+    # stem from it: dots become directories and namespace hyphens become
+    # filename underscores. This rejects literal hyphens in Clojure filenames
+    # and any other pathname that merely happens to map back to the namespace.
+    if test "$file" != "$expected_path"
+        repo_integrity_fail "namespace/path mismatch: $file declares $actual_ns; canonical path is $expected_path"
     end
 
     # src/ is production code and must not contain test namespaces. test/
-    # may contain ordinary helper namespaces; exact path/namespace agreement
-    # above is the invariant that applies there.
+    # may contain ordinary helper namespaces.
     if test "$tree" = src
         if repo_integrity_test_namespace "$actual_ns"
             repo_integrity_fail "test namespace is installed under src/: $file declares $actual_ns"
