@@ -555,13 +555,17 @@
 
 (deftest notify-fragment-triggers-htmx-and-establishes-pending-generation-test
   (let [{:keys [runtime root htmx-fixture]}
-        (runtime-fixture "fragment-1")]
-    (begin-refresh! runtime "fragment-1" {:tx 7})
+        (runtime-fixture "fragment-1")
+        requirement
+        (progression/requirement
+         {:tx-id 7
+          :system-time "2026-08-26T07:00:00Z"})]
+    (begin-refresh! runtime "fragment-1" requirement)
     (let [pending (core/pending-refresh runtime root)
           call (first @(:calls htmx-fixture))]
       (is (= "fragment-1" (:fragment-id pending)))
       (is (pos-int? (:request-generation pending)))
-      (is (= #{{:tx 7}}
+      (is (= #{requirement}
              (:requirements pending)))
       (is (identical? root (:root call)))
       (is (= core/refresh-event-name (:name call)))
@@ -583,17 +587,16 @@
                         [:fragments "missing"])))
       (is (empty? @(:calls htmx-fixture))))))
 
-(deftest explicit-dom-invalidation-preserves-presence-of-nil-requirement-test
+(deftest explicit-dom-invalidation-without-requirement-remains-advisory-test
   (let [{:keys [runtime root]}
         (runtime-fixture "fragment-1")
         {:keys [event]}
         (make-event
          core/invalidated-event-name
          {:extra-detail
-          {:fragmentId "fragment-1"
-           :requirement nil}})]
+          {:fragmentId "fragment-1"}})]
     (is (true? (core/on-invalidated! runtime event)))
-    (is (= #{nil}
+    (is (= #{}
            (:requirements (core/pending-refresh runtime root))))))
 
 ;; =============================================================================
@@ -1251,13 +1254,21 @@
 (deftest queued-refresh-started-during-after-request-is-not-erased-by-old-cleanup-test
   (let [{:keys [runtime root]}
         (runtime-fixture "fragment-1")
+        requirement-a
+        (progression/requirement
+         {:tx-id 201
+          :system-time "2026-08-26T08:10:01Z"})
+        requirement-b
+        (progression/requirement
+         {:tx-id 202
+          :system-time "2026-08-26T08:10:02Z"})
         {xhr-a :xhr} (make-xhr 200)
         {xhr-b :xhr} (make-xhr 200)]
-    (begin-refresh! runtime "fragment-1" :basis-a)
+    (begin-refresh! runtime "fragment-1" requirement-a)
     (bind-request! runtime root xhr-a)
 
     ;; While A is active, invalidate again. Adapter queues instead of starting B.
-    (begin-refresh! runtime "fragment-1" :basis-b)
+    (begin-refresh! runtime "fragment-1" requirement-b)
     (is (nil? (core/pending-refresh runtime root)))
 
     ;; Completing A synchronously emits the next :fragment/refresh. Core must not
@@ -1265,7 +1276,7 @@
     (after-request! runtime root xhr-a true)
     (let [pending-b (core/pending-refresh runtime root)]
       (is (some? pending-b))
-      (is (= #{:basis-b} (:requirements pending-b))))
+      (is (= #{requirement-b} (:requirements pending-b))))
 
     (bind-request! runtime root xhr-b)
     (is (= "request-2"
@@ -1344,11 +1355,15 @@
 (deftest late-xhr-callback-from-request-a-cannot-fail-newer-request-b-on-same-root-test
   (let [{:keys [runtime root]}
         (runtime-fixture "fragment-1")
+        queued-requirement
+        (progression/requirement
+         {:tx-id 301
+          :system-time "2026-08-26T08:20:01Z"})
         {xhr-a :xhr} (make-xhr 200)
         {xhr-b :xhr} (make-xhr 200)]
     (begin-refresh! runtime "fragment-1")
     (bind-request! runtime root xhr-a)
-    (begin-refresh! runtime "fragment-1" :queued)
+    (begin-refresh! runtime "fragment-1" queued-requirement)
     (after-request! runtime root xhr-a true)
     (bind-request! runtime root xhr-b)
 
