@@ -24,6 +24,9 @@
 (def browser-test-namespaces-env
   "GESSO_BROWSER_TEST_NAMESPACES")
 
+(def repo-integrity-script
+  "script/repo_integrity.fish")
+
 (defn fail!
   [message data]
   (throw
@@ -585,6 +588,32 @@
     "No Chromium/Chrome executable was found on PATH."
     {})))
 
+(defn run-repo-integrity!
+  []
+  (println)
+  (println
+   "== Repository integrity ==")
+
+  (when-not
+   (fs/regular-file?
+    repo-integrity-script)
+    (fail!
+     "Repository integrity script is missing."
+     {:script repo-integrity-script}))
+
+  (let [fish
+        (or
+         (some->
+          (fs/which
+           "fish")
+          str)
+         (fail!
+          "Repository integrity checking requires fish on PATH."
+          {:script repo-integrity-script}))]
+    (run-command!
+     [fish
+      repo-integrity-script])))
+
 (defn run-jvm-tests!
   []
   (println)
@@ -1088,7 +1117,11 @@
      "Theme build: PASS")))
 
 (def gate-specs
-  {:jvm
+  {:integrity
+   {:label "Repo integrity"
+    :run run-repo-integrity!}
+
+   :jvm
    {:label "JVM"
     :run run-jvm-tests!}
 
@@ -1170,20 +1203,23 @@
 (defn run-cljs-tests!
   []
   (run-gates!
-   [:node:choreo
+   [:integrity
+    :node:choreo
     :node:browser
     :browser]))
 
 (defn run-node-tests!
   []
   (run-gates!
-   [:node:choreo
+   [:integrity
+    :node:choreo
     :node:browser]))
 
 (defn run-all!
   []
   (run-gates!
-   [:advanced
+   [:integrity
+    :advanced
     :jvm
     :node:choreo
     :node:browser
@@ -1193,49 +1229,61 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|jvm|cljs|node|node:choreo|node:browser|browser|advanced|themes]")
+   "Usage: bb script/gesso_test.clj [all|integrity|jvm|cljs|node|node:choreo|node:browser|browser|advanced|themes]")
   (System/exit
    2))
 
 (defn command-gates
   [command]
-  (case command
-    "all"
-    [:advanced
-     :jvm
-     :node:choreo
-     :node:browser
-     :browser
-     :themes]
+  (let [requested
+        (case command
+          "all"
+          [:advanced
+           :jvm
+           :node:choreo
+           :node:browser
+           :browser
+           :themes]
 
-    "jvm"
-    [:jvm]
+          "integrity"
+          []
 
-    "cljs"
-    [:node:choreo
-     :node:browser
-     :browser]
+          "jvm"
+          [:jvm]
 
-    "node"
-    [:node:choreo
-     :node:browser]
+          "cljs"
+          [:node:choreo
+           :node:browser
+           :browser]
 
-    "node:choreo"
-    [:node:choreo]
+          "node"
+          [:node:choreo
+           :node:browser]
 
-    "node:browser"
-    [:node:browser]
+          "node:choreo"
+          [:node:choreo]
 
-    "browser"
-    [:browser]
+          "node:browser"
+          [:node:browser]
 
-    "advanced"
-    [:advanced]
+          "browser"
+          [:browser]
 
-    "themes"
-    [:themes]
+          "advanced"
+          [:advanced]
 
-    nil))
+          "themes"
+          [:themes]
+
+          nil)]
+    (when
+     (some? requested)
+      ;; Repository structure is a prerequisite for every test/build gate. In
+      ;; particular, browser namespace discovery walks the filesystem, so a
+      ;; misplaced or misnamed namespace must fail before any compiler starts.
+      (into
+       [:integrity]
+       requested))))
 
 (defn -main
   []
