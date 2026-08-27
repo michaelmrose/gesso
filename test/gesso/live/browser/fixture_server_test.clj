@@ -10,20 +10,38 @@
    [gesso.live.browser.fixture-server :as fixture])
   (:import
    (java.io BufferedReader IOException InputStreamReader)
-   (java.net URI)
+   (java.net HttpURLConnection URI URL)
    (java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
                   HttpResponse$BodyHandlers)
+   (java.time Duration)
    (java.nio.charset StandardCharsets)
    (java.util.concurrent ExecutionException TimeUnit)))
 
-(def ^:private client
-  (HttpClient/newHttpClient))
+(def ^:private network-timeout-ms
+  5000)
+
+(def ^:private network-timeout
+  (Duration/ofMillis network-timeout-ms))
+
+(def ^:dynamic *client*
+  nil)
+
+(defn- new-http-client
+  []
+  (-> (HttpClient/newBuilder)
+      (.connectTimeout network-timeout)
+      (.build)))
 
 (defn- with-fixture
   [f]
   (let [server (fixture/start!)]
     (try
-      (f server)
+      ;; Keep connection pools scoped to one test. A process-wide HttpClient can
+      ;; retain idle loopback connections after a fixture stops; rapid ephemeral
+      ;; port reuse can then make an otherwise deterministic fixture test depend
+      ;; on stale pooled transport state.
+      (binding [*client* (new-http-client)]
+        (f server))
       (finally
         (fixture/stop! server)))))
 
@@ -33,7 +51,8 @@
   ([url {:keys [method body headers]
          :or {method :get
               headers {}}}]
-   (let [builder (HttpRequest/newBuilder (URI/create url))
+   (let [builder (doto (HttpRequest/newBuilder (URI/create url))
+                   (.timeout network-timeout))
          publisher (if (nil? body)
                      (HttpRequest$BodyPublishers/noBody)
                      (HttpRequest$BodyPublishers/ofString
@@ -49,7 +68,7 @@
    (send-string! url {}))
   ([url request-options]
    (let [response
-         (.send client
+         (.send ^HttpClient *client*
                 (http-request url request-options)
                 (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8))]
      {:status (.statusCode response)
@@ -57,7 +76,7 @@
 
 (defn- send-string-async!
   [url request-options]
-  (.sendAsync client
+  (.sendAsync ^HttpClient *client*
               (http-request url request-options)
               (HttpResponse$BodyHandlers/ofString StandardCharsets/UTF_8)))
 
@@ -77,18 +96,39 @@
 
 (defn- open-sse!
   [url]
-  (let [response
-        (.send client
-               (http-request url)
-               (HttpResponse$BodyHandlers/ofInputStream))]
-    {:status (.statusCode response)
+  ;; HttpURLConnection exposes a socket read timeout, which is exactly what the
+  ;; fixture's SSE contract test needs. Java HttpClient returns an InputStream
+  ;; for a streaming response but offers no per-read timeout; a missing frame
+  ;; could therefore leave BufferedReader.readLine blocked forever.
+  (let [^HttpURLConnection connection (.openConnection (URL. url))]
+    (.setConnectTimeout connection network-timeout-ms)
+    (.setReadTimeout connection network-timeout-ms)
+    (.setRequestMethod connection "GET")
+    (.setRequestProperty connection "Accept" "text/event-stream")
+    (.connect connection)
+    {:status (.getResponseCode connection)
+     :connection connection
      :reader (BufferedReader.
               (InputStreamReader.
-               (.body response)
+               (.getInputStream connection)
                StandardCharsets/UTF_8))}))
+
+(defn- close-sse-client!
+  [{:keys [^HttpURLConnection connection
+           ^BufferedReader reader]}]
+  (when reader
+    (try
+      (.close reader)
+      (catch IOException _ nil)))
+  (when connection
+    (.disconnect connection))
+  nil)
 
 (defn- read-sse-lines
   [^BufferedReader reader line-count]
+  ;; The connection backing reader has network-timeout-ms as SO_TIMEOUT. A
+  ;; missing or truncated frame therefore becomes a bounded test error instead
+  ;; of hanging the entire JVM test process.
   (mapv (fn [_] (.readLine reader))
         (range line-count)))
 
@@ -280,11 +320,12 @@
 (deftest sse-connections-are-real-addressable-streams-test
   (with-fixture
     (fn [server]
-      (let [{first-status :status first-reader :reader}
-            (open-sse! (fixture/sse-url server "browser one"))
-
-            {second-status :status second-reader :reader}
-            (open-sse! (fixture/sse-url server "browser one"))]
+      (let [first-client (open-sse! (fixture/sse-url server "browser one"))
+            first-status (:status first-client)
+            first-reader (:reader first-client)
+            second-client (open-sse! (fixture/sse-url server "browser one"))
+            second-status (:status second-client)
+            second-reader (:reader second-client)]
         (try
           (is (= 200 first-status))
           (is (= 200 second-status))
@@ -319,21 +360,21 @@
             (is (empty? (fixture/sse-connections server))))
 
           (finally
-            (.close first-reader)
-            (.close second-reader)))))))
+            (close-sse-client! first-client)
+            (close-sse-client! second-client)))))))
 
 (deftest sse-client-ids-round-trip-through-the-url-test
   (with-fixture
     (fn [server]
       (let [client-id "browser/a + b"
-            {:keys [reader]} (open-sse! (fixture/sse-url server client-id))]
+            sse-client (open-sse! (fixture/sse-url server client-id))]
         (try
           (is (= client-id
                  (:client-id
                   (fixture/await-sse-client! server client-id))))
           (finally
             (fixture/close-sse! server client-id)
-            (.close reader)))))))
+            (close-sse-client! sse-client)))))))
 
 (deftest scripts-can-be-cleared-deliberately-test
   (with-fixture
