@@ -24,6 +24,9 @@
 (def browser-test-namespaces-env
   "GESSO_BROWSER_TEST_NAMESPACES")
 
+(def browser-diagnostic-env
+  "GESSO_BROWSER_DIAGNOSTIC")
+
 (def repo-integrity-script
   "script/repo_integrity.fish")
 
@@ -273,6 +276,15 @@
            distinct
            vec))))
 
+(defn browser-diagnostic?
+  []
+  (contains?
+   #{"1" "true" "yes" "on"}
+   (some->
+    (System/getenv browser-diagnostic-env)
+    str/lower-case
+    str/trim)))
+
 (defn browser-test-namespaces
   []
   (let [all-tests
@@ -498,7 +510,25 @@
         (fs/path
          generated-test-src
          "gesso"
-         "test_all_browser_runner.cljs")]
+         "test_all_browser_runner.cljs")
+
+        selected-cases
+        (apply
+         str
+         (map
+          (fn [test-ns]
+            (str
+             "    "
+             (pr-str
+              (str
+               test-ns))
+             "\n"
+             "    (t/run-tests\n"
+             "     (t/empty-env ::reporter)\n"
+             "     '"
+             test-ns
+             ")\n"))
+          namespaces))]
 
     (fs/create-dirs
      (fs/parent
@@ -548,6 +578,13 @@
       "          :column column\n"
       "          :error (str error)})\n"
       "        false))\n\n"
+      "(set! (.-onunhandledrejection js/window)\n"
+      "      (fn [event]\n"
+      "        (complete!\n"
+      "         \"runtime-error\"\n"
+      "         {:message \"Unhandled promise rejection\"\n"
+      "          :reason (str (.-reason event))})\n"
+      "        false))\n\n"
       "(defmethod t/report [::reporter :end-run-tests]\n"
       "  [summary]\n"
       "  (let [failed (+ (or (:fail summary) 0)\n"
@@ -559,13 +596,26 @@
       "      :fail (:fail summary)\n"
       "      :error (:error summary)\n"
       "      :failures @failures})))\n\n"
+      "(defn selected-namespace\n"
+      "  []\n"
+      "  (.get (js/URLSearchParams. (.-search js/location)) \"ns\"))\n\n"
+      "(defn run-selected!\n"
+      "  [selected]\n"
+      "  (case selected\n"
+      selected-cases
+      "    (complete!\n"
+      "     \"runtime-error\"\n"
+      "     {:message \"Unknown Chromium test namespace\"\n"
+      "      :namespace selected})))\n\n"
       "(defn main\n"
       "  []\n"
-      "  (t/run-tests\n"
-      "   (t/empty-env ::reporter)"
+      "  (if-let [selected (selected-namespace)]\n"
+      "    (run-selected! selected)\n"
+      "    (t/run-tests\n"
+      "     (t/empty-env ::reporter)"
       (quoted-test-args
        namespaces)
-      "))\n\n"
+      ")))\n\n"
       "(main)\n"))
 
     path))
@@ -789,6 +839,168 @@
    "\"></script>\n"
    "</html>\n"))
 
+(defn chromium-result-status
+  [dumped-dom]
+  (cond
+    (str/includes?
+     dumped-dom
+     "data-gesso-test-status=\"pass\"")
+    :pass
+
+    (str/includes?
+     dumped-dom
+     "data-gesso-test-status=\"fail\"")
+    :fail
+
+    (str/includes?
+     dumped-dom
+     "data-gesso-test-status=\"runtime-error\"")
+    :runtime-error
+
+    :else
+    :incomplete))
+
+(defn require-successful-chromium-result!
+  [result dump-file context]
+  (let [dumped-dom
+        (:out result)
+
+        status
+        (chromium-result-status
+         dumped-dom)]
+
+    (spit
+     dump-file
+     dumped-dom)
+
+    (case status
+      :pass
+      result
+
+      :fail
+      (do
+        (println
+         dumped-dom)
+        (gate-failure!
+         "CLJS / Chromium assertions failed."
+         (merge
+          {:dump dump-file}
+          context)))
+
+      :runtime-error
+      (do
+        (println
+         dumped-dom)
+        (gate-failure!
+         "CLJS / Chromium encountered an uncaught runtime error."
+         (merge
+          {:dump dump-file}
+          context)))
+
+      :incomplete
+      (do
+        (println
+         dumped-dom)
+
+        (when
+         (seq
+          (:err result))
+          (binding
+           [*out* *err*]
+            (print
+             (:err result))))
+
+        (gate-failure!
+         "Chromium exited without a completed cljs.test run."
+         (merge
+          {:dump dump-file}
+          context))))))
+
+(defn chromium-url
+  [html test-ns]
+  (str
+   "file://"
+   (fs/absolutize
+    html)
+   (when
+    test-ns
+    (str
+     "?ns="
+     (java.net.URLEncoder/encode
+      (str
+       test-ns)
+      "UTF-8")))))
+
+(defn chromium-base-command
+  []
+  (cond->
+   [(chromium-command)
+    "--headless=new"
+    "--disable-gpu"
+    "--disable-dev-shm-usage"
+    "--disable-background-timer-throttling"
+    "--disable-renderer-backgrounding"
+    "--run-all-compositor-stages-before-draw"
+    "--allow-file-access-from-files"
+    "--virtual-time-budget=120000"
+    "--dump-dom"]
+
+   (= "root"
+      (System/getProperty
+       "user.name"))
+   (conj
+    "--no-sandbox")))
+
+(defn run-one-chromium!
+  [html dump-file test-ns]
+  (let [label
+        (if
+         test-ns
+         (str
+          "Chromium namespace "
+          test-ns)
+         "Chromium execution")
+
+        command
+        (conj
+         (chromium-base-command)
+         (chromium-url
+          html
+          test-ns))
+
+        started-at
+        (monotonic-nanos)]
+
+    (println
+     (str
+      label
+      ": START"
+      " (wall timeout "
+      (/ browser-wall-clock-timeout-ms
+         1000)
+      "s)"))
+
+    (let [result
+          (run-command-captured-with-timeout!
+           command
+           browser-wall-clock-timeout-ms)]
+
+      (require-successful-chromium-result!
+       result
+       dump-file
+       (cond->
+        {}
+        test-ns
+        (assoc
+         :namespace
+         test-ns)))
+
+      (print-stage-pass!
+       label
+       started-at)
+
+      result)))
+
 (defn run-browser-tests!
   []
   (println)
@@ -797,6 +1009,9 @@
 
   (let [namespaces
         (browser-test-namespaces)
+
+        diagnostic?
+        (browser-diagnostic?)
 
         browser-dir
         (str
@@ -845,6 +1060,11 @@
          str
          namespaces))))
 
+    (when
+     diagnostic?
+      (println
+       "Chromium diagnostic mode: one namespace per browser process"))
+
     (delete-tree-if-exists!
      browser-dir)
 
@@ -882,113 +1102,41 @@
      (browser-html
       output-to))
 
-    (let [url
-          (str
-           "file://"
-           (fs/absolutize
-            html))
+    (if
+     diagnostic?
 
-          base-command
-          [(chromium-command)
-           "--headless=new"
-           "--disable-gpu"
-           "--disable-dev-shm-usage"
-           "--disable-background-timer-throttling"
-           "--disable-renderer-backgrounding"
-           "--run-all-compositor-stages-before-draw"
-           "--allow-file-access-from-files"
-           "--virtual-time-budget=120000"
-           "--dump-dom"]
-
-          command
-          (cond->
-           base-command
-
-           (= "root"
-              (System/getProperty
-               "user.name"))
-           (conj
-            "--no-sandbox")
-
-           true
-           (conj
-            url))
-
-          started-at
-          (monotonic-nanos)
-
-          _
-          (println
-           "Chromium execution: START"
-           (str
-            "(wall timeout "
-            (/ browser-wall-clock-timeout-ms
-               1000)
-            "s)"))
-
-          result
-          (run-command-captured-with-timeout!
-           command
-           browser-wall-clock-timeout-ms)
-
-          _
-          (print-stage-pass!
-           "Chromium execution"
-           started-at)
-
-          dumped-dom
-          (:out result)]
-
-      (spit
-       dump-file
-       dumped-dom)
-
-      (cond
-        (str/includes?
-         dumped-dom
-         "data-gesso-test-status=\"pass\"")
+      (doseq [[index test-ns]
+              (map-indexed
+               vector
+               namespaces)]
         (println
-         "CLJS / Chromium: PASS")
+         (format
+          "Chromium diagnostic [%d/%d]: %s"
+          (inc
+           index)
+          (count
+           namespaces)
+          test-ns))
 
-        (str/includes?
-         dumped-dom
-         "data-gesso-test-status=\"fail\"")
-        (do
-          (println
-           dumped-dom)
-          (gate-failure!
-           "CLJS / Chromium assertions failed."
-           {:dump
-            dump-file}))
+        (run-one-chromium!
+         html
+         (str
+          browser-dir
+          "/dump-"
+          (format
+           "%03d"
+           (inc
+            index))
+          ".html")
+         test-ns))
 
-        (str/includes?
-         dumped-dom
-         "data-gesso-test-status=\"runtime-error\"")
-        (do
-          (println
-           dumped-dom)
-          (gate-failure!
-           "CLJS / Chromium encountered an uncaught runtime error."
-           {:dump
-            dump-file}))
+      (run-one-chromium!
+       html
+       dump-file
+       nil))
 
-        :else
-        (do
-          (println
-           dumped-dom)
-
-          (when
-           (seq
-            (:err result))
-            (binding
-             [*out* *err*]
-              (print
-               (:err result))))
-
-          (gate-failure!
-           "Chromium exited without a completed cljs.test run."
-           {:dump
-            dump-file}))))))
+    (println
+     "CLJS / Chromium: PASS")))
 
 (defn run-runtime-build!
   []
