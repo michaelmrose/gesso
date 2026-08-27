@@ -682,27 +682,29 @@
     (is (invariant-clean? runtime))))
 
 (deftest nil-incompatible-plan-recovery-handler-restores-conservative-default-test
-  ;; The production default requests a full-page reload when a browser location
-  ;; exists. The required Node host intentionally has no browser location, so we
-  ;; can exercise the same default handler without navigating the Chromium test
-  ;; page. Real reload behavior belongs to the eventual real-browser/HTTP harness.
-  (when (exists? js/process)
-    (let [runtime
-          (choreo/create
-           (shell/create)
-           {:recover-incompatible-plan (fn [_] :custom)})]
-      (is (true?
-           (choreo/set-incompatible-plan-recovery-handler! runtime nil)))
-      (let [result
-            (choreo/start-plan!
-             runtime
-             :execution/default-recovery
-             (incompatible-browser-plan (await-once)))]
-        (is (= :incompatible-plan (:status result)))
-        (is (= :not-active (get-in result [:retirement :status])))
-        (is (= :reload-unavailable (:recovery-result result)))
-        (is (false? (choreo/active? runtime :execution/default-recovery)))
-        (is (invariant-clean? runtime))))))
+  ;; The production default may call location.reload(). This namespace runs in
+  ;; both Node and Chromium, so invoking that handler here would make the test
+  ;; host itself part of the behavior under test and can recursively reload the
+  ;; Chromium test page. The real navigation behavior belongs to the eventual
+  ;; real-browser/HTTP recovery harness.
+  ;;
+  ;; Here we freeze only the configuration contract: nil removes an application
+  ;; override and restores a callable framework-owned default without invoking it.
+  (let [custom-handler (fn [_] :custom)
+        runtime
+        (choreo/create
+         (shell/create)
+         {:recover-incompatible-plan custom-handler})]
+    (is (identical?
+         custom-handler
+         (choreo/incompatible-plan-recovery-handler runtime)))
+    (is (true?
+         (choreo/set-incompatible-plan-recovery-handler! runtime nil)))
+    (let [restored
+          (choreo/incompatible-plan-recovery-handler runtime)]
+      (is (fn? restored))
+      (is (not (identical? custom-handler restored)))
+      (is (invariant-clean? runtime)))))
 
 (deftest retire-submits-generation-bound-retirement-test
   (let [runtime (choreo/create (shell/create))
