@@ -4,31 +4,31 @@
  {org.clojure/clojure
   {:mvn/version "1.12.5"}
 
-com.biffweb/core
-{:git/url "https://github.com/jacobobryant/biff"
- :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
- :deps/root "libs/core"}
+  com.biffweb/core
+  {:git/url "https://github.com/jacobobryant/biff"
+   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
+   :deps/root "libs/core"}
 
-com.biffweb/fx
-{:git/url "https://github.com/jacobobryant/biff"
- :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
- :deps/root "libs/fx"
- :exclusions [com.biffweb/core]}
+  com.biffweb/fx
+  {:git/url "https://github.com/jacobobryant/biff"
+   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
+   :deps/root "libs/fx"
+   :exclusions [com.biffweb/core]}
 
-com.biffweb/graph
-{:git/url "https://github.com/jacobobryant/biff"
- :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
- :deps/root "libs/graph"
- :exclusions [com.biffweb/core
-              com.biffweb/fx]}
+  com.biffweb/graph
+  {:git/url "https://github.com/jacobobryant/biff"
+   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
+   :deps/root "libs/graph"
+   :exclusions [com.biffweb/core
+                com.biffweb/fx]}
 
-com.biffweb/xtdb
-{:git/url "https://github.com/jacobobryant/biff"
- :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
- :deps/root "libs/xtdb"
- :exclusions [com.biffweb/core
-              com.biffweb/fx
-              com.biffweb/graph]}
+  com.biffweb/xtdb
+  {:git/url "https://github.com/jacobobryant/biff"
+   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
+   :deps/root "libs/xtdb"
+   :exclusions [com.biffweb/core
+                com.biffweb/fx
+                com.biffweb/graph]}
 
   com.xtdb/xtdb-api
   {:mvn/version "2.2.0-beta1"}
@@ -61,16 +61,19 @@ com.biffweb/xtdb
   {:mvn/version "7.0.2"}}
 
  :aliases
- {
-  :dev
+ {:dev
   {:extra-deps
    {org.clojure/clojurescript
     {:mvn/version "1.12.145"}}}
+
   :test
   {:extra-paths ["test"]
 
    :extra-deps
-   {org.clojure/test.check
+   {com.microsoft.playwright/playwright
+    {:mvn/version "1.61.0"}
+
+    org.clojure/test.check
     {:mvn/version "1.1.2"}
 
     io.github.cognitect-labs/test-runner
