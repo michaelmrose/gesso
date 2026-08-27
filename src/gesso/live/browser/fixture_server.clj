@@ -22,7 +22,7 @@
    (java.io IOException OutputStream)
    (java.net InetSocketAddress URI)
    (java.nio.charset StandardCharsets)
-   (java.util UUID)
+   (java.util Base64 UUID)
    (java.util.concurrent CompletableFuture Executors ThreadFactory TimeUnit)
    (java.util.concurrent.atomic AtomicLong)))
 
@@ -130,6 +130,19 @@
 ;; Response / script representation
 ;; =============================================================================
 
+(defn- status-forbids-response-body?
+  [status]
+  (or (<= 100 status 199)
+      (contains? #{204 205 304} status)))
+
+(defn- nonempty-body?
+  [body]
+  (cond
+    (nil? body) false
+    (string? body) (not (empty? body))
+    (= (Class/forName "[B") (class body)) (pos? (alength ^bytes body))
+    :else false))
+
 (defn response
   "Construct one finite fixture HTTP response.
 
@@ -161,6 +174,13 @@
        :invalid-body
        "HTTP response body must be nil, a string, or a byte array."
        {:body-type (some-> body class str)})))
+   (when (and (status-forbids-response-body? status)
+              (nonempty-body? body))
+     (throw
+      (fixture-error
+       :body-forbidden-for-status
+       "HTTP response status does not permit a response body."
+       {:status status})))
    {:status status
     :headers (or headers {})
     :body body}))
@@ -428,12 +448,18 @@
   (let [{:keys [status headers body]} (normalize-response! response-map)
         bytes (body-bytes body)]
     (add-response-headers! exchange headers)
-    (.sendResponseHeaders exchange status (alength bytes))
-    (when (pos? (alength bytes))
-      (with-open [output (.getResponseBody exchange)]
-        (.write output bytes)))
-    (when (zero? (alength bytes))
-      (.close exchange))
+    (if (status-forbids-response-body? status)
+      (do
+        ;; HttpServer warns and rewrites 204/304-style responses when given a
+        ;; zero content length. -1 is its explicit no-response-body mode.
+        (.sendResponseHeaders exchange status -1)
+        (.close exchange))
+      (do
+        (.sendResponseHeaders exchange status (alength bytes))
+        (if (pos? (alength bytes))
+          (with-open [output (.getResponseBody exchange)]
+            (.write output bytes))
+          (.close exchange))))
     true))
 
 (defn- pop-action!
@@ -489,18 +515,37 @@
 ;; SSE
 ;; =============================================================================
 
+(def ^:private sse-path-prefix
+  "/__gesso_fixture/sse/")
+
+(defn- encode-sse-client-id
+  [client-id]
+  (let [client-id
+        (require-nonblank-string! "SSE client id" (str client-id))]
+    (.encodeToString
+     (.withoutPadding (Base64/getUrlEncoder))
+     (.getBytes ^String client-id StandardCharsets/UTF_8))))
+
+(defn- decode-sse-client-id
+  [encoded]
+  (String.
+   (.decode (Base64/getUrlDecoder) encoded)
+   StandardCharsets/UTF_8))
+
 (defn sse-path
   [client-id]
-  (str "/__gesso_fixture/sse/"
-       (java.net.URLEncoder/encode
-        (require-nonblank-string! "SSE client id" (str client-id))
-        "UTF-8")))
+  (str sse-path-prefix
+       (encode-sse-client-id client-id)))
 
 (defn- sse-client-id-from-path
   [path]
-  (let [prefix "/__gesso_fixture/sse/"]
-    (when (str/starts-with? path prefix)
-      (java.net.URLDecoder/decode (subs path (count prefix)) "UTF-8"))))
+  (when (str/starts-with? path sse-path-prefix)
+    (let [encoded (subs path (count sse-path-prefix))]
+      (when-not (str/blank? encoded)
+        (try
+          (decode-sse-client-id encoded)
+          (catch IllegalArgumentException _
+            nil))))))
 
 (defn sse-connections
   "Return public metadata for currently open SSE connections."
