@@ -24,7 +24,9 @@
    [gesso.live.browser.continuity :as continuity]
    [gesso.live.browser.core :as core]
    [gesso.live.browser.dom :as dom]
-   [gesso.live.browser.shell :as shell]))
+   [gesso.live.browser.shell :as shell]
+   [gesso.live.progression :as progression]
+   [gesso.live.progression.http :as progression.http]))
 
 ;; =============================================================================
 ;; Real DOM + lifecycle fixture
@@ -181,18 +183,30 @@
            (fn [root name detail]
              (swap! triggers conj {:root root :name name :detail detail})
              (when (= name core/refresh-event-name)
-               ;; Model the one piece HTMX owns before Gesso sees the request:
-               ;; a physical XHR exists and the documented beforeRequest event
-               ;; is emitted from the managed fragment root.
+               ;; Model the narrow physical lifecycle HTMX owns around one
+               ;; generated refresh. Gesso observes configRequest first, where
+               ;; it may attach authoritative progression, then beforeRequest
+               ;; binds the same adapter-issued generation to the physical XHR.
                (let [request-number (swap! xhr-counter inc)
-                     request (xhr (str "xhr-" request-number))
-                     fragment-id (core/fragment-id-from-root root)]
+                     request (assoc (xhr (str "xhr-" request-number))
+                                    :headers (js-obj))
+                     fragment-id (core/fragment-id-from-root root)
+                     config-event
+                     (lifecycle-event!
+                      root
+                      "htmx:configRequest"
+                      #js {:elt root
+                           :headers (:headers request)})]
                  (swap! current-xhrs assoc fragment-id request)
-                 (lifecycle-event!
-                  root
-                  "htmx:beforeRequest"
-                  #js {:elt root
-                       :xhr (:xhr request)})))
+                 ;; HTMX configures the physical request before beforeRequest.
+                 ;; If Gesso fails that last configuration boundary closed, the
+                 ;; fixture must not fabricate a later network lifecycle event.
+                 (when-not (.-defaultPrevented config-event)
+                   (lifecycle-event!
+                    root
+                    "htmx:beforeRequest"
+                    #js {:elt root
+                         :xhr (:xhr request)}))))
              true))
      (let [core-runtime
            (core/create
@@ -245,6 +259,21 @@
 (defn- current-aborted?
   [host fragment-id]
   (get-in @(:current-xhrs host) [fragment-id :aborted?]))
+
+(defn- current-headers
+  [host fragment-id]
+  (get-in @(:current-xhrs host) [fragment-id :headers]))
+
+(defn- current-progression
+  [host fragment-id]
+  (when-let [encoded
+             (some-> (current-headers host fragment-id)
+                     (aget progression.http/request-header-name))]
+    (progression.http/decode-request-progression encoded)))
+
+(defn- requirement
+  [basis]
+  (progression/requirement basis))
 
 (defn- request-record
   [host root]
@@ -373,16 +402,90 @@
   (with-host*
    (fn [host]
      (let [fixture (fragment-tree! (:sandbox host) "fragment-a")]
-       (core/notify-fragment! (:core host) "fragment-a" {:basis 1})
+       (core/notify-fragment! (:core host) "fragment-a" (requirement {:basis 1}))
        (is (= 1 (count @(:triggers host))))
        (is (= core/refresh-event-name (:name (first @(:triggers host)))))
        (is (= {:fragment-id "fragment-a"
                :request-generation 1
                :request-id "request-1"
-               :requirements #{{:basis 1}}}
+               :requirements #{(requirement {:basis 1})}}
               (request-record host (:root fixture))))
        (is (nil? (core/pending-refresh (:core host) (:root fixture))))
        (is (invariant-clean? host))))))
+
+(deftest managed-refresh-configures-progression-before-request-ownership-test
+  (with-host*
+   (fn [host]
+     (let [fixture (fragment-tree! (:sandbox host) "fragment-a")
+           required (requirement
+                     {:tx-id 101
+                      :system-time "2026-08-26T08:00:01Z"})]
+       (core/notify-fragment! (:core host) "fragment-a" required)
+       ;; host-fixture drives the real documented order:
+       ;; configRequest -> beforeRequest. The active request proves
+       ;; beforeRequest ran, while the header proves configuration happened
+       ;; first against the same adapter-issued pending generation.
+       (is (= required (current-progression host "fragment-a")))
+       (is (= #{required}
+              (:requirements (request-record host (:root fixture)))))
+       (is (= 1
+              (:request-generation
+               (request-record host (:root fixture)))))
+       (is (invariant-clean? host))))))
+
+(deftest advisory-refresh-does-not-invent-progression-header-test
+  (with-host*
+   (fn [host]
+     (let [fixture (fragment-tree! (:sandbox host) "fragment-a")]
+       (core/notify-fragment! (:core host) "fragment-a")
+       (is (nil? (current-progression host "fragment-a")))
+       (is (= #{}
+              (:requirements (request-record host (:root fixture)))))
+       (is (invariant-clean? host))))))
+
+(deftest queued-progression-remains-generation-local-through-config-request-test
+  (with-host*
+   (fn [host]
+     (let [fixture (fragment-tree! (:sandbox host) "fragment-a")
+           requirement-a (requirement
+                          {:tx-id 101
+                           :system-time "2026-08-26T08:00:01Z"})
+           requirement-b (requirement
+                          {:tx-id 102
+                           :system-time "2026-08-26T08:00:02Z"})
+           requirement-c (requirement
+                          {:tx-id 103
+                           :system-time "2026-08-26T08:00:03Z"})]
+       ;; Generation A is configured and bound to the first physical request.
+       (core/notify-fragment! (:core host) "fragment-a" requirement-a)
+       (let [headers-a (current-headers host "fragment-a")]
+         (is (= requirement-a
+                (progression.http/decode-request-progression
+                 (aget headers-a progression.http/request-header-name))))
+
+         ;; B and C arrive while A is active. They stay queued and cannot mutate
+         ;; the already-configured request A.
+         (core/notify-fragment! (:core host) "fragment-a" requirement-b)
+         (core/notify-fragment! (:core host) "fragment-a" requirement-c)
+         (is (= #{requirement-b requirement-c}
+                (get-in (fragment-state host "fragment-a")
+                        [:queued-requirements])))
+         (is (= requirement-a
+                (progression.http/decode-request-progression
+                 (aget headers-a progression.http/request-header-name))))
+
+         ;; Completing A synchronously promotes one new refresh generation.
+         ;; host-fixture then drives configRequest before beforeRequest for B.
+         (complete-request! host fixture)
+         (let [expected (progression/compose requirement-b requirement-c)
+               request-b (request-record host (:root fixture))]
+           (is (= "request-2" (:request-id request-b)))
+           (is (= #{requirement-b requirement-c}
+                  (:requirements request-b)))
+           (is (= expected (current-progression host "fragment-a")))
+           (is (= (into (:bases requirement-b) (:bases requirement-c))
+                  (:bases expected)))
+           (is (invariant-clean? host))))))))
 
 (deftest unmanaged-htmx-lifecycle-is-ignored-test
   (with-host*
@@ -401,16 +504,18 @@
   (with-host*
    (fn [host]
      (let [fixture (fragment-tree! (:sandbox host) "fragment-a")]
-       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
-       (core/notify-fragment! (:core host) "fragment-a" :basis/b)
-       (core/notify-fragment! (:core host) "fragment-a" :basis/c)
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/b))
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/c))
        (is (= 1 (count @(:triggers host))))
-       (is (= #{:basis/b :basis/c}
+       (is (= #{(requirement :basis/b)
+                (requirement :basis/c)}
               (get-in (fragment-state host "fragment-a")
                       [:queued-requirements])))
        (complete-request! host fixture)
        (is (= 2 (count @(:triggers host))))
-       (is (= #{:basis/b :basis/c}
+       (is (= #{(requirement :basis/b)
+                (requirement :basis/c)}
               (:requirements (request-record host (:root fixture)))))
        (is (= #{}
               (get-in (fragment-state host "fragment-a")
@@ -421,9 +526,9 @@
   (with-host*
    (fn [host]
      (let [fixture (fragment-tree! (:sandbox host) "fragment-a")]
-       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
        (let [old-xhr (current-xhr host "fragment-a")]
-         (core/notify-fragment! (:core host) "fragment-a" :basis/b)
+         (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/b))
          (complete-request! host fixture)
          (let [new-record (request-record host (:root fixture))]
            (is (= "request-2" (:request-id new-record)))
@@ -449,7 +554,7 @@
       (set! (.-value (:input fixture)) "user edit")
       (.focus (:input fixture))
       (.setSelectionRange (:input fixture) 2 6 "forward")
-      (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+      (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
       (let [{:keys [event detail]}
             (before-swap!
              host fixture
@@ -506,7 +611,7 @@
       ;; First install an authoritative frontier and synchronize on the exact
       ;; continuity completion event rather than guessing browser scheduler
       ;; ordering.
-      (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+      (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
       (before-swap! host fixture {:scope "request/a" :basis "basis/a"})
       (let [slot-token (continuity-slot-token host fixture)
             completion
@@ -529,7 +634,7 @@
                           [:continuity (:slot-id slot-token)])))
              ;; Second request attempts a different basis without the exact
              ;; advancement witness required by the adapter.
-             (core/notify-fragment! (:core host) "fragment-a" :basis/stale)
+             (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/stale))
              (let [{:keys [event detail]}
                    (before-swap!
                     host fixture
@@ -554,9 +659,9 @@
   (with-host*
    (fn [host]
      (let [fixture (fragment-tree! (:sandbox host) "fragment-a")]
-       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
        (let [old-xhr (current-xhr host "fragment-a")]
-         (core/notify-fragment! (:core host) "fragment-a" :basis/b)
+         (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/b))
          (lifecycle-event!
           (:root fixture)
           "htmx:sendError"
@@ -564,7 +669,7 @@
                :xhr old-xhr})
          (is (= "request-2"
                 (:request-id (request-record host (:root fixture)))))
-         (is (= #{:basis/b}
+         (is (= #{(requirement :basis/b)}
                 (:requirements (request-record host (:root fixture)))))
          (is (= 2 (count @(:triggers host))))
          (is (invariant-clean? host)))))))
@@ -573,7 +678,7 @@
   (with-host*
    (fn [host]
      (let [fixture (fragment-tree! (:sandbox host) "fragment-a")]
-       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
        (let [aborted? (current-aborted? host "fragment-a")]
          (is (false? @aborted?))
          (lifecycle-event!
@@ -600,7 +705,7 @@
         (fn [context]
           (swap! local-calls conj context)
           {:value 42}))
-       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
        (let [fragment-before (fragment-state host "fragment-a")
              result (choreo/start-execution!
                      (:choreo host)
@@ -623,7 +728,7 @@
                         :states
                         {:wait (c/await :browser {:browser/go :done})
                          :done (c/return :done)}}))]
-       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
        (let [first-result (choreo/start-execution! (:choreo host) :execution/a execution)
              stale-ref (:execution-ref first-result)
              second-result (choreo/start-execution!
@@ -650,7 +755,7 @@
   (with-host*
    (fn [host]
      (let [fixture (fragment-tree! (:sandbox host) "fragment-a")]
-       (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+       (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
        (let [diagnostics (core/diagnostics (:core host))
              printed-state (pr-str (core/state (:core host)))
              printed-diagnostics (pr-str diagnostics)]
@@ -666,7 +771,7 @@
   (let [host (host-fixture!)
         fixture (fragment-tree! (:sandbox host) "fragment-a")]
     (try
-      (core/notify-fragment! (:core host) "fragment-a" :basis/a)
+      (core/notify-fragment! (:core host) "fragment-a" (requirement :basis/a))
       (is (some? (fragment-state host "fragment-a")))
       (core/stop! (:core host))
       (is (nil? (fragment-state host "fragment-a")))
