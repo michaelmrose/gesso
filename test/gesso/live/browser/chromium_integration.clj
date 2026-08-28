@@ -156,6 +156,8 @@
    "window.__gessoFixture = {\n"
    "  sseMessages: 0,\n"
    "  sseOpens: 0,\n"
+   "  sendErrors: 0,\n"
+   "  responseErrors: 0,\n"
    "  runtimeStarted: false\n"
    "};\n"
    "document.addEventListener('htmx:sseBeforeMessage', function (event) {\n"
@@ -166,6 +168,12 @@
    "});\n"
    "document.addEventListener('htmx:sseOpen', function () {\n"
    "  window.__gessoFixture.sseOpens += 1;\n"
+   "});\n"
+   "document.addEventListener('htmx:sendError', function () {\n"
+   "  window.__gessoFixture.sendErrors += 1;\n"
+   "});\n"
+   "document.addEventListener('htmx:responseError', function () {\n"
+   "  window.__gessoFixture.responseErrors += 1;\n"
    "});\n"
    "gesso.live.browser.runtime.init_BANG_();\n"
    "window.__gessoFixture.runtimeStarted = !!window.gessoLive;\n"))
@@ -464,6 +472,124 @@
 
         (is (true? (chromium/assert-clean! context))
             "The real browser must finish without console errors, uncaught exceptions, or crashes.")))))
+
+
+(deftest failed-refresh-advances-queued-progression-through-real-send-error-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "a real transport failure cannot discard progression queued behind the failed generation"
+        (let [basis-b
+              {:tx-id 202
+               :system-time "2026-08-28T00:10:02Z"}
+
+              requirement-b
+              (progression/requirement basis-b)]
+
+          ;; As in the normal-completion scenario, the EventSource open starts
+          ;; advisory request A. Hold A, then establish a canonical requirement
+          ;; while that generation owns the fragment. This time A never receives
+          ;; an HTTP response: the fixture closes the exchange to force HTMX's
+          ;; real sendError lifecycle.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-never-arrives"))
+            (fixture/respond (fragment-response "B-after-failure"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [first-request
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                first-request-id
+                (:request-id first-request)]
+
+            (is
+             (nil?
+              (request-header
+               first-request
+               progression.http/request-header-name))
+             "The SSE-open request is advisory and must not invent authority.")
+
+            (emit-progression! server requirement-b)
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (is (= 1 (count (fragment-requests server)))
+                "Canonical B must queue behind the still-owned request A.")
+
+            ;; Close the real socket without response headers/body. The runtime
+            ;; must treat the resulting HTMX sendError as completion of exactly
+            ;; A's physical correlation and promote B into a new generation.
+            (fixture/release! server first-request-id :close)
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sendErrors === 1")
+
+            (let [successor
+                  (await-successor-request!
+                   server
+                   first-request-id)
+
+                  encoded
+                  (request-header
+                   successor
+                   progression.http/request-header-name)
+
+                  decoded
+                  (some-> encoded
+                          progression.http/decode-request-progression)]
+
+              (is (= requirement-b decoded)
+                  "The successor after sendError must carry the queued canonical requirement B.")
+
+              (is (= #{basis-b} (:bases decoded))
+                  "The authoritative basis must survive failure/retry through the real HTTP header.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "The failed A plus one successor B is the complete physical request set.")
+
+              (chromium/wait-for-js!
+               page
+               (str "() => document.getElementById('"
+                    fragment-id
+                    "') && document.getElementById('"
+                    fragment-id
+                    "').textContent === 'B-after-failure'"))
+
+              (is (= "B-after-failure"
+                     (chromium/evaluate
+                      page
+                      (str "() => document.getElementById('"
+                           fragment-id
+                           "').textContent")))
+                  "The successor authoritative response must still complete the real HTMX swap.")
+
+              (is (= 0
+                     (chromium/evaluate
+                      page
+                      "() => window.__gessoFixture.responseErrors"))
+                  "A deliberate socket loss should exercise sendError, not HTTP responseError."))))
+
+        (is (true? (chromium/assert-clean! context))
+            "Deliberate request failure must not leave console errors, uncaught exceptions, or crashes.")))))
 
 (defn -main
   [& _]
