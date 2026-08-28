@@ -591,6 +591,161 @@
         (is (true? (chromium/assert-clean! context))
             "Deliberate request failure must not leave console errors, uncaught exceptions, or crashes.")))))
 
+
+(deftest http-response-error-advances-queued-progression-without-swapping-error-body-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "a real HTTP error retires its generation and preserves queued canonical progression"
+        (let [basis-b
+              {:tx-id 302
+               :system-time "2026-08-28T00:20:02Z"}
+
+              requirement-b
+              (progression/requirement basis-b)
+
+              error-response
+              (fixture/response
+               503
+               html-headers
+               (str "<div id=\"" fragment-id
+                    "\" data-fixture-version=\"error\">"
+                    "ERROR-BODY-MUST-NOT-SWAP"
+                    "</div>"))]
+
+          ;; Both generations are held. A will be released with a real HTTP 503.
+          ;; The successor is then observable as an in-flight physical request
+          ;; before we allow its canonical response to complete.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-never-authoritative"))
+            (fixture/hold (fragment-response "B-after-503"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [first-request
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                first-request-id
+                (:request-id first-request)]
+
+            (emit-progression! server requirement-b)
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (is (= 1 (count (fragment-requests server)))
+                "Canonical B must remain queued while A owns the fragment.")
+
+            ;; Establish that setup is clean before deliberately creating the
+            ;; HTTP error. Any diagnostics after this point belong to the
+            ;; response-error experiment itself.
+            (is (true? (chromium/assert-clean! context))
+                "The browser must be clean before the deliberate 503 response.")
+            (chromium/clear-diagnostics! context)
+
+            (fixture/release! server first-request-id error-response)
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.responseErrors === 1")
+
+            (is (= 0
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.sendErrors"))
+                "A real HTTP 503 must exercise responseError, not sendError.")
+
+            (let [successor
+                  (fixture/await-pending!
+                   server
+                   #(and (= :get (:method %))
+                         (= fragment-path (:path %))
+                         (> (:request-id %) first-request-id))
+                   5000)
+
+                  successor-id
+                  (:request-id successor)
+
+                  encoded
+                  (request-header
+                   successor
+                   progression.http/request-header-name)
+
+                  decoded
+                  (some-> encoded
+                          progression.http/decode-request-progression)]
+
+              (is (= requirement-b decoded)
+                  "The successor after responseError must carry queued canonical requirement B.")
+
+              (is (= #{basis-b} (:bases decoded))
+                  "The authoritative basis must survive the real HTTP-error lifecycle.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "The errored A plus one held successor B is the complete physical request set.")
+
+              (is (= "initial"
+                     (str/trim
+                      (chromium/evaluate
+                       page
+                       (str "() => document.getElementById('"
+                            fragment-id
+                            "').textContent"))))
+                  "HTMX must not install the 503 response body as canonical fragment content.")
+
+              ;; HTMX 2 reports an HTTP response error through responseError and
+              ;; may also log that status as console.error. Permit only console
+              ;; diagnostics that explicitly identify this deliberate 503; all
+              ;; uncaught exceptions, promise rejections, crashes, or unrelated
+              ;; console failures remain test failures.
+              (let [browser-errors (chromium/browser-errors context)
+                    unexpected
+                    (remove
+                     (fn [{:keys [kind text]}]
+                       (and (= :console-error kind)
+                            (string? text)
+                            (str/includes? text "503")))
+                     browser-errors)]
+                (is (empty? unexpected)
+                    (str "The deliberate 503 produced unexpected browser diagnostics: "
+                         (pr-str unexpected)
+                         ". Full diagnostics: "
+                         (pr-str (chromium/diagnostics context)))))
+
+              (fixture/release! server successor-id)
+
+              (chromium/wait-for-js!
+               page
+               (str "() => document.getElementById('"
+                    fragment-id
+                    "') && document.getElementById('"
+                    fragment-id
+                    "').textContent === 'B-after-503'"))
+
+              (is (= "B-after-503"
+                     (chromium/evaluate
+                      page
+                      (str "() => document.getElementById('"
+                           fragment-id
+                           "').textContent")))
+                  "Canonical successor B must complete the real HTMX swap after A's HTTP error."))))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
