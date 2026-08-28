@@ -73,6 +73,12 @@
    {com.microsoft.playwright/playwright
     {:mvn/version "1.61.0"}
 
+    org.webjars.npm/htmx.org
+    {:mvn/version "2.0.7"}
+
+    org.webjars.npm/htmx-ext-sse
+    {:mvn/version "2.2.4"}
+
     org.clojure/test.check
     {:mvn/version "1.1.2"}
 
