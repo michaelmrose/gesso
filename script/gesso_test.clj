@@ -21,6 +21,12 @@
 (def browser-wall-clock-timeout-ms
   1800000)
 
+(def real-browser-integration-wall-clock-timeout-ms
+  300000)
+
+(def real-browser-integration-namespace
+  "gesso.live.browser.chromium-integration")
+
 (def browser-test-namespaces-env
   "GESSO_BROWSER_TEST_NAMESPACES")
 
@@ -1138,6 +1144,59 @@
     (println
      "CLJS / Chromium: PASS")))
 
+(defn run-real-browser-integration!
+  []
+  (println)
+  (println
+   "== Production runtime / real Chromium integration ==")
+
+  (when-not
+   (fs/regular-file?
+    generated-runtime-artifact)
+    (fail!
+     "Real-browser integration requires the generated production Gesso Live runtime."
+     {:artifact generated-runtime-artifact
+      :hint "Run the advanced/runtime gate before this integration gate."}))
+
+  (when-not
+   (pos?
+    (fs/size
+     generated-runtime-artifact))
+    (fail!
+     "Real-browser integration found an empty production Gesso Live runtime."
+     {:artifact generated-runtime-artifact}))
+
+  (let [started-at
+        (monotonic-nanos)
+
+        ;; The :test alias normally launches Cognitect's JVM test runner through
+        ;; :main-opts. Reuse the exact test paths/dependencies/JVM options but
+        ;; remove those main opts so this explicit browser integration program
+        ;; owns the process entry point.
+        command
+        ["clojure"
+         "-Sdeps"
+         (cljs-test-sdeps)
+         "-M:gesso-cljs-test"
+         "-m"
+         real-browser-integration-namespace]
+
+        result
+        (run-command-captured-with-timeout!
+         command
+         real-browser-integration-wall-clock-timeout-ms)]
+
+    ;; This gate is intentionally small and its cljs.test summary is valuable
+    ;; in successful full-gate logs too, not only when the subprocess fails.
+    (print-captured-output!
+     result)
+
+    (print-stage-pass!
+     "Production runtime / real Chromium integration"
+     started-at)
+
+    result))
+
 (defn run-runtime-build!
   []
   (println)
@@ -1285,6 +1344,10 @@
    {:label "Chromium"
     :run run-browser-tests!}
 
+   :browser:integration
+   {:label "Chromium integration"
+    :run run-real-browser-integration!}
+
    :advanced
    {:label "Runtime build"
     :run run-runtime-build!}
@@ -1352,9 +1415,11 @@
   []
   (run-gates!
    [:integrity
+    :advanced
     :node:choreo
     :node:browser
-    :browser]))
+    :browser
+    :browser:integration]))
 
 (defn run-node-tests!
   []
@@ -1372,12 +1437,13 @@
     :node:choreo
     :node:browser
     :browser
+    :browser:integration
     :themes]))
 
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|integrity|jvm|cljs|node|node:choreo|node:browser|browser|advanced|themes]")
+   "Usage: bb script/gesso_test.clj [all|integrity|jvm|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes]")
   (System/exit
    2))
 
@@ -1391,6 +1457,7 @@
            :node:choreo
            :node:browser
            :browser
+           :browser:integration
            :themes]
 
           "integrity"
@@ -1400,9 +1467,11 @@
           [:jvm]
 
           "cljs"
-          [:node:choreo
+          [:advanced
+           :node:choreo
            :node:browser
-           :browser]
+           :browser
+           :browser:integration]
 
           "node"
           [:node:choreo
@@ -1416,6 +1485,10 @@
 
           "browser"
           [:browser]
+
+          "browser:integration"
+          [:advanced
+           :browser:integration]
 
           "advanced"
           [:advanced]
