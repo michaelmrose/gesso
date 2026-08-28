@@ -20,6 +20,8 @@
     Tracing$StartOptions
     Tracing$StopOptions
     WebError)
+   (com.microsoft.playwright.options
+    WebErrorLocation)
    (java.io File)
    (java.util.function Consumer)))
 
@@ -35,6 +37,29 @@
 (def ^:private default-timeout-ms 10000)
 (def ^:private default-launch-timeout-ms 20000)
 (def ^:private fatal-console-types #{"assert" "error"})
+
+(def ^:private unhandled-rejection-prefix
+  "[gesso-browser-harness:unhandled-rejection] ")
+
+(def ^:private browser-init-script
+  (str
+   "(() => {\n"
+   "  const key = '__gessoBrowserHarnessUnhandledRejectionInstalled';\n"
+   "  if (globalThis[key]) return;\n"
+   "  Object.defineProperty(globalThis, key, {value: true});\n"
+   "  globalThis.addEventListener('unhandledrejection', (event) => {\n"
+   "    const reason = event.reason;\n"
+   "    let detail;\n"
+   "    try {\n"
+   "      detail = reason && reason.stack ? String(reason.stack) : String(reason);\n"
+   "    } catch (_) {\n"
+   "      detail = '<unprintable rejection reason>';\n"
+   "    }\n"
+   "    console.error("
+   (pr-str unhandled-rejection-prefix)
+   " + detail);\n"
+   "  });\n"
+   "})();\n"))
 
 (defn- fail!
   ([kind message]
@@ -219,15 +244,33 @@
 
 (defn- console-entry
   [^ConsoleMessage message]
-  {:type (.type message)
-   :text (.text message)
-   :location (.location message)
-   :timestamp (.timestamp message)
-   :page-url (safe-page-url (.page message))})
+  (let [text (.text message)
+        unhandled-rejection?
+        (and (string? text)
+             (str/starts-with? text unhandled-rejection-prefix))]
+    (cond->
+     {:type (.type message)
+      :text text
+      :location (.location message)
+      :timestamp (.timestamp message)
+      :page-url (safe-page-url (.page message))}
+      unhandled-rejection?
+      (assoc
+       :kind :unhandled-promise-rejection
+       :reason
+       (subs text (count unhandled-rejection-prefix))))))
+
+(defn- web-error-location
+  [^WebErrorLocation location]
+  (when location
+    {:url (.-url location)
+     :line (.-line location)
+     :column (.-column location)}))
 
 (defn- web-error-entry
   [^WebError error]
   {:error (.error error)
+   :location (web-error-location (.location error))
    :page-url (safe-page-url (.page error))})
 
 (defn- request-failure-entry
@@ -282,6 +325,15 @@
      (.setDefaultTimeout ^BrowserContext context (double timeout-ms))
      (.setDefaultNavigationTimeout ^BrowserContext context
                                    (double navigation-timeout-ms))
+
+     ;; Playwright's WebError event gives us unhandled synchronous page
+     ;; exceptions. Install one independent browser-side listener as well so
+     ;; an unhandled Promise rejection cannot disappear merely because the
+     ;; browser/Playwright version reports it only through console machinery.
+     ;; The listener observes and reports; it does not preventDefault or alter
+     ;; application semantics.
+     (.addInitScript ^BrowserContext context browser-init-script)
+
      (.onConsoleMessage
       ^BrowserContext context
       (consumer #(record! state :console (console-entry %))))
@@ -361,7 +413,11 @@
 (defn browser-errors
   "Returns unexpected browser failures. Deliberate network failures are omitted
    because fault scenarios intentionally create them; inspect :request-failures
-   in diagnostics when network behavior matters."
+   in diagnostics when network behavior matters.
+
+   Unhandled Promise rejections are classified separately from ordinary console
+   errors so a failure report says what actually happened rather than reducing
+   every browser problem to `console.error`."
   [context-harness]
   (let [{:keys [console web-errors page-crashes]}
         (diagnostics context-harness)]
@@ -369,22 +425,28 @@
           cat
           [(->> console
                 (filter #(contains? fatal-console-types (:type %)))
-                (map #(assoc % :kind :console-error)))
+                (map
+                 (fn [entry]
+                   (if (:kind entry)
+                     entry
+                     (assoc entry :kind :console-error)))))
            (map #(assoc % :kind :web-error) web-errors)
            (map #(assoc % :kind :page-crash) page-crashes)])))
 
 (defn assert-clean!
   "Fails with a structured explanation if the page logged a console error/assert,
-   threw an uncaught exception, or crashed."
+   produced an unhandled Promise rejection, threw an uncaught exception, or
+   crashed."
   [context-harness]
   (let [errors (browser-errors context-harness)]
     (when (seq errors)
       (fail!
        :browser-errors
        (str "Chromium produced " (count errors)
-            " unexpected browser failure(s). Inspect :errors and :diagnostics. "
-            "Request failures are recorded separately because adversarial tests "
-            "may cause them intentionally.")
+            " unexpected browser failure(s). Each entry includes its failure kind "
+            "and, when Playwright provides it, source/page location. Inspect "
+            ":errors and :diagnostics. Request failures are recorded separately "
+            "because adversarial tests may cause them intentionally.")
        {:errors errors
         :diagnostics (diagnostics context-harness)}))
     true))
