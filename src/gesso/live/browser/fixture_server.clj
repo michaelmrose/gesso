@@ -633,6 +633,7 @@
     ;; Length zero selects streaming/chunked transfer for HttpServer.
     (.sendResponseHeaders exchange 200 0)
     (let [output (.getResponseBody exchange)
+          _ (.flush ^OutputStream output)
           connection {:connection-id connection-id
                       :client-id client-id
                       :output output
