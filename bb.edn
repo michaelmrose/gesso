@@ -23,7 +23,7 @@
      (println "done"))}
 
   test
-  {:doc "Full gate: JVM + all CLJS hosts + advanced compile + theme verification."
+  {:doc "Full gate: JVM + Node + Chromium + real-browser integration + advanced compile + themes."
    :task
    (shell "bb" "script/gesso_test.clj" "all")}
 
@@ -33,7 +33,7 @@
    (shell "bb" "script/gesso_test.clj" "jvm")}
 
   test:cljs
-  {:doc "Run all CLJS tests: Node groups + full Chromium suite. Included by `bb test`."
+  {:doc "Run all CLJS/browser gates: Node groups + Chromium + real HTTP/HTMX/SSE integration. Included by `bb test`."
    :task
    (shell "bb" "script/gesso_test.clj" "cljs")}
 
@@ -56,6 +56,11 @@
   {:doc "Run every CLJS/CLJC test in real headless Chromium. Included by `bb test:cljs`."
    :task
    (shell "bb" "script/gesso_test.clj" "browser")}
+
+  test:browser:integration
+  {:doc "Run production gesso-live.js against real Chromium + HTMX/SSE + deterministic HTTP fixtures. Included by `bb test:cljs`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "browser:integration")}
 
   test:advanced
   {:doc "Verify the composed production browser runtime advanced-compiles. Included by `bb test`."
