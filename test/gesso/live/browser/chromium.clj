@@ -1,0 +1,424 @@
+(ns gesso.live.browser.chromium
+  "Playwright-backed control for Gesso real-browser integration tests.
+
+   This is test infrastructure only. It owns Chromium process/context/page
+   control and browser diagnostics. Gesso semantics stay in the production
+   browser runtime, while deterministic HTTP/SSE ordering stays in
+   gesso.live.browser.fixture-server."
+  (:require
+   [clojure.java.io :as io]
+   [clojure.string :as str])
+  (:import
+   (com.microsoft.playwright
+    Browser
+    BrowserContext
+    BrowserType$LaunchOptions
+    ConsoleMessage
+    Page
+    Playwright
+    Request
+    Tracing$StartOptions
+    Tracing$StopOptions
+    WebError)
+   (java.io File)
+   (java.util.function Consumer)))
+
+(def ^:private error-type
+  :gesso.live.browser.chromium/error)
+
+(def ^:private default-browser-commands
+  ["chromium"
+   "chromium-browser"
+   "google-chrome"
+   "google-chrome-stable"])
+
+(def ^:private default-timeout-ms 10000)
+(def ^:private default-launch-timeout-ms 20000)
+(def ^:private fatal-console-types #{"assert" "error"})
+
+(defn- fail!
+  ([kind message]
+   (fail! kind message {}))
+  ([kind message data]
+   (throw
+    (ex-info
+     message
+     (merge {:error/type error-type
+             :error/kind kind}
+            data)))))
+
+(defn- executable-path
+  [value]
+  (let [file (io/file (str value))]
+    (when (and (.isFile ^File file)
+               (.canExecute ^File file))
+      (.toAbsolutePath (.toPath ^File file)))))
+
+(defn- path-directories
+  []
+  (let [value (or (System/getenv "PATH") "")
+        separator (re-pattern
+                   (java.util.regex.Pattern/quote File/pathSeparator))]
+    (if (str/blank? value)
+      []
+      (str/split value separator -1))))
+
+(defn- command-path
+  [command]
+  (some
+   (fn [directory]
+     (executable-path
+      (io/file (if (str/blank? directory) "." directory)
+               command)))
+   (path-directories)))
+
+(defn- resolve-executable
+  [value]
+  (or (executable-path value)
+      (when-not (str/includes? (str value) File/separator)
+        (command-path value))))
+
+(defn chromium-executable
+  "Returns the Chromium-family executable used by browser tests.
+
+   Resolution order is explicit :override, GESSO_CHROMIUM, then the standard
+   Chromium/Chrome command names on PATH. An explicit override is authoritative:
+   a bad override fails instead of silently selecting a different browser."
+  ([]
+   (chromium-executable {}))
+  ([{:keys [override candidates]
+     :or {candidates default-browser-commands}}]
+   (let [override (or override
+                      (some-> (System/getenv "GESSO_CHROMIUM")
+                              str/trim
+                              not-empty))]
+     (if override
+       (or (resolve-executable override)
+           (fail!
+            :invalid-chromium-override
+            (str "Chromium override is not executable: " override
+                 ". Set GESSO_CHROMIUM to an executable path or command on PATH.")
+            {:override (str override)}))
+       (or (some resolve-executable candidates)
+           (fail!
+            :chromium-not-found
+            (str "No Chromium-family executable was found for Gesso browser tests. "
+                 "Install Chromium/Chrome or set GESSO_CHROMIUM. Checked: "
+                 (str/join ", " candidates) ".")
+            {:checked-commands (vec candidates)}))))))
+
+(defn start!
+  "Starts Playwright and launches system Chromium.
+
+   Options:
+   - :chromium-executable  explicit executable path/command
+   - :headless?            defaults true
+   - :launch-timeout-ms    defaults 20 seconds
+   - :args                 additional Chromium arguments"
+  ([]
+   (start! {}))
+  ([opts]
+   (let [requested-executable (:chromium-executable opts)
+         headless? (get opts :headless? true)
+         launch-timeout-ms (get opts :launch-timeout-ms
+                                default-launch-timeout-ms)
+         args (vec (get opts :args []))
+         chromium-path
+         (if requested-executable
+           (or (resolve-executable requested-executable)
+               (fail!
+                :invalid-chromium-executable
+                (str "Requested Chromium executable is unavailable: "
+                     requested-executable)
+                {:chromium-executable (str requested-executable)}))
+           (chromium-executable))
+         playwright
+         (try
+           (Playwright/create)
+           (catch Throwable cause
+             (throw
+              (ex-info
+               (str "Playwright could not start for Gesso browser tests. "
+                    "Ensure the Playwright test dependency and driver are available.")
+               {:error/type error-type
+                :error/kind :playwright-start-failed}
+               cause))))]
+     (try
+       (let [launch-options
+             (doto (BrowserType$LaunchOptions.)
+               (.setExecutablePath chromium-path)
+               (.setHeadless (boolean headless?))
+               (.setTimeout (double launch-timeout-ms))
+               (.setArgs args))
+             browser (.launch (.chromium ^Playwright playwright)
+                              launch-options)]
+         {:playwright playwright
+          :browser browser
+          :chromium-executable chromium-path
+          :headless? (boolean headless?)})
+       (catch Throwable cause
+         (try
+           (.close ^Playwright playwright)
+           (catch Throwable _))
+         (throw
+          (ex-info
+           (str "Playwright failed to launch Chromium at " chromium-path ". "
+                "If the installed browser is incompatible with Playwright, "
+                "set GESSO_CHROMIUM to the intended executable explicitly.")
+           {:error/type error-type
+            :error/kind :chromium-launch-failed
+            :chromium-executable (str chromium-path)
+            :headless? (boolean headless?)}
+           cause)))))))
+
+(defn stop!
+  "Closes Chromium and Playwright. Cleanup failures are reported because leaked
+   browser processes can make later integration tests misleading."
+  [{:keys [browser playwright]}]
+  (let [errors (atom [])]
+    (when browser
+      (try
+        (.close ^Browser browser)
+        (catch Throwable cause
+          (swap! errors conj [:browser cause]))))
+    (when playwright
+      (try
+        (.close ^Playwright playwright)
+        (catch Throwable cause
+          (swap! errors conj [:playwright cause]))))
+    (when (seq @errors)
+      (let [[resource cause] (first @errors)]
+        (throw
+         (ex-info
+          (str "Gesso Chromium cleanup failed for " (count @errors)
+               " resource(s); first failure was " (name resource) ".")
+          {:error/type error-type
+           :error/kind :cleanup-failed
+           :resources (mapv first @errors)}
+          cause))))
+    nil))
+
+(defn- consumer
+  [f]
+  (reify Consumer
+    (accept [_ value]
+      (f value))))
+
+(defn- safe-page-url
+  [page]
+  (when page
+    (try
+      (.url ^Page page)
+      (catch Throwable _
+        nil))))
+
+(defn- record!
+  [state key value]
+  (swap! state update key conj value)
+  nil)
+
+(defn- console-entry
+  [^ConsoleMessage message]
+  {:type (.type message)
+   :text (.text message)
+   :location (.location message)
+   :timestamp (.timestamp message)
+   :page-url (safe-page-url (.page message))})
+
+(defn- web-error-entry
+  [^WebError error]
+  {:error (.error error)
+   :page-url (safe-page-url (.page error))})
+
+(defn- request-failure-entry
+  [^Request request]
+  {:method (.method request)
+   :url (.url request)
+   :resource-type (.resourceType request)
+   :failure (.failure request)})
+
+(defn- instrument-page!
+  [state ^Page page]
+  (let [identity (System/identityHashCode page)
+        install? (atom false)]
+    (swap!
+     state
+     (fn [current]
+       (if (contains? (:instrumented-pages current) identity)
+         current
+         (do
+           (reset! install? true)
+           (update current :instrumented-pages conj identity)))))
+    (when @install?
+      (.onCrash
+       page
+       (consumer
+        (fn [crashed-page]
+          (record! state
+                   :page-crashes
+                   {:page-url (safe-page-url crashed-page)})))))
+    page))
+
+(defn new-context!
+  "Creates an isolated browser context with diagnostics installed.
+
+   Separate contexts have separate cookies/storage and are the unit used later
+   for independent HumanHelp/Gesso browser actors."
+  ([harness]
+   (new-context! harness {}))
+  ([{:keys [browser]} opts]
+   (when-not browser
+     (fail! :missing-browser
+            "Cannot create a Chromium context from a harness with no browser."))
+   (let [timeout-ms (get opts :timeout-ms default-timeout-ms)
+         navigation-timeout-ms (get opts :navigation-timeout-ms timeout-ms)
+         context (.newContext ^Browser browser)
+         state (atom {:console []
+                      :web-errors []
+                      :request-failures []
+                      :page-crashes []
+                      :instrumented-pages #{}
+                      :trace-active? false})]
+     (.setDefaultTimeout ^BrowserContext context (double timeout-ms))
+     (.setDefaultNavigationTimeout ^BrowserContext context
+                                   (double navigation-timeout-ms))
+     (.onConsoleMessage
+      ^BrowserContext context
+      (consumer #(record! state :console (console-entry %))))
+     (.onWebError
+      ^BrowserContext context
+      (consumer #(record! state :web-errors (web-error-entry %))))
+     (.onRequestFailed
+      ^BrowserContext context
+      (consumer #(record! state :request-failures
+                          (request-failure-entry %))))
+     (.onPage
+      ^BrowserContext context
+      (consumer #(instrument-page! state %)))
+     {:context context
+      :state state
+      :timeout-ms timeout-ms
+      :navigation-timeout-ms navigation-timeout-ms})))
+
+(defn close-context!
+  "Closes a context. Active tracing is stopped and discarded unless stop-trace!
+   was called first with an output path."
+  [{:keys [context state]}]
+  (when (and context state (:trace-active? @state))
+    (try
+      (.stop (.tracing ^BrowserContext context))
+      (finally
+        (swap! state assoc :trace-active? false))))
+  (when context
+    (.close ^BrowserContext context))
+  nil)
+
+(defn new-page!
+  "Creates and instruments a page in an isolated context."
+  [{:keys [context state]}]
+  (when-not context
+    (fail! :missing-context
+           "Cannot create a Chromium page without a browser context."))
+  (instrument-page! state (.newPage ^BrowserContext context)))
+
+(defn navigate!
+  "Navigates to an absolute URL and returns the Page."
+  [^Page page url]
+  (.navigate page (str url))
+  page)
+
+(defn evaluate
+  "Evaluates JavaScript and returns the Playwright-decoded value."
+  ([^Page page expression]
+   (.evaluate page (str expression)))
+  ([^Page page expression argument]
+   (.evaluate page (str expression) argument)))
+
+(defn wait-for-js!
+  "Waits for a JavaScript expression/function to become truthy.
+   The context timeout bounds the wait; this helper never adds sleeps."
+  ([^Page page expression]
+   (.waitForFunction page (str expression))
+   page)
+  ([^Page page expression argument]
+   (.waitForFunction page (str expression) argument)
+   page))
+
+(defn diagnostics
+  "Returns observable diagnostics while hiding harness bookkeeping."
+  [{:keys [state]}]
+  (dissoc @state :instrumented-pages :trace-active?))
+
+(defn clear-diagnostics!
+  [{:keys [state]}]
+  (swap! state assoc
+         :console []
+         :web-errors []
+         :request-failures []
+         :page-crashes [])
+  nil)
+
+(defn browser-errors
+  "Returns unexpected browser failures. Deliberate network failures are omitted
+   because fault scenarios intentionally create them; inspect :request-failures
+   in diagnostics when network behavior matters."
+  [context-harness]
+  (let [{:keys [console web-errors page-crashes]}
+        (diagnostics context-harness)]
+    (into []
+          cat
+          [(->> console
+                (filter #(contains? fatal-console-types (:type %)))
+                (map #(assoc % :kind :console-error)))
+           (map #(assoc % :kind :web-error) web-errors)
+           (map #(assoc % :kind :page-crash) page-crashes)])))
+
+(defn assert-clean!
+  "Fails with a structured explanation if the page logged a console error/assert,
+   threw an uncaught exception, or crashed."
+  [context-harness]
+  (let [errors (browser-errors context-harness)]
+    (when (seq errors)
+      (fail!
+       :browser-errors
+       (str "Chromium produced " (count errors)
+            " unexpected browser failure(s). Inspect :errors and :diagnostics. "
+            "Request failures are recorded separately because adversarial tests "
+            "may cause them intentionally.")
+       {:errors errors
+        :diagnostics (diagnostics context-harness)}))
+    true))
+
+(defn start-trace!
+  "Starts a Playwright trace. Screenshots and DOM/network snapshots default on."
+  ([context-harness]
+   (start-trace! context-harness {}))
+  ([{:keys [context state] :as context-harness} opts]
+   (when (:trace-active? @state)
+     (fail! :trace-already-active
+            "Playwright tracing is already active for this browser context."))
+   (let [options (doto (Tracing$StartOptions.)
+                   (.setScreenshots (boolean (get opts :screenshots? true)))
+                   (.setSnapshots (boolean (get opts :snapshots? true)))
+                   (.setSources (boolean (get opts :sources? false))))]
+     (when-let [title (:title opts)]
+       (.setTitle options (str title)))
+     (.start (.tracing ^BrowserContext context) options)
+     (swap! state assoc :trace-active? true)
+     context-harness)))
+
+(defn stop-trace!
+  "Stops tracing and writes a trace zip to output-path."
+  [{:keys [context state] :as context-harness} output-path]
+  (when-not (:trace-active? @state)
+    (fail! :trace-not-active
+           "Cannot stop a Playwright trace because tracing is not active."))
+  (let [file (io/file (str output-path))]
+    (some-> (.getParentFile ^File file) .mkdirs)
+    (try
+      (.stop (.tracing ^BrowserContext context)
+             (doto (Tracing$StopOptions.)
+               (.setPath (.toPath ^File file))))
+      (finally
+        (swap! state assoc :trace-active? false))))
+  context-harness)
