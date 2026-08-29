@@ -394,7 +394,7 @@
 
 (defn- default-htmx
   []
-  (.-htmx js/window))
+  (aget js/window "htmx"))
 
 (defn- default-request-id
   []
@@ -540,7 +540,7 @@
   [runtime root event-name detail]
   (let [htmx (:htmx runtime)
         trigger (when htmx
-                  (.-trigger htmx))]
+                  (aget htmx "trigger"))]
     (when-not (= "function"
                  (js* "typeof ~{}" trigger))
       (throw
