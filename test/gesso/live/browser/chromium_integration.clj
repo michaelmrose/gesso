@@ -746,6 +746,157 @@
                            "').textContent")))
                   "Canonical successor B must complete the real HTMX swap after A's HTTP error."))))))))
 
+
+(deftest sse-reconnect-queues-one-advisory-successor-behind-in-flight-refresh-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "reconnecting a managed EventSource queues one advisory refresh without inventing authority"
+        ;; Initial SSE open starts advisory request A. Keep A in flight across a
+        ;; forced EventSource disconnect/reconnect. The second sseOpen is another
+        ;; advisory invalidation: it must be coordinated behind A rather than
+        ;; creating a parallel physical GET.
+        (fixture/script!
+         server
+         :get
+         fragment-path
+         [(fixture/hold (fragment-response "A-before-reconnect"))
+          (fixture/hold (fragment-response "B-after-reconnect"))])
+
+        (chromium/navigate!
+         page
+         (fixture/url server page-path))
+
+        (chromium/wait-for-js!
+         page
+         "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+        (let [initial-sse
+              (fixture/await-sse-client!
+               server
+               client-id
+               5000)
+
+              initial-connection-id
+              (:connection-id initial-sse)
+
+              first-request
+              (fixture/await-pending!
+               server
+               #(and (= :get (:method %))
+                     (= fragment-path (:path %)))
+               5000)
+
+              first-request-id
+              (:request-id first-request)]
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture.sseOpens === 1")
+
+          (is
+           (nil?
+            (request-header
+             first-request
+             progression.http/request-header-name))
+           "Initial sseOpen refresh A is advisory and must not invent progression authority.")
+
+          (is (= 1 (count (fragment-requests server)))
+              "Exactly one physical fragment request must own the fragment before reconnect.")
+
+          ;; Set the native EventSource retry delay through the SSE protocol
+          ;; itself. A retry-only frame dispatches no application message, so
+          ;; this controls timing without creating another semantic invalidation.
+          (is (= 1
+                 (fixture/emit-sse!
+                  server
+                  client-id
+                  {:retry 50}))
+              "The reconnect timing control must reach exactly the open EventSource.")
+
+          (is (= 1 (fixture/close-sse! server client-id))
+              "The fixture must close exactly the currently open managed EventSource.")
+
+          ;; Synchronize on the fixture's new real connection rather than
+          ;; sleeping for the native/extension reconnect path.
+          (let [reconnected
+                (fixture/await-sse-client!
+                 server
+                 client-id
+                 5000)]
+
+            (is (not= initial-connection-id
+                      (:connection-id reconnected))
+                "The observed SSE client must be a genuinely new connection.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseOpens === 2")
+
+            (is (= 1 (count (fragment-requests server)))
+                "Reconnect while A is in flight must queue an advisory wakeup, not start a parallel GET.")
+
+            ;; Completion of A promotes the queued reconnect wakeup into exactly
+            ;; one successor generation. Because reconnect carries no known
+            ;; progression fact, the successor must remain headerless.
+            (fixture/release! server first-request-id)
+
+            (let [successor
+                  (fixture/await-pending!
+                   server
+                   #(and (= :get (:method %))
+                         (= fragment-path (:path %))
+                         (> (:request-id %) first-request-id))
+                   5000)
+
+                  successor-id
+                  (:request-id successor)]
+
+              (is
+               (nil?
+                (request-header
+                 successor
+                 progression.http/request-header-name))
+               "Reconnect successor B is advisory and must not fabricate a minimum-read progression.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "A plus exactly one reconnect successor B is the complete physical request set.")
+
+              (is (= "A-before-reconnect"
+                     (chromium/evaluate
+                      page
+                      (str "() => document.getElementById('"
+                           fragment-id
+                           "').textContent")))
+                  "A may complete normally; reconnect still requires one subsequent authoritative refresh.")
+
+              (fixture/release! server successor-id)
+
+              (chromium/wait-for-js!
+               page
+               (str "() => document.getElementById('"
+                    fragment-id
+                    "') && document.getElementById('"
+                    fragment-id
+                    "').textContent === 'B-after-reconnect'"))
+
+              (is (= "B-after-reconnect"
+                     (chromium/evaluate
+                      page
+                      (str "() => document.getElementById('"
+                           fragment-id
+                           "').textContent")))
+                  "The single reconnect successor must complete the real HTMX swap.")
+
+              (is (= 2
+                     (chromium/evaluate
+                      page
+                      "() => window.__gessoFixture.sseOpens"))
+                  "One forced disconnect must produce exactly one observed reconnect/open.")
+
+              (is (true? (chromium/assert-clean! context))
+                  "Forced SSE reconnect must not leave console errors, uncaught exceptions, or crashes."))))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
