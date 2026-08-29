@@ -158,6 +158,8 @@
    "  sseOpens: 0,\n"
    "  sendErrors: 0,\n"
    "  responseErrors: 0,\n"
+   "  fragmentBeforeRequests: 0,\n"
+   "  fragmentAfterRequests: 0,\n"
    "  runtimeStarted: false\n"
    "};\n"
    "document.addEventListener('htmx:sseBeforeMessage', function (event) {\n"
@@ -174,6 +176,18 @@
    "});\n"
    "document.addEventListener('htmx:responseError', function () {\n"
    "  window.__gessoFixture.responseErrors += 1;\n"
+   "});\n"
+   "document.addEventListener('htmx:beforeRequest', function (event) {\n"
+   "  var elt = event.detail && event.detail.elt;\n"
+   "  if (elt && elt.hasAttribute('data-gesso-live-fragment')) {\n"
+   "    window.__gessoFixture.fragmentBeforeRequests += 1;\n"
+   "  }\n"
+   "});\n"
+   "document.addEventListener('htmx:afterRequest', function (event) {\n"
+   "  var elt = event.detail && event.detail.elt;\n"
+   "  if (elt && elt.hasAttribute('data-gesso-live-fragment')) {\n"
+   "    window.__gessoFixture.fragmentAfterRequests += 1;\n"
+   "  }\n"
    "});\n"
    "gesso.live.browser.runtime.init_BANG_();\n"
    "window.__gessoFixture.runtimeStarted = !!window.gessoLive;\n"))
@@ -1499,6 +1513,161 @@
 
                   (is (true? (chromium/assert-clean! context))
                       "Reconnect plus duplicate canonical delivery must leave the browser clean."))))))))))
+
+
+(deftest duplicate-authority-already-carried-by-bound-request-does-not-schedule-successor-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "a duplicate canonical requirement already carried by the bound request is absorbed"
+        (let [basis-d
+              {:tx-id 704
+               :system-time "2026-08-28T01:00:04Z"}
+
+              requirement-d
+              (progression/requirement basis-d)]
+
+          ;; Initial SSE open starts advisory A. Canonical D queues behind it.
+          ;; Once successor B is physically bound, configRequest has attached D
+          ;; to B's real HTTP request. Re-observing D while B is held is then
+          ;; already-covered authority, not evidence that another generation is
+          ;; needed after B.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-advisory"))
+            (fixture/hold (fragment-response "B-authoritative-D"))
+            ;; If the adapter regresses and schedules a redundant successor,
+            ;; keep it held so the test can diagnose that physical request
+            ;; deterministically rather than letting a default response race.
+            (fixture/hold (fragment-response "UNEXPECTED-duplicate-D-successor"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [request-a
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                request-a-id
+                (:request-id request-a)]
+
+            (is
+             (nil?
+              (request-header
+               request-a
+               progression.http/request-header-name))
+             "Initial SSE-open request A must remain advisory and headerless.")
+
+            (is (= 1 (emit-progression! server requirement-d))
+                "Canonical requirement D must reach the managed EventSource.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (is (= 1 (count (fragment-requests server)))
+                "D must queue behind advisory A rather than overlap it.")
+
+            (fixture/release! server request-a-id)
+
+            (let [request-b
+                  (fixture/await-pending!
+                   server
+                   #(and (= :get (:method %))
+                         (= fragment-path (:path %))
+                         (> (:request-id %) request-a-id))
+                   5000)
+
+                  request-b-id
+                  (:request-id request-b)
+
+                  encoded
+                  (request-header
+                   request-b
+                   progression.http/request-header-name)
+
+                  decoded
+                  (some-> encoded
+                          progression.http/decode-request-progression)]
+
+              (is (= requirement-d decoded)
+                  "Bound successor B must carry canonical requirement D on the real HTTP request.")
+
+              (is (= #{basis-d} (:bases decoded))
+                  "B's minimum-read header must contain exactly D's basis.")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.fragmentBeforeRequests === 2")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Only advisory A and canonical B exist before duplicate D is delivered.")
+
+              ;; This is the boundary v7.346 changed: B is not merely a logical
+              ;; generation anymore; it is a physically bound HTMX request that
+              ;; demonstrably carries D. The duplicate must therefore be
+              ;; recognized as already covered.
+              (is (= 1 (emit-progression! server requirement-d))
+                  "Duplicate canonical D must genuinely reach the browser while B is in flight.")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.sseMessages === 2")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Duplicate D must not start a parallel request while B owns the fragment.")
+
+              (fixture/release! server request-b-id)
+
+              (chromium/wait-for-js!
+               page
+               (str "() => document.getElementById('"
+                    fragment-id
+                    "') && document.getElementById('"
+                    fragment-id
+                    "').textContent === 'B-authoritative-D'"))
+
+              ;; afterRequest is the coordinator's completion boundary. Waiting
+              ;; for the second managed afterRequest means all synchronous Gesso
+              ;; handlers for B's completion have run before these assertions.
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.fragmentAfterRequests === 2")
+
+              (is (= 2
+                     (chromium/evaluate
+                      page
+                      "() => window.__gessoFixture.fragmentBeforeRequests"))
+                  "Completing B must not synchronously admit a third HTMX fragment request.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Duplicate authority already carried by B must not create a post-B physical refresh.")
+
+              (is (empty? (fixture/pending-request-ids server))
+                  "No hidden held successor may remain after authoritative B completes.")
+
+              (is (= "B-authoritative-D"
+                     (chromium/evaluate
+                      page
+                      (str "() => document.getElementById('"
+                           fragment-id
+                           "').textContent")))
+                  "The authoritative D response remains the final canonical DOM.")
+
+              (is (true? (chromium/assert-clean! context))
+                  "Covered duplicate authority must leave the real browser clean."))))))))
 
 (defn -main
   [& _]
