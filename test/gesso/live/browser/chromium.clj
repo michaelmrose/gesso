@@ -16,6 +16,7 @@
     ConsoleMessage
     Page
     Playwright
+    Playwright$CreateOptions
     Request
     Tracing$StartOptions
     Tracing$StopOptions
@@ -157,14 +158,24 @@
                      requested-executable)
                 {:chromium-executable (str requested-executable)}))
            (chromium-executable))
+         playwright-env
+         (assoc
+          (into {} (System/getenv))
+          "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"
+          "1")
+         create-options
+         (doto (Playwright$CreateOptions.)
+           (.setEnv playwright-env))
          playwright
          (try
-           (Playwright/create)
+           (Playwright/create create-options)
            (catch Throwable cause
              (throw
               (ex-info
                (str "Playwright could not start for Gesso browser tests. "
-                    "Ensure the Playwright test dependency and driver are available.")
+                    "Gesso suppresses Playwright-managed browser downloads because "
+                    "these tests launch the resolved system Chromium executable. "
+                    "Ensure the Playwright test dependency and driver bundle are available.")
                {:error/type error-type
                 :error/kind :playwright-start-failed}
                cause))))]
