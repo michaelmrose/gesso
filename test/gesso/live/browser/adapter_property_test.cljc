@@ -998,6 +998,113 @@
                                 [:fragments fragment-id :inflight]))))
            (adapter/state? state-c))))))))
 
+
+(deftest generated-bound-active-requirement-deduplicates-exact-reobservation-test
+  (testing "a bound active requirement absorbs exact duplicates while distinct authority coalesces into one successor"
+    (check-property!
+     property-test-count
+     (prop/for-all*
+      [small-natural-gen
+       (gen/vector small-natural-gen 0 40)]
+      (fn [active-index observed-indexes]
+        (let [fragment-id :fragment/generated-covered-authority
+              active-requirement (basis-id active-index)
+              observed-requirements (mapv basis-id observed-indexes)
+              distinct-requirements
+              (set (remove #{active-requirement}
+                           observed-requirements))
+              [state-a refresh-effects]
+              (adapter/step
+               (adapter/initial-state)
+               (invalidate-with-requirement
+                fragment-id
+                active-requirement))
+              first-refresh
+              (effect-data :fragment/refresh refresh-effects)
+              generation (:request-generation first-refresh)
+              request-id :request/generated-covered-authority
+              [bound-state bind-effects]
+              (adapter/step
+               state-a
+               {:event :htmx/before-request
+                :fragment-id fragment-id
+                :request-generation generation
+                :request-id request-id})
+              {:keys [state effects-valid? duplicate-noops?]}
+              (reduce
+               (fn [{:keys [state effects-valid? duplicate-noops?]}
+                    requirement]
+                 (let [[state' effects]
+                       (adapter/step
+                        state
+                        (invalidate-with-requirement
+                         fragment-id
+                         requirement))
+                       duplicate? (= active-requirement requirement)]
+                   {:state state'
+                    :effects-valid?
+                    (and effects-valid?
+                         (empty? effects))
+                    :duplicate-noops?
+                    (and duplicate-noops?
+                         (if duplicate?
+                           (= state state')
+                           true))}))
+               {:state bound-state
+                :effects-valid? true
+                :duplicate-noops? true}
+               observed-requirements)
+              fragment (get-in state [:fragments fragment-id])
+              [finished finish-effects]
+              (adapter/step
+               state
+               {:event :htmx/after-request
+                :fragment-id fragment-id
+                :request-generation generation
+                :request-id request-id})
+              next-refresh
+              (effect-data :fragment/refresh finish-effects)]
+          (and
+           (= #{active-requirement}
+              (:requirements first-refresh))
+           (= request-id
+              (get-in bound-state
+                      [:fragments fragment-id :inflight :request-id]))
+           (= #{active-requirement}
+              (get-in bound-state
+                      [:fragments fragment-id :inflight :requirements]))
+           (= 1 (count (effects-by-kind :htmx/allow-request bind-effects)))
+           effects-valid?
+           duplicate-noops?
+           (= (boolean (seq distinct-requirements))
+              (:queued-refresh? fragment))
+           (= distinct-requirements
+              (:queued-requirements fragment))
+           (if (seq distinct-requirements)
+             (and
+              next-refresh
+              (= distinct-requirements
+                 (:requirements next-refresh))
+              (not= generation
+                    (:request-generation next-refresh))
+              (= false
+                 (get-in finished
+                         [:fragments fragment-id :queued-refresh?]))
+              (= #{}
+                 (get-in finished
+                         [:fragments fragment-id :queued-requirements])))
+             (and
+              (nil? next-refresh)
+              (nil? (get-in finished
+                            [:fragments fragment-id :inflight]))
+              (= false
+                 (get-in finished
+                         [:fragments fragment-id :queued-refresh?]))
+              (= #{}
+                 (get-in finished
+                         [:fragments fragment-id :queued-requirements]))))
+           (adapter/state? finished))))))))
+
 ;; =============================================================================
 ;; Authoritative-install monotonicity
 ;; =============================================================================
