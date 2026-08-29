@@ -409,16 +409,38 @@
         status-token
         (str status)
 
+        console-errors
+        (filterv console-error? errors)
+
+        chromium-resource-errors
+        (filterv
+         (fn [{:keys [type text location]}]
+           (and (= "error" type)
+                (string? text)
+                (str/includes? text "Failed to load resource")
+                (str/includes? text "server responded with a status of")
+                (str/includes? text status-token)
+                (string? location)
+                (str/includes? location fragment-path)))
+         console-errors)
+
+        htmx-response-errors
+        (filterv
+         (fn [{:keys [type text]}]
+           (and (= "error" type)
+                (string? text)
+                (str/includes? text "Response Status Error Code")
+                (str/includes? text status-token)
+                (str/includes? text fragment-path)))
+         console-errors)
+
         expected?
         (and
-         (exactly-one-console-error-matching?
-          errors
-          (fn [{:keys [type text]}]
-            (and (= "error" type)
-                 (string? text)
-                 (str/includes? text "Response Status Error Code")
-                 (str/includes? text status-token)
-                 (str/includes? text fragment-path))))
+         (= 2 (count errors))
+         (= 2 (count console-errors))
+         (= 1 (count chromium-resource-errors))
+         (= 1 (count htmx-response-errors))
+         ;; A completed HTTP 5xx is not a Playwright request failure.
          (empty? request-failures))]
 
     (when-not expected?
@@ -426,8 +448,10 @@
        (integration-error
         :unexpected-response-error-diagnostics
         (str "The deliberate HTTP " status
-             " response did not produce exactly HTMX's expected responseError "
-             "diagnostic.")
+             " response did not produce exactly the expected browser/HTMX "
+             "response-error diagnostics: one Chromium failed-resource console "
+             "entry, one HTMX responseError console entry, and no transport "
+             "request failure.")
         {:status status
          :errors errors
          :diagnostics diagnostics})))
