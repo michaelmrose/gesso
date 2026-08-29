@@ -669,7 +669,12 @@
                :xhr old-xhr})
          (is (= "request-2"
                 (:request-id (request-record host (:root fixture)))))
-         (is (= #{(requirement :basis/b)}
+         ;; A failed physical request did not satisfy its own canonical
+         ;; requirement. Because progression bases are opaque and orderless,
+         ;; queued B cannot be assumed to subsume failed A. The promoted
+         ;; successor must therefore retain every still-unsatisfied basis.
+         (is (= #{(requirement :basis/a)
+                  (requirement :basis/b)}
                 (:requirements (request-record host (:root fixture)))))
          (is (= 2 (count @(:triggers host))))
          (is (invariant-clean? host)))))))
