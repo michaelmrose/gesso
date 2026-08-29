@@ -2266,6 +2266,220 @@
                 (is (true? (chromium/assert-clean! context))
                     "The completed failure-recovery scenario must leave the browser clean.")))))))))
 
+
+(deftest failed-bound-canonical-refresh-via-http-error-preserves-active-and-queued-authority-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "a failed bound canonical generation preserves D ∪ E across real HTTP responseError"
+        (let [basis-d
+              {:tx-id 1004
+               :system-time "2026-08-29T00:30:04Z"}
+
+              basis-e
+              {:tx-id 1005
+               :system-time "2026-08-29T00:30:05Z"}
+
+              requirement-d
+              (progression/requirement basis-d)
+
+              requirement-e
+              (progression/requirement basis-e)
+
+              requirement-d+e
+              (progression/compose requirement-d requirement-e)
+
+              error-response
+              (fixture/response
+               503
+               html-headers
+               (str "<div id=\"" fragment-id
+                    "\" data-fixture-version=\"error\">"
+                    "B-503-MUST-NOT-BECOME-CANONICAL"
+                    "</div>"))]
+
+          ;; Initial SSE open creates advisory A. Canonical D queues behind A
+          ;; and becomes physically bound to B. While B is held, genuinely new E
+          ;; queues. B then receives a completed HTTP 503 response. Since neither
+          ;; D nor E has been satisfied by a successful canonical generation,
+          ;; the already-required successor must retain both.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-advisory"))
+            (fixture/hold (fragment-response "B-unused-success-body"))
+            (fixture/hold (fragment-response "C-authoritative-D+E"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [request-a
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                request-a-id
+                (:request-id request-a)]
+
+            (is
+             (nil?
+              (request-header
+               request-a
+               progression.http/request-header-name))
+             "Initial SSE-open request A must remain advisory and headerless.")
+
+            (is (= 1 (emit-progression! server requirement-d))
+                "Canonical D must reach the browser while advisory A owns the fragment.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (is (= 1 (count (fragment-requests server)))
+                "D must queue behind A rather than create parallel physical work.")
+
+            (fixture/release! server request-a-id)
+
+            (let [request-b
+                  (fixture/await-pending!
+                   server
+                   #(and (= :get (:method %))
+                         (= fragment-path (:path %))
+                         (> (:request-id %) request-a-id))
+                   5000)
+
+                  request-b-id
+                  (:request-id request-b)
+
+                  encoded-b
+                  (request-header
+                   request-b
+                   progression.http/request-header-name)
+
+                  decoded-b
+                  (some-> encoded-b
+                          progression.http/decode-request-progression)]
+
+              (is (= requirement-d decoded-b)
+                  "Physical request B must be bound carrying canonical D.")
+
+              (is (= #{basis-d} (:bases decoded-b))
+                  "B's real minimum-read header must contain exactly D's basis.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Only advisory A and canonical B exist before E arrives.")
+
+              (is (= 1 (emit-progression! server requirement-e))
+                  "Genuinely new E must reach the browser while B is physically bound.")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.sseMessages === 2")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "E must queue behind B without admitting parallel fragment work.")
+
+              ;; Establish a clean diagnostic baseline immediately before the
+              ;; deliberate HTTP failure so every subsequent console entry is
+              ;; attributable to this exact 503.
+              (is (true? (chromium/assert-clean! context))
+                  "The browser must be clean before the deliberate 503 response.")
+              (chromium/clear-diagnostics! context)
+
+              (fixture/release! server request-b-id error-response)
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.responseErrors === 1")
+
+              (is (= 0
+                     (chromium/evaluate
+                      page
+                      "() => window.__gessoFixture.sendErrors"))
+                  "A completed HTTP 503 must exercise responseError, not sendError.")
+
+              (let [request-c
+                    (fixture/await-pending!
+                     server
+                     #(and (= :get (:method %))
+                           (= fragment-path (:path %))
+                           (> (:request-id %) request-b-id))
+                     5000)
+
+                    request-c-id
+                    (:request-id request-c)
+
+                    encoded-c
+                    (request-header
+                     request-c
+                     progression.http/request-header-name)
+
+                    decoded-c
+                    (some-> encoded-c
+                            progression.http/decode-request-progression)]
+
+                (is (= requirement-d+e decoded-c)
+                    "Successor C after B's HTTP failure must carry D ∪ E.")
+
+                (is (= #{basis-d basis-e} (:bases decoded-c))
+                    "No unsatisfied active or queued canonical basis may be lost across responseError.")
+
+                (is (= 2 (count (:bases decoded-c)))
+                    "The successor progression header must contain exactly D and E.")
+
+                (is (= 3 (count (fragment-requests server)))
+                    "A, errored B, and one composed successor C are the complete physical request set.")
+
+                (is (= "A-advisory"
+                       (chromium/evaluate
+                        page
+                        (str "() => document.getElementById('"
+                             fragment-id
+                             "').textContent")))
+                    "The 503 response body for failed B must never become canonical DOM.")
+
+                (is (true? (consume-expected-response-error-diagnostics!
+                            context
+                            503))
+                    "B's deliberate 503 must produce exactly the expected Chromium/HTMX diagnostics.")
+
+                (is (true? (chromium/assert-clean! context))
+                    "After accounting for B's deliberate 503, no unrelated browser failure may remain.")
+
+                (fixture/release! server request-c-id)
+
+                (chromium/wait-for-js!
+                 page
+                 (str "() => document.getElementById('"
+                      fragment-id
+                      "') && document.getElementById('"
+                      fragment-id
+                      "').textContent === 'C-authoritative-D+E'"))
+
+                (is (= "C-authoritative-D+E"
+                       (chromium/evaluate
+                        page
+                        (str "() => document.getElementById('"
+                             fragment-id
+                             "').textContent")))
+                    "The composed D ∪ E successor must complete the final real HTMX swap.")
+
+                (is (= 3 (count (fragment-requests server)))
+                    "Completing C must not reveal a hidden fourth refresh.")
+
+                (is (true? (chromium/assert-clean! context))
+                    "The completed HTTP-error recovery scenario must leave the browser clean.")))))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
