@@ -1380,6 +1380,9 @@
     (is (= #{:basis-1}
            (get-in state
                    [:fragments :request-card :inflight :requirements])))
+    (is (false?
+         (get-in state
+                 [:fragments :request-card :queued-refresh?])))
     (is (= #{}
            (get-in state
                    [:fragments :request-card :queued-requirements])))
@@ -1398,11 +1401,54 @@
     (is (= generation
            (get-in state-c
                    [:fragments :request-card :inflight :generation])))
+    (is (true?
+         (get-in state-c
+                 [:fragments :request-card :queued-refresh?])))
     (is (= #{:basis-2 :basis-3}
            (get-in state-c
                    [:fragments :request-card :queued-requirements])))
     (is (= [] effects-b))
     (is (= [] effects-c))))
+
+(deftest advisory-invalidation-during-request-queues-headerless-successor-test
+  (let [{state-a :state gen-1 :generation refresh-a :refresh}
+        (begin-fragment (adapter/initial-state) :panel)
+        [state-b _]
+        (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c effects-c]
+        (adapter/step state-b (invalidation :panel))
+        [state-d effects-d]
+        (adapter/step
+         state-c
+         {:event :htmx/after-request
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1})
+        refresh-b (effect-data :fragment/refresh effects-d)
+        gen-2 (:request-generation refresh-b)]
+    (is (= #{} (:requirements refresh-a))
+        "The active advisory generation carries no progression requirement.")
+    (is (true?
+         (get-in state-c [:fragments :panel :queued-refresh?]))
+        "An advisory invalidation must be representable as queued work even with no requirement.")
+    (is (= #{}
+           (get-in state-c [:fragments :panel :queued-requirements]))
+        "Advisory queueing must not fabricate progression authority.")
+    (is (= [] effects-c)
+        "The queued advisory refresh must not create a parallel physical request.")
+    (is (not= gen-1 gen-2)
+        "Finishing the active request must promote the advisory queue into a new generation.")
+    (is (= #{} (:requirements refresh-b))
+        "The promoted advisory successor must remain headerless at the semantic boundary.")
+    (is (= gen-2
+           (get-in state-d [:fragments :panel :inflight :generation])))
+    (is (= #{}
+           (get-in state-d [:fragments :panel :inflight :requirements])))
+    (is (false?
+         (get-in state-d [:fragments :panel :queued-refresh?]))
+        "Promoting the queued advisory refresh must clear the queue flag.")
+    (is (= #{}
+           (get-in state-d [:fragments :panel :queued-requirements])))))
 
 (deftest before-request-binds-one-physical-request-id-test
   (let [{state-a :state generation :generation}
@@ -1831,6 +1877,8 @@
     (is (= #{:basis-2} (:requirements refresh)))
     (is (= gen-2
            (get-in state-d [:fragments :panel :inflight :generation])))
+    (is (false?
+         (get-in state-d [:fragments :panel :queued-refresh?])))
     (is (= #{}
            (get-in state-d [:fragments :panel :queued-requirements])))))
 
