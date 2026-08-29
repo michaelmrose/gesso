@@ -53,8 +53,10 @@
    requirements. A queued refresh is represented independently from its
    requirement set: an advisory wakeup that arrives during one active request
    must still survive until that request retires. Canonical requirements are
-   accumulated conservatively as a set. The adapter never guesses ordering
-   between distinct requirements.
+   accumulated conservatively as a set. Once a physical HTMX request is bound,
+   re-observing an exact canonical requirement already carried by that request
+   is idempotent and does not manufacture a redundant successor. The adapter
+   never guesses ordering or subsumption between distinct requirements.
 
    Continuity remains browser-local rendering state. This namespace owns only
    continuity slot identity/lifetime; it never stores captured DOM state.
@@ -1610,6 +1612,16 @@
         :request-generation request-generation
         :requirements (set requirements)})]]))
 
+(defn- active-request-covers-requirement?
+  [fragment event]
+  (let [inflight (:inflight fragment)]
+    (and
+     inflight
+     (some? (:request-id inflight))
+     (contains? event :requirement)
+     (contains? (:requirements inflight)
+                (:requirement event)))))
+
 (defn- invalidate-fragment
   [state event]
   (let [fragment-id
@@ -1620,7 +1632,16 @@
             {:inflight nil
              :queued-refresh? false
              :queued-requirements #{}})]
-    (if (:inflight fragment)
+    (cond
+      (active-request-covers-requirement? fragment event)
+      ;; Once HTMX has bound a physical request, configRequest has already
+      ;; attached this generation's minimum-read requirement. Re-observing the
+      ;; exact same canonical requirement therefore cannot strengthen the read
+      ;; and must not manufacture a redundant successor refresh. Preserve any
+      ;; independently queued advisory or stronger/different canonical work.
+      [state []]
+
+      (:inflight fragment)
       [(-> state
            (assoc-in
             [:fragments fragment-id :queued-refresh?]
@@ -1630,6 +1651,8 @@
             into
             requirements))
        []]
+
+      :else
       (begin-fragment-request
        (assoc-in state [:fragments fragment-id] fragment)
        fragment-id
