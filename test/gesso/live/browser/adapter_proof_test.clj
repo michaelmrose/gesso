@@ -501,7 +501,7 @@
   [state event next-state effects]
   (let [fragment (adapter/fragment-state next-state proof-fragment-id)
         active-request-count (if (:inflight fragment) 1 0)
-        queued-refresh-count (if (seq (:queued-requirements fragment)) 1 0)
+        queued-refresh-count (if (true? (:queued-refresh? fragment)) 1 0)
         refresh-effects (effects-of :fragment/refresh effects)
         continuity? (continuity-event? event)
         failure? (= :continuity/failed (:event event))
@@ -556,7 +556,9 @@
         stats (atom {:states 0
                      :attempts 0
                      :successful-transitions 0
-                     :blocked-transitions 0})
+                     :blocked-transitions 0
+                     :advisory-queued-states 0
+                     :canonical-queued-states 0})
         failure (atom nil)]
     (letfn [(visit! [state path remaining]
               (let [key [remaining (canonical-generation-state state)]]
@@ -564,6 +566,11 @@
                            (not (contains? @seen key)))
                   (swap! seen conj key)
                   (swap! stats update :states inc)
+                  (let [fragment (adapter/fragment-state state proof-fragment-id)]
+                    (when (true? (:queued-refresh? fragment))
+                      (if (seq (:queued-requirements fragment))
+                        (swap! stats update :canonical-queued-states inc)
+                        (swap! stats update :advisory-queued-states inc))))
                   (when (pos? remaining)
                     (doseq [[operation resolve-event]
                             fragment-abstract-operations
@@ -619,6 +626,13 @@
           (pr-str result))
       (is (> (:successful-transitions result) 100)
           (pr-str result))
+      (is (pos? (:advisory-queued-states result))
+          (str "The proof search must actually visit a queued advisory refresh "
+               "whose requirement set is empty. "
+               (pr-str result)))
+      (is (pos? (:canonical-queued-states result))
+          (str "The proof search must also visit queued canonical refreshes. "
+               (pr-str result)))
       (is (zero? (:blocked-transitions result))
           (str "All abstract normalized fragment operations should be handled "
                "as transitions/dispositions rather than throwing. "
