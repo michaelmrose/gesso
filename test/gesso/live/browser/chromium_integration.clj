@@ -156,6 +156,7 @@
    "window.__gessoFixture = {\n"
    "  sseMessages: 0,\n"
    "  sseOpens: 0,\n"
+   "  sseErrors: 0,\n"
    "  sendErrors: 0,\n"
    "  responseErrors: 0,\n"
    "  fragmentBeforeRequests: 0,\n"
@@ -170,6 +171,9 @@
    "});\n"
    "document.addEventListener('htmx:sseOpen', function () {\n"
    "  window.__gessoFixture.sseOpens += 1;\n"
+   "});\n"
+   "document.addEventListener('htmx:sseError', function () {\n"
+   "  window.__gessoFixture.sseErrors += 1;\n"
    "});\n"
    "document.addEventListener('htmx:sendError', function () {\n"
    "  window.__gessoFixture.sendErrors += 1;\n"
@@ -291,6 +295,145 @@
          (= fragment-path (:path %))
          (> (:request-id %) first-request-id))
    5000))
+
+
+(defn- console-error?
+  [entry]
+  (= :console-error (:kind entry)))
+
+(defn- exactly-one-console-error-matching?
+  [errors pred]
+  (and (= 1 (count errors))
+       (console-error? (first errors))
+       (pred (first errors))))
+
+(defn- consume-expected-send-error-diagnostics!
+  [context]
+  (let [errors
+        (chromium/browser-errors context)
+
+        diagnostics
+        (chromium/diagnostics context)
+
+        texts
+        (mapv :text errors)
+
+        request-failures
+        (:request-failures diagnostics)
+
+        expected-console?
+        (and (= 3 (count errors))
+             (every? console-error? errors)
+             (= 1 (count (filter #{"htmx:afterRequest"} texts)))
+             (= 1 (count (filter #{"htmx:sendError"} texts)))
+             (= 1
+                (count
+                 (filter
+                  (fn [text]
+                    (and (string? text)
+                         (str/includes? text "Failed to load resource")
+                         (str/includes? text "ERR_EMPTY_RESPONSE")))
+                  texts))))
+
+        expected-request-failure?
+        (and (= 1 (count request-failures))
+             (= "GET" (:method (first request-failures)))
+             (str/ends-with? (:url (first request-failures))
+                             fragment-path)
+             (str/includes?
+              (or (:failure (first request-failures)) "")
+              "ERR_EMPTY_RESPONSE"))]
+
+    (when-not (and expected-console?
+                   expected-request-failure?)
+      (throw
+       (integration-error
+        :unexpected-send-error-diagnostics
+        (str "The deliberate empty-response transport failure did not produce "
+             "exactly HTMX's expected sendError diagnostics. Gesso must not "
+             "globally suppress browser errors merely because a fault test "
+             "intentionally breaks one request.")
+        {:errors errors
+         :diagnostics diagnostics})))
+
+    (chromium/clear-diagnostics! context)
+    true))
+
+(defn- consume-expected-sse-reconnect-diagnostics!
+  [context]
+  (let [errors
+        (chromium/browser-errors context)
+
+        diagnostics
+        (chromium/diagnostics context)
+
+        request-failures
+        (:request-failures diagnostics)
+
+        expected?
+        (and
+         (exactly-one-console-error-matching?
+          errors
+          (fn [{:keys [type text]}]
+            (and (= "error" type)
+                 (string? text)
+                 (or (= "Event" text)
+                     (= "[object Event]" text)))))
+         (empty? request-failures))]
+
+    (when-not expected?
+      (throw
+       (integration-error
+        :unexpected-sse-reconnect-diagnostics
+        (str "The deliberate EventSource disconnect did not produce exactly "
+             "the expected htmx-ext-sse/HTMX error diagnostic. Unexpected "
+             "browser failures must remain visible rather than being globally "
+             "whitelisted.")
+        {:errors errors
+         :diagnostics diagnostics})))
+
+    (chromium/clear-diagnostics! context)
+    true))
+
+(defn- consume-expected-response-error-diagnostics!
+  [context status]
+  (let [errors
+        (chromium/browser-errors context)
+
+        diagnostics
+        (chromium/diagnostics context)
+
+        request-failures
+        (:request-failures diagnostics)
+
+        status-token
+        (str status)
+
+        expected?
+        (and
+         (exactly-one-console-error-matching?
+          errors
+          (fn [{:keys [type text]}]
+            (and (= "error" type)
+                 (string? text)
+                 (str/includes? text "Response Status Error Code")
+                 (str/includes? text status-token)
+                 (str/includes? text fragment-path))))
+         (empty? request-failures))]
+
+    (when-not expected?
+      (throw
+       (integration-error
+        :unexpected-response-error-diagnostics
+        (str "The deliberate HTTP " status
+             " response did not produce exactly HTMX's expected responseError "
+             "diagnostic.")
+        {:status status
+         :errors errors
+         :diagnostics diagnostics})))
+
+    (chromium/clear-diagnostics! context)
+    true))
 
 (defn- safe-cleanup!
   [label f]
@@ -602,8 +745,10 @@
                       "() => window.__gessoFixture.responseErrors"))
                   "A deliberate socket loss should exercise sendError, not HTTP responseError."))))
 
+        (is (true? (consume-expected-send-error-diagnostics! context))
+            "The deliberate socket loss must produce exactly the expected HTMX/browser diagnostics.")
         (is (true? (chromium/assert-clean! context))
-            "Deliberate request failure must not leave console errors, uncaught exceptions, or crashes.")))))
+            "After accounting for the deliberate socket loss, the browser must be clean.")))))
 
 
 (deftest http-response-error-advances-queued-progression-without-swapping-error-body-test
@@ -723,24 +868,10 @@
                             "').textContent"))))
                   "HTMX must not install the 503 response body as canonical fragment content.")
 
-              ;; HTMX 2 reports an HTTP response error through responseError and
-              ;; may also log that status as console.error. Permit only console
-              ;; diagnostics that explicitly identify this deliberate 503; all
-              ;; uncaught exceptions, promise rejections, crashes, or unrelated
-              ;; console failures remain test failures.
-              (let [browser-errors (chromium/browser-errors context)
-                    unexpected
-                    (remove
-                     (fn [{:keys [kind text]}]
-                       (and (= :console-error kind)
-                            (string? text)
-                            (str/includes? text "503")))
-                     browser-errors)]
-                (is (empty? unexpected)
-                    (str "The deliberate 503 produced unexpected browser diagnostics: "
-                         (pr-str unexpected)
-                         ". Full diagnostics: "
-                         (pr-str (chromium/diagnostics context)))))
+              (is (true? (consume-expected-response-error-diagnostics!
+                           context
+                           503))
+                  "The deliberate 503 must produce exactly HTMX's expected responseError diagnostic.")
 
               (fixture/release! server successor-id)
 
@@ -758,7 +889,10 @@
                       (str "() => document.getElementById('"
                            fragment-id
                            "').textContent")))
-                  "Canonical successor B must complete the real HTMX swap after A's HTTP error."))))))))
+                  "Canonical successor B must complete the real HTMX swap after A's HTTP error.")
+
+              (is (true? (chromium/assert-clean! context))
+                  "After accounting for the deliberate 503, the browser must be clean."))))))))
 
 
 (deftest sse-reconnect-queues-one-advisory-successor-behind-in-flight-refresh-test
@@ -908,8 +1042,17 @@
                       "() => window.__gessoFixture.sseOpens"))
                   "One forced disconnect must produce exactly one observed reconnect/open.")
 
+              (is (= 1
+                     (chromium/evaluate
+                      page
+                      "() => window.__gessoFixture.sseErrors"))
+                  "Exactly one deliberate EventSource disconnect must produce exactly one htmx:sseError.")
+
+              (is (true? (consume-expected-sse-reconnect-diagnostics! context))
+                  "The forced disconnect must produce exactly htmx-ext-sse's expected browser diagnostic.")
+
               (is (true? (chromium/assert-clean! context))
-                  "Forced SSE reconnect must not leave console errors, uncaught exceptions, or crashes."))))))))
+                  "After accounting for the deliberate SSE disconnect, the browser must be clean."))))))))
 
 
 (deftest canonical-progression-after-reconnect-advisory-refresh-queues-authoritative-successor-test
@@ -1104,8 +1247,17 @@
                           "() => window.__gessoFixture.sseOpens"))
                       "The canonical follow-up must not require or create another SSE reconnect.")
 
+                  (is (= 1
+                         (chromium/evaluate
+                          page
+                          "() => window.__gessoFixture.sseErrors"))
+                      "The scenario's single forced disconnect must produce exactly one htmx:sseError.")
+
+                  (is (true? (consume-expected-sse-reconnect-diagnostics! context))
+                      "Reconnect must produce only htmx-ext-sse's expected disconnect diagnostic.")
+
                   (is (true? (chromium/assert-clean! context))
-                      "Reconnect followed by canonical progression must leave the browser clean."))))))))))
+                      "After accounting for the deliberate SSE disconnect, reconnect plus canonical progression must leave the browser clean."))))))))))
 
 
 (deftest multiple-canonical-progressions-compose-behind-reconnect-advisory-refresh-test
@@ -1311,8 +1463,17 @@
                           "() => window.__gessoFixture.sseOpens"))
                       "Composing canonical requirements must not create another SSE reconnect.")
 
+                  (is (= 1
+                         (chromium/evaluate
+                          page
+                          "() => window.__gessoFixture.sseErrors"))
+                      "The scenario's single forced disconnect must produce exactly one htmx:sseError.")
+
+                  (is (true? (consume-expected-sse-reconnect-diagnostics! context))
+                      "Reconnect must produce only htmx-ext-sse's expected disconnect diagnostic.")
+
                   (is (true? (chromium/assert-clean! context))
-                      "Reconnect plus multiple canonical invalidations must leave the browser clean."))))))))))
+                      "After accounting for the deliberate SSE disconnect, reconnect plus multiple canonical invalidations must leave the browser clean."))))))))))
 
 
 (deftest duplicate-canonical-progression-is-idempotent-behind-reconnect-advisory-refresh-test
@@ -1511,8 +1672,17 @@
                           "() => window.__gessoFixture.sseOpens"))
                       "Duplicate canonical delivery must not cause an SSE reconnect.")
 
+                  (is (= 1
+                         (chromium/evaluate
+                          page
+                          "() => window.__gessoFixture.sseErrors"))
+                      "The scenario's single forced disconnect must produce exactly one htmx:sseError.")
+
+                  (is (true? (consume-expected-sse-reconnect-diagnostics! context))
+                      "Reconnect must produce only htmx-ext-sse's expected disconnect diagnostic.")
+
                   (is (true? (chromium/assert-clean! context))
-                      "Reconnect plus duplicate canonical delivery must leave the browser clean."))))))))))
+                      "After accounting for the deliberate SSE disconnect, reconnect plus duplicate canonical delivery must leave the browser clean."))))))))))
 
 
 (deftest duplicate-authority-already-carried-by-bound-request-does-not-schedule-successor-test
