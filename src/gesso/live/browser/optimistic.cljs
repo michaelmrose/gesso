@@ -209,10 +209,16 @@
 
 (defn- default-process-element
   [element]
-  (when (and element
-             (.-htmx js/window)
-             (.-process (.-htmx js/window)))
-    (.process (.-htmx js/window) element))
+  ;; HTMX is a foreign JavaScript library rather than Closure-managed code.
+  ;; Quoted lookup is therefore required here: ordinary CLJS property access
+  ;; may rename `htmx` or `process` under :advanced compilation. Preserve the
+  ;; method receiver as well, so this remains valid even if HTMX eventually
+  ;; relies on `this` inside process().
+  (let [htmx (aget js/window "htmx")
+        process-element (when htmx
+                          (aget htmx "process"))]
+    (when (and element process-element)
+      (.call process-element htmx element)))
   element)
 
 (defn- command-wire
