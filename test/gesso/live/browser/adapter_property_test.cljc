@@ -1105,6 +1105,153 @@
                          [:fragments fragment-id :queued-requirements]))))
            (adapter/state? finished))))))))
 
+
+(deftest generated-success-and-failure-preserve-exact-unsatisfied-requirements-test
+  (testing "successful completion discharges active authority while failure preserves it into any already-required successor"
+    (check-property!
+     property-test-count
+     (prop/for-all*
+      [small-natural-gen
+       (gen/vector small-natural-gen 0 40)
+       gen/boolean
+       gen/boolean]
+      (fn [active-index observed-indexes advisory? fail?]
+        (let [fragment-id :fragment/generated-success-failure
+              active-requirement (basis-id active-index)
+              observed-requirements (mapv basis-id observed-indexes)
+              queued-requirements
+              (set
+               (remove
+                #{active-requirement}
+                observed-requirements))
+              successor-required?
+              (or advisory?
+                  (seq queued-requirements))
+              expected-success-requirements
+              queued-requirements
+              expected-failure-requirements
+              (conj queued-requirements active-requirement)
+              [state-a refresh-effects]
+              (adapter/step
+               (adapter/initial-state)
+               (invalidate-with-requirement
+                fragment-id
+                active-requirement))
+              first-refresh
+              (effect-data :fragment/refresh refresh-effects)
+              generation
+              (:request-generation first-refresh)
+              request-id
+              :request/generated-success-failure
+              [bound-state _]
+              (adapter/step
+               state-a
+               {:event :htmx/before-request
+                :fragment-id fragment-id
+                :request-generation generation
+                :request-id request-id})
+              [state-b _]
+              (if advisory?
+                (adapter/step
+                 bound-state
+                 {:event :live/invalidated
+                  :fragment-id fragment-id})
+                [bound-state []])
+              state-c
+              (reduce
+               (fn [state requirement]
+                 (first
+                  (adapter/step
+                   state
+                   (invalidate-with-requirement
+                    fragment-id
+                    requirement))))
+               state-b
+               observed-requirements)
+              terminal-event
+              (if fail?
+                {:event :http/failed
+                 :fragment-id fragment-id
+                 :request-generation generation
+                 :request-id request-id
+                 :reason :generated-failure}
+                {:event :htmx/after-request
+                 :fragment-id fragment-id
+                 :request-generation generation
+                 :request-id request-id})
+              [finished terminal-effects]
+              (adapter/step
+               state-c
+               terminal-event)
+              successor
+              (effect-data :fragment/refresh terminal-effects)
+              expected-requirements
+              (if fail?
+                expected-failure-requirements
+                expected-success-requirements)]
+          (and
+           (= #{active-requirement}
+              (:requirements first-refresh))
+           (= request-id
+              (get-in bound-state
+                      [:fragments fragment-id :inflight :request-id]))
+           (= (boolean successor-required?)
+              (get-in state-c
+                      [:fragments fragment-id :queued-refresh?]))
+           (= queued-requirements
+              (get-in state-c
+                      [:fragments fragment-id :queued-requirements]))
+           (= fail?
+              (boolean
+               (seq
+                (effects-by-kind
+                 :fragment/request-failed
+                 terminal-effects))))
+           (<= (count
+                (effects-by-kind
+                 :fragment/refresh
+                 terminal-effects))
+               1)
+           (if successor-required?
+             (and
+              successor
+              (= expected-requirements
+                 (:requirements successor))
+              (if fail?
+                (contains?
+                 (:requirements successor)
+                 active-requirement)
+                (not
+                 (contains?
+                  (:requirements successor)
+                  active-requirement)))
+              (not= generation
+                    (:request-generation successor))
+              (= (:request-generation successor)
+                 (get-in finished
+                         [:fragments fragment-id
+                          :inflight :generation]))
+              (= false
+                 (get-in finished
+                         [:fragments fragment-id :queued-refresh?]))
+              (= #{}
+                 (get-in finished
+                         [:fragments fragment-id
+                          :queued-requirements])))
+             (and
+              (nil? successor)
+              (nil?
+               (get-in finished
+                       [:fragments fragment-id :inflight]))
+              (= false
+                 (get-in finished
+                         [:fragments fragment-id :queued-refresh?]))
+              (= #{}
+                 (get-in finished
+                         [:fragments fragment-id
+                          :queued-requirements]))))
+           (adapter/state? finished))))))))
+
 ;; =============================================================================
 ;; Authoritative-install monotonicity
 ;; =============================================================================
