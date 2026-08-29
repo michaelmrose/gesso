@@ -49,11 +49,12 @@
    :advances. The truth of that witness remains a trusted boundary outside this
    pure transition system.
 
-   Live invalidations are advisory. When multiple invalidations arrive during
-   one fragment request, their opaque requirements are accumulated as a set.
-   This is intentionally conservative: the adapter preserves every outstanding
-   requirement instead of pretending it can choose a strongest XTDB basis it
-   does not understand.
+   Live invalidations may be advisory or carry opaque authoritative refresh
+   requirements. A queued refresh is represented independently from its
+   requirement set: an advisory wakeup that arrives during one active request
+   must still survive until that request retires. Canonical requirements are
+   accumulated conservatively as a set. The adapter never guesses ordering
+   between distinct requirements.
 
    Continuity remains browser-local rendering state. This namespace owns only
    continuity slot identity/lifetime; it never stores captured DOM state.
@@ -373,6 +374,7 @@
   [value]
   (and
    (map? value)
+   (boolean? (:queued-refresh? value))
    (set? (:queued-requirements value))
    (let [inflight (:inflight value)]
      (or
@@ -1586,6 +1588,7 @@
         fragment
         (or (get-in state' [:fragments fragment-id])
             {:inflight nil
+             :queued-refresh? false
              :queued-requirements #{}})
         inflight
         {:generation request-generation
@@ -1598,6 +1601,7 @@
          [:fragments fragment-id]
          (assoc fragment
                 :inflight inflight
+                :queued-refresh? false
                 :queued-requirements #{}))]
     [state''
      [(effect
@@ -1614,13 +1618,17 @@
         fragment
         (or (get-in state [:fragments fragment-id])
             {:inflight nil
+             :queued-refresh? false
              :queued-requirements #{}})]
     (if (:inflight fragment)
-      [(assoc-in
-        state
-        [:fragments fragment-id :queued-requirements]
-        (into (:queued-requirements fragment)
-              requirements))
+      [(-> state
+           (assoc-in
+            [:fragments fragment-id :queued-refresh?]
+            true)
+           (update-in
+            [:fragments fragment-id :queued-requirements]
+            into
+            requirements))
        []]
       (begin-fragment-request
        (assoc-in state [:fragments fragment-id] fragment)
@@ -1920,14 +1928,19 @@
   (if-not (current-fragment-request?
            state fragment-id request-generation request-id)
     [state []]
-    (let [queued
+    (let [queued-refresh?
+          (true?
+           (get-in state
+                   [:fragments fragment-id :queued-refresh?]))
+          queued
           (get-in state [:fragments fragment-id :queued-requirements])
           state'
           (assoc-in state
                     [:fragments fragment-id]
                     {:inflight nil
+                     :queued-refresh? false
                      :queued-requirements #{}})]
-      (if (seq queued)
+      (if queued-refresh?
         (begin-fragment-request
          state'
          fragment-id
@@ -2366,6 +2379,8 @@
                      :request-id
                      :requirements
                      :authoritative]))
+           :queued-refresh?
+           (:queued-refresh? fragment)
            :queued-requirements
            (:queued-requirements fragment)}]))
       (:fragments state'))
