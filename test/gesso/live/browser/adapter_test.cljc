@@ -1859,6 +1859,98 @@
     (is (= 1 (count (effects-of :htmx/cancel-request effects-d))))
     (is (= 1 (count (effects-of :continuity/release effects-d))))))
 
+(deftest bound-request-ignores-duplicate-covered-canonical-requirement-test
+  (let [{state-a :state generation :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _]
+        (bind-request state-a :panel generation :xhr-1)
+        [state-c effects-c]
+        (adapter/step state-b (invalidation :panel :basis-1))]
+    (is (= state-b state-c)
+        "Re-observing authority already carried by the bound request must not change coordinator state.")
+    (is (= [] effects-c)
+        "Covered duplicate authority must not create any browser effect.")
+    (is (false?
+         (get-in state-c [:fragments :panel :queued-refresh?]))
+        "Covered duplicate authority must not manufacture a successor refresh.")
+    (is (= #{}
+           (get-in state-c [:fragments :panel :queued-requirements]))
+        "Covered duplicate authority must not enter the queued progression set.")
+    (is (= #{:basis-1}
+           (get-in state-c [:fragments :panel :inflight :requirements]))
+        "The bound generation must retain the authority it already carries.")))
+
+(deftest bound-request-queues-only-distinct-new-canonical-requirement-test
+  (let [{state-a :state gen-1 :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _]
+        (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c duplicate-effects]
+        (adapter/step state-b (invalidation :panel :basis-1))
+        [state-d distinct-effects]
+        (adapter/step state-c (invalidation :panel :basis-2))
+        [state-e completion-effects]
+        (adapter/step
+         state-d
+         {:event :htmx/after-request
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1})
+        refresh (effect-data :fragment/refresh completion-effects)
+        gen-2 (:request-generation refresh)]
+    (is (= [] duplicate-effects)
+        "Duplicate basis-1 must be absorbed by the bound generation.")
+    (is (= [] distinct-effects)
+        "Distinct basis-2 queues rather than starting a parallel physical request.")
+    (is (true?
+         (get-in state-d [:fragments :panel :queued-refresh?])))
+    (is (= #{:basis-2}
+           (get-in state-d [:fragments :panel :queued-requirements]))
+        "Only authority not already covered by the active request belongs in the successor queue.")
+    (is (not= gen-1 gen-2))
+    (is (= #{:basis-2} (:requirements refresh))
+        "The promoted successor must carry exactly the newly required authority.")
+    (is (= #{:basis-2}
+           (get-in state-e [:fragments :panel :inflight :requirements])))
+    (is (false?
+         (get-in state-e [:fragments :panel :queued-refresh?])))
+    (is (= #{}
+           (get-in state-e [:fragments :panel :queued-requirements])))))
+
+(deftest duplicate-covered-authority-preserves-independently-queued-advisory-refresh-test
+  (let [{state-a :state gen-1 :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _]
+        (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c advisory-effects]
+        (adapter/step state-b (invalidation :panel))
+        [state-d duplicate-effects]
+        (adapter/step state-c (invalidation :panel :basis-1))
+        [state-e completion-effects]
+        (adapter/step
+         state-d
+         {:event :htmx/after-request
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1})
+        refresh (effect-data :fragment/refresh completion-effects)]
+    (is (= [] advisory-effects))
+    (is (= [] duplicate-effects))
+    (is (= state-c state-d)
+        "Ignoring duplicate covered authority must not erase independently queued work.")
+    (is (true?
+         (get-in state-d [:fragments :panel :queued-refresh?]))
+        "The previously queued advisory refresh must survive duplicate canonical delivery.")
+    (is (= #{}
+           (get-in state-d [:fragments :panel :queued-requirements]))
+        "Preserved advisory work must remain headerless rather than inherit already-covered authority.")
+    (is (= #{} (:requirements refresh))
+        "Completing the active canonical request must promote the preserved advisory refresh headerlessly.")
+    (is (false?
+         (get-in state-e [:fragments :panel :queued-refresh?])))
+    (is (= #{}
+           (get-in state-e [:fragments :panel :queued-requirements])))))
+
 (deftest queued-requirements-start-next-generation-after-current-request-finishes-test
   (let [{state-a :state gen-1 :generation}
         (begin-fragment (adapter/initial-state) :panel :basis-1)
