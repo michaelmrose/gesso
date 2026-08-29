@@ -1951,6 +1951,89 @@
     (is (= #{}
            (get-in state-e [:fragments :panel :queued-requirements])))))
 
+(deftest failed-bound-request-preserves-unsatisfied-active-and-queued-canonical-requirements-test
+  (let [{state-a :state gen-1 :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _]
+        (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c _]
+        (adapter/step state-b (invalidation :panel :basis-2))
+        [state-d failure-effects]
+        (adapter/step
+         state-c
+         {:event :http/failed
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1
+          :reason :send-error})
+        failure (effect-data :fragment/request-failed failure-effects)
+        refresh (effect-data :fragment/refresh failure-effects)
+        gen-2 (:request-generation refresh)]
+    (is (= {:fragment-id :panel
+            :request-generation gen-1
+            :request-id :xhr-1
+            :reason :send-error}
+           failure)
+        "Failure must remain an explicit physical outcome rather than masquerading as successful completion.")
+    (is (not= gen-1 gen-2))
+    (is (= #{:basis-1 :basis-2}
+           (:requirements refresh))
+        "A failed generation did not satisfy basis-1, so an already-required successor must preserve basis-1 together with queued basis-2.")
+    (is (= #{:basis-1 :basis-2}
+           (get-in state-d [:fragments :panel :inflight :requirements])))
+    (is (false?
+         (get-in state-d [:fragments :panel :queued-refresh?])))
+    (is (= #{}
+           (get-in state-d [:fragments :panel :queued-requirements])))))
+
+(deftest failed-bound-request-preserves-active-requirement-when-advisory-successor-was-queued-test
+  (let [{state-a :state gen-1 :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _]
+        (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c _]
+        (adapter/step state-b (invalidation :panel))
+        [state-d failure-effects]
+        (adapter/step
+         state-c
+         {:event :http/failed
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1
+          :reason :response-error})
+        refresh (effect-data :fragment/refresh failure-effects)]
+    (is (= #{:basis-1}
+           (:requirements refresh))
+        "An advisory successor supplies no authority of its own, so failure must carry forward the active generation's still-unsatisfied requirement.")
+    (is (= #{:basis-1}
+           (get-in state-d [:fragments :panel :inflight :requirements])))
+    (is (false?
+         (get-in state-d [:fragments :panel :queued-refresh?])))
+    (is (= #{}
+           (get-in state-d [:fragments :panel :queued-requirements])))))
+
+(deftest failed-bound-request-without-queued-work-does-not-manufacture-retry-test
+  (let [{state-a :state gen-1 :generation}
+        (begin-fragment (adapter/initial-state) :panel :basis-1)
+        [state-b _]
+        (bind-request state-a :panel gen-1 :xhr-1)
+        [state-c failure-effects]
+        (adapter/step
+         state-b
+         {:event :http/failed
+          :fragment-id :panel
+          :request-generation gen-1
+          :request-id :xhr-1
+          :reason :send-error})]
+    (is (= 1 (count (effects-of :fragment/request-failed failure-effects))))
+    (is (= 0 (count (effects-of :fragment/refresh failure-effects)))
+        "Failure alone must not introduce an implicit retry policy.")
+    (is (nil? (get-in state-c [:fragments :panel :inflight])))
+    (is (false?
+         (get-in state-c [:fragments :panel :queued-refresh?])))
+    (is (= #{}
+           (get-in state-c [:fragments :panel :queued-requirements])))))
+
 (deftest queued-requirements-start-next-generation-after-current-request-finishes-test
   (let [{state-a :state gen-1 :generation}
         (begin-fragment (adapter/initial-state) :panel :basis-1)
