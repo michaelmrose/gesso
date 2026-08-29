@@ -377,8 +377,18 @@
 (defn release!
   "Release one held request.
 
-   response-map overrides the response captured by its hold action. Passing the
-   keyword :close closes the exchange without an HTTP response."
+   response-map overrides the response captured by its hold action.
+
+   Passing :close closes the exchange before sending response headers. A browser
+   may transparently retry an idempotent GET in that case, so :close is useful for
+   testing pre-response connection loss but is not a deterministic way to force an
+   XHR/EventSource-visible transport error.
+
+   Passing :truncate commits the held response's status, headers, and full
+   Content-Length, writes only a strict prefix of its non-empty body, and then
+   closes the exchange. Once response headers have been observed the browser
+   cannot safely replay the request as though no response existed, making this the
+   preferred deterministic fault for tests that require HTMX sendError."
   ([fixture request-id]
    (release! fixture request-id nil))
   ([fixture request-id response-map]
@@ -393,9 +403,18 @@
           :pending-request-ids (pending-request-ids fixture)})))
      (let [value
            (cond
-             (= :close response-map) :close
-             (nil? response-map) (:response control)
-             :else (normalize-response! response-map))]
+             (= :close response-map)
+             :close
+
+             (= :truncate response-map)
+             {:fixture/release-kind :truncate
+              :response (:response control)}
+
+             (nil? response-map)
+             (:response control)
+
+             :else
+             (normalize-response! response-map))]
        (.complete ^CompletableFuture (:release control) value)
        true))))
 
@@ -442,6 +461,41 @@
       (doseq [v values]
         (.add (.getResponseHeaders exchange) (str name) (str v)))))
   true)
+
+(defn- write-truncated-response!
+  [^HttpExchange exchange response-map]
+  (let [{:keys [status headers body]} (normalize-response! response-map)
+        bytes (body-bytes body)
+        length (alength bytes)]
+    (when (status-forbids-response-body? status)
+      (throw
+       (fixture-error
+        :truncate-body-forbidden
+        "Cannot truncate a response status that forbids a response body."
+        {:status status})))
+    (when (< length 2)
+      (throw
+       (fixture-error
+        :truncate-body-too-short
+        "Truncated fixture responses require at least two response-body bytes."
+        {:status status
+         :body-length length})))
+    (add-response-headers! exchange headers)
+    ;; Declare the complete body length, then deliberately send only a strict
+    ;; prefix. The client has now observed an HTTP response and cannot safely
+    ;; replay an idempotent request as a pre-response connection retry.
+    (.sendResponseHeaders exchange status length)
+    (let [prefix-length (max 1 (quot length 2))
+          output (.getResponseBody exchange)]
+      (try
+        (.write output bytes 0 prefix-length)
+        (.flush output)
+        (finally
+          ;; Closing the fixed-length response stream itself may complain that
+          ;; fewer bytes than declared were written. Closing the exchange is the
+          ;; transport fault we actually want and reliably tears down the socket.
+          (.close exchange))))
+    true))
 
 (defn- write-response!
   [^HttpExchange exchange response-map]
@@ -504,9 +558,19 @@
         (try
           (let [released (.get release)]
             (cond
-              (= stop-sentinel released) (.close exchange)
-              (= :close released) (.close exchange)
-              :else (write-response! exchange released)))
+              (= stop-sentinel released)
+              (.close exchange)
+
+              (= :close released)
+              (.close exchange)
+
+              (= :truncate (:fixture/release-kind released))
+              (write-truncated-response!
+               exchange
+               (:response released))
+
+              :else
+              (write-response! exchange released)))
           (finally
             (swap! (:pending fixture) dissoc request-id)
             (signal! fixture)))))))
