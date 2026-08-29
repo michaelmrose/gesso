@@ -1093,6 +1093,213 @@
                   (is (true? (chromium/assert-clean! context))
                       "Reconnect followed by canonical progression must leave the browser clean."))))))))))
 
+
+(deftest multiple-canonical-progressions-compose-behind-reconnect-advisory-refresh-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "multiple canonical requirements arriving during reconnect advisory work compose into one successor"
+        (let [basis-d
+              {:tx-id 504
+               :system-time "2026-08-28T00:40:04Z"}
+
+              basis-e
+              {:tx-id 505
+               :system-time "2026-08-28T00:40:05Z"}
+
+              requirement-d
+              (progression/requirement basis-d)
+
+              requirement-e
+              (progression/requirement basis-e)
+
+              expected
+              (progression/compose requirement-d requirement-e)]
+
+          ;; Initial SSE open admits advisory A. A reconnect while A is held
+          ;; queues advisory B. Once B owns the fragment, deliver two distinct
+          ;; canonical progression requirements over the reconnected EventSource.
+          ;; They must be accumulated by set union behind B and admitted as one
+          ;; successor C; neither arrival may overwrite the other or create its
+          ;; own physical refresh.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-initial-open"))
+            (fixture/hold (fragment-response "B-reconnect-advisory"))
+            (fixture/hold (fragment-response "C-composed-authority"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (let [initial-sse
+                (fixture/await-sse-client!
+                 server
+                 client-id
+                 5000)
+
+                initial-connection-id
+                (:connection-id initial-sse)
+
+                request-a
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                request-a-id
+                (:request-id request-a)]
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseOpens === 1")
+
+            (is
+             (nil?
+              (request-header
+               request-a
+               progression.http/request-header-name))
+             "Initial-open request A must be advisory and headerless.")
+
+            (is (= 1
+                   (fixture/emit-sse!
+                    server
+                    client-id
+                    {:retry 50}))
+                "The reconnect timing control must reach exactly the initial EventSource.")
+
+            (is (= 1 (fixture/close-sse! server client-id))
+                "The fixture must close exactly the initial EventSource.")
+
+            (let [reconnected
+                  (fixture/await-sse-client!
+                   server
+                   client-id
+                   5000)]
+
+              (is (not= initial-connection-id
+                        (:connection-id reconnected))
+                  "The browser must establish a genuinely new SSE connection.")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.sseOpens === 2")
+
+              (is (= 1 (count (fragment-requests server)))
+                  "Reconnect must queue advisory B behind A rather than overlap it.")
+
+              (fixture/release! server request-a-id)
+
+              (let [request-b
+                    (fixture/await-pending!
+                     server
+                     #(and (= :get (:method %))
+                           (= fragment-path (:path %))
+                           (> (:request-id %) request-a-id))
+                     5000)
+
+                    request-b-id
+                    (:request-id request-b)]
+
+                (is
+                 (nil?
+                  (request-header
+                   request-b
+                   progression.http/request-header-name))
+                 "Reconnect advisory request B must remain headerless.")
+
+                (is (= 2 (count (fragment-requests server)))
+                    "A plus advisory B are the only physical requests before canonical requirements arrive.")
+
+                ;; Emit E before D deliberately. The expected requirement is
+                ;; composed in the opposite textual order to prove that browser
+                ;; admission is set-union semantics, not last-arrival authority.
+                (is (= 1 (emit-progression! server requirement-e))
+                    "Canonical requirement E must reach the reconnected EventSource.")
+
+                (is (= 1 (emit-progression! server requirement-d))
+                    "Canonical requirement D must reach the reconnected EventSource.")
+
+                (chromium/wait-for-js!
+                 page
+                 "() => window.__gessoFixture.sseMessages === 2")
+
+                (is (= 2 (count (fragment-requests server)))
+                    "D and E must both queue behind B without creating parallel or per-event GETs.")
+
+                (fixture/release! server request-b-id)
+
+                (let [request-c
+                      (fixture/await-pending!
+                       server
+                       #(and (= :get (:method %))
+                             (= fragment-path (:path %))
+                             (> (:request-id %) request-b-id))
+                       5000)
+
+                      request-c-id
+                      (:request-id request-c)
+
+                      encoded
+                      (request-header
+                       request-c
+                       progression.http/request-header-name)
+
+                      decoded
+                      (some-> encoded
+                              progression.http/decode-request-progression)]
+
+                  (is (= expected decoded)
+                      "The single successor must carry composition D∪E, independent of arrival order.")
+
+                  (is (= #{basis-d basis-e} (:bases decoded))
+                      "Neither canonical basis may be discarded as advisory B settles.")
+
+                  (is (= 3 (count (fragment-requests server)))
+                      "A, advisory B, and one composed canonical successor C are the complete physical request set.")
+
+                  (is (= "B-reconnect-advisory"
+                         (chromium/evaluate
+                          page
+                          (str "() => document.getElementById('"
+                               fragment-id
+                               "').textContent")))
+                      "B may settle, but composed D∪E still requires exactly one follow-up refresh.")
+
+                  (fixture/release! server request-c-id)
+
+                  (chromium/wait-for-js!
+                   page
+                   (str "() => document.getElementById('"
+                        fragment-id
+                        "') && document.getElementById('"
+                        fragment-id
+                        "').textContent === 'C-composed-authority'"))
+
+                  (is (= "C-composed-authority"
+                         (chromium/evaluate
+                          page
+                          (str "() => document.getElementById('"
+                               fragment-id
+                               "').textContent")))
+                      "The composed canonical successor must complete the final real HTMX swap.")
+
+                  (is (= 2
+                         (chromium/evaluate
+                          page
+                          "() => window.__gessoFixture.sseOpens"))
+                      "Composing canonical requirements must not create another SSE reconnect.")
+
+                  (is (true? (chromium/assert-clean! context))
+                      "Reconnect plus multiple canonical invalidations must leave the browser clean."))))))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
