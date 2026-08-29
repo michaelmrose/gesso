@@ -1947,28 +1947,43 @@
         [state-b effects]))))
 
 (defn- finish-fragment-request
-  [state fragment-id request-generation request-id]
-  (if-not (current-fragment-request?
-           state fragment-id request-generation request-id)
-    [state []]
-    (let [queued-refresh?
-          (true?
-           (get-in state
-                   [:fragments fragment-id :queued-refresh?]))
-          queued
-          (get-in state [:fragments fragment-id :queued-requirements])
+  ([state fragment-id request-generation request-id]
+   (finish-fragment-request
+    state fragment-id request-generation request-id #{}))
+  ([state
+    fragment-id
+    request-generation
+    request-id
+    carry-forward-requirements]
+   (if-not (current-fragment-request?
+            state fragment-id request-generation request-id)
+     [state []]
+     (let [queued-refresh?
+           (true?
+            (get-in state
+                    [:fragments fragment-id :queued-refresh?]))
+           queued
+           (get-in state [:fragments fragment-id :queued-requirements])
+           ;; A successful generation has satisfied its own minimum-read
+           ;; requirements, so the ordinary completion path carries forward
+           ;; nothing. A failed generation has not satisfied them. If queued
+           ;; work already warrants a successor, that successor must therefore
+           ;; retain the failed generation's opaque requirements as well as the
+           ;; independently queued ones.
+           successor-requirements
+           (into queued carry-forward-requirements)
+           state'
+           (assoc-in state
+                     [:fragments fragment-id]
+                     {:inflight nil
+                      :queued-refresh? false
+                      :queued-requirements #{}})]
+       (if queued-refresh?
+         (begin-fragment-request
           state'
-          (assoc-in state
-                    [:fragments fragment-id]
-                    {:inflight nil
-                     :queued-refresh? false
-                     :queued-requirements #{}})]
-      (if queued-refresh?
-        (begin-fragment-request
-         state'
-         fragment-id
-         queued)
-        [state' []]))))
+          fragment-id
+          successor-requirements)
+         [state' []])))))
 
 (defn- after-request
   [state event]
@@ -2007,9 +2022,20 @@
          {:fragment-id fragment-id
           :request-generation request-generation
           :request-id request-id})]]
-      (let [[state' next-effects]
+      (let [;; Failure cannot prove that the active generation satisfied its
+            ;; minimum-read frontier. Preserve those opaque requirements in any
+            ;; successor that queued work already requires; do not manufacture
+            ;; an unconditional retry when no successor is queued.
+            inflight-requirements
+            (get-in state
+                    [:fragments fragment-id :inflight :requirements])
+            [state' next-effects]
             (finish-fragment-request
-             state fragment-id request-generation request-id)]
+             state
+             fragment-id
+             request-generation
+             request-id
+             inflight-requirements)]
         [state'
          (into
           [(effect
