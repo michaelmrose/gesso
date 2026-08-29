@@ -1669,6 +1669,210 @@
               (is (true? (chromium/assert-clean! context))
                   "Covered duplicate authority must leave the real browser clean."))))))))
 
+
+(deftest duplicate-covered-authority-plus-new-authority-queues-only-new-successor-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "duplicate authority covered by the bound request is discarded while genuinely new authority survives"
+        (let [basis-d
+              {:tx-id 804
+               :system-time "2026-08-28T01:10:04Z"}
+
+              basis-e
+              {:tx-id 805
+               :system-time "2026-08-28T01:10:05Z"}
+
+              requirement-d
+              (progression/requirement basis-d)
+
+              requirement-e
+              (progression/requirement basis-e)]
+
+          ;; Advisory A owns the fragment first. D arrives and becomes bound to
+          ;; successor B's actual HTTP request. While B is held, deliver D again
+          ;; followed by genuinely new E. The duplicate D is already covered by
+          ;; B; only E may survive into the queued successor.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-advisory"))
+            (fixture/hold (fragment-response "B-authoritative-D"))
+            (fixture/hold (fragment-response "C-authoritative-E"))
+            ;; A regression that turns duplicate D into additional queued work
+            ;; would eventually reveal itself as a fourth request. Keep it held
+            ;; so that mistake remains deterministic and inspectable.
+            (fixture/hold (fragment-response "UNEXPECTED-fourth-refresh"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [request-a
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                request-a-id
+                (:request-id request-a)]
+
+            (is
+             (nil?
+              (request-header
+               request-a
+               progression.http/request-header-name))
+             "Initial SSE-open request A must remain advisory and headerless.")
+
+            (is (= 1 (emit-progression! server requirement-d))
+                "Canonical requirement D must reach the managed EventSource.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (is (= 1 (count (fragment-requests server)))
+                "D must queue behind advisory A rather than overlap it.")
+
+            (fixture/release! server request-a-id)
+
+            (let [request-b
+                  (fixture/await-pending!
+                   server
+                   #(and (= :get (:method %))
+                         (= fragment-path (:path %))
+                         (> (:request-id %) request-a-id))
+                   5000)
+
+                  request-b-id
+                  (:request-id request-b)
+
+                  encoded-b
+                  (request-header
+                   request-b
+                   progression.http/request-header-name)
+
+                  decoded-b
+                  (some-> encoded-b
+                          progression.http/decode-request-progression)]
+
+              (is (= requirement-d decoded-b)
+                  "Bound request B must carry canonical D on its real HTTP request.")
+
+              (is (= #{basis-d} (:bases decoded-b))
+                  "B's minimum-read header must contain exactly D's basis.")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.fragmentBeforeRequests === 2")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Only advisory A and canonical B exist before the mixed observations.")
+
+              (is (= 1 (emit-progression! server requirement-d))
+                  "Duplicate D must genuinely reach the browser while B is physically bound.")
+
+              (is (= 1 (emit-progression! server requirement-e))
+                  "New canonical E must genuinely reach the browser while B is physically bound.")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.sseMessages === 3")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Duplicate D plus new E must remain queued behind B without parallel fragment work.")
+
+              (fixture/release! server request-b-id)
+
+              (let [request-c
+                    (fixture/await-pending!
+                     server
+                     #(and (= :get (:method %))
+                           (= fragment-path (:path %))
+                           (> (:request-id %) request-b-id))
+                     5000)
+
+                    request-c-id
+                    (:request-id request-c)
+
+                    encoded-c
+                    (request-header
+                     request-c
+                     progression.http/request-header-name)
+
+                    decoded-c
+                    (some-> encoded-c
+                            progression.http/decode-request-progression)]
+
+                (is (= requirement-e decoded-c)
+                    "Successor C must carry only genuinely new authority E.")
+
+                (is (= #{basis-e} (:bases decoded-c))
+                    "D is already covered by completed B and must not be redundantly retained in C's header.")
+
+                (is (= 1 (count (:bases decoded-c)))
+                    "Successor C must contain exactly one distinct canonical basis.")
+
+                (chromium/wait-for-js!
+                 page
+                 "() => window.__gessoFixture.fragmentBeforeRequests === 3")
+
+                (is (= 3 (count (fragment-requests server)))
+                    "A, B, and exactly one E successor C are the complete physical request set.")
+
+                (is (= "B-authoritative-D"
+                       (chromium/evaluate
+                        page
+                        (str "() => document.getElementById('"
+                             fragment-id
+                             "').textContent")))
+                    "B may settle normally before E's successor becomes canonical.")
+
+                (fixture/release! server request-c-id)
+
+                (chromium/wait-for-js!
+                 page
+                 (str "() => document.getElementById('"
+                      fragment-id
+                      "') && document.getElementById('"
+                      fragment-id
+                      "').textContent === 'C-authoritative-E'"))
+
+                (chromium/wait-for-js!
+                 page
+                 "() => window.__gessoFixture.fragmentAfterRequests === 3")
+
+                (is (= 3
+                       (chromium/evaluate
+                        page
+                        "() => window.__gessoFixture.fragmentBeforeRequests"))
+                    "Completing C must not admit a redundant fourth request for duplicate D.")
+
+                (is (= 3 (count (fragment-requests server)))
+                    "No hidden post-C refresh may be scheduled from authority already covered by B.")
+
+                (is (empty? (fixture/pending-request-ids server))
+                    "No unexpected fourth held refresh may remain after canonical E completes.")
+
+                (is (= "C-authoritative-E"
+                       (chromium/evaluate
+                        page
+                        (str "() => document.getElementById('"
+                             fragment-id
+                             "').textContent")))
+                    "The genuinely new E response must remain the final canonical DOM.")
+
+                (is (true? (chromium/assert-clean! context))
+                    "Covered duplicate D plus new E must leave the real browser clean.")))))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
