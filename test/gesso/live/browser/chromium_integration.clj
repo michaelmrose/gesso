@@ -136,20 +136,24 @@
         "</div>")))
 
 (defn- fragment-panel-html
-  [server]
-  (let [panel
-        (live.ui/fragment-panel
-         {:id fragment-id
-          :src fragment-path
-          :stream-url (fixture/sse-url server client-id)
-          :event "live-update"
-          :swap "outerHTML"})
-        ;; fragment-panel intentionally renders an empty canonical target.
-        ;; Give this scenario a visible initial marker without changing any
-        ;; behavior-owning markup.
-        panel'
-        (update-in panel [3] conj "initial")]
-    (rum/render-static-markup panel')))
+  ([server]
+   (fragment-panel-html server nil))
+  ([server {:keys [client-continuity]}]
+   (let [panel
+         (live.ui/fragment-panel
+          (cond-> {:id fragment-id
+                   :src fragment-path
+                   :stream-url (fixture/sse-url server client-id)
+                   :event "live-update"
+                   :swap "outerHTML"}
+            (some? client-continuity)
+            (assoc :client-continuity client-continuity)))
+         ;; fragment-panel intentionally renders an empty canonical target.
+         ;; Give this scenario a visible initial marker without changing any
+         ;; behavior-owning markup.
+         panel'
+         (update-in panel [3] conj "initial")]
+     (rum/render-static-markup panel'))))
 
 (def ^:private browser-observer-script
   (str
@@ -161,6 +165,9 @@
    "  responseErrors: 0,\n"
    "  fragmentBeforeRequests: 0,\n"
    "  fragmentAfterRequests: 0,\n"
+   "  continuityCaptured: 0,\n"
+   "  continuityRestored: 0,\n"
+   "  continuityErrors: 0,\n"
    "  windowErrors: [],\n"
    "  runtimeStarted: false\n"
    "};\n"
@@ -194,6 +201,15 @@
    "    window.__gessoFixture.fragmentAfterRequests += 1;\n"
    "  }\n"
    "});\n"
+   "document.addEventListener('gesso:live-continuity:captured', function () {\n"
+   "  window.__gessoFixture.continuityCaptured += 1;\n"
+   "});\n"
+   "document.addEventListener('gesso:live-continuity:restored', function () {\n"
+   "  window.__gessoFixture.continuityRestored += 1;\n"
+   "});\n"
+   "document.addEventListener('gesso:live-continuity:error', function () {\n"
+   "  window.__gessoFixture.continuityErrors += 1;\n"
+   "});\n"
    "window.addEventListener('error', function (event) {\n"
    "  window.__gessoFixture.windowErrors.push({\n"
    "    message: event.message || '',\n"
@@ -204,25 +220,27 @@
    "window.__gessoFixture.runtimeStarted = !!window.gessoLive;\n"))
 
 (defn- page-html
-  [server]
-  (str
-   "<!doctype html>\n"
-   "<html>\n"
-   "<head>\n"
-   "  <meta charset=\"utf-8\">\n"
-   "  <title>Gesso Live real-browser progression fixture</title>\n"
-   "  <link rel=\"icon\" href=\"data:,\">\n"
-   "  <script src=\"" htmx-path "\"></script>\n"
-   "  <script src=\"" sse-extension-path "\"></script>\n"
-   "  <script src=\"" gesso-runtime-path "\"></script>\n"
-   "</head>\n"
-   "<body>\n"
-   (fragment-panel-html server)
-   "\n<script>\n"
-   browser-observer-script
-   "</script>\n"
-   "</body>\n"
-   "</html>\n"))
+  ([server]
+   (page-html server nil))
+  ([server options]
+   (str
+    "<!doctype html>\n"
+    "<html>\n"
+    "<head>\n"
+    "  <meta charset=\"utf-8\">\n"
+    "  <title>Gesso Live real-browser progression fixture</title>\n"
+    "  <link rel=\"icon\" href=\"data:,\">\n"
+    "  <script src=\"" htmx-path "\"></script>\n"
+    "  <script src=\"" sse-extension-path "\"></script>\n"
+    "  <script src=\"" gesso-runtime-path "\"></script>\n"
+    "</head>\n"
+    "<body>\n"
+    (fragment-panel-html server options)
+    "\n<script>\n"
+    browser-observer-script
+    "</script>\n"
+    "</body>\n"
+    "</html>\n")))
 
 (defn- repeated-action
   [copies action]
@@ -237,8 +255,10 @@
 
 (defn- script-static-routes!
   ([server]
-   (script-static-routes! server 1))
+   (script-static-routes! server 1 (page-html server)))
   ([server copies]
+   (script-static-routes! server copies (page-html server)))
+  ([server copies page-body]
    (fixture/script!
     server
     :get
@@ -279,8 +299,7 @@
     (repeated-action
      copies
      (fixture/respond
-      (html-response
-       (page-html server)))))
+      (html-response page-body))))
 
    server))
 
@@ -3740,6 +3759,257 @@
 
             (is (true? (chromium/assert-clean! context))
                 "Managed-fragment retirement followed by stale completion must leave Chromium clean.")))))))
+
+
+(deftest continuity-restore-failure-is-local-and-later-refresh-recovers-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "continuity restore failure cannot roll back canonical DOM or poison later fragment refreshes"
+        (let [basis-d
+              {:tx-id 1404
+               :system-time "2026-08-29T02:20:04Z"}
+
+              requirement-d
+              (progression/requirement basis-d)]
+
+          ;; Enable the ordinary server-authored client-continuity metadata.
+          ;; The first advisory refresh will be swapped normally, but the test
+          ;; makes the browser's next requestAnimationFrame invocation throw at
+          ;; continuity's post-layout restore boundary. This exercises the real
+          ;; continuity Promise rejection -> shell continuity/failed -> adapter
+          ;; release path without replacing any Gesso handler.
+          (script-static-routes!
+           server
+           1
+           (page-html
+            server
+            {:client-continuity true}))
+
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold
+             (fragment-response "A-canonical-despite-continuity-failure"))
+            (fixture/hold
+             (fragment-response "B-recovered-continuity"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [request-a
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                request-a-id
+                (:request-id request-a)]
+
+            (is
+             (nil?
+              (request-header
+               request-a
+               progression.http/request-header-name))
+             "Initial SSE-open request A must remain advisory and headerless.")
+
+            (is
+             (true?
+              (chromium/evaluate
+               page
+               "() => {
+                  const root = document.querySelector('[data-gesso-live-fragment]');
+                  return !!root
+                    && root.getAttribute('data-gesso-live-continuity') === 'true';
+                }"))
+             "The production page must genuinely enable Gesso client continuity.")
+
+            ;; Save and sabotage the physical RAF primitive only for the first
+            ;; restore. after-layout! catches this synchronous browser failure
+            ;; and returns a rejected Promise; the shell must translate that
+            ;; rejection into the current continuity slot's failed lifecycle.
+            (is
+             (true?
+              (chromium/evaluate
+               page
+               "() => {
+                  window.__gessoFixture.originalRequestAnimationFrame =
+                    window.requestAnimationFrame;
+                  window.__gessoFixture.rafFaults = 0;
+                  window.requestAnimationFrame = function () {
+                    window.__gessoFixture.rafFaults += 1;
+                    throw new Error('fixture continuity requestAnimationFrame failure');
+                  };
+                  return true;
+                }"))
+             "The continuity-only browser fault must be installed.")
+
+            (fixture/release! server request-a-id)
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.continuityCaptured === 1")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.rafFaults === 1")
+
+            ;; Remove the physical fault immediately after continuity has hit it
+            ;; once, so no unrelated browser behavior is affected and the next
+            ;; refresh can demonstrate recovery.
+            (is
+             (true?
+              (chromium/evaluate
+               page
+               "() => {
+                  window.requestAnimationFrame =
+                    window.__gessoFixture.originalRequestAnimationFrame;
+                  return typeof window.requestAnimationFrame === 'function';
+                }"))
+             "The browser RAF primitive must be restored after the deliberate continuity failure.")
+
+            (chromium/wait-for-js!
+             page
+             (str "() => document.getElementById('"
+                  fragment-id
+                  "') && document.getElementById('"
+                  fragment-id
+                  "').textContent === 'A-canonical-despite-continuity-failure'"))
+
+            ;; The canonical swap already happened before continuity restoration
+            ;; failed. Continuity is explicitly not choreography truth, so its
+            ;; physical failure cannot roll back, reinterpret, or hide that DOM.
+            (is (= "A-canonical-despite-continuity-failure"
+                   (chromium/evaluate
+                    page
+                    (str "() => document.getElementById('"
+                         fragment-id
+                         "').textContent")))
+                "Continuity failure must not roll back the successfully installed canonical fragment.")
+
+            (chromium/wait-for-js!
+             page
+             "() => {
+                const d = window.gessoLive.diagnostics();
+                const shell = d.core && d.core.shell;
+                const resources = shell && shell['resource-counts'];
+                return !!shell
+                  && shell['active-continuity-slots'] === 0
+                  && !!resources
+                  && resources.continuity === 0;
+              }")
+
+            (is (= 1
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.continuityCaptured"))
+                "Exactly one continuity resource must have been captured for failed restore A.")
+
+            (is (= 0
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.continuityRestored"))
+                "A failed restore must not emit the successful restored event.")
+
+            (is (= 0
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.continuityErrors"))
+                "RAF-level restore rejection is shell-managed and must not masquerade as a malformed continuity-config DOM error.")
+
+            (is (true? (chromium/assert-clean! context))
+                "Handled continuity failure must not escape as an uncaught browser error.")
+
+            ;; A later canonical invalidation proves the failed physical
+            ;; continuity resource did not poison the fragment coordinator.
+            (is (= 1 (emit-progression! server requirement-d))
+                "Canonical D must reach the browser after continuity failure.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (let [request-b
+                  (fixture/await-pending!
+                   server
+                   #(and (= :get (:method %))
+                         (= fragment-path (:path %))
+                         (> (:request-id %) request-a-id))
+                   5000)
+
+                  request-b-id
+                  (:request-id request-b)
+
+                  encoded-b
+                  (request-header
+                   request-b
+                   progression.http/request-header-name)
+
+                  decoded-b
+                  (some-> encoded-b
+                          progression.http/decode-request-progression)]
+
+              (is (= requirement-d decoded-b)
+                  "Recovery request B must carry the later canonical requirement D.")
+
+              (is (= #{basis-d} (:bases decoded-b))
+                  "The failed continuity slot must contribute no authority to later progression.")
+
+              (fixture/release! server request-b-id)
+
+              (chromium/wait-for-js!
+               page
+               (str "() => document.getElementById('"
+                    fragment-id
+                    "') && document.getElementById('"
+                    fragment-id
+                    "').textContent === 'B-recovered-continuity'"))
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.continuityRestored === 1")
+
+              (chromium/wait-for-js!
+               page
+               "() => {
+                  const d = window.gessoLive.diagnostics();
+                  const shell = d.core && d.core.shell;
+                  const resources = shell && shell['resource-counts'];
+                  return !!shell
+                    && shell['active-continuity-slots'] === 0
+                    && !!resources
+                    && resources.continuity === 0;
+                }")
+
+              (is (= 2
+                     (chromium/evaluate
+                      page
+                      "() => window.__gessoFixture.continuityCaptured"))
+                  "Both swaps must have captured independent continuity resources.")
+
+              (is (= 1
+                     (chromium/evaluate
+                      page
+                      "() => window.__gessoFixture.continuityRestored"))
+                  "Only the second, post-recovery continuity generation may report successful restoration.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Continuity failure must not create retry or hidden fragment refresh work.")
+
+              (is (empty? (fixture/pending-request-ids server))
+                  "All physical HTTP ownership must be retired after continuity recovery.")
+
+              (is (true? (chromium/assert-clean! context))
+                  "The recovered continuity scenario must finish browser-clean."))))))))
 
 (defn -main
   [& _]
