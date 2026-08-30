@@ -3005,6 +3005,290 @@
             (finally
               (chromium/close-context! context-b))))))))
 
+
+(deftest targeted-and-shared-canonical-progression-compose-per-browser-context-test
+  (with-real-browser
+    (fn [{:keys [server harness context page]}]
+      (testing
+       "private authority followed by shared authority composes independently in each browser context"
+        (let [basis-b
+              {:tx-id 1302
+               :system-time "2026-08-29T01:10:02Z"}
+
+              basis-c
+              {:tx-id 1303
+               :system-time "2026-08-29T01:10:03Z"}
+
+              requirement-b
+              (progression/requirement basis-b)
+
+              requirement-c
+              (progression/requirement basis-c)
+
+              requirement-b+c
+              (progression/compose requirement-b requirement-c)
+
+              context-b
+              (chromium/new-context! harness)]
+          (try
+            (let [page-b
+                  (chromium/new-page! context-b)]
+
+              (script-static-routes! server 2)
+
+              ;; A and B each begin with one advisory refresh. Their successors
+              ;; are held generically; after observing the actual progression
+              ;; headers we release each with a response chosen by authority,
+              ;; so response order cannot accidentally identify the context.
+              (fixture/script!
+               server
+               :get
+               fragment-path
+               [(fixture/hold (fragment-response "A-initial"))
+                (fixture/hold (fragment-response "B-initial"))
+                (fixture/hold (fragment-response "held-successor-1"))
+                (fixture/hold (fragment-response "held-successor-2"))])
+
+              ;; Establish context A first so its physical SSE connection and
+              ;; initial request are identified without relying on collection
+              ;; iteration order.
+              (chromium/navigate!
+               page
+               (fixture/url server page-path))
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.sseOpens === 1")
+
+              (let [connection-a
+                    (fixture/await-sse-client! server client-id 5000)
+
+                    connection-a-id
+                    (:connection-id connection-a)
+
+                    request-a
+                    (fixture/await-pending!
+                     server
+                     #(and (= :get (:method %))
+                           (= fragment-path (:path %)))
+                     5000)
+
+                    request-a-id
+                    (:request-id request-a)]
+
+                (chromium/navigate!
+                 page-b
+                 (fixture/url server page-path))
+
+                (chromium/wait-for-js!
+                 page-b
+                 "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+                (chromium/wait-for-js!
+                 page-b
+                 "() => window.__gessoFixture.sseOpens === 1")
+
+                (let [connections
+                      (vec
+                       (filter
+                        #(= client-id (:client-id %))
+                        (fixture/sse-connections server)))
+
+                      connection-b
+                      (first
+                       (remove
+                        #(= connection-a-id (:connection-id %))
+                        connections))
+
+                      request-b
+                      (fixture/await-pending!
+                       server
+                       #(and (= :get (:method %))
+                             (= fragment-path (:path %))
+                             (not= request-a-id (:request-id %)))
+                       5000)
+
+                      request-b-id
+                      (:request-id request-b)]
+
+                  (is (= 2 (count connections))
+                      "Two isolated BrowserContexts must own two physical SSE connections.")
+
+                  (is (some? connection-b)
+                      "Context B must have a physical SSE connection distinct from context A.")
+
+                  (is
+                   (every?
+                    nil?
+                    [(request-header
+                      request-a
+                      progression.http/request-header-name)
+                     (request-header
+                      request-b
+                      progression.http/request-header-name)])
+                   "Both initial SSE-open fragment requests must remain advisory and headerless.")
+
+                  ;; First give only A canonical B.
+                  (is (= 1
+                         (fixture/emit-sse-connection!
+                          server
+                          connection-a-id
+                          {:event "live-update"
+                           :data (progression-payload requirement-b)}))
+                      "Private canonical B must reach exactly context A's physical connection.")
+
+                  (chromium/wait-for-js!
+                   page
+                   "() => window.__gessoFixture.sseMessages === 1")
+
+                  (is (= 0
+                         (chromium/evaluate
+                          page-b
+                          "() => window.__gessoFixture.sseMessages"))
+                      "Context B must not observe A's private canonical B.")
+
+                  ;; Then broadcast canonical C to both physical connections.
+                  ;; A should compose B ∪ C; B should know only C.
+                  (is (= 2
+                         (fixture/emit-sse!
+                          server
+                          client-id
+                          {:event "live-update"
+                           :data (progression-payload requirement-c)}))
+                      "Shared canonical C must reach both physical SSE connections.")
+
+                  (chromium/wait-for-js!
+                   page
+                   "() => window.__gessoFixture.sseMessages === 2")
+
+                  (chromium/wait-for-js!
+                   page-b
+                   "() => window.__gessoFixture.sseMessages === 1")
+
+                  (is (= 2 (count (fragment-requests server)))
+                      "All canonical observations must queue behind the two active advisory requests without parallel work.")
+
+                  ;; Release both advisory requests. Each browser must promote
+                  ;; one successor, but with a different minimum-read requirement.
+                  (fixture/release! server request-a-id)
+                  (fixture/release! server request-b-id)
+
+                  (let [successor-1
+                        (fixture/await-pending!
+                         server
+                         #(and (= :get (:method %))
+                               (= fragment-path (:path %))
+                               (> (:request-id %)
+                                  (max request-a-id request-b-id)))
+                         5000)
+
+                        successor-2
+                        (fixture/await-pending!
+                         server
+                         #(and (= :get (:method %))
+                               (= fragment-path (:path %))
+                               (> (:request-id %)
+                                  (max request-a-id request-b-id))
+                               (not= (:request-id %)
+                                     (:request-id successor-1)))
+                         5000)
+
+                        successors
+                        [successor-1 successor-2]
+
+                        decoded-by-id
+                        (into
+                         {}
+                         (map
+                          (fn [request]
+                            [(:request-id request)
+                             (some->
+                              (request-header
+                               request
+                               progression.http/request-header-name)
+                              progression.http/decode-request-progression)])
+                          successors))
+
+                        decoded-requirements
+                        (set (vals decoded-by-id))]
+
+                    (is (= #{requirement-b+c requirement-c}
+                           decoded-requirements)
+                        "A must request B ∪ C while B requests C only; shared authority must not erase or leak private authority.")
+
+                    (is (= #{#{basis-b basis-c}
+                             #{basis-c}}
+                           (set (map :bases decoded-requirements)))
+                        "Successor basis sets must be exactly {B,C} for A and {C} for B.")
+
+                    (is (= 4 (count (fragment-requests server)))
+                        "Two advisory requests plus exactly one successor per context are the complete physical request set.")
+
+                    ;; Release according to the actual progression each request
+                    ;; carries, not according to request arrival order.
+                    (doseq [request successors]
+                      (let [decoded
+                            (get decoded-by-id (:request-id request))
+
+                            response-text
+                            (cond
+                              (= requirement-b+c decoded)
+                              "A-private-B-plus-shared-C"
+
+                              (= requirement-c decoded)
+                              "B-shared-C-only"
+
+                              :else
+                              (throw
+                               (integration-error
+                                :unexpected-multi-context-progression
+                                "A multi-context successor carried an unexpected progression requirement."
+                                {:request request
+                                 :decoded decoded
+                                 :expected
+                                 #{requirement-b+c requirement-c}})))]
+                        (fixture/release!
+                         server
+                         (:request-id request)
+                         (fragment-response response-text))))
+
+                    ;; Whichever physical request was admitted first, the DOM
+                    ;; results reveal whether the authority remained attached to
+                    ;; the correct browser coordinator.
+                    (chromium/wait-for-js!
+                     page
+                     (str "() => document.getElementById('"
+                          fragment-id
+                          "') && document.getElementById('"
+                          fragment-id
+                          "').textContent === 'A-private-B-plus-shared-C'"))
+
+                    (chromium/wait-for-js!
+                     page-b
+                     (str "() => document.getElementById('"
+                          fragment-id
+                          "') && document.getElementById('"
+                          fragment-id
+                          "').textContent === 'B-shared-C-only'"))
+
+                    (is (= 4 (count (fragment-requests server)))
+                        "Settling both asymmetric successors must not expose hidden cross-context work.")
+
+                    (is (empty? (fixture/pending-request-ids server))
+                        "No cross-context successor may remain pending after both browsers settle.")
+
+                    (is (true? (chromium/assert-clean! context))
+                        "Context A must remain browser-clean after composing private B with shared C.")
+
+                    (is (true? (chromium/assert-clean! context-b))
+                        "Context B must remain browser-clean with shared C only.")))))
+            (finally
+              (chromium/close-context! context-b))))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
