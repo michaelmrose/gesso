@@ -18,12 +18,14 @@
     Playwright
     Playwright$CreateOptions
     Request
+    TimeoutError
     Tracing$StartOptions
     Tracing$StopOptions
     WebError)
    (com.microsoft.playwright.options
     WebErrorLocation)
    (java.io File)
+   (java.util Collections WeakHashMap)
    (java.util.function Consumer)))
 
 (def ^:private error-type
@@ -41,6 +43,12 @@
 
 (def ^:private unhandled-rejection-prefix
   "[gesso-browser-harness:unhandled-rejection] ")
+
+(defonce ^:private page-diagnostic-states
+  ;; Page objects are physical browser resources. Keep only weak keys so test
+  ;; diagnostics never become another owner that can prolong a page/context
+  ;; lifetime after Playwright cleanup.
+  (Collections/synchronizedMap (WeakHashMap.)))
 
 (def ^:private browser-init-script
   (str
@@ -293,6 +301,9 @@
 
 (defn- instrument-page!
   [state ^Page page]
+  ;; Associate the page with its context diagnostic atom for bounded-wait
+  ;; failure reporting. Weak keys prevent this registry from owning pages.
+  (.put page-diagnostic-states page state)
   (let [identity (System/identityHashCode page)
         install? (atom false)]
     (swap!
@@ -397,15 +408,77 @@
   ([^Page page expression argument]
    (.evaluate page (str expression) argument)))
 
+(defn- bounded-string
+  [value limit]
+  (let [value (str value)]
+    (if (<= (count value) limit)
+      value
+      (str (subs value 0 limit) "…"))))
+
+(defn- diagnostics-from-state
+  [state]
+  (when state
+    (dissoc @state :instrumented-pages :trace-active?)))
+
+(defn- page-diagnostic-state
+  [^Page page]
+  (.get page-diagnostic-states page))
+
+(defn- safe-page-snapshot
+  [^Page page]
+  (try
+    {:url (safe-page-url page)
+     :document
+     (.evaluate
+      page
+      (str
+       "() => ({"
+       "readyState: document.readyState,"
+       "title: document.title,"
+       "bodyText: document.body ? document.body.innerText.slice(0, 1200) : null"
+       "})"))}
+    (catch Throwable snapshot-error
+      {:url (safe-page-url page)
+       :snapshot-error (.getMessage snapshot-error)})))
+
+(defn- wait-timeout!
+  [^Page page expression cause]
+  (let [state (page-diagnostic-state page)
+        captured (diagnostics-from-state state)]
+    (throw
+     (ex-info
+      (str
+       "Timed out waiting for a browser predicate. The failure report includes "
+       "the predicate, current page snapshot, and diagnostics already observed "
+       "by the owning BrowserContext so a root runtime error is not hidden "
+       "behind the downstream timeout.")
+      {:error/type error-type
+       :error/kind :wait-for-js-timeout
+       :expression (bounded-string expression 1200)
+       :page (safe-page-snapshot page)
+       :diagnostics captured}
+      cause))))
+
 (defn wait-for-js!
   "Waits for a JavaScript expression/function to become truthy.
-   The context timeout bounds the wait; this helper never adds sleeps."
+
+   The context timeout bounds the wait; this helper never adds sleeps. If the
+   predicate times out, the thrown ExceptionInfo preserves Playwright's timeout
+   as its cause and adds the current page snapshot plus every browser diagnostic
+   already captured by the page's BrowserContext. This prevents a real runtime
+   failure from degrading into an opaque downstream wait timeout."
   ([^Page page expression]
-   (.waitForFunction page (str expression))
-   page)
+   (try
+     (.waitForFunction page (str expression))
+     page
+     (catch TimeoutError cause
+       (wait-timeout! page expression cause))))
   ([^Page page expression argument]
-   (.waitForFunction page (str expression) argument)
-   page))
+   (try
+     (.waitForFunction page (str expression) argument)
+     page
+     (catch TimeoutError cause
+       (wait-timeout! page expression cause)))))
 
 (defn diagnostics
   "Returns observable diagnostics while hiding harness bookkeeping."
