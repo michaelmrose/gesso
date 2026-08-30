@@ -2778,6 +2778,233 @@
             (finally
               (chromium/close-context! context-b))))))))
 
+
+(deftest targeted-canonical-progression-does-not-leak-across-browser-contexts-test
+  (with-real-browser
+    (fn [{:keys [server harness context page]}]
+      (testing
+       "canonical progression delivered to one physical SSE connection cannot leak into another browser context"
+        (let [basis-b
+              {:tx-id 1202
+               :system-time "2026-08-29T01:00:02Z"}
+
+              requirement-b
+              (progression/requirement basis-b)
+
+              context-b
+              (chromium/new-context! harness)]
+          (try
+            (let [page-b
+                  (chromium/new-page! context-b)]
+
+              (script-static-routes! server 2)
+
+              (fixture/script!
+               server
+               :get
+               fragment-path
+               [(fixture/hold (fragment-response "A-initial"))
+                (fixture/hold (fragment-response "B-initial"))
+                (fixture/hold (fragment-response "A-authoritative"))
+                (fixture/hold (fragment-response "UNEXPECTED-B-successor"))])
+
+              (chromium/navigate!
+               page
+               (fixture/url server page-path))
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.sseOpens === 1")
+
+              (let [connection-a
+                    (fixture/await-sse-client! server client-id 5000)
+                    connection-a-id
+                    (:connection-id connection-a)
+                    request-a
+                    (fixture/await-pending!
+                     server
+                     #(and (= :get (:method %))
+                           (= fragment-path (:path %)))
+                     5000)
+                    request-a-id
+                    (:request-id request-a)]
+
+                (is (= client-id (:client-id connection-a))
+                    "Context A must establish the shared logical client-id on its physical SSE connection.")
+
+                (is
+                 (nil?
+                  (request-header
+                   request-a
+                   progression.http/request-header-name))
+                 "Context A's initial SSE-open request must be advisory and headerless.")
+
+                (chromium/navigate!
+                 page-b
+                 (fixture/url server page-path))
+
+                (chromium/wait-for-js!
+                 page-b
+                 "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+                (chromium/wait-for-js!
+                 page-b
+                 "() => window.__gessoFixture.sseOpens === 1")
+
+                (let [connections
+                      (vec
+                       (filter
+                        #(= client-id (:client-id %))
+                        (fixture/sse-connections server)))
+                      connection-b
+                      (first
+                       (remove
+                        #(= connection-a-id (:connection-id %))
+                        connections))
+                      request-b
+                      (fixture/await-pending!
+                       server
+                       #(and (= :get (:method %))
+                             (= fragment-path (:path %))
+                             (not= request-a-id (:request-id %)))
+                       5000)
+                      request-b-id
+                      (:request-id request-b)]
+
+                  (is (= 2 (count connections))
+                      "Exactly two physical SSE connections must exist for the shared logical client.")
+
+                  (is (some? connection-b)
+                      "Context B must own a physical SSE connection distinct from context A.")
+
+                  (is (= client-id (:client-id connection-b))
+                      "Context B must share A's logical client-id without sharing its physical connection.")
+
+                  (is (not= connection-a-id (:connection-id connection-b))
+                      "The two BrowserContexts must remain physically distinct SSE observers.")
+
+                  (is
+                   (nil?
+                    (request-header
+                     request-b
+                     progression.http/request-header-name))
+                   "Context B's initial SSE-open request must also be advisory and headerless.")
+
+                  (is (= 2 (count (fragment-requests server)))
+                      "Exactly one advisory fragment request per context may exist before targeted authority arrives.")
+
+                  (is (= 1
+                         (fixture/emit-sse-connection!
+                          server
+                          connection-a-id
+                          {:event "live-update"
+                           :data (progression-payload requirement-b)}))
+                      "Canonical B must be written to exactly context A's physical SSE stream.")
+
+                  (chromium/wait-for-js!
+                   page
+                   "() => window.__gessoFixture.sseMessages === 1")
+
+                  (is (= 0
+                         (chromium/evaluate
+                          page-b
+                          "() => window.__gessoFixture.sseMessages"))
+                      "Untargeted context B must not observe context A's canonical progression event.")
+
+                  (is (= 2 (count (fragment-requests server)))
+                      "Targeted B must queue behind A's active request without creating parallel work in either context.")
+
+                  (fixture/release! server request-b-id)
+
+                  (chromium/wait-for-js!
+                   page-b
+                   (str "() => document.getElementById('"
+                        fragment-id
+                        "') && document.getElementById('"
+                        fragment-id
+                        "').textContent === 'B-initial'"))
+
+                  (chromium/wait-for-js!
+                   page-b
+                   "() => window.__gessoFixture.fragmentAfterRequests === 1")
+
+                  (is (= 2 (count (fragment-requests server)))
+                      "Settling untargeted B must not create any canonical successor.")
+
+                  (fixture/release! server request-a-id)
+
+                  (let [successor
+                        (fixture/await-pending!
+                         server
+                         #(and (= :get (:method %))
+                               (= fragment-path (:path %))
+                               (> (:request-id %)
+                                  (max request-a-id request-b-id)))
+                         5000)
+                        successor-id
+                        (:request-id successor)
+                        decoded
+                        (some->
+                         (request-header
+                          successor
+                          progression.http/request-header-name)
+                         progression.http/decode-request-progression)]
+
+                    (is (= requirement-b decoded)
+                        "Only context A's successor may carry targeted canonical B.")
+
+                    (is (= #{basis-b} (:bases decoded))
+                        "The targeted successor must carry exactly basis B and no cross-context authority.")
+
+                    (is (= 3 (count (fragment-requests server)))
+                        "Two advisory requests plus one targeted canonical successor are the complete physical request set.")
+
+                    (fixture/release! server successor-id)
+
+                    (chromium/wait-for-js!
+                     page
+                     (str "() => document.getElementById('"
+                          fragment-id
+                          "') && document.getElementById('"
+                          fragment-id
+                          "').textContent === 'A-authoritative'"))
+
+                    (chromium/wait-for-js!
+                     page
+                     "() => window.__gessoFixture.fragmentAfterRequests === 2")
+
+                    (is (= "B-initial"
+                           (chromium/evaluate
+                            page-b
+                            (str "() => document.getElementById('"
+                                 fragment-id
+                                 "').textContent")))
+                        "Untargeted context B must remain on its own advisory result after A becomes authoritative.")
+
+                    (is (= 0
+                           (chromium/evaluate
+                            page-b
+                            "() => window.__gessoFixture.sseMessages"))
+                        "Context B must still have observed zero canonical messages after A settles.")
+
+                    (is (= 3 (count (fragment-requests server)))
+                        "No hidden fourth refresh may appear in the untargeted context.")
+
+                    (is (empty? (fixture/pending-request-ids server))
+                        "No leaked cross-context successor may remain held in the fixture.")
+
+                    (is (true? (chromium/assert-clean! context))
+                        "Targeted context A must remain browser-clean throughout authority delivery.")
+
+                    (is (true? (chromium/assert-clean! context-b))
+                        "Untargeted context B must remain browser-clean and authority-free.")))))
+            (finally
+              (chromium/close-context! context-b))))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
