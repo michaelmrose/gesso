@@ -277,6 +277,60 @@
                  (catch ExecutionException error
                    (.getCause error))))))))))
 
+(deftest held-request-may-be-truncated-after-response-headers-test
+  (with-fixture
+    (fn [server]
+      (fixture/script!
+       server
+       :post
+       "/held-truncate"
+       (fixture/hold
+        (fixture/response
+         200
+         {"content-type" "text/plain; charset=utf-8"}
+         "complete-body-must-not-arrive")))
+
+      (let [response-future
+            (send-string-async!
+             (fixture/url server "/held-truncate")
+             {:method :post
+              :body "truncate-me"})
+
+            request
+            (fixture/await-pending!
+             server
+             #(= "/held-truncate" (:path %)))]
+
+        (testing "the held request is observable before the committed response is truncated"
+          (is (= :post (:method request)))
+          (is (= "truncate-me" (:body request)))
+          (is (= :hold (:script-kind request)))
+          (is (= #{(:request-id request)}
+                 (fixture/pending-request-ids server))))
+
+        (is (true?
+             (fixture/release!
+              server
+              (:request-id request)
+              :truncate)))
+
+        (let [failure
+              (try
+                (.get response-future 5 TimeUnit/SECONDS)
+                nil
+                (catch ExecutionException error
+                  (.getCause error)))]
+          (testing "a committed but incomplete body is a bounded client-visible transport failure"
+            (is (instance? IOException failure))
+            (is (.isDone response-future)))
+
+          (testing "the fixture releases pending ownership even though transport completion failed"
+            (is (empty? (fixture/pending-request-ids server)))
+            (is (= request
+                   (fixture/request-by-id
+                    server
+                    (:request-id request))))))))))
+
 (deftest immediate-close-action-drops-the-exchange-test
   (with-fixture
     (fn [server]
