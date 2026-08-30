@@ -3538,6 +3538,209 @@
               (is (true? (chromium/assert-clean! context))
                   "After consuming the deliberate rejection diagnostic, valid subsequent work must finish clean."))))))))
 
+
+(deftest retired-fragment-stale-http-completion-cannot-resurrect-replacement-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "real HTMX cleanup retires queued authority before a stale physical response can touch replacement DOM"
+        (let [basis-b
+              {:tx-id 1302
+               :system-time "2026-08-29T02:00:02Z"}
+
+              requirement-b
+              (progression/requirement basis-b)
+
+              remove-path
+              "/remove-managed-fragment"]
+
+          ;; Advisory request A owns the managed fragment while canonical B is
+          ;; queued behind it. A separate real HTMX request then deletes the
+          ;; stable behavior-owning fragment root with hx-swap=delete. HTMX
+          ;; emits beforeCleanupElement while that root is still attached, so
+          ;; Gesso must retire the logical fragment and discard both physical
+          ;; correlation and queued B before stale A is allowed to complete.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-stale-after-retirement"))
+            ;; If retirement accidentally preserves B, keep the illicit
+            ;; successor deterministic and observable instead of letting it
+            ;; fall through to the fixture's generic response.
+            (fixture/hold (fragment-response "UNEXPECTED-successor-B"))])
+
+          (fixture/script!
+           server
+           :get
+           remove-path
+           [(fixture/respond (html-response ""))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [request-a
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                request-a-id
+                (:request-id request-a)]
+
+            (is
+             (nil?
+              (request-header
+               request-a
+               progression.http/request-header-name))
+             "Initial request A must be advisory and headerless.")
+
+            (is (= 1 (emit-progression! server requirement-b))
+                "Canonical B must reach the managed EventSource while A is physically held.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (is (= 1 (count (fragment-requests server)))
+                "B must queue behind A rather than creating parallel fragment work.")
+
+            ;; Install observation directly on the behavior-owning root before
+            ;; HTMX removes it. A detached node no longer bubbles afterRequest
+            ;; to document, but its own raw event listener remains available and
+            ;; gives us a deterministic completion barrier for stale A.
+            (is
+             (true?
+              (chromium/evaluate
+               page
+               (str
+                "() => {"
+                "  const root = document.querySelector('[data-gesso-live-fragment]');"
+                "  if (!root) return false;"
+                "  window.__gessoFixture.managedCleanupEvents = 0;"
+                "  window.__gessoFixture.detachedAfterRequests = 0;"
+                "  root.addEventListener('htmx:beforeCleanupElement', function (event) {"
+                "    if (event.target === root) {"
+                "      window.__gessoFixture.managedCleanupEvents += 1;"
+                "    }"
+                "  });"
+                "  root.addEventListener('htmx:afterRequest', function (event) {"
+                "    if (event.target === root) {"
+                "      window.__gessoFixture.detachedAfterRequests += 1;"
+                "    }"
+                "  });"
+                "  const button = document.createElement('button');"
+                "  button.id = 'remove-managed-fragment';"
+                "  button.setAttribute('hx-get', '" remove-path "');"
+                "  button.setAttribute('hx-target', '[data-gesso-live-fragment]');"
+                "  button.setAttribute('hx-swap', 'delete');"
+                "  document.body.appendChild(button);"
+                "  window.htmx.process(button);"
+                "  button.click();"
+                "  return true;"
+                "}")))
+             "The real HTMX deletion control must be installed and activated.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.managedCleanupEvents === 1 && document.querySelector('[data-gesso-live-fragment]') === null")
+
+            (is (= 1
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.managedCleanupEvents"))
+                "HTMX must emit exactly one cleanup event for the removed managed fragment root.")
+
+            (is (= 1 (count (fragment-requests server)))
+                "Retirement itself must not promote queued B into a successor.")
+
+            ;; Reuse the old inner target's DOM id deliberately. If stale A
+            ;; re-resolves targets by id or if Gesso retained root ownership,
+            ;; this fresh replacement would be vulnerable to resurrection or
+            ;; mutation by the obsolete response.
+            (is
+             (true?
+              (chromium/evaluate
+               page
+               (str
+                "() => {"
+                "  const replacement = document.createElement('div');"
+                "  replacement.id = '" fragment-id "';"
+                "  replacement.setAttribute('data-fixture-replacement', 'true');"
+                "  replacement.textContent = 'replacement-survivor';"
+                "  document.body.appendChild(replacement);"
+                "  return true;"
+                "}")))
+             "A fresh replacement node reusing the old target id must be installed.")
+
+            (is (= "replacement-survivor"
+                   (chromium/evaluate
+                    page
+                    (str "() => document.getElementById('"
+                         fragment-id
+                         "').textContent")))
+                "The replacement must be present before stale A is released.")
+
+            ;; A is still a real in-flight XHR owned by HTMX. Let it complete
+            ;; normally after the logical fragment has been retired. HTMX may
+            ;; finish work against its detached target object, but Gesso must
+            ;; not resurrect the fragment or allow queued B to survive cleanup.
+            (fixture/release! server request-a-id)
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.detachedAfterRequests === 1")
+
+            (is (= "replacement-survivor"
+                   (chromium/evaluate
+                    page
+                    (str "() => document.getElementById('"
+                         fragment-id
+                         "').textContent")))
+                "Stale A must not mutate the fresh replacement that reuses the same DOM id.")
+
+            (is
+             (true?
+              (chromium/evaluate
+               page
+               (str
+                "() => {"
+                "  const replacement = document.getElementById('" fragment-id "');"
+                "  return !!replacement"
+                "    && replacement.getAttribute('data-fixture-replacement') === 'true'"
+                "    && document.querySelector('[data-gesso-live-fragment]') === null;"
+                "}")))
+             "No managed fragment root may be resurrected by stale completion.")
+
+            (is (= 1 (count (fragment-requests server)))
+                "Queued canonical B must have been discarded with retirement; no successor GET may appear.")
+
+            (is (empty? (fixture/pending-request-ids server))
+                "The stale request must finish without leaving hidden fixture ownership or an illicit successor.")
+
+            (is (= 0
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.sendErrors"))
+                "Normal completion of detached A must not be mistaken for transport failure.")
+
+            (is (= 0
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.responseErrors"))
+                "Normal completion of detached A must not be mistaken for HTTP response failure.")
+
+            (is (true? (chromium/assert-clean! context))
+                "Managed-fragment retirement followed by stale completion must leave Chromium clean.")))))))
+
 (defn -main
   [& _]
   (let [{:keys [fail error] :as summary}
