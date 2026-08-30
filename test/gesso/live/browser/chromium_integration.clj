@@ -301,11 +301,28 @@
   [entry]
   (= :console-error (:kind entry)))
 
-(defn- exactly-one-console-error-matching?
-  [errors pred]
-  (and (= 1 (count errors))
-       (console-error? (first errors))
-       (pred (first errors))))
+(defn- htmx-console-error?
+  [entry pred]
+  (let [{:keys [type text location]} entry]
+    (and
+     (console-error? entry)
+     (= "error" type)
+     (string? text)
+     (pred text)
+     (string? location)
+     (str/includes? location htmx-path))))
+
+(defn- fragment-resource-console-error?
+  [entry pred]
+  (let [{:keys [type text location]} entry]
+    (and
+     (console-error? entry)
+     (= "error" type)
+     (string? text)
+     (str/includes? text "Failed to load resource")
+     (pred text)
+     (string? location)
+     (str/includes? location fragment-path))))
 
 (defn- consume-expected-send-error-diagnostics!
   [context]
@@ -315,45 +332,82 @@
         diagnostics
         (chromium/diagnostics context)
 
-        texts
-        (mapv :text errors)
-
         request-failures
         (:request-failures diagnostics)
 
-        expected-console?
-        (and (= 3 (count errors))
-             (every? console-error? errors)
-             (= 1 (count (filter #{"htmx:afterRequest"} texts)))
-             (= 1 (count (filter #{"htmx:sendError"} texts)))
-             (= 1
-                (count
-                 (filter
-                  (fn [text]
-                    (and (string? text)
-                         (str/includes? text "Failed to load resource")
-                         (str/includes? text "ERR_EMPTY_RESPONSE")))
-                  texts))))
+        after-request-errors
+        (filterv
+         #(htmx-console-error?
+           %
+           (fn [text]
+             (= "htmx:afterRequest" text)))
+         errors)
+
+        send-errors
+        (filterv
+         #(htmx-console-error?
+           %
+           (fn [text]
+             (= "htmx:sendError" text)))
+         errors)
+
+        resource-errors
+        (filterv
+         #(fragment-resource-console-error?
+           %
+           (constantly true))
+         errors)
+
+        recognized-errors
+        (set
+         (concat
+          after-request-errors
+          send-errors
+          resource-errors))
+
+        unexpected-errors
+        (removev recognized-errors errors)
+
+        request-failure
+        (first request-failures)
 
         expected-request-failure?
-        (and (= 1 (count request-failures))
-             (= "GET" (:method (first request-failures)))
-             (str/ends-with? (:url (first request-failures))
-                             fragment-path)
-             (str/includes?
-              (or (:failure (first request-failures)) "")
-              "ERR_EMPTY_RESPONSE"))]
+        (and
+         (= 1 (count request-failures))
+         (= "GET" (:method request-failure))
+         (string? (:url request-failure))
+         (str/includes? (:url request-failure) fragment-path)
+         (string? (:failure request-failure))
+         (not (str/blank? (:failure request-failure)))
+         ;; The exact Chromium net error for a deliberately truncated fixed-
+         ;; length response is browser-version presentation detail. What matters
+         ;; is that Playwright observed a genuine network failure for /fragment.
+         (str/includes? (:failure request-failure) "ERR_"))
 
-    (when-not (and expected-console?
-                   expected-request-failure?)
+        expected?
+        (and
+         (= 1 (count after-request-errors))
+         (= 1 (count send-errors))
+         ;; Chromium normally emits one failed-resource console line for the
+         ;; truncated XHR, but that console presentation is not part of HTMX's
+         ;; contract and may change across system-Chromium revisions.
+         (<= (count resource-errors) 1)
+         (empty? unexpected-errors)
+         expected-request-failure?)]
+
+    (when-not expected?
       (throw
        (integration-error
         :unexpected-send-error-diagnostics
-        (str "The deliberate empty-response transport failure did not produce "
-             "exactly HTMX's expected sendError diagnostics. Gesso must not "
-             "globally suppress browser errors merely because a fault test "
-             "intentionally breaks one request.")
+        (str "The deliberate truncated-response transport failure did not "
+             "produce the expected semantic diagnostics: exactly one HTMX "
+             "afterRequest error, exactly one HTMX sendError, exactly one "
+             "Playwright network failure for GET /fragment, at most one "
+             "Chromium failed-resource console entry for that request, and no "
+             "other browser failures. The exact Chromium net error string is "
+             "deliberately not part of the contract.")
         {:errors errors
+         :unexpected-errors unexpected-errors
          :diagnostics diagnostics})))
 
     (chromium/clear-diagnostics! context)
@@ -370,15 +424,22 @@
         request-failures
         (:request-failures diagnostics)
 
+        sse-console-errors
+        (filterv
+         #(htmx-console-error?
+           %
+           (constantly true))
+         errors)
+
         expected?
         (and
-         (exactly-one-console-error-matching?
-          errors
-          (fn [{:keys [type text]}]
-            (and (= "error" type)
-                 (string? text)
-                 (or (= "Event" text)
-                     (= "[object Event]" text)))))
+         ;; htmx-ext-sse deliberately reports EventSource.onerror through
+         ;; HTMX triggerErrorEvent. HTMX therefore console.errors the native
+         ;; Event object. Playwright's textual rendering of that Event is not a
+         ;; stable semantic API, so require its source/category rather than the
+         ;; literal string "Event".
+         (= 1 (count errors))
+         (= 1 (count sse-console-errors))
          (empty? request-failures))]
 
     (when-not expected?
@@ -386,9 +447,9 @@
        (integration-error
         :unexpected-sse-reconnect-diagnostics
         (str "The deliberate EventSource disconnect did not produce exactly "
-             "the expected htmx-ext-sse/HTMX error diagnostic. Unexpected "
-             "browser failures must remain visible rather than being globally "
-             "whitelisted.")
+             "one HTMX-sourced console error and no HTTP request failure. "
+             "Unexpected browser failures must remain visible rather than "
+             "being globally whitelisted.")
         {:errors errors
          :diagnostics diagnostics})))
 
@@ -409,38 +470,43 @@
         status-token
         (str status)
 
-        console-errors
-        (filterv console-error? errors)
-
-        chromium-resource-errors
-        (filterv
-         (fn [{:keys [type text location]}]
-           (and (= "error" type)
-                (string? text)
-                (str/includes? text "Failed to load resource")
-                (str/includes? text "server responded with a status of")
-                (str/includes? text status-token)
-                (string? location)
-                (str/includes? location fragment-path)))
-         console-errors)
-
         htmx-response-errors
         (filterv
-         (fn [{:keys [type text]}]
-           (and (= "error" type)
-                (string? text)
-                (str/includes? text "Response Status Error Code")
-                (str/includes? text status-token)
-                (str/includes? text fragment-path)))
-         console-errors)
+         #(htmx-console-error?
+           %
+           (fn [text]
+             (and
+              (str/includes? text "Response Status Error Code")
+              (str/includes? text status-token)
+              (str/includes? text fragment-path))))
+         errors)
+
+        resource-errors
+        (filterv
+         #(fragment-resource-console-error?
+           %
+           (fn [text]
+             (str/includes? text status-token)))
+         errors)
+
+        recognized-errors
+        (set
+         (concat
+          htmx-response-errors
+          resource-errors))
+
+        unexpected-errors
+        (removev recognized-errors errors)
 
         expected?
         (and
-         (= 2 (count errors))
-         (= 2 (count console-errors))
-         (= 1 (count chromium-resource-errors))
          (= 1 (count htmx-response-errors))
-         ;; A completed HTTP 5xx is not a Playwright request failure.
+         ;; Chromium currently logs one failed-resource line for a 5xx XHR.
+         ;; Keep it shape-checked when present, but don't make browser console
+         ;; presentation part of Gesso's semantic contract.
+         (<= (count resource-errors) 1)
+         (empty? unexpected-errors)
+         ;; A completed HTTP 5xx is not a Playwright transport failure.
          (empty? request-failures))]
 
     (when-not expected?
@@ -448,12 +514,13 @@
        (integration-error
         :unexpected-response-error-diagnostics
         (str "The deliberate HTTP " status
-             " response did not produce exactly the expected browser/HTMX "
-             "response-error diagnostics: one Chromium failed-resource console "
-             "entry, one HTMX responseError console entry, and no transport "
-             "request failure.")
+             " response did not produce the expected semantic diagnostics: "
+             "exactly one HTMX responseError, no Playwright transport failure, "
+             "at most one Chromium failed-resource console entry for /fragment, "
+             "and no other browser failures.")
         {:status status
          :errors errors
+         :unexpected-errors unexpected-errors
          :diagnostics diagnostics})))
 
     (chromium/clear-diagnostics! context)
@@ -669,9 +736,9 @@
 
           ;; As in the normal-completion scenario, the EventSource open starts
           ;; advisory request A. Hold A, then establish a canonical requirement
-          ;; while that generation owns the fragment. This time A never receives
-          ;; an HTTP response: the fixture closes the exchange to force HTMX's
-          ;; real sendError lifecycle.
+          ;; while that generation owns the fragment. This time A receives a
+          ;; deliberately truncated HTTP response: headers commit the response,
+          ;; but the body ends early so HTMX must take its real sendError path.
           (fixture/script!
            server
            :get
@@ -715,10 +782,15 @@
             (is (= 1 (count (fragment-requests server)))
                 "Canonical B must queue behind the still-owned request A.")
 
-            ;; Close the real socket without response headers/body. The runtime
-            ;; must treat the resulting HTMX sendError as completion of exactly
-            ;; A's physical correlation and promote B into a new generation.
-            (fixture/release! server first-request-id :close)
+            (is (true? (chromium/assert-clean! context))
+                "The browser must be clean before the deliberate truncated response.")
+            (chromium/clear-diagnostics! context)
+
+            ;; Commit a real HTTP response with a full Content-Length, send only
+            ;; a strict body prefix, then close. Unlike a pre-header connection
+            ;; loss, this cannot be transparently replayed by Chromium as an
+            ;; idempotent GET; HTMX must observe the resulting sendError.
+            (fixture/release! server first-request-id :truncate)
 
             (chromium/wait-for-js!
              page
@@ -767,12 +839,12 @@
                      (chromium/evaluate
                       page
                       "() => window.__gessoFixture.responseErrors"))
-                  "A deliberate socket loss should exercise sendError, not HTTP responseError."))))
+                  "A deliberate truncated transport failure should exercise sendError, not HTTP responseError."))))
 
         (is (true? (consume-expected-send-error-diagnostics! context))
-            "The deliberate socket loss must produce exactly the expected HTMX/browser diagnostics.")
+            "The deliberate truncated response must produce exactly the expected semantic HTMX/browser diagnostics.")
         (is (true? (chromium/assert-clean! context))
-            "After accounting for the deliberate socket loss, the browser must be clean.")))))
+            "After accounting for the deliberate truncated response, the browser must be clean.")))))
 
 
 (deftest http-response-error-advances-queued-progression-without-swapping-error-body-test
@@ -2181,10 +2253,17 @@
               (is (= 2 (count (fragment-requests server)))
                   "E must queue behind B without admitting parallel fragment work.")
 
-              ;; B carries D but never receives a response. Closing the exchange
-              ;; forces the real HTMX sendError path. Since D was not satisfied,
-              ;; the successor must retain D as well as queued E.
-              (fixture/release! server request-b-id :close)
+              (is (true? (chromium/assert-clean! context))
+                  "The browser must be clean before B's deliberate truncated response.")
+              (chromium/clear-diagnostics! context)
+
+              ;; B carries D, receives response headers declaring a complete
+              ;; body, then the fixture closes after only a strict body prefix.
+              ;; Chromium cannot transparently replay that partially observed
+              ;; response, so HTMX deterministically takes the sendError path.
+              ;; Since D was not satisfied, the successor must retain D as well
+              ;; as queued E.
+              (fixture/release! server request-b-id :truncate)
 
               (chromium/wait-for-js!
                page
@@ -2234,14 +2313,12 @@
                        (chromium/evaluate
                         page
                         "() => window.__gessoFixture.responseErrors"))
-                    "The deliberate socket loss must exercise sendError, not HTTP responseError.")
+                    "The deliberate truncated transport failure must exercise sendError, not HTTP responseError.")
 
-                (is (true? (consume-expected-send-error-diagnostics! context))
-                    "B's deliberate socket loss must produce exactly the expected HTMX/browser diagnostics.")
-
-                (is (true? (chromium/assert-clean! context))
-                    "After accounting for B's deliberate transport loss, no unrelated browser failure may remain.")
-
+                ;; Keep C held until the semantic assertions above are complete.
+                ;; Consume B's browser/network diagnostics only after C settles;
+                ;; this avoids racing Playwright's console/request-failure
+                ;; callbacks against HTMX's synchronous sendError event.
                 (fixture/release! server request-c-id)
 
                 (chromium/wait-for-js!
@@ -2263,8 +2340,11 @@
                 (is (= 3 (count (fragment-requests server)))
                     "Completing C must not reveal a hidden fourth refresh.")
 
+                (is (true? (consume-expected-send-error-diagnostics! context))
+                    "B's deliberate truncated response must produce exactly the expected semantic HTMX/browser diagnostics.")
+
                 (is (true? (chromium/assert-clean! context))
-                    "The completed failure-recovery scenario must leave the browser clean.")))))))))
+                    "After accounting for B's deliberate transport failure, the completed recovery scenario must leave the browser clean.")))))))))
 
 
 (deftest failed-bound-canonical-refresh-via-http-error-preserves-active-and-queued-authority-test
