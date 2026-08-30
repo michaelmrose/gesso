@@ -161,6 +161,7 @@
    "  responseErrors: 0,\n"
    "  fragmentBeforeRequests: 0,\n"
    "  fragmentAfterRequests: 0,\n"
+   "  windowErrors: [],\n"
    "  runtimeStarted: false\n"
    "};\n"
    "document.addEventListener('htmx:sseBeforeMessage', function (event) {\n"
@@ -192,6 +193,12 @@
    "  if (elt && elt.hasAttribute('data-gesso-live-fragment')) {\n"
    "    window.__gessoFixture.fragmentAfterRequests += 1;\n"
    "  }\n"
+   "});\n"
+   "window.addEventListener('error', function (event) {\n"
+   "  window.__gessoFixture.windowErrors.push({\n"
+   "    message: event.message || '',\n"
+   "    errorMessage: event.error && event.error.message ? event.error.message : ''\n"
+   "  });\n"
    "});\n"
    "gesso.live.browser.runtime.init_BANG_();\n"
    "window.__gessoFixture.runtimeStarted = !!window.gessoLive;\n"))
@@ -472,6 +479,54 @@
              "Unexpected browser failures must remain visible rather than "
              "being globally whitelisted.")
         {:errors errors
+         :diagnostics diagnostics})))
+
+    (chromium/clear-diagnostics! context)
+    true))
+
+(defn- consume-expected-managed-sse-progression-rejection!
+  [context]
+  (let [errors
+        (chromium/browser-errors context)
+
+        diagnostics
+        (chromium/diagnostics context)
+
+        web-errors
+        (filterv #(= :web-error (:kind %)) errors)
+
+        matching-errors
+        (filterv
+         (fn [{:keys [error]}]
+           (and (string? error)
+                (str/includes?
+                 error
+                 "Managed Gesso Live SSE progression copies disagree.")))
+         web-errors)
+
+        recognized-errors
+        (set matching-errors)
+
+        unexpected-errors
+        (vec (remove recognized-errors errors))
+
+        expected?
+        (and
+         (= 1 (count web-errors))
+         (= 1 (count matching-errors))
+         (empty? unexpected-errors)
+         (empty? (:request-failures diagnostics))
+         (empty? (:page-crashes diagnostics)))]
+
+    (when-not expected?
+      (throw
+       (integration-error
+        :unexpected-managed-sse-progression-diagnostic
+        (str "A deliberately inconsistent managed SSE progression payload did "
+             "not fail closed with exactly one uncaught Gesso Live progression "
+             "diagnostic and no unrelated browser/network failure.")
+        {:errors errors
+         :unexpected-errors unexpected-errors
          :diagnostics diagnostics})))
 
     (chromium/clear-diagnostics! context)
@@ -3288,6 +3343,200 @@
                         "Context B must remain browser-clean with shared C only.")))))
             (finally
               (chromium/close-context! context-b))))))))
+
+
+(deftest inconsistent-sse-progression-fails-closed-without-advisory-downgrade-test
+  (with-real-browser
+    (fn [{:keys [server context page]}]
+      (testing
+       "conflicting canonical progression copies are rejected loudly and cannot become advisory refresh work"
+        (let [basis-b
+              {:tx-id 1202
+               :system-time "2026-08-29T01:20:02Z"}
+
+              basis-c
+              {:tx-id 1203
+               :system-time "2026-08-29T01:20:03Z"}
+
+              basis-d
+              {:tx-id 1204
+               :system-time "2026-08-29T01:20:04Z"}
+
+              requirement-b
+              (progression/requirement basis-b)
+
+              requirement-c
+              (progression/requirement basis-c)
+
+              requirement-d
+              (progression/requirement basis-d)
+
+              wire-b
+              (progression/requirement->wire requirement-b)
+
+              wire-c
+              (progression/requirement->wire requirement-c)
+
+              forged-payload
+              (pr-str
+               {:progression wire-b
+                :invalidation
+                {:progression wire-c}})]
+
+          ;; Initial SSE open creates one advisory A. While A is held, send a
+          ;; payload whose two protocol-mandated progression copies are both
+          ;; individually valid but disagree. Core prevents the SSE swap before
+          ;; decoding and must then fail closed rather than downgrade the bad
+          ;; authority into an advisory invalidation.
+          (fixture/script!
+           server
+           :get
+           fragment-path
+           [(fixture/hold (fragment-response "A-after-forged-event"))
+            (fixture/hold (fragment-response "B-valid-after-rejection"))
+            (fixture/hold (fragment-response "UNEXPECTED-extra-refresh"))])
+
+          (chromium/navigate!
+           page
+           (fixture/url server page-path))
+
+          (chromium/wait-for-js!
+           page
+           "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+          (fixture/await-sse-client! server client-id 5000)
+
+          (let [request-a
+                (fixture/await-pending!
+                 server
+                 #(and (= :get (:method %))
+                       (= fragment-path (:path %)))
+                 5000)
+
+                request-a-id
+                (:request-id request-a)]
+
+            (is
+             (nil?
+              (request-header
+               request-a
+               progression.http/request-header-name))
+             "Initial request A must remain advisory and headerless.")
+
+            (is (= 1
+                   (fixture/emit-sse!
+                    server
+                    client-id
+                    {:event "live-update"
+                     :data forged-payload}))
+                "The forged managed progression payload must reach exactly one EventSource.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 1")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.windowErrors.length === 1")
+
+            (let [message
+                  (chromium/evaluate
+                   page
+                   "() => window.__gessoFixture.windowErrors[0].errorMessage || window.__gessoFixture.windowErrors[0].message")]
+              (is (and (string? message)
+                       (str/includes?
+                        message
+                        "Managed Gesso Live SSE progression copies disagree."))
+                  (str "The browser must surface the actual rejected progression invariant, got: "
+                       (pr-str message))))
+
+            (is (= 1 (count (fragment-requests server)))
+                "Rejected canonical data must not create a parallel or queued fragment GET while A is active.")
+
+            (is (true? (consume-expected-managed-sse-progression-rejection!
+                        context))
+                "The malformed authority must produce exactly one explicit Gesso progression diagnostic.")
+
+            (fixture/release! server request-a-id)
+
+            (chromium/wait-for-js!
+             page
+             (str "() => document.getElementById('"
+                  fragment-id
+                  "') && document.getElementById('"
+                  fragment-id
+                  "').textContent === 'A-after-forged-event'"))
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.fragmentAfterRequests === 1")
+
+            (is (= 1
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.fragmentBeforeRequests"))
+                "Finishing A must not reveal an advisory successor derived from the rejected payload.")
+
+            (is (= 1 (count (fragment-requests server)))
+                "The forged event must contribute zero physical refresh work after A settles.")
+
+            ;; Rejection of one malformed message must not poison the managed
+            ;; fragment. A later valid canonical progression remains admissible
+            ;; and must produce the normal authoritative successor.
+            (is (= 1 (emit-progression! server requirement-d))
+                "A later valid canonical D must still reach the EventSource.")
+
+            (chromium/wait-for-js!
+             page
+             "() => window.__gessoFixture.sseMessages === 2")
+
+            (let [request-b
+                  (fixture/await-pending!
+                   server
+                   #(and (= :get (:method %))
+                         (= fragment-path (:path %))
+                         (> (:request-id %) request-a-id))
+                   5000)
+
+                  request-b-id
+                  (:request-id request-b)
+
+                  encoded
+                  (request-header
+                   request-b
+                   progression.http/request-header-name)
+
+                  decoded
+                  (some-> encoded
+                          progression.http/decode-request-progression)]
+
+              (is (= requirement-d decoded)
+                  "The first refresh after rejection must carry only the later valid D authority.")
+
+              (is (= #{basis-d} (:bases decoded))
+                  "Rejected B/C authority must not leak into the later valid request header.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "A plus one later valid-D successor are the complete physical request set.")
+
+              (fixture/release! server request-b-id)
+
+              (chromium/wait-for-js!
+               page
+               (str "() => document.getElementById('"
+                    fragment-id
+                    "') && document.getElementById('"
+                    fragment-id
+                    "').textContent === 'B-valid-after-rejection'"))
+
+              (is (= 2 (count (fragment-requests server)))
+                  "No hidden refresh may appear after valid recovery from the rejected payload.")
+
+              (is (empty? (fixture/pending-request-ids server))
+                  "All fixture work must settle after the valid recovery request.")
+
+              (is (true? (chromium/assert-clean! context))
+                  "After consuming the deliberate rejection diagnostic, valid subsequent work must finish clean."))))))))
 
 (defn -main
   [& _]
