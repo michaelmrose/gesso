@@ -132,6 +132,31 @@
   (mapv (fn [_] (.readLine reader))
         (range line-count)))
 
+(defn- await-sse-connections!
+  [server expected-count]
+  (let [deadline (+ (System/nanoTime)
+                    (* network-timeout-ms 1000000))]
+    (loop []
+      (let [connections (fixture/sse-connections server)]
+        (cond
+          (= expected-count (count connections))
+          connections
+
+          (< (System/nanoTime) deadline)
+          (do
+            (Thread/yield)
+            (recur))
+
+          :else
+          (throw
+           (ex-info
+            "Timed out waiting for expected SSE connection count."
+            {:error/type :gesso.live.browser.fixture-server-test/error
+             :error/kind :sse-connection-count-timeout
+             :expected-count expected-count
+             :actual-count (count connections)
+             :connections connections})))))))
+
 (deftest scripted-responses-are-consumed-in-order-test
   (with-fixture
     (fn [server]
@@ -416,6 +441,120 @@
           (finally
             (close-sse-client! first-client)
             (close-sse-client! second-client)))))))
+
+(deftest sse-connection-targeting-isolated-between-physical-streams-test
+  (with-fixture
+    (fn [server]
+      (let [client-id "shared-browser"
+            first-client (open-sse! (fixture/sse-url server client-id))
+            first-reader (:reader first-client)]
+        (try
+          (is (= 200 (:status first-client)))
+
+          (let [first-connection
+                (fixture/await-sse-client! server client-id)
+
+                first-connection-id
+                (:connection-id first-connection)
+
+                second-client
+                (open-sse! (fixture/sse-url server client-id))
+
+                second-reader
+                (:reader second-client)]
+            (try
+              (is (= 200 (:status second-client)))
+
+              (let [connections
+                    (await-sse-connections! server 2)
+
+                    second-connection
+                    (first
+                     (remove
+                      #(= first-connection-id
+                          (:connection-id %))
+                      connections))
+
+                    second-connection-id
+                    (:connection-id second-connection)]
+
+                (is (= client-id (:client-id first-connection)))
+                (is (= client-id (:client-id second-connection)))
+                (is (string? first-connection-id))
+                (is (string? second-connection-id))
+                (is (not= first-connection-id
+                          second-connection-id))
+
+                (testing "a connection-targeted frame reaches only its physical SSE stream"
+                  (is (= 1
+                         (fixture/emit-sse-connection!
+                          server
+                          first-connection-id
+                          {:id "only-a"
+                           :event "live-update"
+                           :data "A"})))
+
+                  (is (= 1
+                         (fixture/emit-sse-connection!
+                          server
+                          second-connection-id
+                          {:id "only-b"
+                           :event "live-update"
+                           :data "B"}))))
+
+                (testing "client-id broadcast semantics remain unchanged"
+                  (is (= 2
+                         (fixture/emit-sse!
+                          server
+                          client-id
+                          {:id "both"
+                           :event "live-update"
+                           :data "broadcast"}))))
+
+                (let [broadcast
+                      ["id: both"
+                       "event: live-update"
+                       "data: broadcast"
+                       ""]
+
+                      first-expected
+                      (into
+                       ["id: only-a"
+                        "event: live-update"
+                        "data: A"
+                        ""]
+                       broadcast)
+
+                      second-expected
+                      (into
+                       ["id: only-b"
+                        "event: live-update"
+                        "data: B"
+                        ""]
+                       broadcast)]
+
+                  (is (= first-expected
+                         (read-sse-lines first-reader 8)))
+                  (is (= second-expected
+                         (read-sse-lines second-reader 8))))
+
+                (testing "an unknown physical connection cannot disturb live streams"
+                  (is (= 0
+                         (fixture/emit-sse-connection!
+                          server
+                          "missing-connection"
+                          {:event "live-update"
+                           :data "must-not-send"})))
+                  (is (= 2
+                         (count
+                          (fixture/sse-connections server))))))
+
+              (finally
+                (close-sse-client! second-client))))
+
+          (finally
+            (fixture/close-sse! server client-id)
+            (close-sse-client! first-client)))))))
 
 (deftest sse-client-ids-round-trip-through-the-url-test
   (with-fixture
