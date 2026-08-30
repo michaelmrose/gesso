@@ -640,18 +640,9 @@
         (apply str))
    "\n"))
 
-(defn emit-sse!
-  "Emit one SSE frame to every currently open connection for client-id.
-
-   Returns the number of connections successfully written. Failed connections
-   are closed and removed."
-  [fixture client-id event]
-  (let [fixture (require-fixture! fixture)
-        client-id (str client-id)
-        connections
-        (filter #(= client-id (:client-id %))
-                (vals @(:sse-connections fixture)))
-        bytes (.getBytes ^String (sse-frame event) StandardCharsets/UTF_8)]
+(defn- emit-sse-to-connections!
+  [fixture connections event]
+  (let [bytes (.getBytes ^String (sse-frame event) StandardCharsets/UTF_8)]
     (reduce
      (fn [sent {:keys [connection-id output close-latch]}]
        (try
@@ -665,6 +656,36 @@
            sent)))
      0
      connections)))
+
+(defn emit-sse-connection!
+  "Emit one SSE frame to exactly one currently open connection.
+
+   connection-id must be one of the ids returned by sse-connections or
+   await-sse-client!. Returns 1 when the frame was written and 0 when that
+   connection is no longer open or the write fails. Failed connections are
+   closed and removed. This is a deterministic test-control primitive for
+   multi-client scenarios; client-id broadcast semantics remain owned by
+   emit-sse!."
+  [fixture connection-id event]
+  (let [fixture (require-fixture! fixture)
+        connection-id (str connection-id)
+        connection (get @(:sse-connections fixture) connection-id)]
+    (if connection
+      (emit-sse-to-connections! fixture [connection] event)
+      0)))
+
+(defn emit-sse!
+  "Emit one SSE frame to every currently open connection for client-id.
+
+   Returns the number of connections successfully written. Failed connections
+   are closed and removed."
+  [fixture client-id event]
+  (let [fixture (require-fixture! fixture)
+        client-id (str client-id)
+        connections
+        (filter #(= client-id (:client-id %))
+                (vals @(:sse-connections fixture)))]
+    (emit-sse-to-connections! fixture connections event)))
 
 (defn close-sse!
   "Force-close all current SSE connections for client-id.
