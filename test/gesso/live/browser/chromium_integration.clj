@@ -217,44 +217,65 @@
    "</body>\n"
    "</html>\n"))
 
+(defn- repeated-action
+  [copies action]
+  (when-not (and (integer? copies)
+                 (pos? copies))
+    (throw
+     (integration-error
+      :invalid-route-copy-count
+      "Real-browser static route copy count must be a positive integer."
+      {:copies copies})))
+  (vec (repeat copies action)))
+
 (defn- script-static-routes!
-  [server]
-  (fixture/script!
-   server
-   :get
-   htmx-path
-   (fixture/respond
-    (js-response
-     (resource-text!
-      "HTMX 2.0.7 WebJar asset"
-      htmx-resource-candidates))))
+  ([server]
+   (script-static-routes! server 1))
+  ([server copies]
+   (fixture/script!
+    server
+    :get
+    htmx-path
+    (repeated-action
+     copies
+     (fixture/respond
+      (js-response
+       (resource-text!
+        "HTMX 2.0.7 WebJar asset"
+        htmx-resource-candidates)))))
 
-  (fixture/script!
-   server
-   :get
-   sse-extension-path
-   (fixture/respond
-    (js-response
-     (resource-text!
-      "htmx-ext-sse 2.2.4 WebJar asset"
-      sse-resource-candidates))))
+   (fixture/script!
+    server
+    :get
+    sse-extension-path
+    (repeated-action
+     copies
+     (fixture/respond
+      (js-response
+       (resource-text!
+        "htmx-ext-sse 2.2.4 WebJar asset"
+        sse-resource-candidates)))))
 
-  (fixture/script!
-   server
-   :get
-   gesso-runtime-path
-   (fixture/respond
-    (js-response (runtime-text!))))
+   (fixture/script!
+    server
+    :get
+    gesso-runtime-path
+    (repeated-action
+     copies
+     (fixture/respond
+      (js-response (runtime-text!)))))
 
-  (fixture/script!
-   server
-   :get
-   page-path
-   (fixture/respond
-    (html-response
-     (page-html server))))
+   (fixture/script!
+    server
+    :get
+    page-path
+    (repeated-action
+     copies
+     (fixture/respond
+      (html-response
+       (page-html server)))))
 
-  server)
+   server))
 
 (defn- fragment-requests
   [server]
@@ -366,7 +387,7 @@
           resource-errors))
 
         unexpected-errors
-        (removev recognized-errors errors)
+        (vec (remove recognized-errors errors))
 
         request-failure
         (first request-failures)
@@ -496,7 +517,7 @@
           resource-errors))
 
         unexpected-errors
-        (removev recognized-errors errors)
+        (vec (remove recognized-errors errors))
 
         expected?
         (and
@@ -2559,6 +2580,203 @@
 
                 (is (true? (chromium/assert-clean! context))
                     "The completed HTTP-error recovery scenario must leave the browser clean.")))))))))
+
+
+(deftest two-isolated-browser-contexts-preserve-independent-single-flight-and-shared-authority-test
+  (with-real-browser
+    (fn [{:keys [server harness context page]}]
+      (testing
+       "two isolated Chromium contexts independently coordinate one shared authoritative invalidation"
+        (let [basis-b
+              {:tx-id 1102
+               :system-time "2026-08-29T00:40:02Z"}
+
+              requirement-b
+              (progression/requirement basis-b)
+
+              context-b
+              (chromium/new-context! harness)]
+          (try
+            (let [page-b
+                  (chromium/new-page! context-b)]
+
+              ;; with-real-browser initially scripts one page load. Replace the
+              ;; static queues before navigation so both isolated contexts load
+              ;; the exact same pinned HTMX/SSE/runtime bytes from real HTTP.
+              (script-static-routes! server 2)
+
+              ;; Each context receives an independent advisory request from its
+              ;; own EventSource open and, after the shared canonical B event,
+              ;; one independently coordinated successor. Keep all four
+              ;; physical GETs held so their headers/counts are inspectable.
+              (fixture/script!
+               server
+               :get
+               fragment-path
+               [(fixture/hold (fragment-response "A-context-1"))
+                (fixture/hold (fragment-response "A-context-2"))
+                (fixture/hold (fragment-response "B-authoritative"))
+                (fixture/hold (fragment-response "B-authoritative"))])
+
+              (chromium/navigate!
+               page
+               (fixture/url server page-path))
+
+              (chromium/navigate!
+               page-b
+               (fixture/url server page-path))
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+              (chromium/wait-for-js!
+               page-b
+               "() => window.__gessoFixture && window.__gessoFixture.runtimeStarted === true")
+
+              (chromium/wait-for-js!
+               page
+               "() => window.__gessoFixture.sseOpens === 1")
+
+              (chromium/wait-for-js!
+               page-b
+               "() => window.__gessoFixture.sseOpens === 1")
+
+              (is (= 2
+                     (count
+                      (filter
+                       #(= client-id (:client-id %))
+                       (fixture/sse-connections server))))
+                  "Each isolated BrowserContext must own a distinct real EventSource connection.")
+
+              (is (= 2 (count (fragment-requests server)))
+                  "Exactly one advisory fragment request per browser context may exist before canonical delivery.")
+
+              (let [initial-requests
+                    (vec (fragment-requests server))
+
+                    initial-ids
+                    (mapv :request-id initial-requests)
+
+                    max-initial-id
+                    (apply max initial-ids)]
+
+                (is (= 2 (count initial-requests))
+                    "Each browser context must independently admit one advisory initial refresh.")
+
+                (is (every?
+                     #(nil?
+                       (request-header
+                        %
+                        progression.http/request-header-name))
+                     initial-requests)
+                    "Both initial requests are advisory and must remain headerless.")
+
+                (is (= 2 (emit-progression! server requirement-b))
+                    "One canonical SSE invalidation must be delivered to both live browser contexts.")
+
+                (chromium/wait-for-js!
+                 page
+                 "() => window.__gessoFixture.sseMessages === 1")
+
+                (chromium/wait-for-js!
+                 page-b
+                 "() => window.__gessoFixture.sseMessages === 1")
+
+                (is (= 2 (count (fragment-requests server)))
+                    "Shared B must queue independently behind each context's own active A; no parallel successor may start yet.")
+
+                (doseq [request-id initial-ids]
+                  (fixture/release! server request-id))
+
+                (let [successor-1
+                      (fixture/await-request!
+                       server
+                       #(and (= :get (:method %))
+                             (= fragment-path (:path %))
+                             (> (:request-id %) max-initial-id))
+                       5000)
+
+                      successor-2
+                      (fixture/await-request!
+                       server
+                       #(and (= :get (:method %))
+                             (= fragment-path (:path %))
+                             (> (:request-id %) (:request-id successor-1)))
+                       5000)
+
+                      successors
+                      [successor-1 successor-2]
+
+                      decoded
+                      (mapv
+                       (fn [request]
+                         (some->
+                          (request-header
+                           request
+                           progression.http/request-header-name)
+                          progression.http/decode-request-progression))
+                       successors)]
+
+                  (is (= [requirement-b requirement-b]
+                         decoded)
+                      "Each isolated browser must independently carry the same canonical B minimum-read requirement.")
+
+                  (is (every? #(= #{basis-b} (:bases %)) decoded)
+                      "Neither context may invent, drop, or merge authority through the other context's coordinator state.")
+
+                  (is (= 4 (count (fragment-requests server)))
+                      "Two initial A requests plus one B successor per context are the complete physical request set.")
+
+                  (is (= 2
+                         (chromium/evaluate
+                          page
+                          "() => window.__gessoFixture.fragmentBeforeRequests"))
+                      "Context A must observe exactly its own initial request and successor.")
+
+                  (is (= 2
+                         (chromium/evaluate
+                          page-b
+                          "() => window.__gessoFixture.fragmentBeforeRequests"))
+                      "Context B must observe exactly its own initial request and successor.")
+
+                  (doseq [{:keys [request-id]} successors]
+                    (fixture/release! server request-id))
+
+                  (chromium/wait-for-js!
+                   page
+                   (str "() => document.getElementById('"
+                        fragment-id
+                        "') && document.getElementById('"
+                        fragment-id
+                        "').textContent === 'B-authoritative'"))
+
+                  (chromium/wait-for-js!
+                   page-b
+                   (str "() => document.getElementById('"
+                        fragment-id
+                        "') && document.getElementById('"
+                        fragment-id
+                        "').textContent === 'B-authoritative'"))
+
+                  (chromium/wait-for-js!
+                   page
+                   "() => window.__gessoFixture.fragmentAfterRequests === 2")
+
+                  (chromium/wait-for-js!
+                   page-b
+                   "() => window.__gessoFixture.fragmentAfterRequests === 2")
+
+                  (is (= 4 (count (fragment-requests server)))
+                      "Settling both successors must not expose cross-context duplicate work.")
+
+                  (is (true? (chromium/assert-clean! context))
+                      "Context A must remain browser-clean throughout shared-authority delivery.")
+
+                  (is (true? (chromium/assert-clean! context-b))
+                      "Context B must remain browser-clean throughout shared-authority delivery."))))
+            (finally
+              (chromium/close-context! context-b))))))))
 
 (defn -main
   [& _]
