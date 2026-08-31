@@ -514,25 +514,33 @@
         web-errors
         (filterv #(= :web-error (:kind %)) errors)
 
-        matching-errors
+        runtime-web-errors
         (filterv
-         (fn [{:keys [error]}]
-           (and (string? error)
-                (str/includes?
-                 error
-                 "Managed Gesso Live SSE progression copies disagree.")))
+         (fn [{:keys [location]}]
+           (let [url
+                 (when (map? location)
+                   (:url location))]
+             (and
+              (string? url)
+              (str/includes? url gesso-runtime-path))))
          web-errors)
 
         recognized-errors
-        (set matching-errors)
+        (set runtime-web-errors)
 
         unexpected-errors
         (vec (remove recognized-errors errors))
 
         expected?
         (and
+         ;; The semantic message is asserted separately from the browser's
+         ;; window.error event. Under Closure :advanced, Playwright's Java
+         ;; WebError.error() may stringify the same exception as an internal
+         ;; minified constructor such as "Error: ol". That presentation is not
+         ;; a Gesso API. Here we require one uncaught exception sourced from the
+         ;; production runtime and no unrelated browser/network failure.
          (= 1 (count web-errors))
-         (= 1 (count matching-errors))
+         (= 1 (count runtime-web-errors))
          (empty? unexpected-errors)
          (empty? (:request-failures diagnostics))
          (empty? (:page-crashes diagnostics)))]
@@ -542,8 +550,98 @@
        (integration-error
         :unexpected-managed-sse-progression-diagnostic
         (str "A deliberately inconsistent managed SSE progression payload did "
-             "not fail closed with exactly one uncaught Gesso Live progression "
-             "diagnostic and no unrelated browser/network failure.")
+             "not produce exactly one uncaught WebError sourced from the "
+             "production Gesso runtime with no unrelated browser/network "
+             "failure. The semantic invariant text is asserted independently "
+             "through window.error because Playwright's advanced-compiled "
+             "exception string is presentation detail.")
+        {:errors errors
+         :unexpected-errors unexpected-errors
+         :diagnostics diagnostics})))
+
+    (chromium/clear-diagnostics! context)
+    true))
+
+(defn- consume-expected-managed-fragment-abort-diagnostics!
+  [context]
+  (let [errors
+        (chromium/browser-errors context)
+
+        diagnostics
+        (chromium/diagnostics context)
+
+        request-failures
+        (:request-failures diagnostics)
+
+        after-request-errors
+        (filterv
+         #(htmx-console-error?
+           %
+           (fn [text]
+             (= "htmx:afterRequest" text)))
+         errors)
+
+        send-abort-errors
+        (filterv
+         #(htmx-console-error?
+           %
+           (fn [text]
+             (= "htmx:sendAbort" text)))
+         errors)
+
+        resource-errors
+        (filterv
+         #(fragment-resource-console-error?
+           %
+           (constantly true))
+         errors)
+
+        recognized-errors
+        (set
+         (concat
+          after-request-errors
+          send-abort-errors
+          resource-errors))
+
+        unexpected-errors
+        (vec (remove recognized-errors errors))
+
+        request-failure
+        (first request-failures)
+
+        expected-request-failure?
+        (and
+         (= 1 (count request-failures))
+         (= "GET" (:method request-failure))
+         (string? (:url request-failure))
+         (str/includes? (:url request-failure) fragment-path)
+         (string? (:failure request-failure))
+         (str/includes? (:failure request-failure) "ERR_ABORTED"))
+
+        expected?
+        (and
+         ;; HTMX 2.0.7 aborts an in-flight XHR when its owning element is
+         ;; cleaned up. triggerErrorEvent reports both lifecycle events through
+         ;; console.error, while Playwright observes the XHR as ERR_ABORTED.
+         (= 1 (count after-request-errors))
+         (= 1 (count send-abort-errors))
+         ;; Chromium may or may not additionally render a failed-resource
+         ;; console line for an aborted XHR. That rendering is not semantic.
+         (<= (count resource-errors) 1)
+         (empty? unexpected-errors)
+         expected-request-failure?
+         (empty? (:page-crashes diagnostics)))]
+
+    (when-not expected?
+      (throw
+       (integration-error
+        :unexpected-managed-fragment-abort-diagnostics
+        (str "Deleting a managed fragment with an in-flight HTMX request did "
+             "not produce the expected physical-abort contract: exactly one "
+             "HTMX afterRequest error, exactly one HTMX sendAbort error, "
+             "exactly one Playwright GET /fragment failure containing "
+             "ERR_ABORTED, at most one Chromium failed-resource console "
+             "entry, and no unrelated browser failure.")
         {:errors errors
          :unexpected-errors unexpected-errors
          :diagnostics diagnostics})))
@@ -3558,11 +3656,11 @@
                   "After consuming the deliberate rejection diagnostic, valid subsequent work must finish clean."))))))))
 
 
-(deftest retired-fragment-stale-http-completion-cannot-resurrect-replacement-test
+(deftest retired-fragment-aborts-in-flight-request-and-cannot-resurrect-replacement-test
   (with-real-browser
     (fn [{:keys [server context page]}]
       (testing
-       "real HTMX cleanup retires queued authority before a stale physical response can touch replacement DOM"
+       "real HTMX cleanup retires queued authority, aborts physical work, and cannot corrupt replacement DOM"
         (let [basis-b
               {:tx-id 1302
                :system-time "2026-08-29T02:00:02Z"}
@@ -3574,19 +3672,19 @@
               "/remove-managed-fragment"]
 
           ;; Advisory request A owns the managed fragment while canonical B is
-          ;; queued behind it. A separate real HTMX request then deletes the
-          ;; stable behavior-owning fragment root with hx-swap=delete. HTMX
-          ;; emits beforeCleanupElement while that root is still attached, so
-          ;; Gesso must retire the logical fragment and discard both physical
-          ;; correlation and queued B before stale A is allowed to complete.
+          ;; queued behind it. A separate real HTMX request deletes the stable
+          ;; behavior-owning root with hx-swap=delete. HTMX 2.0.7 cleans the
+          ;; root, emits beforeCleanupElement, and aborts A's XHR. Gesso must
+          ;; retire the logical fragment and discard queued B before the
+          ;; physical abort lifecycle is reported.
           (fixture/script!
            server
            :get
            fragment-path
-           [(fixture/hold (fragment-response "A-stale-after-retirement"))
+           [(fixture/hold (fragment-response "A-never-delivered-after-retirement"))
             ;; If retirement accidentally preserves B, keep the illicit
-            ;; successor deterministic and observable instead of letting it
-            ;; fall through to the fixture's generic response.
+            ;; successor deterministic and observable instead of allowing an
+            ;; unplanned fixture response.
             (fixture/hold (fragment-response "UNEXPECTED-successor-B"))])
 
           (fixture/script!
@@ -3632,10 +3730,10 @@
             (is (= 1 (count (fragment-requests server)))
                 "B must queue behind A rather than creating parallel fragment work.")
 
-            ;; Install observation directly on the behavior-owning root before
-            ;; HTMX removes it. A detached node no longer bubbles afterRequest
-            ;; to document, but its own raw event listener remains available and
-            ;; gives us a deterministic completion barrier for stale A.
+            ;; Observe the actual HTMX cleanup/abort lifecycle directly on the
+            ;; behavior-owning root before removal. Once detached, its events no
+            ;; longer need to bubble to document, but listeners on the detached
+            ;; object remain a deterministic barrier.
             (is
              (true?
               (chromium/evaluate
@@ -3646,6 +3744,7 @@
                 "  if (!root) return false;"
                 "  window.__gessoFixture.managedCleanupEvents = 0;"
                 "  window.__gessoFixture.detachedAfterRequests = 0;"
+                "  window.__gessoFixture.detachedSendAborts = 0;"
                 "  root.addEventListener('htmx:beforeCleanupElement', function (event) {"
                 "    if (event.target === root) {"
                 "      window.__gessoFixture.managedCleanupEvents += 1;"
@@ -3654,6 +3753,11 @@
                 "  root.addEventListener('htmx:afterRequest', function (event) {"
                 "    if (event.target === root) {"
                 "      window.__gessoFixture.detachedAfterRequests += 1;"
+                "    }"
+                "  });"
+                "  root.addEventListener('htmx:sendAbort', function (event) {"
+                "    if (event.target === root) {"
+                "      window.__gessoFixture.detachedSendAborts += 1;"
                 "    }"
                 "  });"
                 "  const button = document.createElement('button');"
@@ -3670,7 +3774,10 @@
 
             (chromium/wait-for-js!
              page
-             "() => window.__gessoFixture.managedCleanupEvents === 1 && document.querySelector('[data-gesso-live-fragment]') === null")
+             "() => window.__gessoFixture.managedCleanupEvents === 1
+                    && window.__gessoFixture.detachedAfterRequests === 1
+                    && window.__gessoFixture.detachedSendAborts === 1
+                    && document.querySelector('[data-gesso-live-fragment]') === null")
 
             (is (= 1
                    (chromium/evaluate
@@ -3678,13 +3785,25 @@
                     "() => window.__gessoFixture.managedCleanupEvents"))
                 "HTMX must emit exactly one cleanup event for the removed managed fragment root.")
 
+            (is (= 1
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.detachedAfterRequests"))
+                "The aborted in-flight XHR must report exactly one afterRequest lifecycle event.")
+
+            (is (= 1
+                   (chromium/evaluate
+                    page
+                    "() => window.__gessoFixture.detachedSendAborts"))
+                "HTMX cleanup must report exactly one sendAbort for request A.")
+
             (is (= 1 (count (fragment-requests server)))
                 "Retirement itself must not promote queued B into a successor.")
 
-            ;; Reuse the old inner target's DOM id deliberately. If stale A
-            ;; re-resolves targets by id or if Gesso retained root ownership,
-            ;; this fresh replacement would be vulnerable to resurrection or
-            ;; mutation by the obsolete response.
+            ;; Reuse the old inner target's DOM id deliberately. Even though
+            ;; HTMX has already physically aborted A, this still verifies that
+            ;; cleanup did not leave behavior ownership capable of resurrecting
+            ;; or mutating a fresh unrelated node with the same id.
             (is
              (true?
               (chromium/evaluate
@@ -3706,17 +3825,13 @@
                     (str "() => document.getElementById('"
                          fragment-id
                          "').textContent")))
-                "The replacement must be present before stale A is released.")
+                "The replacement must survive the real HTMX cleanup/abort lifecycle.")
 
-            ;; A is still a real in-flight XHR owned by HTMX. Let it complete
-            ;; normally after the logical fragment has been retired. HTMX may
-            ;; finish work against its detached target object, but Gesso must
-            ;; not resurrect the fragment or allow queued B to survive cleanup.
+            ;; The client has aborted A, but the deterministic fixture handler
+            ;; remains held until explicitly released. Release it only to retire
+            ;; server-side fixture ownership; the response is no longer a stale
+            ;; browser completion and must not be treated as one.
             (fixture/release! server request-a-id)
-
-            (chromium/wait-for-js!
-             page
-             "() => window.__gessoFixture.detachedAfterRequests === 1")
 
             (is (= "replacement-survivor"
                    (chromium/evaluate
@@ -3724,7 +3839,7 @@
                     (str "() => document.getElementById('"
                          fragment-id
                          "').textContent")))
-                "Stale A must not mutate the fresh replacement that reuses the same DOM id.")
+                "Draining the server-side held request after client abort must not mutate the replacement.")
 
             (is
              (true?
@@ -3737,29 +3852,34 @@
                 "    && replacement.getAttribute('data-fixture-replacement') === 'true'"
                 "    && document.querySelector('[data-gesso-live-fragment]') === null;"
                 "}")))
-             "No managed fragment root may be resurrected by stale completion.")
+             "No managed fragment root may be resurrected after retirement.")
 
             (is (= 1 (count (fragment-requests server)))
                 "Queued canonical B must have been discarded with retirement; no successor GET may appear.")
 
             (is (empty? (fixture/pending-request-ids server))
-                "The stale request must finish without leaving hidden fixture ownership or an illicit successor.")
+                "Draining aborted A must leave no fixture ownership or illicit successor.")
 
             (is (= 0
                    (chromium/evaluate
                     page
                     "() => window.__gessoFixture.sendErrors"))
-                "Normal completion of detached A must not be mistaken for transport failure.")
+                "HTMX sendAbort is distinct from the transport sendError contract.")
 
             (is (= 0
                    (chromium/evaluate
                     page
                     "() => window.__gessoFixture.responseErrors"))
-                "Normal completion of detached A must not be mistaken for HTTP response failure.")
+                "HTMX sendAbort is distinct from an HTTP responseError.")
+
+            (is
+             (true?
+              (consume-expected-managed-fragment-abort-diagnostics!
+               context))
+             "The deliberate physical abort must be consumed through an exact, local diagnostic contract.")
 
             (is (true? (chromium/assert-clean! context))
-                "Managed-fragment retirement followed by stale completion must leave Chromium clean.")))))))
-
+                "After consuming the expected abort diagnostics, fragment retirement must leave Chromium clean.")))))))
 
 (deftest continuity-restore-failure-is-local-and-later-refresh-recovers-test
   (with-real-browser
