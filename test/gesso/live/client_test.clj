@@ -1015,6 +1015,65 @@
         (close-response!
          new-response)))))
 
+(deftest reconnect-closes-displaced-stream-and-preserves-new-owner-test
+  (let [channel
+        (test-channel)
+
+        old-response
+        (connect!
+         channel
+         "client-1"
+         {:label
+          "old"})
+
+        old-stream
+        (:body
+         old-response)
+
+        new-response
+        (connect!
+         channel
+         "client-1"
+         {:label
+          "new"})
+
+        new-stream
+        (:body
+         new-response)]
+
+    (try
+      (is (eventually
+           #(s/closed?
+             old-stream))
+          "Registering a replacement for one logical client id must actively close the displaced physical SSE stream.")
+
+      (is (not
+           (s/closed?
+            new-stream))
+          "The replacement physical stream must remain open.")
+
+      (is (= "new"
+             (get-in
+              (client/connected-clients
+               channel)
+              ["client-1"
+               :test/label]))
+          "The replacement descriptor must remain the current logical owner after the displaced stream closes.")
+
+      (is (= #{"client-1"}
+             (set
+              (client/connected-client-ids
+               channel)))
+          "The displaced stream's close callback must not unregister the replacement owner.")
+
+      (finally
+        ;; old-stream should already be closed by reconnect. Keep cleanup
+        ;; idempotent so a failing implementation does not leak the test stream.
+        (close-response!
+         old-response)
+        (close-response!
+         new-response)))))
+
 (deftest closing-current-stream-after-reconnect-removes-client-test
   (let [channel
         (test-channel)
