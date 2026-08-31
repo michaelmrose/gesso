@@ -214,19 +214,43 @@
                     :dropped-count 0})})))
 
 (defn reset-channel!
-  "Close all connected client streams and clear channel state."
+  "Atomically clear logical channel state, then close the displaced streams.
+
+   Reset has one state-linearization point:
+
+   - registrations committed before that point are part of the displaced state
+     and are closed;
+   - registrations committed after that point belong to the new state and
+     survive;
+   - physical stream closure happens only after the logical reset is visible.
+
+   Keeping close-stream! outside swap-vals! is essential because the atomic
+   update function may be retried under contention and stream closure is a
+   physical side effect."
   [channel]
-  (let [old-state @(:state channel)]
-    (doseq [client (vals (:clients old-state))]
-      (close-stream! (:stream client)))
-    (reset! (:state channel)
-            {:clients {}
-             :pending {}
-             :latest-client-id nil
-             :created-at (now-ms)
-             :sent-count 0
-             :wakeup-count 0
-             :dropped-count 0}))
+  (let [reset-state
+        {:clients {}
+         :pending {}
+         :latest-client-id nil
+         :created-at (now-ms)
+         :sent-count 0
+         :wakeup-count 0
+         :dropped-count 0}
+
+        [old-state _new-state]
+        (swap-vals!
+         (:state channel)
+         (constantly
+          reset-state))]
+
+    (doseq [client
+            (vals
+             (:clients
+              old-state))]
+      (close-stream!
+       (:stream
+        client))))
+
   :reset)
 
 (defn new-client-id
