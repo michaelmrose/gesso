@@ -410,21 +410,62 @@
 ;; Pending OOB fragments
 ;; -----------------------------------------------------------------------------
 
+(def ^:private pending-target-stream-key
+  ::pending-target-stream)
+
 (defn- enqueue-pending!
   [channel client-id fragments]
-  (swap! (:state channel)
-         (fn [state]
-           (-> state
-               (update-in [:pending client-id]
-                          (fnil into [])
-                          fragments)
-               (update :sent-count inc))))
-  client-id)
+  (let [expected-stream
+        (get
+         (meta fragments)
+         pending-target-stream-key)
+
+        enqueued?
+        (volatile!
+         false)]
+
+    (swap!
+     (:state channel)
+     (fn [state]
+       (let [current-stream
+             (get-in
+              state
+              [:clients
+               client-id
+               :stream])]
+         (if
+          (and expected-stream
+               (identical?
+                expected-stream
+                current-stream))
+           (do
+             (vreset!
+              enqueued?
+              true)
+
+             (-> state
+                 (update-in
+                  [:pending client-id]
+                  (fnil into [])
+                  fragments)
+                 (update
+                  :sent-count
+                  inc)))
+
+           state))))
+
+    (when @enqueued?
+      client-id)))
 
 (defn drain-fragments!
-  "Drain and return pending fragments for client-id.
+  "Claim and return the current pending-fragment batch for client-id.
 
    Returns nil when no fragments are pending.
+
+   This is an intentionally destructive, at-most-once claim boundary. Once a
+   batch has been removed from channel state, receiver-specific rendering does
+   not acknowledge it back into the channel and a later rendering failure does
+   not replay it. Work sent after this claim remains pending for a later drain.
 
    Pending fragments are intentionally not rendered here, because some pending
    entries may be functions that need the receiving request ctx. Rendering
@@ -600,27 +641,58 @@
       :woke? ...
       :target ...}"
   [channel {:keys [to fragments] :as request}]
-  (let [fragments' (vec fragments)
-        targets    (clients-matching-target channel to)]
-    (doseq [[client-id _client] targets]
-      (enqueue-pending! channel client-id fragments'))
+  (let [fragments'
+        (vec fragments)
 
-    (let [woke
-          (reduce-kv
-           (fn [n client-id client]
-             (if-let [stream (:stream client)]
-               (do
-                 (wake-client-stream! channel client-id stream)
-                 (inc n))
-               n))
-           0
-           targets)]
-      {:sent (count targets)
-       :woke woke
-       :woke? (pos? woke)
-       :target to
-       :fragment-count (count fragments')
-       :request request})))
+        selected-targets
+        (clients-matching-target
+         channel
+         to)
+
+        enqueued-targets
+        (reduce-kv
+         (fn [targets client-id client]
+           (let [stream
+                 (:stream client)
+
+                 fragments-for-target
+                 (with-meta
+                  fragments'
+                  {pending-target-stream-key
+                   stream})]
+             (if
+              (enqueue-pending!
+               channel
+               client-id
+               fragments-for-target)
+               (assoc
+                targets
+                client-id
+                client)
+               targets)))
+         {}
+         selected-targets)
+
+        woke
+        (reduce-kv
+         (fn [n client-id client]
+           (if-let [stream (:stream client)]
+             (do
+               (wake-client-stream!
+                channel
+                client-id
+                stream)
+               (inc n))
+             n))
+         0
+         enqueued-targets)]
+
+    {:sent (count enqueued-targets)
+     :woke woke
+     :woke? (pos? woke)
+     :target to
+     :fragment-count (count fragments')
+     :request request}))
 
 (defn send-to-client!
   "Send complete OOB fragments to one connected browser client."
