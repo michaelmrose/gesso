@@ -291,12 +291,52 @@
 
 (defn- register-client!
   [channel ctx client-id stream]
-  (let [client (connected-client channel ctx client-id stream)]
-    (swap! (:state channel)
-           (fn [state]
-             (assoc state
-                    :latest-client-id client-id
-                    :clients (assoc (:clients state) client-id client))))
+  (let [client
+        (connected-client
+         channel
+         ctx
+         client-id
+         stream)
+
+        [old-state _new-state]
+        (swap-vals!
+         (:state channel)
+         (fn [state]
+           (assoc
+            state
+            :latest-client-id
+            client-id
+            :clients
+            (assoc
+             (:clients state)
+             client-id
+             client))))
+
+        displaced-stream
+        (get-in
+         old-state
+         [:clients
+          client-id
+          :stream])]
+
+    ;; One logical client id has exactly one current physical stream owner.
+    ;;
+    ;; Install the replacement atomically before closing the displaced stream.
+    ;; The old stream's on-closed callback therefore observes the replacement as
+    ;; current and remove-client-if-same-stream! cannot unregister it.
+    ;;
+    ;; Keep the close outside the atomic update function: swap-vals! may invoke
+    ;; that function more than once under contention, and stream closure is a
+    ;; physical side effect that must happen at most once for this registration.
+    (when
+     (and displaced-stream
+          (not
+           (identical?
+            displaced-stream
+            stream)))
+      (close-stream!
+       displaced-stream))
+
     client))
 
 (defn- wake-client-stream!
@@ -341,10 +381,6 @@
                "connection" "keep-alive"
                "x-accel-buffering" "no"}
      :body stream}))
-
-;; -----------------------------------------------------------------------------
-;; Pending OOB fragments
-;; -----------------------------------------------------------------------------
 
 ;; -----------------------------------------------------------------------------
 ;; Pending OOB fragments
