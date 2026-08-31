@@ -2,11 +2,13 @@
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.live.consistency.xtdb :as xtdb-live]
+   [gesso.live.core :as live]
    [gesso.live.progression.http :as progression.http]
    [xtdb.api :as xt]
    [xtdb.node :as xtn])
   (:import
    [java.time Instant]
+   [java.util.concurrent CountDownLatch TimeUnit]
    [xtdb.api TransactionKey]))
 
 ;; -----------------------------------------------------------------------------
@@ -288,6 +290,92 @@
           after-delete  (q-user-consistent id (:consistency del-result))]
       (is (= id (row-id before-delete)))
       (is (= [] after-delete)))))
+
+
+;; -----------------------------------------------------------------------------
+;; Synced-value concurrency against real XTDB
+;; -----------------------------------------------------------------------------
+
+(deftest live-swap-is-an-atomic-functional-update-test
+  (testing "Concurrent live-swap! calls must not lose an update."
+    (let [id
+          (unique-id "live-swap-atomic")
+
+          synced-value
+          (live/->synced
+           {:table :synced_counters
+            :id id
+            :col :counter/value
+            :topic :counter
+            :default 0})
+
+          ctx
+          {:xtdb/connectable (node)
+           :xtdb/read-connectable (node)}
+
+          ;; Both first applications of f wait here. This forces both public
+          ;; live-swap! calls to complete their initial read before either one
+          ;; is allowed to attempt its write. A correct atomic implementation
+          ;; may retry f after a compare-and-set conflict; retries deliberately
+          ;; skip this one-shot rendezvous.
+          first-read-gate
+          (CountDownLatch. 2)
+
+          swap-future
+          (fn []
+            (let [first-call? (atom true)]
+              (future
+                (live/live-swap!
+                 ctx
+                 synced-value
+                 (fn [old-value]
+                   (when (compare-and-set! first-call? true false)
+                     (.countDown first-read-gate)
+                     (when-not (.await first-read-gate 5 TimeUnit/SECONDS)
+                       (throw
+                        (ex-info
+                         "Timed out waiting for concurrent live-swap! reads."
+                         {}))))
+                   (inc old-value))
+                 {:system {}
+                  :emit false}))))]
+
+      (xtdb-live/execute-tx!
+       (node)
+       [(xtdb-live/put-docs-op
+         :synced_counters
+         {:xt/id id
+          :counter/value 0})])
+
+      (let [a
+            (swap-future)
+
+            b
+            (swap-future)
+
+            result-a
+            (deref a 10000 ::timeout)
+
+            result-b
+            (deref b 10000 ::timeout)]
+
+        (is (not= ::timeout result-a)
+            "The first concurrent live-swap! must terminate.")
+
+        (is (not= ::timeout result-b)
+            "The second concurrent live-swap! must terminate.")
+
+        (is (= [1 2]
+               (sort
+                [(:value result-a)
+                 (:value result-b)]))
+            "Atomic swaps must commit distinct successive values.")
+
+        (is (= 2
+               (live/live-read
+                ctx
+                synced-value))
+            "Two concurrent increments must leave the durable value at 2, never 1.")))))
 
 ;; -----------------------------------------------------------------------------
 ;; Observed submit-tx behavior
