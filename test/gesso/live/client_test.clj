@@ -2978,6 +2978,373 @@ data: client-1
          old-response)))))
 
 ;; -----------------------------------------------------------------------------
+;; Pending OOB semantic policy
+;; -----------------------------------------------------------------------------
+
+(deftest pending-oob-duplicates-remain-distinct-and-ordered-test
+  (let [channel
+        (test-channel)
+
+        response
+        (connect!
+         channel
+         "client-1")]
+
+    (try
+      ;; The generic client layer cannot safely infer that two OOB entries are
+      ;; semantically interchangeable. Different swap modes, receiver-specific
+      ;; rendering, or deliberate repeated effects can make order observable.
+      ;; Therefore pending OOB is an ordered queue of work, not a coalesced map
+      ;; of logical target state.
+      (client/send-to-client!
+       channel
+       "client-1"
+       fragment-a)
+
+      (client/send-to-client!
+       channel
+       "client-1"
+       fragment-a
+       fragment-b)
+
+      (is (= {"client-1" 3}
+             (client/pending-counts
+              channel)))
+
+      (is (= [fragment-a
+              fragment-a
+              fragment-b]
+             (client/drain-fragments!
+              channel
+              "client-1")))
+
+      (is (= {}
+             (client/pending-counts
+              channel)))
+
+      (finally
+        (close-response!
+         response)))))
+
+(deftest pending-drain-claims-one-batch-before-concurrent-send-test
+  (let [channel
+        (test-channel)
+
+        response
+        (connect!
+         channel
+         "client-1")
+
+        render-entered
+        (promise)
+
+        release-render
+        (promise)
+
+        drain-future
+        (atom nil)]
+
+    (try
+      (client/send-to-client!
+       channel
+       "client-1"
+       (fn [_ctx]
+         (deliver
+          render-entered
+          true)
+
+         @release-render
+
+         fragment-a))
+
+      (reset!
+       drain-future
+       (future
+         (client/drain-fragment!
+          channel
+          {:query-params
+           {:client-id
+            "client-1"}})))
+
+      (is (= true
+             (deref
+              render-entered
+              1000
+              ::timeout))
+          "The first pending request must reach receiver-side rendering.")
+
+      (is (= {}
+             (client/pending-counts
+              channel))
+          "A drain claims its current batch before receiver-specific rendering begins.")
+
+      ;; This send is deliberately ordered after the first batch has been
+      ;; claimed but before it has finished rendering. It must become future
+      ;; pending work rather than being spliced into the already-claimed HTTP
+      ;; response.
+      (client/send-to-client!
+       channel
+       "client-1"
+       fragment-b)
+
+      (is (= {"client-1" 1}
+             (client/pending-counts
+              channel)))
+
+      (deliver
+       release-render
+       true)
+
+      (is (= [:div
+              {:data-gesso-live-client-pending
+               true
+
+               :data-gesso-live-client-id
+               "client-1"}
+              fragment-a]
+             (deref
+              @drain-future
+              1000
+              ::timeout))
+          "The already-claimed response contains only its original batch.")
+
+      (is (= [fragment-b]
+             (client/drain-fragments!
+              channel
+              "client-1"))
+          "Work sent after the claim boundary remains queued for the next drain.")
+
+      (is (= {}
+             (client/pending-counts
+              channel)))
+
+      (finally
+        (deliver
+         release-render
+         true)
+
+        (when-let [f
+                   @drain-future]
+          (future-cancel
+           f))
+
+        (close-response!
+         response)))))
+
+(deftest reset-clears-unclaimed-pending-without-replaying-claimed-render-test
+  (let [channel
+        (test-channel)
+
+        response
+        (connect!
+         channel
+         "client-1")
+
+        render-entered
+        (promise)
+
+        release-render
+        (promise)
+
+        drain-future
+        (atom nil)]
+
+    (try
+      (client/send-to-client!
+       channel
+       "client-1"
+       (fn [_ctx]
+         (deliver
+          render-entered
+          true)
+
+         @release-render
+
+         fragment-a))
+
+      (reset!
+       drain-future
+       (future
+         (client/drain-fragment!
+          channel
+          {:query-params
+           {:client-id
+            "client-1"}})))
+
+      (is (= true
+             (deref
+              render-entered
+              1000
+              ::timeout))
+          "The drain must claim its batch before reset is introduced.")
+
+      (is (= :reset
+             (client/reset-channel!
+              channel)))
+
+      (is (= {}
+             (client/pending-counts
+              channel))
+          "Reset clears channel-owned pending state at its linearization point.")
+
+      (deliver
+       release-render
+       true)
+
+      (is (= [:div
+              {:data-gesso-live-client-pending
+               true
+
+               :data-gesso-live-client-id
+               "client-1"}
+              fragment-a]
+             (deref
+              @drain-future
+              1000
+              ::timeout))
+          "Reset does not create a hidden cancellation/acknowledgement protocol for request-local work already claimed by a drain.")
+
+      (is (= {}
+             (client/pending-counts
+              channel))
+          "Already-claimed work is not replayed into channel state after reset.")
+
+      (let [replacement-response
+            (connect!
+             channel
+             "client-1")]
+
+        (try
+          (is (string?
+               (await-result
+                (s/take!
+                 (:body
+                  replacement-response))))
+              "Reconnect still receives the ordinary initial wake.")
+
+          (is (nil?
+               (client/drain-fragments!
+                channel
+                "client-1"))
+              "The claimed pre-reset batch is not replayed after reconnect.")
+
+          (finally
+            (close-response!
+             replacement-response))))
+
+      (finally
+        (deliver
+         release-render
+         true)
+
+        (when-let [f
+                   @drain-future]
+          (future-cancel
+           f))
+
+        (close-response!
+         response)))))
+
+(deftest reset-racing-with-pre-reset-send-cannot-resurrect-pending-work-test
+  (let [channel
+        (test-channel)
+
+        response
+        (connect!
+         channel
+         "client-1")
+
+        enqueue-var
+        (ns-resolve
+         'gesso.live.client
+         'enqueue-pending!)
+
+        original-enqueue-pending!
+        (var-get
+         enqueue-var)
+
+        enqueue-entered
+        (promise)
+
+        release-enqueue
+        (promise)
+
+        send-future
+        (atom nil)]
+
+    (try
+      ;; Pause send! after it has selected the pre-reset connected-client
+      ;; snapshot but before it mutates pending state. Reset then establishes its
+      ;; linearization point. Releasing the stale send afterward must not be able
+      ;; to recreate pending work for the displaced registration.
+      (with-redefs-fn
+       {enqueue-var
+        (fn [channel' client-id fragments]
+          (deliver
+           enqueue-entered
+           true)
+
+          @release-enqueue
+
+          (original-enqueue-pending!
+           channel'
+           client-id
+           fragments))}
+
+       (fn []
+         (reset!
+          send-future
+          (future
+            (client/send-to-client!
+             channel
+             "client-1"
+             fragment-a)))
+
+         (is (= true
+                (deref
+                 enqueue-entered
+                 1000
+                 ::timeout))
+             "The send must have selected its pre-reset target before reset linearizes.")
+
+         (is (= :reset
+                (client/reset-channel!
+                 channel)))
+
+         (deliver
+          release-enqueue
+          true)
+
+         (is (map?
+              (deref
+               @send-future
+               1000
+               ::timeout))
+             "The racing send must complete instead of deadlocking around reset.")))
+
+      (is (= []
+             (client/connected-client-ids
+              channel)))
+
+      (is (= {}
+             (client/pending-counts
+              channel))
+          "A send whose selected registration was displaced by reset must not resurrect pre-reset pending work afterward.")
+
+      (finally
+        (deliver
+         release-enqueue
+         true)
+
+        (when-let [f
+                   @send-future]
+          (future-cancel
+           f))
+
+        (close-response!
+         response)))))
+
+;; -----------------------------------------------------------------------------
 ;; App-policy boundary
 ;; -----------------------------------------------------------------------------
 
