@@ -2650,6 +2650,333 @@ data: client-1
           (close-response!
            second-response))))))
 
+
+;; -----------------------------------------------------------------------------
+;; Deterministic lifecycle policy
+;; -----------------------------------------------------------------------------
+
+(deftest replacement-preserves-one-at-most-once-pending-delivery-test
+  (let [channel
+        (test-channel)
+
+        old-response
+        (connect!
+         channel
+         "client-1")]
+
+    (try
+      ;; Consume the old connection's initial wake, then queue exactly one OOB
+      ;; delivery before replacing its physical stream.
+      (is (string?
+           (await-result
+            (s/take!
+             (:body
+              old-response)))))
+
+      (client/send-to-client!
+       channel
+       "client-1"
+       fragment-a)
+
+      (let [new-response
+            (connect!
+             channel
+             "client-1")]
+
+        (try
+          (is (eventually
+               #(s/closed?
+                 (:body
+                  old-response)))
+              "Replacement must retire the displaced physical stream.")
+
+          ;; The reconnect wake tells the browser to fetch whatever is currently
+          ;; pending. Replacing transport ownership must neither lose nor clone
+          ;; the logical pending entry.
+          (is (= "event: client-oob\ndata: client-1\n\n"
+                 (await-result
+                  (s/take!
+                   (:body
+                    new-response)))))
+
+          (is (= [fragment-a]
+                 (client/drain-fragments!
+                  channel
+                  "client-1")))
+
+          (is (nil?
+               (client/drain-fragments!
+                channel
+                "client-1"))
+              "Pending delivery is destructive/at-most-once, not replayable.")
+
+          (is (= {}
+                 (client/pending-counts
+                  channel)))
+
+          (finally
+            (close-response!
+             new-response))))
+
+      (finally
+        (close-response!
+         old-response)))))
+
+(deftest rejected-wake-preserves-work-for-later-reconnect-test
+  (let [channel
+        (test-channel)
+
+        response
+        (connect!
+         channel
+         "client-1")
+
+        rejected-stream
+        (s/stream 1)]
+
+    (try
+      ;; Consume the real connection wake before replacing the runtime stream
+      ;; with a deterministically closed Manifold stream.
+      (is (string?
+           (await-result
+            (s/take!
+             (:body
+              response)))))
+
+      (s/close!
+       rejected-stream)
+
+      (swap!
+       (:state
+        channel)
+       assoc-in
+       [:clients
+        "client-1"
+        :stream]
+       rejected-stream)
+
+      (client/send-to-client!
+       channel
+       "client-1"
+       fragment-a)
+
+      (is (eventually
+           #(empty?
+             (client/connected-client-ids
+              channel)))
+          "Rejected physical wake removes the failed current registration.")
+
+      (is (= {"client-1" 1}
+             (client/pending-counts
+              channel))
+          "Wake failure must not pretend the queued OOB payload was delivered.")
+
+      (let [reconnected-response
+            (connect!
+             channel
+             "client-1")]
+
+        (try
+          (is (= "event: client-oob\ndata: client-1\n\n"
+                 (await-result
+                  (s/take!
+                   (:body
+                    reconnected-response))))
+              "Reconnect must wake the browser so surviving pending work can be fetched.")
+
+          (is (= [fragment-a]
+                 (client/drain-fragments!
+                  channel
+                  "client-1")))
+
+          (is (nil?
+               (client/drain-fragments!
+                channel
+                "client-1"))
+              "Surviving work is still at-most-once once claimed by a drain.")
+
+          (finally
+            (close-response!
+             reconnected-response))))
+
+      (finally
+        (s/close!
+         rejected-stream)
+
+        (close-response!
+         response)))))
+
+(deftest pending-render-failure-is-explicitly-at-most-once-test
+  (let [channel
+        (test-channel)
+
+        response
+        (connect!
+         channel
+         "client-1")
+
+        render-count
+        (atom 0)
+
+        render-error
+        (ex-info
+         "fixture pending render failure"
+         {:fixture/error
+          :pending-render-failure})]
+
+    (try
+      (client/send-to-client!
+       channel
+       "client-1"
+       (fn [_ctx]
+         (swap!
+          render-count
+          inc)
+
+         (throw
+          render-error)))
+
+      (is (identical?
+           render-error
+           (try
+             (client/drain-fragment!
+              channel
+              {:query-params
+               {:client-id
+                "client-1"}})
+
+             nil
+
+             (catch clojure.lang.ExceptionInfo error
+               error)))
+          "Receiver-side render failure must remain visible to the caller.")
+
+      (is (= 1
+             @render-count))
+
+      (is (= {}
+             (client/pending-counts
+              channel))
+          "The pending entry is claimed by drain before rendering; there is no hidden acknowledgement/retry protocol.")
+
+      (is (nil?
+           (client/drain-fragment!
+            channel
+            {:query-params
+             {:client-id
+              "client-1"}}))
+          "A failed render is not silently replayed on the next pending fetch.")
+
+      (is (= 1
+             @render-count)
+          "At-most-once policy means the failed entry is not rendered twice.")
+
+      (finally
+        (close-response!
+         response)))))
+
+(deftest reset-linearizes-before-closing-displaced-streams-test
+  (let [channel
+        (test-channel)
+
+        old-response
+        (connect!
+         channel
+         "client-1")
+
+        old-stream
+        (:body
+         old-response)
+
+        close-stream-var
+        (ns-resolve
+         'gesso.live.client
+         'close-stream!)
+
+        original-close-stream!
+        (var-get
+         close-stream-var)
+
+        replacement-response
+        (atom nil)
+
+        installed?
+        (atom false)]
+
+    (try
+      ;; Force a new registration at the exact physical-close seam used by
+      ;; reset-channel!. A correct reset first atomically publishes the empty
+      ;; post-reset state and only then closes streams displaced by that state
+      ;; transition. The registration below is therefore logically after reset
+      ;; and must survive.
+      ;;
+      ;; The pre-v7.380 implementation snapshots state, closes old streams, and
+      ;; only afterward reset!s the atom. Under that ordering this new stream is
+      ;; left physically open while its just-created registration is silently
+      ;; erased -- a real stream leak.
+      (with-redefs-fn
+       {close-stream-var
+        (fn [stream]
+          (when
+           (and
+            (identical?
+             stream
+             old-stream)
+
+            (compare-and-set!
+             installed?
+             false
+             true))
+
+            (reset!
+             replacement-response
+             (connect!
+              channel
+              "client-2")))
+
+          (original-close-stream!
+           stream))}
+
+       (fn []
+         (is (= :reset
+                (client/reset-channel!
+                 channel)))))
+
+      (let [new-response
+            @replacement-response]
+
+        (is (some?
+             new-response)
+            "The deterministic close seam must install the racing replacement.")
+
+        (is (not
+             (s/closed?
+              (:body
+               new-response)))
+            "A registration logically after reset must remain physically live.")
+
+        (is (= #{"client-2"}
+               (set
+                (client/connected-client-ids
+                 channel)))
+            "Reset must not erase a registration created after its atomic linearization point.")
+
+        (is (= "client-2"
+               (client/latest-client-id
+                channel)))
+
+        (is (= {}
+               (client/pending-counts
+                channel))
+            "Reset still clears all pending work that existed before its linearization point.")
+
+        (close-response!
+         new-response))
+
+      (finally
+        (close-response!
+         old-response)))))
+
 ;; -----------------------------------------------------------------------------
 ;; App-policy boundary
 ;; -----------------------------------------------------------------------------
