@@ -3344,6 +3344,156 @@ data: client-1
         (close-response!
          response)))))
 
+(deftest reset-racing-with-pre-reset-send-cannot-target-same-id-reconnect-test
+  (let [channel
+        (test-channel)
+
+        old-response
+        (connect!
+         channel
+         "client-1"
+         {:label
+          "old"})
+
+        enqueue-var
+        (ns-resolve
+         'gesso.live.client
+         'enqueue-pending!)
+
+        original-enqueue-pending!
+        (var-get
+         enqueue-var)
+
+        enqueue-entered
+        (promise)
+
+        release-enqueue
+        (promise)
+
+        send-future
+        (atom nil)
+
+        replacement-response
+        (atom nil)]
+
+    (try
+      ;; A logical client id may be reused after reset, but that does not make
+      ;; the replacement physical registration the owner of work selected for
+      ;; the displaced stream. Pause the old send after target selection, reset,
+      ;; reconnect the same id with a new stream, then let the stale send resume.
+      (with-redefs-fn
+       {enqueue-var
+        (fn [channel' client-id fragments]
+          (deliver
+           enqueue-entered
+           true)
+
+          @release-enqueue
+
+          (original-enqueue-pending!
+           channel'
+           client-id
+           fragments))}
+
+       (fn []
+         (reset!
+          send-future
+          (future
+            (client/send-to-client!
+             channel
+             "client-1"
+             fragment-a)))
+
+         (is (= true
+                (deref
+                 enqueue-entered
+                 1000
+                 ::timeout))
+             "The stale send must have selected the old physical registration before reset linearizes.")
+
+         (is (= :reset
+                (client/reset-channel!
+                 channel)))
+
+         (reset!
+          replacement-response
+          (connect!
+           channel
+           "client-1"
+           {:label
+            "replacement"}))
+
+         (is (= "replacement"
+                (get-in
+                 (client/connected-clients
+                  channel)
+                 ["client-1"
+                  :test/label]))
+             "The same logical client id now belongs to a new physical stream.")
+
+         (deliver
+          release-enqueue
+          true)
+
+         (let [stale-result
+               (deref
+                @send-future
+                1000
+                ::timeout)]
+           (is (= 0
+                  (:sent
+                   stale-result))
+               "Work selected for the displaced stream must not transfer to a same-id replacement registration.")
+
+           (is (= 0
+                  (:woke
+                   stale-result))
+               "A rejected stale enqueue must not wake the replacement stream."))))
+
+      (is (= {}
+             (client/pending-counts
+              channel))
+          "The stale pre-reset send must leave no pending work on the replacement owner.")
+
+      (let [fresh-result
+            (client/send-to-client!
+             channel
+             "client-1"
+             fragment-b)]
+        (is (= 1
+               (:sent
+                fresh-result))
+            "The replacement registration must still accept work selected after reconnect.")
+
+        (is (= {"client-1"
+                1}
+               (client/pending-counts
+                channel)))
+
+        (is (= [fragment-b]
+               (client/drain-fragments!
+                channel
+                "client-1"))
+            "Only fresh work selected for the replacement stream may be drained."))
+
+      (finally
+        (deliver
+         release-enqueue
+         true)
+
+        (when-let [f
+                   @send-future]
+          (future-cancel
+           f))
+
+        (close-response!
+         old-response)
+
+        (when-let [response
+                   @replacement-response]
+          (close-response!
+           response))))))
+
 ;; -----------------------------------------------------------------------------
 ;; App-policy boundary
 ;; -----------------------------------------------------------------------------
