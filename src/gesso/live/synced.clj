@@ -252,6 +252,56 @@
   (let [{:keys [table]} (require-synced! synced)]
     [(live.xtdb/put-docs-op table (doc synced value))]))
 
+(defn- assert-current-value-op
+  "Build the XTDB ASSERT used by guarded-tx-ops.
+
+   The guard matches the logical value returned by live-read rather than only
+   the physical column representation. In particular, XTDB omits a selected
+   column whose current value is SQL NULL, and value-from-row maps a missing
+   row/column to the descriptor default. Therefore, when expected equals the
+   descriptor default, absence/NULL/default-valued rows are all valid current
+   representations of that same logical synced value.
+
+   Identifier text is interpolated only after the descriptor's existing strict
+   SQL identifier validation has succeeded. Values remain transaction
+   parameters."
+  [synced expected]
+  (let [{:keys [table id col default]} (require-synced! synced)
+        table-sql (require-sql-ident! :table table)
+        col-sql   (require-sql-column! col)]
+    (if (= expected default)
+      [:sql
+       (str
+        "ASSERT ("
+        "NOT EXISTS (SELECT 1 FROM " table-sql " WHERE _id = ?) "
+        "OR EXISTS (SELECT 1 FROM " table-sql
+        " WHERE _id = ? AND (" col-sql " IS NULL OR " col-sql " = ?))"
+        ")")
+       [id id expected]]
+      [:sql
+       (str
+        "ASSERT EXISTS (SELECT 1 FROM " table-sql
+        " WHERE _id = ? AND " col-sql " = ?)")
+       [id expected]])))
+
+(defn guarded-tx-ops
+  "Build one compare-and-set transaction for a synced value.
+
+   expected is the logical value previously observed through live-read. The
+   returned transaction first ASSERTs that the current authoritative XTDB value
+   still represents expected and only then puts new-value. XTDB executes those
+   operations atomically in one transaction.
+
+   If another transaction changes the synced value first, XTDB aborts this
+   transaction with :xtdb/assert-failed. The caller is responsible for deciding
+   whether to retry by rereading and reapplying its update function.
+
+   This helper does not itself retry, emit invalidations, or claim that an
+   aborted transaction committed."
+  [synced expected new-value]
+  [(assert-current-value-op synced expected)
+   (first (tx-ops synced new-value))])
+
 (defn change
   "Build the primary live change for a synced value.
 
