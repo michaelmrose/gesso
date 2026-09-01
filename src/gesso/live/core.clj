@@ -1316,10 +1316,99 @@
                   :entry-fn (:entry-fn options')})]
      (assoc result :value value))))
 
-(defn live-swap!
-  "Read a synced value, apply f to it, set the result, and notify subscribers.
+(defn- xtdb-assert-failed?
+  "Return true when error or one of its causes is XTDB's ASSERT conflict.
 
-   f is called as a unary function with the current value.
+   Guarded synced swaps use XTDB ASSERT as their compare-and-set boundary. Only
+   that conflict is retryable. Post-commit delivery failures and every other
+   transaction/read/application failure must escape unchanged."
+  [error]
+  (loop [cause error
+         depth 0]
+    (cond
+      (nil? cause)
+      false
+
+      (= :xtdb/assert-failed
+         (:xtdb.error/code (ex-data cause)))
+      true
+
+      (>= depth 32)
+      false
+
+      :else
+      (recur (.getCause ^Throwable cause)
+             (inc depth)))))
+
+(defn- live-swap-read-options
+  "Build query options for an authoritative guarded-swap read.
+
+   live-swap! is a mutation primitive, so it must compute f from the current
+   authoritative value rather than from a request's historical fragment basis.
+   Explicit snapshot coordinates are therefore removed. Other ordinary query
+   options are retained, and an explicit transaction database owns the read
+   database as well."
+  [options]
+  (let [options' (or options {})
+        read-options (dissoc (or (:read-options options') {})
+                             :snapshot-time
+                             :snapshot-token)
+        tx-database (get-in options' [:tx-options :database])]
+    (cond-> read-options
+      tx-database
+      (assoc :database tx-database))))
+
+(defn- live-swap-write-connectable
+  "Return the mutation connectable without misclassifying XTDB record values as ctx maps."
+  [ctx]
+  (if (and (map? ctx)
+           (some #(contains? ctx %)
+                 [:xtdb/connectable
+                  :xtdb/conn
+                  :xtdb/node
+                  :biff.xtdb/node
+                  :biff/conn
+                  :biff/node]))
+    (live.xtdb/connectable-from ctx)
+    ctx))
+
+(defn- live-swap-current-value
+  "Read a synced value from the write connectable without request snapshot pinning."
+  [ctx synced-value read-options]
+  ;; synced/live-read expects a context-like value. Wrap the write connectable so
+  ;; XTDB node records, which satisfy map?, are not mistaken for a context map by
+  ;; consistency.xtdb/read-connectable-from.
+  (synced/live-read
+   {:xtdb/read-connectable (live-swap-write-connectable ctx)}
+   synced-value
+   read-options))
+
+(defn live-swap!
+  "Atomically apply f to the current authoritative synced value.
+
+   Each attempt reads the value from the XTDB write connectable, applies f, and
+   submits one transaction containing an ASSERT of the observed value followed
+   by the replacement PUT. If another transaction wins first, XTDB aborts the
+   guarded transaction and live-swap! rereads/reapplies f until one attempt
+   commits. This gives the helper genuine compare-and-set swap semantics instead
+   of an unguarded read/modify/write that can lose concurrent updates.
+
+   As with clojure.core/swap!, f may be invoked more than once and therefore
+   should be free of externally visible side effects. Failed ASSERT attempts do
+   not publish live invalidations. Once a transaction commits, any subsequent
+   publication failure remains a classified post-commit delivery failure and is
+   never retried as a mutation.
+
+   Request-scoped :gesso.live/consistency and :gesso.live/progression describe
+   observation requirements and are intentionally not used as the mutation's
+   read basis. :read-options may still supply ordinary XTDB query options, but
+   :snapshot-time and :snapshot-token are ignored for this operation. When
+   :tx-options contains :database, that database is also used for the guarded
+   read.
+
+   Other options match live-set!: :system, :emit, :tx-options, :entry,
+   :entry-fn, :change, :data, and :change/kind. Generated changes describe the
+   old/new values of the attempt that actually committed.
 
    Example:
 
@@ -1327,12 +1416,48 @@
   ([ctx synced-value f]
    (live-swap! ctx synced-value f nil))
   ([ctx synced-value f options]
-   (let [old-value (live-read ctx synced-value (:read-options options))
-         new-value (f old-value)
-         options' (assoc (or options {})
-                         :old-value old-value
-                         :new-value new-value)]
-     (live-set! ctx synced-value new-value options'))))
+   (let [options' (or options {})
+         system (system-from ctx options')
+         read-options (live-swap-read-options options')
+         entry' (if (contains? options' :entry)
+                  (:entry options')
+                  (synced/entry synced-value))]
+     (loop []
+       (let [old-value (live-swap-current-value
+                        ctx
+                        synced-value
+                        read-options)
+             new-value (f old-value)
+             change-options (assoc options'
+                                   :old-value old-value
+                                   :new-value new-value)
+             change' (or (:change options')
+                         (synced/change
+                          synced-value
+                          new-value
+                          change-options))]
+         (let [[status result]
+              (try
+                [:committed
+                 (transact-and-notify!
+                  system
+                  ctx
+                  {:tx-ops (synced/guarded-tx-ops
+                            synced-value
+                            old-value
+                            new-value)
+                   :change change'
+                   :tx-options (:tx-options options')
+                   :emit (:emit options')
+                   :entry entry'
+                   :entry-fn (:entry-fn options')})]
+                (catch Throwable error
+                  (if (xtdb-assert-failed? error)
+                    [:retry nil]
+                    (throw error))))]
+          (if (= :retry status)
+            (recur)
+            (assoc result :value new-value))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Flow and SSE
