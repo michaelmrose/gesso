@@ -233,23 +233,16 @@
            :tx-id 42
            :ignored true}))))
 
-(deftest attach-consistency-assocs-normalized-consistency-onto-change-test
-  (is (= (assoc request-change
-                :gesso.live/consistency
-                {:snapshot-time :snapshot-1
-                 :tx-id 42})
-         (live/attach-consistency
-          request-change
-          {:snapshot-time :snapshot-1
-           :tx-id 42
-           :ignored true}))))
+(deftest transaction-consistency-attachment-is-not-public-core-api-test
+  (let [publics (ns-publics 'gesso.live.core)]
+    (testing "explicit read-context consistency helpers remain public"
+      (is (contains? publics 'consistency))
+      (is (contains? publics 'with-consistency)))
 
-(deftest attach-consistency-leaves-change-alone-when-consistency-is-empty-test
-  (is (= request-change
-         (live/attach-consistency request-change nil)))
-
-  (is (= request-change
-         (live/attach-consistency request-change {:ignored true}))))
+    (testing "transaction-derived change consistency is attached only inside the mutation boundary"
+      (is (contains? publics 'transact-and-notify!))
+      (is (not (contains? publics 'attach-consistency))
+          "change consistency attachment must remain an internal transaction step"))))
 
 ;; -----------------------------------------------------------------------------
 ;; Progression ctx/change helpers
