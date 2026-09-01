@@ -185,66 +185,23 @@
         (is (= [ctx query {:key-fn :kebab-case-keyword}]
                @seen))))))
 
-(deftest execute-tx-facade-delegates-to-xtdb-helper-test
-  (let [seen (atom nil)
-        ctx {:xtdb/connectable :node}]
-    (with-xtdb-stub
-      'execute-tx-from!
-      (fn
-        ([ctx' tx-ops]
-         (reset! seen [ctx' tx-ops])
-         {:tx-result {:tx-id 1}
-          :consistency {:tx-id 1}})
-        ([ctx' tx-ops opts]
-         (reset! seen [ctx' tx-ops opts])
-         {:tx-result {:tx-id 2}
-          :consistency {:tx-id 2}}))
-      (fn []
-        (is (= {:tx-result {:tx-id 1}
-                :consistency {:tx-id 1}}
-               (live/execute-tx! ctx sample-tx)))
-        (is (= [ctx sample-tx]
-               @seen))
+(deftest raw-xtdb-write-facades-are-not-public-core-api-test
+  (let [publics (ns-publics 'gesso.live.core)]
+    (testing "core keeps the authoritative Live mutation boundary public"
+      (is (contains? publics 'transact-and-notify!))
+      (is (contains? publics 'live-set!))
+      (is (contains? publics 'live-swap!)))
 
-        (is (= {:tx-result {:tx-id 2}
-                :consistency {:tx-id 2}}
-               (live/execute-tx! ctx sample-tx {:database :xtdb})))
-        (is (= [ctx sample-tx {:database :xtdb}]
-               @seen))))))
+    (testing "raw XTDB mutation helpers stay in the XTDB adapter instead of the Live core facade"
+      (doseq [sym '[execute-tx!
+                    submit-tx!
+                    put-docs-op
+                    delete-docs-op]]
+        (is (not (contains? publics sym))
+            (str "raw XTDB write helper must not be public through gesso.live.core: " sym))))
 
-(deftest submit-tx-facade-delegates-to-xtdb-helper-test
-  (let [seen (atom nil)
-        ctx {:xtdb/connectable :node}]
-    (with-xtdb-stub
-      'submit-tx-from!
-      (fn
-        ([ctx' tx-ops]
-         (reset! seen [ctx' tx-ops])
-         {:tx-result {:tx-id 1}
-          :consistency {:tx-id 1}})
-        ([ctx' tx-ops opts]
-         (reset! seen [ctx' tx-ops opts])
-         {:tx-result {:tx-id 2}
-          :consistency {:tx-id 2}}))
-      (fn []
-        (is (= {:tx-result {:tx-id 1}
-                :consistency {:tx-id 1}}
-               (live/submit-tx! ctx sample-tx)))
-        (is (= [ctx sample-tx]
-               @seen))
-
-        (is (= {:tx-result {:tx-id 2}
-                :consistency {:tx-id 2}}
-               (live/submit-tx! ctx sample-tx {:database :xtdb})))
-        (is (= [ctx sample-tx {:database :xtdb}]
-               @seen))))))
-
-(deftest tx-op-facades-delegate-to-xtdb-helper-test
-  (is (= (xtdb-live/put-docs-op :requests {:xt/id "req-1"})
-         (live/put-docs-op :requests {:xt/id "req-1"})))
-
-  (is (= (xtdb-live/delete-docs-op :requests "req-1")
-         (live/delete-docs-op :requests "req-1"))))
+    (testing "the progression-aware read facade remains intentionally public"
+      (is (contains? publics 'q)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency ctx helpers
