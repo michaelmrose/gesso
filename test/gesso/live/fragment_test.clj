@@ -4,6 +4,7 @@
    [clojure.test :refer [deftest is testing]]
    [gesso.live.fragment :as fragment]
    [gesso.live.model :as model]
+   [gesso.live.progression :as progression]
    [missionary.core :as m]))
 
 ;; -----------------------------------------------------------------------------
@@ -274,24 +275,69 @@
          (fragment/fragment-key :store-queue))))
 
 (deftest fragment-key-includes-known-dimensions-in-stable-order-test
-  (is (= [:gesso.live.fragment :store-queue
-          :scope [:store "store-1"]
-          :user-key [:user "u-1"]
-          :variant :compact
-          :params {:page 1}
-          :locale :en
-          :theme :dark
-          :consistency-token "tx-1"]
-         (fragment/fragment-key
-          :store-queue
-          {:theme :dark
-           :params {:page 1}
-           :scope [:store "store-1"]
-           :unknown :ignored
-           :consistency-token "tx-1"
-           :variant :compact
-           :user-key [:user "u-1"]
-           :locale :en}))))
+  (let [requirement (progression/requirement-from-bases
+                     [:basis/store-1 :basis/index-7])]
+    (is (= [:gesso.live.fragment :store-queue
+            :scope [:store "store-1"]
+            :user-key [:user "u-1"]
+            :variant :compact
+            :params {:page 1}
+            :locale :en
+            :theme :dark
+            :progression requirement]
+           (fragment/fragment-key
+            :store-queue
+            {:theme :dark
+             :params {:page 1}
+             :scope [:store "store-1"]
+             :unknown :ignored
+             :progression requirement
+             :variant :compact
+             :user-key [:user "u-1"]
+             :locale :en})))))
+
+(deftest fragment-key-normalizes-orderless-progression-test
+  (let [forward (progression/requirement-from-bases
+                 [:basis/store-1 :basis/index-7])
+        reverse (progression/requirement-from-bases
+                 [:basis/index-7 :basis/store-1])]
+    (is (= forward reverse))
+    (is (= (fragment/fragment-key :store-queue {:progression forward})
+           (fragment/fragment-key :store-queue {:progression reverse})))))
+
+(deftest fragment-key-separates-distinct-progression-requirements-test
+  (let [before (progression/requirement :basis/before)
+        after (progression/requirement :basis/after)]
+    (is (not= before after))
+    (is (not= (fragment/fragment-key :store-queue {:progression before})
+              (fragment/fragment-key :store-queue {:progression after})))))
+
+(deftest fragment-key-omits-nil-progression-test
+  (is (= (fragment/fragment-key :store-queue)
+         (fragment/fragment-key :store-queue {:progression nil}))))
+
+(deftest fragment-key-rejects-malformed-progression-test
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"normalized non-empty Gesso Live progression requirement"
+       (fragment/fragment-key
+        :store-queue
+        {:progression {:basis :not-a-requirement}}))))
+
+(deftest fragment-key-rejects-retired-consistency-token-test
+  (let [error
+        (try
+          (fragment/fragment-key
+           :store-queue
+           {:consistency-token "tx-1"})
+          nil
+          (catch clojure.lang.ExceptionInfo e
+            e))]
+    (is (some? error))
+    (is (re-find #"no longer accept :consistency-token"
+                 (ex-message error)))
+    (is (= :consistency-token
+           (:unsupported-dimension (ex-data error))))))
 
 (deftest strict-fragment-key-requires-fragment-scope-and-user-key-test
   (is (thrown-with-msg?
@@ -319,17 +365,18 @@
                                       :user-key [:user "u-1"]}))))
 
 (deftest strict-fragment-key-builds-key-test
-  (is (= [:gesso.live.fragment :store-queue
-          :scope [:store "store-1"]
-          :user-key [:user "u-1"]
-          :params {:page 1}
-          :consistency-token "tx-1"]
-         (fragment/strict-fragment-key
-          {:fragment :store-queue
-           :scope [:store "store-1"]
-           :user-key [:user "u-1"]
-           :params {:page 1}
-           :consistency-token "tx-1"}))))
+  (let [requirement (progression/requirement :basis/store-1)]
+    (is (= [:gesso.live.fragment :store-queue
+            :scope [:store "store-1"]
+            :user-key [:user "u-1"]
+            :params {:page 1}
+            :progression requirement]
+           (fragment/strict-fragment-key
+            {:fragment :store-queue
+             :scope [:store "store-1"]
+             :user-key [:user "u-1"]
+             :params {:page 1}
+             :progression requirement})))))
 
 ;; -----------------------------------------------------------------------------
 ;; Manager stats and validation
