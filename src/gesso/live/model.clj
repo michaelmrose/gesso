@@ -20,9 +20,10 @@
     - This namespace does not know about gesso.live.ui, SSE, Manifold, Missionary
       transports, dispatcher queues, or concrete live runtime startup.
 
-    - :request-policy and :consistency are model metadata in this namespace.
-      They are exposed through fragment descriptors and explain-live-app.
-      They are not passed through to live UI runtime helpers here.
+    - Fragment :request-policy and :consistency metadata from the older Live
+      model are intentionally unsupported. The current runtime does not enforce
+      those declarations, so accepting them would let compiled metadata claim
+      guarantees it does not provide.
 
     - render-fragment-response requires an explicit response renderer, either
       via opts {:response ...} or compiled app metadata {:response ...}. This
@@ -130,9 +131,7 @@
    [:id-fn callable-schema]
    [:query callable-schema]
    [:render callable-schema]
-   [:swap {:optional true} keyword?]
-   [:consistency {:optional true} [:or keyword? map?]]
-   [:request-policy {:optional true} [:or keyword? map?]]])
+   [:swap {:optional true} keyword?]])
 
 (def live-app-schema
   [:map
@@ -269,10 +268,7 @@
       (assoc :id-fn (default-fragment-id-fn fragment-name))
 
       (nil? (:swap fragment))
-      (assoc :swap :outerHTML)
-
-      (nil? (:request-policy fragment))
-      (assoc :request-policy :default-safe-live-fragment))))
+      (assoc :swap :outerHTML))))
 
 (defn normalize-fragments
   [fragments]
@@ -354,6 +350,24 @@
          {:scope scope-name
           :known-scopes (sort known)})))))
 
+(def stale-fragment-metadata-keys
+  #{:request-policy :consistency})
+
+(defn fragment-unsupported-metadata-errors
+  [{:keys [fragments]}]
+  (when (map? fragments)
+    (for [[fragment-name fragment] fragments
+          :when (map? fragment)
+          stale-key stale-fragment-metadata-keys
+          :when (contains? fragment stale-key)]
+      (validation-error
+       :unsupported-fragment-metadata
+       [:fragments fragment-name stale-key]
+       "Fragment metadata key is unsupported because the current Live runtime does not enforce it."
+       {:fragment fragment-name
+        :key stale-key
+        :unsupported-keys stale-fragment-metadata-keys}))))
+
 (defn graph-missing-id-key-errors
   [{:keys [scopes graph]}]
   ;; After normalization, known scopes should have inherited :id-key. If a known
@@ -382,6 +396,7 @@
     (duplicate-topic-errors (:scopes app))
     (graph-unknown-scope-errors app)
     (fragment-unknown-scope-errors app)
+    (fragment-unsupported-metadata-errors app)
     (graph-missing-id-key-errors app))))
 
 (defn validate-normalized-live-app
@@ -655,9 +670,7 @@
                 [k (select-keys fragment
                                 [:name
                                  :scope
-                                 :swap
-                                 :consistency
-                                 :request-policy])]))
+                                 :swap])]))
          (:fragments compiled))
 
    :events
