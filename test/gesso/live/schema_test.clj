@@ -8,14 +8,47 @@
 ;; Schema lookup
 ;; -----------------------------------------------------------------------------
 
+(def ^:private retired-schema-keys
+  #{:gesso.live/positive-milliseconds
+    :gesso.live/scopes
+    :gesso.live/dispatch-mode
+    :gesso.live/dispatch-options
+    :gesso.live/core-emit-options
+    :gesso.live/stream-handler-options
+    :gesso.live/coalesce-by-options
+    :gesso.live/isolation-options
+    :gesso.live/fragment-config
+    :gesso.live/fragment-cache-options
+    :gesso.live/fragment-singleflight-options
+    :gesso.live/sse-response-options
+    :gesso.live/sse-frame-event
+    :gesso.live/client-descriptor
+    :gesso.live/oob-target
+    :gesso.live/oob-send-options})
+
 (deftest schema-lookup-test
-  (testing "known schema keys resolve"
-    (is (some? (schema/schema :gesso.live/primary-change)))
-    (is (some? (schema/schema :gesso.live/invalidation)))
-    (is (some? (schema/schema :gesso.live/subscription)))
-    (is (some? (schema/schema :gesso.live/live-event)))
-    (is (some? (schema/schema :gesso.live/progression)))
-    (is (some? (schema/schema :gesso.live/fragment-config))))
+  (testing "current runtime boundary schema keys resolve"
+    (doseq [schema-key [:gesso.live/primary-change
+                        :gesso.live/invalidation
+                        :gesso.live/subscription
+                        :gesso.live/live-event
+                        :gesso.live/progression
+                        :gesso.live/invalidation-rules
+                        :gesso.live/invalidation-options
+                        :gesso.live/source-options
+                        :gesso.live/dispatcher-options
+                        :gesso.live/flow-for-subscription-options
+                        :gesso.live/invalidation-event-options]]
+      (is (some? (schema/schema schema-key))
+          (str "current schema should resolve: " schema-key))))
+
+  (testing "retired schemas no longer advertise unenforced or obsolete contracts"
+    (doseq [schema-key retired-schema-keys]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Unknown gesso.live schema key"
+           (schema/schema schema-key))
+          (str "retired schema should not resolve: " schema-key))))
 
   (testing "unknown schema keys throw useful errors"
     (is (thrown-with-msg?
@@ -49,19 +82,10 @@
     (is (schema/validate :gesso.live/event-ref 'live-update))
     (is (not (schema/validate :gesso.live/event-ref ""))))
 
-  (testing "milliseconds are non-negative and positive milliseconds are positive"
+  (testing "milliseconds are non-negative"
     (is (schema/validate :gesso.live/milliseconds 0))
     (is (schema/validate :gesso.live/milliseconds 15000))
-    (is (not (schema/validate :gesso.live/milliseconds -1)))
-
-    (is (schema/validate :gesso.live/positive-milliseconds 1))
-    (is (not (schema/validate :gesso.live/positive-milliseconds 0)))
-    (is (not (schema/validate :gesso.live/positive-milliseconds -1))))
-
-  (testing "scopes may be a set or a sequential collection"
-    (is (schema/validate :gesso.live/scopes #{[:user "u1"]}))
-    (is (schema/validate :gesso.live/scopes [[:user "u1"]]))
-    (is (not (schema/validate :gesso.live/scopes {:user "u1"})))))
+    (is (not (schema/validate :gesso.live/milliseconds -1)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Authoritative progression
@@ -331,40 +355,20 @@
           {:on-unmatched :explode})))))
 
 ;; -----------------------------------------------------------------------------
-;; Source, dispatch, core, and stream options
+;; Current runtime option boundaries
 ;; -----------------------------------------------------------------------------
 
-(deftest source-and-dispatch-options-test
+(deftest source-and-dispatcher-options-test
   (testing "source options validate"
     (is (schema/validate
          :gesso.live/source-options
          {:id :app/live
-          :coalesce-window-ms 50})))
+          :coalesce-window-ms 50}))
 
-  (testing "source coalesce window cannot be negative"
     (is (not
          (schema/validate
           :gesso.live/source-options
           {:coalesce-window-ms -1}))))
-
-  (testing "dispatch options validate"
-    (is (schema/validate
-         :gesso.live/dispatch-options
-         {:dispatch :sync}))
-
-    (is (schema/validate
-         :gesso.live/dispatch-options
-         {:dispatch :async
-          :dispatcher :fake-dispatcher
-          :on-overflow :throw
-          :consistency-token "token-1"
-          :ctx-data {:user/id "u1"}})))
-
-  (testing "dispatch mode is constrained"
-    (is (not
-         (schema/validate
-          :gesso.live/dispatch-options
-          {:dispatch :eventually}))))
 
   (testing "dispatcher construction options validate"
     (is (schema/validate
@@ -372,66 +376,20 @@
          {:name "gesso-live-expansion"
           :threads 4
           :queue-size 1024
-          :on-overflow :throw})))
+          :on-overflow :throw}))
 
-  (testing "dispatcher options reject blank names and invalid sizes"
     (is (not
          (schema/validate
           :gesso.live/dispatcher-options
           {:name ""})))
-
     (is (not
          (schema/validate
           :gesso.live/dispatcher-options
           {:threads 0})))
-
     (is (not
          (schema/validate
           :gesso.live/dispatcher-options
           {:queue-size 0})))))
-
-(deftest core-and-stream-options-test
-  (testing "core emit options validate"
-    (is (schema/validate
-         :gesso.live/core-emit-options
-         {:source :fake-source
-          :rules [{:when-topic :request
-                   :expand (fn [_ctx change]
-                             [change])}]
-          :ctx {:request/id "r1"}
-          :dispatch :sync})))
-
-  (testing "core emit options require source"
-    (is (not
-         (schema/validate
-          :gesso.live/core-emit-options
-          {:rules []}))))
-
-  (testing "stream handler options validate"
-    (is (schema/validate
-         :gesso.live/stream-handler-options
-         {:source :fake-source
-          :parse-subscription (fn [_ctx raw]
-                                raw)
-          :authorize-subscription (fn [_ctx _sub]
-                                    true)
-          :interested? (fn [sub invalidation]
-                         (= (select-keys sub [:topic :id])
-                            (select-keys invalidation [:topic :id])))
-          :event :live-update
-          :keepalive-ms 15000})))
-
-  (testing "stream handler options require handler fns"
-    (is (not
-         (schema/validate
-          :gesso.live/stream-handler-options
-          {:source :fake-source
-           :parse-subscription identity
-           :authorize-subscription (fn [_ctx _sub] true)})))))
-
-;; -----------------------------------------------------------------------------
-;; Flow options
-;; -----------------------------------------------------------------------------
 
 (deftest flow-options-test
   (testing "flow subscription options validate"
@@ -442,162 +400,11 @@
           :interested? (fn [_sub _invalidation]
                          true)})))
 
-  (testing "invalidation event options accept app-facing event refs"
+  (testing "invalidation event options accept the current event/data contract"
     (is (schema/validate
          :gesso.live/invalidation-event-options
          {:event :live-update
-          :data {:reason :test}})))
-
-  (testing "coalesce-by options validate"
-    (is (schema/validate
-         :gesso.live/coalesce-by-options
-         {:key-fn #(select-keys % [:topic :id])
-          :window-ms 50})))
-
-  (testing "isolation options validate"
-    (is (schema/validate
-         :gesso.live/isolation-options
-         {:on-error (fn [_e] nil)
-          :on-close (fn [] nil)}))))
-
-;; -----------------------------------------------------------------------------
-;; Fragment config and fragment performance helpers
-;; -----------------------------------------------------------------------------
-
-(deftest fragment-options-test
-  (testing "fragment configs validate"
-    (is (schema/validate
-         :gesso.live/fragment-config
-         {:subscription {:topic :demo-counter
-                         :id "global-shared-counter"}
-          :fragment/id "simple-shared-counter-fragment"
-          :fragment/src "/app/demo/simple-shared-counter/fragment"
-          :fragment/swap "innerHTML"
-          :fragment/event :live-update
-          :fragment/jitter-ms 250
-          :fragment/attrs {:class "wrapper"}
-          :fragment/inner-attrs {:class "target"}})))
-
-  (testing "fragment configs require subscription, id, and src"
-    (is (not
-         (schema/validate
-          :gesso.live/fragment-config
-          {:fragment/id "x"
-           :fragment/src "/fragment"})))
-
-    (is (not
-         (schema/validate
-          :gesso.live/fragment-config
-          {:subscription {:topic :demo-counter
-                          :id "global-shared-counter"}
-           :fragment/src "/fragment"})))
-
-    (is (not
-         (schema/validate
-          :gesso.live/fragment-config
-          {:subscription {:topic :demo-counter
-                          :id "global-shared-counter"}
-           :fragment/id "x"}))))
-
-  (testing "fragment cache options require non-nil key"
-    (is (schema/validate
-         :gesso.live/fragment-cache-options
-         {:key [:store-queue "store-1" :manager]
-          :ttl-ms 250
-          :maximum-size 1024}))
-
-    (is (not
-         (schema/validate
-          :gesso.live/fragment-cache-options
-          {:key nil
-           :ttl-ms 250}))))
-
-  (testing "fragment singleflight options require non-nil key"
-    (is (schema/validate
-         :gesso.live/fragment-singleflight-options
-         {:key [:store-queue "store-1"]}))
-
-    (is (not
-         (schema/validate
-          :gesso.live/fragment-singleflight-options
-          {:key nil})))))
-
-;; -----------------------------------------------------------------------------
-;; SSE
-;; -----------------------------------------------------------------------------
-
-(deftest sse-schema-test
-  (testing "SSE response options require a flow"
-    (is (schema/validate
-         :gesso.live/sse-response-options
-         {:flow :fake-flow
-          :keepalive-ms 15000
-          :headers {"x-test" "yes"}}))
-
-    (is (not
-         (schema/validate
-          :gesso.live/sse-response-options
-          {:flow nil}))))
-
-  (testing "SSE frame events allow frames, live events, and event/data maps"
-    (is (schema/validate
-         :gesso.live/sse-frame-event
-         "event: live-update\ndata: {}\n\n"))
-
-    (is (schema/validate
-         :gesso.live/sse-frame-event
-         {:event "live-update"
-          :invalidation {:topic :demo-counter
-                         :id "global-shared-counter"
-                         :change/kind :updated}}))
-
-    (is (schema/validate
-         :gesso.live/sse-frame-event
-         {:event :client-oob
-          :data "<div hx-swap-oob=\"true\"></div>"}))))
-
-;; -----------------------------------------------------------------------------
-;; OOB
-;; -----------------------------------------------------------------------------
-
-(deftest oob-schema-test
-  (testing "client descriptors validate with set or sequential scopes"
-    (is (schema/validate
-         :gesso.live/client-descriptor
-         {:client/id "client-1"
-          :client/user-id "user-1"
-          :client/scopes #{[:user "user-1"]
-                           [:store "store-1"]}
-          :client/connected-at 123}))
-
-    (is (schema/validate
-         :gesso.live/client-descriptor
-         {:client/user-id "user-1"
-          :client/scopes [[:user "user-1"]
-                          [:store "store-1"]]})))
-
-  (testing "OOB targets validate"
-    (is (schema/validate :gesso.live/oob-target :all))
-    (is (schema/validate :gesso.live/oob-target [:client "client-1"]))
-    (is (schema/validate :gesso.live/oob-target [:user "user-1"]))
-    (is (schema/validate :gesso.live/oob-target [:scope [:store "store-1"]]))
-    (is (not (schema/validate :gesso.live/oob-target [:team "team-1"]))))
-
-  (testing "OOB send options require :fragments or :oob"
-    (is (schema/validate
-         :gesso.live/oob-send-options
-         {:to :all
-          :fragments [[:div "hello"]]}))
-
-    (is (schema/validate
-         :gesso.live/oob-send-options
-         {:to [:user "user-1"]
-          :oob [:div "hello"]}))
-
-    (is (not
-         (schema/validate
-          :gesso.live/oob-send-options
-          {:to :all})))))
+          :data {:reason :test}}))))
 
 ;; -----------------------------------------------------------------------------
 ;; Validation helper behavior
@@ -638,8 +445,7 @@
     (doseq [schema-key [:gesso.live/primary-change
                         :gesso.live/invalidation
                         :gesso.live/subscription
-                        :gesso.live/live-event
-                        :gesso.live/fragment-config]]
+                        :gesso.live/live-event]]
       (is (identical? (schema/validator schema-key)
                       (schema/validator schema-key))
           (str "validator should be reused for " schema-key))
