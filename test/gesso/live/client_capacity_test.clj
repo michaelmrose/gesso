@@ -201,6 +201,141 @@
         (close-response! response-a)
         (close-response! response-b)))))
 
+
+(deftest repeated-sends-coalesce-wakeups-until-pending-drain-test
+  (let [capacity 4
+        channel (test-channel
+                 {:max-pending-fragments-per-client capacity})
+        response (connect! channel "client-1")]
+    (try
+      ;; Consume the connection-open wake so this test measures only wakes
+      ;; created by pending-work transitions.
+      (is (string?
+           (deref
+            (s/take! (:body response))
+            1000
+            nil)))
+
+      (let [results
+            (mapv
+             (fn [fragment]
+               (client/send-to-client!
+                channel
+                "client-1"
+                fragment))
+             (fragments 50))]
+
+        (is (every? #(= 1 (:sent %)) results)
+            "Wake coalescing must not change logical enqueue ownership.")
+
+        (is (= 1 (reduce + (map :woke results)))
+            "A continuously nonempty mailbox needs one attempted physical SSE wake, not one wake per send.")
+
+        (is (= {"client-1" capacity}
+               (client/pending-counts channel))
+            "Wake coalescing composes with the independent mailbox entry bound."))
+
+      (is (= capacity
+             (count
+              (client/drain-fragments!
+               channel
+               "client-1")))
+          "Draining ends the current nonempty-mailbox wake epoch.")
+
+      (let [after-drain
+            (client/send-to-client!
+             channel
+             "client-1"
+             {:test/fragment :after-drain})]
+        (is (= 1 (:woke after-drain))
+            "The first send after a destructive drain must create a fresh wake."))
+      (finally
+        (close-response! response)))))
+
+(deftest wake-coalescing-is-independent-per-client-test
+  (let [capacity 8
+        channel (test-channel
+                 {:max-pending-fragments-per-client capacity})
+        response-a (connect! channel "client-a")
+        response-b (connect! channel "client-b")]
+    (try
+      (is (string?
+           (deref (s/take! (:body response-a)) 1000 nil)))
+      (is (string?
+           (deref (s/take! (:body response-b)) 1000 nil)))
+
+      (let [results
+            (mapv
+             (fn [fragment]
+               (client/broadcast!
+                channel
+                fragment))
+             (fragments 20))]
+        (is (= 2 (reduce + (map :woke results)))
+            "Two clients with continuously nonempty mailboxes need one wake attempt each, not forty wake attempts."))
+
+      (client/drain-fragments! channel "client-a")
+
+      (let [after-a-drain
+            (client/broadcast!
+             channel
+             {:test/fragment :successor})]
+        (is (= 1 (:woke after-a-drain))
+            "Only the client whose mailbox became empty may need a successor wake."))
+      (finally
+        (close-response! response-a)
+        (close-response! response-b)))))
+
+(deftest reconnect-wake-does-not-reopen-a-redundant-send-wake-epoch-test
+  (let [capacity 4
+        channel (test-channel
+                 {:max-pending-fragments-per-client capacity})
+        first-response (connect! channel "client-1")]
+    (try
+      (is (string?
+           (deref (s/take! (:body first-response)) 1000 nil)))
+
+      ;; Establish pending work. The replacement connection supplies its own
+      ;; recovery wake. While that same pending epoch survives, later sends must
+      ;; not stack additional wake attempts behind a slow reconnecting browser.
+      (client/send-to-client!
+       channel
+       "client-1"
+       {:test/fragment :before-reconnect})
+
+      (let [replacement-response (connect! channel "client-1")]
+        (try
+          (is (string?
+               (deref
+                (s/take! (:body replacement-response))
+                1000
+                nil))
+              "Reconnect itself always supplies the recovery wake for surviving pending work.")
+
+          (let [results
+                (mapv
+                 (fn [fragment]
+                   (client/send-to-client!
+                    channel
+                    "client-1"
+                    fragment))
+                 (fragments 25))]
+            (is (= 0 (reduce + (map :woke results)))
+                "Surviving pending work plus the reconnect-open wake must suppress redundant send wakes until drain."))
+
+          (client/drain-fragments! channel "client-1")
+
+          (let [after-drain
+                (client/send-to-client!
+                 channel
+                 "client-1"
+                 {:test/fragment :after-reconnect-drain})]
+            (is (= 1 (:woke after-drain))))
+          (finally
+            (close-response! replacement-response))))
+      (finally
+        (close-response! first-response)))))
+
 (deftest invalid-pending-capacities-are-rejected-at-channel-construction-test
   (doseq [invalid [nil 0 -1 1.5 "4" :four [] {}]]
     (testing (str "invalid capacity " (pr-str invalid))
