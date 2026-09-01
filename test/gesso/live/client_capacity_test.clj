@@ -200,3 +200,76 @@
       (finally
         (close-response! response-a)
         (close-response! response-b)))))
+
+(deftest invalid-pending-capacities-are-rejected-at-channel-construction-test
+  (doseq [invalid [nil 0 -1 1.5 "4" :four [] {}]]
+    (testing (str "invalid capacity " (pr-str invalid))
+      (let [error
+            (try
+              (client/channel
+               {:max-pending-fragments-per-client invalid})
+              nil
+              (catch clojure.lang.ExceptionInfo ex
+                ex))]
+        (is (some? error)
+            "Invalid capacity must fail before a channel with ambiguous retention semantics can exist.")
+        (is (= :max-pending-fragments-per-client
+               (:key (ex-data error))))
+        (is (= invalid
+               (:value (ex-data error))))))))
+
+(deftest reset-clears-pending-capacity-state-without-changing-policy-test
+  (let [capacity 2
+        channel (test-channel
+                 {:max-pending-fragments-per-client capacity})
+        first-response (connect! channel "client-1")]
+    (try
+      (apply
+       client/send-to-client!
+       channel
+       "client-1"
+       (fragments 7))
+
+      (let [before-reset (client/state-summary channel)]
+        (is (= {"client-1" capacity}
+               (:pending-counts before-reset)))
+        (is (= 5
+               (:pending-overflow-count before-reset)))
+        (is (= capacity
+               (:max-pending-fragments-per-client before-reset))))
+
+      (is (= :reset
+             (client/reset-channel! channel)))
+
+      (let [after-reset (client/state-summary channel)]
+        (is (= 0 (:connected-count after-reset)))
+        (is (= [] (:connected-client-ids after-reset)))
+        (is (nil? (:latest-client-id after-reset)))
+        (is (= {} (:pending-counts after-reset)))
+        (is (= 0 (:sent-count after-reset)))
+        (is (= 0 (:wakeup-count after-reset)))
+        (is (= 0 (:dropped-count after-reset)))
+        (is (= 0 (:pending-overflow-count after-reset))
+            "Reset starts a fresh diagnostics epoch rather than carrying stale overflow history into a new client lifecycle.")
+        (is (= capacity
+               (:max-pending-fragments-per-client after-reset))
+            "Reset clears runtime state, not the channel's configured retention policy."))
+
+      (let [replacement-response (connect! channel "client-1")]
+        (try
+          (apply
+           client/send-to-client!
+           channel
+           "client-1"
+           (fragments 3))
+
+          (let [summary (client/state-summary channel)]
+            (is (= {"client-1" capacity}
+                   (:pending-counts summary)))
+            (is (= 1
+                   (:pending-overflow-count summary))
+                "Overflow accounting after reset must restart from zero and describe only the new lifecycle."))
+          (finally
+            (close-response! replacement-response))))
+      (finally
+        (close-response! first-response)))))
