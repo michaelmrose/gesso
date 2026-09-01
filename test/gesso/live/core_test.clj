@@ -582,6 +582,41 @@
            (ns-resolve 'gesso.live.core sym))
           (str "obsolete protocol-v2 facade must remain absent: " sym)))))
 
+(deftest final-live-core-facade-authority-boundaries-test
+  (let [publics (ns-publics 'gesso.live.core)]
+    (testing "current authoritative read/write and protocol-v3 boundaries remain public"
+      (doseq [sym '[q
+                    progression
+                    with-progression
+                    bind-request-progression
+                    transact-and-notify!
+                    live-set!
+                    live-swap!
+                    optimistic-capability
+                    bind-optimistic-capability
+                    optimistic-server
+                    run-optimistic-command
+                    run-optimistic-wire-command]]
+        (is (contains? publics sym)
+            (str "current Live facade boundary must remain public: " sym))))
+
+    (testing "retired mutation and transaction-derived metadata escape hatches stay out of the facade"
+      (doseq [sym '[execute-tx!
+                    submit-tx!
+                    put-docs-op
+                    delete-docs-op
+                    attach-consistency
+                    attach-progression]]
+        (is (not (contains? publics sym))
+            (str "internal/low-level Live authority helper must not be public: " sym))))
+
+    (testing "retired fragment consistency-token vocabulary is not reintroduced through core"
+      (doseq [sym '[consistency-fragment-dimension
+                    with-consistency-dimension
+                    with-consistency-dimension-from]]
+        (is (not (contains? publics sym))
+            (str "fragment freshness belongs to canonical progression, not retired consistency dimensions: " sym))))))
+
 ;; -----------------------------------------------------------------------------
 ;; transact-and-notify!
 ;; -----------------------------------------------------------------------------
