@@ -211,21 +211,25 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest consistency-token-test
-  (let [token-fn (ns-resolve 'gesso.live.consistency.xtdb 'consistency-token)]
-    (is (fn? token-fn)
+  (let [token-var (ns-resolve 'gesso.live.consistency.xtdb 'consistency-token)]
+    (is (var? token-var)
         "XTDB consistency may still be encoded as an opaque optional transport token.")
+    (is (or (nil? token-var)
+            (fn? @token-var))
+        "The resolved consistency-token Var must contain an ordinary function.")
 
-    (when token-fn
-      (is (nil? (token-fn nil)))
-      (is (nil? (token-fn {:ignored true})))
-      (is (= [:xtdb2/read-consistency {:snapshot-token "snap"}]
-             (token-fn {:snapshot-token "snap"})))
-      (is (= [:xtdb2/read-consistency
-              {:snapshot-time (Instant/parse "2026-01-01T00:00:00Z")
-               :tx-id 42}]
-             (token-fn {:snapshot-time (Instant/parse "2026-01-01T00:00:00Z")
-                        :tx-id 42
-                        :ignored true}))))))
+    (when token-var
+      (let [token-fn @token-var]
+        (is (nil? (token-fn nil)))
+        (is (nil? (token-fn {:ignored true})))
+        (is (= [:xtdb2/read-consistency {:snapshot-token "snap"}]
+               (token-fn {:snapshot-token "snap"})))
+        (is (= [:xtdb2/read-consistency
+                {:snapshot-time (Instant/parse "2026-01-01T00:00:00Z")
+                 :tx-id 42}]
+               (token-fn {:snapshot-time (Instant/parse "2026-01-01T00:00:00Z")
+                          :tx-id 42
+                          :ignored true})))))))
 
 (deftest fragment-consistency-dimension-helpers-are-retired-test
   (doseq [sym '[consistency-fragment-dimension
