@@ -556,6 +556,79 @@
             (fixture/close-sse! server client-id)
             (close-sse-client! first-client)))))))
 
+(deftest sse-reconnect-retires-old-physical-identity-test
+  (with-fixture
+    (fn [server]
+      (let [client-id "reconnecting-browser"
+            first-client (open-sse! (fixture/sse-url server client-id))]
+        (try
+          (is (= 200 (:status first-client)))
+
+          (let [first-connection
+                (fixture/await-sse-client! server client-id)
+                first-connection-id
+                (:connection-id first-connection)]
+
+            (is (string? first-connection-id))
+
+            (testing "forced loss removes the old physical stream immediately"
+              (is (= 1
+                     (fixture/close-sse! server client-id)))
+              (is (= []
+                     (await-sse-connections! server 0)))
+              (is (= 0
+                     (fixture/emit-sse-connection!
+                      server
+                      first-connection-id
+                      {:event "live-update"
+                       :data "stale-must-not-send"}))))
+
+            (let [second-client
+                  (open-sse! (fixture/sse-url server client-id))]
+              (try
+                (is (= 200 (:status second-client)))
+
+                (let [second-connection
+                      (fixture/await-sse-client! server client-id)
+                      second-connection-id
+                      (:connection-id second-connection)]
+
+                  (testing "reconnect creates a fresh physical identity for the same logical client"
+                    (is (= client-id
+                           (:client-id second-connection)))
+                    (is (string? second-connection-id))
+                    (is (not= first-connection-id
+                              second-connection-id)))
+
+                  (testing "only the reconnected physical stream can receive targeted work"
+                    (is (= 0
+                           (fixture/emit-sse-connection!
+                            server
+                            first-connection-id
+                            {:event "live-update"
+                             :data "old"})))
+                    (is (= 1
+                           (fixture/emit-sse-connection!
+                            server
+                            second-connection-id
+                            {:id "fresh"
+                             :event "live-update"
+                             :data "new"})))
+                    (is (= ["id: fresh"
+                            "event: live-update"
+                            "data: new"
+                            ""]
+                           (read-sse-lines
+                            (:reader second-client)
+                            4)))))
+
+                (finally
+                  (fixture/close-sse! server client-id)
+                  (close-sse-client! second-client)))))
+
+          (finally
+            (close-sse-client! first-client)))))))
+
 (deftest sse-client-ids-round-trip-through-the-url-test
   (with-fixture
     (fn [server]
