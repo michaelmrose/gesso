@@ -207,34 +207,33 @@
              :debug-fn println})))))
 
 ;; -----------------------------------------------------------------------------
-;; Fragment consistency dimensions
+;; Optional transport consistency token
 ;; -----------------------------------------------------------------------------
 
-(deftest consistency-fragment-dimension-test
-  (is (nil? (xtdb-live/consistency-fragment-dimension nil)))
+(deftest consistency-token-test
+  (let [token-fn (ns-resolve 'gesso.live.consistency.xtdb 'consistency-token)]
+    (is (fn? token-fn)
+        "XTDB consistency may still be encoded as an opaque optional transport token.")
 
-  (is (= [:xtdb2/read-consistency {:snapshot-token "snap"}]
-         (xtdb-live/consistency-fragment-dimension
-          {:snapshot-token "snap"}))))
+    (when token-fn
+      (is (nil? (token-fn nil)))
+      (is (nil? (token-fn {:ignored true})))
+      (is (= [:xtdb2/read-consistency {:snapshot-token "snap"}]
+             (token-fn {:snapshot-token "snap"})))
+      (is (= [:xtdb2/read-consistency
+              {:snapshot-time (Instant/parse "2026-01-01T00:00:00Z")
+               :tx-id 42}]
+             (token-fn {:snapshot-time (Instant/parse "2026-01-01T00:00:00Z")
+                        :tx-id 42
+                        :ignored true}))))))
 
-(deftest with-consistency-dimension-test
-  (is (= {:entity [:user "u1"]
-          :consistency-token [:xtdb2/read-consistency {:snapshot-token "snap"}]}
-         (xtdb-live/with-consistency-dimension
-          {:entity [:user "u1"]}
-          {:snapshot-token "snap"})))
-
-  (is (= {:entity [:user "u1"]}
-         (xtdb-live/with-consistency-dimension
-          {:entity [:user "u1"]}
-          nil))))
-
-(deftest with-consistency-dimension-from-test
-  (is (= {:entity [:user "u1"]
-          :consistency-token [:xtdb2/read-consistency {:await-token "tok"}]}
-         (xtdb-live/with-consistency-dimension-from
-          {:entity [:user "u1"]}
-          {:consistency {:await-token "tok"}}))))
+(deftest fragment-consistency-dimension-helpers-are-retired-test
+  (doseq [sym '[consistency-fragment-dimension
+                with-consistency-dimension
+                with-consistency-dimension-from]]
+    (is (nil? (ns-resolve 'gesso.live.consistency.xtdb sym))
+        (str sym
+             " must stay retired; fragment freshness is represented by canonical progression, not read-consistency metadata."))))
 
 ;; -----------------------------------------------------------------------------
 ;; Query wrappers
