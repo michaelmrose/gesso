@@ -595,3 +595,228 @@
       (finally
         (s/close! rejected-stream)
         (close-response! response)))))
+
+;; =============================================================================
+;; Disconnected logical-client retention bounds
+;; =============================================================================
+
+(defn- reject-one-client-wake!
+  "Create one pending mailbox whose physical wake is deterministically rejected.
+
+   The logical client is left disconnected while its pending presentation work
+   survives for possible same-id reconnect, matching the recovery contract
+   established above."
+  [channel client-id fragment]
+  (let [response (connect! channel client-id)
+        original-stream (:body response)
+        rejected-stream (s/stream 1)]
+    (try
+      ;; Consume stream-open recovery so the measured wake belongs to the first
+      ;; pending-work epoch.
+      (let [open-wake
+            (deref
+             (s/take! original-stream)
+             1000
+             ::timeout)]
+        (when-not (string? open-wake)
+          (throw
+           (ex-info
+            "Test client did not receive its stream-open recovery wake."
+            {:client-id client-id
+             :value open-wake}))))
+
+      ;; Replace the current physical owner with a closed stream, exactly as in
+      ;; rejected-coalesced-wake-preserves-bounded-work-for-reconnect-test.
+      (s/close! rejected-stream)
+      (swap!
+       (:state channel)
+       assoc-in
+       [:clients client-id :stream]
+       rejected-stream)
+
+      (let [result
+            (client/send-to-client!
+             channel
+             client-id
+             fragment)]
+        (when-not
+         (eventually
+          #(not
+            (some #{client-id}
+                  (client/connected-client-ids channel))))
+         (throw
+          (ex-info
+           "Rejected client wake did not retire its physical owner."
+           {:client-id client-id})))
+        result)
+      (finally
+        (s/close! rejected-stream)
+        (close-response! response)))))
+
+(deftest default-disconnected-pending-client-capacity-is-finite-test
+  (let [configured
+        (:max-disconnected-pending-clients
+         client/default-options)
+
+        channel
+        (client/channel)]
+
+    (is (and (pos-int? configured)
+             (<= configured 1024))
+        "Disconnected logical-client mailboxes need a finite defensive global cap, not merely a per-client fragment cap.")
+
+    (is (= configured
+           (:max-disconnected-pending-clients channel))
+        "The effective disconnected-client retention cap must be explicit on the channel for diagnostics and policy review.")))
+
+(deftest unique-abandoned-client-ids-cannot-grow-pending-retention-without-bound-test
+  (let [capacity 3
+        attempted-clients 12
+        channel
+        (test-channel
+         {:max-pending-fragments-per-client 8
+          :max-disconnected-pending-clients capacity})
+
+        results
+        (mapv
+         (fn [index]
+           (let [client-id (str "abandoned-" index)]
+             (reject-one-client-wake!
+              channel
+              client-id
+              {:test/client-id client-id})))
+         (range attempted-clients))]
+
+    (is (every? #(= 1 (:sent %)) results))
+    (is (every? #(= 1 (:woke %)) results)
+        "Each abandoned mailbox begins with one attempted empty->nonempty wake edge.")
+
+    (is (eventually
+         #(= attempted-clients
+             (:dropped-count
+              (client/state-summary channel))))
+        "Every deliberately rejected physical wake must remain visible as a transport diagnostic.")
+
+    (let [pending
+          (client/pending-counts channel)
+
+          summary
+          (client/state-summary channel)]
+
+      (is (= capacity (count pending))
+          "An unlimited succession of abandoned logical ids must retain at most the configured number of reconnectable mailboxes.")
+
+      (is (every? #(= 1 %) (vals pending))
+          "The retained disconnected mailboxes still contain the one offered presentation entry each.")
+
+      (is (= (- attempted-clients capacity)
+             (:disconnected-pending-overflow-count summary))
+          "Eviction of abandoned logical-client mailboxes must be observable separately from physical wake rejection.")
+
+      (is (= 0 (:pending-overflow-count summary))
+          "Global disconnected-client retention pressure must not masquerade as per-client fragment overflow.")
+
+      (is (= capacity
+             (:max-disconnected-pending-clients summary))
+          "Introspection must report the effective global disconnected-mailbox cap."))))
+
+(deftest disconnected-pending-cap-never-evicts-currently-connected-mailbox-test
+  (let [capacity 2
+        channel
+        (test-channel
+         {:max-pending-fragments-per-client 8
+          :max-disconnected-pending-clients capacity})
+        keeper-response (connect! channel "keeper")]
+    (try
+      ;; Consume the keeper's stream-open wake and establish one still-connected
+      ;; pending mailbox. Churn from unrelated abandoned ids must never consume
+      ;; the retention budget by evicting currently connected work.
+      (is (string?
+           (deref
+            (s/take! (:body keeper-response))
+            1000
+            nil)))
+
+      (is (= 1
+             (:sent
+              (client/send-to-client!
+               channel
+               "keeper"
+               {:test/client-id "keeper"}))))
+
+      (doseq [index (range 6)]
+        (let [client-id (str "orphan-" index)]
+          (reject-one-client-wake!
+           channel
+           client-id
+           {:test/client-id client-id})))
+
+      (let [pending
+            (client/pending-counts channel)
+
+            disconnected-ids
+            (disj (set (keys pending)) "keeper")]
+
+        (is (= 1 (get pending "keeper"))
+            "A currently connected client's pending work is outside the disconnected-retention eviction class.")
+
+        (is (= capacity (count disconnected-ids))
+            "Only disconnected pending client ids are limited by the global disconnected-mailbox cap.")
+
+        (is (= (inc capacity) (count pending))
+            "The bound is disconnected-mailbox count, not a hidden cap on currently connected clients.")
+
+        (is (= [{:test/client-id "keeper"}]
+               (client/drain-fragments! channel "keeper"))
+            "Connected pending work remains claimable after unrelated disconnected-client churn."))
+      (finally
+        (close-response! keeper-response)))))
+
+(deftest retained-disconnected-mailbox-remains-recoverable-by-same-id-reconnect-test
+  (let [capacity 2
+        channel
+        (test-channel
+         {:max-pending-fragments-per-client 8
+          :max-disconnected-pending-clients capacity})]
+
+    (doseq [index (range 7)]
+      (let [client-id (str "recoverable-" index)]
+        (reject-one-client-wake!
+         channel
+         client-id
+         {:test/client-id client-id})))
+
+    (let [retained-ids
+          (set
+           (keys
+            (client/pending-counts channel)))
+
+          retained-id
+          (first retained-ids)]
+
+      (is (= capacity (count retained-ids)))
+      (is (string? retained-id))
+
+      (let [replacement-response
+            (connect! channel retained-id)]
+        (try
+          (is (string?
+               (deref
+                (s/take! (:body replacement-response))
+                1000
+                nil))
+              "Same-id reconnect supplies a recovery wake for a mailbox that survived global disconnected-client pressure.")
+
+          (is (= 1
+                 (get
+                  (client/pending-counts channel)
+                  retained-id))
+              "Reconnect must not silently discard retained presentation work before it is claimed.")
+
+          (is (= [{:test/client-id retained-id}]
+                 (client/drain-fragments!
+                  channel
+                  retained-id))
+              "A retained disconnected mailbox remains recoverable by its same logical client id.")
+          (finally
+            (close-response! replacement-response)))))))
