@@ -44,6 +44,7 @@
   {:id nil
    :event default-event
    :endpoint default-endpoint
+   :max-pending-fragments-per-client 256
    :client (fn [_ctx]
              {:client/scopes #{}})})
 
@@ -75,6 +76,15 @@
          {:key k
           :value f})))
   f)
+
+(defn- require-pos-int!
+  [k value]
+  (when-not (pos-int? value)
+    (throw
+     (ex "gesso.live client channel option must be a positive integer."
+         {:key k
+          :value value})))
+  value)
 
 (defn- event-name
   [event]
@@ -187,6 +197,13 @@
          :pending-path
          :client-id-param
 
+     :max-pending-fragments-per-client
+       Finite per-client entry cap for the ephemeral pending OOB mailbox.
+       Defaults to 256. Overflow drops the oldest pending entries, retaining
+       the newest work and incrementing :pending-overflow-count. Pending OOB is
+       still at-most-once, non-authoritative presentation work; this cap is a
+       retention bound, not a durability or acknowledgement mechanism.
+
      :client
        Function of ctx -> app client descriptor.
 
@@ -200,10 +217,15 @@
   ([options]
    (let [options'  (opts options)
          endpoint' (normalize-endpoint (:endpoint options'))
-         client-fn (require-fn! :client (:client options'))]
+         client-fn (require-fn! :client (:client options'))
+         max-pending-fragments-per-client
+         (require-pos-int!
+          :max-pending-fragments-per-client
+          (:max-pending-fragments-per-client options'))]
      {:id (or (:id options') (random-uuid))
       :event (event-name (:event options'))
       :endpoint endpoint'
+      :max-pending-fragments-per-client max-pending-fragments-per-client
       :client client-fn
       :state (atom {:clients {}
                     :pending {}
@@ -211,7 +233,8 @@
                     :created-at (now-ms)
                     :sent-count 0
                     :wakeup-count 0
-                    :dropped-count 0})})))
+                    :dropped-count 0
+                    :pending-overflow-count 0})})))
 
 (defn reset-channel!
   "Atomically clear logical channel state, then close the displaced streams.
@@ -235,7 +258,8 @@
          :created-at (now-ms)
          :sent-count 0
          :wakeup-count 0
-         :dropped-count 0}
+         :dropped-count 0
+         :pending-overflow-count 0}
 
         [old-state _new-state]
         (swap-vals!
@@ -413,12 +437,37 @@
 (def ^:private pending-target-stream-key
   ::pending-target-stream)
 
+(defn- bounded-pending-append
+  [pending fragments capacity]
+  (let [combined
+        (into
+         (vec
+          (or pending []))
+         fragments)
+
+        overflow-count
+        (max
+         0
+         (- (count combined)
+            capacity))
+
+        retained
+        (if (pos? overflow-count)
+          (subvec combined overflow-count)
+          combined)]
+    [retained
+     overflow-count]))
+
 (defn- enqueue-pending!
   [channel client-id fragments]
   (let [expected-stream
         (get
          (meta fragments)
          pending-target-stream-key)
+
+        capacity
+        (:max-pending-fragments-per-client
+         channel)
 
         enqueued?
         (volatile!
@@ -438,19 +487,30 @@
                (identical?
                 expected-stream
                 current-stream))
-           (do
+           (let [[pending'
+                  overflow-count]
+                 (bounded-pending-append
+                  (get-in
+                   state
+                   [:pending
+                    client-id])
+                  fragments
+                  capacity)]
              (vreset!
               enqueued?
               true)
 
              (-> state
-                 (update-in
+                 (assoc-in
                   [:pending client-id]
-                  (fnil into [])
-                  fragments)
+                  pending')
                  (update
                   :sent-count
-                  inc)))
+                  inc)
+                 (update
+                  :pending-overflow-count
+                  (fnil + 0)
+                  overflow-count)))
 
            state))))
 
@@ -738,6 +798,8 @@
   (let [state @(:state channel)]
     {:id (:id channel)
      :event (:event channel)
+     :max-pending-fragments-per-client
+     (:max-pending-fragments-per-client channel)
      :connected-count (count (:clients state))
      :connected-client-ids (vec (keys (:clients state)))
      :latest-client-id (:latest-client-id state)
@@ -745,4 +807,5 @@
      :sent-count (:sent-count state)
      :wakeup-count (:wakeup-count state)
      :dropped-count (:dropped-count state)
+     :pending-overflow-count (:pending-overflow-count state)
      :created-at (:created-at state)}))
