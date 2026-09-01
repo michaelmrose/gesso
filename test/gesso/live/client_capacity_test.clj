@@ -36,6 +36,20 @@
     (s/close! stream))
   nil)
 
+(defn- eventually
+  ([pred]
+   (eventually pred 1000))
+  ([pred timeout-ms]
+   (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
+     (loop []
+       (if (pred)
+         true
+         (if (< (System/currentTimeMillis) deadline)
+           (do
+             (Thread/sleep 5)
+             (recur))
+           false))))))
+
 (defn- fragments
   [n]
   (mapv
@@ -408,3 +422,176 @@
             (close-response! replacement-response))))
       (finally
         (close-response! first-response)))))
+
+
+(deftest concurrent-empty-mailbox-sends-share-one-wake-edge-test
+  (let [send-count 64
+        capacity 128
+        channel (test-channel
+                 {:max-pending-fragments-per-client capacity})
+        response (connect! channel "client-1")
+        ready (java.util.concurrent.CountDownLatch. send-count)
+        start (java.util.concurrent.CountDownLatch. 1)]
+    (try
+      ;; Remove stream-open recovery wake from the measurement.
+      (is (string?
+           (deref
+            (s/take! (:body response))
+            1000
+            nil)))
+
+      (let [workers
+            (mapv
+             (fn [index]
+               (future
+                 (.countDown ready)
+                 (.await start)
+                 (client/send-to-client!
+                  channel
+                  "client-1"
+                  {:test/concurrent-fragment index})))
+             (range send-count))]
+
+        (is (.await
+             ready
+             5
+             java.util.concurrent.TimeUnit/SECONDS)
+            "All send workers must be poised before the concurrent release.")
+
+        (.countDown start)
+
+        (let [results (mapv deref workers)]
+          (is (every? #(= 1 (:sent %)) results)
+              "Wake coalescing must not reject logically owned concurrent sends.")
+
+          (is (= 1
+                 (reduce + (map :woke results)))
+              "Exactly one racing send may claim the empty -> nonempty physical wake edge.")
+
+          (is (= {"client-1" send-count}
+                 (client/pending-counts channel))
+              "All concurrently owned work remains pending when the configured cap is not reached.")
+
+          (is (= 0
+                 (:pending-overflow-count
+                  (client/state-summary channel))))
+
+          (is (= send-count
+                 (count
+                  (client/drain-fragments!
+                   channel
+                   "client-1"))))
+
+          (is (= 1
+                 (:woke
+                  (client/send-to-client!
+                   channel
+                   "client-1"
+                   {:test/concurrent-fragment :successor})))
+              "Destructive drain closes the contested wake epoch and permits one successor wake.")))
+      (finally
+        (.countDown start)
+        (close-response! response)))))
+
+(deftest rejected-coalesced-wake-preserves-bounded-work-for-reconnect-test
+  (let [capacity 64
+        channel (test-channel
+                 {:max-pending-fragments-per-client capacity})
+        response (connect! channel "client-1")
+        rejected-stream (s/stream 1)]
+    (try
+      ;; Remove the connection-open wake, then replace the runtime owner with
+      ;; an already-closed real Manifold stream. The first pending-work wake is
+      ;; therefore deterministically rejected by the transport rather than by
+      ;; a mocked implementation.
+      (is (string?
+           (deref
+            (s/take! (:body response))
+            1000
+            nil)))
+
+      (s/close! rejected-stream)
+      (is (s/closed? rejected-stream))
+
+      (swap!
+       (:state channel)
+       assoc-in
+       [:clients "client-1" :stream]
+       rejected-stream)
+
+      (let [first-result
+            (client/send-to-client!
+             channel
+             "client-1"
+             {:test/fragment :first})]
+
+        (is (= 1 (:sent first-result)))
+        (is (= 1 (:woke first-result))
+            "The empty -> nonempty transition owns exactly one rejected physical wake attempt.")
+
+        (is (eventually
+             #(empty?
+               (client/connected-client-ids channel)))
+            "Rejected coalesced wake must retire exactly that failed physical owner.")
+
+        (is (eventually
+             #(= 1
+                 (:dropped-count
+                  (client/state-summary channel))))
+            "One rejected physical wake is one dropped wake diagnostic.")
+
+        (is (= {"client-1" 1}
+               (client/pending-counts channel))
+            "Wake rejection cannot pretend the bounded pending payload was delivered.")
+
+        (let [while-disconnected
+              (client/send-to-client!
+               channel
+               "client-1"
+               {:test/fragment :disconnected})]
+          (is (= 0 (:sent while-disconnected)))
+          (is (= 0 (:woke while-disconnected)))
+          (is (= {"client-1" 1}
+                 (client/pending-counts channel))
+              "A retired physical owner cannot accumulate additional targeted work by logical id alone.")))
+
+      (let [replacement-response (connect! channel "client-1")]
+        (try
+          (is (string?
+               (deref
+                (s/take! (:body replacement-response))
+                1000
+                nil))
+              "Reconnect supplies the recovery wake for the surviving nonempty mailbox.")
+
+          (let [later-results
+                (mapv
+                 (fn [index]
+                   (client/send-to-client!
+                    channel
+                    "client-1"
+                    {:test/fragment index}))
+                 (range 25))]
+            (is (every? #(= 1 (:sent %)) later-results))
+            (is (= 0
+                   (reduce + (map :woke later-results)))
+                "Surviving failed-wake work plus reconnect recovery must suppress redundant send wakes until drain."))
+
+          (is (= 26
+                 (count
+                  (client/drain-fragments!
+                   channel
+                   "client-1"))))
+
+          (is (= 1
+                 (:woke
+                  (client/send-to-client!
+                   channel
+                   "client-1"
+                   {:test/fragment :after-recovery-drain})))
+              "Once recovered work is claimed, the next pending epoch gets exactly one fresh wake.")
+          (finally
+            (close-response! replacement-response))))
+      (finally
+        (s/close! rejected-stream)
+        (close-response! response)))))
