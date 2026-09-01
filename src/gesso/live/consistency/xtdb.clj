@@ -11,7 +11,7 @@
    - thin submit-tx/execute-tx task wrappers
    - portable XTDB-backed authoritative progression bases/requirements
    - trusted XTDB progression comparison and query-option translation
-   - fragment-key consistency dimensions
+   - opaque consistency-token encoding for optional transport/event metadata
    - small tx-op constructors
 
    It does not:
@@ -709,28 +709,19 @@
   [opts]
   (select-compact opts tx-option-keys))
 
-(defn consistency-fragment-dimension
-  "Return a stable value suitable for a fragment key's :consistency-token
-   dimension.
+(defn consistency-token
+  "Return an opaque stable token for normalized XTDB read consistency.
 
-   Returns nil when the consistency map is empty."
+   This token is optional transport/event metadata. It is not an authoritative
+   progression requirement and must not be used to partition fragment cache or
+   singleflight identity. Fragment freshness is represented by canonical
+   gesso.live.progression requirements instead.
+
+   Returns nil when the normalized consistency map is empty."
   [consistency]
   (let [c (normalize-consistency consistency)]
     (when (seq c)
       [:xtdb2/read-consistency c])))
-
-(defn with-consistency-dimension
-  "Assoc a consistency dimension into a fragment key dimension map when present."
-  [dimensions consistency]
-  (if-let [dimension (consistency-fragment-dimension consistency)]
-    (assoc (or dimensions {}) :consistency-token dimension)
-    (or dimensions {})))
-
-(defn with-consistency-dimension-from
-  "Assoc explicit consistency from a context into a fragment key dimension map."
-  [dimensions ctx-or-source]
-  (with-consistency-dimension dimensions
-    (consistency-from ctx-or-source)))
 
 ;; -----------------------------------------------------------------------------
 ;; Query wrappers
