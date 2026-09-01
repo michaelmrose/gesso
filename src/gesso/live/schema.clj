@@ -1,11 +1,15 @@
 (ns gesso.live.schema
-  "Malli schemas and validation helpers for gesso.live.
+  "Malli schemas and validation helpers for current gesso.live boundaries.
 
-   This namespace defines the small map-shaped contracts used by the live
-   system. These schemas are intended for edge validation, tests, helpful error
-   messages, and API guardrails.
+   This namespace intentionally contains only contracts that correspond to
+   live runtime or compilation boundaries that still exist. Historical API
+   shapes belong in version history, not in the named schema registry: keeping
+   an unenforced schema around makes the framework appear to promise semantics
+   that no current consumer actually implements.
 
-   They should not make the internal implementation noisy."
+   These schemas are intended for edge validation, tests, helpful error
+   messages, and API guardrails. They should not make the internal
+   implementation noisy."
   (:require
    [clojure.string :as str]
    [gesso.live.progression :as progression]
@@ -65,19 +69,6 @@
 (def Milliseconds
   "A non-negative millisecond value."
   [:and int? [:>= 0]])
-
-(def PositiveMilliseconds
-  "A positive millisecond value."
-  [:and int? [:> 0]])
-
-(def Scopes
-  "App-provided client scopes.
-
-   Normalized client descriptors may use a set, but app hooks often naturally
-   return a vector/list/etc. OOB code can normalize these to a set."
-  [:or
-   [:set any?]
-   [:sequential any?]])
 
 (def ProgressionRequirement
   "One normalized authoritative refresh-progression requirement.
@@ -181,7 +172,7 @@
    [:dedupe? {:optional true} boolean?]])
 
 ;; -----------------------------------------------------------------------------
-;; Source, dispatch, and flow options
+;; Current source, dispatcher, and flow option boundaries
 ;; -----------------------------------------------------------------------------
 
 (def SourceOptions
@@ -190,22 +181,8 @@
    [:coalesce-window-ms {:optional true} Milliseconds]
    [:on-error {:optional true} fn?]])
 
-(def DispatchMode
-  [:enum :sync :async])
-
 (def OverflowPolicy
   [:enum :block :throw :drop :coalesce])
-
-(def DispatchOptions
-  "Per-emission dispatch options.
-
-   These options describe how core/emit! should run expansion."
-  [:map
-   [:dispatch {:optional true} DispatchMode]
-   [:dispatcher {:optional true} any?]
-   [:on-overflow {:optional true} OverflowPolicy]
-   [:consistency-token {:optional true} any?]
-   [:ctx-data {:optional true} any?]])
 
 (def DispatcherOptions
   "Options for constructing an async expansion dispatcher."
@@ -214,31 +191,6 @@
    [:threads {:optional true} pos-int?]
    [:queue-size {:optional true} pos-int?]
    [:on-overflow {:optional true} OverflowPolicy]])
-
-(def CoreEmitOptions
-  "Options for gesso.live.core/emit!.
-
-   core/emit! receives primary changes, expands them, and then emits expanded
-   invalidations into the source."
-  [:map
-   [:source some?]
-   [:rules {:optional true} InvalidationRules]
-   [:ctx {:optional true} any?]
-   [:dispatch {:optional true} DispatchMode]
-   [:dispatcher {:optional true} any?]
-   [:on-overflow {:optional true} OverflowPolicy]
-   [:consistency-token {:optional true} any?]
-   [:ctx-data {:optional true} any?]])
-
-(def StreamHandlerOptions
-  "Options for building a live SSE stream handler."
-  [:map
-   [:source some?]
-   [:parse-subscription fn?]
-   [:authorize-subscription fn?]
-   [:interested? fn?]
-   [:event {:optional true} EventRef]
-   [:keepalive-ms {:optional true} PositiveMilliseconds]])
 
 (def FlowForSubscriptionOptions
   [:map
@@ -251,98 +203,17 @@
    [:data {:optional true} any?]
    [:consistency-token {:optional true} any?]])
 
-(def CoalesceByOptions
-  [:map
-   [:key-fn fn?]
-   [:window-ms {:optional true} Milliseconds]])
-
-(def IsolationOptions
-  [:map
-   [:on-error {:optional true} fn?]
-   [:on-close {:optional true} fn?]])
-
-;; -----------------------------------------------------------------------------
-;; HTMX / fragment config
-;; -----------------------------------------------------------------------------
-
-(def FragmentConfig
-  [:map
-   [:subscription Subscription]
-   [:fragment/id NonBlankString]
-   [:fragment/src NonBlankString]
-   [:fragment/swap {:optional true} NonBlankString]
-   [:fragment/event {:optional true} EventRef]
-   [:fragment/trigger {:optional true} NonBlankString]
-   [:fragment/jitter-ms {:optional true} Milliseconds]
-   [:fragment/attrs {:optional true} map?]
-   [:fragment/inner-attrs {:optional true} map?]])
-
-(def FragmentCacheOptions
-  [:map
-   [:key some?]
-   [:ttl-ms {:optional true} PositiveMilliseconds]
-   [:maximum-size {:optional true} pos-int?]])
-
-(def FragmentSingleflightOptions
-  [:map
-   [:key some?]])
-
-;; -----------------------------------------------------------------------------
-;; SSE
-;; -----------------------------------------------------------------------------
-
-(def SseResponseOptions
-  [:map
-   [:flow some?]
-   [:keepalive-ms {:optional true} PositiveMilliseconds]
-   [:headers {:optional true} map?]])
-
-(def SseFrameEvent
-  [:or
-   string?
-   LiveEvent
-   [:map
-    [:event EventRef]
-    [:data any?]]])
-
-;; -----------------------------------------------------------------------------
-;; OOB
-;; -----------------------------------------------------------------------------
-
-(def ClientDescriptor
-  [:map
-   [:client/id {:optional true} Id]
-   [:client/user-id {:optional true} Id]
-   [:client/scopes {:optional true} Scopes]
-   [:client/connected-at {:optional true} int?]])
-
-(def OobTarget
-  [:or
-   [:= :all]
-   [:tuple [:= :client] Id]
-   [:tuple [:= :user] Id]
-   [:tuple [:= :scope] any?]])
-
-(def OobSendOptions
-  [:and
-   [:map
-    [:to OobTarget]
-    [:fragments {:optional true} any?]
-    [:oob {:optional true} any?]]
-   [:fn
-    {:error/message "must include :fragments or :oob"}
-    (fn [m]
-      (or (contains? m :fragments)
-          (contains? m :oob)))]])
-
 ;; -----------------------------------------------------------------------------
 ;; Registry
 ;; -----------------------------------------------------------------------------
 
 (def schemas
-  "Named schema registry for gesso.live.
+  "Named schema registry for current gesso.live contracts.
 
-   These keys are intentionally public and stable enough to use in tests."
+   A key belongs here only while a corresponding runtime or compilation
+   boundary actually enforces the contract. Retired API shapes intentionally
+   become unknown keys rather than remaining as misleading compatibility
+   metadata."
   {:gesso.live/topic Topic
    :gesso.live/change-kind ChangeKind
    :gesso.live/id Id
@@ -350,8 +221,6 @@
    :gesso.live/event-name EventName
    :gesso.live/event-ref EventRef
    :gesso.live/milliseconds Milliseconds
-   :gesso.live/positive-milliseconds PositiveMilliseconds
-   :gesso.live/scopes Scopes
    :gesso.live/progression ProgressionRequirement
 
    :gesso.live/primary-change PrimaryChange
@@ -364,27 +233,10 @@
    :gesso.live/invalidation-options InvalidationOptions
 
    :gesso.live/source-options SourceOptions
-   :gesso.live/dispatch-mode DispatchMode
    :gesso.live/overflow-policy OverflowPolicy
-   :gesso.live/dispatch-options DispatchOptions
    :gesso.live/dispatcher-options DispatcherOptions
-   :gesso.live/core-emit-options CoreEmitOptions
-   :gesso.live/stream-handler-options StreamHandlerOptions
    :gesso.live/flow-for-subscription-options FlowForSubscriptionOptions
-   :gesso.live/invalidation-event-options InvalidationEventOptions
-   :gesso.live/coalesce-by-options CoalesceByOptions
-   :gesso.live/isolation-options IsolationOptions
-
-   :gesso.live/fragment-config FragmentConfig
-   :gesso.live/fragment-cache-options FragmentCacheOptions
-   :gesso.live/fragment-singleflight-options FragmentSingleflightOptions
-
-   :gesso.live/sse-response-options SseResponseOptions
-   :gesso.live/sse-frame-event SseFrameEvent
-
-   :gesso.live/client-descriptor ClientDescriptor
-   :gesso.live/oob-target OobTarget
-   :gesso.live/oob-send-options OobSendOptions})
+   :gesso.live/invalidation-event-options InvalidationEventOptions})
 
 (def ^:private hot-schema-keys
   "Schemas validated on ordinary Live hot paths.
@@ -395,8 +247,7 @@
   #{:gesso.live/primary-change
     :gesso.live/invalidation
     :gesso.live/subscription
-    :gesso.live/live-event
-    :gesso.live/fragment-config})
+    :gesso.live/live-event})
 
 (def ^:private compiled-validators
   (into {}
@@ -514,7 +365,3 @@
 (defn validate-live-event!
   [x]
   (validate! :gesso.live/live-event x))
-
-(defn validate-fragment-config!
-  [x]
-  (validate! :gesso.live/fragment-config x))
