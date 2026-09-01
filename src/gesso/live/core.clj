@@ -584,7 +584,7 @@
     (assoc ctx :gesso.live/progression progression')
     (dissoc ctx :gesso.live/progression)))
 
-(defn attach-consistency
+(defn- attach-consistency
   "Attach explicit consistency to a change/invalidation map.
 
    This is plain immutable data. It is not used to mutate XTDB state.
