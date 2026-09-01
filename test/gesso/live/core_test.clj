@@ -287,42 +287,14 @@
              :progression sample-other-progression}
             nil)))))
 
-(deftest attach-progression-preserves-or-attaches-exact-authority-test
-  (is (= (assoc request-change
-                :progression sample-commit-progression)
-         (live/attach-progression
-          request-change
-          sample-commit-progression)))
+(deftest authoritative-progression-attachment-is-not-public-core-api-test
+  (let [publics (ns-publics 'gesso.live.core)]
+    (testing "transaction-established progression remains part of the public mutation boundary"
+      (is (contains? publics 'transact-and-notify!)))
 
-  (testing "an exact repeated requirement is idempotent"
-    (let [change (assoc request-change
-                        :progression sample-commit-progression)]
-      (is (identical? change
-                      (live/attach-progression
-                       change
-                       sample-commit-progression)))))
-
-  (testing "nil cannot erase an existing requirement"
-    (let [change (assoc request-change
-                        :progression sample-commit-progression)]
-      (is (identical? change
-                      (live/attach-progression change nil))))))
-
-(deftest attach-progression-rejects-conflicting-authority-test
-  (let [error
-        (try
-          (live/attach-progression
-           (assoc request-change
-                  :progression sample-other-progression)
-           sample-commit-progression)
-          nil
-          (catch clojure.lang.ExceptionInfo e
-            e))]
-    (is (some? error))
-    (is (= sample-other-progression
-           (:existing-progression (ex-data error))))
-    (is (= sample-commit-progression
-           (:authoritative-progression (ex-data error))))))
+    (testing "callers cannot manufacture authoritative change progression through the core facade"
+      (is (not (contains? publics 'attach-progression))
+          "authoritative progression attachment must remain an internal transaction-evidence step"))))
 
 ;; -----------------------------------------------------------------------------
 ;; HTTP progression request boundary
