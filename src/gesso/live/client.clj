@@ -469,9 +469,9 @@
         (:max-pending-fragments-per-client
          channel)
 
-        enqueued?
+        outcome
         (volatile!
-         false)]
+         nil)]
 
     (swap!
      (:state channel)
@@ -487,18 +487,32 @@
                (identical?
                 expected-stream
                 current-stream))
-           (let [[pending'
+           (let [pending
+                 (get-in
+                  state
+                  [:pending
+                   client-id])
+
+                 [pending'
                   overflow-count]
                  (bounded-pending-append
-                  (get-in
-                   state
-                   [:pending
-                    client-id])
+                  pending
                   fragments
-                  capacity)]
+                  capacity)
+
+                 wake?
+                 (and (empty? pending)
+                      (seq pending'))]
+             ;; swap! may retry this function under contention. Reset the
+             ;; volatile on every invocation so the outcome always describes
+             ;; the state transition that actually won. In particular, two
+             ;; concurrent sends against an empty mailbox cannot both claim the
+             ;; empty -> nonempty wake edge: whichever retries observes the
+             ;; first send's pending work and returns :wake? false.
              (vreset!
-              enqueued?
-              true)
+              outcome
+              {:client-id client-id
+               :wake? (boolean wake?)})
 
              (-> state
                  (assoc-in
@@ -512,10 +526,13 @@
                   (fnil + 0)
                   overflow-count)))
 
-           state))))
+           (do
+             (vreset!
+              outcome
+              nil)
+             state)))))
 
-    (when @enqueued?
-      client-id)))
+    @outcome))
 
 (defn drain-fragments!
   "Claim and return the current pending-fragment batch for client-id.
@@ -695,6 +712,12 @@
    work, so they can use that browser's request ctx, params, session, user, and
    included board state.
 
+   Physical SSE wakes are coalesced per client while that client's pending
+   mailbox remains nonempty. The first successful empty -> nonempty enqueue
+   attempts one wake; later sends in the same pending epoch only append work.
+   Draining the mailbox ends the epoch, and stream-response always supplies an
+   unconditional reconnect/open wake so surviving pending work is recoverable.
+
    Returns:
      {:sent ...
       :woke ...
@@ -720,29 +743,33 @@
                   fragments'
                   {pending-target-stream-key
                    stream})]
-             (if
-              (enqueue-pending!
-               channel
-               client-id
-               fragments-for-target)
+             (if-let [enqueue-outcome
+                      (enqueue-pending!
+                       channel
+                       client-id
+                       fragments-for-target)]
                (assoc
                 targets
                 client-id
-                client)
+                {:client client
+                 :wake? (:wake? enqueue-outcome)})
                targets)))
          {}
          selected-targets)
 
         woke
         (reduce-kv
-         (fn [n client-id client]
-           (if-let [stream (:stream client)]
-             (do
-               (wake-client-stream!
-                channel
-                client-id
-                stream)
-               (inc n))
+         (fn [n client-id {:keys [client wake?]}]
+           (if
+            wake?
+             (if-let [stream (:stream client)]
+               (do
+                 (wake-client-stream!
+                  channel
+                  client-id
+                  stream)
+                 (inc n))
+               n)
              n))
          0
          enqueued-targets)]
