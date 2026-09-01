@@ -9,7 +9,8 @@
    [gesso.live.optimistic.server :as optimistic.server]
    [gesso.live.progression :as progression]
    [gesso.live.progression.http :as progression.http]
-   [gesso.live.source :as source]))
+   [gesso.live.source :as source]
+   [gesso.live.synced :as synced]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
@@ -1237,4 +1238,217 @@
             (is (= :gesso.live.core/transact-and-notify
                    (:event (first @debug-calls)))
                 "debug failure is swallowed only after the event is offered")))))))
+
+;; -----------------------------------------------------------------------------
+;; Atomic synced swap contract
+;; -----------------------------------------------------------------------------
+
+(def atomic-swap-counter
+  (live/->synced
+   {:table :atomic_swap_counters
+    :id "counter-1"
+    :col :counter/value
+    :topic :atomic-swap-counter
+    :default 0}))
+
+(deftest live-swap-retries-only-after-xtdb-assert-conflict-test
+  (let [read-count (atom 0)
+        f-inputs (atom [])
+        guarded-calls (atom [])
+        tx-calls (atom [])
+        assert-error (ex-info "guard lost"
+                              {:xtdb.error/code :xtdb/assert-failed})
+        wrapped-assert-error (ex-info "transaction failed"
+                                      {:phase :execute}
+                                      assert-error)
+        system {:options {}}
+        ctx {:xtdb/connectable :write-node}]
+    (with-redefs [synced/live-read
+                  (fn [read-ctx synced-value read-options]
+                    (is (= {:xtdb/read-connectable :write-node}
+                           read-ctx))
+                    (is (identical? atomic-swap-counter synced-value))
+                    (is (= {} read-options))
+                    (case (swap! read-count inc)
+                      1 0
+                      2 1
+                      (throw
+                       (ex-info "unexpected extra live-swap read"
+                                {:read-count @read-count}))))
+
+                  synced/guarded-tx-ops
+                  (fn [synced-value expected new-value]
+                    (swap! guarded-calls conj
+                           [synced-value expected new-value])
+                    [[:guard expected new-value]])
+
+                  live/transact-and-notify!
+                  (fn [system' ctx' options]
+                    (swap! tx-calls conj [system' ctx' options])
+                    (if (= 1 (count @tx-calls))
+                      (throw wrapped-assert-error)
+                      {:tx-result {:tx-id 2}
+                       :consistency {:tx-id 2}}))]
+      (let [result
+            (live/live-swap!
+             ctx
+             atomic-swap-counter
+             (fn [value]
+               (swap! f-inputs conj value)
+               (inc value))
+             {:system system})]
+        (is (= 2 (:value result)))
+        (is (= [0 1] @f-inputs)
+            "f is reapplied to the freshly reread value after contention")
+        (is (= 2 @read-count))
+        (is (= [[atomic-swap-counter 0 1]
+                [atomic-swap-counter 1 2]]
+               @guarded-calls))
+        (is (= 2 (count @tx-calls)))
+        (is (= [[[:guard 0 1]]
+                [[:guard 1 2]]]
+               (mapv #(get-in % [2 :tx-ops]) @tx-calls)))
+        (is (= [{:topic :atomic-swap-counter
+                 :id "counter-1"
+                 :change/kind :updated
+                 :old-value 0
+                 :new-value 1}
+                {:topic :atomic-swap-counter
+                 :id "counter-1"
+                 :change/kind :updated
+                 :old-value 1
+                 :new-value 2}]
+               (mapv #(get-in % [2 :change]) @tx-calls))
+            "each attempt describes the value pair it actually tried to commit")))))
+
+(deftest live-swap-does-not-retry-ordinary-transaction-failure-test
+  (let [cause (ex-info "database unavailable"
+                       {:xtdb.error/code :xtdb/transient-failure})
+        f-calls (atom 0)
+        tx-calls (atom 0)
+        system {:options {}}
+        ctx {:xtdb/connectable :write-node}]
+    (with-redefs [synced/live-read
+                  (fn [_ctx _synced _read-options]
+                    7)
+
+                  synced/guarded-tx-ops
+                  (fn [_synced expected new-value]
+                    [[:guard expected new-value]])
+
+                  live/transact-and-notify!
+                  (fn [& _]
+                    (swap! tx-calls inc)
+                    (throw cause))]
+      (let [error
+            (try
+              (live/live-swap!
+               ctx
+               atomic-swap-counter
+               (fn [value]
+                 (swap! f-calls inc)
+                 (inc value))
+               {:system system})
+              nil
+              (catch Throwable t
+                t))]
+        (is (identical? cause error))
+        (is (= 1 @f-calls)
+            "non-ASSERT transaction failure must not cause f to run again")
+        (is (= 1 @tx-calls)
+            "non-ASSERT transaction failure must escape immediately")))))
+
+(deftest live-swap-never-retries-classified-post-commit-delivery-failure-test
+  (let [delivery-error
+        (ex-info
+         "invalidation delivery failed after commit"
+         {:error/type live/post-commit-delivery-failure-type
+          :failure/stage :post-commit-delivery
+          :commit/status :committed})
+        f-calls (atom 0)
+        tx-calls (atom 0)
+        system {:options {}}
+        ctx {:xtdb/connectable :write-node}]
+    (with-redefs [synced/live-read
+                  (fn [_ctx _synced _read-options]
+                    10)
+
+                  synced/guarded-tx-ops
+                  (fn [_synced expected new-value]
+                    [[:guard expected new-value]])
+
+                  live/transact-and-notify!
+                  (fn [& _]
+                    (swap! tx-calls inc)
+                    (throw delivery-error))]
+      (let [error
+            (try
+              (live/live-swap!
+               ctx
+               atomic-swap-counter
+               (fn [value]
+                 (swap! f-calls inc)
+                 (inc value))
+               {:system system})
+              nil
+              (catch Throwable t
+                t))]
+        (is (identical? delivery-error error))
+        (is (live/post-commit-delivery-failure? error))
+        (is (= 1 @f-calls)
+            "a committed mutation must never be reapplied after delivery failure")
+        (is (= 1 @tx-calls)
+            "post-commit failure is terminal for the mutation attempt")))))
+
+(deftest live-swap-reads-current-write-database-not-request-snapshot-test
+  (let [reads (atom [])
+        guarded-calls (atom [])
+        tx-calls (atom [])
+        system {:options {}}
+        ctx {:xtdb/connectable :write-node
+             :gesso.live/consistency {:snapshot-time :request-snapshot
+                                      :snapshot-token "request-token"}
+             :gesso.live/progression
+             (progression/requirement :request-basis)}]
+    (with-redefs [synced/live-read
+                  (fn [read-ctx synced-value read-options]
+                    (swap! reads conj [read-ctx synced-value read-options])
+                    4)
+
+                  synced/guarded-tx-ops
+                  (fn [synced-value expected new-value]
+                    (swap! guarded-calls conj
+                           [synced-value expected new-value])
+                    [[:guard expected new-value]])
+
+                  live/transact-and-notify!
+                  (fn [system' ctx' options]
+                    (swap! tx-calls conj [system' ctx' options])
+                    {:tx-result {:tx-id 5}
+                     :consistency {:tx-id 5}})]
+      (let [result
+            (live/live-swap!
+             ctx
+             atomic-swap-counter
+             inc
+             {:system system
+              :read-options {:snapshot-time :stale-snapshot
+                             :snapshot-token "stale-token"
+                             :database :caller-read-db
+                             :key-fn :snake-case-keyword}
+              :tx-options {:database :authoritative-write-db}})]
+        (is (= 5 (:value result)))
+        (is (= [[{:xtdb/read-connectable :write-node}
+                 atomic-swap-counter
+                 {:database :authoritative-write-db
+                  :key-fn :snake-case-keyword}]]
+               @reads)
+            "historical snapshot coordinates are stripped and the write database owns the read")
+        (is (= [[atomic-swap-counter 4 5]]
+               @guarded-calls))
+        (is (= 1 (count @tx-calls)))
+        (is (= {:database :authoritative-write-db}
+               (get-in @tx-calls [0 2 :tx-options])))
+        (is (= [[:guard 4 5]]
+               (get-in @tx-calls [0 2 :tx-ops])))))))
 
