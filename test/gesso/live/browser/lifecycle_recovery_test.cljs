@@ -6,9 +6,20 @@
    browser.core, become advisory fragment invalidations, and pass through the
    same AdapterState generation/single-flight rules as SSE wakeups.
 
-   This namespace is intentionally small and host-fakeable. Real Chromium tests
-   can separately prove browser event delivery, while these tests pin the
-   semantic ownership boundary and coalescing behavior."
+   Native browser event ownership matters:
+
+   - online belongs to Window
+   - pageshow belongs to Window
+   - visibilitychange belongs to Document
+
+   The tests therefore use distinct fake Window and Document event targets.
+   This prevents a fake-green implementation that installs every listener on
+   document even though real browsers deliver two of the recovery events to
+   Window.
+
+   This namespace remains host-fakeable. Real Chromium tests can separately
+   prove browser event delivery, while these tests pin the semantic ownership
+   boundary and coalescing behavior."
   (:require
    [cljs.test :refer-macros [deftest is testing]]
    [gesso.live.browser.core :as core]))
@@ -47,12 +58,38 @@
   [fragment-id]
   (make-element fragment-id "sse:live-update"))
 
-(defn- make-document
-  [roots]
-  (let [roots* (atom (vec roots))
-        added (atom [])
+(defn- make-event-target
+  []
+  (let [added (atom [])
         removed (atom [])
-        document (js-obj)]
+        target (js-obj)]
+    (aset target
+          "addEventListener"
+          (fn [name handler capture?]
+            (swap! added conj [name handler capture?])))
+    (aset target
+          "removeEventListener"
+          (fn [name handler capture?]
+            (swap! removed conj [name handler capture?])))
+    {:target target
+     :added added
+     :removed removed}))
+
+(defn- make-window
+  []
+  (let [{:keys [target added removed]}
+        (make-event-target)]
+    {:window target
+     :added added
+     :removed removed}))
+
+(defn- make-document
+  [roots window]
+  (let [{:keys [target added removed]}
+        (make-event-target)
+        roots* (atom (vec roots))
+        document target]
+    (aset document "defaultView" window)
     (aset document "visibilityState" "hidden")
     (aset document
           "querySelectorAll"
@@ -60,14 +97,6 @@
             (if (= selector core/fragment-selector)
               (to-array @roots*)
               (array))))
-    (aset document
-          "addEventListener"
-          (fn [name handler capture?]
-            (swap! added conj [name handler capture?])))
-    (aset document
-          "removeEventListener"
-          (fn [name handler capture?]
-            (swap! removed conj [name handler capture?])))
     {:document document
      :roots roots*
      :added added
@@ -100,27 +129,30 @@
 
 (defn- lifecycle-fixture
   [roots]
-  (let [document-fixture (make-document roots)
+  (let [window-fixture (make-window)
+        document-fixture
+        (make-document roots (:window window-fixture))
         htmx-fixture (make-htmx)
         runtime
         (core/create
          {:document (:document document-fixture)
           :htmx (:htmx htmx-fixture)})]
     {:runtime runtime
+     :window-fixture window-fixture
      :document-fixture document-fixture
      :htmx-fixture htmx-fixture}))
 
 (defn- installed-entry
-  [document-fixture event-name]
+  [target-fixture event-name]
   (some
-   (fn [[name handler capture? :as entry]]
+   (fn [[name _handler _capture? :as entry]]
      (when (= event-name name)
        entry))
-   @(:added document-fixture)))
+   @(:added target-fixture)))
 
 (defn- installed-handler
-  [document-fixture event-name]
-  (second (installed-entry document-fixture event-name)))
+  [target-fixture event-name]
+  (second (installed-entry target-fixture event-name)))
 
 (defn- refresh-calls
   [htmx-fixture]
@@ -134,37 +166,43 @@
    (core/pending-refresh runtime root)))
 
 ;; =============================================================================
-;; Lifecycle ownership
+;; Native lifecycle ownership
 ;; =============================================================================
 
-(deftest lifecycle-repair-events-belong-to-core-owned-listener-set-test
-  (let [events (set (map first core/listener-specs))]
-    (testing "online recovery is owned by browser.core"
-      (is (contains? events "online")))
-
-    (testing "bfcache/pageshow recovery is owned by browser.core"
-      (is (contains? events "pageshow")))
-
-    (testing "foreground visibility recovery is owned by browser.core"
-      (is (contains? events "visibilitychange")))))
-
-(deftest start-stop-own-lifecycle-listeners-exactly-test
-  (let [{:keys [runtime document-fixture]}
+(deftest lifecycle-repair-listeners-use-native-browser-event-targets-test
+  (let [{:keys [runtime window-fixture document-fixture]}
         (lifecycle-fixture [])]
     (core/start! runtime)
-    (let [entries
-          (keep
-           #(installed-entry document-fixture %)
-           ["online" "pageshow" "visibilitychange"])]
-      (is (= 3 (count entries))
-          "Core must physically install all three lifecycle-recovery listeners.")
+    (try
+      (let [online-entry
+            (installed-entry window-fixture "online")
+            pageshow-entry
+            (installed-entry window-fixture "pageshow")
+            visibility-entry
+            (installed-entry document-fixture "visibilitychange")]
+        (testing "Window owns online/pageshow recovery"
+          (is (some? online-entry))
+          (is (some? pageshow-entry))
+          (is (nil? (installed-entry document-fixture "online")))
+          (is (nil? (installed-entry document-fixture "pageshow"))))
 
-      (core/stop! runtime)
+        (testing "Document owns visibilitychange recovery"
+          (is (some? visibility-entry))
+          (is (nil? (installed-entry window-fixture "visibilitychange"))))
 
-      (doseq [entry entries]
-        (is (some #(= entry %)
-                  @(:removed document-fixture))
-            "Core stop must remove the exact handler/capture tuple it installed.")))))
+        (core/stop! runtime)
+
+        (testing "stop removes the exact registrations from their owning targets"
+          (is (some #(= online-entry %)
+                    @(:removed window-fixture)))
+          (is (some #(= pageshow-entry %)
+                    @(:removed window-fixture)))
+          (is (some #(= visibility-entry %)
+                    @(:removed document-fixture)))))
+      (finally
+        ;; stop! is idempotent from the lifecycle owner's perspective; keep the
+        ;; fixture retired even if an assertion above throws.
+        (core/stop! runtime)))))
 
 ;; =============================================================================
 ;; Advisory convergence repair
@@ -174,13 +212,13 @@
   (let [managed-a (make-managed-root "managed-a")
         managed-b (make-managed-root "managed-b")
         legacy (make-legacy-root "legacy")
-        {:keys [runtime document-fixture htmx-fixture]}
+        {:keys [runtime window-fixture htmx-fixture]}
         (lifecycle-fixture [managed-a managed-b legacy])]
     (core/start! runtime)
     (try
-      (let [handler (installed-handler document-fixture "online")]
+      (let [handler (installed-handler window-fixture "online")]
         (is (fn? handler)
-            "The online recovery listener must be installed by Core.")
+            "The online recovery listener must be installed on Window.")
         (when handler
           (handler (make-event "online"))))
 
@@ -198,13 +236,13 @@
 
 (deftest persisted-pageshow-repairs-but-ordinary-pageshow-does-not-test
   (let [managed (make-managed-root "managed")
-        {:keys [runtime document-fixture htmx-fixture]}
+        {:keys [runtime window-fixture htmx-fixture]}
         (lifecycle-fixture [managed])]
     (core/start! runtime)
     (try
-      (let [handler (installed-handler document-fixture "pageshow")]
+      (let [handler (installed-handler window-fixture "pageshow")]
         (is (fn? handler)
-            "The pageshow recovery listener must be installed by Core.")
+            "The pageshow recovery listener must be installed on Window.")
 
         (when handler
           (handler
@@ -232,7 +270,7 @@
     (try
       (let [handler (installed-handler document-fixture "visibilitychange")]
         (is (fn? handler)
-            "The visibilitychange recovery listener must be installed by Core.")
+            "The visibilitychange recovery listener must be installed on Document.")
 
         (aset document "visibilityState" "hidden")
         (when handler
@@ -252,20 +290,20 @@
 
 (deftest lifecycle-repair-signals-coalesce-through-adapter-test
   (let [managed (make-managed-root "managed")
-        {:keys [runtime document-fixture htmx-fixture]}
+        {:keys [runtime window-fixture document-fixture htmx-fixture]}
         (lifecycle-fixture [managed])
         document (:document document-fixture)]
     (core/start! runtime)
     (try
       (let [online-handler
-            (installed-handler document-fixture "online")
+            (installed-handler window-fixture "online")
             pageshow-handler
-            (installed-handler document-fixture "pageshow")
+            (installed-handler window-fixture "pageshow")
             visibility-handler
             (installed-handler document-fixture "visibilitychange")]
         (is (every? fn?
                     [online-handler pageshow-handler visibility-handler])
-            "All lifecycle recovery handlers must be physically installed.")
+            "All lifecycle recovery handlers must be physically installed on their native targets.")
 
         ;; Fire three distinct repair boundaries before HTMX has begun the
         ;; adapter-issued physical request. They are three advisory facts about
