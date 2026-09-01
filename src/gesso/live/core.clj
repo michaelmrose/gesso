@@ -650,8 +650,13 @@
   ([ctx query opts]
    (live.xtdb/q-consistent-from ctx query opts)))
 
-(defn execute-tx!
-  "Execute XTDB2 tx ops using a raw connectable or app ctx.
+(defn- execute-tx!
+  "Execute XTDB2 tx ops for Live's authoritative mutation workflows.
+
+   This is deliberately private. Application code that needs raw XTDB
+   transaction execution should use gesso.live.consistency.xtdb explicitly;
+   authoritative mutations that participate in Live should normally enter
+   through transact-and-notify!, live-set!, or live-swap!.
 
    Returns the result from gesso.live.consistency.xtdb/execute-tx-from!:
 
@@ -659,36 +664,13 @@
       :consistency ...
       :progression ...} ; when complete authoritative basis data is available
 
-   execute-tx! is preferred for write paths that need immediate live
-   read-after-write consistency because XTDB2 execute-tx returns tx-id and
-   system-time, from which the XTDB helper derives both per-query consistency
+   Live keeps this helper internally because execute-tx returns tx-id and
+   system-time, from which the XTDB adapter derives both per-query consistency
    and a portable authoritative progression requirement."
   ([ctx tx-ops]
    (live.xtdb/execute-tx-from! ctx tx-ops))
   ([ctx tx-ops opts]
    (live.xtdb/execute-tx-from! ctx tx-ops opts)))
-
-(defn submit-tx!
-  "Submit XTDB2 tx ops using a raw connectable or app ctx.
-
-   Public XTDB2 submit-tx returns only :tx-id. The returned consistency is
-   therefore metadata-only unless XTDB changes that public result shape."
-  ([ctx tx-ops]
-   (live.xtdb/submit-tx-from! ctx tx-ops))
-  ([ctx tx-ops opts]
-   (live.xtdb/submit-tx-from! ctx tx-ops opts)))
-
-(def put-docs-op
-  "Build an XTDB2 :put-docs tx op.
-
-   Re-export of gesso.live.consistency.xtdb/put-docs-op."
-  live.xtdb/put-docs-op)
-
-(def delete-docs-op
-  "Build an XTDB2 :delete-docs tx op.
-
-   Re-export of gesso.live.consistency.xtdb/delete-docs-op."
-  live.xtdb/delete-docs-op)
 
 ;; -----------------------------------------------------------------------------
 ;; HTMX/raw attr facade
