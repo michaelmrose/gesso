@@ -1,6 +1,6 @@
 (ns gesso.live.oob-test
   (:require
-   [clojure.test :refer [deftest is]]
+   [clojure.test :refer [deftest is testing]]
    [gesso.live.oob :as oob]))
 
 ;; -----------------------------------------------------------------------------
@@ -320,3 +320,53 @@
              (oob/with-live-id :request-1)
              (oob/with-consistency-token "opaque-token")
              (oob/with-trigger :live-update)))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative absence boundary
+;; -----------------------------------------------------------------------------
+
+(deftest nil-fragment-is-no-oob-opinion-not-authoritative-absence-test
+  (testing "ordinary omission remains distinct from an explicit physical delete"
+    (is (= []
+           (oob/fragments nil)))
+    (is (= [:div {:hx-swap-oob "delete:#panel"}]
+           (oob/delete-oob "#panel")))))
+
+(deftest delete-oob-is-physical-markup-not-authority-test
+  (let [[tag attrs & children]
+        (oob/delete-oob "#panel")]
+    (testing "the generic OOB helper expresses only the HTMX physical delete"
+      (is (= :div tag))
+      (is (empty? children))
+      (is (= {:hx-swap-oob "delete:#panel"}
+             attrs)))
+
+    (testing "delete markup carries no Gesso authority/progression claim"
+      (doseq [k [:authority
+                 :presence
+                 :basis
+                 :authoritative
+                 :data-gesso-authority
+                 :data-gesso-authoritative
+                 :data-gesso-canonical
+                 :data-gesso-basis
+                 :data-gesso-progression]]
+        (is (not (contains? attrs k))
+            (str "generic OOB delete must not establish semantic authority through " k))))))
+
+(deftest opaque-oob-metadata-does-not-turn-delete-into-authority-test
+  (let [[_ attrs]
+        (-> (oob/delete-oob "#panel")
+            (oob/with-live-id :request-1)
+            (oob/with-consistency-token "opaque-token")
+            (oob/with-trigger :live-update))]
+    (is (= {:hx-swap-oob "delete:#panel"
+            :data-gesso-live-id "request-1"
+            :data-gesso-consistency-token "opaque-token"
+            :data-gesso-trigger "live-update"}
+           attrs))
+    (is (not (contains? attrs :authority)))
+    (is (not (contains? attrs :presence)))
+    (is (not (contains? attrs :basis)))
+    (is (not (contains? attrs :authoritative)))))
+
