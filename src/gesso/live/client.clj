@@ -45,6 +45,7 @@
    :event default-event
    :endpoint default-endpoint
    :max-pending-fragments-per-client 256
+   :max-disconnected-pending-clients 256
    :client (fn [_ctx]
              {:client/scopes #{}})})
 
@@ -204,6 +205,16 @@
        still at-most-once, non-authoritative presentation work; this cap is a
        retention bound, not a durability or acknowledgement mechanism.
 
+     :max-disconnected-pending-clients
+       Finite global cap on logical client ids that are disconnected while
+       retaining pending OOB work for same-id reconnect recovery. Defaults to
+       256. When the cap is exceeded, disconnected pending mailboxes are
+       evicted until the bound is restored and
+       :disconnected-pending-overflow-count is incremented. Currently connected
+       clients are never part of this eviction class. Eviction order is not a
+       delivery guarantee; pending OOB remains non-authoritative presentation
+       work.
+
      :client
        Function of ctx -> app client descriptor.
 
@@ -221,20 +232,27 @@
          max-pending-fragments-per-client
          (require-pos-int!
           :max-pending-fragments-per-client
-          (:max-pending-fragments-per-client options'))]
+          (:max-pending-fragments-per-client options'))
+         max-disconnected-pending-clients
+         (require-pos-int!
+          :max-disconnected-pending-clients
+          (:max-disconnected-pending-clients options'))]
      {:id (or (:id options') (random-uuid))
       :event (event-name (:event options'))
       :endpoint endpoint'
       :max-pending-fragments-per-client max-pending-fragments-per-client
+      :max-disconnected-pending-clients max-disconnected-pending-clients
       :client client-fn
       :state (atom {:clients {}
                     :pending {}
+                    :disconnected-pending-order []
                     :latest-client-id nil
                     :created-at (now-ms)
                     :sent-count 0
                     :wakeup-count 0
                     :dropped-count 0
-                    :pending-overflow-count 0})})))
+                    :pending-overflow-count 0
+                    :disconnected-pending-overflow-count 0})})))
 
 (defn reset-channel!
   "Atomically clear logical channel state, then close the displaced streams.
@@ -254,12 +272,14 @@
   (let [reset-state
         {:clients {}
          :pending {}
+         :disconnected-pending-order []
          :latest-client-id nil
          :created-at (now-ms)
          :sent-count 0
          :wakeup-count 0
          :dropped-count 0
-         :pending-overflow-count 0}
+         :pending-overflow-count 0
+         :disconnected-pending-overflow-count 0}
 
         [old-state _new-state]
         (swap-vals!
@@ -327,13 +347,123 @@
 ;; Stream registration
 ;; -----------------------------------------------------------------------------
 
+(defn- without-client-id
+  [client-ids client-id]
+  (into []
+        (remove #(= client-id %))
+        (or client-ids [])))
+
+(defn- canonical-disconnected-pending-order
+  "Return a clean oldest->newest order for disconnected logical clients that
+   still own pending work.
+
+   The derived eligibility check is intentionally authoritative over the cached
+   order vector. This keeps hot-reloaded/legacy channel state safe when the
+   vector is absent or stale, without changing the pending mailbox shape."
+  [state]
+  (let [eligible
+        (set
+         (keep
+          (fn [[client-id fragments]]
+            (when
+             (and
+              (seq fragments)
+              (not
+               (contains?
+                (:clients state)
+                client-id)))
+             client-id))
+          (:pending state)))
+
+        ordered
+        (reduce
+         (fn [result client-id]
+           (if
+            (and
+             (contains? eligible client-id)
+             (not
+              (some #{client-id} result)))
+             (conj result client-id)
+             result))
+         []
+         (or (:disconnected-pending-order state) []))
+
+        ordered-set
+        (set ordered)
+
+        missing
+        (sort-by str
+                 (remove ordered-set eligible))]
+    (into ordered missing)))
+
+(defn- enforce-disconnected-pending-cap
+  "Mark client-id as the most recently disconnected retained mailbox and
+   enforce the channel-wide disconnected mailbox bound.
+
+   Connected client ids are never eligible. Eviction removes only ephemeral
+   pending presentation work; it does not affect an active physical stream.
+   The counter is separate from per-mailbox fragment overflow and wake failure
+   diagnostics."
+  [state channel client-id]
+  (let [capacity
+        (:max-disconnected-pending-clients channel)
+
+        ordered0
+        (canonical-disconnected-pending-order state)
+
+        client-retained?
+        (and
+         (not
+          (contains?
+           (:clients state)
+           client-id))
+         (seq
+          (get-in
+           state
+           [:pending client-id])))
+
+        ordered
+        (if client-retained?
+          (conj
+           (without-client-id ordered0 client-id)
+           client-id)
+          ordered0)
+
+        overflow-count
+        (max
+         0
+         (- (count ordered)
+            capacity))
+
+        evicted-client-ids
+        (take overflow-count ordered)
+
+        retained-order
+        (vec
+         (drop overflow-count ordered))]
+    (-> state
+        (assoc
+         :disconnected-pending-order
+         retained-order)
+        (update
+         :pending
+         #(apply dissoc % evicted-client-ids))
+        (update
+         :disconnected-pending-overflow-count
+         (fnil + 0)
+         overflow-count))))
+
 (defn- remove-client-if-same-stream!
   [channel client-id stream]
   (swap! (:state channel)
          (fn [state]
            (let [client (get-in state [:clients client-id])]
              (if (identical? stream (:stream client))
-               (update state :clients dissoc client-id)
+               (-> state
+                   (update :clients dissoc client-id)
+                   (enforce-disconnected-pending-cap
+                    channel
+                    client-id))
                state))))
   nil)
 
@@ -350,15 +480,22 @@
         (swap-vals!
          (:state channel)
          (fn [state]
-           (assoc
-            state
-            :latest-client-id
-            client-id
-            :clients
-            (assoc
-             (:clients state)
-             client-id
-             client))))
+           (-> state
+               (assoc
+                :latest-client-id
+                client-id
+                :clients
+                (assoc
+                 (:clients state)
+                 client-id
+                 client))
+               ;; A same-id reconnect immediately protects its retained mailbox
+               ;; from disconnected-client eviction at this registration's
+               ;; linearization point.
+               (update
+                :disconnected-pending-order
+                without-client-id
+                client-id))))
 
         displaced-stream
         (get-in
@@ -553,7 +690,12 @@
            (fn [state]
              (let [fragments (get-in state [:pending client-id])]
                (reset! drained fragments)
-               (update state :pending dissoc client-id))))
+               (-> state
+                   (update :pending dissoc client-id)
+                   (update
+                    :disconnected-pending-order
+                    without-client-id
+                    client-id)))))
     (when (seq @drained)
       (vec @drained))))
 
@@ -827,6 +969,8 @@
      :event (:event channel)
      :max-pending-fragments-per-client
      (:max-pending-fragments-per-client channel)
+     :max-disconnected-pending-clients
+     (:max-disconnected-pending-clients channel)
      :connected-count (count (:clients state))
      :connected-client-ids (vec (keys (:clients state)))
      :latest-client-id (:latest-client-id state)
@@ -835,4 +979,6 @@
      :wakeup-count (:wakeup-count state)
      :dropped-count (:dropped-count state)
      :pending-overflow-count (:pending-overflow-count state)
+     :disconnected-pending-overflow-count
+     (or (:disconnected-pending-overflow-count state) 0)
      :created-at (:created-at state)}))
