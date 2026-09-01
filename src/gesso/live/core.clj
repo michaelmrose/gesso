@@ -597,7 +597,7 @@
       (assoc change :gesso.live/consistency consistency')
       change)))
 
-(defn attach-progression
+(defn- attach-progression
   "Attach one normalized authoritative progression requirement to a primary
    change/invalidation map.
 
