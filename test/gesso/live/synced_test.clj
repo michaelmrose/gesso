@@ -1065,6 +1065,151 @@
             1)))))
 
 ;; -----------------------------------------------------------------------------
+;; Guarded XTDB transaction ops
+;; -----------------------------------------------------------------------------
+
+(deftest guarded-tx-ops-assert-exact-non-default-value-test
+  (is (= [[:sql
+           "ASSERT EXISTS (SELECT 1 FROM demo_counters WHERE _id = ? AND demo$value = ?)"
+           ["global-shared-counter"
+            7]]
+
+          [:put-docs
+           :demo_counters
+
+           {:xt/id
+            "global-shared-counter"
+
+            :demo/value
+            8}]]
+         (synced/guarded-tx-ops
+          (descriptor)
+          7
+          8))))
+
+(deftest guarded-tx-ops-default-guard-matches-logical-absence-null-or-default-test
+  (is (= [[:sql
+           (str
+            "ASSERT ("
+            "NOT EXISTS (SELECT 1 FROM demo_counters WHERE _id = ?) "
+            "OR EXISTS (SELECT 1 FROM demo_counters "
+            "WHERE _id = ? AND (demo$value IS NULL OR demo$value = ?))"
+            ")")
+           ["global-shared-counter"
+            "global-shared-counter"
+            0]]
+
+          [:put-docs
+           :demo_counters
+
+           {:xt/id
+            "global-shared-counter"
+
+            :demo/value
+            1}]]
+         (synced/guarded-tx-ops
+          (descriptor)
+          0
+          1))))
+
+(deftest guarded-tx-ops-nil-default-uses-logical-default-guard-test
+  (is (= [[:sql
+           (str
+            "ASSERT ("
+            "NOT EXISTS (SELECT 1 FROM demo_counters WHERE _id = ?) "
+            "OR EXISTS (SELECT 1 FROM demo_counters "
+            "WHERE _id = ? AND (demo$value IS NULL OR demo$value = ?))"
+            ")")
+           ["global-shared-counter"
+            "global-shared-counter"
+            nil]]
+
+          [:put-docs
+           :demo_counters
+
+           {:xt/id
+            "global-shared-counter"
+
+            :demo/value
+            :first-value}]]
+         (synced/guarded-tx-ops
+          (descriptor
+           {:default
+            nil})
+          nil
+          :first-value))))
+
+(deftest guarded-tx-ops-delegates-write-through-xtdb-helper-test
+  (let [seen
+        (atom nil)
+
+        sentinel
+        [:sentinel-put]]
+
+    (with-redefs
+     [live.xtdb/put-docs-op
+      (fn [table doc]
+        (reset!
+         seen
+         [table
+          doc])
+
+        sentinel)]
+
+      (is (= [[:sql
+               "ASSERT EXISTS (SELECT 1 FROM demo_counters WHERE _id = ? AND demo$value = ?)"
+               ["global-shared-counter"
+                41]]
+              sentinel]
+             (synced/guarded-tx-ops
+              (descriptor)
+              41
+              42)))
+
+      (is (= [:demo_counters
+              {:xt/id
+               "global-shared-counter"
+
+               :demo/value
+               42}]
+             @seen)))))
+
+(deftest guarded-tx-ops-requires-synced-descriptor-test
+  (is (= {:value
+          {}}
+         (thrown-data
+          #(synced/guarded-tx-ops
+            {}
+            0
+            1)))))
+
+(deftest guarded-tx-ops-revalidates-mutated-identifiers-test
+  (let [base
+        (descriptor)]
+
+    (is (= :table
+           (:kind
+            (thrown-data
+             #(synced/guarded-tx-ops
+               (assoc
+                base
+                :table
+                "bad-table")
+               0
+               1)))))
+
+    (is (= "bad-column"
+           (:attr
+            (thrown-data
+             #(synced/guarded-tx-ops
+               (assoc
+                base
+                :col
+                "bad-column")
+               0
+               1)))))))
+
+;; -----------------------------------------------------------------------------
 ;; Primary live change
 ;; -----------------------------------------------------------------------------
 
