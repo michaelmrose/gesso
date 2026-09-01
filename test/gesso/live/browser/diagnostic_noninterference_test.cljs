@@ -25,9 +25,6 @@
    [gesso.live.browser.adapter :as adapter]
    [gesso.live.browser.shell :as shell]))
 
-(def fixed-now
-  :gesso.test/fixed-now)
-
 (defn- canonical-browser-plan
   []
   (project/project
@@ -59,9 +56,7 @@
   {:event :execution/start
    :execution-id execution-id
    :execution
-   (machine/start
-    plan
-    {:now-fn (constantly fixed-now)})
+   (machine/start plan)
    :target-id :diagnostic/noninterference})
 
 (defn- stale-retire-event
@@ -74,8 +69,8 @@
 (defn- event-sequence
   [plan]
   ;; Construct this vector once and feed the exact same immutable event values to
-  ;; both runtimes. The fixed machine clock removes incidental trace-time
-  ;; differences from the comparison.
+  ;; both runtimes. Any execution-local incidental metadata is therefore shared
+  ;; rather than regenerated independently for the two comparison runs.
   [(start-event "execution-1" plan)
    (stale-retire-event)
    (start-event "execution-2" plan)])
