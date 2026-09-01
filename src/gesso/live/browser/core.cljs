@@ -17,7 +17,9 @@
    - triggering an HTMX-owned refresh from :fragment/refresh effects
    - translating fragment removal into :fragment/retire
    - exposing a small explicit invalidation entry point for SSE/other wakeups
-   - installing/removing the documented browser listeners
+   - turning browser recovery boundaries into advisory managed-fragment repair
+   - installing/removing the documented browser listeners on their native
+     Document/Window owners
 
    It deliberately does not:
 
@@ -29,6 +31,7 @@
    - retain raw DOM/HTMX/XHR objects in AdapterState
    - issue XMLHttpRequest/fetch directly
    - recreate HTMX request, target, swap, include, or synchronization behavior
+   - treat lifecycle recovery as authoritative progression evidence
 
    Physical request correlation is intentionally outside AdapterState. A stable
    fragment root may temporarily be associated with adapter generation data and
@@ -36,9 +39,14 @@
    later HTMX callbacks. The adapter remains the sole semantic arbiter.
 
    The adapter emits :fragment/refresh. Core responds by asking HTMX to trigger
-   `gesso:live-refresh` on the stable fragment root. Server markup will be
-   tightened separately so managed fragments declaratively listen for this
-   event. Core never synthesizes an HTTP request itself.
+   `gesso:live-refresh` on the stable fragment root. Core never synthesizes an
+   HTTP request itself.
+
+   Browser lifecycle recovery follows the same rule. `online`, persisted
+   `pageshow`, and foreground `visibilitychange` are advisory evidence that the
+   browser may have missed invalidations. Core therefore notifies AdapterState
+   for each currently managed root; AdapterState still owns generation and
+   single-flight/coalescing semantics.
 
    Continuity defaults to one per-core physical gesso.live.browser.continuity
    runtime. That runtime captures/restores only browser-local presentation
@@ -94,14 +102,15 @@
     "htmx:abort"})
 
 (def listener-specs
-  "Documented lifecycle events observed by the browser core.
+  "Document-owned lifecycle events observed by the browser core.
 
-   Core remains the single owner of document/HTMX listener registration.
+   Core remains the single owner of Document/HTMX listener registration.
    Higher browser realizations may register read/write event observers through
    register-event-observer! without installing competing document listeners.
-   Observers receive raw browser events only at this physical integration
-   boundary; they do not enter AdapterState and cannot replace Core's protected
-   fragment/continuity handlers."
+
+   `visibilitychange` is included here because its native owner is Document.
+   Window-owned recovery events (`online` and `pageshow`) are deliberately
+   registered separately and are not part of the shared HTMX observer seam."
   [["htmx:configRequest" :config-request]
    ["htmx:beforeRequest" :before-request]
    ["htmx:beforeSend" :observe-only]
@@ -115,7 +124,17 @@
    ["htmx:beforeCleanupElement" :before-cleanup]
    [sse-before-message-event-name :sse-before-message]
    [sse-open-event-name :sse-open]
-   [invalidated-event-name :invalidated]])
+   [invalidated-event-name :invalidated]
+   ["visibilitychange" :visibility-change]])
+
+(def window-lifecycle-listener-specs
+  "Window-owned advisory convergence-repair events.
+
+   These do not expose a generic raw-event observation seam. They exist only to
+   re-enter the managed fragment adapter after browser lifecycle boundaries
+   where advisory invalidations may have been missed."
+  [["online" :online]
+   ["pageshow" :pageshow]])
 
 (def option-keys
   #{:document
@@ -268,11 +287,7 @@
   false)
 
 (defn cancel-swap-event!
-  "Physically suppress one HTMX swap.
-
-   HTMX exposes detail.shouldSwap at beforeSwap. preventDefault is also invoked
-   when available so synthetic/test events and future-compatible listeners fail
-   closed rather than silently swapping."
+  "Physically suppress one HTMX swap."
   [event]
   (when-let [detail (event-detail event)]
     (aset detail "shouldSwap" false))
@@ -344,11 +359,7 @@
     nil))
 
 (defn event-elements
-  "Candidate physical elements carried by documented HTMX event shapes.
-
-   Order matters: request source (:elt) precedes swap target, then the DOM event
-   target. Duplicate host identities are removed without converting them to
-   portable data."
+  "Candidate physical elements carried by documented HTMX event shapes."
   [event]
   (let [candidates [(detail-field event "elt")
                     (detail-field event "target")
@@ -429,11 +440,7 @@
   (:shell (require-core! runtime)))
 
 (defn continuity-runtime
-  "Return this core runtime's physical continuity runtime.
-
-   Captured resources are not stored here; shell owns those by adapter-issued
-   slot generation. This accessor exists for per-runtime physical extension
-   such as continuity/register-box!."
+  "Return this core runtime's physical continuity runtime."
   [runtime]
   (:continuity (require-core! runtime)))
 
@@ -444,7 +451,7 @@
 (declare event-observers)
 
 (defn diagnostics
-  "Plain diagnostics. WeakMap/XHR/DOM resources are deliberately absent."
+  "Plain diagnostics. WeakMap/XHR/DOM/Window resources are deliberately absent."
   [runtime]
   (let [runtime (require-core! runtime)]
     {:gesso.live.browser.core/type runtime-type
@@ -459,10 +466,7 @@
 ;; =============================================================================
 
 (defn event-observers
-  "Return event-name -> observer-id set for registered physical observers.
-
-   Observer functions themselves are intentionally omitted so diagnostics and
-   callers never acquire host callbacks accidentally."
+  "Return event-name -> observer-id set for registered physical observers."
   [runtime]
   (let [runtime (require-core! runtime)]
     (into {}
@@ -472,18 +476,16 @@
           @(:event-observers runtime))))
 
 (defn register-event-observer!
-  "Register one observer on an event already owned by Core's listener set.
+  "Register one observer on an event already owned by Core's Document listener
+   set.
 
-   event-name must be one of listener-specs. observer-id is a keyword used for
-   exact ownership and replacement-safe cleanup. handler receives the raw DOM
-   event and may perform only physical integration work; semantic decisions must
-   still enter the adapter/Choreo boundary through their public dispatch APIs.
-
-   Registering the same [event-name observer-id] replaces that observer only.
-   Core itself remains the sole document listener owner."
+   Window-only lifecycle repair is framework-owned and intentionally not exposed
+   through this generic raw-event observer seam."
   [runtime event-name observer-id handler]
   (let [runtime (require-core! runtime)
-        event-name (require-nonblank-string! "Browser core observed event name" event-name)
+        event-name (require-nonblank-string!
+                    "Browser core observed event name"
+                    event-name)
         supported (set (map first listener-specs))]
     (when-not (contains? supported event-name)
       (throw
@@ -512,7 +514,8 @@
   (let [runtime (require-core! runtime)]
     (swap! (:event-observers runtime)
            (fn [observers]
-             (let [event-observers' (dissoc (get observers event-name {}) observer-id)]
+             (let [event-observers'
+                   (dissoc (get observers event-name {}) observer-id)]
                (if (seq event-observers')
                  (assoc observers event-name event-observers')
                  (dissoc observers event-name)))))
@@ -520,8 +523,6 @@
 
 (defn- notify-event-observers!
   [runtime event-name event]
-  ;; Snapshot the observer map before invocation. Registration/removal during a
-  ;; callback affects only later browser events and cannot perturb this delivery.
   (doseq [[_ handler] (get @(:event-observers runtime) event-name {})]
     (handler event))
   true)
@@ -535,6 +536,16 @@
   [options]
   (or (:htmx options)
       (default-htmx)))
+
+(defn- document-window
+  "Return the Window naturally associated with this runtime's Document.
+
+   Custom host-independent Documents may intentionally have no defaultView; in
+   that case Window-only lifecycle listeners are simply unavailable while all
+   Document/HTMX behavior remains testable."
+  [document]
+  (when document
+    (.-defaultView document)))
 
 (defn- htmx-trigger!
   [runtime root event-name detail]
@@ -551,22 +562,29 @@
          :fragment-id (fragment-id-from-root root)})))
     (.call trigger htmx root event-name detail)))
 
+(defn- fragment-roots
+  [runtime]
+  (let [document (:document runtime)]
+    (if document
+      (try
+        (vec (array-seq (.querySelectorAll document fragment-selector)))
+        (catch :default _
+          []))
+      [])))
+
+(defn- managed-fragment-roots
+  [runtime]
+  (filterv managed-fragment-root?
+           (fragment-roots runtime)))
+
 (defn- fragment-root-by-id
   [runtime fragment-id]
-  (let [document (:document runtime)
-        roots
-        (if document
-          (try
-            (array-seq (.querySelectorAll document fragment-selector))
-            (catch :default _
-              nil))
-          nil)]
-    (some
-     (fn [root]
-       (when (= fragment-id
-                (fragment-id-from-root root))
-         root))
-     roots)))
+  (some
+   (fn [root]
+     (when (= fragment-id
+              (fragment-id-from-root root))
+       root))
+   (fragment-roots runtime)))
 
 (defn- weak-get
   [^js weak-map key]
@@ -584,11 +602,7 @@
     (.delete weak-map key)))
 
 (defn- delete-if-same!
-  "Identity-safe physical cleanup.
-
-   A completing request may synchronously cause the adapter to issue the next
-   queued refresh. Never allow cleanup for generation A to delete a physical
-   record that was already replaced by generation B."
+  "Identity-safe physical cleanup."
   [^js weak-map key expected]
   (when (and key
              (identical? expected
@@ -628,12 +642,7 @@
   nil)
 
 (defn- active-request-from-event
-  "Resolve the exact physical managed request represented by an HTMX event.
-
-   When HTMX supplies an XHR, the XHR identity is authoritative for physical
-   correlation. A late callback from request A therefore cannot be interpreted
-   as request B merely because both used the same stable fragment root. Root-only
-   fallback is used only for lifecycle observations that supply no XHR."
+  "Resolve the exact physical managed request represented by an HTMX event."
   [runtime event]
   (let [xhr (xhr-from-event event)]
     (if xhr
@@ -755,41 +764,7 @@
 
    The returned value owns one shell runtime plus only physical correlation
    WeakMaps and listener registrations. No raw browser object enters the shell's
-   AdapterState.
-
-   Options:
-
-     :document
-       Browser document seam. Defaults to js/document.
-
-     :htmx
-       HTMX object seam. Defaults to window.htmx.
-
-     :request-id-fn
-       Zero-arity physical request identity generator.
-
-     :authoritative-from-event
-       event -> nil or plain adapter authoritative candidate. This is a parser/
-       carrier seam only; the adapter decides whether installation is allowed.
-
-     :handlers
-       Additional shell effect handlers for machine/transport/etc. Framework
-       HTMX and continuity handlers may not be overridden here. Extend
-       continuity through :continuity-options, continuity-runtime/register-box!,
-       or the explicit :continuity-*-! seams below.
-
-     :continuity-options
-       Options passed to continuity/create for this core runtime. This is the
-       normal extension point for custom physical boxes, diagnostics, and RAF
-       seams.
-
-     :continuity-capture! / :continuity-restore! / :continuity-release!
-       Optional physical continuity handler overrides. They do not receive or
-       return semantic state. When omitted, this runtime's continuity instance
-       provides the handlers.
-
-     :shell-options
-       Additional options forwarded to shell/create, excluding :handlers."
+   AdapterState."
   ([]
    (create nil))
   ([options]
@@ -842,6 +817,7 @@
           :active-requests (js/WeakMap.)
           :requests-by-xhr (js/WeakMap.)
           :listeners (atom [])
+          :window-listeners (atom [])
           :event-observers (atom {})
           :started? (atom false)}
          built-ins (built-in-handlers runtime-base options)
@@ -857,9 +833,7 @@
 ;; =============================================================================
 
 (defn pending-refresh
-  "Return DOM-light pending correlation data for tests/diagnostics, or nil.
-
-   This function never returns the root itself."
+  "Return DOM-light pending correlation data for tests/diagnostics, or nil."
   [runtime root]
   (when-let [pending
              (weak-get (:pending-refreshes (require-core! runtime)) root)]
@@ -910,16 +884,11 @@
       value)))
 
 ;; =============================================================================
-;; Explicit invalidation boundary
+;; Explicit invalidation / lifecycle recovery boundary
 ;; =============================================================================
 
 (defn- read-managed-sse-payload
-  "Decode one managed Gesso Live SSE payload from HTMX's MessageEvent detail.
-
-   nil data is treated as an advisory invalidation with no progression. This
-   preserves compatibility with older servers/tests that emitted wakeups only.
-   When data is present it must be EDN representing a map; malformed payloads
-   fail closed before any refresh is admitted."
+  "Decode one managed Gesso Live SSE payload from HTMX's MessageEvent detail."
   [event]
   (let [data (detail-field event "data")]
     (when (some? data)
@@ -963,12 +932,7 @@
 
 (defn- payload-progression
   "Return {:present? boolean :requirement normalized-or-nil} for one decoded
-   managed LiveEvent payload.
-
-   Current server transport writes progression at both the LiveEvent top level
-   and inside :invalidation. If either copy is present, both must be present and
-   decode to the same normalized requirement. Core validates correlation only;
-   it never compares opaque bases or decides which basis is stronger."
+   managed LiveEvent payload."
   [payload]
   (if (nil? payload)
     {:present? false
@@ -1022,18 +986,8 @@
 (defn notify-fragment!
   "Notify the pure adapter that a logical Live fragment must refresh.
 
-   The one-arity fragment form is an advisory refresh and therefore carries no
-   authoritative minimum-read requirement.
-
-   When a requirement is supplied it must already be one canonical, normalized
-   gesso.live.progression requirement. Core validates that closed portable
-   shape before admitting the invalidation, but does not compare opaque bases or
-   decide progression ordering. Multiple requirements observed while a request
-   is active are coalesced by adapter.cljc and conservatively composed at the
-   HTMX configRequest boundary.
-
-   This is the intended browser entry point for SSE wakeups and other Live
-   invalidation sources."
+   The two-argument runtime/fragment form is advisory and carries no
+   authoritative minimum-read requirement."
   ([runtime fragment-id]
    (notify-fragment! runtime fragment-id nil false))
   ([runtime fragment-id requirement]
@@ -1051,27 +1005,53 @@
            (assoc :requirement requirement))]
      (shell/dispatch! (:shell runtime) event))))
 
+(defn- repair-managed-fragments!
+  "Advisory convergence repair for every currently managed stable root.
+
+   Lifecycle events say only that the browser may have missed invalidations.
+   They never carry or synthesize progression requirements."
+  [runtime]
+  (let [runtime (require-core! runtime)]
+    (doseq [root (managed-fragment-roots runtime)
+            :let [fragment-id (fragment-id-from-root root)]
+            :when fragment-id]
+      (notify-fragment! runtime fragment-id)))
+  true)
+
+(defn on-online!
+  "Treat Window online as an advisory convergence-repair boundary."
+  [runtime _event]
+  (repair-managed-fragments! runtime))
+
+(defn on-pageshow!
+  "Repair after bfcache restoration only.
+
+   Ordinary pageshow participates in normal page startup and must not create a
+   duplicate refresh merely because the page became visible."
+  [runtime event]
+  (when (true? (when event
+                 (.-persisted event)))
+    (repair-managed-fragments! runtime))
+  true)
+
+(defn on-visibility-change!
+  "Repair when the runtime Document becomes visible again.
+
+   Transitioning into hidden/background state is not itself permission to issue
+   work."
+  [runtime _event]
+  (let [runtime (require-core! runtime)
+        document (:document runtime)]
+    (when (= "visible"
+             (some-> document .-visibilityState str))
+      (repair-managed-fragments! runtime)))
+  true)
+
 (defn on-sse-before-message!
-  "Normalize one managed HTMX SSE message into a fragment invalidation.
-
-   Server markup registers the configured SSE event on a dedicated descendant
-   carrying data-gesso-live-invalidation=<fragment-id>. The descendant exists
-   only to make htmx-ext-sse subscribe to the named EventSource event; it is not
-   allowed to swap SSE payload data into the DOM.
-
-   This handler therefore prevents the SSE extension's direct swap path first,
-   then notifies the adapter. Legacy sse:* request triggers are ignored because
-   they do not carry the invalidation-listener marker.
-
-   Managed Gesso Live payloads are EDN maps produced by the SSE transport. Core
-   decodes only the explicit versioned progression wire field and validates that
-   the top-level and nested invalidation copies agree. It does not infer
-   progression from arrival order or arbitrary payload fields."
+  "Normalize one managed HTMX SSE message into a fragment invalidation."
   [runtime event]
   (let [listener (detail-field event "elt")]
     (when (invalidation-listener? listener)
-      ;; A Gesso invalidation listener must never become a second DOM mutation
-      ;; path, even if its defensive hx-swap=none markup is accidentally changed.
       (prevent-event! event)
       (let [root (fragment-root-from-element listener)
             listener-id (some-> (element-attr listener
@@ -1098,11 +1078,7 @@
 
 (defn on-sse-open!
   "Treat opening or reopening a managed fragment's EventSource as an
-   invalidation.
-
-   Reconnect can follow a period in which advisory invalidations were missed, so
-   the safe response is to ask the adapter for one coordinated authoritative
-   refresh. Legacy direct-SSE fragments are ignored during migration."
+   invalidation."
   [runtime event]
   (when-let [root (some-> (detail-field event "elt")
                           fragment-root-from-element)]
@@ -1112,16 +1088,7 @@
   true)
 
 (defn on-invalidated!
-  "Normalize one explicit DOM invalidation event.
-
-   Expected detail:
-     {fragmentId: \"...\", requirement: <optional canonical progression data>}
-
-   Omitting requirement is the advisory-refresh form. If the field is present,
-   notify-fragment! validates it as a canonical normalized progression
-   requirement before AdapterState can observe it. Core does not parse raw SSE
-   frames here; SSE transport integration can emit this event or call
-   notify-fragment! directly once it has identified the logical fragment."
+  "Normalize one explicit DOM invalidation event."
   [runtime event]
   (let [fragment-id (detail-field event "fragmentId")
         detail (event-detail event)
@@ -1131,10 +1098,11 @@
               (.call (.-hasOwnProperty (.-prototype js/Object))
                      detail
                      "requirement")))
-        requirement (when requirement-present?
-                      (js->clj
-                       (aget detail "requirement")
-                       :keywordize-keys true))]
+        requirement
+        (when requirement-present?
+          (js->clj
+           (aget detail "requirement")
+           :keywordize-keys true))]
     (when fragment-id
       (notify-fragment!
        runtime
@@ -1158,21 +1126,7 @@
 
 (defn on-config-request!
   "Attach the adapter-approved authoritative progression requirement to one
-   managed HTMX fragment refresh.
-
-   HTMX exposes mutable request headers at htmx:configRequest. Core uses only
-   the pending adapter-issued refresh correlation for the matching stable
-   fragment root; unrelated HTMX requests are ignored. Multiple canonical
-   progression requirements are conservatively composed through
-   gesso.live.progression before the shared HTTP codec serializes them.
-
-   This header is a minimum-read request, not browser authority. The trusted
-   server boundary must decode it, compose it with any server-established
-   requirement, authenticate/authorize the read, and interpret bases through
-   the authority-specific consistency adapter.
-
-   A managed request with an unsendable requirement fails closed before HTMX
-   reaches the network."
+   managed HTMX fragment refresh."
   [runtime event]
   (let [runtime (require-core! runtime)
         root (fragment-root-from-event event)
@@ -1194,24 +1148,12 @@
                   progression.http/request-header-name
                   (progression.http/encode-request-progression requirement))))
         (catch :default error
-          ;; configRequest is the last documented request-configuration boundary
-          ;; before HTMX proceeds toward beforeRequest/send. Never allow a
-          ;; managed refresh whose authoritative minimum-read requirement could
-          ;; not be represented on the request.
           (prevent-event! event)
           (throw error)))))
   true)
 
 (defn on-before-request!
-  "Bind the adapter-issued request generation to one physical HTMX request.
-
-   Unmanaged HTMX requests are ignored. The adapter remains responsible for
-   deciding whether this request generation is current; core only supplies a
-   fresh physical request id and enforces the resulting allow/cancel effect.
-
-   Pending correlation is consumed only after normalization and semantic
-   dispatch succeed. A host-side failure before binding therefore fails the
-   physical request closed without losing the adapter-issued generation."
+  "Bind the adapter-issued request generation to one physical HTMX request."
   [runtime event]
   (let [runtime (require-core! runtime)
         root (fragment-root-from-event event)
@@ -1221,45 +1163,38 @@
       (let [disposition (atom :undecided)]
         (try
           (let [request-id ((:request-id-fn runtime))
-                _ (require-nonblank-string! "Physical HTMX request id" request-id)
+                _ (require-nonblank-string!
+                   "Physical HTMX request id"
+                   request-id)
                 record (assoc pending
                               :request-id request-id
                               :xhr (xhr-from-event event))
-                physical (physical-context runtime event root record disposition)
+                physical
+                (physical-context runtime event root record disposition)
                 result
                 (shell/dispatch!
                  (:shell runtime)
                  (normalized-request-event :htmx/before-request record)
                  physical)]
-            ;; Remove only the correlation this callback consumed. A re-entrant
-            ;; effect is allowed to have installed a newer pending generation.
             (delete-if-same! (:pending-refreshes runtime) root pending)
             (if (= :cancelled @disposition)
               (unregister-active-request! runtime root record)
               (register-active-request! runtime root record))
             result)
           (catch :default error
-            ;; Generation/validation/adapter/shell failure must never let an
-            ;; unowned managed request escape to the network. Because pending
-            ;; correlation is consumed only on success, a pre-binding host
-            ;; failure also leaves the exact generation available for recovery.
             (prevent-event! event)
             (throw error))))))
   true)
 
 (defn on-before-swap!
-  "Normalize HTMX beforeSwap for the exact currently correlated managed request.
-
-   The optional authoritative candidate is parsed into plain data, then the
-   adapter alone decides whether the swap may install it. Parsing and
-   normalization are inside the same fail-closed boundary as semantic dispatch:
-   no malformed or exceptional response metadata may escape into a DOM swap."
+  "Normalize HTMX beforeSwap for the exact currently correlated managed request."
   [runtime event]
   (let [runtime (require-core! runtime)
         {:keys [root record]} (active-request-from-event runtime event)]
     (when record
       (let [disposition (atom :undecided)
-            physical (physical-context runtime event root record disposition)]
+            physical
+            (physical-context runtime event root record disposition)]
         (try
           (let [candidate (event-authoritative-candidate runtime event)
                 normalized
@@ -1271,17 +1206,12 @@
              normalized
              physical))
           (catch :default error
-            ;; beforeSwap is the last safe point to prevent an unclassified
-            ;; replacement from reaching the DOM. This includes parser and
-            ;; normalization failures, not only adapter/shell failures.
             (cancel-swap-event! event)
             (throw error))))))
   true)
 
 (defn on-after-swap!
-  "Normalize HTMX afterSwap. Core does not infer that a swap was authoritative;
-   only candidate data previously accepted at beforeSwap can advance the
-   adapter's authoritative frontier."
+  "Normalize HTMX afterSwap."
   [runtime event]
   (let [runtime (require-core! runtime)
         {:keys [root record]} (active-request-from-event runtime event)]
@@ -1308,16 +1238,11 @@
              (:shell runtime)
              normalized
              (physical-context runtime event root record (atom :observed)))]
-        ;; dispatch! may synchronously start the queued next generation. Remove
-        ;; only the record that actually completed.
         (unregister-active-request! runtime root record)
         result))))
 
 (defn on-after-request!
-  "Finish one managed HTMX request.
-
-   Physical success/failure is deliberately not a semantic command outcome. It
-   only closes or fails the fragment request generation."
+  "Finish one managed HTMX request."
   [runtime event]
   (finish-active-request!
    (require-core! runtime)
@@ -1326,10 +1251,7 @@
   true)
 
 (defn on-request-failed!
-  "Normalize HTMX transport/error events.
-
-   If afterRequest later reports the same request, identity-safe cleanup makes
-   the duplicate callback harmless."
+  "Normalize HTMX transport/error events."
   [runtime event]
   (finish-active-request!
    (require-core! runtime)
@@ -1338,10 +1260,7 @@
   true)
 
 (defn on-before-cleanup!
-  "Retire managed fragments whose stable roots are being removed.
-
-   Semantic retirement happens through adapter events before physical WeakMap
-   correlation is discarded. Nested fragment roots are independently retired."
+  "Retire managed fragments whose stable roots are being removed."
   [runtime event]
   (let [runtime (require-core! runtime)
         element (or (detail-field event "elt")
@@ -1378,6 +1297,16 @@
   (.removeEventListener document name handler capture?)
   true)
 
+(defn- add-window-listener!
+  [window name handler capture?]
+  (.addEventListener window name handler capture?)
+  [window name handler capture?])
+
+(defn- remove-window-listener!
+  [window name handler capture?]
+  (.removeEventListener window name handler capture?)
+  true)
+
 (defn- built-in-handler-for
   [runtime handler-id]
   (case handler-id
@@ -1391,25 +1320,53 @@
     :before-cleanup #(on-before-cleanup! runtime %)
     :sse-before-message #(on-sse-before-message! runtime %)
     :sse-open #(on-sse-open! runtime %)
-    :invalidated #(on-invalidated! runtime %)))
+    :invalidated #(on-invalidated! runtime %)
+    :visibility-change #(on-visibility-change! runtime %)
+    :online #(on-online! runtime %)
+    :pageshow #(on-pageshow! runtime %)))
 
 (defn- handler-for
   [runtime event-name handler-id]
   (let [built-in (built-in-handler-for runtime handler-id)]
     (fn [event]
-      ;; Framework observers are invoked first. For pre-request hooks this lets
-      ;; a protocol realization establish correlation before Core observes the
-      ;; same HTMX lifecycle boundary. Observers that must fail a physical event
-      ;; closed are responsible for invoking the documented HTMX/DOM cancellation
-      ;; hook before rethrowing.
       (notify-event-observers! runtime event-name event)
       (when built-in
         (built-in event))
       true)))
 
+(defn- window-lifecycle-handler-for
+  [runtime handler-id]
+  (or (built-in-handler-for runtime handler-id)
+      (throw
+       (core-error
+        :missing-window-lifecycle-handler
+        "Window lifecycle listener has no framework handler."
+        {:handler-id handler-id}))))
+
+(defn- remove-installed-listeners!
+  [runtime]
+  (let [document (:document runtime)]
+    (doseq [[name handler capture?] @(:listeners runtime)]
+      (try
+        (remove-document-listener! document name handler capture?)
+        (catch :default _
+          nil)))
+    (doseq [[window name handler capture?] @(:window-listeners runtime)]
+      (try
+        (remove-window-listener! window name handler capture?)
+        (catch :default _
+          nil)))
+    (reset! (:listeners runtime) [])
+    (reset! (:window-listeners runtime) [])
+    true))
+
 (defn start!
-  "Install the first pure-adapter HTMX integration listeners exactly once for
-   this core runtime."
+  "Install Core's Document/HTMX and browser lifecycle listeners exactly once.
+
+   `visibilitychange` is installed on Document. `online` and `pageshow` are
+   installed on Document.defaultView when that Window seam exists. Host-
+   independent fake Documents may omit defaultView; this preserves portable
+   Node tests without pretending those Window events were installed elsewhere."
   [runtime]
   (let [runtime (require-core! runtime)]
     (when (compare-and-set! (:started? runtime) false true)
@@ -1421,11 +1378,36 @@
             :missing-document
             "Browser core requires a document to install lifecycle listeners."
             {})))
-        (doseq [[name handler-id] listener-specs]
-          (let [handler (handler-for runtime name handler-id)
-                registration (add-document-listener!
-                              document name handler false)]
-            (swap! (:listeners runtime) conj registration)))))
+        (try
+          (doseq [[name handler-id] listener-specs]
+            (let [handler (handler-for runtime name handler-id)
+                  registration
+                  (add-document-listener!
+                   document
+                   name
+                   handler
+                   false)]
+              (swap! (:listeners runtime) conj registration)))
+
+          (when-let [window (document-window document)]
+            (doseq [[name handler-id] window-lifecycle-listener-specs]
+              (let [handler
+                    (window-lifecycle-handler-for runtime handler-id)
+                    registration
+                    (add-window-listener!
+                     window
+                     name
+                     handler
+                     false)]
+                (swap! (:window-listeners runtime)
+                       conj
+                       registration))))
+
+          (catch :default error
+            ;; Partial physical acquisition must never survive a failed start.
+            (remove-installed-listeners! runtime)
+            (reset! (:started? runtime) false)
+            (throw error)))))
     runtime))
 
 (defn stop!
@@ -1434,15 +1416,9 @@
    Shell shutdown semantically retires owned work before best-effort physical
    cleanup. Listener removal itself carries no semantic authority."
   [runtime]
-  (let [runtime (require-core! runtime)
-        document (:document runtime)]
+  (let [runtime (require-core! runtime)]
     (when @(:started? runtime)
-      (doseq [[name handler capture?] @(:listeners runtime)]
-        (try
-          (remove-document-listener! document name handler capture?)
-          (catch :default _
-            nil)))
-      (reset! (:listeners runtime) [])
+      (remove-installed-listeners! runtime)
       (reset! (:started? runtime) false))
     (shell/shutdown! (:shell runtime))
     :stopped))
@@ -1469,19 +1445,17 @@
                ([fragment-id]
                 (notify-fragment! runtime fragment-id))
                ([fragment-id requirement]
-                (notify-fragment! runtime fragment-id (js->clj requirement))))
+                (notify-fragment!
+                 runtime
+                 fragment-id
+                 (js->clj requirement))))
              :shutdown (fn []
                          (stop! runtime))}]
     (aset js/window "gessoLive" api)
     true))
 
 (defn ^:export init!
-  "Create/start the default browser runtime once.
-
-   The namespace itself does not auto-initialize. The generated Gesso Live entry
-   script should call this exported function explicitly, which keeps tests and
-   hot reload from acquiring hidden browser ownership merely by requiring the
-   namespace."
+  "Create/start the default browser runtime once."
   ([]
    (init! nil))
   ([options]
