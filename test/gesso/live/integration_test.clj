@@ -1285,7 +1285,7 @@
         seen-payload (atom nil)
         consistency {:snapshot-time :system-time-42
                      :tx-id 42}
-        consistency-token (xtdb-live/consistency-fragment-dimension consistency)
+        consistency-token (xtdb-live/consistency-token consistency)
         started (live/start-sse!
                  system
                  request-sub
