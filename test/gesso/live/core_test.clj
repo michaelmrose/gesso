@@ -120,7 +120,7 @@
               :scope [:request "req-1"]
               :user-key [:user "u-1"]
               :params {:tab :summary}
-              :consistency-token "tx-1"})
+              :progression sample-request-progression})
         render-count (atom 0)
         render-fn (fn []
                     (str "<section>render-" (swap! render-count inc) "</section>"))]
