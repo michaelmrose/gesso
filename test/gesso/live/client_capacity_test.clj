@@ -820,3 +820,83 @@
               "A retained disconnected mailbox remains recoverable by its same logical client id.")
           (finally
             (close-response! replacement-response)))))))
+
+
+(deftest invalid-disconnected-pending-client-capacities-are-rejected-at-channel-construction-test
+  (doseq [invalid [nil 0 -1 1.5 "4" :four [] {}]]
+    (testing (str "invalid disconnected pending-client capacity " (pr-str invalid))
+      (let [error
+            (try
+              (client/channel
+               {:max-disconnected-pending-clients invalid})
+              nil
+              (catch clojure.lang.ExceptionInfo ex
+                ex))]
+        (is (some? error)
+            "Invalid disconnected-client retention capacity must fail before a channel with ambiguous global retention semantics can exist.")
+        (is (= :max-disconnected-pending-clients
+               (:key (ex-data error))))
+        (is (= invalid
+               (:value (ex-data error))))))))
+
+(deftest reset-clears-disconnected-retention-state-without-changing-policy-test
+  (let [capacity 2
+        channel
+        (test-channel
+         {:max-pending-fragments-per-client 8
+          :max-disconnected-pending-clients capacity})]
+
+    (doseq [index (range 5)]
+      (let [client-id (str "before-reset-" index)]
+        (reject-one-client-wake!
+         channel
+         client-id
+         {:test/client-id client-id})))
+
+    (let [before-reset
+          (client/state-summary channel)]
+      (is (= capacity
+             (count (:pending-counts before-reset))))
+      (is (= 3
+             (:disconnected-pending-overflow-count before-reset)))
+      (is (= capacity
+             (:max-disconnected-pending-clients before-reset))))
+
+    (is (= :reset
+           (client/reset-channel! channel)))
+
+    (let [after-reset
+          (client/state-summary channel)]
+      (is (= 0 (:connected-count after-reset)))
+      (is (= [] (:connected-client-ids after-reset)))
+      (is (nil? (:latest-client-id after-reset)))
+      (is (= {} (:pending-counts after-reset)))
+      (is (= 0 (:sent-count after-reset)))
+      (is (= 0 (:wakeup-count after-reset)))
+      (is (= 0 (:dropped-count after-reset)))
+      (is (= 0 (:pending-overflow-count after-reset)))
+      (is (= 0
+             (:disconnected-pending-overflow-count after-reset))
+          "Reset starts a new global disconnected-retention diagnostics epoch.")
+      (is (= capacity
+             (:max-disconnected-pending-clients after-reset))
+          "Reset clears runtime retention state, not the channel's configured global policy."))
+
+    ;; Prove the reset did not merely hide old diagnostics: the same policy must
+    ;; remain active and counting starts again from zero.
+    (doseq [index (range 3)]
+      (let [client-id (str "after-reset-" index)]
+        (reject-one-client-wake!
+         channel
+         client-id
+         {:test/client-id client-id})))
+
+    (let [new-epoch
+          (client/state-summary channel)]
+      (is (= capacity
+             (count (:pending-counts new-epoch))))
+      (is (= 1
+             (:disconnected-pending-overflow-count new-epoch))
+          "After reset, disconnected-retention overflow accounting must describe only the new lifecycle.")
+      (is (= capacity
+             (:max-disconnected-pending-clients new-epoch))))))
