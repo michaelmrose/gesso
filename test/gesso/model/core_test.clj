@@ -5,6 +5,8 @@
    [com.biffweb.xtdb :as biff.xtdb]
    [com.biffweb.graph :as graph]
    ;; [gesso.graph :as graph]
+   [gesso.live.consistency.xtdb :as live.xtdb]
+   [gesso.live.progression :as progression]
    [gesso.model.command :as command]
    [gesso.model.core :as model]
    [gesso.model.schema :as model.schema]
@@ -748,6 +750,148 @@
 ;; =============================================================================
 ;; Persistence reads
 ;; =============================================================================
+
+(deftest q-read-boundary-test
+  (let [query
+        {:select [:xt/id]
+         :from   [:widget]}]
+
+    (testing "unconstrained two-arity reads delegate to Biff unchanged"
+      (let [ctx
+            {:biff.xtdb/node :node
+             :biff.xtdb/snapshot-token "request-token"
+             :opaque/request-value :preserved}
+
+            calls
+            (atom [])]
+
+        (with-redefs
+         [biff.xtdb/q
+          (fn [& args]
+            (swap! calls conj args)
+            [{:ok true}])]
+
+          (is (= [{:ok true}]
+                 (model/q ctx query)))
+
+          (is (= [[ctx query]]
+                 @calls)))))
+
+    (testing "unconstrained three-arity reads preserve caller options and Biff snapshot semantics"
+      (let [ctx
+            {:biff.xtdb/node :node
+             :biff.xtdb/snapshot-token "request-token"}
+
+            opts
+            {:key-fn :kebab-case-keyword}
+
+            calls
+            (atom [])]
+
+        (with-redefs
+         [biff.xtdb/q
+          (fn [& args]
+            (swap! calls conj args)
+            [{:ok true}])]
+
+          (is (= [{:ok true}]
+                 (model/q ctx query opts)))
+
+          (is (= [[ctx query opts]]
+                 @calls)))))
+
+    (testing "authoritative progression overrides a stale request snapshot token"
+      (let [required-time
+            (Instant/parse
+             "2026-09-01T18:00:00Z")
+
+            required-basis
+            (live.xtdb/basis
+             60
+             required-time)
+
+            requirement
+            (progression/requirement
+             required-basis)
+
+            ctx
+            {:biff.xtdb/node :node
+             :biff.xtdb/snapshot-token "stale-token"
+             :gesso.live/progression requirement}
+
+            calls
+            (atom [])]
+
+        (with-redefs
+         [biff.xtdb/q
+          (fn [& args]
+            (swap! calls conj args)
+            [{:ok true}])]
+
+          (is (= [{:ok true}]
+                 (model/q ctx query)))
+
+          (is (= [[(dissoc ctx :biff.xtdb/snapshot-token)
+                   query
+                   {:snapshot-token
+                    (live.xtdb/basis-snapshot-token
+                     required-basis)}]]
+                 @calls)))))
+
+    (testing "progression is applied after explicit consistency and caller query options"
+      (let [required-time
+            (Instant/parse
+             "2026-09-01T18:05:00Z")
+
+            required-basis
+            (live.xtdb/basis
+             :analytics
+             61
+             required-time)
+
+            requirement
+            (progression/requirement
+             required-basis)
+
+            caller-time
+            (Instant/parse
+             "2025-01-01T00:00:00Z")
+
+            ctx
+            {:biff.xtdb/node :node
+             :biff.xtdb/snapshot-token "request-token"
+             :gesso.live/consistency
+             {:snapshot-token "consistency-token"
+              :await-token "await"}
+             :gesso.live/progression requirement}
+
+            opts
+            {:snapshot-token "caller-token"
+             :snapshot-time caller-time
+             :database :analytics
+             :key-fn :kebab-case-keyword}
+
+            calls
+            (atom [])]
+
+        (with-redefs
+         [biff.xtdb/q
+          (fn [& args]
+            (swap! calls conj args)
+            [{:ok true}])]
+
+          (is (= [{:ok true}]
+                 (model/q ctx query opts)))
+
+          (is (= [[(dissoc ctx :biff.xtdb/snapshot-token)
+                   query
+                   {:await-token "await"
+                    :database :analytics
+                    :key-fn :kebab-case-keyword
+                    :snapshot-token
+                    (live.xtdb/basis-snapshot-token
+                     required-basis)}]]
+                 @calls)))))))
 
 (deftest load-by-id-test
   (let [id
