@@ -59,6 +59,7 @@
    [com.biffweb.graph :as graph]
    ;; [gesso.fx :as fx]
    ;; [gesso.graph :as graph]
+   [gesso.live.consistency.xtdb :as live.xtdb]
    [gesso.model.command :as command]
    [gesso.model.schema :as model.schema]
    [gesso.model.tx :as model.tx]))
@@ -593,22 +594,101 @@
    {:codec-overrides (get-in descriptor [:persistence :codec-overrides])
     :malli-options (malli-options ctx)}))
 
+(defn q
+  "Run one Biff-style XTDB2 query through the Gesso model read boundary.
+
+   With no Gesso Live read requirement, this delegates to com.biffweb.xtdb/q
+   unchanged, preserving Biff's HoneySQL formatting and request-local
+   :biff.xtdb/snapshot-token behavior.
+
+   When ctx carries explicit Gesso query consistency and/or authoritative
+   :gesso.live/progression, those constraints are composed with Biff/caller
+   query options. Progression is applied last, so neither explicit opts nor a
+   stale Biff snapshot token can weaken the required authoritative basis.
+
+   Custom model Graph namespaces should prefer this helper over calling
+   com.biffweb.xtdb/q directly when their reads may participate in Live or
+   choreography."
+  ([ctx query]
+   (let [ctx
+         (query-context! ctx)
+
+         consistency
+         (live.xtdb/consistency-from ctx)
+
+         progression
+         (live.xtdb/progression-from ctx)
+
+         constrained?
+         (or
+          (seq
+           (live.xtdb/query-consistency consistency))
+          (some? progression))]
+     (if-not constrained?
+       (biff.xtdb/q ctx query)
+       (let [ordinary-opts
+             (when-some [snapshot-token
+                         (:biff.xtdb/snapshot-token ctx)]
+               {:snapshot-token snapshot-token})]
+         (biff.xtdb/q
+          (dissoc ctx :biff.xtdb/snapshot-token)
+          query
+          (live.xtdb/read-query-opts
+           consistency
+           progression
+           ordinary-opts))))))
+  ([ctx query opts]
+   (let [ctx
+         (query-context! ctx)
+
+         consistency
+         (live.xtdb/consistency-from ctx)
+
+         progression
+         (live.xtdb/progression-from ctx)
+
+         constrained?
+         (or
+          (seq
+           (live.xtdb/query-consistency consistency))
+          (some? progression))]
+     (if-not constrained?
+       (biff.xtdb/q ctx query opts)
+       (let [ordinary-opts
+             (cond-> (or opts {})
+               (:biff.xtdb/snapshot-token ctx)
+               (assoc
+                :snapshot-token
+                (:biff.xtdb/snapshot-token ctx)))]
+         ;; Biff's q re-associates :biff.xtdb/snapshot-token from ctx after its
+         ;; explicit opts. Remove that legacy carrier here because ordinary-opts
+         ;; already contains it and progression must be allowed to override it.
+         (biff.xtdb/q
+          (dissoc ctx :biff.xtdb/snapshot-token)
+          query
+          (live.xtdb/read-query-opts
+           consistency
+           progression
+           ordinary-opts)))))))
+
 (defn load-by-id
-  "Loads one current document through Biff's XTDB2 helper."
+  "Loads one current document through the progression-aware Biff XTDB2 model
+   read boundary."
   [descriptor ctx id]
   (validate-descriptor descriptor)
   (when (some? id)
     (when-let [raw
                (first
-                (biff.xtdb/q
-                 (query-context! ctx)
+                (q
+                 ctx
                  {:select (document-columns descriptor)
                   :from [(:entity-type descriptor)]
                   :where [:= (identity-storage-key descriptor) id]}))]
       (normalize-loaded-document descriptor ctx raw))))
 
 (defn load-by-lookup
-  "Loads at most one current document through a declared scalar equality lookup."
+  "Loads at most one current document through a declared scalar equality lookup
+   using the progression-aware Biff XTDB2 model read boundary."
   [descriptor ctx field value]
   (validate-descriptor descriptor)
   (when-not (some #{field} (:lookups descriptor))
@@ -622,8 +702,8 @@
     (let [documents
           (mapv
            #(normalize-loaded-document descriptor ctx %)
-           (biff.xtdb/q
-            (query-context! ctx)
+           (q
+            ctx
             {:select (document-columns descriptor)
              :from [(:entity-type descriptor)]
              :where [:= field value]}))]
