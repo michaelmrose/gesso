@@ -457,10 +457,21 @@
    (stamp?
     (get-in value
             [:analysis :current-stamp]))
-   (or (not (:valid? value))
-       (stamp?
-        (get-in value
-                [:analysis :generated-stamp])))
+   (let [current-stamp
+         (get-in value
+                 [:analysis :current-stamp])
+
+         generated-stamp
+         (get-in value
+                 [:analysis :generated-stamp])]
+     (and
+      (stamp? current-stamp)
+      (or
+       (not (:valid? value))
+       (and
+        (stamp? generated-stamp)
+        (= current-stamp
+           generated-stamp)))))
    (= (:valid? value)
       (empty? (:errors value)))))
 
