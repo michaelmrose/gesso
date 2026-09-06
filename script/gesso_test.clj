@@ -363,6 +363,7 @@
     test-ns)
    "gesso.choreo."))
 
+
 (defn deps-edn
   []
   (edn/read-string
@@ -785,15 +786,15 @@
          (case
           group-id
 
-           :browser
-           "Node browser-semantic suites"
+          :browser
+          "Node browser-semantic suites"
 
-           :choreo
-           "Portable Choreo suites"
+          :choreo
+          "Portable Choreo suites"
 
-           (str
-            "Node group "
-            group-id)))
+          (str
+           "Node group "
+           group-id)))
         (println
          "Namespaces:"
          (count
@@ -930,12 +931,12 @@
     html)
    (when
     test-ns
-     (str
-      "?ns="
-      (java.net.URLEncoder/encode
-       (str
-        test-ns)
-       "UTF-8")))))
+    (str
+     "?ns="
+     (java.net.URLEncoder/encode
+      (str
+       test-ns)
+      "UTF-8")))))
 
 (defn chromium-base-command
   []
@@ -951,21 +952,21 @@
     "--virtual-time-budget=120000"
     "--dump-dom"]
 
-    (= "root"
-       (System/getProperty
-        "user.name"))
-    (conj
-     "--no-sandbox")))
+   (= "root"
+      (System/getProperty
+       "user.name"))
+   (conj
+    "--no-sandbox")))
 
 (defn run-one-chromium!
   [html dump-file test-ns]
   (let [label
         (if
          test-ns
-          (str
-           "Chromium namespace "
-           test-ns)
-          "Chromium execution")
+         (str
+          "Chromium namespace "
+          test-ns)
+         "Chromium execution")
 
         command
         (conj
@@ -996,10 +997,10 @@
        dump-file
        (cond->
         {}
-         test-ns
-         (assoc
-          :namespace
-          test-ns)))
+        test-ns
+        (assoc
+         :namespace
+         test-ns)))
 
       (print-stage-pass!
        label
