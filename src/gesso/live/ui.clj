@@ -75,6 +75,22 @@
   "Inert response marker consumed by the protocol-v3 browser HTMX bridge."
   :data-gesso-live-optimistic-settlement)
 
+(def choreo-operation-option-key
+  "Semantic Choreo operation option understood by operation-bound UI helpers.
+
+   Application views use this key to name the operation an affordance actuates.
+   The value is resolved through the validated operation-capability registry in
+   render context; it is never treated as browser/server authority."
+  :choreo/op)
+
+(def optimistic-operation-capabilities-context-key
+  "Framework-owned render-context key containing a canonical operation-keyed
+   optimistic capability registry.
+
+   Prefer with-optimistic-operation-capabilities to installing this value
+   directly so malformed registries fail at the context assembly boundary."
+  ::optimistic-operation-capabilities)
+
 (def optimistic-action-required-keys
   #{:operation
     :arguments
@@ -264,6 +280,46 @@
       :error/kind kind}
      data))))
 
+(defn with-optimistic-operation-capabilities
+  "Install one canonical operation-keyed optimistic capability registry into a
+   render context.
+
+   The registry should normally come from
+   gesso.live.optimistic.capability/operation-capabilities, which derives
+   semantic operation identity from the operation-keyed browser ExecutablePlan
+   registry. Installing it once lets view helpers bind an affordance by naming
+   only :choreo/op plus per-render optimistic binding data.
+
+   This is inert render configuration, not authorization. The browser remains
+   adversarial and trusted server execution must still authenticate, authorize,
+   resolve the operation through its own registry, and revalidate domain state."
+  [ctx capabilities]
+  (when-not (map? ctx)
+    (optimistic-ui-error
+     :invalid-render-context
+     "gesso.live optimistic operation capabilities require a map render context."
+     {:context ctx}))
+  (assoc ctx
+         optimistic-operation-capabilities-context-key
+         (optimistic.capability/require-operation-capabilities capabilities)))
+
+(defn- operation-capabilities-from-context
+  [ctx operation]
+  (when-not (map? ctx)
+    (optimistic-ui-error
+     :invalid-render-context
+     "gesso.live semantic Choreo operation binding requires a map render context."
+     {:context ctx
+      :operation operation}))
+  (if (contains? ctx optimistic-operation-capabilities-context-key)
+    (optimistic.capability/require-operation-capabilities
+     (get ctx optimistic-operation-capabilities-context-key))
+    (optimistic-ui-error
+     :missing-operation-capabilities
+     "gesso.live semantic Choreo operation binding requires an operation-capability registry in render context."
+     {:operation operation
+      :context-key optimistic-operation-capabilities-context-key})))
+
 (defn- require-optimistic-map!
   [value]
   (when-not (map? value)
@@ -326,8 +382,9 @@
    framework code, tests, and staged migration.
 
    Two-arity accepts a canonical gesso.live.optimistic.capability operation
-   capability plus per-render binding data. This is the preferred application
-   path: model/choreography code owns operation identity and browser policy,
+   capability plus per-render binding data. This is the preferred explicit
+   capability-binding path: model/choreography code owns operation identity and
+   browser policy,
    while the view supplies only arguments, observed authoritative basis, scope,
    fact versions, and logical target identity.
 
@@ -869,18 +926,51 @@
        (contains? value optimistic.capability/capability-type-key)))
 
 (defn- resolve-post-button-optimistic
-  [opts]
-  (let [optimistic-value (:optimistic opts)
-        binding-present? (contains? opts :optimistic-binding)
-        binding (:optimistic-binding opts)]
+  [ctx opts]
+  (let [operation-present?
+        (contains? opts choreo-operation-option-key)
+
+        operation
+        (get opts choreo-operation-option-key)
+
+        optimistic-present?
+        (contains? opts :optimistic)
+
+        optimistic-value
+        (:optimistic opts)
+
+        binding-present?
+        (contains? opts :optimistic-binding)
+
+        binding
+        (:optimistic-binding opts)]
     (cond
+      operation-present?
+      (do
+        (when optimistic-present?
+          (optimistic-ui-error
+           :conflicting-optimistic-declarations
+           "gesso.live UI :choreo/op cannot be combined with the legacy/escape-hatch :optimistic declaration."
+           {:operation operation
+            :optimistic optimistic-value}))
+        (when-not binding-present?
+          (optimistic-ui-error
+           :missing-optimistic-binding
+           "gesso.live UI :choreo/op requires :optimistic-binding."
+           {:operation operation}))
+        (optimistic-action
+         (optimistic.capability/capability-for-operation
+          (operation-capabilities-from-context ctx operation)
+          operation)
+         binding))
+
       (or (nil? optimistic-value)
           (false? optimistic-value))
       (do
         (when binding-present?
           (optimistic-ui-error
            :orphan-optimistic-binding
-           "gesso.live UI :optimistic-binding requires an optimistic operation capability."
+           "gesso.live UI :optimistic-binding requires :choreo/op or an optimistic operation capability."
            {:optimistic optimistic-value
             :optimistic-binding binding}))
         nil)
@@ -897,7 +987,7 @@
       binding-present?
       (optimistic-ui-error
        :unexpected-optimistic-binding
-       "gesso.live UI :optimistic-binding is accepted only with an optimistic operation capability."
+       "gesso.live UI :optimistic-binding is accepted only with :choreo/op or an optimistic operation capability."
        {:optimistic optimistic-value
         :optimistic-binding binding})
 
@@ -957,16 +1047,23 @@
 
      :optimistic
        Optional protocol-v3 optimistic action map, or a canonical
-       gesso.live.optimistic.capability operation capability. The capability
-       form is preferred for application views because operation identity and
-       browser execution policy stay with model/choreography configuration.
+       gesso.live.optimistic.capability operation capability. These remain
+       lower-level/migration paths. Application views should normally prefer
+       :choreo/op so capability identity is resolved from assembled context.
+
+     :choreo/op
+       Preferred semantic operation declaration for application views. The
+       operation is resolved through the canonical operation-capability registry
+       installed in ctx with with-optimistic-operation-capabilities. A view does
+       not fetch/pass a capability object and cannot choose a second plan key.
 
      :optimistic-binding
-       Required when :optimistic is an operation capability and rejected with
-       a raw action map. Supplies only per-render arguments, observed basis,
-       scope/fact versions, and target identity.
+       Required with :choreo/op and when :optimistic is an operation capability;
+       rejected with a raw action map. Supplies only per-render arguments,
+       observed basis, scope/fact versions, and target identity.
 
-       Both forms emit the same inert data-gesso-live-optimistic EDN annotation.
+       The semantic-operation, explicit-capability, and raw-action forms emit
+       the same inert data-gesso-live-optimistic EDN annotation.
        The browser bridge allocates command/execution identities and realizes
        optimism through the shared adapter; this helper does not render
        provisional templates or grant server authority.
@@ -985,9 +1082,9 @@
           fragment-or-opts
           maybe-opts)
          optimistic-action'
-         (resolve-post-button-optimistic opts)
+         (resolve-post-button-optimistic ctx opts)
          opts'
-         (dissoc opts :optimistic :optimistic-binding)]
+         (dissoc opts :optimistic :optimistic-binding choreo-operation-option-key)]
      (if (nil? optimistic-action')
        (render-ordinary-post-button
         ctx
