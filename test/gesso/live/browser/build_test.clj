@@ -1,11 +1,13 @@
 (ns gesso.live.browser.build-test
   (:require
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.core :as choreo]
    [gesso.choreo.preflight :as choreo-preflight]
    [gesso.choreo.project :as project]
    [gesso.live.browser.artifact :as artifact]
    [gesso.live.browser.build :as build]
+   [gesso.live.browser.entrypoint :as entrypoint]
    [gesso.live.browser.preflight :as browser-preflight])
   (:import
    (java.nio.file Files)))
@@ -116,6 +118,37 @@
 (defn- exact-js
   []
   "console.log('gesso browser artifact');\n")
+
+(defn- application-declaration
+  ([optimistic?]
+   (let [role
+         :request-client
+
+         plans
+         {:request/claim
+          (one-role-plan role :request/claim)
+
+          :request/cancel
+          (one-role-plan role :request/cancel)}]
+     (cond->
+      {:name :humanhelp/application-browser
+       :plans plans
+       :required-plan-keys #{:request/claim :request/cancel}
+       :browser-role role}
+       optimistic?
+       (assoc
+        :optimistic? true
+        :optimistic-htmx? true)))))
+
+(defn- clojurescript-compiler-available?
+  []
+  (try
+    (and
+     (some? (requiring-resolve 'cljs.build.api/build))
+     (some? (requiring-resolve 'cljs.build.api/inputs)))
+    (catch Throwable _
+      false)))
+
 
 (deftest generated-artifact-descriptor-is-content-addressed-and-nonempty
   (with-temp-dir
@@ -795,3 +828,232 @@
             (is (not=
                  (get-in data [:recorded :digest])
                  (get-in data [:current :digest]))))))))))
+
+(deftest application-entrypoint-source-embeds-one-exact-closed-manifest
+  (let [declaration
+        (application-declaration false)
+
+        manifest
+        (entrypoint/compile-browser-assembly!
+         declaration)
+
+        generated-ns
+        'example.generated.request_browser
+
+        source
+        (build/application-entrypoint-source
+         generated-ns
+         manifest
+         nil)
+
+        manifest-text
+        (pr-str manifest)
+
+        first-manifest-offset
+        (.indexOf source manifest-text)
+
+        last-manifest-offset
+        (.lastIndexOf source manifest-text)]
+    (is (browser-preflight/assembly-manifest? manifest))
+    (is (not (contains? (:features manifest) :optimistic)))
+    (is (= :none
+           (:optimistic-command-transport manifest)))
+
+    (testing "the exact preflight product is embedded once, not reconstructed"
+      (is (<= 0 first-manifest-offset))
+      (is (= first-manifest-offset
+             last-manifest-offset))
+      (is (str/includes?
+           source
+           (str
+            "(def ^:private browser-assembly\n"
+            "  '"
+            manifest-text
+            ")"))))
+
+    (testing "generated source owns bootstrap semantics and needs no app wrapper"
+      (is (str/includes?
+           source
+           "[gesso.live.browser.bootstrap :as bootstrap]"))
+      (is (str/includes?
+           source
+           "(bootstrap/init!\n   browser-assembly"))
+      (is (false?
+           (str/includes?
+            source
+            "application-realization"))))))
+
+(deftest optimistic-generated-entrypoint-requires-only-a-qualified-physical-realization-var
+  (let [manifest
+        (entrypoint/compile-browser-assembly!
+         (application-declaration true))]
+    (is (= #{:optimistic :optimistic-htmx}
+           (:features manifest)))
+
+    (testing "optimism cannot compile without its physical realization input"
+      (let [data
+            (thrown-data
+             #(build/application-entrypoint-source
+               'example.generated.optimistic
+               manifest
+               nil))]
+        (is (= :gesso.live.browser.build/error
+               (:error/type data)))
+        (is (= :missing-realization-options-var
+               (:error/kind data)))
+        (is (= (:name manifest)
+               (:manifest-name data)))
+        (is (= (:features manifest)
+               (:features data)))))
+
+    (testing "the physical realization identity must be explicit and qualified"
+      (let [data
+            (thrown-data
+             #(build/application-entrypoint-source
+               'example.generated.optimistic
+               manifest
+               'realization-options))]
+        (is (= :invalid-realization-options-var
+               (:error/kind data)))
+        (is (= 'realization-options
+               (:realization-options-var data)))))
+
+    (testing "a valid realization Var cannot replace manifest-owned semantics"
+      (let [source
+            (build/application-entrypoint-source
+             'example.generated.optimistic
+             manifest
+             'example.browser/realization-options)]
+        (is (str/includes?
+             source
+             "[example.browser :as application-realization]"))
+        (is (str/includes?
+             source
+             "application-realization/realization-options"))
+        (is (str/includes?
+             source
+             (pr-str manifest)))
+        (is (false?
+             (str/includes?
+              source
+              ":browser-role application-realization")))))))
+
+(deftest application-build-options-cannot-introduce-a-competing-semantic-assembly
+  (with-temp-dir
+    (fn [dir]
+      (let [declaration
+            (application-declaration false)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            forbidden-options
+            [{:manifest
+              (entrypoint/compile-browser-assembly!
+               declaration)}
+             {:emitter identity}
+             {:browser-role :helper}
+             {:plans {}}]]
+        (doseq [options forbidden-options]
+          (let [data
+                (thrown-data
+                 #(build/build-application-artifact!
+                   declaration
+                   artifact-path
+                   options))]
+            (is (= :gesso.live.browser.build/error
+                   (:error/type data)))
+            (is (= :unknown-application-build-options
+                   (:error/kind data)))
+            (is (= (set (keys options))
+                   (:unknown-keys data)))
+            (is (= #{:receipt-path
+                     :realization-options-var}
+                   (:allowed-keys data)))))
+
+        (is (false?
+             (.exists
+              (java.io.File. artifact-path))))))))
+
+(deftest structured-owned-compiler-failure-survives-the-staging-boundary
+  (with-temp-dir
+    (fn [dir]
+      (let [declaration
+            (application-declaration false)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            receipt-path
+            (build/receipt-path artifact-path)
+
+            original-requiring-resolve
+            requiring-resolve
+
+            data
+            (with-redefs
+             [clojure.core/requiring-resolve
+              (fn [sym]
+                (if (contains?
+                     #{'cljs.build.api/build
+                       'cljs.build.api/inputs}
+                     sym)
+                  (throw
+                   (ClassNotFoundException.
+                    "simulated missing ClojureScript compiler"))
+                  (original-requiring-resolve sym)))]
+             (thrown-data
+              #(build/build-application-artifact!
+                declaration
+                artifact-path)))]
+        (is (= :gesso.live.browser.build/error
+               (:error/type data)))
+        (is (= :clojurescript-compiler-unavailable
+               (:error/kind data)))
+        (is (false?
+             (.exists
+              (java.io.File. artifact-path))))
+        (is (false?
+             (.exists
+              (java.io.File. receipt-path))))))))
+
+(deftest application-owned-advanced-compile-corresponds-to-the-same-manifest-when-compiler-is-present
+  (if-not (clojurescript-compiler-available?)
+    ;; `bb test:jvm` intentionally uses only :test while the compiler is a :dev
+    ;; dependency. The supported build must remain loadable there; the full
+    ;; compile branch is exercised whenever a build/test classpath supplies CLJS.
+    (is true
+        "ClojureScript compiler is optional on the ordinary JVM runtime/test classpath.")
+    (with-temp-dir
+      (fn [dir]
+        (let [declaration
+              (application-declaration false)
+
+              manifest
+              (entrypoint/compile-browser-assembly!
+               declaration)
+
+              artifact-path
+              (child-path dir "gesso-application.js")
+
+              receipt
+              (build/build-application-artifact!
+               declaration
+               artifact-path)]
+          (is (build/receipt? receipt))
+          (is (= (artifact/stamp manifest)
+                 (:stamp receipt)))
+          (is (= (build/artifact-descriptor artifact-path)
+                 (:artifact receipt)))
+          (is (= receipt
+                 (build/read-artifact-receipt!
+                  (build/receipt-path artifact-path))))
+          (is (= receipt
+                 (build/verify-generated-artifact!
+                  manifest
+                  artifact-path)))
+          (is (.isFile
+               (java.io.File. artifact-path)))
+          (is (pos?
+               (.length
+                (java.io.File. artifact-path)))))))))
