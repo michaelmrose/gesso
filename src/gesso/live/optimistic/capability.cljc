@@ -26,6 +26,7 @@
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
+   [gesso.choreo.project :as project]
    [gesso.live.optimistic.protocol :as protocol]))
 
 (def operation-capability-type
@@ -52,6 +53,16 @@
   #{:scope
     :fact-versions
     :target-id})
+
+(def derived-policy-optional-keys
+  "Capability-owned browser policy that may vary by semantic operation when
+   capabilities are derived from an operation-keyed browser plan map.
+
+   :plan-key is intentionally absent. In the canonical derived path the logical
+   browser plan key *is* the semantic operation key, eliminating one duplicated
+   application declaration. Applications that genuinely require another mapping
+   can use operation-capability directly as the explicit escape hatch."
+  (disj capability-optional-keys :plan-key))
 
 (defn- capability-error
   [kind message data]
@@ -227,6 +238,147 @@
      "Expected a canonical optimistic operation capability."
      {:capability capability}))
   capability)
+
+(defn operation-capabilities
+  "Derive the canonical semantic-operation -> optimistic-capability map from an
+   operation-keyed browser ExecutablePlan map.
+
+   This is the preferred application authoring path when logical browser plan
+   keys are semantic operation ids (for example :request/claim). It removes the
+   need to repeat the same operation/plan-key correspondence in a second
+   capability declaration.
+
+   One-arity derives capabilities with no per-operation browser policy.
+
+   Two-arity accepts an optional semantic-operation -> policy map. Policy maps
+   may contain only capability-owned browser execution fields:
+
+     :rollback-eligible?
+     :timeout-ms
+     :replace-owner?
+     :replace-execution?
+
+   :plan-key is deliberately not configurable here. The derived capability's
+   :operation and :plan-key are both the logical key from browser-plans.
+
+   Every browser-plan value must already be a canonical current ExecutablePlan.
+   This establishes the local affordance -> executable-plan membership edge at
+   construction time. It does not establish authorization, transport/route
+   closure, or whole-application closure; those remain separate trusted/preflight
+   boundaries."
+  ([browser-plans]
+   (operation-capabilities browser-plans {}))
+  ([browser-plans policy-by-operation]
+   (let [plans'
+         (require-map!
+          "Optimistic operation browser plans"
+          browser-plans)
+
+         policies'
+         (require-map!
+          "Optimistic operation capability policies"
+          (or policy-by-operation {}))
+
+         plan-operations
+         (set (keys plans'))
+
+         policy-operations
+         (set (keys policies'))
+
+         unknown-policy-operations
+         (set/difference policy-operations plan-operations)]
+     (when (empty? plans')
+       (capability-error
+        :empty-browser-plans
+        "Optimistic operation capability derivation requires at least one browser ExecutablePlan."
+        {}))
+
+     (doseq [[operation plan] plans']
+       (require-keyword!
+        "Optimistic browser plan semantic operation"
+        operation)
+       (when-not (project/executable-plan? plan)
+         (capability-error
+          :invalid-browser-plan
+          "Optimistic operation capability derivation requires canonical current ExecutablePlans."
+          {:operation operation
+           :plan plan})))
+
+     (when (seq unknown-policy-operations)
+       (capability-error
+        :unknown-policy-operations
+        "Optimistic capability policy names semantic operations absent from the browser plan map."
+        {:unknown-operations unknown-policy-operations
+         :available-operations plan-operations}))
+
+     (into {}
+           (map
+            (fn [[operation _plan]]
+              (let [policy
+                    (require-closed-map!
+                     "Optimistic derived operation policy"
+                     (get policies' operation {})
+                     #{}
+                     derived-policy-optional-keys)]
+                [operation
+                 (operation-capability
+                  (assoc policy
+                         :operation operation
+                         :plan-key operation))]))
+            plans')))))
+
+(defn operation-capabilities?
+  "True for a canonical operation-keyed capability map produced by
+   operation-capabilities.
+
+   This predicate validates only the derived map's local closed shape: every key
+   is a semantic operation keyword, every value is a canonical capability, and
+   each capability's :operation and :plan-key equal its map key. It cannot by
+   itself reconstruct or prove the originating browser plan map."
+  [value]
+  (and
+   (map? value)
+   (not (empty? value))
+   (every?
+    (fn [[operation capability]]
+      (and
+       (keyword? operation)
+       (operation-capability? capability)
+       (= operation (:operation capability))
+       (= operation (:plan-key capability))))
+    value)))
+
+(defn require-operation-capabilities
+  "Return capabilities when it is a canonical derived operation-capability map;
+   otherwise throw a structured capability error."
+  [capabilities]
+  (when-not (operation-capabilities? capabilities)
+    (capability-error
+     :invalid-operation-capabilities
+     "Expected a canonical operation-keyed optimistic capability map."
+     {:capabilities capabilities}))
+  capabilities)
+
+(defn capability-for-operation
+  "Resolve one semantic operation from a canonical derived capability map.
+
+   Unknown operations fail immediately and report the closed set of available
+   operation ids. This is diagnostic lookup only; it never guesses or silently
+   substitutes a near operation and grants no execution authority."
+  [capabilities operation]
+  (let [capabilities'
+        (require-operation-capabilities capabilities)
+        operation'
+        (require-keyword!
+         "Optimistic capability semantic operation"
+         operation)]
+    (or
+     (get capabilities' operation')
+     (capability-error
+      :unknown-operation
+      "Optimistic capability map does not contain the requested semantic operation."
+      {:operation operation'
+       :available-operations (set (keys capabilities'))}))))
 
 (defn bind
   "Bind one operation capability to per-render semantic input.
