@@ -26,11 +26,13 @@
 
    This namespace deliberately does not invoke cljs.main itself. Different
    applications may own different physical compiler commands, output paths, and
-   bundling arrangements. The supported build path must call
-   record-generated-artifact! immediately after successful emission and
-   verify-generated-artifact! before consuming an existing generated artifact.
-   Later wiring can make those calls unavoidable without duplicating the
-   correspondence rules here."
+   bundling arrangements. build-generated-artifact! is the supported orchestration
+   boundary: it stages emission into a temporary sibling artifact, derives exact
+   semantic/physical correspondence before publication, publishes the generated
+   bytes, writes the receipt atomically, and verifies the final pair before
+   returning. Lower-level record/verify functions remain available to build-system
+   integrations that must own publication themselves, but ordinary application
+   builds should not compose those steps independently."
   (:require
    [clojure.edn :as edn]
    [clojure.java.io :as io]
@@ -482,3 +484,151 @@
           :current current-descriptor})))
 
      receipt)))
+
+;; -----------------------------------------------------------------------------
+;; Supported generated-artifact build orchestration
+;; -----------------------------------------------------------------------------
+
+(defn- temp-artifact-path
+  [artifact-path]
+  (let [target
+        (.toPath
+         (io/file artifact-path))
+
+        parent
+        (path-parent target)
+
+        filename
+        (str (.getFileName target))]
+    (Files/createDirectories
+     parent
+     (make-array java.nio.file.attribute.FileAttribute 0))
+    (.resolve
+     parent
+     (str
+      ".gesso-stage."
+      (UUID/randomUUID)
+      "."
+      filename))))
+
+(defn- publish-generated-artifact!
+  [staged-path artifact-path]
+  (let [target
+        (.toPath
+         (io/file artifact-path))]
+    (try
+      (move-replacing! staged-path target)
+      (catch Throwable error
+        (throw
+         (build-error
+          :generated-artifact-publication-failed
+          "Gesso could not publish the staged generated browser artifact."
+          {:artifact-path (str artifact-path)
+           :staged-path (str staged-path)}
+          error))))))
+
+(defn build-generated-artifact!
+  "Run the supported fail-closed build boundary for one application browser
+   artifact.
+
+   emit! is called exactly once with a temporary sibling output path. It must
+   emit the complete non-empty JavaScript artifact at that path or throw. The
+   final artifact path is not replaced until the staged bytes can be stamped
+   against the supplied current BrowserAssemblyManifest.
+
+   On successful emission this function:
+
+     1. derives a closed ArtifactReceipt from the staged bytes and manifest;
+     2. atomically publishes the staged JavaScript where supported;
+     3. atomically writes the receipt where supported;
+     4. verifies the published artifact + receipt against the current manifest.
+
+   If emission fails, the previously published artifact/receipt pair is left
+   untouched. If publication or receipt writing fails, the operation fails
+   closed and subsequent verification cannot bless mismatched bytes/metadata.
+
+   :receipt-path may override the default sibling receipt path. No other options
+   are accepted. Returns the final verified ArtifactReceipt.
+
+   This is the ordinary application build API. record-generated-artifact! and
+   verify-generated-artifact! are lower-level integration primitives for build
+   systems that must own emission/publication separately."
+  ([manifest artifact-path emit!]
+   (build-generated-artifact!
+    manifest
+    artifact-path
+    emit!
+    {}))
+  ([manifest artifact-path emit! {:keys [receipt-path]
+                                  :as options}]
+   (let [unknown-options
+         (seq
+          (remove
+           #{:receipt-path}
+           (keys options)))]
+     (when unknown-options
+       (throw
+        (build-error
+         :unknown-build-options
+         "Generated browser artifact build received unsupported options."
+         {:unknown-keys (set unknown-options)
+          :allowed-keys #{:receipt-path}}))))
+
+   (when-not
+    (ifn? emit!)
+     (throw
+      (build-error
+       :invalid-artifact-emitter
+       "Generated browser artifact build requires an emission function."
+       {:artifact-path (str artifact-path)
+        :emitter emit!})))
+
+   ;; Validate semantic assembly before invoking a physical compiler or touching
+   ;; the previously published artifact. This keeps malformed application
+   ;; assembly a construction/build failure rather than an emission failure.
+   (artifact/stamp manifest)
+
+   (let [staged-path
+         (temp-artifact-path artifact-path)
+
+         metadata-path
+         (or receipt-path
+             (gesso.live.browser.build/receipt-path
+              artifact-path))]
+     (try
+       (try
+         (emit! (str staged-path))
+         (catch Throwable error
+           (throw
+            (build-error
+             :generated-artifact-emission-failed
+             "Gesso browser artifact emission failed before a new artifact could be published."
+             {:artifact-path (str artifact-path)
+              :staged-path (str staged-path)}
+             error))))
+
+       (let [receipt
+             (artifact-receipt
+              manifest
+              (str staged-path))]
+         (publish-generated-artifact!
+          staged-path
+          artifact-path)
+
+         (write-edn-atomically!
+          metadata-path
+          receipt)
+
+         (verify-generated-artifact!
+          manifest
+          artifact-path
+          {:receipt-path metadata-path}))
+       (finally
+         ;; Staging cleanup is physical hygiene, not semantic build success. A
+         ;; cleanup failure must never replace the actual compiler/publication
+         ;; exception that caused the build to fail.
+         (try
+           (Files/deleteIfExists staged-path)
+           (catch Throwable _
+             nil)))))))
+
