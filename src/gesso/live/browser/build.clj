@@ -99,6 +99,11 @@
      data)
     cause)))
 
+(defn- build-error?
+  [error]
+  (= :gesso.live.browser.build/error
+     (:error/type (ex-data error))))
+
 (defn- closed-map?
   [expected-keys value]
   (and
@@ -632,13 +637,20 @@
        (try
          (emit! (str staged-path))
          (catch Throwable error
-           (throw
-            (build-error
-             :generated-artifact-emission-failed
-             "Gesso browser artifact emission failed before a new artifact could be published."
-             {:artifact-path (str artifact-path)
-              :staged-path (str staged-path)}
-             error))))
+           ;; Preserve precise Gesso build failures produced by an owned emitter
+           ;; (for example :clojurescript-compiler-unavailable). Arbitrary
+           ;; physical/compiler failures still collapse to the generic emission
+           ;; boundary below. This keeps structured repair information from being
+           ;; hidden behind an implementation-detail wrapper.
+           (if (build-error? error)
+             (throw error)
+             (throw
+              (build-error
+               :generated-artifact-emission-failed
+               "Gesso browser artifact emission failed before a new artifact could be published."
+               {:artifact-path (str artifact-path)
+                :staged-path (str staged-path)}
+               error)))))
 
        (let [receipt
              (artifact-receipt
