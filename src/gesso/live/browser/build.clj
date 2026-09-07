@@ -292,6 +292,23 @@
       (finally
         (Files/deleteIfExists temp)))))
 
+(defn- publish-artifact-receipt!
+  [artifact-path metadata-path receipt]
+  (try
+    (write-edn-atomically!
+     metadata-path
+     receipt)
+    (catch Throwable error
+      (throw
+       (build-error
+        :artifact-receipt-publication-failed
+        "Gesso could not publish the generated browser ArtifactReceipt; the artifact must not be consumed until a matching receipt is published."
+        {:artifact-path (str artifact-path)
+         :receipt-path (str metadata-path)
+         :artifact (:artifact receipt)
+         :stamp (:stamp receipt)}
+        error)))))
+
 (defn record-generated-artifact!
   "Record exact correspondence metadata for one successfully generated browser
    artifact.
@@ -331,7 +348,8 @@
          (or receipt-path
              (gesso.live.browser.build/receipt-path
               artifact-path))]
-     (write-edn-atomically!
+     (publish-artifact-receipt!
+      artifact-path
       metadata-path
       receipt)
      receipt)))
@@ -615,7 +633,8 @@
           staged-path
           artifact-path)
 
-         (write-edn-atomically!
+         (publish-artifact-receipt!
+          artifact-path
           metadata-path
           receipt)
 
