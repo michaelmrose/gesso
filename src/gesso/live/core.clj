@@ -717,7 +717,12 @@
   live.ui/post-form)
 
 (def post-button
-  "Render a tiny type=button HTMX POST control, optionally with :optimistic.
+  "Render a tiny type=button HTMX POST control.
+
+   Choreo-bound views should normally use :choreo/op plus
+   :optimistic-binding after installing operation-keyed browser plans with
+   with-optimistic-browser-plans. Lower-level :optimistic action/capability
+   forms remain available for explicit integration and migration paths.
 
    Re-export of gesso.live.ui/post-button."
   live.ui/post-button)
@@ -767,6 +772,56 @@
 
    Re-export of gesso.live.optimistic.capability/bind."
   optimistic.capability/bind)
+
+(def optimistic-operation-capabilities
+  "Derive one canonical semantic-operation -> optimistic-capability map from an
+   operation-keyed browser ExecutablePlan map.
+
+   This is the explicit/precomputed form of the same derivation used by
+   with-optimistic-browser-plans. It removes an independently authored
+   operation -> plan-key declaration while preserving optional per-operation
+   browser policy. The result remains inert render configuration, not trusted
+   server authority.
+
+   Re-export of gesso.live.optimistic.capability/operation-capabilities."
+  optimistic.capability/operation-capabilities)
+
+(def with-optimistic-operation-capabilities
+  "Install an already-derived canonical optimistic operation-capability registry
+   into one render context.
+
+   Prefer with-optimistic-browser-plans for ordinary application composition so
+   callers do not need to materialize a second derived registry themselves.
+   This lower-level form is useful when the derived map is intentionally
+   precomputed once and reused.
+
+   Re-export of gesso.live.ui/with-optimistic-operation-capabilities."
+  live.ui/with-optimistic-operation-capabilities)
+
+(defn with-optimistic-browser-plans
+  "Install operation-keyed browser ExecutablePlans as semantic Choreo
+   affordances in one render context.
+
+   This is the preferred application composition path for protocol-v3
+   optimistic UI. It derives the canonical operation-capability registry from
+   browser-plans and immediately installs that closed registry into ctx, so a
+   view can name only :choreo/op plus per-render :optimistic-binding data.
+
+   The one-arity plan form derives no additional per-operation browser policy.
+   The optional policy-by-operation map is passed to
+   optimistic-operation-capabilities and may contain only capability-owned
+   browser execution policy. In particular, it cannot supply a competing
+   :plan-key.
+
+   This helper establishes only the local render affordance -> known browser
+   ExecutablePlan edge. It does not grant authorization or establish
+   transport/route/server closure."
+  ([ctx browser-plans]
+   (with-optimistic-browser-plans ctx browser-plans {}))
+  ([ctx browser-plans policy-by-operation]
+   (with-optimistic-operation-capabilities
+    ctx
+    (optimistic-operation-capabilities browser-plans policy-by-operation))))
 
 ;; -----------------------------------------------------------------------------
 ;; Optimistic protocol-v3 trusted-server facade
