@@ -1,6 +1,9 @@
 (ns gesso.live.core-test
   (:require
+   [clojure.edn :as edn]
    [clojure.test :refer [deftest is testing]]
+   [gesso.choreo.core :as choreo]
+   [gesso.choreo.project :as project]
    [gesso.live.consistency.xtdb :as xtdb-live]
    [gesso.live.core :as live]
    [gesso.live.fragment :as fragment]
@@ -455,6 +458,227 @@
 ;; -----------------------------------------------------------------------------
 ;; Optimistic protocol-v3 application capability facade
 ;; -----------------------------------------------------------------------------
+
+(defn- core-one-role-browser-plan
+  [operation]
+  (project/project
+   (choreo/->choreography
+    {:name :example/core-operation-binding
+     :initial :run
+     :states
+     {:run
+      (choreo/local :browser operation :done)
+
+      :done
+      (choreo/return :done)}})
+   :browser))
+
+(def core-browser-plans
+  {:request/claim
+   (core-one-role-browser-plan :request/claim)
+
+   :request/cancel
+   (core-one-role-browser-plan :request/cancel)})
+
+(def core-operation-policy
+  {:request/claim
+   {:rollback-eligible? true
+    :timeout-ms 5000
+    :replace-owner? false
+    :replace-execution? true}})
+
+(def core-optimistic-binding
+  {:arguments {:request-id "request-1"}
+   :observed-basis {:tx-id 42
+                    :system-time "2026-08-26T17:00:00Z"}
+   :scope [:request "request-1"]
+   :fact-versions {:request/status 9}
+   :target-id "request-request-1"})
+
+(defn- core-element-children
+  [hiccup]
+  (let [xs (rest hiccup)]
+    (if (map? (first xs))
+      (rest xs)
+      xs)))
+
+(defn- core-direct-child-by-tag
+  [hiccup tag]
+  (some #(when (and (vector? %)
+                    (= tag (first %)))
+           %)
+        (core-element-children hiccup)))
+
+(defn- core-decoded-optimistic-action
+  [hiccup]
+  (some-> hiccup
+          (core-direct-child-by-tag :button)
+          second
+          :data-gesso-live-optimistic
+          edn/read-string))
+
+(defn- core-error-data
+  [f]
+  (try
+    (f)
+    nil
+    (catch clojure.lang.ExceptionInfo e
+      (ex-data e))))
+
+(deftest optimistic-operation-capability-derivation-is-public-through-core-test
+  (testing "core re-exports the canonical browser-plan -> operation-capability derivation"
+    (is (identical? optimistic.capability/operation-capabilities
+                    live/optimistic-operation-capabilities)))
+
+  (let [derived
+        (live/optimistic-operation-capabilities
+         core-browser-plans
+         core-operation-policy)]
+    (is (= #{:request/claim :request/cancel}
+           (set (keys derived))))
+    (is (= :request/claim
+           (get-in derived [:request/claim :operation])))
+    (is (= :request/claim
+           (get-in derived [:request/claim :plan-key])))
+    (is (= true
+           (get-in derived [:request/claim :rollback-eligible?])))
+    (is (= 5000
+           (get-in derived [:request/claim :timeout-ms])))
+    (is (= false
+           (get-in derived [:request/claim :replace-owner?])))
+    (is (= true
+           (get-in derived [:request/claim :replace-execution?])))
+    (is (= :request/cancel
+           (get-in derived [:request/cancel :operation])))
+    (is (= :request/cancel
+           (get-in derived [:request/cancel :plan-key])))))
+
+(deftest with-optimistic-browser-plans-is-the-one-step-core-composition-path-test
+  (let [ctx {:anti-forgery-token "anti-forgery-token"
+             :app/value 7}
+        derived
+        (live/optimistic-operation-capabilities
+         core-browser-plans
+         core-operation-policy)
+        explicit
+        (live/with-optimistic-operation-capabilities
+         ctx
+         derived)
+        one-step
+        (live/with-optimistic-browser-plans
+         ctx
+         core-browser-plans
+         core-operation-policy)]
+    (testing "one-step composition is exactly derivation followed by installation"
+      (is (= explicit one-step))
+      (is (= 7 (:app/value one-step))))
+
+    (testing "the two-arity form is the same path with no optional browser policy"
+      (is (= (live/with-optimistic-operation-capabilities
+              ctx
+              (live/optimistic-operation-capabilities core-browser-plans))
+             (live/with-optimistic-browser-plans
+              ctx
+              core-browser-plans))))))
+
+(deftest core-composed-context-renders-semantic-choreo-operation-test
+  (let [ctx {:anti-forgery-token "anti-forgery-token"}
+        derived
+        (live/optimistic-operation-capabilities
+         core-browser-plans
+         core-operation-policy)
+        semantic
+        (live/post-button
+         (live/with-optimistic-browser-plans
+          ctx
+          core-browser-plans
+          core-operation-policy)
+         {:to "/request/claim"
+          :target "request-request-1"
+          :swap "outerHTML"
+          :label "Claim"
+          :choreo/op :request/claim
+          :optimistic-binding core-optimistic-binding})
+        explicit
+        (live/post-button
+         ctx
+         {:to "/request/claim"
+          :target "request-request-1"
+          :swap "outerHTML"
+          :label "Claim"
+          :optimistic (get derived :request/claim)
+          :optimistic-binding core-optimistic-binding})
+        action
+        (core-decoded-optimistic-action semantic)]
+    (testing "the semantic operation path renders exactly like the explicit derived capability"
+      (is (= explicit semantic)))
+
+    (testing "the emitted inert action keeps semantic identity and derived browser plan identity aligned"
+      (is (= :request/claim (:operation action)))
+      (is (= :request/claim (:plan-key action)))
+      (is (= (:arguments core-optimistic-binding)
+             (:arguments action)))
+      (is (= (:observed-basis core-optimistic-binding)
+             (:observed-basis action)))
+      (is (= 5000 (:timeout-ms action)))
+      (doseq [authority-key [:principal
+                             :authority
+                             :authorities
+                             :command-id
+                             :execution-id
+                             :settlement]]
+        (is (not (contains? action authority-key)))))))
+
+(deftest core-operation-composition-propagates-closed-lower-layer-diagnostics-test
+  (testing "malformed browser-plan registries fail during derivation"
+    (let [data
+          (core-error-data
+           #(live/with-optimistic-browser-plans
+             {}
+             {}))]
+      (is (= :gesso.live.optimistic.capability/error
+             (:error/type data)))
+      (is (= :empty-browser-plans
+             (:error/kind data)))))
+
+  (testing "policy cannot name an operation absent from the canonical browser-plan set"
+    (let [data
+          (core-error-data
+           #(live/with-optimistic-browser-plans
+             {}
+             core-browser-plans
+             {:request/unclaim
+              {:timeout-ms 5000}}))]
+      (is (= :unknown-policy-operations
+             (:error/kind data)))
+      (is (= #{:request/unclaim}
+             (:unknown-operations data)))
+      (is (= #{:request/claim :request/cancel}
+             (:available-operations data)))))
+
+  (testing "policy cannot reintroduce an independently authored browser plan key"
+    (let [data
+          (core-error-data
+           #(live/with-optimistic-browser-plans
+             {}
+             core-browser-plans
+             {:request/claim
+              {:plan-key :request/cancel}}))]
+      (is (= :unknown-fields
+             (:error/kind data)))
+      (is (= #{:plan-key}
+             (:unknown data)))))
+
+  (testing "the lower-level precomputed-registry facade validates before installing"
+    (let [data
+          (core-error-data
+           #(live/with-optimistic-operation-capabilities
+             {}
+             {:request/claim
+              {:operation :request/claim
+               :plan-key :request/claim}}))]
+      (is (= :invalid-operation-capabilities
+             (:error/kind data))))))
 
 (deftest optimistic-capability-facades-test
   (testing "core exposes the portable application capability constructors"
