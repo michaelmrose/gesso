@@ -1,8 +1,11 @@
 (ns gesso.live.optimistic.capability-test
   (:require
    [clojure.set :as set]
-   [clojure.test :refer [deftest is testing]]
+   [gesso.choreo.core :as choreo]
+   [gesso.choreo.project :as project]
    [gesso.live.optimistic.capability :as capability]
+   #?(:clj [clojure.test :refer [deftest is testing]]
+      :cljs [cljs.test :refer-macros [deftest is testing]])
    #?(:clj [gesso.live.ui :as ui])))
 
 (def basis
@@ -28,6 +31,34 @@
    :scope [:request "request-1"]
    :fact-versions fact-versions
    :target-id "request-request-1"})
+
+(defn- one-role-plan
+  [operation]
+  (project/project
+   (choreo/->choreography
+    {:name :example/optimistic-capability-plan
+     :initial :run
+     :states
+     {:run
+      (choreo/local :browser operation :done)
+
+      :done
+      (choreo/return :done)}})
+   :browser))
+
+(def browser-plans
+  {:request/claim
+   (one-role-plan :request/claim)
+
+   :request/cancel
+   (one-role-plan :request/cancel)})
+
+(def derived-policy
+  {:request/claim
+   {:rollback-eligible? true
+    :timeout-ms 5000
+    :replace-owner? false
+    :replace-execution? true}})
 
 (def authority-or-correlation-keys
   #{:principal
@@ -144,6 +175,198 @@
            (error-kind
             #(capability/require-operation-capability
               (assoc canonical :principal :forged)))))))
+
+(deftest operation-capabilities-derive-one-capability-per-canonical-browser-plan
+  (let [capabilities
+        (capability/operation-capabilities browser-plans)]
+    (is (= (set (keys browser-plans))
+           (set (keys capabilities))))
+    (is (true?
+         (capability/operation-capabilities? capabilities)))
+    (is (= capabilities
+           (capability/require-operation-capabilities capabilities)))
+    (doseq [operation (keys browser-plans)]
+      (let [derived (get capabilities operation)]
+        (is (capability/operation-capability? derived))
+        (is (= operation (:operation derived)))
+        (is (= operation (:plan-key derived)))))
+
+    (testing "the derived map does not copy executable plans into view capabilities"
+      (is (every?
+           #(empty? (set/intersection
+                     (set (keys %))
+                     #{:plan
+                       :executable-plan
+                       :states
+                       :browser-role
+                       :transport}))
+           (vals capabilities))))))
+
+(deftest operation-capabilities-preserve-only-explicit-per-operation-browser-policy
+  (let [capabilities
+        (capability/operation-capabilities
+         browser-plans
+         derived-policy)
+        claim
+        (get capabilities :request/claim)
+        cancel
+        (get capabilities :request/cancel)]
+    (is (= :request/claim (:operation claim)))
+    (is (= :request/claim (:plan-key claim)))
+    (is (= true (:rollback-eligible? claim)))
+    (is (= 5000 (:timeout-ms claim)))
+    (is (= false (:replace-owner? claim)))
+    (is (= true (:replace-execution? claim)))
+
+    (testing "operations without explicit policy remain minimal"
+      (is (= {capability/capability-type-key
+              capability/operation-capability-type
+              :operation :request/cancel
+              :plan-key :request/cancel}
+             cancel)))
+
+    (testing "derived policy cannot reintroduce an independently declared plan key"
+      (let [data
+            (error-data
+             #(capability/operation-capabilities
+               browser-plans
+               {:request/claim
+                {:plan-key :request/cancel}}))]
+        (is (= :unknown-fields (:error/kind data)))
+        (is (= #{:plan-key} (:unknown data)))))))
+
+(deftest operation-capabilities-require-a-nonempty-operation-keyed-canonical-plan-map
+  (testing "the registry itself is required and nonempty"
+    (is (= :invalid-shape
+           (error-kind
+            #(capability/operation-capabilities nil))))
+    (is (= :empty-browser-plans
+           (error-kind
+            #(capability/operation-capabilities {})))))
+
+  (testing "semantic operation ids are keywords"
+    (let [data
+          (error-data
+           #(capability/operation-capabilities
+             {"request/claim"
+              (get browser-plans :request/claim)}))]
+      (is (= :invalid-keyword (:error/kind data)))
+      (is (= "request/claim" (:value data)))))
+
+  (testing "plan values must be canonical current ExecutablePlans, not tagged lookalikes"
+    (let [plan
+          (get browser-plans :request/claim)
+          stale
+          (assoc plan
+                 :gesso.choreo/version
+                 (inc project/executable-plan-version))
+          malformed
+          (dissoc plan :states)]
+      (doseq [candidate [nil {} stale malformed]]
+        (let [data
+              (error-data
+               #(capability/operation-capabilities
+                 {:request/claim candidate}))]
+          (is (= :invalid-browser-plan (:error/kind data)))
+          (is (= :request/claim (:operation data)))
+          (is (= candidate (:plan data))))))))
+
+(deftest operation-capabilities-policy-is-closed-over-the-plan-operation-set
+  (testing "policy cannot name an operation absent from the canonical plan map"
+    (let [data
+          (error-data
+           #(capability/operation-capabilities
+             browser-plans
+             {:request/unclaim
+              {:timeout-ms 10}}))]
+      (is (= :unknown-policy-operations (:error/kind data)))
+      (is (= #{:request/unclaim}
+             (:unknown-operations data)))
+      (is (= #{:request/claim :request/cancel}
+             (:available-operations data)))))
+
+  (testing "each policy value is itself a closed map"
+    (is (= :invalid-shape
+           (error-kind
+            #(capability/operation-capabilities
+              browser-plans
+              {:request/claim :fast}))))
+    (let [data
+          (error-data
+           #(capability/operation-capabilities
+             browser-plans
+             {:request/claim
+              {:principal :forged}}))]
+      (is (= :unknown-fields (:error/kind data)))
+      (is (= #{:principal} (:unknown data))))))
+
+(deftest operation-capabilities-predicate-establishes-local-shape-only
+  (let [derived
+        (capability/operation-capabilities browser-plans)
+        claim
+        (get derived :request/claim)]
+    (is (true? (capability/operation-capabilities? derived)))
+
+    (doseq [candidate
+            [nil
+             []
+             {}
+             {:request/claim
+              (assoc claim :operation :request/cancel)}
+             {:request/claim
+              (assoc claim :plan-key :request/cancel)}
+             {:request/claim
+              (assoc claim :principal :forged)}
+             {"request/claim" claim}]]
+      (is (false?
+           (capability/operation-capabilities? candidate))))
+
+    (testing "a locally canonical map is accepted without pretending to reconstruct plan provenance"
+      (let [local-shape-only
+            {:request/claim
+             (capability/operation-capability
+              {:operation :request/claim})}]
+        (is (true?
+             (capability/operation-capabilities? local-shape-only)))
+        (is (= local-shape-only
+               (capability/require-operation-capabilities
+                local-shape-only)))))))
+
+(deftest capability-for-operation-is-exact-and-fails-closed
+  (let [capabilities
+        (capability/operation-capabilities browser-plans)]
+    (is (= (get capabilities :request/claim)
+           (capability/capability-for-operation
+            capabilities
+            :request/claim)))
+
+    (testing "unknown semantic ids are never guessed or silently substituted"
+      (let [data
+            (error-data
+             #(capability/capability-for-operation
+               capabilities
+               :request/claime))]
+        (is (= :unknown-operation (:error/kind data)))
+        (is (= :request/claime (:operation data)))
+        (is (= #{:request/claim :request/cancel}
+               (:available-operations data)))))
+
+    (testing "lookup requires a keyword semantic operation"
+      (is (= :invalid-keyword
+             (error-kind
+              #(capability/capability-for-operation
+                capabilities
+                "request/claim")))))
+
+    (testing "lookup rejects a noncanonical capability registry before resolving from it"
+      (is (= :invalid-operation-capabilities
+             (error-kind
+              #(capability/capability-for-operation
+                {:request/claim
+                 (assoc
+                  (get capabilities :request/claim)
+                  :plan-key :request/cancel)}
+                :request/claim)))))))
 
 (deftest bind-produces-the-existing-inert-v3-action-shape
   (let [cap (capability/operation-capability
