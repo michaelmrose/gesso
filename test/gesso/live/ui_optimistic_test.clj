@@ -2,7 +2,9 @@
   (:require
    [clojure.edn :as edn]
    [clojure.test :refer [deftest is testing]]
+   [gesso.choreo.core :as choreo]
    [gesso.choreo.identity :as identity]
+   [gesso.choreo.project :as project]
    [gesso.live.optimistic.capability :as capability]
    [gesso.live.optimistic.protocol :as protocol]
    [gesso.live.ui :as ui]))
@@ -46,6 +48,41 @@
     :timeout-ms 5000
     :replace-owner? true
     :replace-execution? false}))
+
+(defn- one-role-plan
+  [operation]
+  (project/project
+   (choreo/->choreography
+    {:name :example/ui-operation-binding
+     :initial :run
+     :states
+     {:run
+      (choreo/local :browser operation :done)
+
+      :done
+      (choreo/return :done)}})
+   :browser))
+
+(def browser-plans
+  {:request/claim
+   (one-role-plan :request/claim)
+
+   :request/cancel
+   (one-role-plan :request/cancel)})
+
+(def derived-capabilities
+  (capability/operation-capabilities
+   browser-plans
+   {:request/claim
+    {:rollback-eligible? true
+     :timeout-ms 5000
+     :replace-owner? true
+     :replace-execution? false}}))
+
+(def operation-ctx
+  (ui/with-optimistic-operation-capabilities
+   ctx
+   derived-capabilities))
 
 (def optimistic-binding
   {:arguments {:request-id "request-1"}
@@ -176,6 +213,227 @@
              :include ["#board-state"
                        ["#selection-state"
                         "#board-state"]]}))))))
+
+
+;; -----------------------------------------------------------------------------
+;; Semantic Choreo operation binding
+;; -----------------------------------------------------------------------------
+
+(deftest choreo-operation-path-is-render-equivalent-to-explicit-capability-test
+  (let [explicit
+        (ui/post-button
+         ctx
+         {:to "/claim"
+          :target "request-card-request-1"
+          :swap "outerHTML"
+          :include "#request-board-state"
+          :label "Claim"
+          :optimistic claim-capability
+          :optimistic-binding optimistic-binding})
+        semantic
+        (ui/post-button
+         operation-ctx
+         {:to "/claim"
+          :target "request-card-request-1"
+          :swap "outerHTML"
+          :include "#request-board-state"
+          :label "Claim"
+          :choreo/op :request/claim
+          :optimistic-binding optimistic-binding})]
+    (is (= explicit semantic))
+    (is (= optimistic-action (decoded-action semantic)))
+    (is (= :request/claim
+           (:operation (decoded-action semantic))))
+    (is (= :request/claim
+           (:plan-key (decoded-action semantic))))
+    (doseq [authority-key [:principal
+                           :authority
+                           :authorities
+                           :command-id
+                           :execution-id
+                           :settlement]]
+      (is (not (contains? (decoded-action semantic) authority-key))))))
+
+(deftest operation-capability-context-installation-is-closed-test
+  (let [installed
+        (ui/with-optimistic-operation-capabilities
+         (assoc ctx :app/value 7)
+         derived-capabilities)]
+    (is (= 7 (:app/value installed)))
+    (is (= derived-capabilities
+           (get installed
+                ui/optimistic-operation-capabilities-context-key))))
+
+  (testing "render context itself must be a map"
+    (doseq [bad-context [nil [] :context]]
+      (let [data
+            (error-data
+             #(ui/with-optimistic-operation-capabilities
+               bad-context
+               derived-capabilities))]
+        (is (= :gesso.live.ui/optimistic-error
+               (:error/type data)))
+        (is (= :invalid-render-context
+               (:error/kind data))))))
+
+  (testing "malformed registries fail when installed, before any affordance renders"
+    (doseq [bad-capabilities
+            [nil
+             {}
+             {:request/claim
+              (assoc claim-capability
+                     :operation :request/cancel)}]]
+      (let [data
+            (error-data
+             #(ui/with-optimistic-operation-capabilities
+               ctx
+               bad-capabilities))]
+        (is (= :gesso.live.optimistic.capability/error
+               (:error/type data)))
+        (is (= :invalid-operation-capabilities
+               (:error/kind data)))))))
+
+(deftest choreo-operation-binding-requires-an-installed-capability-registry-test
+  (let [data
+        (error-data
+         #(ui/post-button
+           ctx
+           {:to "/claim"
+            :label "Claim"
+            :choreo/op :request/claim
+            :optimistic-binding optimistic-binding}))]
+    (is (= :gesso.live.ui/optimistic-error
+           (:error/type data)))
+    (is (= :missing-operation-capabilities
+           (:error/kind data)))
+    (is (= :request/claim (:operation data)))
+    (is (= ui/optimistic-operation-capabilities-context-key
+           (:context-key data))))
+
+  (testing "a directly tampered framework context key is revalidated at use"
+    (let [data
+          (error-data
+           #(ui/post-button
+             (assoc ctx
+                    ui/optimistic-operation-capabilities-context-key
+                    {:request/claim
+                     (assoc claim-capability
+                            :plan-key :request/cancel)})
+             {:to "/claim"
+              :label "Claim"
+              :choreo/op :request/claim
+              :optimistic-binding optimistic-binding}))]
+      (is (= :gesso.live.optimistic.capability/error
+             (:error/type data)))
+      (is (= :invalid-operation-capabilities
+             (:error/kind data))))))
+
+(deftest choreo-operation-lookup-is-exact-and-exposes-the-closed-search-space-test
+  (let [data
+        (error-data
+         #(ui/post-button
+           operation-ctx
+           {:to "/claim"
+            :label "Claim"
+            :choreo/op :request/claime
+            :optimistic-binding optimistic-binding}))]
+    (is (= :gesso.live.optimistic.capability/error
+           (:error/type data)))
+    (is (= :unknown-operation
+           (:error/kind data)))
+    (is (= :request/claime
+           (:operation data)))
+    (is (= #{:request/claim :request/cancel}
+           (:available-operations data))))
+
+  (testing "semantic operation ids remain closed keywords and are never coerced"
+    (let [data
+          (error-data
+           #(ui/post-button
+             operation-ctx
+             {:to "/claim"
+              :label "Claim"
+              :choreo/op "request/claim"
+              :optimistic-binding optimistic-binding}))]
+      (is (= :gesso.live.optimistic.capability/error
+             (:error/type data)))
+      (is (= :invalid-keyword
+             (:error/kind data)))
+      (is (= "request/claim" (:value data))))))
+
+(deftest choreo-operation-binding-is-required-and-cannot-redeclare-plan-policy-test
+  (testing ":choreo/op always requires per-render binding data"
+    (let [data
+          (error-data
+           #(ui/post-button
+             operation-ctx
+             {:to "/claim"
+              :label "Claim"
+              :choreo/op :request/claim}))]
+      (is (= :gesso.live.ui/optimistic-error
+             (:error/type data)))
+      (is (= :missing-optimistic-binding
+             (:error/kind data)))
+      (is (= :request/claim (:operation data)))))
+
+  (testing "binding cannot smuggle capability-owned plan/policy fields"
+    (doseq [[key value]
+            [[:plan-key :request/cancel]
+             [:rollback-eligible? false]
+             [:timeout-ms 1]
+             [:principal :forged]]]
+      (let [data
+            (error-data
+             #(ui/post-button
+               operation-ctx
+               {:to "/claim"
+                :label "Claim"
+                :choreo/op :request/claim
+                :optimistic-binding
+                (assoc optimistic-binding key value)}))]
+        (is (= :gesso.live.optimistic.capability/error
+               (:error/type data)))
+        (is (= :unknown-fields
+               (:error/kind data)))
+        (is (= #{key} (:unknown data)))))))
+
+(deftest choreo-operation-and-legacy-optimistic-declarations-are-mutually-exclusive-test
+  (doseq [legacy-value [nil false claim-capability optimistic-action]]
+    (let [data
+          (error-data
+           #(ui/post-button
+             operation-ctx
+             {:to "/claim"
+              :label "Claim"
+              :choreo/op :request/claim
+              :optimistic legacy-value
+              :optimistic-binding optimistic-binding}))]
+      (is (= :gesso.live.ui/optimistic-error
+             (:error/type data)))
+      (is (= :conflicting-optimistic-declarations
+             (:error/kind data)))
+      (is (= :request/claim (:operation data)))
+      (is (= legacy-value (:optimistic data))))))
+
+(deftest fragment-call-shape-supports-semantic-choreo-operation-binding-test
+  (let [fragment
+        (ui/->fragment
+         {:id "request-list"
+          :src "/app/fragments/requests"
+          :stream-url "/app/streams/requests"
+          :swap "outerHTML"})
+        markup
+        (ui/post-button
+         operation-ctx
+         fragment
+         {:to "/claim"
+          :label "Claim"
+          :choreo/op :request/claim
+          :optimistic-binding optimistic-binding})
+        attrs (optimistic-attrs markup)]
+    (is (= "#request-list" (:hx-target attrs)))
+    (is (= "outerHTML" (:hx-swap attrs)))
+    (is (= optimistic-action (decoded-action markup)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Protocol-v3 action annotation
