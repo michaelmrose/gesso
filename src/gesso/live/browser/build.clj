@@ -36,7 +36,7 @@
    [clojure.java.io :as io]
    [gesso.live.browser.artifact :as artifact])
   (:import
-   (java.io BufferedInputStream FileInputStream)
+   (java.io BufferedInputStream FileInputStream PushbackReader StringReader)
    (java.nio.charset StandardCharsets)
    (java.nio.file AtomicMoveNotSupportedException
                    Files
@@ -334,10 +334,40 @@
       receipt)
      receipt)))
 
-(defn read-artifact-receipt!
-  "Read and recognize one generated browser ArtifactReceipt from disk.
+(def ^:private edn-eof
+  (Object.))
 
-   Missing, unreadable, non-EDN, or structurally invalid metadata fails closed."
+(defn- read-one-edn-form
+  [text]
+  (with-open [reader
+              (PushbackReader.
+               (StringReader. text))]
+    (let [value
+          (edn/read
+           {:eof edn-eof}
+           reader)]
+      (when
+       (identical? edn-eof value)
+        (throw
+         (IllegalArgumentException.
+          "Artifact receipt contains no EDN form.")))
+      (let [trailing
+            (edn/read
+             {:eof edn-eof}
+             reader)]
+        (when-not
+         (identical? edn-eof trailing)
+          (throw
+           (IllegalArgumentException.
+            "Artifact receipt contains more than one EDN form."))))
+      value)))
+
+(defn read-artifact-receipt!
+  "Read and recognize exactly one generated browser ArtifactReceipt from disk.
+
+   Missing, unreadable, non-EDN, multi-form, or structurally invalid metadata
+   fails closed. Whitespace and comments after the one receipt form are allowed,
+   but a second EDN value is never silently ignored."
   [metadata-path]
   (let [file
         (io/file metadata-path)]
@@ -349,13 +379,13 @@
         {:receipt-path (str metadata-path)})))
     (let [value
           (try
-            (edn/read-string
+            (read-one-edn-form
              (slurp file :encoding "UTF-8"))
             (catch Throwable error
               (throw
                (build-error
                 :unreadable-artifact-receipt
-                "Generated Gesso browser artifact receipt could not be read as EDN."
+                "Generated Gesso browser artifact receipt must contain exactly one readable EDN value."
                 {:receipt-path (str metadata-path)}
                 error))))]
       (when-not
