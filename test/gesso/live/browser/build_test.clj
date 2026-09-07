@@ -476,3 +476,322 @@
           (is (not=
                (artifact/stamp manifest)
                (:stamp stale-receipt))))))))
+
+(deftest supported-build-publishes-one-verified-staged-artifact
+  (with-temp-dir
+    (fn [dir]
+      (let [manifest
+            (browser-manifest)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            staged-path
+            (atom nil)
+
+            receipt
+            (build/build-generated-artifact!
+             manifest
+             artifact-path
+             (fn [output-path]
+               (reset! staged-path output-path)
+               (is (not= artifact-path output-path))
+               (is (.endsWith output-path "gesso-live.js"))
+               (write-js! output-path (exact-js))))]
+        (is (build/receipt? receipt))
+        (is (= receipt
+               (build/verify-generated-artifact!
+                manifest
+                artifact-path)))
+        (is (= (exact-js)
+               (slurp artifact-path :encoding "UTF-8")))
+        (is (.isFile
+             (java.io.File.
+              (build/receipt-path artifact-path))))
+        (is (some? @staged-path))
+        (is (false?
+             (.exists
+              (java.io.File. @staged-path))))))))
+
+(deftest supported-build-rejects-invalid-input-before-emission
+  (with-temp-dir
+    (fn [dir]
+      (let [manifest
+            (browser-manifest)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            calls
+            (atom 0)
+
+            emitter
+            (fn [output-path]
+              (swap! calls inc)
+              (write-js! output-path (exact-js)))]
+        (testing "invalid current assembly is rejected before the emitter is called"
+          (let [data
+                (thrown-data
+                 #(build/build-generated-artifact!
+                   (assoc manifest :browser-role :helper)
+                   artifact-path
+                   emitter))]
+            (is (= :gesso.live.browser.artifact/error
+                   (:error/type data)))
+            (is (= :invalid-browser-assembly-manifest
+                   (:error/kind data)))
+            (is (zero? @calls))
+            (is (false? (.exists (java.io.File. artifact-path))))))
+
+        (testing "emitter and option contracts fail before touching output"
+          (is (= :invalid-artifact-emitter
+                 (:error/kind
+                  (thrown-data
+                   #(build/build-generated-artifact!
+                     manifest
+                     artifact-path
+                     nil)))))
+          (is (= :unknown-build-options
+                 (:error/kind
+                  (thrown-data
+                   #(build/build-generated-artifact!
+                     manifest
+                     artifact-path
+                     emitter
+                     {:unknown true})))))
+          (is (zero? @calls))
+          (is (false? (.exists (java.io.File. artifact-path)))))))))
+
+(deftest emission-failure-preserves-the-last-verified-artifact-pair
+  (with-temp-dir
+    (fn [dir]
+      (let [manifest
+            (browser-manifest)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            receipt-path
+            (build/receipt-path artifact-path)
+
+            previous-js
+            "console.log('previous verified runtime');\n"]
+        (write-js! artifact-path previous-js)
+        (let [previous-receipt
+              (build/record-generated-artifact!
+               manifest
+               artifact-path)
+
+              data
+              (thrown-data
+               #(build/build-generated-artifact!
+                 manifest
+                 artifact-path
+                 (fn [output-path]
+                   ;; Even a partially emitted staged artifact must never replace
+                   ;; the last verified runtime when the compiler fails.
+                   (write-js! output-path
+                              "console.log('partial');\n")
+                   (throw
+                    (ex-info "compiler failed"
+                             {:phase :compile})))))]
+          (is (= :gesso.live.browser.build/error
+                 (:error/type data)))
+          (is (= :generated-artifact-emission-failed
+                 (:error/kind data)))
+          (is (= previous-js
+                 (slurp artifact-path :encoding "UTF-8")))
+          (is (= previous-receipt
+                 (build/read-artifact-receipt!
+                  receipt-path)))
+          (is (= previous-receipt
+                 (build/verify-generated-artifact!
+                  manifest
+                  artifact-path)))
+          (is (false?
+               (.exists
+                (java.io.File.
+                 (:staged-path data)))))))))
+
+(deftest staged-output-must-exist-and-be-nonempty-before-publication
+  (with-temp-dir
+    (fn [dir]
+      (let [manifest
+            (browser-manifest)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            receipt-path
+            (build/receipt-path artifact-path)
+
+            previous-js
+            "console.log('previous');\n"]
+        (write-js! artifact-path previous-js)
+        (let [previous-receipt
+              (build/record-generated-artifact!
+               manifest
+               artifact-path)]
+          (testing "an emitter that produces no staged artifact fails closed"
+            (let [data
+                  (thrown-data
+                   #(build/build-generated-artifact!
+                     manifest
+                     artifact-path
+                     (fn [_output-path]
+                       :did-not-emit)))]
+              (is (= :missing-generated-artifact
+                     (:error/kind data)))
+              (is (= previous-js
+                     (slurp artifact-path :encoding "UTF-8")))
+              (is (= previous-receipt
+                     (build/read-artifact-receipt!
+                      receipt-path)))))
+
+          (testing "an empty staged artifact fails closed"
+            (let [data
+                  (thrown-data
+                   #(build/build-generated-artifact!
+                     manifest
+                     artifact-path
+                     (fn [output-path]
+                       (write-js! output-path ""))))]
+              (is (= :empty-generated-artifact
+                     (:error/kind data)))
+              (is (= previous-js
+                     (slurp artifact-path :encoding "UTF-8")))
+              (is (= previous-receipt
+                     (build/verify-generated-artifact!
+                      manifest
+                      artifact-path)))))
+
+          (testing "writing an unrelated path does not satisfy staged ownership"
+            (let [wrong-path
+                  (child-path dir "wrong-output.js")
+
+                  data
+                  (thrown-data
+                   #(build/build-generated-artifact!
+                     manifest
+                     artifact-path
+                     (fn [_output-path]
+                       (write-js! wrong-path (exact-js)))))]
+              (is (= :missing-generated-artifact
+                     (:error/kind data)))
+              (is (.isFile
+                   (java.io.File. wrong-path)))
+              (is (= previous-js
+                     (slurp artifact-path :encoding "UTF-8")))
+              (is (= previous-receipt
+                     (build/verify-generated-artifact!
+                      manifest
+                      artifact-path))))))))))
+
+(deftest supported-build-honors-one-explicit-receipt-location
+  (with-temp-dir
+    (fn [dir]
+      (let [manifest
+            (browser-manifest)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            custom-receipt-path
+            (child-path dir "metadata/browser.edn")
+
+            default-receipt-path
+            (build/receipt-path artifact-path)
+
+            receipt
+            (build/build-generated-artifact!
+             manifest
+             artifact-path
+             (fn [output-path]
+               (write-js! output-path (exact-js)))
+             {:receipt-path custom-receipt-path})]
+        (is (= receipt
+               (build/verify-generated-artifact!
+                manifest
+                artifact-path
+                {:receipt-path custom-receipt-path})))
+        (is (.isFile
+             (java.io.File. custom-receipt-path)))
+        (is (false?
+             (.exists
+              (java.io.File. default-receipt-path))))))))
+
+(deftest stale-receipt-cannot-bless-newly-published-bytes-after-receipt-write-failure
+  (with-temp-dir
+    (fn [dir]
+      (let [manifest
+            (browser-manifest)
+
+            artifact-path
+            (child-path dir "gesso-live.js")
+
+            default-receipt-path
+            (build/receipt-path artifact-path)
+
+            impossible-receipt-path
+            (child-path dir "receipt-target")
+
+            previous-js
+            "console.log('previous');\n"
+
+            next-js
+            "console.log('next runtime');\n"]
+        (write-js! artifact-path previous-js)
+        (let [previous-receipt
+              (build/record-generated-artifact!
+               manifest
+               artifact-path)]
+          ;; A non-empty directory cannot be atomically replaced by the receipt
+          ;; file on ordinary filesystems, forcing receipt persistence to fail
+          ;; after the staged JavaScript has already been published.
+          (.mkdirs (java.io.File. impossible-receipt-path))
+          (write-js!
+           (child-path (java.io.File. impossible-receipt-path)
+                       "keep")
+           "not metadata")
+
+          (let [data
+                (thrown-data
+                 #(build/build-generated-artifact!
+                   manifest
+                   artifact-path
+                   (fn [output-path]
+                     (write-js! output-path next-js))
+                   {:receipt-path impossible-receipt-path}))]
+            (is (= :gesso.live.browser.build/error
+                   (:error/type data)))
+            (is (= :artifact-receipt-publication-failed
+                   (:error/kind data)))
+            (is (= {:artifact-path artifact-path
+                    :receipt-path impossible-receipt-path}
+                   (select-keys data
+                                [:artifact-path
+                                 :receipt-path])))
+            (is (= {:artifact (build/artifact-descriptor artifact-path)
+                    :stamp (artifact/stamp manifest)}
+                   (select-keys data
+                                [:artifact
+                                 :stamp]))))
+
+          (is (= next-js
+                 (slurp artifact-path :encoding "UTF-8")))
+          (is (= previous-receipt
+                 (build/read-artifact-receipt!
+                  default-receipt-path)))
+
+          (let [data
+                (thrown-data
+                 #(build/verify-generated-artifact!
+                   manifest
+                   artifact-path))]
+            (is (= :generated-artifact-content-mismatch
+                   (:error/kind data)))
+            (is (= (:artifact previous-receipt)
+                   (:recorded data)))
+            (is (not=
+                 (get-in data [:recorded :digest])
+                 (get-in data [:current :digest]))))))))))
