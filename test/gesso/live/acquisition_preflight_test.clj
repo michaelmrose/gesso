@@ -174,6 +174,98 @@
     (request-list-routes)
     overrides)))
 
+
+(defn- generic-query
+  [_ctx id]
+  {:id id})
+
+(defn- generic-render
+  [{:keys [id]}]
+  [:section {:id (str id)}])
+
+(defn- never-target?
+  [_ctx _change]
+  false)
+
+(defn- fragment-id
+  [prefix]
+  (fn [id]
+    (str prefix "-" id)))
+
+(defn- compile-shared-scope-live
+  ([]
+   (compile-shared-scope-live :humanhelp/shared))
+  ([shared-topic]
+   (model/compile-live-app
+    {:response html-response
+
+     :scopes
+     {:shared
+      {:topic shared-topic
+       :id-key :request/location-id
+       :authorized? allow?}
+
+      :static
+      {:topic :humanhelp/static
+       :id-key :request/location-id
+       :authorized? allow?}}
+
+     :graph
+     {:request
+      [{:scope :shared
+        :id-key :request/location-id
+        :optional? true
+        :when never-target?}]}
+
+     :fragments
+     {:shared-summary
+      {:scope :shared
+       :id-fn (fragment-id "shared-summary")
+       :query generic-query
+       :render generic-render
+       :swap :outerHTML}
+
+      :shared-detail
+      {:scope :shared
+       :id-fn (fragment-id "shared-detail")
+       :query generic-query
+       :render generic-render
+       :swap :outerHTML}
+
+      :static
+      {:scope :static
+       :id-fn (fragment-id "static")
+       :query generic-query
+       :render generic-render
+       :swap :outerHTML}}})))
+
+(defn- generic-realization
+  [live-app fragment]
+  (acquisition/require-acquisition-realization!
+   {:name (keyword "fixture" (name fragment))
+    :live-app live-app
+    :fragment fragment
+    :fragment-route
+    (acquisition/fragment-route
+     {:fragment fragment
+      :path (str "/fragments/" (name fragment))})
+    :stream-route
+    (acquisition/stream-route
+     {:fragment fragment
+      :path (str "/streams/" (name fragment))})}))
+
+(defn- assembly-error-kinds
+  [report]
+  (set (map :kind (:errors report))))
+
+(defn- assembly-warning-kinds
+  [report]
+  (set (map :kind (:warnings report))))
+
+(defn- assembly-issue-of-kind
+  [report kind]
+  (first (filter #(= kind (:kind %)) (:errors report))))
+
 ;; =============================================================================
 ;; Canonical route capabilities
 ;; =============================================================================
@@ -521,3 +613,290 @@
     (is (= #{:invalid-live-app}
            (error-kinds report)))
     (is (false? (acquisition/valid? report)))))
+
+;; =============================================================================
+;; Graph-derived acquisition obligations
+;; =============================================================================
+
+(deftest graph-obligations-require-every-fragment-projecting-an-invalidated-scope
+  (let [live-app     (compile-shared-scope-live)
+        obligations  (acquisition/acquisition-obligations live-app)]
+    (is (= #{:shared-summary :shared-detail}
+           (set (keys obligations))))
+    (testing "multiple fragments projecting the same invalidated scope are independent obligations"
+      (doseq [fragment [:shared-summary :shared-detail]]
+        (let [obligation (get obligations fragment)]
+          (is (acquisition/acquisition-obligation? obligation))
+          (is (= fragment (:fragment obligation)))
+          (is (= :shared (:scope obligation)))
+          (is (= :humanhelp/shared (:scope-topic obligation)))
+          (is (= :request/location-id (:scope-id-key obligation)))
+          (is (= #{:request} (:change-topics obligation)))
+          (is (= acquisition/managed-acquisition-profile
+                 (:acquisition-profile obligation))))))
+    (testing "declared fragments whose scopes are not graph-reachable are not silently promoted"
+      (is (nil? (get obligations :static))))))
+
+(deftest conditional-and-optional-targets-still-create-conservative-may-invalidate-obligations
+  (let [live-app    (compile-shared-scope-live)
+        graph-target (first (get-in live-app [:graph :request]))
+        obligations (acquisition/acquisition-obligations live-app)]
+    (is (true? (:optional? graph-target)))
+    (is (= never-target? (:when graph-target)))
+    (testing "preflight does not execute arbitrary application predicates to erase a possible edge"
+      (is (= #{:shared-summary :shared-detail}
+             (set (keys obligations))))
+      (is (= #{:request}
+             (get-in obligations [:shared-summary :change-topics]))))
+    (testing "the obligation means acquisition must exist if the target becomes active, not that every change must invalidate it"
+      (is (= acquisition/managed-acquisition-profile
+             (get-in obligations [:shared-detail :acquisition-profile]))))))
+
+(deftest missing-graph-derived-realizations-fail-with-one-local-obligation-per-fragment
+  (let [live-app (compile-shared-scope-live)
+        report   (acquisition/check-acquisition-assembly
+                  {:name :fixture/shared
+                   :live-app live-app
+                   :realizations {}})
+        errors   (:errors report)]
+    (is (acquisition/acquisition-assembly-report? report))
+    (is (false? (acquisition/acquisition-assembly-valid? report)))
+    (is (= #{:missing-acquisition-realization}
+           (assembly-error-kinds report)))
+    (is (= 2 (count errors)))
+    (is (= #{:shared-summary :shared-detail}
+           (get-in report [:analysis :required-fragments])))
+    (is (= #{}
+           (get-in report [:analysis :supplied-fragments])))
+    (doseq [error errors]
+      (is (contains? #{:shared-summary :shared-detail} (:fragment error)))
+      (is (= #{:shared-summary :shared-detail}
+             (:required-fragments error)))
+      (is (= #{} (:supplied-fragments error)))
+      (is (acquisition/acquisition-obligation? (:obligation error))))))
+
+(deftest successful-acquisition-assembly-is-derived-from-the-live-graph-not-caller-requirements
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        detail   (generic-realization live-app :shared-detail)
+        options  {:name :fixture/shared
+                  :live-app live-app
+                  :realizations {:shared-summary summary
+                                 :shared-detail detail}}
+        report   (acquisition/check-acquisition-assembly options)
+        assembly (acquisition/require-acquisition-assembly! options)
+        explanation (acquisition/explain assembly)]
+    (is (acquisition/acquisition-assembly-valid? report))
+    (is (empty? (:errors report)))
+    (is (empty? (:warnings report)))
+    (is (= #{:shared-summary :shared-detail}
+           (get-in report [:analysis :required-fragments])))
+    (is (= #{:shared-summary :shared-detail}
+           (get-in report [:analysis :supplied-fragments])))
+    (is (acquisition/acquisition-assembly? assembly))
+    (is (= (acquisition/acquisition-obligations live-app)
+           (:obligations assembly)))
+    (is (= #{:shared-summary :shared-detail}
+           (:required-fragments assembly)))
+    (is (= acquisition/managed-acquisition-profile
+           (:acquisition-profile assembly)))
+    (is (= :invalidation-acquisition-preflight-closed-relative-to-trusted-routes
+           (:guarantee explanation)))
+    (is (= (:obligations assembly) (:obligations explanation)))
+    (is (= (:required-fragments assembly) (:required-fragments explanation)))))
+
+(deftest valid-realization-outside-the-invalidation-graph-is-retained-as-a-warning-not-a-fake-obligation
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        detail   (generic-realization live-app :shared-detail)
+        static   (generic-realization live-app :static)
+        options  {:name :fixture/shared-with-static
+                  :live-app live-app
+                  :realizations {:shared-summary summary
+                                 :shared-detail detail
+                                 :static static}}
+        report   (acquisition/check-acquisition-assembly options)
+        assembly (acquisition/require-acquisition-assembly! options)
+        warning  (first (:warnings report))]
+    (is (acquisition/acquisition-assembly-valid? report))
+    (is (= #{:unrequired-acquisition-realization}
+           (assembly-warning-kinds report)))
+    (is (= 1 (count (:warnings report))))
+    (is (= :static (:fragment warning)))
+    (is (= #{:shared-summary :shared-detail}
+           (:required-fragments warning)))
+    (is (= #{:shared-summary :shared-detail}
+           (:required-fragments assembly)))
+    (is (= #{:shared-summary :shared-detail :static}
+           (set (keys (:realizations assembly)))))
+    (is (nil? (get (:obligations assembly) :static)))
+    (is (acquisition/acquisition-assembly? assembly))))
+
+(deftest invalid-required-realization-is-not-mistaken-for-a-missing-registry-key
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        detail   (generic-realization live-app :shared-detail)
+        tampered (assoc detail :scope :static)
+        report   (acquisition/check-acquisition-assembly
+                  {:name :fixture/tampered
+                   :live-app live-app
+                   :realizations {:shared-summary summary
+                                  :shared-detail tampered}})]
+    (is (= #{:invalid-acquisition-realization}
+           (assembly-error-kinds report)))
+    (is (= #{:shared-summary :shared-detail}
+           (get-in report [:analysis :supplied-fragments])))
+    (is (false? (acquisition/acquisition-assembly-valid? report)))))
+
+(deftest acquisition-realization-cannot-be-reused-across-compiled-live-apps
+  (let [live-app-a (compile-shared-scope-live :humanhelp/shared-a)
+        live-app-b (compile-shared-scope-live :humanhelp/shared-b)
+        summary-a  (generic-realization live-app-a :shared-summary)
+        detail-b   (generic-realization live-app-b :shared-detail)
+        report     (acquisition/check-acquisition-assembly
+                    {:name :fixture/cross-app
+                     :live-app live-app-b
+                     :realizations {:shared-summary summary-a
+                                    :shared-detail detail-b}})
+        mismatch   (assembly-issue-of-kind report :acquisition-live-app-mismatch)]
+    (is (acquisition/acquisition-realization? summary-a))
+    (is (= #{:acquisition-live-app-mismatch}
+           (assembly-error-kinds report)))
+    (is (= :shared-summary (:fragment mismatch)))
+    (is (= live-app-b (:expected-live-app mismatch)))
+    (is (= live-app-a (:actual-live-app mismatch)))))
+
+(deftest realization-registry-key-cannot-semantically-relabel-another-fragment
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        detail   (generic-realization live-app :shared-detail)
+        report   (acquisition/check-acquisition-assembly
+                  {:name :fixture/relabelled
+                   :live-app live-app
+                   :realizations {:shared-summary detail
+                                  :shared-detail summary}})]
+    (is (= #{:acquisition-fragment-key-mismatch}
+           (assembly-error-kinds report)))
+    (is (= 2 (count (:errors report))))
+    (is (false? (acquisition/acquisition-assembly-valid? report)))))
+
+(deftest unknown-realization-fragments-are-rejected-with-the-compiled-available-set
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        detail   (generic-realization live-app :shared-detail)
+        report   (acquisition/check-acquisition-assembly
+                  {:name :fixture/unknown
+                   :live-app live-app
+                   :realizations {:shared-summary summary
+                                  :shared-detail detail
+                                  :missing summary}})
+        unknown  (assembly-issue-of-kind report :unknown-acquisition-fragment)]
+    (is (= #{:unknown-acquisition-fragment
+             :acquisition-fragment-key-mismatch}
+           (assembly-error-kinds report)))
+    (is (= :missing (:fragment unknown)))
+    (is (= #{:shared-summary :shared-detail :static}
+           (:known-fragments unknown)))))
+
+;; =============================================================================
+;; Closed assembly/report recognition
+;; =============================================================================
+
+(deftest forged-positive-acquisition-assembly-report-is-not-recognized
+  (let [live-app (compile-shared-scope-live)
+        report   (acquisition/check-acquisition-assembly
+                  {:name :fixture/forged
+                   :live-app live-app
+                   :realizations {}})
+        forged   (assoc report :valid? true :errors [])]
+    (is (acquisition/acquisition-assembly-report? report))
+    (is (false? (acquisition/acquisition-assembly-valid? report)))
+    (is (false? (acquisition/acquisition-assembly-report? forged)))
+    (is (false? (acquisition/acquisition-assembly-valid? forged)))))
+
+(deftest acquisition-assembly-report-obligations-cannot-be-relabelled-after-derivation
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        detail   (generic-realization live-app :shared-detail)
+        report   (acquisition/check-acquisition-assembly
+                  {:name :fixture/report
+                   :live-app live-app
+                   :realizations {:shared-summary summary
+                                  :shared-detail detail}})
+        forged   (assoc-in report
+                           [:analysis :obligations :shared-summary :change-topics]
+                           #{:other-change})]
+    (is (acquisition/acquisition-assembly-valid? report))
+    (is (false? (acquisition/acquisition-assembly-report? forged)))
+    (is (false? (acquisition/acquisition-assembly-valid? forged)))))
+
+(deftest closed-acquisition-assembly-rejects-obligation-required-set-profile-and-realization-tampering
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        detail   (generic-realization live-app :shared-detail)
+        assembly (acquisition/require-acquisition-assembly!
+                  {:name :fixture/closed
+                   :live-app live-app
+                   :realizations {:shared-summary summary
+                                  :shared-detail detail}})
+        obligation-tampered
+        (assoc-in assembly
+                  [:obligations :shared-summary :change-topics]
+                  #{:other-change})
+        required-tampered
+        (assoc assembly :required-fragments #{:shared-summary})
+        profile-tampered
+        (assoc assembly :acquisition-profile :example/other-profile)
+        realization-swapped
+        (assoc-in assembly [:realizations :shared-summary] detail)]
+    (is (acquisition/acquisition-assembly? assembly))
+    (is (false? (acquisition/acquisition-assembly? obligation-tampered)))
+    (is (false? (acquisition/acquisition-assembly? required-tampered)))
+    (is (false? (acquisition/acquisition-assembly? profile-tampered)))
+    (is (false? (acquisition/acquisition-assembly? realization-swapped)))))
+
+(deftest require-acquisition-assembly-preserves-the-complete-failure-report
+  (let [live-app (compile-shared-scope-live)
+        summary  (generic-realization live-app :shared-summary)
+        data     (error-data
+                  #(acquisition/require-acquisition-assembly!
+                    {:name :fixture/incomplete
+                     :live-app live-app
+                     :realizations {:shared-summary summary}}))
+        report   (:preflight data)]
+    (is (= :gesso.live.acquisition-preflight/error
+           (:error/type data)))
+    (is (= :authoritative-acquisition-assembly-failed
+           (:error/kind data)))
+    (is (acquisition/acquisition-assembly-report? report))
+    (is (= #{:missing-acquisition-realization}
+           (assembly-error-kinds report)))
+    (is (= :shared-detail
+           (:fragment
+            (assembly-issue-of-kind report :missing-acquisition-realization))))))
+
+(deftest assembly-definition-time-input-hygiene-is-closed-and-early
+  (let [live-app (compile-shared-scope-live)]
+    (is (= :unknown-assembly-option
+           (error-kind
+            #(acquisition/check-acquisition-assembly
+              {:live-app live-app
+               :realizations {}
+               :required-fragments #{:shared-summary}}))))
+    (is (= :invalid-acquisition-realizations
+           (error-kind
+            #(acquisition/check-acquisition-assembly
+              {:live-app live-app
+               :realizations [:shared-summary]}))))
+    (is (= :invalid-name
+           (error-kind
+            #(acquisition/check-acquisition-assembly
+              {:name "not-a-keyword"
+               :live-app live-app
+               :realizations {}}))))))
+
+(deftest acquisition-obligation-derivation-rejects-tampered-compiled-live-metadata
+  (let [live-app (compile-shared-scope-live)
+        tampered (assoc-in live-app [:fragments :shared-summary :scope] :missing-scope)]
+    (is (= :invalid-live-app
+           (error-kind #(acquisition/acquisition-obligations tampered))))))
