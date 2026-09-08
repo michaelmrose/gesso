@@ -16,6 +16,8 @@
    - one current untampered BrowserAssemblyManifest with optimism enabled;
    - one canonical operation capability naming a plan present in that manifest;
    - one trusted optimistic.server operation under the same semantic operation;
+   - exact equality between that server operation's authority ExecutablePlan and
+     the authority projection implied by its own choreography identity/roles;
    - exact browser-role agreement; and
    - exact equality between the manifest's browser ExecutablePlan and the
      browser projection implied by the trusted server operation's choreography
@@ -193,6 +195,12 @@
    (operation-choreo-options server-operation)
    (:browser-role server-operation)))
 
+(defn- expected-authority-plan
+  [server-operation]
+  (optimistic-choreo/command-plan
+   (operation-choreo-options server-operation)
+   (:authority-role server-operation)))
+
 (defn- browser-plan
   [browser-assembly plan-key]
   (get-in browser-assembly
@@ -240,6 +248,17 @@
         "Browser-exposed optimistic operation is absent from the trusted server operation registry."
         {:operation operation
          :registered-server-operations (set (keys server-operations))}))
+
+      (and server-operation
+           (not= (:authority-plan server-operation)
+                 (expected-authority-plan server-operation)))
+      (conj
+       (issue
+        :server-authority-plan-correspondence-mismatch
+        "Trusted server operation authority ExecutablePlan does not exactly match the authority projection implied by its choreography identity and roles."
+        {:operation operation
+         :choreography-name (:name server-operation)
+         :authority-role (:authority-role server-operation)}))
 
       (and server-operation
            (not= manifest-role (:browser-role server-operation)))
