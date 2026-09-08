@@ -61,6 +61,20 @@
 (def cancel-operation
   (trusted-operation :request/cancel))
 
+(def confirmed-claim-contract
+  (server/settlement-contract
+   {:confirmed
+    {:outcomes #{:request/claimed}
+     :commit/status :committed
+     :progression :authoritative-basis}}))
+
+(def confirmed-cancel-contract
+  (server/settlement-contract
+   {:confirmed
+    {:outcomes #{:request/cancelled}
+     :commit/status :committed
+     :progression :authoritative-basis}}))
+
 (def claim-plan
   (optimistic-choreo/command-plan
    {:name (:name claim-operation)
@@ -273,6 +287,97 @@
                          [:execution-capabilities
                           :required-by-operation])))))
         "The derived execution summary covers route-exposed operations, not unrelated server-only operations.")))
+
+
+(deftest settlement-contracts-are-derived-from-the-prepared-server-boundary
+  (let [operation
+        (trusted-operation
+         :request/claim
+         {:settlement-contract confirmed-claim-contract})
+        routes
+        (route-assembly {:request/claim operation})
+        concrete-server
+        (prepared-server {:request/claim operation})
+        options
+        (execution-options routes concrete-server)
+        report
+        (execution-preflight/check-execution-assembly options)
+        assembly
+        (execution-preflight/require-execution-assembly! options)
+        expected
+        {:request/claim confirmed-claim-contract}]
+    (is (= expected
+           (get-in report [:analysis :settlement-contracts-by-operation])))
+    (is (= expected (:settlement-contracts assembly)))
+    (is (= expected
+           (execution-preflight/settlement-contracts assembly)))
+    (is (= expected
+           (:settlement-contracts
+            (execution-preflight/explain assembly))))
+    (is (= 2
+           (:gesso.live.optimistic.execution-preflight/version assembly)))
+    (is (= 2
+           (:gesso.live.optimistic.execution-preflight/version report)))))
+
+(deftest route-exposed-unconstrained-operations-are-explicitly-nil
+  (let [claim
+        (trusted-operation
+         :request/claim
+         {:settlement-contract confirmed-claim-contract})
+        operations
+        {:request/claim claim
+         :request/cancel cancel-operation}
+        op-assembly
+        (operation-assembly
+         operations
+         {:plans {:request/claim claim-plan
+                  :request/cancel cancel-plan}})
+        routes
+        (route-assembly
+         operations
+         {:operation-assembly op-assembly
+          :route-capabilities
+          {:request/claim claim-route
+           :request/cancel cancel-route}})
+        concrete-server
+        (prepared-server operations)
+        assembly
+        (execution-preflight/require-execution-assembly!
+         (execution-options routes concrete-server))
+        contracts
+        (execution-preflight/settlement-contracts assembly)]
+    (is (= #{:request/claim :request/cancel}
+           (set (keys contracts))))
+    (is (= confirmed-claim-contract
+           (:request/claim contracts)))
+    (is (contains? contracts :request/cancel))
+    (is (nil? (:request/cancel contracts))
+        "Nil means this known route-exposed operation intentionally has no declared settlement constraint yet.")))
+
+(deftest server-only-settlement-contracts-do-not-leak-into-the-route-exposed-summary
+  (let [claim
+        (trusted-operation
+         :request/claim
+         {:settlement-contract confirmed-claim-contract})
+        cancel
+        (trusted-operation
+         :request/cancel
+         {:settlement-contract confirmed-cancel-contract})
+        routes
+        (route-assembly {:request/claim claim})
+        concrete-server
+        (prepared-server
+         {:request/claim claim
+          :request/cancel cancel})
+        assembly
+        (execution-preflight/require-execution-assembly!
+         (execution-options routes concrete-server))
+        contracts
+        (execution-preflight/settlement-contracts assembly)]
+    (is (= {:request/claim confirmed-claim-contract}
+           contracts))
+    (is (not (contains? contracts :request/cancel))
+        "Server-registry supersets remain valid, but unrelated server-only operations are outside this application slice.")))
 
 (deftest capability-closure-does-not-imply-domain-authorization
   (let [operation
@@ -487,6 +592,42 @@
     (is (false? (execution-preflight/execution-assembly? requirements-tampered)))
     (is (false? (execution-preflight/execution-assembly? extra-operation)))))
 
+
+(deftest execution-assembly-recognition-rejects-settlement-contract-summary-tampering
+  (let [operation
+        (trusted-operation
+         :request/claim
+         {:settlement-contract confirmed-claim-contract})
+        routes
+        (route-assembly {:request/claim operation})
+        concrete-server
+        (prepared-server {:request/claim operation})
+        assembly
+        (execution-preflight/require-execution-assembly!
+         (execution-options routes concrete-server))
+        changed-outcome
+        (assoc-in assembly
+                  [:settlement-contracts
+                   :request/claim
+                   :confirmed
+                   :outcomes]
+                  #{:request/cancelled})
+        erased-contract
+        (assoc-in assembly
+                  [:settlement-contracts :request/claim]
+                  nil)
+        extra-operation
+        (assoc-in assembly
+                  [:settlement-contracts :request/cancel]
+                  nil)]
+    (is (execution-preflight/execution-assembly? assembly))
+    (is (false? (execution-preflight/execution-assembly? changed-outcome)))
+    (is (false? (execution-preflight/execution-assembly? erased-contract)))
+    (is (false? (execution-preflight/execution-assembly? extra-operation)))
+    (is (= :invalid-execution-assembly
+           (error-kind
+            #(execution-preflight/settlement-contracts changed-outcome))))))
+
 (deftest execution-assembly-recognition-rejects-upstream-route-tampering
   (let [{:keys [options]} (base-fixture)
         assembly
@@ -508,6 +649,13 @@
   (let [{:keys [options]} (base-fixture)
         assembly
         (execution-preflight/require-execution-assembly! options)]
+    (is (= 2 execution-preflight/preflight-version))
+    (is (= 2
+           (:gesso.live.optimistic.execution-preflight/version assembly)))
+    (is (contains? assembly :settlement-contracts))
+    (is (false?
+         (execution-preflight/execution-assembly?
+          (dissoc assembly :settlement-contracts))))
     (is (false?
          (execution-preflight/execution-assembly?
           (assoc assembly :unexpected true))))
@@ -564,6 +712,10 @@
     (is (= #{:request/claim} (:operations explanation)))
     (is (= (:execution-capabilities assembly)
            (:execution-capabilities explanation)))
+    (is (= {:request/claim nil}
+           (:settlement-contracts assembly)))
+    (is (= (:settlement-contracts assembly)
+           (:settlement-contracts explanation)))
     (is (= :unrecognized-value
            (error-kind
             #(execution-preflight/explain {:nope true}))))))
