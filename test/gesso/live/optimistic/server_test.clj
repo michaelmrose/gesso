@@ -502,6 +502,252 @@
 ;; Operation-result / settlement boundary
 ;; =============================================================================
 
+(deftest settlement-contract-construction-is-closed-and-operation-owned
+  (let [contract
+        (server/settlement-contract
+         {:confirmed
+          {:outcomes #{:request/claimed}
+           :commit/status :committed
+           :progression :authoritative-basis}})
+        prepared-operation
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:settlement-contract contract})]
+    (is (server/settlement-contract? contract))
+    (is (= {:confirmed
+            {:outcomes #{:request/claimed}
+             :commit/status server/committed-status
+             :progression server/authoritative-progression-contract}}
+           contract))
+    (is (= contract
+           (:settlement-contract prepared-operation)))
+    (is (= contract
+           (server/operation-settlement-contract prepared-operation)))
+    (is (server/operation? prepared-operation))
+    (is (= :empty-settlement-contract
+           (error-kind #(server/settlement-contract {}))))
+    (is (= :invalid-keyword-set
+           (error-kind
+            #(server/settlement-contract
+              {:confirmed {:outcomes #{}}}))))
+    (is (= :invalid-settlement-commit-status-contract
+           (error-kind
+            #(server/settlement-contract
+              {:confirmed {:commit/status :rolled-back}}))))
+    (is (= :invalid-settlement-progression-contract
+           (error-kind
+            #(server/settlement-contract
+              {:confirmed {:progression :latest}}))))))
+
+(deftest settlement-contract-validates-trusted-evidence-before-wire-construction
+  (let [requirement (progression/requirement authoritative-basis)
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations
+          {:request/claim
+           (base-operation
+            (fn [_]
+              (confirmed-result
+               {:commit/status :committed
+                :progression requirement}))
+            {:settlement-contract
+             {:confirmed
+              {:outcomes #{:request/claimed}
+               :commit/status :committed
+               :progression :authoritative-basis}}})}})
+        prepared
+        (server/run-command prepared-server trusted-ctx (command-envelope))
+        settlement (:settlement prepared)
+        wire (:settlement-wire prepared)]
+    (is (= :confirmed (:resolution settlement)))
+    (is (= :request/claimed (:outcome settlement)))
+    (is (= authoritative-request (:authoritative settlement)))
+    (doseq [private-key [:commit/status :progression :progression-advances]]
+      (is (not (contains? settlement private-key)))
+      (is (not (contains? wire private-key))))
+    (is (= settlement
+           (protocol/wire->settlement wire)))))
+
+(deftest settlement-contract-rejects-undeclared-resolution
+  (let [prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations
+          {:request/claim
+           (base-operation
+            (fn [_] (rejected-result))
+            {:settlement-contract
+             {:confirmed {:outcomes #{:request/claimed}}}})}})
+        data
+        (error-data
+         #(server/run-command prepared-server trusted-ctx (command-envelope)))]
+    (is (= :settlement-resolution-not-allowed (:error/kind data)))
+    (is (= :request/claim (:operation data)))
+    (is (= :rejected (:resolution data)))
+    (is (= #{:confirmed} (:allowed-resolutions data)))))
+
+(deftest settlement-contract-rejects-wrong-or-missing-domain-outcome
+  (let [contract {:confirmed {:outcomes #{:request/claimed}}}
+        run
+        (fn [result]
+          (let [prepared-server
+                (server/server
+                 {:principal-fn (fn [_] trusted-principal)
+                  :operations
+                  {:request/claim
+                   (base-operation
+                    (fn [_] result)
+                    {:settlement-contract contract})}})]
+            (error-data
+             #(server/run-command prepared-server trusted-ctx (command-envelope)))))
+        wrong (run (confirmed-result {:outcome :request/cancelled}))
+        missing (run (dissoc (confirmed-result) :outcome))]
+    (doseq [[data outcome] [[wrong :request/cancelled]
+                            [missing nil]]]
+      (is (= :settlement-outcome-not-allowed (:error/kind data)))
+      (is (= :request/claim (:operation data)))
+      (is (= :confirmed (:resolution data)))
+      (is (= outcome (:outcome data)))
+      (is (= #{:request/claimed} (:allowed-outcomes data))))))
+
+(deftest settlement-contract-requires-exact-committed-provenance
+  (let [contract {:confirmed {:commit/status :committed}}
+        run
+        (fn [result]
+          (let [prepared-server
+                (server/server
+                 {:principal-fn (fn [_] trusted-principal)
+                  :operations
+                  {:request/claim
+                   (base-operation
+                    (fn [_] result)
+                    {:settlement-contract contract})}})]
+            (error-data
+             #(server/run-command prepared-server trusted-ctx (command-envelope)))))
+        missing (run (confirmed-result))
+        wrong (run (confirmed-result {:commit/status :rolled-back}))]
+    (doseq [[data actual] [[missing nil]
+                           [wrong :rolled-back]]]
+      (is (= :settlement-commit-status-mismatch (:error/kind data)))
+      (is (= :request/claim (:operation data)))
+      (is (= :confirmed (:resolution data)))
+      (is (= :committed (:expected data)))
+      (is (= actual (:actual data))))))
+
+(deftest settlement-contract-requires-progression-evidence
+  (let [prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations
+          {:request/claim
+           (base-operation
+            (fn [_]
+              (confirmed-result {:commit/status :committed}))
+            {:settlement-contract
+             {:confirmed
+              {:commit/status :committed
+               :progression :authoritative-basis}}})}})
+        data
+        (error-data
+         #(server/run-command prepared-server trusted-ctx (command-envelope)))]
+    (is (= :missing-settlement-progression (:error/kind data)))
+    (is (= :request/claim (:operation data)))
+    (is (= :confirmed (:resolution data)))
+    (is (nil? (:progression data)))))
+
+(deftest settlement-contract-progression-needs-authoritative-observation
+  (let [requirement (progression/requirement observed-basis)
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations
+          {:request/claim
+           (base-operation
+            (fn [_]
+              {:resolution :rejected
+               :reason :not-authorized
+               :progression requirement})
+            {:settlement-contract
+             {:rejected {:progression :authoritative-basis}}})}})
+        data
+        (error-data
+         #(server/run-command prepared-server trusted-ctx (command-envelope)))]
+    (is (= :missing-settlement-progression-authority (:error/kind data)))
+    (is (= :request/claim (:operation data)))
+    (is (= :rejected (:resolution data)))))
+
+(deftest settlement-contract-rejects-authoritative-basis-that-does-not-satisfy-progression
+  (let [requirement (progression/requirement observed-basis)
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations
+          {:request/claim
+           (base-operation
+            (fn [_]
+              (confirmed-result
+               {:progression requirement}))
+            {:settlement-contract
+             {:confirmed {:progression :authoritative-basis}}})}})
+        data
+        (error-data
+         #(server/run-command prepared-server trusted-ctx (command-envelope)))]
+    (is (= :settlement-progression-not-satisfied (:error/kind data)))
+    (is (= authoritative-basis (:authoritative-basis data)))
+    (is (= requirement (:progression data)))
+    (is (= [] (:progression-advances data)))))
+
+(deftest settlement-contract-supports-composed-progression-with-explicit-direct-witnesses
+  (let [other-basis {:tx-id 41
+                     :system-time "2026-08-25T00:59:59Z"}
+        requirement
+        (progression/requirement-from-bases
+         [observed-basis other-basis])
+        advances
+        [(progression/advance observed-basis authoritative-basis)
+         (progression/advance other-basis authoritative-basis)]
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations
+          {:request/claim
+           (base-operation
+            (fn [_]
+              (confirmed-result
+               {:commit/status :committed
+                :progression requirement
+                :progression-advances advances}))
+            {:settlement-contract
+             {:confirmed
+              {:outcomes #{:request/claimed}
+               :commit/status :committed
+               :progression :authoritative-basis}}})}})
+        prepared
+        (server/run-command prepared-server trusted-ctx (command-envelope))]
+    (is (= :confirmed (get-in prepared [:settlement :resolution])))
+    (is (= :request/claimed (get-in prepared [:settlement :outcome])))
+    (is (= authoritative-request
+           (get-in prepared [:settlement :authoritative])))
+    (is (not (contains? (:settlement prepared) :progression)))
+    (is (not (contains? (:settlement prepared) :progression-advances)))
+    (is (not (contains? (:settlement prepared) :commit/status)))))
+
+(deftest unconstrained-operation-remains-backward-compatible
+  (let [prepared-operation
+        (base-operation (fn [_] (confirmed-result)))
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations {:request/claim prepared-operation}})
+        prepared
+        (server/run-command prepared-server trusted-ctx (command-envelope))]
+    (is (nil? (server/operation-settlement-contract prepared-operation)))
+    (is (= :confirmed (get-in prepared [:settlement :resolution])))
+    (is (= :request/claimed (get-in prepared [:settlement :outcome])))
+    (is (= authoritative-request
+           (get-in prepared [:settlement :authoritative])))))
+
 (deftest operation-result-cannot-smuggle-protocol-correlation-identities
   (let [prepared-server
         (base-server (fn [_] (confirmed-result)))
