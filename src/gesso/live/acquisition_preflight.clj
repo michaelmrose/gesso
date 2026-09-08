@@ -37,10 +37,17 @@
    *given* those route declarations, and it keeps the trusted boundary identity
    explicit in the resulting realization.
 
-   This first acquisition relation is intentionally fragment-local. A later
-   whole-application assembly can derive which fragment acquisitions are
-   required by exposed operations, settlements, and invalidation topology rather
-   than asking applications to maintain a duplicate required-fragment registry."
+   The fragment-local relation is also lifted into an invalidation-acquisition
+   assembly. That assembly derives required fragment acquisitions from the
+   compiled Live graph itself:
+
+     change topic -> invalidated scope -> fragment projecting that scope
+
+   Applications therefore do not maintain a second required-fragment registry.
+   Realizations for fragments outside the current invalidation graph are allowed
+   as additional physical evidence but are reported as unrequired; the checker
+   does not pretend that merely declaring a fragment makes it managed or
+   invalidation-driven."
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
@@ -60,6 +67,15 @@
 
 (def acquisition-realization-type
   :gesso.live.acquisition-preflight/authoritative-acquisition-realization)
+
+(def acquisition-obligation-type
+  :gesso.live.acquisition-preflight/authoritative-acquisition-obligation)
+
+(def acquisition-assembly-report-type
+  :gesso.live.acquisition-preflight/acquisition-assembly-report)
+
+(def acquisition-assembly-type
+  :gesso.live.acquisition-preflight/authoritative-acquisition-assembly)
 
 (def fragment-route-kind
   :fragment)
@@ -153,6 +169,48 @@
     :fragment
     :fragment-route
     :stream-route})
+
+(def ^:private obligation-keys
+  #{:gesso.live.acquisition-preflight/type
+    :gesso.live.acquisition-preflight/version
+    :fragment
+    :scope
+    :scope-topic
+    :scope-id-key
+    :change-topics
+    :acquisition-profile})
+
+(def ^:private assembly-option-keys
+  #{:name
+    :live-app
+    :realizations})
+
+(def ^:private assembly-report-keys
+  #{:gesso.live.acquisition-preflight/type
+    :gesso.live.acquisition-preflight/version
+    :valid?
+    :errors
+    :warnings
+    :analysis})
+
+(def ^:private assembly-analysis-keys
+  #{:name
+    :live-app
+    :known-fragments
+    :obligations
+    :required-fragments
+    :supplied-fragments
+    :realizations})
+
+(def ^:private assembly-keys
+  #{:gesso.live.acquisition-preflight/type
+    :gesso.live.acquisition-preflight/version
+    :name
+    :live-app
+    :obligations
+    :required-fragments
+    :realizations
+    :acquisition-profile})
 
 ;; =============================================================================
 ;; Errors / primitive validation
@@ -767,10 +825,444 @@
            :preflight report})))
       realization)))
 
+(defn- invalidation-change-topics-by-scope
+  [live-app]
+  (reduce-kv
+   (fn [acc change-topic targets]
+     (reduce
+      (fn [acc' target]
+        (update acc' (:scope target) (fnil conj #{}) change-topic))
+      acc
+      targets))
+   {}
+   (:graph live-app)))
+
+(defn acquisition-obligations
+  "Derive invalidation-driven authoritative-acquisition obligations from a
+   compiled Live application.
+
+   No application-owned required-fragment registry is accepted. The obligation
+   set follows only relations already present in compiled Live metadata:
+
+     graph change topic -> invalidated scope
+     fragment            -> projected scope
+
+   A fragment whose scope is never targeted by the compiled invalidation graph
+   does not become a required managed acquisition merely because the fragment is
+   declared. Such a fragment may still have a valid realization supplied to an
+   assembly, but it is additional evidence rather than a graph-derived
+   obligation.
+
+   Each returned value is closed plain data and records the change topics that
+   can invalidate the fragment's scope."
+  [live-app]
+  (when-not (compiled-live-app? live-app)
+    (throw
+     (preflight-error
+      :invalid-live-app
+      "Acquisition obligation derivation requires a current compiled Gesso Live application."
+      {:live-app live-app})))
+  (let [change-topics-by-scope
+        (invalidation-change-topics-by-scope live-app)]
+    (into
+     (sorted-map)
+     (keep
+      (fn [[fragment-name fragment]]
+        (let [scope-name (:scope fragment)
+              change-topics (get change-topics-by-scope scope-name)]
+          (when (seq change-topics)
+            (let [scope-desc (model/scope-descriptor live-app scope-name)]
+              [fragment-name
+               {:gesso.live.acquisition-preflight/type acquisition-obligation-type
+                :gesso.live.acquisition-preflight/version preflight-version
+                :fragment fragment-name
+                :scope scope-name
+                :scope-topic (:topic scope-desc)
+                :scope-id-key (:id-key scope-desc)
+                :change-topics change-topics
+                :acquisition-profile managed-acquisition-profile}])))))
+     (:fragments live-app))))
+
+(defn acquisition-obligation?
+  "True for one closed current obligation derived from some compiled Live app.
+
+   This predicate validates the value's local shape. Exact correspondence to a
+   particular Live app is checked by acquisition assembly recognition."
+  [value]
+  (and
+   (closed-map? obligation-keys value)
+   (= acquisition-obligation-type
+      (:gesso.live.acquisition-preflight/type value))
+   (= preflight-version
+      (:gesso.live.acquisition-preflight/version value))
+   (keyword? (:fragment value))
+   (keyword? (:scope value))
+   (keyword? (:scope-topic value))
+   (keyword? (:scope-id-key value))
+   (set? (:change-topics value))
+   (seq (:change-topics value))
+   (every? keyword? (:change-topics value))
+   (= managed-acquisition-profile
+      (:acquisition-profile value))))
+
+(defn- validate-assembly-options!
+  [options]
+  (let [options' (require-map! "Authoritative acquisition assembly options" options)
+        keys' (set (keys options'))
+        unknown (set/difference keys' assembly-option-keys)]
+    (when (seq unknown)
+      (throw
+       (preflight-error
+        :unknown-assembly-option
+        "Authoritative acquisition assembly contains unknown options."
+        {:unknown-keys unknown
+         :allowed-keys assembly-option-keys})))
+    (when (and (contains? options' :name)
+               (some? (:name options'))
+               (not (keyword? (:name options'))))
+      (throw
+       (preflight-error
+        :invalid-name
+        "Authoritative acquisition assembly :name must be nil or a keyword."
+        {:name (:name options')})))
+    (when (and (contains? options' :realizations)
+               (some? (:realizations options'))
+               (not (map? (:realizations options'))))
+      (throw
+       (preflight-error
+        :invalid-acquisition-realizations
+        "Authoritative acquisition assembly :realizations must be a fragment-keyed map."
+        {:realizations (:realizations options')})))
+    options'))
+
+(defn- realization-entry-errors
+  [live-app known-fragments fragment realization]
+  (cond-> []
+    (not (keyword? fragment))
+    (conj
+     (issue
+      :invalid-acquisition-fragment-key
+      "Acquisition realization registry key must be a semantic fragment keyword."
+      {:fragment fragment}))
+
+    (and (keyword? fragment)
+         (not (contains? known-fragments fragment)))
+    (conj
+     (issue
+      :unknown-acquisition-fragment
+      "Acquisition realization is supplied for a fragment absent from the compiled Live application."
+      {:fragment fragment
+       :known-fragments known-fragments}))
+
+    (not (acquisition-realization? realization))
+    (conj
+     (issue
+      :invalid-acquisition-realization
+      "Acquisition assembly received an invalid or tampered fragment realization."
+      {:fragment fragment
+       :realization realization}))
+
+    (and (acquisition-realization? realization)
+         (not= fragment (:fragment realization)))
+    (conj
+     (issue
+      :acquisition-fragment-key-mismatch
+      "Acquisition realization registry key does not match the realization's semantic fragment."
+      {:fragment fragment
+       :expected fragment
+       :actual (:fragment realization)}))
+
+    (and (acquisition-realization? realization)
+         (not= live-app (:live-app realization)))
+    (conj
+     (issue
+      :acquisition-live-app-mismatch
+      "Acquisition realization belongs to a different compiled Live application."
+      {:fragment fragment
+       :expected-live-app live-app
+       :actual-live-app (:live-app realization)}))))
+
+(defn check-acquisition-assembly
+  "Check invalidation-driven acquisition closure for one compiled Live app.
+
+   Required acquisition fragments are derived from the compiled invalidation
+   graph; callers supply only fragment-keyed AuthoritativeAcquisitionRealization
+   values already established by require-acquisition-realization!.
+
+   A missing graph-derived realization is fatal. A valid same-application
+   realization for a fragment outside the current invalidation graph is retained
+   but reported as :unrequired-acquisition-realization. This keeps the checker
+   honest about what the graph actually requires while allowing other explicit
+   acquisition uses such as initial-only projections.
+
+   This relation does not yet connect a particular optimistic settlement to a
+   particular Live change topic. That later whole-application edge can consume
+   this closed Live acquisition assembly instead of reconstructing its topology."
+  [options]
+  (let [{:keys [name live-app realizations]}
+        (validate-assembly-options! options)
+
+        live-app-valid?
+        (compiled-live-app? live-app)
+
+        realizations'
+        (or realizations {})
+
+        known
+        (known-fragments live-app)
+
+        obligations
+        (if live-app-valid?
+          (acquisition-obligations live-app)
+          (sorted-map))
+
+        required-fragments
+        (set (keys obligations))
+
+        supplied-fragments
+        (if (map? realizations')
+          (set (keys realizations'))
+          #{})
+
+        missing-fragments
+        (set/difference required-fragments supplied-fragments)
+
+        base-errors
+        (cond-> []
+          (nil? live-app)
+          (conj
+           (issue
+            :missing-live-app
+            "Authoritative acquisition assembly requires a compiled Gesso Live application."
+            {:live-app live-app}))
+
+          (and (some? live-app)
+               (not live-app-valid?))
+          (conj
+           (issue
+            :invalid-live-app
+            "Authoritative acquisition assembly requires current normalized/validated compiled Live metadata."
+            {:live-app live-app})))
+
+        missing-errors
+        (mapv
+         (fn [fragment]
+           (issue
+            :missing-acquisition-realization
+            "Compiled Live invalidation topology requires an authoritative acquisition realization that was not supplied."
+            {:fragment fragment
+             :obligation (get obligations fragment)
+             :required-fragments required-fragments
+             :supplied-fragments supplied-fragments}))
+         (sort missing-fragments))
+
+        realization-errors
+        (if (and live-app-valid? (map? realizations'))
+          (vec
+           (mapcat
+            (fn [[fragment realization]]
+              (realization-entry-errors live-app known fragment realization))
+            realizations'))
+          [])
+
+        unrequired
+        (set/difference supplied-fragments required-fragments)
+
+        warnings
+        (if live-app-valid?
+          (mapv
+           (fn [fragment]
+             (issue
+              :unrequired-acquisition-realization
+              "A valid acquisition realization is supplied for a fragment not required by the current compiled invalidation graph."
+              {:fragment fragment
+               :required-fragments required-fragments}))
+           (sort
+            (filter
+             (fn [fragment]
+               (let [realization (get realizations' fragment)]
+                 (and
+                  (keyword? fragment)
+                  (contains? known fragment)
+                  (acquisition-realization? realization)
+                  (= fragment (:fragment realization))
+                  (= live-app (:live-app realization)))))
+             unrequired)))
+          [])
+
+        errors
+        (vec (concat base-errors missing-errors realization-errors))]
+    {:gesso.live.acquisition-preflight/type acquisition-assembly-report-type
+     :gesso.live.acquisition-preflight/version preflight-version
+     :valid? (empty? errors)
+     :errors errors
+     :warnings warnings
+     :analysis
+     {:name name
+      :live-app live-app
+      :known-fragments known
+      :obligations obligations
+      :required-fragments required-fragments
+      :supplied-fragments supplied-fragments
+      :realizations realizations'}}))
+
+(defn acquisition-assembly-report?
+  "True only when value is exactly the current acquisition-assembly report
+   derivable from its embedded inputs."
+  [value]
+  (and
+   (closed-map? assembly-report-keys value)
+   (= acquisition-assembly-report-type
+      (:gesso.live.acquisition-preflight/type value))
+   (= preflight-version
+      (:gesso.live.acquisition-preflight/version value))
+   (boolean? (:valid? value))
+   (vector? (:errors value))
+   (vector? (:warnings value))
+   (closed-map? assembly-analysis-keys (:analysis value))
+   (set? (get-in value [:analysis :known-fragments]))
+   (map? (get-in value [:analysis :obligations]))
+   (every? acquisition-obligation?
+           (vals (get-in value [:analysis :obligations])))
+   (set? (get-in value [:analysis :required-fragments]))
+   (set? (get-in value [:analysis :supplied-fragments]))
+   (map? (get-in value [:analysis :realizations]))
+   (= (:valid? value)
+      (empty? (:errors value)))
+   (try
+     (let [{:keys [name live-app realizations]}
+           (:analysis value)]
+       (= value
+          (check-acquisition-assembly
+           {:name name
+            :live-app live-app
+            :realizations realizations})))
+     (catch Exception _
+       false))))
+
+(defn acquisition-assembly-valid?
+  "True only for a recognized successful acquisition-assembly report."
+  [report]
+  (and
+   (acquisition-assembly-report? report)
+   (true? (:valid? report))))
+
+(defn- assembly-recheck
+  [value]
+  (check-acquisition-assembly
+   {:name (:name value)
+    :live-app (:live-app value)
+    :realizations (:realizations value)}))
+
+(defn acquisition-assembly?
+  "True for one closed invalidation-driven authoritative-acquisition assembly.
+
+   Recognition re-derives obligations from the embedded compiled Live graph and
+   revalidates every supplied fragment realization. The obligation set therefore
+   cannot be independently edited, relabeled, or copied from a different Live
+   application."
+  [value]
+  (and
+   (closed-map? assembly-keys value)
+   (= acquisition-assembly-type
+      (:gesso.live.acquisition-preflight/type value))
+   (= preflight-version
+      (:gesso.live.acquisition-preflight/version value))
+   (or (nil? (:name value))
+       (keyword? (:name value)))
+   (compiled-live-app? (:live-app value))
+   (map? (:obligations value))
+   (every? acquisition-obligation? (vals (:obligations value)))
+   (set? (:required-fragments value))
+   (map? (:realizations value))
+   (= managed-acquisition-profile (:acquisition-profile value))
+   (try
+     (let [report (assembly-recheck value)]
+       (and
+        (acquisition-assembly-valid? report)
+        (= (:obligations value)
+           (get-in report [:analysis :obligations]))
+        (= (:required-fragments value)
+           (get-in report [:analysis :required-fragments]))))
+     (catch Exception _
+       false))))
+
+(defn require-acquisition-assembly!
+  "Require all acquisition realizations implied by the compiled Live
+   invalidation graph and return one closed assembly.
+
+   The caller does not enumerate required fragments. It supplies whatever
+   fragment realizations physically exist; Gesso derives the required subset and
+   rejects omissions before browser interaction."
+  [options]
+  (let [{:keys [name live-app realizations]
+         :as options'}
+        (validate-assembly-options! options)
+
+        report
+        (check-acquisition-assembly options')]
+    (when-not (acquisition-assembly-valid? report)
+      (throw
+       (preflight-error
+        :authoritative-acquisition-assembly-failed
+        "Gesso Live authoritative-acquisition assembly failed."
+        {:preflight report})))
+    (let [assembly
+          {:gesso.live.acquisition-preflight/type acquisition-assembly-type
+           :gesso.live.acquisition-preflight/version preflight-version
+           :name name
+           :live-app live-app
+           :obligations (get-in report [:analysis :obligations])
+           :required-fragments (get-in report [:analysis :required-fragments])
+           :realizations (or realizations {})
+           :acquisition-profile managed-acquisition-profile}]
+      (when-not (acquisition-assembly? assembly)
+        (throw
+         (preflight-error
+          :invalid-emitted-acquisition-assembly
+          "Authoritative acquisition preflight produced an internally inconsistent assembly."
+          {:assembly assembly
+           :preflight report})))
+      assembly)))
+
 (defn explain
-  "Return a compact stable summary of an acquisition report or realization."
+  "Return a compact stable summary of an acquisition report, realization,
+   assembly report, or closed acquisition assembly."
   [value]
   (cond
+    (acquisition-assembly? value)
+    {:type acquisition-assembly-type
+     :version preflight-version
+     :name (:name value)
+     :required-fragments (:required-fragments value)
+     :obligations (:obligations value)
+     :realizations
+     (into
+      (sorted-map)
+      (map
+       (fn [[fragment realization]]
+         [fragment
+          (select-keys realization
+                       [:fragment :scope :fragment-route :stream-route])]))
+      (:realizations value))
+     :acquisition-profile (:acquisition-profile value)
+     :guarantee :invalidation-acquisition-preflight-closed-relative-to-trusted-routes}
+
+    (acquisition-assembly-report? value)
+    {:type acquisition-assembly-report-type
+     :version preflight-version
+     :valid? (:valid? value)
+     :errors (:errors value)
+     :warnings (:warnings value)
+     :analysis
+     (select-keys
+      (:analysis value)
+      [:name
+       :known-fragments
+       :obligations
+       :required-fragments
+       :supplied-fragments])}
+
     (acquisition-realization? value)
     {:type acquisition-realization-type
      :version preflight-version
@@ -798,5 +1290,5 @@
     (throw
      (preflight-error
       :unrecognized-value
-      "Expected an authoritative-acquisition preflight report or realization."
+      "Expected an authoritative-acquisition report, realization, assembly report, or acquisition assembly."
       {:value value}))))
