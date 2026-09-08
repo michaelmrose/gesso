@@ -1,5 +1,6 @@
 (ns gesso.live.optimistic.server-test
   (:require
+   [clojure.set :as set]
    [clojure.test :refer [deftest is testing]]
    [gesso.choreo.identity :as identity]
    [gesso.choreo.machine :as machine]
@@ -184,6 +185,223 @@
              :operations
              {:request/unclaim
               (base-operation (fn [_] (confirmed-result)))}})))))
+
+;; =============================================================================
+;; Execution capability closure
+;; =============================================================================
+
+(deftest operation-requires-authenticated-principal-intrinsically-test
+  (let [prepared-operation
+        (base-operation (fn [_] (confirmed-result)))]
+    (is (= #{server/authenticated-principal-capability}
+           server/default-operation-required-capabilities))
+    (is (= server/default-operation-required-capabilities
+           (:required-capabilities prepared-operation)))
+    (is (= server/default-operation-required-capabilities
+           (server/operation-required-capabilities prepared-operation)))
+    (is (server/execution-capabilities?
+         (:required-capabilities prepared-operation)))
+    (is (server/operation? prepared-operation))))
+
+(deftest application-operation-requirements-are-additive-not-replacement-test
+  (let [empty-declaration
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:required-capabilities #{}})
+        prepared-operation
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:required-capabilities #{:transaction
+                                   :clock
+                                   :random-seed}})]
+    (is (= #{server/authenticated-principal-capability}
+           (:required-capabilities empty-declaration))
+        "An application cannot erase the intrinsic principal prerequisite with an empty declaration.")
+    (is (= #{server/authenticated-principal-capability
+             :transaction
+             :clock
+             :random-seed}
+           (:required-capabilities prepared-operation)))
+    (is (= :invalid-execution-capabilities
+           (error-kind
+            #(base-operation
+              (fn [_] (confirmed-result))
+              {:required-capabilities [:transaction]}))))
+    (is (= :invalid-execution-capabilities
+           (error-kind
+            #(base-operation
+              (fn [_] (confirmed-result))
+              {:required-capabilities #{"transaction"}}))))))
+
+(deftest server-supplied-capabilities-include-intrinsic-principal-test
+  (let [prepared-server
+        (base-server
+         (fn [_] (confirmed-result))
+         {:supplied-capabilities #{:transaction :clock}})]
+    (is (= #{server/authenticated-principal-capability}
+           server/intrinsic-server-capabilities))
+    (is (= #{server/authenticated-principal-capability
+             :transaction
+             :clock}
+           (:supplied-capabilities prepared-server)))
+    (is (= (:supplied-capabilities prepared-server)
+           (server/server-supplied-capabilities prepared-server)))
+    (is (server/server? prepared-server))))
+
+(deftest server-rejects-each-operation-with-missing-execution-capabilities-test
+  (let [claim-operation
+        (server/operation
+         {:name :request/claim-optimistic
+          :operation :request/claim
+          :required-capabilities #{:transaction :clock}
+          :execute! (fn [_] (confirmed-result))})
+        cancel-operation
+        (server/operation
+         {:name :request/cancel-optimistic
+          :operation :request/cancel
+          :required-capabilities #{:transaction :random-seed}
+          :execute! (fn [_] (rejected-result))})
+        data
+        (error-data
+         #(server/server
+           {:principal-fn (fn [_] trusted-principal)
+            :operations {:request/claim claim-operation
+                         :request/cancel cancel-operation}
+            :supplied-capabilities #{:transaction}}))]
+    (is (= :gesso.live.optimistic.server/error
+           (:error/type data)))
+    (is (= :missing-execution-capabilities
+           (:error/kind data)))
+    (is (= #{server/authenticated-principal-capability
+             :transaction}
+           (:supplied-capabilities data)))
+    (is (= #{:request/claim :request/cancel}
+           (set (keys (:missing-by-operation data)))))
+    (is (= #{server/authenticated-principal-capability
+             :transaction
+             :clock}
+           (get-in data [:missing-by-operation
+                         :request/claim
+                         :required-capabilities])))
+    (is (= #{:clock}
+           (get-in data [:missing-by-operation
+                         :request/claim
+                         :missing-capabilities])))
+    (is (= #{server/authenticated-principal-capability
+             :transaction
+             :random-seed}
+           (get-in data [:missing-by-operation
+                         :request/cancel
+                         :required-capabilities])))
+    (is (= #{:random-seed}
+           (get-in data [:missing-by-operation
+                         :request/cancel
+                         :missing-capabilities])))))
+
+(deftest server-accepts-closed-capability-superset-test
+  (let [prepared-operation
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:required-capabilities #{:transaction :clock}})
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations {:request/claim prepared-operation}
+          :supplied-capabilities #{:transaction
+                                   :clock
+                                   :random-seed
+                                   :authoritative-basis}})]
+    (is (server/server? prepared-server))
+    (is (= #{server/authenticated-principal-capability
+             :transaction
+             :clock}
+           (server/operation-required-capabilities prepared-operation)))
+    (is (= #{server/authenticated-principal-capability
+             :transaction
+             :clock
+             :random-seed
+             :authoritative-basis}
+           (server/server-supplied-capabilities prepared-server)))
+    (is (set/subset?
+         (server/operation-required-capabilities prepared-operation)
+         (server/server-supplied-capabilities prepared-server)))))
+
+(deftest forged-operation-cannot-remove-intrinsic-principal-requirement-test
+  (let [prepared-operation
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:required-capabilities #{:transaction}})
+        forged
+        (assoc prepared-operation
+               :required-capabilities #{:transaction})]
+    (is (server/operation? prepared-operation))
+    (is (false? (server/operation? forged)))
+    (is (= :invalid-operation
+           (error-kind
+            #(server/operation-required-capabilities forged))))))
+
+(deftest supplied-capability-tampering-invalidates-prepared-server-test
+  (let [prepared-operation
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:required-capabilities #{:transaction}})
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations {:request/claim prepared-operation}
+          :supplied-capabilities #{:transaction}})
+        without-principal
+        (assoc prepared-server
+               :supplied-capabilities #{:transaction})
+        without-transaction
+        (assoc prepared-server
+               :supplied-capabilities
+               #{server/authenticated-principal-capability})]
+    (is (server/server? prepared-server))
+    (is (false? (server/server? without-principal))
+        "A prepared server cannot erase the capability supplied intrinsically by principal binding.")
+    (is (false? (server/server? without-transaction))
+        "A prepared server cannot stop supplying a capability required by one of its installed operations.")
+    (is (= :invalid-server
+           (error-kind
+            #(server/server-supplied-capabilities without-transaction))))))
+
+(deftest execution-capability-availability-does-not-confer-authorization-test
+  (let [seen (atom nil)
+        prepared-operation
+        (base-operation
+         (fn [operation-ctx]
+           (reset! seen operation-ctx)
+           (rejected-result {:reason :not-authorized}))
+         {:required-capabilities #{:transaction}})
+        prepared-server
+        (server/server
+         {:principal-fn (fn [ctx]
+                          (:authenticated-principal ctx))
+          :operations {:request/claim prepared-operation}
+          :supplied-capabilities #{:transaction}})
+        prepared-send
+        (server/run-command prepared-server trusted-ctx (command-envelope))]
+    (is (server/server? prepared-server))
+    (is (= #{server/authenticated-principal-capability :transaction}
+           (server/server-supplied-capabilities prepared-server)))
+    (is (= trusted-principal (:principal @seen))
+        "The capability records that a trusted principal is available to execution; it does not decide authorization.")
+    (is (= :rejected
+           (get-in prepared-send [:settlement :resolution])))
+    (is (= "not-authorized"
+           (get-in prepared-send [:settlement :reason])))
+    (is (not (contains? (:settlement prepared-send) :authoritative)))))
+
+(deftest capability-accessors-reject-unprepared-values-test
+  (is (= :invalid-operation
+         (error-kind
+          #(server/operation-required-capabilities
+            {:operation :request/claim}))))
+  (is (= :invalid-server
+         (error-kind
+          #(server/server-supplied-capabilities
+            {:operations {}})))))
 
 ;; =============================================================================
 ;; Trusted principal / operation boundary
