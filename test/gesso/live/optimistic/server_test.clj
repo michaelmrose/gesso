@@ -404,6 +404,207 @@
             {:operations {}})))))
 
 ;; =============================================================================
+;; Semantic Live publication declarations
+;; =============================================================================
+
+(deftest published-change-topic-declaration-distinguishes-omitted-empty-and-nonempty-test
+  (let [undeclared
+        (base-operation (fn [_] (confirmed-result)))
+        explicit-empty
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:published-change-topics #{}})
+        declared
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:published-change-topics #{:request :request-assignment}})]
+    (is (server/operation? undeclared))
+    (is (server/operation? explicit-empty))
+    (is (server/operation? declared))
+    (is (contains? undeclared :published-change-topics)
+        "Prepared operations canonicalize omission to an inspectable nil declaration.")
+    (is (nil? (:published-change-topics undeclared)))
+    (is (nil? (server/operation-published-change-topics undeclared)))
+    (is (= #{} (:published-change-topics explicit-empty)))
+    (is (= #{} (server/operation-published-change-topics explicit-empty)))
+    (is (= #{:request :request-assignment}
+           (:published-change-topics declared)))
+    (is (= #{:request :request-assignment}
+           (server/operation-published-change-topics declared)))
+    (is (server/published-change-topics? #{}))
+    (is (server/published-change-topics? #{:request}))
+    (is (false? (server/published-change-topics? nil)))
+    (is (false? (server/published-change-topics? [:request])))
+    (is (false? (server/published-change-topics? #{"request"})))))
+
+(deftest published-change-topic-declaration-fails-closed-at-construction-test
+  (doseq [bad-value [nil
+                     [:request]
+                     #{"request"}
+                     #{:request "assignment"}
+                     {:request true}]]
+    (let [data
+          (error-data
+           #(base-operation
+             (fn [_] (confirmed-result))
+             {:published-change-topics bad-value}))]
+      (is (= :gesso.live.optimistic.server/error (:error/type data)))
+      (is (= :invalid-published-change-topics (:error/kind data)))
+      (is (= bad-value (:published-change-topics data)))))
+  (is (= :unknown-key
+         (error-kind
+          #(server/operation
+            {:name :request/claim-optimistic
+             :operation :request/claim
+             :execute! (fn [_] (confirmed-result))
+             :published-change-topic :request})))))
+
+(deftest prepared-server-preserves-each-operation-publication-declaration-test
+  (let [claim-operation
+        (server/operation
+         {:name :request/claim-optimistic
+          :operation :request/claim
+          :published-change-topics #{:request :request-assignment}
+          :execute! (fn [_] (confirmed-result))})
+        cancel-operation
+        (server/operation
+         {:name :request/cancel-optimistic
+          :operation :request/cancel
+          :published-change-topics #{}
+          :execute! (fn [_] (rejected-result))})
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations {:request/claim claim-operation
+                       :request/cancel cancel-operation}})]
+    (is (server/server? prepared-server))
+    (is (= #{:request :request-assignment}
+           (get-in prepared-server
+                   [:operations :request/claim :published-change-topics])))
+    (is (= #{}
+           (get-in prepared-server
+                   [:operations :request/cancel :published-change-topics])))
+    (is (= #{:request :request-assignment}
+           (server/operation-published-change-topics
+            (get-in prepared-server [:operations :request/claim]))))
+    (is (= #{}
+           (server/operation-published-change-topics
+            (get-in prepared-server [:operations :request/cancel]))))))
+
+(deftest publication-metadata-does-not-change-command-or-settlement-semantics-test
+  (let [runs (atom [])
+        run
+        (fn [operation-options]
+          (let [prepared-server
+                (server/server
+                 {:principal-fn (fn [_] trusted-principal)
+                  :operations
+                  {:request/claim
+                   (base-operation
+                    (fn [operation-ctx]
+                      (swap! runs conj
+                             (select-keys operation-ctx
+                                          [:principal
+                                           :operation
+                                           :arguments
+                                           :observed-basis
+                                           :scope
+                                           :fact-versions]))
+                      (confirmed-result))
+                    operation-options)}})]
+            (server/run-command
+             prepared-server
+             trusted-ctx
+             (command-envelope))))
+        undeclared (run {})
+        explicit-empty (run {:published-change-topics #{}})
+        declared (run {:published-change-topics #{:request}})]
+    (is (= 3 (count @runs)))
+    (is (apply = @runs)
+        "Publication metadata is assembly information and is not injected into execute! context.")
+    (is (= (:settlement undeclared)
+           (:settlement explicit-empty)
+           (:settlement declared)))
+    (is (= (:settlement-wire undeclared)
+           (:settlement-wire explicit-empty)
+           (:settlement-wire declared)))
+    (is (= :confirmed (get-in declared [:settlement :resolution])))
+    (is (= :request/claimed (get-in declared [:settlement :outcome])))))
+
+(deftest publication-declaration-does-not-confer-authorization-test
+  (let [seen (atom nil)
+        prepared-server
+        (server/server
+         {:principal-fn (fn [ctx]
+                          (:authenticated-principal ctx))
+          :operations
+          {:request/claim
+           (base-operation
+            (fn [operation-ctx]
+              (reset! seen operation-ctx)
+              (rejected-result {:reason :not-authorized}))
+            {:published-change-topics #{:request}})}})
+        prepared-send
+        (server/run-command
+         prepared-server
+         trusted-ctx
+         (command-envelope))]
+    (is (= trusted-principal (:principal @seen)))
+    (is (= :request/claim (:operation @seen)))
+    (is (= :rejected (get-in prepared-send [:settlement :resolution])))
+    (is (= "not-authorized" (get-in prepared-send [:settlement :reason])))
+    (is (not (contains? (:settlement prepared-send) :authoritative)))
+    (is (= #{:request}
+           (server/operation-published-change-topics
+            (get-in prepared-server [:operations :request/claim]))))))
+
+(deftest malformed-publication-metadata-tampering-invalidates-prepared-values-test
+  (let [prepared-operation
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:published-change-topics #{:request}})
+        prepared-server
+        (server/server
+         {:principal-fn (fn [_] trusted-principal)
+          :operations {:request/claim prepared-operation}})
+        malformed-operation
+        (assoc prepared-operation
+               :published-change-topics [:request])
+        malformed-server
+        (assoc-in prepared-server
+                  [:operations :request/claim :published-change-topics]
+                  #{"request"})]
+    (is (server/operation? prepared-operation))
+    (is (server/server? prepared-server))
+    (is (false? (server/operation? malformed-operation)))
+    (is (false? (server/server? malformed-server)))
+    (is (= :invalid-operation
+           (error-kind
+            #(server/operation-published-change-topics malformed-operation))))
+    (is (= :invalid-server
+           (error-kind
+            #(server/run-command
+              malformed-server
+              trusted-ctx
+              (command-envelope)))))))
+
+(deftest publication-declaration-is-trusted-metadata-not-an-authorization-or-proof-token-test
+  (let [prepared-operation
+        (base-operation
+         (fn [_] (confirmed-result))
+         {:published-change-topics #{:request}})
+        redeclared
+        (assoc prepared-operation
+               :published-change-topics #{:some-other-semantic-topic})]
+    (is (server/operation? redeclared)
+        "A different well-formed trusted declaration cannot be disproved from the prepared operation alone; later application closure relates it to independently assembled Live facts.")
+    (is (= #{:some-other-semantic-topic}
+           (server/operation-published-change-topics redeclared)))
+    (is (= (:authority-plan prepared-operation)
+           (:authority-plan redeclared))
+        "Publication intent is not smuggled into the Choreo authority projection.")))
+
+;; =============================================================================
 ;; Trusted principal / operation boundary
 ;; =============================================================================
 
