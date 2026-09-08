@@ -27,16 +27,22 @@
    - the prepared server itself remains execution-capability closed.
 
    Successful preflight emits one OptimisticExecutionAssembly containing the
-   actual prepared server boundary plus a derived, inspectable capability
-   summary.  Keeping the prepared server in the JVM-side product lets
-   recognition recheck the exact trusted operation entries rather than trusting
-   a copied summary.
+   actual prepared server boundary plus derived, inspectable execution
+   capabilities and settlement contracts.  Keeping the prepared server in the
+   JVM-side product lets recognition recheck the exact trusted operation entries
+   rather than trusting copied summaries.
+
+   Settlement contracts are carried outward by derivation, not restatement.  If
+   a prepared operation constrains :confirmed to a specific domain outcome,
+   committed provenance, and authoritative progression, the execution assembly
+   exposes exactly that canonical contract for later whole-application closure.
+   An operation with no contract remains explicitly unconstrained here.
 
    This layer does NOT prove that an application-declared capability provider is
-   correct, that the current principal is authorized by domain policy, that an
-   arbitrary Ring/Biff handler body invokes this server, or that settlement,
-   progression, and Live acquisition are closed.  Those remain trusted/runtime
-   facts or later application-assembly edges."
+   correct, that trusted commit/progression evidence is truthful, that the
+   current principal is authorized by domain policy, that an arbitrary Ring/Biff
+   handler body invokes this server, or that Live acquisition is closed.  Those
+   remain trusted/runtime facts or later application-assembly edges."
   (:require
    [clojure.set :as set]
    [gesso.choreo.artifact :as choreo-artifact]
@@ -48,7 +54,7 @@
 ;; Identity
 ;; =============================================================================
 
-(def preflight-version 1)
+(def preflight-version 2)
 
 (def report-type
   :gesso.live.optimistic.execution-preflight/report)
@@ -70,7 +76,8 @@
     :name
     :route-assembly
     :server
-    :execution-capabilities})
+    :execution-capabilities
+    :settlement-contracts})
 
 (def ^:private capability-summary-keys
   #{:supplied
@@ -206,6 +213,23 @@
    (= value
       (execution-capability-summary route-assembly prepared-server))))
 
+(defn- settlement-contract-summary
+  [route-assembly prepared-server]
+  (into {}
+        (map
+         (fn [operation]
+           [operation
+            (optimistic-server/operation-settlement-contract
+             (server-operation prepared-server operation))]))
+        (sort-by pr-str (required-operations route-assembly))))
+
+(defn- settlement-contract-summary?
+  [route-assembly prepared-server value]
+  (and
+   (map? value)
+   (= value
+      (settlement-contract-summary route-assembly prepared-server))))
+
 ;; =============================================================================
 ;; Per-operation correspondence
 ;; =============================================================================
@@ -337,6 +361,18 @@
                     (optimistic-server/operation-required-capabilities
                      prepared-operation)])))
               (sort-by pr-str (required-operations route-assembly)))
+        {})
+      :settlement-contracts-by-operation
+      (if (and route-assembly-valid? server-valid?)
+        (into {}
+              (keep
+               (fn [operation]
+                 (when-let [prepared-operation
+                            (server-operation server operation)]
+                   [operation
+                    (optimistic-server/operation-settlement-contract
+                     prepared-operation)])))
+              (sort-by pr-str (required-operations route-assembly)))
         {})}}))
 
 (defn report?
@@ -372,8 +408,9 @@
 
    Recognition rechecks the embedded route assembly and the actual prepared
    server boundary, then re-runs exact route-exposed operation correspondence.
-   The capability summary is derived from that embedded server and must match it
-   exactly; it is not an independently authorable second registry."
+   The capability and settlement-contract summaries are derived from that
+   embedded server and must match it exactly; neither is an independently
+   authorable second registry."
   [value]
   (and
    (map? value)
@@ -398,7 +435,11 @@
    (capability-summary?
     (:route-assembly value)
     (:server value)
-    (:execution-capabilities value))))
+    (:execution-capabilities value))
+   (settlement-contract-summary?
+    (:route-assembly value)
+    (:server value)
+    (:settlement-contracts value))))
 
 (defn require-execution-assembly!
   "Run execution-boundary preflight and return one closed
@@ -427,7 +468,9 @@
            :route-assembly route-assembly
            :server server
            :execution-capabilities
-           (execution-capability-summary route-assembly server)}]
+           (execution-capability-summary route-assembly server)
+           :settlement-contracts
+           (settlement-contract-summary route-assembly server)}]
       (when-not (execution-assembly? assembly)
         (throw
          (preflight-error
@@ -448,6 +491,19 @@
       {:execution-assembly execution-assembly})))
   (:execution-capabilities execution-assembly))
 
+(defn settlement-contracts
+  "Return the exact operation-keyed settlement-contract summary for a current
+   execution assembly.  Every route-exposed operation is present; nil means the
+   trusted operation intentionally declares no settlement constraint yet."
+  [execution-assembly]
+  (when-not (execution-assembly? execution-assembly)
+    (throw
+     (preflight-error
+      :invalid-execution-assembly
+      "Expected a current OptimisticExecutionAssembly."
+      {:execution-assembly execution-assembly})))
+  (:settlement-contracts execution-assembly))
+
 (defn explain
   "Return a compact stable summary of an execution-preflight report or assembly."
   [value]
@@ -458,7 +514,8 @@
      :name (:name value)
      :route-assembly-name (get-in value [:route-assembly :name])
      :operations (required-operations (:route-assembly value))
-     :execution-capabilities (:execution-capabilities value)}
+     :execution-capabilities (:execution-capabilities value)
+     :settlement-contracts (:settlement-contracts value)}
 
     (report? value)
     {:type report-type
