@@ -38,6 +38,12 @@
    exposes exactly that canonical contract for later whole-application closure.
    An operation with no contract remains explicitly unconstrained here.
 
+   Trusted semantic Live publication declarations are also carried outward by
+   derivation from the embedded prepared server.  They are deliberately NOT
+   copied into another stored assembly registry: callers obtain the exact
+   operation-keyed summary through published-change-topics, and explain derives
+   the same view.  nil remains distinct from an explicitly empty set.
+
    This layer does NOT prove that an application-declared capability provider is
    correct, that trusted commit/progression evidence is truthful, that the
    current principal is authorized by domain policy, that an arbitrary Ring/Biff
@@ -230,6 +236,16 @@
    (= value
       (settlement-contract-summary route-assembly prepared-server))))
 
+(defn- published-change-topic-summary
+  [route-assembly prepared-server]
+  (into {}
+        (map
+         (fn [operation]
+           [operation
+            (optimistic-server/operation-published-change-topics
+             (server-operation prepared-server operation))]))
+        (sort-by pr-str (required-operations route-assembly))))
+
 ;; =============================================================================
 ;; Per-operation correspondence
 ;; =============================================================================
@@ -373,6 +389,18 @@
                     (optimistic-server/operation-settlement-contract
                      prepared-operation)])))
               (sort-by pr-str (required-operations route-assembly)))
+        {})
+      :published-change-topics-by-operation
+      (if (and route-assembly-valid? server-valid?)
+        (into {}
+              (keep
+               (fn [operation]
+                 (when-let [prepared-operation
+                            (server-operation server operation)]
+                   [operation
+                    (optimistic-server/operation-published-change-topics
+                     prepared-operation)])))
+              (sort-by pr-str (required-operations route-assembly)))
         {})}}))
 
 (defn report?
@@ -504,6 +532,26 @@
       {:execution-assembly execution-assembly})))
   (:settlement-contracts execution-assembly))
 
+(defn published-change-topics
+  "Return the exact operation-keyed semantic Live publication declarations for
+   a current execution assembly.
+
+   The summary is derived from the assembly's embedded prepared server rather
+   than stored as a second registry. Every route-exposed operation is present.
+   nil means publication intent is not declared yet; #{} explicitly declares no
+   semantic Live publication; a non-empty keyword set names the declared topics.
+   Server-only operations are outside this route-exposed application slice."
+  [execution-assembly]
+  (when-not (execution-assembly? execution-assembly)
+    (throw
+     (preflight-error
+      :invalid-execution-assembly
+      "Expected a current OptimisticExecutionAssembly."
+      {:execution-assembly execution-assembly})))
+  (published-change-topic-summary
+   (:route-assembly execution-assembly)
+   (:server execution-assembly)))
+
 (defn explain
   "Return a compact stable summary of an execution-preflight report or assembly."
   [value]
@@ -515,7 +563,11 @@
      :route-assembly-name (get-in value [:route-assembly :name])
      :operations (required-operations (:route-assembly value))
      :execution-capabilities (:execution-capabilities value)
-     :settlement-contracts (:settlement-contracts value)}
+     :settlement-contracts (:settlement-contracts value)
+     :published-change-topics
+     (published-change-topic-summary
+      (:route-assembly value)
+      (:server value))}
 
     (report? value)
     {:type report-type
