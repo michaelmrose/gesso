@@ -11,6 +11,8 @@
      capabilities, with construction-time required-subset-supplied closure;
    - declaring optional per-resolution settlement contracts and checking trusted
      commit/progression evidence before settlement construction;
+   - declaring optional operation-owned semantic Live publication topics for
+     later whole-application preflight;
    - resolving a browser-proposed semantic operation through a trusted registry;
    - starting/resuming the trusted authority projection for that operation;
    - invoking the registered public model-operation adapter;
@@ -26,7 +28,7 @@
      must re-establish those rules from trusted context and current authority);
    - XTDB transaction construction or commit guards, or proof that an
      application-supplied commit/progression witness is truthful;
-   - Live invalidation/publication;
+   - executing or inspecting Live invalidation/publication;
    - HTTP response rendering;
    - conversion of arbitrary exceptions into :failed settlements.
 
@@ -91,6 +93,16 @@
 
 (defn execution-capabilities?
   "True for a closed set of execution-capability keyword identities."
+  [value]
+  (and (set? value)
+       (every? keyword? value)))
+
+(defn published-change-topics?
+  "True for one closed semantic Live publication-topic set.
+
+   The empty set is meaningful: it explicitly declares that the trusted
+   operation publishes no semantic Live changes. nil is reserved for an
+   operation that has not yet declared this application-assembly fact."
   [value]
   (and (set? value)
        (every? keyword? value)))
@@ -335,6 +347,7 @@
     :authority-role
     :required-capabilities
     :settlement-contract
+    :published-change-topics
     :execute!})
 
 (defn- operation-choreo-options
@@ -388,6 +401,15 @@
    commit/progression expectations inspectable without putting that evidence on
    the browser wire.
 
+   :published-change-topics is an optional closed set of semantic Gesso Live
+   primary-change topics that this trusted operation declares it may publish
+   after authoritative execution. This is application-owned semantic metadata
+   for later whole-application closure; this namespace does not inspect execute!,
+   model transaction plans, or arbitrary Live publication to infer or prove the
+   declaration. The empty set explicitly means no semantic Live publication;
+   omission remains nil so later preflight can distinguish undeclared metadata
+   from an intentional empty declaration.
+
    :required-capabilities is an optional closed set of application-specific
    execution prerequisites needed by execute!.
    #{:authenticated-principal} is always added because typed principal binding
@@ -432,7 +454,17 @@
 
         settlement-contract'
         (when (some? declared-settlement-contract)
-          (settlement-contract declared-settlement-contract))]
+          (settlement-contract declared-settlement-contract))
+
+        published-change-topics
+        (when (contains? options' :published-change-topics)
+          (let [topics (:published-change-topics options')]
+            (when-not (published-change-topics? topics)
+              (server-error
+               :invalid-published-change-topics
+               "Optimistic operation :published-change-topics must be a set of semantic Live topic keywords."
+               {:published-change-topics topics}))
+            topics))]
     (when (= browser-role authority-role)
       (server-error
        :same-role
@@ -447,6 +479,7 @@
            :authority-role (require-keyword! "Optimistic operation :authority-role" authority-role)
            :required-capabilities required-capabilities
            :settlement-contract settlement-contract'
+           :published-change-topics published-change-topics
            :execute! (require-callable! "Optimistic operation :execute!" execute!)}]
       ;; Verification/projection is registry-construction work, not request work.
       ;; Every request for this operation executes the same canonical authority
@@ -475,6 +508,9 @@
        (contains? value :settlement-contract)
        (or (nil? (:settlement-contract value))
            (settlement-contract? (:settlement-contract value)))
+       (contains? value :published-change-topics)
+       (or (nil? (:published-change-topics value))
+           (published-change-topics? (:published-change-topics value)))
        (fn? (:execute! value))
        (machine/executable-plan?
         (:authority-plan value))))
@@ -623,6 +659,21 @@
      "Expected a prepared optimistic server operation entry."
      {:operation prepared-operation}))
   (:settlement-contract prepared-operation))
+
+(defn operation-published-change-topics
+  "Return the optional semantic Live publication-topic declaration for one
+   prepared trusted operation entry.
+
+   nil means this application-assembly fact is not declared yet. An empty set
+   is an explicit declaration that the operation publishes no semantic Live
+   primary changes."
+  [prepared-operation]
+  (when-not (operation? prepared-operation)
+    (server-error
+     :invalid-operation
+     "Expected a prepared optimistic server operation entry."
+     {:operation prepared-operation}))
+  (:published-change-topics prepared-operation))
 
 (defn server-supplied-capabilities
   "Return the effective execution-capability set supplied by a prepared trusted
