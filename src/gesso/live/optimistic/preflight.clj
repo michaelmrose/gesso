@@ -35,6 +35,7 @@
    Those remain later application-assembly edges."
   (:require
    [clojure.set :as set]
+   [gesso.choreo.artifact :as choreo-artifact]
    [gesso.live.browser.preflight :as browser-preflight]
    [gesso.live.optimistic.capability :as capability]
    [gesso.live.optimistic.choreo :as optimistic-choreo]
@@ -44,7 +45,7 @@
 ;; Identity
 ;; =============================================================================
 
-(def preflight-version 1)
+(def preflight-version 2)
 
 (def report-type
   :gesso.live.optimistic.preflight/report)
@@ -78,6 +79,7 @@
     :browser-role
     :authority-role
     :browser-plan-digest
+    :authority-plan-digest
     :command-transport})
 
 (def ^:private route-requirement-keys
@@ -211,6 +213,26 @@
   (get-in browser-assembly
           [:plan-registry :digests plan-key]))
 
+(defn- realization-projected-plans
+  [operation realization]
+  (try
+    (let [options
+          {:name (:choreography-name realization)
+           :operation operation
+           :browser-role (:browser-role realization)
+           :authority-role (:authority-role realization)}]
+      {:browser
+       (optimistic-choreo/command-plan
+        options
+        (:browser-role realization))
+
+       :authority
+       (optimistic-choreo/command-plan
+        options
+        (:authority-role realization))})
+    (catch clojure.lang.ExceptionInfo _
+      nil)))
+
 ;; =============================================================================
 ;; Per-operation correspondence
 ;; =============================================================================
@@ -292,6 +314,9 @@
      :browser-role (:browser-role server-operation)
      :authority-role (:authority-role server-operation)
      :browser-plan-digest (browser-plan-digest browser-assembly plan-key)
+     :authority-plan-digest
+     (choreo-artifact/executable-digest
+      (:authority-plan server-operation))
      :command-transport (:optimistic-command-transport browser-assembly)}))
 
 (defn- route-requirement
@@ -471,9 +496,11 @@
   "True when value is a closed current OptimisticOperationAssembly.
 
    The emitted realization summary retains exactly the static choreography facts
-   needed to reconstruct the expected browser projection. Recognition therefore
-   rechecks exact browser-plan correspondence against the embedded manifest while
-   deliberately omitting execute! functions and any claim of runtime authority."
+   needed to reconstruct both projected sides plus a digest of the exact trusted
+   authority plan accepted during preflight. Recognition therefore rechecks exact
+   browser-plan correspondence against the embedded manifest and exact authority
+   projection correspondence against that digest while deliberately omitting
+   execute! functions and any claim of runtime authority."
   [value]
   (and
    (map? value)
@@ -490,36 +517,38 @@
    (not (empty? (:operations value)))
    (every?
     (fn [[operation realization]]
-      (and
-       (keyword? operation)
-       (map? realization)
-       (= operation-realization-keys
-          (set (keys realization)))
-       (= operation (:operation realization))
-       (keyword? (:plan-key realization))
-       (keyword? (:choreography-name realization))
-       (keyword? (:browser-role realization))
-       (keyword? (:authority-role realization))
-       (string? (:browser-plan-digest realization))
-       (= (:browser-role (:browser-assembly value))
-          (:browser-role realization))
-       (= (:optimistic-command-transport (:browser-assembly value))
-          (:command-transport realization))
-       (contains? (:required-plan-keys (:browser-assembly value))
-                  (:plan-key realization))
-       (= (:browser-plan-digest realization)
-          (browser-plan-digest
-           (:browser-assembly value)
-           (:plan-key realization)))
-       (= (browser-plan
-           (:browser-assembly value)
-           (:plan-key realization))
-          (optimistic-choreo/command-plan
-           {:name (:choreography-name realization)
-            :operation operation
-            :browser-role (:browser-role realization)
-            :authority-role (:authority-role realization)}
-           (:browser-role realization)))))
+      (let [projected
+            (when (map? realization)
+              (realization-projected-plans operation realization))]
+        (and
+         (keyword? operation)
+         (map? realization)
+         (= operation-realization-keys
+            (set (keys realization)))
+         (= operation (:operation realization))
+         (keyword? (:plan-key realization))
+         (keyword? (:choreography-name realization))
+         (keyword? (:browser-role realization))
+         (keyword? (:authority-role realization))
+         (string? (:browser-plan-digest realization))
+         (string? (:authority-plan-digest realization))
+         projected
+         (= (:authority-plan-digest realization)
+            (choreo-artifact/executable-digest (:authority projected)))
+         (= (:browser-role (:browser-assembly value))
+            (:browser-role realization))
+         (= (:optimistic-command-transport (:browser-assembly value))
+            (:command-transport realization))
+         (contains? (:required-plan-keys (:browser-assembly value))
+                    (:plan-key realization))
+         (= (:browser-plan-digest realization)
+            (browser-plan-digest
+             (:browser-assembly value)
+             (:plan-key realization)))
+         (= (browser-plan
+             (:browser-assembly value)
+             (:plan-key realization))
+            (:browser projected)))))
     (:operations value))
    (map? (:route-requirements value))
    (= (set (keys (:operations value)))
