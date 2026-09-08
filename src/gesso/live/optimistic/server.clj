@@ -9,6 +9,8 @@
    - deriving the authenticated principal from trusted server context;
    - declaring operation execution prerequisites and server-boundary supplied
      capabilities, with construction-time required-subset-supplied closure;
+   - declaring optional per-resolution settlement contracts and checking trusted
+     commit/progression evidence before settlement construction;
    - resolving a browser-proposed semantic operation through a trusted registry;
    - starting/resuming the trusted authority projection for that operation;
    - invoking the registered public model-operation adapter;
@@ -22,7 +24,8 @@
    - browser DOM, optimistic templates, target/snapshot ownership, or continuity;
    - application authorization/business policy (the registered public operation
      must re-establish those rules from trusted context and current authority);
-   - XTDB transaction construction or commit guards;
+   - XTDB transaction construction or commit guards, or proof that an
+     application-supplied commit/progression witness is truthful;
    - Live invalidation/publication;
    - HTTP response rendering;
    - conversion of arbitrary exceptions into :failed settlements.
@@ -38,7 +41,8 @@
    [gesso.choreo.identity :as identity]
    [gesso.choreo.machine :as machine]
    [gesso.live.optimistic.choreo :as optimistic-choreo]
-   [gesso.live.optimistic.protocol :as protocol]))
+   [gesso.live.optimistic.protocol :as protocol]
+   [gesso.live.progression :as progression]))
 
 ;; =============================================================================
 ;; Stable public vocabulary
@@ -91,16 +95,41 @@
   (and (set? value)
        (every? keyword? value)))
 
+(def authoritative-progression-contract
+  "Settlement-contract marker requiring trusted operation progression evidence
+   to be satisfied by the settlement's authoritative basis."
+  :authoritative-basis)
+
+(def committed-status
+  "The one stable successful commit-status currently recognized by settlement
+   contracts. Gesso deliberately does not invent semantics for other transaction
+   status vocabularies."
+  :committed)
+
+(def settlement-contract-rule-keys
+  "Closed per-resolution settlement-contract rule vocabulary."
+  #{:outcomes
+    :commit/status
+    :progression})
+
 (def operation-result-keys
   "Closed trusted operation-result vocabulary.
 
    :resolution is always required. :authoritative is required by protocol v3
    for successful authoritative resolutions. :outcome remains model-specific;
-   :reason is optional protocol explanation data."
+   :reason is optional protocol explanation data.
+
+   :commit/status, :progression, and :progression-advances are trusted execution
+   evidence. They are never serialized into the browser settlement. They gain
+   application-assembly meaning only when the prepared operation declares a
+   matching :settlement-contract."
   #{:resolution
     :authoritative
     :outcome
-    :reason})
+    :reason
+    :commit/status
+    :progression
+    :progression-advances})
 
 ;; =============================================================================
 ;; Errors / validation
@@ -178,6 +207,114 @@
         :allowed allowed}))
     value'))
 
+(defn- require-keyword-set!
+  [label value]
+  (when-not (and (set? value)
+                 (seq value)
+                 (every? keyword? value))
+    (server-error
+     :invalid-keyword-set
+     (str label " must be a non-empty set of keyword identities.")
+     {:label label
+      :value value}))
+  value)
+
+(defn- settlement-contract-rule
+  [resolution rule]
+  (let [rule'
+        (require-closed-map!
+         (str "Optimistic settlement contract rule for " resolution)
+         rule
+         #{}
+         settlement-contract-rule-keys)
+        outcomes
+        (when (contains? rule' :outcomes)
+          (require-keyword-set!
+           "Optimistic settlement contract :outcomes"
+           (:outcomes rule')))
+        commit-status
+        (when (contains? rule' :commit/status)
+          (require-keyword!
+           "Optimistic settlement contract :commit/status"
+           (:commit/status rule')))
+        _
+        (when (and (some? commit-status)
+                   (not= committed-status commit-status))
+          (server-error
+           :invalid-settlement-commit-status-contract
+           "Optimistic settlement contract currently recognizes only :committed commit provenance."
+           {:resolution resolution
+            :commit/status commit-status
+            :allowed #{committed-status}}))
+        progression-mode
+        (when (contains? rule' :progression)
+          (:progression rule'))]
+    (when (and (some? progression-mode)
+               (not= authoritative-progression-contract progression-mode))
+      (server-error
+       :invalid-settlement-progression-contract
+       "Optimistic settlement contract :progression must use the supported authoritative-basis relation."
+       {:resolution resolution
+        :progression progression-mode
+        :allowed #{authoritative-progression-contract}}))
+    (cond-> {}
+      outcomes
+      (assoc :outcomes outcomes)
+
+      commit-status
+      (assoc :commit/status commit-status)
+
+      progression-mode
+      (assoc :progression progression-mode))))
+
+(defn settlement-contract
+  "Construct one closed trusted-operation settlement contract.
+
+   The input is a non-empty map from generic protocol settlement resolution to
+   one rule map. Only resolutions present in the contract are permitted for that
+   prepared operation.
+
+   Per-resolution rules may contain:
+
+     :outcomes
+       Non-empty set of permitted application outcome keywords. When omitted,
+       the contract does not constrain the optional outcome.
+
+     :commit/status :committed
+       Require trusted evidence that the authoritative model operation crossed a
+       successful commit boundary. This evidence is checked server-side and is
+       not placed on the wire.
+
+     :progression :authoritative-basis
+       Require a normalized Gesso Live progression requirement in the operation
+       result and require the settlement's authoritative basis to satisfy it.
+       Optional :progression-advances operation-result evidence may supply exact
+       trusted advancement witnesses for composed opaque requirements.
+
+   Construction validates the contract shape; it does not prove that a trusted
+   adapter tells the truth about its external transaction system."
+  [value]
+  (let [value' (require-map! "Optimistic settlement contract" value)]
+    (when-not (seq value')
+      (server-error
+       :empty-settlement-contract
+       "Optimistic settlement contract must contain at least one resolution rule."
+       {:contract value}))
+    (into {}
+          (map
+           (fn [[resolution rule]]
+             [(protocol/normalize-settlement-resolution resolution)
+              (settlement-contract-rule resolution rule)]))
+          value')))
+
+(defn settlement-contract?
+  "True for one canonical trusted-operation settlement contract."
+  [value]
+  (try
+    (= value (settlement-contract value))
+    (catch Throwable _
+      false)))
+
 (defn- require-principal!
   [principal]
   (when-not (identity/principal? principal)
@@ -197,6 +334,7 @@
     :browser-role
     :authority-role
     :required-capabilities
+    :settlement-contract
     :execute!})
 
 (defn- operation-choreo-options
@@ -238,9 +376,17 @@
        and invoke the public model operation that owns the transition.
 
        It returns a closed operation-result map containing :resolution and
-       optional :authoritative, :outcome, and :reason. It must not return
-       command-id or execution-id; this namespace supplies those identities from
-       the validated command.
+       optional :authoritative, :outcome, :reason, plus trusted server-only
+       execution evidence (:commit/status, :progression, and
+       :progression-advances) when required by :settlement-contract. It must not
+       return command-id or execution-id; this namespace supplies those identities
+       from the validated command.
+
+   :settlement-contract is optional. When present it is a closed per-resolution
+   contract built by settlement-contract and checked against every result before
+   settlement construction. It lets application authority adapters make stable
+   commit/progression expectations inspectable without putting that evidence on
+   the browser wire.
 
    :required-capabilities is an optional closed set of application-specific
    execution prerequisites needed by execute!.
@@ -279,7 +425,14 @@
         required-capabilities
         (set/union
          default-operation-required-capabilities
-         declared-required-capabilities)]
+         declared-required-capabilities)
+
+        declared-settlement-contract
+        (:settlement-contract options')
+
+        settlement-contract'
+        (when (some? declared-settlement-contract)
+          (settlement-contract declared-settlement-contract))]
     (when (= browser-role authority-role)
       (server-error
        :same-role
@@ -293,6 +446,7 @@
            :browser-role (require-keyword! "Optimistic operation :browser-role" browser-role)
            :authority-role (require-keyword! "Optimistic operation :authority-role" authority-role)
            :required-capabilities required-capabilities
+           :settlement-contract settlement-contract'
            :execute! (require-callable! "Optimistic operation :execute!" execute!)}]
       ;; Verification/projection is registry-construction work, not request work.
       ;; Every request for this operation executes the same canonical authority
@@ -318,6 +472,9 @@
         (:required-capabilities value))
        (set/subset? default-operation-required-capabilities
                     (:required-capabilities value))
+       (contains? value :settlement-contract)
+       (or (nil? (:settlement-contract value))
+           (settlement-contract? (:settlement-contract value)))
        (fn? (:execute! value))
        (machine/executable-plan?
         (:authority-plan value))))
@@ -455,6 +612,17 @@
      "Expected a prepared optimistic server operation entry."
      {:operation prepared-operation}))
   (:required-capabilities prepared-operation))
+
+(defn operation-settlement-contract
+  "Return the canonical optional settlement contract for one prepared trusted
+   operation entry."
+  [prepared-operation]
+  (when-not (operation? prepared-operation)
+    (server-error
+     :invalid-operation
+     "Expected a prepared optimistic server operation entry."
+     {:operation prepared-operation}))
+  (:settlement-contract prepared-operation))
 
 (defn server-supplied-capabilities
   "Return the effective execution-capability set supplied by a prepared trusted
@@ -631,13 +799,105 @@
 ;; Trusted operation result -> protocol-v3 settlement
 ;; =============================================================================
 
+(defn- require-progression-advances!
+  [value]
+  (when-not (vector? value)
+    (server-error
+     :invalid-progression-advances
+     "Optimistic operation :progression-advances evidence must be a vector."
+     {:progression-advances value}))
+  (mapv progression/require-advance! value))
+
 (defn- normalize-operation-result
   [result]
-  (require-closed-map!
-   "Optimistic authoritative operation result"
-   result
-   #{protocol/resolution-key}
-   operation-result-keys))
+  (let [result'
+        (require-closed-map!
+         "Optimistic authoritative operation result"
+         result
+         #{protocol/resolution-key}
+         operation-result-keys)]
+    (when (contains? result' :commit/status)
+      (require-keyword!
+       "Optimistic operation result :commit/status"
+       (:commit/status result')))
+    (when (contains? result' :progression)
+      (progression/require-requirement! (:progression result')))
+    (when (contains? result' :progression-advances)
+      (require-progression-advances! (:progression-advances result')))
+    result'))
+
+(defn- authoritative-observation
+  [result]
+  (when-some [value (get result protocol/authoritative-key)]
+    (protocol/authoritative
+     (if (= :authoritative (get value protocol/authority-key))
+       (dissoc value protocol/authority-key)
+       value))))
+
+(defn- require-settlement-contract!
+  [operation-entry result]
+  (when-some [contract (:settlement-contract operation-entry)]
+    (let [resolution (get result protocol/resolution-key)
+          rule (get contract resolution)]
+      (when-not (some? rule)
+        (server-error
+         :settlement-resolution-not-allowed
+         "Trusted operation result resolution is not permitted by its settlement contract."
+         {:operation (:operation operation-entry)
+          :resolution resolution
+          :allowed-resolutions (set (keys contract))}))
+
+      (when-some [outcomes (:outcomes rule)]
+        (let [outcome (get result protocol/outcome-key)]
+          (when-not (contains? outcomes outcome)
+            (server-error
+             :settlement-outcome-not-allowed
+             "Trusted operation result outcome is not permitted by its settlement contract."
+             {:operation (:operation operation-entry)
+              :resolution resolution
+              :outcome outcome
+              :allowed-outcomes outcomes}))))
+
+      (when (contains? rule :commit/status)
+        (let [expected (:commit/status rule)
+              actual (:commit/status result)]
+          (when-not (= expected actual)
+            (server-error
+             :settlement-commit-status-mismatch
+             "Trusted operation result does not carry the commit-status required by its settlement contract."
+             {:operation (:operation operation-entry)
+              :resolution resolution
+              :expected expected
+              :actual actual}))))
+
+      (when (= authoritative-progression-contract (:progression rule))
+        (let [requirement (:progression result)
+              advances (or (:progression-advances result) [])
+              authoritative (authoritative-observation result)
+              basis (get authoritative protocol/basis-key)]
+          (when-not (progression/requirement? requirement)
+            (server-error
+             :missing-settlement-progression
+             "Trusted operation result is missing the progression evidence required by its settlement contract."
+             {:operation (:operation operation-entry)
+              :resolution resolution
+              :progression requirement}))
+          (when-not (some? authoritative)
+            (server-error
+             :missing-settlement-progression-authority
+             "Settlement progression contract requires an authoritative observation."
+             {:operation (:operation operation-entry)
+              :resolution resolution}))
+          (when-not (progression/satisfied-by? basis requirement advances)
+            (server-error
+             :settlement-progression-not-satisfied
+             "Settlement authoritative basis does not satisfy the trusted operation progression evidence."
+             {:operation (:operation operation-entry)
+              :resolution resolution
+              :authoritative-basis basis
+              :progression requirement
+              :progression-advances advances}))))))
+  result)
 
 (defn settlement-from-result
   "Construct a protocol-v3 settlement from one trusted operation result.
@@ -656,7 +916,9 @@
      "Settlement construction requires an active authoritative command boundary."
      {:boundary boundary}))
   (let [result'
-        (normalize-operation-result result)
+        (->> result
+             normalize-operation-result
+             (require-settlement-contract! (:operation-entry boundary)))
         command
         (:command boundary)]
     (protocol/settlement
