@@ -379,6 +379,107 @@
     (is (not (contains? contracts :request/cancel))
         "Server-registry supersets remain valid, but unrelated server-only operations are outside this application slice.")))
 
+(deftest published-change-topics-are-derived-from-the-prepared-server-boundary
+  (let [operation
+        (trusted-operation
+         :request/claim
+         {:published-change-topics #{:request :request-assignment}})
+        routes
+        (route-assembly {:request/claim operation})
+        concrete-server
+        (prepared-server {:request/claim operation})
+        options
+        (execution-options routes concrete-server)
+        report
+        (execution-preflight/check-execution-assembly options)
+        assembly
+        (execution-preflight/require-execution-assembly! options)
+        expected
+        {:request/claim #{:request :request-assignment}}]
+    (is (= expected
+           (get-in report
+                   [:analysis :published-change-topics-by-operation])))
+    (is (= expected
+           (execution-preflight/published-change-topics assembly)))
+    (is (= expected
+           (:published-change-topics
+            (execution-preflight/explain assembly))))
+    (is (not (contains? assembly :published-change-topics))
+        "Publication topics are derived from the embedded trusted server rather than duplicated into the closed assembly.")
+    (is (= 2
+           (:gesso.live.optimistic.execution-preflight/version assembly)))))
+
+(deftest publication-summary-preserves-undeclared-versus-explicit-empty
+  (let [claim
+        (trusted-operation :request/claim)
+        cancel
+        (trusted-operation
+         :request/cancel
+         {:published-change-topics #{}})
+        operations
+        {:request/claim claim
+         :request/cancel cancel}
+        op-assembly
+        (operation-assembly
+         operations
+         {:plans {:request/claim claim-plan
+                  :request/cancel cancel-plan}})
+        routes
+        (route-assembly
+         operations
+         {:operation-assembly op-assembly
+          :route-capabilities
+          {:request/claim claim-route
+           :request/cancel cancel-route}})
+        concrete-server
+        (prepared-server operations)
+        assembly
+        (execution-preflight/require-execution-assembly!
+         (execution-options routes concrete-server))
+        topics
+        (execution-preflight/published-change-topics assembly)]
+    (is (= #{:request/claim :request/cancel}
+           (set (keys topics))))
+    (is (contains? topics :request/claim))
+    (is (nil? (:request/claim topics))
+        "Nil preserves an undeclared application publication relation.")
+    (is (contains? topics :request/cancel))
+    (is (= #{} (:request/cancel topics))
+        "An explicit empty set remains distinguishable from omission.")))
+
+(deftest server-only-publication-topics-do-not-leak-into-route-exposed-summary
+  (let [claim
+        (trusted-operation
+         :request/claim
+         {:published-change-topics #{:request}})
+        cancel
+        (trusted-operation
+         :request/cancel
+         {:published-change-topics #{:audit}})
+        routes
+        (route-assembly {:request/claim claim})
+        concrete-server
+        (prepared-server
+         {:request/claim claim
+          :request/cancel cancel})
+        options
+        (execution-options routes concrete-server)
+        report
+        (execution-preflight/check-execution-assembly options)
+        assembly
+        (execution-preflight/require-execution-assembly! options)
+        expected
+        {:request/claim #{:request}}]
+    (is (= expected
+           (get-in report
+                   [:analysis :published-change-topics-by-operation])))
+    (is (= expected
+           (execution-preflight/published-change-topics assembly)))
+    (is (not (contains?
+              (execution-preflight/published-change-topics assembly)
+              :request/cancel))
+        "Trusted server supersets do not enlarge this route-exposed application slice.")))
+
 (deftest capability-closure-does-not-imply-domain-authorization
   (let [operation
         (trusted-operation
@@ -627,6 +728,63 @@
     (is (= :invalid-execution-assembly
            (error-kind
             #(execution-preflight/settlement-contracts changed-outcome))))))
+
+(deftest publication-accessor-rejects-structurally-corrupted-assemblies
+  (let [operation
+        (trusted-operation
+         :request/claim
+         {:published-change-topics #{:request}})
+        routes
+        (route-assembly {:request/claim operation})
+        concrete-server
+        (prepared-server {:request/claim operation})
+        assembly
+        (execution-preflight/require-execution-assembly!
+         (execution-options routes concrete-server))
+        malformed-topics
+        (assoc-in assembly
+                  [:server :operations :request/claim :published-change-topics]
+                  [:request])
+        duplicated-summary
+        (assoc assembly
+               :published-change-topics
+               {:request/claim #{:request}})]
+    (is (execution-preflight/execution-assembly? assembly))
+    (is (false? (server/server? (:server malformed-topics))))
+    (is (false? (execution-preflight/execution-assembly? malformed-topics)))
+    (is (= :invalid-execution-assembly
+           (error-kind
+            #(execution-preflight/published-change-topics malformed-topics))))
+    (is (false? (execution-preflight/execution-assembly? duplicated-summary))
+        "Adding a second publication registry violates the closed assembly shape.")
+    (is (= :invalid-execution-assembly
+           (error-kind
+            #(execution-preflight/published-change-topics duplicated-summary))))))
+
+(deftest valid-publication-substitution-remains-an-explicit-trusted-declaration
+  (let [operation
+        (trusted-operation
+         :request/claim
+         {:published-change-topics #{:request}})
+        routes
+        (route-assembly {:request/claim operation})
+        concrete-server
+        (prepared-server {:request/claim operation})
+        assembly
+        (execution-preflight/require-execution-assembly!
+         (execution-options routes concrete-server))
+        substituted
+        (assoc-in assembly
+                  [:server :operations :request/claim :published-change-topics]
+                  #{:other-semantic-topic})]
+    (is (server/server? (:server substituted)))
+    (is (execution-preflight/execution-assembly? substituted)
+        "Execution preflight has no independent model-publication oracle with which to disprove another well-formed trusted declaration.")
+    (is (= {:request/claim #{:other-semantic-topic}}
+           (execution-preflight/published-change-topics substituted)))
+    (is (= {:request/claim #{:other-semantic-topic}}
+           (:published-change-topics
+            (execution-preflight/explain substituted))))))
 
 (deftest execution-assembly-recognition-rejects-upstream-route-tampering
   (let [{:keys [options]} (base-fixture)
