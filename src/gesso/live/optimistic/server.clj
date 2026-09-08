@@ -7,6 +7,8 @@
    It owns:
    - decoding/validating browser command wire values;
    - deriving the authenticated principal from trusted server context;
+   - declaring operation execution prerequisites and server-boundary supplied
+     capabilities, with construction-time required-subset-supplied closure;
    - resolving a browser-proposed semantic operation through a trusted registry;
    - starting/resuming the trusted authority projection for that operation;
    - invoking the registered public model-operation adapter;
@@ -58,6 +60,36 @@
 
 (def completed-send-type
   :gesso.live.optimistic.server/completed-send)
+
+(def authenticated-principal-capability
+  "Execution-capability identity for the typed principal established by the
+   trusted optimistic server before a public operation adapter may run.
+
+   This capability is intrinsic to every prepared optimistic server: the server
+   always invokes :principal-fn and rejects an untyped result before execute!.
+   It describes the boundary input that is available; it does not mean the
+   current principal is authorized for a model operation."
+  :authenticated-principal)
+
+(def intrinsic-server-capabilities
+  "Execution capabilities supplied by the optimistic server implementation
+   itself rather than declared by an application integration."
+  #{authenticated-principal-capability})
+
+(def default-operation-required-capabilities
+  "Default trusted-operation prerequisites.
+
+   Every optimistic operation runs behind typed principal binding, so the
+   ordinary operation constructor records that dependency without asking each
+   application to repeat it. Application-declared requirements are added to
+   this intrinsic set rather than replacing it."
+  #{authenticated-principal-capability})
+
+(defn execution-capabilities?
+  "True for a closed set of execution-capability keyword identities."
+  [value]
+  (and (set? value)
+       (every? keyword? value)))
 
 (def operation-result-keys
   "Closed trusted operation-result vocabulary.
@@ -114,6 +146,16 @@
       :value value}))
   value)
 
+(defn- require-execution-capabilities!
+  [label value]
+  (when-not (execution-capabilities? value)
+    (server-error
+     :invalid-execution-capabilities
+     (str label " must be a set of keyword capability identities.")
+     {:label label
+      :value value}))
+  value)
+
 (defn- require-closed-map!
   [label value required allowed]
   (let [value' (require-map! label value)
@@ -154,6 +196,7 @@
     :operation
     :browser-role
     :authority-role
+    :required-capabilities
     :execute!})
 
 (defn- operation-choreo-options
@@ -199,8 +242,16 @@
        command-id or execution-id; this namespace supplies those identities from
        the validated command.
 
+   :required-capabilities is an optional closed set of application-specific
+   execution prerequisites needed by execute!.
+   #{:authenticated-principal} is always added because typed principal binding
+   is intrinsic to this trusted server boundary. Requirements such as
+   :transaction, :authoritative-basis, :clock, or :random-seed should be declared
+   here when the adapter genuinely depends on them.
+
    Optional :browser-role and :authority-role customize only static choreography
-   roles. They do not confer runtime authorization."
+   roles. Neither role nor a capability declaration confers runtime
+   authorization."
   [options]
   (let [options'
         (require-closed-map!
@@ -216,7 +267,19 @@
                 execute!]
          :or {browser-role optimistic-choreo/default-browser-role
               authority-role optimistic-choreo/default-authority-role}}
-        options']
+        options'
+
+        declared-required-capabilities
+        (if (contains? options' :required-capabilities)
+          (require-execution-capabilities!
+           "Optimistic operation :required-capabilities"
+           (:required-capabilities options'))
+          #{})
+
+        required-capabilities
+        (set/union
+         default-operation-required-capabilities
+         declared-required-capabilities)]
     (when (= browser-role authority-role)
       (server-error
        :same-role
@@ -229,6 +292,7 @@
            :operation (require-keyword! "Optimistic operation :operation" operation)
            :browser-role (require-keyword! "Optimistic operation :browser-role" browser-role)
            :authority-role (require-keyword! "Optimistic operation :authority-role" authority-role)
+           :required-capabilities required-capabilities
            :execute! (require-callable! "Optimistic operation :execute!" execute!)}]
       ;; Verification/projection is registry-construction work, not request work.
       ;; Every request for this operation executes the same canonical authority
@@ -250,6 +314,10 @@
        (keyword? (:authority-role value))
        (not= (:browser-role value)
              (:authority-role value))
+       (execution-capabilities?
+        (:required-capabilities value))
+       (set/subset? default-operation-required-capabilities
+                    (:required-capabilities value))
        (fn? (:execute! value))
        (machine/executable-plan?
         (:authority-plan value))))
@@ -262,7 +330,8 @@
 
 (def ^:private server-option-keys
   #{:principal-fn
-    :operations})
+    :operations
+    :supplied-capabilities})
 
 (defn server
   "Construct a trusted optimistic server adapter.
@@ -274,13 +343,24 @@
    :operations is a map from semantic operation keyword to trusted operation
    entry/options. The map key must exactly equal the entry's :operation. A
    browser may propose :operation, but it can only select among entries already
-   installed in this trusted registry."
+   installed in this trusted registry.
+
+   :supplied-capabilities is an optional application-owned set describing other
+   execution prerequisites that this concrete server boundary provides to
+   operation adapters. :authenticated-principal is added automatically because
+   principal binding is enforced by this namespace. Declaring a capability does
+   not establish model authorization and does not prove an arbitrary external
+   provider correct; it is assembly data whose required/supplied relation can be
+   rejected before requests execute.
+
+   Construction fails when any registered operation requires a capability absent
+   from the effective supplied set."
   [options]
   (let [options'
         (require-closed-map!
          "Optimistic server"
          options
-         server-option-keys
+         #{:principal-fn :operations}
          server-option-keys)
         principal-fn
         (require-callable!
@@ -308,10 +388,41 @@
                       {:registry-key registry-key'
                        :operation (:operation operation')}))
                    [registry-key' operation'])))
-              operations-raw)]
+              operations-raw)
+
+        declared-supplied-capabilities
+        (if (contains? options' :supplied-capabilities)
+          (require-execution-capabilities!
+           "Optimistic server :supplied-capabilities"
+           (:supplied-capabilities options'))
+          #{})
+
+        supplied-capabilities
+        (set/union
+         intrinsic-server-capabilities
+         declared-supplied-capabilities)
+
+        missing-by-operation
+        (into {}
+              (keep
+               (fn [[operation-key operation-entry]]
+                 (let [required (:required-capabilities operation-entry)
+                       missing (set/difference required supplied-capabilities)]
+                   (when (seq missing)
+                     [operation-key
+                      {:required-capabilities required
+                       :missing-capabilities missing}]))))
+              operations')]
+    (when (seq missing-by-operation)
+      (server-error
+       :missing-execution-capabilities
+       "Optimistic server boundary does not supply every execution capability required by its registered operations."
+       {:supplied-capabilities supplied-capabilities
+        :missing-by-operation missing-by-operation}))
     {:gesso.live.optimistic.server/type server-type
      :principal-fn principal-fn
-     :operations operations'}))
+     :operations operations'
+     :supplied-capabilities supplied-capabilities}))
 
 (defn server?
   [value]
@@ -319,13 +430,42 @@
        (= server-type
           (:gesso.live.optimistic.server/type value))
        (fn? (:principal-fn value))
+       (execution-capabilities?
+        (:supplied-capabilities value))
+       (set/subset? intrinsic-server-capabilities
+                    (:supplied-capabilities value))
        (map? (:operations value))
        (every?
         (fn [[operation-key operation-entry]]
           (and (= operation-key
                   (:operation operation-entry))
-               (operation? operation-entry)))
+               (operation? operation-entry)
+               (set/subset?
+                (:required-capabilities operation-entry)
+                (:supplied-capabilities value))))
         (:operations value))))
+
+(defn operation-required-capabilities
+  "Return the closed execution-capability set required by a prepared trusted
+   operation entry."
+  [prepared-operation]
+  (when-not (operation? prepared-operation)
+    (server-error
+     :invalid-operation
+     "Expected a prepared optimistic server operation entry."
+     {:operation prepared-operation}))
+  (:required-capabilities prepared-operation))
+
+(defn server-supplied-capabilities
+  "Return the effective execution-capability set supplied by a prepared trusted
+   optimistic server boundary, including intrinsic Gesso capabilities."
+  [prepared-server]
+  (when-not (server? prepared-server)
+    (server-error
+     :invalid-server
+     "Expected a prepared optimistic server adapter."
+     {:server prepared-server}))
+  (:supplied-capabilities prepared-server))
 
 (defn- require-server!
   [value]
