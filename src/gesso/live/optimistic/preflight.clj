@@ -24,10 +24,13 @@
      identity/roles.
 
    Successful preflight emits one closed OptimisticOperationAssembly.  The
-   assembly also carries a route requirement for each operation: semantic
-   operation plus the already-preflighted command transport.  A later route
-   layer can consume those requirements without asking the application to repeat
-   transport identity.
+   assembly retains the exact trusted operation-capability registry that defined
+   the exposed semantic operation set, then carries a route requirement for each
+   operation: semantic operation plus the already-preflighted command transport.
+   Recognition therefore cannot silently drop one realization and its matching
+   route requirement while leaving the source capability declaration intact. A
+   later route layer can consume those requirements without asking the
+   application to repeat transport identity.
 
    This layer deliberately does NOT claim route closure, authentication,
    authorization, required/supplied execution-capability closure, model
@@ -45,7 +48,7 @@
 ;; Identity
 ;; =============================================================================
 
-(def preflight-version 2)
+(def preflight-version 3)
 
 (def report-type
   :gesso.live.optimistic.preflight/report)
@@ -69,6 +72,7 @@
     :gesso.live.optimistic.preflight/version
     :name
     :browser-assembly
+    :operation-capabilities
     :operations
     :route-requirements})
 
@@ -500,7 +504,10 @@
    authority plan accepted during preflight. Recognition therefore rechecks exact
    browser-plan correspondence against the embedded manifest and exact authority
    projection correspondence against that digest while deliberately omitting
-   execute! functions and any claim of runtime authority."
+   execute! functions and any claim of runtime authority. The embedded canonical
+   operation-capability registry is the trusted source declaration for the exposed
+   operation set; recognition requires the derived realization set to match it
+   exactly."
   [value]
   (and
    (map? value)
@@ -513,8 +520,12 @@
        (keyword? (:name value)))
    (browser-preflight/assembly-manifest?
     (:browser-assembly value))
+   (canonical-capability-registry?
+    (:operation-capabilities value))
    (map? (:operations value))
    (not (empty? (:operations value)))
+   (= (set (keys (:operation-capabilities value)))
+      (set (keys (:operations value))))
    (every?
     (fn [[operation realization]]
       (let [projected
@@ -526,6 +537,8 @@
          (= operation-realization-keys
             (set (keys realization)))
          (= operation (:operation realization))
+         (= (:plan-key (get (:operation-capabilities value) operation))
+            (:plan-key realization))
          (keyword? (:plan-key realization))
          (keyword? (:choreography-name realization))
          (keyword? (:browser-role realization))
@@ -612,6 +625,7 @@
            :gesso.live.optimistic.preflight/version preflight-version
            :name name
            :browser-assembly browser-assembly
+           :operation-capabilities operation-capabilities
            :operations operations
            :route-requirements route-requirements}]
       (when-not (operation-assembly? assembly)
