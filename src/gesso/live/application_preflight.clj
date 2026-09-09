@@ -40,10 +40,17 @@
    wrap-application-handler installs the generic gesso.http pre-serialization
    guard once around an ordinary handler invocation, so every nested call to the
    existing gesso.core/html-response / gesso.http/html-response validates its
-   actual Hiccup against the current ApplicationAssembly automatically. This is
-   structural closure relative to the wrapped handler tree, not a claim that
-   arbitrary manually constructed Ring responses or unwrapped entrypoints are
-   impossible.
+   actual Hiccup against the current ApplicationAssembly automatically.
+
+   v635 lifts that wrapper into the ordinary Biff 2 component boundary.
+   application-handler-component consumes one current ApplicationAssembly and
+   returns a Biff-style system component that replaces the existing
+   :biff.ring/handler with the checked wrapper before a server component consumes
+   it. Gesso adds no parallel handler key, route registry, or server dependency.
+   This is structural closure relative to a component list containing the Gesso
+   component and a server that consumes :biff.ring/handler; arbitrary manually
+   constructed Ring HTML responses and application startup paths that deliberately
+   bypass that system handler remain outside the guarantee.
 
    ApplicationAssembly is intentionally physical rather than portable:
    recognition re-verifies current artifact bytes/receipt and rescans any embedded
@@ -90,6 +97,10 @@
 
 (def canonical-html-response-surface
   :gesso.live.application-preflight/html-response)
+
+(def biff-ring-handler-key
+  "Canonical Biff 2 system key consumed by Ring server components."
+  :biff.ring/handler)
 
 (def ^:private option-keys
   #{:name
@@ -163,7 +174,7 @@
    :edge :application->rendered-surfaces
    :status :open
    :message
-   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface before browser delivery. wrap-application-handler can structurally install that check around every nested canonical Gesso HTML response for one handler tree, but ApplicationAssembly alone does not yet prove that every application entrypoint is wrapped or that arbitrary hand-built Ring responses use the canonical Gesso HTML boundary."})
+   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface before browser delivery. application-handler-component can replace the canonical Biff :biff.ring/handler with a wrapper that checks every nested canonical Gesso HTML response before serialization. ApplicationAssembly alone still does not prove that the component is present in every startup path, that every server consumes :biff.ring/handler, or that arbitrary hand-built Ring HTML responses use the canonical Gesso HTML boundary."})
 
 (def ^:private trusted-assumptions
   #{:application-publication-declarations-match-model-publication
@@ -1162,6 +1173,67 @@
         rendered))
      (fn []
        (invoke-actual-function handler request)))))
+
+(defn application-handler-component
+  "Return a Biff 2-style system component that installs application preflight
+   on the canonical :biff.ring/handler.
+
+   The returned component is an ordinary one-argument system-map transformer,
+   so an application can place it directly in its Biff component vector before
+   the HTTP server component:
+
+     [(application-handler-component application-assembly)
+      use-server]
+
+   At component execution time Gesso requires a system map containing an actual
+   function (or Var currently containing one) at :biff.ring/handler and replaces
+   only that value with wrap-application-handler. All other system entries are
+   preserved exactly. No Gesso-specific system marker is added, avoiding a second
+   handler registry and avoiding Biff schema/registry coupling.
+
+   application-assembly is checked both when this component is constructed and
+   again when the wrapped handler is installed. The installed handler rechecks
+   the assembly for every canonical HTML response, so later artifact/receipt
+   staleness still fails before browser serialization.
+
+   This establishes the canonical Biff handler integration when the returned
+   component is present in the application's component sequence. It does not
+   claim that a server which ignores :biff.ring/handler, a startup path omitting
+   the component, or a manually constructed pre-serialized HTML Ring response is
+   covered by this boundary."
+  [application-assembly]
+  (when-not (application-assembly? application-assembly)
+    (throw
+     (preflight-error
+      :invalid-application-handler-component-assembly
+      "application-handler-component requires a current ApplicationAssembly."
+      {:application-assembly application-assembly})))
+  (fn [system]
+    (when-not (map? system)
+      (throw
+       (preflight-error
+        :invalid-application-handler-system
+        "Gesso application handler component requires a Biff-style system map."
+        {:system system})))
+    (when-not (contains? system biff-ring-handler-key)
+      (throw
+       (preflight-error
+        :missing-biff-ring-handler
+        "Gesso application handler component requires :biff.ring/handler in the system map."
+        {:system-keys (set (keys system))})))
+    (let [handler (get system biff-ring-handler-key)]
+      (when-not (actual-function? handler)
+        (throw
+         (preflight-error
+          :invalid-biff-ring-handler
+          "Gesso application handler component requires :biff.ring/handler to be an actual function or a Var currently containing one."
+          {:handler handler})))
+      (assoc
+       system
+       biff-ring-handler-key
+       (wrap-application-handler
+        application-assembly
+        handler)))))
 
 ;; =============================================================================
 ;; Closed current physical application product
