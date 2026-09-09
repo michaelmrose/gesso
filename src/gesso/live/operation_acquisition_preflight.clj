@@ -167,6 +167,19 @@
   [acquisition-assembly]
   (:obligations acquisition-assembly))
 
+(defn- affected-scopes-from-graph
+  [acquisition-assembly published-topics]
+  (if (set? published-topics)
+    (let [graph
+          (:graph (:live-app acquisition-assembly))]
+      (into
+       #{}
+       (mapcat
+        (fn [change-topic]
+          (map :scope (get graph change-topic []))))
+       published-topics))
+    #{}))
+
 (defn- affected-obligations
   [acquisition-assembly published-topics]
   (if (set? published-topics)
@@ -183,12 +196,21 @@
 
 (defn- operation-impact
   [acquisition-assembly published-topics]
-  (let [affected (affected-obligations acquisition-assembly published-topics)]
+  (let [affected-obligations'
+        (affected-obligations acquisition-assembly published-topics)]
     {:scopes
-     (set (map :scope (vals affected)))
+     ;; Scope impact comes directly from the compiled Live invalidation graph.
+     ;; Do not derive it from acquisition obligations: a graph may legitimately
+     ;; target a semantic scope for which this application currently projects no
+     ;; managed fragment. Such a scope is still affected even though it creates
+     ;; no authoritative-acquisition obligation.
+     (affected-scopes-from-graph acquisition-assembly published-topics)
 
      :fragments
-     (set (keys affected))}))
+     ;; Fragment impact is the projection subset that has graph-derived managed
+     ;; acquisition obligations. A scope with no projected fragment therefore
+     ;; contributes no fragment here, exactly as intended.
+     (set (keys affected-obligations'))}))
 
 (defn- impact-summary
   [execution-assembly acquisition-assembly]
