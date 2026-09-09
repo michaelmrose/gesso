@@ -403,3 +403,167 @@
            (:error/type data)))
     (is (= :unsupported-explain-value
            (:error/kind data)))))
+
+;; =============================================================================
+;; v653 — adversarial report re-derivation closure
+;; =============================================================================
+
+(deftest report-recognition-rejects-forged-positive-invalid-preflight
+  (let [plan
+        (one-role-plan :browser :request/claim)
+
+        invalid-report
+        (preflight/check-plan-registry
+         {:name :fixture/forged-positive
+          :plans {:request/claim plan}
+          :required-keys #{:request/claim :request/cancel}
+          :single-role? true
+          :expected-role :browser})
+
+        forged-positive
+        (assoc invalid-report
+               :valid? true
+               :errors [])]
+    (testing "the source report remains a recognized current negative result"
+      (is (preflight/report? invalid-report))
+      (is (false? (preflight/valid? invalid-report)))
+      (is (= #{:missing-required-plans}
+             (error-kinds invalid-report))))
+
+    (testing "clearing the errors and flipping :valid? cannot forge success"
+      (is (false? (preflight/report? forged-positive)))
+      (is (false? (preflight/valid? forged-positive))))))
+
+(deftest report-recognition-rejects-derived-analysis-forgery
+  (let [claim-plan
+        (one-role-plan :browser :request/claim)
+
+        cancel-plan
+        (one-role-plan :browser :request/cancel)
+
+        report
+        (preflight/check-plan-registry
+         {:name :fixture/report-analysis
+          :plans {:request/claim claim-plan
+                  :request/cancel cancel-plan}
+          :required-keys #{:request/claim :request/cancel}
+          :single-role? true
+          :expected-role :browser})]
+    (is (preflight/report? report))
+    (is (preflight/valid? report))
+
+    (doseq [[label forged]
+            [["name"
+              (assoc-in report [:analysis :name] :fixture/forged-name)]
+             ["plan-key set"
+              (assoc-in report [:analysis :plan-keys] #{:request/claim})]
+             ["role set"
+              (assoc-in report [:analysis :roles] #{:server})]
+             ["digest map"
+              (assoc-in report
+                        [:analysis :digests :request/claim]
+                        (zeros-digest))]]]
+      (testing (str "editing derived " label " invalidates recognition")
+        (is (false? (preflight/report? forged)))
+        (is (false? (preflight/valid? forged)))))))
+
+(deftest report-recognition-rejects-cross-product-analysis-substitution
+  (let [claim-plan
+        (one-role-plan :browser :request/claim)
+
+        cancel-plan
+        (one-role-plan :browser :request/cancel)
+
+        claim-report
+        (preflight/check-plan-registry
+         {:name :fixture/claim-only
+          :plans {:request/claim claim-plan}
+          :required-keys #{:request/claim}
+          :single-role? true
+          :expected-role :browser})
+
+        cancel-report
+        (preflight/check-plan-registry
+         {:name :fixture/cancel-only
+          :plans {:request/cancel cancel-plan}
+          :required-keys #{:request/cancel}
+          :single-role? true
+          :expected-role :browser})
+
+        forged
+        (assoc claim-report :analysis (:analysis cancel-report))]
+    (testing "both source reports are independently valid"
+      (is (preflight/valid? claim-report))
+      (is (preflight/valid? cancel-report)))
+
+    (testing "a complete valid analysis from another report is not substitutable"
+      (is (false? (preflight/report? forged)))
+      (is (false? (preflight/valid? forged))))))
+
+(deftest report-recognition-binds-exact-checker-inputs
+  (let [claim-plan
+        (one-role-plan :browser :request/claim)
+
+        cancel-plan
+        (one-role-plan :browser :request/cancel)
+
+        report
+        (preflight/check-plan-registry
+         {:name :fixture/input-binding
+          :plans {:request/claim claim-plan
+                  :request/cancel cancel-plan}
+          :required-keys #{:request/claim :request/cancel}
+          :single-role? true
+          :expected-role :browser})]
+    (testing "recognized reports expose the exact checker input map used for re-derivation"
+      (is (map? (:inputs report)))
+      (is (= :fixture/input-binding
+             (get-in report [:inputs :name])))
+      (is (= #{:request/claim :request/cancel}
+             (get-in report [:inputs :required-keys]))))
+
+    (doseq [[label forged]
+            [["name"
+              (assoc-in report [:inputs :name] :fixture/other-name)]
+             ["required operation set"
+              (assoc-in report [:inputs :required-keys] #{:request/claim})]
+             ["expected role"
+              (assoc-in report [:inputs :expected-role] :server)]
+             ["plan registry"
+              (assoc-in report [:inputs :plans] {:request/claim claim-plan})]]]
+      (testing (str "changing bound checker input " label " breaks re-derivation")
+        (is (false? (preflight/report? forged)))
+        (is (false? (preflight/valid? forged)))))))
+
+(deftest report-recognition-rejects-errors-warnings-and-shape-recomposition
+  (let [plan
+        (one-role-plan :browser :request/claim)
+
+        report
+        (preflight/check-plan-registry
+         {:name :fixture/report-shape
+          :plans {:request/claim plan}
+          :required-keys #{:request/claim}
+          :single-role? true
+          :expected-role :browser})]
+    (is (preflight/valid? report))
+
+    (doseq [[label forged]
+            [["invented warning"
+              (assoc report
+                     :warnings
+                     [{:kind :forged-warning
+                       :message "not derived by the checker"}])]
+             ["invented error with matching false validity"
+              (assoc report
+                     :valid? false
+                     :errors
+                     [{:kind :forged-error
+                       :message "not derived by the checker"}])]
+             ["missing checker inputs"
+              (dissoc report :inputs)]
+             ["extra analysis field"
+              (assoc-in report [:analysis :forged] true)]]]
+      (testing (str label " cannot remain a recognized checker report")
+        (is (false? (preflight/report? forged)))
+        (is (false? (preflight/valid? forged)))))))
