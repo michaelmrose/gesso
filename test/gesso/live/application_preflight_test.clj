@@ -1,6 +1,8 @@
 (ns gesso.live.application-preflight-test
   (:require
    [clojure.test :refer [deftest is testing]]
+   [com.biffweb.core :as biff]
+   [gesso.core :as g]
    [gesso.choreo.identity :as identity]
    [gesso.choreo.preflight :as choreo-preflight]
    [gesso.live.acquisition-preflight :as acquisition]
@@ -1540,3 +1542,241 @@
                (set (map :kind (application/open-obligations assembly)))))
         (is (= :application-runtime-backbone-preflight-closed
                (:guarantee (application/explain assembly))))))))
+
+
+;; =============================================================================
+;; v636 Biff lifecycle application-handler component boundary
+;; =============================================================================
+
+(def component-test-modules [])
+
+(defn component-var-handler
+  [_request]
+  (g/html-response [:main [:p "var-handler"]]))
+
+(defn- valid-component-handler
+  [ctx]
+  (fn [_request]
+    (g/html-response
+     [:main
+      (rendered-operation-button
+       ctx
+       :request/claim
+       "/operations/request/claim")])))
+
+(defn- invalid-component-handler
+  [ctx]
+  (fn [_request]
+    (g/html-response
+     [:main
+      (rendered-operation-button
+       ctx
+       :request/claim
+       "/operations/request/not-claim")])))
+
+(deftest application-handler-component-integrates-through-real-biff-start
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [original-handler (valid-component-handler ctx)
+              observed-handler (atom nil)
+              initial-system
+              {:biff.ring/handler original-handler
+               :fixture/preserved {:sentinel 42}}
+              observer-component
+              (fn [system]
+                (reset! observed-handler (:biff.ring/handler system))
+                (assoc system :fixture/observer-saw-handler? true))
+              started
+              (biff/start
+               initial-system
+               #'component-test-modules
+               [(application/application-handler-component assembly)
+                observer-component])]
+          (is (= {:sentinel 42} (:fixture/preserved started)))
+          (is (true? (:fixture/observer-saw-handler? started)))
+          (is (fn? @observed-handler))
+          (is (not (identical? original-handler @observed-handler)))
+          (is (identical? @observed-handler (:biff.ring/handler started)))
+          (is (= 200 (:status ((:biff.ring/handler started) {:uri "/"})))))))))
+
+(deftest application-handler-component-preserves-system-except-handler
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [handler (valid-component-handler ctx)
+              component (application/application-handler-component assembly)
+              system {:biff.ring/handler handler
+                      :fixture/a 1
+                      :fixture/b {:nested true}}
+              updated (component system)]
+          (is (= 1 (:fixture/a updated)))
+          (is (= {:nested true} (:fixture/b updated)))
+          (is (= (dissoc system :biff.ring/handler)
+                 (dissoc updated :biff.ring/handler)))
+          (is (fn? (:biff.ring/handler updated)))
+          (is (not (identical? handler (:biff.ring/handler updated)))))))))
+
+(deftest application-handler-component-accepts-var-handler
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [component (application/application-handler-component assembly)
+              updated (component {:biff.ring/handler #'component-var-handler})
+              response ((:biff.ring/handler updated) {:uri "/"})]
+          (is (fn? (:biff.ring/handler updated)))
+          (is (= 200 (:status response)))
+          (is (string? (:body response))))))))
+
+(deftest component-rejects-missing-invalid-handler-and-invalid-system
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [component (application/application-handler-component assembly)]
+          (is (= :invalid-application-handler-system
+                 (error-kind #(component nil))))
+          (is (= :missing-biff-ring-handler
+                 (error-kind #(component {:fixture/value 1}))))
+          (doseq [handler [nil 42 :callable-keyword {}]]
+            (is (= :invalid-biff-ring-handler
+                   (error-kind
+                    #(component {:biff.ring/handler handler}))))))))))
+
+(deftest stale-assembly-between-component-construction-and-installation-fails
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly artifact-path]}]
+        (let [component (application/application-handler-component assembly)]
+          (spit artifact-path "// stale after component construction\n")
+          (is (= :invalid-application-handler-assembly
+                 (error-kind
+                  #(component
+                    {:biff.ring/handler (valid-component-handler ctx)})))))))))
+
+(deftest stale-artifact-after-installation-fails-on-next-html-response
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly artifact-path]}]
+        (let [component (application/application-handler-component assembly)
+              updated
+              (component
+               {:biff.ring/handler (valid-component-handler ctx)})
+              handler (:biff.ring/handler updated)]
+          (is (= 200 (:status (handler {:uri "/before"}))))
+          (spit artifact-path "// stale after handler installation\n")
+          (is (= :rendered-surface-preflight-failed
+                 (error-kind #(handler {:uri "/after"})))))))))
+
+(deftest component-blocks-route-incoherent-affordance-before-html-delivery
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [component (application/application-handler-component assembly)
+              handler
+              (:biff.ring/handler
+               (component
+                {:biff.ring/handler (invalid-component-handler ctx)}))
+              data (error-data #(handler {:uri "/"}))]
+          (is (= :rendered-surface-preflight-failed (:error/kind data)))
+          (is (contains?
+               (set (map :kind (:errors (:preflight data))))
+               :rendered-affordance-path-mismatch)))))))
+
+(deftest later-biff-component-observes-already-wrapped-handler
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [original (valid-component-handler ctx)
+              seen (atom nil)
+              started
+              (biff/start
+               {:biff.ring/handler original}
+               #'component-test-modules
+               [(application/application-handler-component assembly)
+                (fn [system]
+                  (reset! seen (:biff.ring/handler system))
+                  system)])]
+          (is (fn? @seen))
+          (is (identical? @seen (:biff.ring/handler started)))
+          (is (not (identical? original @seen))))))))
+
+(deftest multiple-application-handler-components-compose-instead-of-shadowing
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-surfaced-application
+      {:request-board
+       [:main
+        (rendered-operation-button
+         ctx :request/claim "/operations/request/claim")]}
+      (fn [{:keys [assembly]}]
+        (let [calls (atom [])
+              original-require application/require-rendered-surface!
+              started
+              (biff/start
+               {:biff.ring/handler (valid-component-handler ctx)}
+               #'component-test-modules
+               [(application/application-handler-component assembly)
+                (application/application-handler-component assembly)])]
+          (with-redefs [application/require-rendered-surface!
+                        (fn [app surface rendered]
+                          (swap! calls conj [app surface rendered])
+                          (original-require app surface rendered))]
+            (is (= 200
+                   (:status
+                    ((:biff.ring/handler started) {:uri "/"})))))
+          (is (= 2 (count @calls)))
+          (is (every?
+               #(= application/canonical-html-response-surface (second %))
+               @calls))
+          (is (= (nth (first @calls) 2)
+                 (nth (second @calls) 2))))))))
+
+(deftest component-construction-requires-current-application-assembly
+  (is (= :invalid-application-handler-component-assembly
+         (error-kind
+          #(application/application-handler-component nil))))
+  (is (= :invalid-application-handler-component-assembly
+         (error-kind
+          #(application/application-handler-component
+            {:gesso.live.application-preflight/type
+             :gesso.live.application-preflight/application-assembly})))))
