@@ -1,74 +1,33 @@
 (ns gesso.live.application-preflight
   "JVM-side whole-application preflight for one assembled Gesso Live application.
 
-   Earlier preflight layers deliberately close one relation at a time. By the
-   time an OperationAcquisitionAssembly exists it already nests the exact chain:
+   ApplicationAssembly composes the already-closed browser, operation, route,
+   trusted execution, settlement/progression, Live publication, invalidation,
+   and authoritative-acquisition relations with the exact generated browser
+   artifact currently on disk. Optional rendered-surface snapshots add concrete
+   canonical :choreo/op affordance -> plan -> HTTP route correspondence.
 
-     BrowserAssemblyManifest
-       -> optimistic operation correspondence
-       -> trusted transport/route correspondence
-       -> concrete prepared server + execution capabilities
-       -> settlement/progression contracts
-       -> trusted semantic publication declarations
-       -> compiled Live invalidation topology
-       -> authoritative acquisition realizations
+   Dynamic Clojure rendering is handled at the real serialization boundary rather
+   than by pretending every possible Hiccup value is statically enumerable.
+   check-rendered-surface validates one actual render; wrap-application-handler
+   installs that validation around the canonical Gesso HTML response path;
+   application-handler-component lifts the wrapper into Biff's :biff.ring/handler
+   lifecycle; and start-biff-application! makes that component mandatory on the
+   canonical Gesso/Biff startup path.
 
-   This namespace composes that chain with the exact generated JavaScript
-   artifact currently on disk. v627 can additionally consume named rendered
-   server-side surfaces. Canonical :choreo/op affordances are discovered from
-   Gesso-owned Clojure metadata produced by the ordinary UI helper and checked
-   against the already-assembled semantic operation, browser plan, HTTP method,
-   and trusted physical route template. No second affordance registry is authored.
+   The resulting guarantee is verified assembly plus pre-browser enforcement for
+   canonical Gesso HTML responses when that startup path is used. ApplicationAssembly
+   itself cannot prove deployment used the canonical startup, that later arbitrary
+   Clojure did not replace :biff.ring/handler, that a server did not ignore the
+   standard Biff handler key, or that code did not hand-build pre-serialized HTML
+   Ring responses. Those are explicit escape/deployment boundaries, not hidden
+   holes or fabricated static proof obligations.
 
-   Supplying rendered surfaces closes the affordance relation *relative to that
-   supplied render snapshot*. Gesso still does not independently know that the
-   supplied surface set enumerates every possible application render surface, so
-   surface-set completeness remains an explicit open obligation rather than being
-   promoted to whole-application proof. Omitting rendered surfaces preserves the
-   earlier runtime-backbone-only preflight behavior.
-
-   v629 additionally owns a pre-browser dynamic render boundary. Arbitrary Clojure
-   route handlers can render state-dependent Hiccup, so current Biff/Reitit route
-   structure cannot honestly enumerate every possible rendered value at static
-   preflight time. check-rendered-surface and checked-rendered-response! therefore
-   let the normal response path validate each actual named Hiccup surface against
-   the current ApplicationAssembly before any response renderer serializes it.
-   This is runtime enforcement before browser delivery, not a fabricated static
-   proof that every application render producer has been enumerated.
-
-   v632 closes the next structural edge for the canonical Gesso HTML path.
-   wrap-application-handler installs the generic gesso.http pre-serialization
-   guard once around an ordinary handler invocation, so every nested call to the
-   existing gesso.core/html-response / gesso.http/html-response validates its
-   actual Hiccup against the current ApplicationAssembly automatically.
-
-   v635 lifts that wrapper into the ordinary Biff 2 component boundary.
-   application-handler-component consumes one current ApplicationAssembly and
-   returns a Biff-style system component that replaces the existing
-   :biff.ring/handler with the checked wrapper before a server component consumes
-   it. Gesso adds no parallel handler key, route registry, or server dependency.
-
-   v637 adds the canonical Biff startup path. start-biff-application! delegates to
-   biff.core/start but prepends application-handler-component automatically, so a
-   caller using the Gesso startup API cannot forget to include the preflight
-   component or place a normal server component before it. The handler must exist
-   after Biff module initialization / initial-system merge, before ordinary
-   components run. Arbitrary direct biff.core/start calls, later components that
-   deliberately replace :biff.ring/handler, servers that ignore that key, and
-   manually constructed pre-serialized HTML Ring responses remain explicit escape
-   hatches rather than being mislabeled as closed.
-
-   ApplicationAssembly is intentionally physical rather than portable:
-   recognition re-verifies current artifact bytes/receipt and rescans any embedded
-   rendered surfaces. A stale generated artifact, malformed canonical affordance,
-   unknown operation, plan mismatch, HTTP method mismatch, or rendered URL that
-   cannot match the trusted route template fails closed.
-
-   The guarantee is verified assembly relative to named trusted application
-   declarations and physical boundaries. It is not the v4.5 universal
-   projection/refinement theorem, does not prove arbitrary handler/query
-   implementations, does not prove that the supplied surface set is exhaustive,
-   and does not turn browser metadata into authority."
+   Recognition remains physical and fail-closed: current artifact bytes/receipt,
+   nested assemblies, rendered metadata, operation/plan identity, route method/path,
+   and authoritative acquisition are revalidated from their source facts. Browser
+   metadata never grants authority, and trusted application/model declarations remain
+   named assumptions rather than being promoted to v4.5 machine-checked proof."
   (:require
    [clojure.set :as set]
    [com.biffweb.core :as biff]
@@ -174,14 +133,41 @@
    :edge :rendered-affordance->semantic-operation
    :status :open
    :message
-   "Gesso does not yet have a static enumerable registry of every rendered Choreo affordance; runtime :choreo/op resolution is fail-closed but cannot yet discharge whole-application affordance enumeration during preflight."})
+   "No rendered-surface snapshot was supplied to this ApplicationAssembly, so it contains no static affordance sample. Canonical Gesso/Biff startup can still validate every actual canonical HTML render before serialization. What ApplicationAssembly alone cannot establish is deployment adoption of that checked startup/response boundary or absence of deliberate raw-response escape hatches."})
 
 (def ^:private rendered-surface-completeness-open-obligation
   {:kind :rendered-surface-enumeration-completeness-not-yet-modeled
    :edge :application->rendered-surfaces
    :status :open
    :message
-   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface before browser delivery. start-biff-application! prepends application-handler-component automatically on the canonical Gesso/Biff startup path, so every nested canonical Gesso HTML response beneath :biff.ring/handler is checked before serialization. ApplicationAssembly alone still does not prove that every startup path uses start-biff-application!, that later components do not deliberately replace :biff.ring/handler, that every server consumes that key, or that arbitrary hand-built Ring HTML responses use the canonical Gesso HTML boundary."})
+   "All canonical affordances in the supplied render snapshot are closed to the assembled application backbone. Arbitrary Clojure render state is not statically enumerable, so snapshot completeness is not treated as proof. Canonical Gesso/Biff startup validates each actual canonical HTML response dynamically; ApplicationAssembly alone still cannot prove that deployment used that boundary or avoided deliberate raw-response/handler-replacement escape hatches."})
+
+(def ^:private canonical-html-enforcement
+  {:status :available-on-canonical-gesso-biff-startup
+   :startup-boundary :gesso.live.application-preflight/start-biff-application!
+   :biff-handler-key biff-ring-handler-key
+   :handler-boundary :gesso.live.application-preflight/wrap-application-handler
+   :response-boundary :gesso.http/html-response
+   :per-render-guarantee rendered-surface-guarantee
+   :installation-proof :not-carried-by-application-assembly})
+
+(def ^:private explicit-escape-hatches
+  [{:kind :direct-biff-start-bypass
+    :boundary :application-startup
+    :description
+    "Calling Biff startup directly instead of start-biff-application! can omit the canonical Gesso application-preflight component."}
+   {:kind :later-handler-replacement
+    :boundary :biff-component-order
+    :description
+    "Arbitrary later Clojure can deliberately replace :biff.ring/handler after Gesso installed the checked handler."}
+   {:kind :server-ignores-biff-ring-handler
+    :boundary :server-integration
+    :description
+    "A server that does not consume the canonical :biff.ring/handler system key is outside this integration guarantee."}
+   {:kind :pre-serialized-html-ring-response
+    :boundary :html-serialization
+    :description
+    "Hand-built Ring responses containing already-serialized HTML bypass gesso.http/html-response and therefore bypass canonical Hiccup affordance validation."}])
 
 (def ^:private trusted-assumptions
   #{:application-publication-declarations-match-model-publication
@@ -662,11 +648,14 @@
       {:operation-acquisition-assembly operation-acquisition-assembly}))))
 
 (defn open-obligations
-  "Return the currently known whole-application obligations that are not yet
-   discharged by the modeled runtime-backbone preflight.
+  "Return the currently known obligations that ApplicationAssembly alone cannot
+   discharge.
 
-   v623 keeps currentness fail-closed while avoiding duplicate full-graph
-   validation during ordinary explanation."
+   These are now deployment/coverage boundaries rather than missing operation,
+   route, settlement, Live, or acquisition plumbing. Canonical Gesso/Biff startup
+   provides dynamic pre-browser enforcement, but the assembly value itself does
+   not prove that deployment adopted that startup path or avoided explicit raw
+   response/handler-replacement escape hatches."
   [application-or-operation-acquisition]
   (cond
     (application-assembly-shape? application-or-operation-acquisition)
@@ -764,11 +753,11 @@
        set is itself still an application snapshot; v627 does not independently
        prove that it enumerates every possible render surface.
 
-   A valid report means every modeled runtime-backbone edge is closed, the
-   browser artifact is current, and every canonical affordance in any supplied
-   surface resolves to that backbone. Whole-application surface-set completeness
-   remains visible as an open obligation until Gesso owns a complete surface
-   enumeration source."
+   A valid report means every modeled runtime-backbone edge is closed, the browser
+   artifact is current, and every canonical affordance in any supplied snapshot
+   resolves to that backbone. Arbitrary render-state completeness is handled by
+   canonical dynamic pre-browser enforcement, not by claiming a static snapshot is
+   exhaustive. Deployment adoption of that checked boundary remains explicit."
   [options]
   (let [{:keys [name
                 operation-acquisition-assembly
@@ -856,12 +845,12 @@
          [(if supplied-surfaces?
             (issue
              :rendered-surface-enumeration-completeness-not-yet-modeled
-             "Every canonical Choreo affordance in the supplied rendered surfaces is checked, but Gesso does not yet independently prove that the supplied surface set is complete."
+             "Every canonical Choreo affordance in the supplied rendered surfaces is checked. Static snapshot completeness is intentionally not treated as proof; canonical Gesso/Biff startup can validate each actual render dynamically, while deployment adoption remains outside ApplicationAssembly."
              {:edge :application->rendered-surfaces
               :surface-names (set (keys rendered-surfaces))})
             (issue
              :static-affordance-closure-not-yet-modeled
-             "Static whole-application affordance enumeration is not yet modeled; this obligation remains open even when runtime-backbone preflight succeeds."
+             "No rendered-surface snapshot was supplied. Canonical Gesso/Biff startup can still validate each actual canonical HTML render dynamically; ApplicationAssembly alone does not prove that deployment used that checked boundary."
              {:edge :rendered-affordance->semantic-operation}))]
           (seq unhandled-topics)
           (conj
@@ -1360,13 +1349,14 @@
   (boolean (current-application-report value)))
 
 (defn require-application-assembly!
-  "Require the currently modeled application runtime backbone and return one
-   closed physical ApplicationAssembly.
+  "Require the modeled application runtime backbone and return one current physical
+   ApplicationAssembly.
 
-   Success does not erase known whole-application obligations. Without rendered
-   surfaces the affordance-enumeration edge remains open. With rendered surfaces,
-   every discovered canonical affordance is closed to the assembled route/runtime
-   backbone while completeness of the supplied surface set remains explicitly open."
+   Optional rendered surfaces provide static sample evidence and close every
+   discovered canonical affordance to the route/runtime backbone. Dynamic render
+   completeness is enforced on the canonical Gesso/Biff response path rather than
+   fabricated as a static enumeration proof. The assembly itself still does not
+   prove deployment adoption of that canonical startup/response boundary."
   [options]
   (let [{:keys [name
                 operation-acquisition-assembly
@@ -1424,7 +1414,8 @@
        :operation operation
        :guarantee backbone-guarantee
        :affordance-guarantee
-       (get-in report [:analysis :affordance-closure :guarantee])))
+       (get-in report [:analysis :affordance-closure :guarantee])
+       :canonical-html-enforcement canonical-html-enforcement))
     (throw
      (preflight-error
       :invalid-application-assembly
@@ -1432,16 +1423,17 @@
       {:application-assembly application-assembly}))))
 
 (defn explain
-  "Return one compact whole-application runtime-backbone explanation.
+  "Return one compact current application explanation.
 
-   The explanation intentionally separates:
+   The explanation separates five things that should not be conflated:
 
-     :guarantee        what the modeled assembly currently closes;
-     :open-obligations what still lacks a whole-application preflight model;
-     :trusted-assumptions facts outside the proved/assembly-verified core.
+     :guarantee                  verified assembly closure;
+     :canonical-html-enforcement enforcement available on canonical Gesso/Biff startup;
+     :open-obligations           deployment/coverage facts not carried by the assembly;
+     :trusted-assumptions        named facts outside the verified assembly core;
+     :explicit-escape-hatches    deliberate ways arbitrary Clojure can bypass the canonical path.
 
-   v623 reuses one fresh application report rather than recognizing the assembly
-   and then independently recomputing the same report."
+   One fresh application report is reused throughout the explanation."
   [value]
   (cond
     (application-assembly-shape? value)
@@ -1469,6 +1461,8 @@
        :affordance-closure (get-in report [:analysis :affordance-closure])
        :open-obligations (get-in report [:analysis :open-obligations])
        :trusted-assumptions (get-in report [:analysis :trusted-assumptions])
+       :canonical-html-enforcement canonical-html-enforcement
+       :explicit-escape-hatches explicit-escape-hatches
        :warnings (:warnings report)}
       (throw
        (preflight-error
@@ -1482,6 +1476,8 @@
      :valid? (:valid? value)
      :errors (:errors value)
      :warnings (:warnings value)
+     :canonical-html-enforcement canonical-html-enforcement
+     :explicit-escape-hatches explicit-escape-hatches
      :analysis
      (select-keys
       (:analysis value)
