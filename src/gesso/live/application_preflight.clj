@@ -1,8 +1,7 @@
 (ns gesso.live.application-preflight
-  "JVM-side whole-application backbone preflight for one assembled Gesso Live
-   application.
+  "JVM-side whole-application preflight for one assembled Gesso Live application.
 
-   Earlier preflight layers deliberately close one relation at a time.  By the
+   Earlier preflight layers deliberately close one relation at a time. By the
    time an OperationAcquisitionAssembly exists it already nests the exact chain:
 
      BrowserAssemblyManifest
@@ -14,43 +13,43 @@
        -> compiled Live invalidation topology
        -> authoritative acquisition realizations
 
-   This namespace composes that chain with the remaining physical browser-build
-   fact: the exact generated JavaScript artifact currently on disk.  Callers do
-   not repeat operation registries, routes, capabilities, settlement contracts,
-   publication topics, affected fragments, or acquisition obligations.
+   This namespace composes that chain with the exact generated JavaScript
+   artifact currently on disk. v627 can additionally consume named rendered
+   server-side surfaces. Canonical :choreo/op affordances are discovered from
+   Gesso-owned Clojure metadata produced by the ordinary UI helper and checked
+   against the already-assembled semantic operation, browser plan, HTTP method,
+   and trusted physical route template. No second affordance registry is authored.
 
-   A successful ApplicationAssembly is deliberately described as a *runtime
-   backbone* closure, not yet as complete whole-application closure.  Gesso does
-   not currently have a static enumerable registry of every rendered Choreo
-   affordance, so the edge:
+   Supplying rendered surfaces closes the affordance relation *relative to that
+   supplied render snapshot*. Gesso still does not independently know that the
+   supplied surface set enumerates every possible application render surface, so
+   surface-set completeness remains an explicit open obligation rather than being
+   promoted to whole-application proof. Omitting rendered surfaces preserves the
+   earlier runtime-backbone-only preflight behavior.
 
-     rendered affordance -> semantic operation
+   ApplicationAssembly is intentionally physical rather than portable:
+   recognition re-verifies current artifact bytes/receipt and rescans any embedded
+   rendered surfaces. A stale generated artifact, malformed canonical affordance,
+   unknown operation, plan mismatch, HTTP method mismatch, or rendered URL that
+   cannot match the trusted route template fails closed.
 
-   remains an explicit open obligation at this layer.  Runtime view composition
-   still fails unknown :choreo/op bindings locally, but that is not equivalent to
-   proving ahead of rendering that every application affordance has been
-   enumerated.
-
-   ApplicationAssembly is also intentionally physical rather than portable:
-   recognition re-verifies the current artifact bytes and receipt against the
-   nested BrowserAssemblyManifest.  If the generated file or receipt changes,
-   the previously emitted assembly no longer recognizes as current.
-
-   The guarantee is therefore verified assembly relative to named trusted
-   application declarations and physical boundaries.  It is not the v4.5
-   universal projection/refinement theorem, does not prove arbitrary handler or
-   query implementations, and does not turn browser metadata into authority."
+   The guarantee is verified assembly relative to named trusted application
+   declarations and physical boundaries. It is not the v4.5 universal
+   projection/refinement theorem, does not prove arbitrary handler/query
+   implementations, does not prove that the supplied surface set is exhaustive,
+   and does not turn browser metadata into authority."
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
    [gesso.live.browser.build :as browser-build]
-   [gesso.live.operation-acquisition-preflight :as operation-acquisition]))
+   [gesso.live.operation-acquisition-preflight :as operation-acquisition]
+   [gesso.live.ui :as ui]))
 
 ;; =============================================================================
 ;; Identity / closed vocabulary
 ;; =============================================================================
 
-(def preflight-version 1)
+(def preflight-version 2)
 
 (def report-type
   :gesso.live.application-preflight/report)
@@ -61,11 +60,15 @@
 (def backbone-guarantee
   :application-runtime-backbone-preflight-closed)
 
+(def rendered-affordance-guarantee
+  :supplied-rendered-affordances-preflight-closed)
+
 (def ^:private option-keys
   #{:name
     :operation-acquisition-assembly
     :browser-artifact-path
-    :browser-receipt-path})
+    :browser-receipt-path
+    :rendered-surfaces})
 
 (def ^:private report-keys
   #{:gesso.live.application-preflight/type
@@ -82,6 +85,9 @@
     :browser-receipt-path
     :operations
     :artifact-receipt
+    :rendered-surfaces
+    :affordances
+    :affordance-closure
     :open-obligations
     :trusted-assumptions})
 
@@ -92,6 +98,9 @@
     :operation-acquisition-assembly
     :browser-artifact-path
     :browser-receipt-path})
+
+(def ^:private assembly-with-rendered-surfaces-keys
+  (conj assembly-keys :rendered-surfaces))
 
 (def ^:private operation-acquisition-assembly-keys
   #{:gesso.live.operation-acquisition-preflight/type
@@ -106,6 +115,13 @@
    :status :open
    :message
    "Gesso does not yet have a static enumerable registry of every rendered Choreo affordance; runtime :choreo/op resolution is fail-closed but cannot yet discharge whole-application affordance enumeration during preflight."})
+
+(def ^:private rendered-surface-completeness-open-obligation
+  {:kind :rendered-surface-enumeration-completeness-not-yet-modeled
+   :edge :application->rendered-surfaces
+   :status :open
+   :message
+   "Gesso verifies every canonical Choreo affordance found in the supplied rendered surfaces, but does not yet independently prove that the supplied named surface set enumerates every application render surface."})
 
 (def ^:private trusted-assumptions
   #{:application-publication-declarations-match-model-publication
@@ -148,6 +164,18 @@
   (and
    (string? value)
    (not (str/blank? value))))
+
+(defn- rendered-surfaces?
+  [value]
+  (and
+   (map? value)
+   (not (empty? value))
+   (every?
+    (fn [[surface-name rendered]]
+      (and
+       (keyword? surface-name)
+       (some? rendered)))
+    value)))
 
 (defn- require-map!
   [label value]
@@ -201,6 +229,13 @@
         :invalid-browser-receipt-path
         "Application preflight :browser-receipt-path must be nil or a non-blank string."
         {:browser-receipt-path (:browser-receipt-path options')})))
+    (when (and (contains? options' :rendered-surfaces)
+               (not (rendered-surfaces? (:rendered-surfaces options'))))
+      (throw
+       (preflight-error
+        :invalid-rendered-surfaces
+        "Application preflight :rendered-surfaces must be a non-empty map of keyword surface names to non-nil rendered values."
+        {:rendered-surfaces (:rendered-surfaces options')})))
     options'))
 
 ;; =============================================================================
@@ -340,6 +375,207 @@
               (sort-by pr-str (get affected-fragments operation #{}))))}]))
       (sort-by pr-str (keys (:operations operation')))))))
 
+(defn- path-only
+  [path]
+  (first (str/split path #"[?#]" 2)))
+
+(defn- route-template-segments
+  [path]
+  (str/split (path-only path) #"/" -1))
+
+(defn- route-placeholder-segment?
+  [segment]
+  (and
+   (str/starts-with? segment ":")
+   (> (count segment) 1)))
+
+(defn- route-template-matches?
+  "Match one concrete rendered affordance path against the small physical route
+   template vocabulary already used by current Biff/Reitit applications.
+
+   A full `:name` path segment is treated as one non-empty concrete segment;
+   every other segment is literal. Query/fragment suffixes on the rendered URL
+   are ignored for route selection. Gesso does not infer optional segments,
+   wildcards, regexes, or application-specific coercion here."
+  [template concrete]
+  (let [template-segments (route-template-segments template)
+        concrete-segments (route-template-segments concrete)]
+    (and
+     (= (count template-segments) (count concrete-segments))
+     (every?
+      true?
+      (map
+       (fn [template-segment concrete-segment]
+         (if (route-placeholder-segment? template-segment)
+           (not (str/blank? concrete-segment))
+           (= template-segment concrete-segment)))
+       template-segments
+       concrete-segments)))))
+
+(defn- scan-rendered-surfaces
+  [rendered-surfaces]
+  (if (nil? rendered-surfaces)
+    {:affordances []
+     :errors []}
+    (reduce
+     (fn [{:keys [affordances errors]} surface-name]
+       (let [rendered (get rendered-surfaces surface-name)]
+         (try
+           {:affordances
+            (into affordances
+                  (map #(assoc % :surface surface-name))
+                  (ui/rendered-choreo-affordances rendered))
+            :errors errors}
+           (catch clojure.lang.ExceptionInfo error
+             {:affordances affordances
+              :errors
+              (conj
+               errors
+               (issue
+                :rendered-affordance-scan-failed
+                "Application preflight could not enumerate canonical Choreo affordances from a supplied rendered surface."
+                {:surface surface-name
+                 :cause-type (:error/type (ex-data error))
+                 :cause-kind (:error/kind (ex-data error))
+                 :cause-data (dissoc (ex-data error) :error/type :error/kind)}))})
+           (catch Throwable error
+             {:affordances affordances
+              :errors
+              (conj
+               errors
+               (issue
+                :rendered-affordance-scan-failed
+                "Application preflight failed while enumerating a supplied rendered surface."
+                {:surface surface-name
+                 :exception-class (str (class error))
+                 :exception-message (.getMessage error)}))}))))
+     {:affordances []
+      :errors []}
+     (sort-by pr-str (keys rendered-surfaces)))))
+
+(defn- resolve-rendered-affordances
+  [operation-summary' affordances]
+  (reduce
+   (fn [{:keys [affordances errors]} affordance]
+     (let [operation (:operation affordance)
+           operation-entry (get operation-summary' operation)]
+       (cond
+         (nil? operation-entry)
+         {:affordances (conj affordances affordance)
+          :errors
+          (conj
+           errors
+           (issue
+            :rendered-affordance-unknown-operation
+            "Rendered Choreo affordance references an operation outside the assembled route-exposed application slice."
+            {:surface (:surface affordance)
+             :render-path (:render-path affordance)
+             :operation operation
+             :available-operations (set (keys operation-summary'))}))}
+
+         (not= (:plan-key affordance)
+               (:browser-plan-key operation-entry))
+         {:affordances (conj affordances affordance)
+          :errors
+          (conj
+           errors
+           (issue
+            :rendered-affordance-plan-mismatch
+            "Rendered Choreo affordance plan key does not match the assembled browser plan for its semantic operation."
+            {:surface (:surface affordance)
+             :render-path (:render-path affordance)
+             :operation operation
+             :affordance-plan-key (:plan-key affordance)
+             :assembled-plan-key (:browser-plan-key operation-entry)}))}
+
+         :else
+         (let [declared-routes (:routes operation-entry)
+               method-routes
+               (filterv #(= (:method affordance) (:method %)) declared-routes)
+               matching-routes
+               (filterv
+                #(route-template-matches? (:path %) (:path affordance))
+                method-routes)]
+           (cond
+             (empty? method-routes)
+             {:affordances (conj affordances affordance)
+              :errors
+              (conj
+               errors
+               (issue
+                :rendered-affordance-method-mismatch
+                "Rendered Choreo affordance HTTP method is not realized by a trusted route for its semantic operation."
+                {:surface (:surface affordance)
+                 :render-path (:render-path affordance)
+                 :operation operation
+                 :method (:method affordance)
+                 :declared-routes declared-routes}))}
+
+             (empty? matching-routes)
+             {:affordances (conj affordances affordance)
+              :errors
+              (conj
+               errors
+               (issue
+                :rendered-affordance-path-mismatch
+                "Rendered Choreo affordance URL does not match a trusted route template for its semantic operation."
+                {:surface (:surface affordance)
+                 :render-path (:render-path affordance)
+                 :operation operation
+                 :method (:method affordance)
+                 :path (:path affordance)
+                 :route-templates (mapv :path method-routes)}))}
+
+             (> (count matching-routes) 1)
+             {:affordances (conj affordances affordance)
+              :errors
+              (conj
+               errors
+               (issue
+                :ambiguous-rendered-affordance-route
+                "Rendered Choreo affordance matches more than one trusted route realization."
+                {:surface (:surface affordance)
+                 :render-path (:render-path affordance)
+                 :operation operation
+                 :method (:method affordance)
+                 :path (:path affordance)
+                 :matching-routes matching-routes}))}
+
+             :else
+             (let [route (first matching-routes)]
+               {:affordances
+                (conj
+                 affordances
+                 (assoc affordance
+                        :route-id (:route-id route)
+                        :route-template (:path route)
+                        :required-transport (:required-transport route)))
+                :errors errors}))))))
+   {:affordances []
+    :errors []}
+   affordances))
+
+(defn- affordances-by-operation
+  [affordances]
+  (reduce
+   (fn [acc affordance]
+     (update acc (:operation affordance) (fnil conj []) affordance))
+   (sorted-map)
+   affordances))
+
+(defn- enrich-operation-summary-with-affordances
+  [operation-summary' affordances]
+  (let [by-operation (affordances-by-operation affordances)]
+    (into
+     (sorted-map)
+     (map
+      (fn [[operation summary]]
+        [operation
+         (assoc summary
+                :rendered-affordances
+                (vec (get by-operation operation [])))])
+      operation-summary'))))
+
 (defn operation-summary
   "Return one completely derived operation-keyed explanation for a current
    OperationAcquisitionAssembly.
@@ -440,7 +676,9 @@
 ;; =============================================================================
 
 (defn check-application-assembly
-  "Check the currently modeled whole-application runtime backbone.
+  "Check the currently modeled whole-application runtime backbone and, when
+   supplied, the canonical Choreo affordances discoverable from named rendered
+   Hiccup surfaces.
 
    Required inputs:
 
@@ -453,16 +691,30 @@
        The exact generated JavaScript artifact to verify physically against the
        BrowserAssemblyManifest nested in the supplied assembly.
 
-   Optional :browser-receipt-path selects a non-default receipt path.
+   Optional:
 
-   A valid report means every *modeled runtime-backbone edge* is closed and the
-   browser artifact is current.  It does not mean whole-application affordance
-   enumeration is complete; see :open-obligations."
+     :browser-receipt-path
+       Selects a non-default artifact receipt path.
+
+     :rendered-surfaces
+       Non-empty map of keyword surface-name -> rendered server-side Hiccup/value.
+       Canonical :choreo/op affordances are derived from Gesso-owned metadata on
+       the ordinary rendered nodes and checked against the assembled operation,
+       browser-plan, HTTP method, and trusted route template. The supplied surface
+       set is itself still an application snapshot; v627 does not independently
+       prove that it enumerates every possible render surface.
+
+   A valid report means every modeled runtime-backbone edge is closed, the
+   browser artifact is current, and every canonical affordance in any supplied
+   surface resolves to that backbone. Whole-application surface-set completeness
+   remains visible as an open obligation until Gesso owns a complete surface
+   enumeration source."
   [options]
   (let [{:keys [name
                 operation-acquisition-assembly
                 browser-artifact-path
-                browser-receipt-path]}
+                browser-receipt-path
+                rendered-surfaces]}
         (validate-options! options)
 
         operation-acquisition-report
@@ -486,6 +738,31 @@
         artifact-error
         (:error artifact-verification)
 
+        base-operation-summary
+        (if operation-acquisition-valid?
+          (operation-summary-from-report
+           operation-acquisition-assembly
+           operation-acquisition-report)
+          (sorted-map))
+
+        surface-scan
+        (scan-rendered-surfaces rendered-surfaces)
+
+        affordance-resolution
+        (resolve-rendered-affordances
+         base-operation-summary
+         (:affordances surface-scan))
+
+        affordances
+        (:affordances affordance-resolution)
+
+        operation-summary'
+        (if (some? rendered-surfaces)
+          (enrich-operation-summary-with-affordances
+           base-operation-summary
+           affordances)
+          base-operation-summary)
+
         errors
         (cond-> []
           (not operation-acquisition-valid?)
@@ -496,14 +773,13 @@
             {:operation-acquisition-assembly operation-acquisition-assembly}))
 
           artifact-error
-          (conj artifact-error))
+          (conj artifact-error)
 
-        operation-summary'
-        (if operation-acquisition-valid?
-          (operation-summary-from-report
-           operation-acquisition-assembly
-           operation-acquisition-report)
-          (sorted-map))
+          (seq (:errors surface-scan))
+          (into (:errors surface-scan))
+
+          (seq (:errors affordance-resolution))
+          (into (:errors affordance-resolution)))
 
         unhandled-topics
         (if operation-acquisition-valid?
@@ -512,12 +788,21 @@
                    :unhandled-published-change-topics-by-operation])
           {})
 
+        supplied-surfaces?
+        (some? rendered-surfaces)
+
         warnings
         (cond->
-         [(issue
-           :static-affordance-closure-not-yet-modeled
-           "Static whole-application affordance enumeration is not yet modeled; this obligation remains open even when runtime-backbone preflight succeeds."
-           {:edge :rendered-affordance->semantic-operation})]
+         [(if supplied-surfaces?
+            (issue
+             :rendered-surface-enumeration-completeness-not-yet-modeled
+             "Every canonical Choreo affordance in the supplied rendered surfaces is checked, but Gesso does not yet independently prove that the supplied surface set is complete."
+             {:edge :application->rendered-surfaces
+              :surface-names (set (keys rendered-surfaces))})
+            (issue
+             :static-affordance-closure-not-yet-modeled
+             "Static whole-application affordance enumeration is not yet modeled; this obligation remains open even when runtime-backbone preflight succeeds."
+             {:edge :rendered-affordance->semantic-operation}))]
           (seq unhandled-topics)
           (conj
            (issue
@@ -526,7 +811,27 @@
             {:topics-by-operation unhandled-topics})))
 
         obligations
-        [affordance-open-obligation]]
+        [(if supplied-surfaces?
+           rendered-surface-completeness-open-obligation
+           affordance-open-obligation)]
+
+        affordance-closure
+        (if supplied-surfaces?
+          {:status
+           (if (or (seq (:errors surface-scan))
+                   (seq (:errors affordance-resolution)))
+             :failed
+             :closed-relative-to-supplied-rendered-surfaces)
+           :guarantee
+           (when (and (empty? (:errors surface-scan))
+                      (empty? (:errors affordance-resolution)))
+             rendered-affordance-guarantee)
+           :surface-count (count rendered-surfaces)
+           :affordance-count (count affordances)}
+          {:status :not-modeled
+           :guarantee nil
+           :surface-count 0
+           :affordance-count 0})]
     {:gesso.live.application-preflight/type report-type
      :gesso.live.application-preflight/version preflight-version
      :valid? (empty? errors)
@@ -539,6 +844,9 @@
       :browser-receipt-path browser-receipt-path
       :operations operation-summary'
       :artifact-receipt (:receipt artifact-verification)
+      :rendered-surfaces rendered-surfaces
+      :affordances (vec affordances)
+      :affordance-closure affordance-closure
       :open-obligations obligations
       :trusted-assumptions trusted-assumptions}}))
 
@@ -569,14 +877,18 @@
      (let [{:keys [name
                    operation-acquisition-assembly
                    browser-artifact-path
-                   browser-receipt-path]}
+                   browser-receipt-path
+                   rendered-surfaces]}
            (:analysis value)]
        (= value
           (check-application-assembly
-           {:name name
-            :operation-acquisition-assembly operation-acquisition-assembly
-            :browser-artifact-path browser-artifact-path
-            :browser-receipt-path browser-receipt-path})))
+           (cond->
+            {:name name
+             :operation-acquisition-assembly operation-acquisition-assembly
+             :browser-artifact-path browser-artifact-path
+             :browser-receipt-path browser-receipt-path}
+             (some? rendered-surfaces)
+             (assoc :rendered-surfaces rendered-surfaces)))))
      (catch Exception _
        false))))
 
@@ -596,7 +908,9 @@
 (defn- application-assembly-shape?
   [value]
   (and
-   (closed-map? assembly-keys value)
+   (or
+    (closed-map? assembly-keys value)
+    (closed-map? assembly-with-rendered-surfaces-keys value))
    (= application-assembly-type
       (:gesso.live.application-preflight/type value))
    (= preflight-version
@@ -607,7 +921,10 @@
     (:operation-acquisition-assembly value))
    (nonblank-string? (:browser-artifact-path value))
    (or (nil? (:browser-receipt-path value))
-       (nonblank-string? (:browser-receipt-path value)))))
+       (nonblank-string? (:browser-receipt-path value)))
+   (or
+    (not (contains? value :rendered-surfaces))
+    (rendered-surfaces? (:rendered-surfaces value)))))
 
 (defn- current-application-report
   [value]
@@ -615,11 +932,14 @@
     (try
       (let [report
             (check-application-assembly
-             {:name (:name value)
-              :operation-acquisition-assembly
-              (:operation-acquisition-assembly value)
-              :browser-artifact-path (:browser-artifact-path value)
-              :browser-receipt-path (:browser-receipt-path value)})]
+             (cond->
+              {:name (:name value)
+               :operation-acquisition-assembly
+               (:operation-acquisition-assembly value)
+               :browser-artifact-path (:browser-artifact-path value)
+               :browser-receipt-path (:browser-receipt-path value)}
+               (contains? value :rendered-surfaces)
+               (assoc :rendered-surfaces (:rendered-surfaces value))))]
         (when (true? (:valid? report))
           report))
       (catch Exception _
@@ -639,14 +959,16 @@
   "Require the currently modeled application runtime backbone and return one
    closed physical ApplicationAssembly.
 
-   Success does not erase known whole-application obligations. Use
-   open-obligations or explain to see the static affordance-enumeration edge that
-   remains intentionally open in v622."
+   Success does not erase known whole-application obligations. Without rendered
+   surfaces the affordance-enumeration edge remains open. With rendered surfaces,
+   every discovered canonical affordance is closed to the assembled route/runtime
+   backbone while completeness of the supplied surface set remains explicitly open."
   [options]
   (let [{:keys [name
                 operation-acquisition-assembly
                 browser-artifact-path
-                browser-receipt-path]
+                browser-receipt-path
+                rendered-surfaces]
          :as options'}
         (validate-options! options)
 
@@ -659,12 +981,15 @@
         "Gesso whole-application runtime-backbone preflight failed."
         {:preflight report})))
     (let [assembly
-          {:gesso.live.application-preflight/type application-assembly-type
-           :gesso.live.application-preflight/version preflight-version
-           :name name
-           :operation-acquisition-assembly operation-acquisition-assembly
-           :browser-artifact-path browser-artifact-path
-           :browser-receipt-path browser-receipt-path}]
+          (cond->
+           {:gesso.live.application-preflight/type application-assembly-type
+            :gesso.live.application-preflight/version preflight-version
+            :name name
+            :operation-acquisition-assembly operation-acquisition-assembly
+            :browser-artifact-path browser-artifact-path
+            :browser-receipt-path browser-receipt-path}
+            (contains? options' :rendered-surfaces)
+            (assoc :rendered-surfaces rendered-surfaces))]
       (when-not (application-assembly? assembly)
         (throw
          (preflight-error
@@ -693,7 +1018,9 @@
       (assoc
        (get summary operation)
        :operation operation
-       :guarantee backbone-guarantee))
+       :guarantee backbone-guarantee
+       :affordance-guarantee
+       (get-in report [:analysis :affordance-closure :guarantee])))
     (throw
      (preflight-error
       :invalid-application-assembly
@@ -732,6 +1059,10 @@
                 :acquisition-assembly
                 :live-app
                 :name])
+       :rendered-surface-names
+       (set (keys (or (get-in report [:analysis :rendered-surfaces]) {})))
+       :affordances (get-in report [:analysis :affordances])
+       :affordance-closure (get-in report [:analysis :affordance-closure])
        :open-obligations (get-in report [:analysis :open-obligations])
        :trusted-assumptions (get-in report [:analysis :trusted-assumptions])
        :warnings (:warnings report)}
@@ -754,6 +1085,9 @@
        :browser-artifact-path
        :browser-receipt-path
        :operations
+       :rendered-surfaces
+       :affordances
+       :affordance-closure
        :open-obligations
        :trusted-assumptions])}
 
