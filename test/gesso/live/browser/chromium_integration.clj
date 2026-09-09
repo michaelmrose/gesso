@@ -2862,7 +2862,7 @@
                   (fixture/release! server request-id))
 
                 (let [successor-1
-                      (fixture/await-request!
+                      (fixture/await-pending!
                        server
                        #(and (= :get (:method %))
                              (= fragment-path (:path %))
@@ -2870,11 +2870,13 @@
                        5000)
 
                       successor-2
-                      (fixture/await-request!
+                      (fixture/await-pending!
                        server
                        #(and (= :get (:method %))
                              (= fragment-path (:path %))
-                             (> (:request-id %) (:request-id successor-1)))
+                             (> (:request-id %) max-initial-id)
+                             (not= (:request-id %)
+                                   (:request-id successor-1)))
                        5000)
 
                       successors
