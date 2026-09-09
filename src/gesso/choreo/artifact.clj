@@ -473,7 +473,7 @@
 ;; -----------------------------------------------------------------------------
 
 (def artifact-correspondence-evidence-version
-  1)
+  2)
 
 (def artifact-correspondence-evidence-type
   :gesso.choreo.artifact/concrete-correspondence-evidence)
@@ -503,12 +503,104 @@
     :correspondence
     :nonclaims})
 
-(defn artifact-correspondence-evidence?
-  "True when value has the closed shape of exact-artifact-bound concrete
-   correspondence evidence.
+(def ^:private correspondence-binding-key
+  ::correspondence-inputs)
 
-   This predicate checks the internal evidence contract. Use evidence-matches?
-   when the question is whether the evidence belongs to a particular ArtifactSet."
+(def ^:private correspondence-binding-input-keys
+  #{:choreography
+    :verification-options
+    :witness
+    :options})
+
+(defn- correspondence-binding-inputs
+  [choreography-or-verified witness options]
+  (let [verified
+        (verify/ensure-verified choreography-or-verified)]
+    {:choreography
+     (:choreography verified)
+
+     :verification-options
+     (get-in verified [:verification :options])
+
+     :witness
+     witness
+
+     :options
+     options}))
+
+(defn- correspondence-binding-inputs?
+  [value]
+  (and
+   (map? value)
+   (= correspondence-binding-input-keys
+      (set (keys value)))
+   (map? (:choreography value))
+   (map? (:verification-options value))
+   (vector? (:witness value))
+   (or (nil? (:options value))
+       (map? (:options value)))))
+
+(defn- correspondence-rederives?
+  [evidence]
+  (try
+    (let [bound-result
+          (:correspondence evidence)
+
+          inputs
+          (get bound-result correspondence-binding-key)
+
+          result
+          (dissoc bound-result correspondence-binding-key)
+
+          verified
+          (verify/verify!
+           (:choreography inputs)
+           (:verification-options inputs))
+
+          projected
+          (project/project-all verified)
+
+          structural-certificate
+          (proof/check-projection-structure verified)
+
+          expected-result
+          (case (:mode evidence)
+            :lockstep
+            (correspondence/check-witness
+             verified
+             (:witness inputs)
+             (:options inputs))
+
+            :weak
+            (correspondence/check-weak-witness
+             verified
+             (:witness inputs)
+             (:options inputs)))]
+
+      (and
+       (= (:executable-digests evidence)
+          (plan-digests projected))
+       (= (:structural-certificate evidence)
+          structural-certificate)
+       (= result expected-result)
+       (= (:valid? evidence)
+          (correspondence/valid? expected-result))))
+    (catch Exception _
+      false)))
+
+(defn artifact-correspondence-evidence?
+  "True when value is current exact-artifact-bound concrete correspondence
+   evidence whose witness result re-derives from the exact embedded checker
+   inputs.
+
+   Evidence v2 stores the artifact binding inputs inside the correspondence
+   result, re-verifies/re-projects the source choreography, recomputes the
+   structural certificate, and reruns the concrete witness checker. A plausible
+   or even structurally recognized correspondence map therefore cannot be
+   substituted for the result that was actually derived from this evidence.
+
+   Use evidence-matches? when the additional question is whether this evidence
+   belongs to a particular ArtifactSet."
   [value]
   (and
    (map? value)
@@ -544,6 +636,9 @@
     (:structural-certificate value))
    (correspondence/result?
     (:correspondence value))
+   (correspondence-binding-inputs?
+    (get (:correspondence value)
+         correspondence-binding-key))
    (= (case (:mode value)
         :lockstep correspondence/correspondence-property
         :weak correspondence/weak-correspondence-property)
@@ -552,7 +647,8 @@
       (:nonclaims value))
    (= (:valid? value)
       (correspondence/valid?
-       (:correspondence value)))))
+       (:correspondence value)))
+   (correspondence-rederives? value)))
 
 
 (defn artifact-correspondence-valid?
@@ -681,9 +777,18 @@
     verified))
 
 (defn- artifact-correspondence-evidence
-  [artifact-set mode result]
+  [artifact-set mode choreography-or-verified witness options result]
   (let [sidecar
-        (:diagnostic-proof-sidecar artifact-set)]
+        (:diagnostic-proof-sidecar artifact-set)
+
+        bound-result
+        (assoc
+         result
+         correspondence-binding-key
+         (correspondence-binding-inputs
+          choreography-or-verified
+          witness
+          options))]
     {:gesso.choreo/type
      artifact-correspondence-evidence-type
 
@@ -715,7 +820,7 @@
      (:proof sidecar)
 
      :correspondence
-     result
+     bound-result
 
      :nonclaims
      artifact-correspondence-evidence-nonclaims}))
@@ -757,6 +862,9 @@
          (artifact-correspondence-evidence
           artifact-set
           :lockstep
+          verified
+          witness
+          options
           result)]
      (require-evidence-match!
       artifact-set
@@ -791,6 +899,9 @@
          (artifact-correspondence-evidence
           artifact-set
           :weak
+          verified
+          witness
+          options
           result)]
      (require-evidence-match!
       artifact-set
