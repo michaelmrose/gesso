@@ -64,7 +64,8 @@
     :analysis})
 
 (def ^:private analysis-keys
-  #{:current-stamp
+  #{:current-manifest
+    :current-stamp
     :generated-stamp})
 
 (def ^:private supported-features
@@ -432,12 +433,18 @@
      []
 
      :analysis
-     {:current-stamp current-stamp
+     {:current-manifest current-manifest
+      :current-stamp current-stamp
       :generated-stamp generated-stamp}}))
 
 (defn report?
-  "True when value has the closed shape of a current artifact-correspondence
-   report and :valid? agrees with its error collection."
+  "True only when value is exactly the current artifact-correspondence report
+   derivable from its embedded BrowserAssemblyManifest and generated stamp.
+
+   Recognition intentionally re-runs check-correspondence. Equal-looking stamps
+   are not sufficient evidence by themselves: the current stamp must be the one
+   derived from the independently closed browser assembly that introduced the
+   artifact obligation."
   [value]
   (and
    (closed-map? report-keys value)
@@ -454,26 +461,23 @@
    (closed-map?
     analysis-keys
     (:analysis value))
+   (browser-preflight/assembly-manifest?
+    (get-in value
+            [:analysis :current-manifest]))
    (stamp?
     (get-in value
             [:analysis :current-stamp]))
-   (let [current-stamp
-         (get-in value
-                 [:analysis :current-stamp])
-
-         generated-stamp
-         (get-in value
-                 [:analysis :generated-stamp])]
-     (and
-      (stamp? current-stamp)
-      (or
-       (not (:valid? value))
-       (and
-        (stamp? generated-stamp)
-        (= current-stamp
-           generated-stamp)))))
    (= (:valid? value)
-      (empty? (:errors value)))))
+      (empty? (:errors value)))
+   (try
+     (let [{:keys [current-manifest generated-stamp]}
+           (:analysis value)]
+       (= value
+          (check-correspondence
+           current-manifest
+           generated-stamp)))
+     (catch Exception _
+       false))))
 
 (defn valid?
   "True only for a recognized successful browser artifact correspondence report."
