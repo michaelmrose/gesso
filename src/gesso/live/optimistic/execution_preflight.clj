@@ -74,7 +74,18 @@
     :valid?
     :errors
     :warnings
+    :inputs
     :analysis})
+
+(def ^:private analysis-keys
+  #{:name
+    :route-assembly-name
+    :required-operations
+    :registered-server-operations
+    :supplied-capabilities
+    :required-capabilities-by-operation
+    :settlement-contracts-by-operation
+    :published-change-topics-by-operation})
 
 (def ^:private assembly-keys
   #{:gesso.live.optimistic.execution-preflight/type
@@ -309,7 +320,8 @@
    the route assembly.  Every route-exposed operation must, however, correspond
    exactly to the same prepared trusted operation on this concrete server."
   [options]
-  (let [{:keys [name route-assembly server]}
+  (let [{:keys [name route-assembly server]
+         :as options'}
         (validate-options! options)
 
         route-assembly-valid?
@@ -350,6 +362,7 @@
      :valid? (empty? errors)
      :errors errors
      :warnings []
+     :inputs options'
      :analysis
      {:name name
       :route-assembly-name
@@ -404,8 +417,13 @@
         {})}}))
 
 (defn report?
-  "True when value has the closed shape of a current execution-preflight report
-   and :valid? agrees with its error vector."
+  "True only when value is exactly the current execution-preflight report
+   derivable from its embedded preflight inputs.
+
+   Recognition deliberately re-runs check-execution-assembly. A caller cannot
+   forge a positive report by editing derived operation sets, execution
+   capabilities, settlement/publication summaries, errors, or validity while
+   retaining a plausible report shape."
   [value]
   (and
    (map? value)
@@ -417,9 +435,23 @@
    (boolean? (:valid? value))
    (vector? (:errors value))
    (vector? (:warnings value))
+   (map? (:inputs value))
    (map? (:analysis value))
+   (= analysis-keys
+      (set (keys (:analysis value))))
+   (set? (get-in value [:analysis :required-operations]))
+   (set? (get-in value [:analysis :registered-server-operations]))
+   (set? (get-in value [:analysis :supplied-capabilities]))
+   (map? (get-in value [:analysis :required-capabilities-by-operation]))
+   (map? (get-in value [:analysis :settlement-contracts-by-operation]))
+   (map? (get-in value [:analysis :published-change-topics-by-operation]))
    (= (:valid? value)
-      (empty? (:errors value)))))
+      (empty? (:errors value)))
+   (try
+     (= value
+        (check-execution-assembly (:inputs value)))
+     (catch Exception _
+       false))))
 
 (defn valid?
   "True only for a recognized successful execution-preflight report."
