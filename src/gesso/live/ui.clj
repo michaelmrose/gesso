@@ -83,6 +83,33 @@
    render context; it is never treated as browser/server authority."
   :choreo/op)
 
+(def choreo-affordance-metadata-key
+  "Framework-owned Clojure metadata key marking one canonical :choreo/op
+   affordance in rendered server-side Hiccup.
+
+   The metadata value is the already-validated semantic operation keyword.
+   Metadata is intentionally not emitted into HTML and is not browser authority;
+   it exists so whole-application preflight can enumerate ordinary Gesso view
+   declarations without an application-maintained affordance registry or a
+   second rendered protocol attribute."
+  ::choreo-affordance)
+
+(def rendered-choreo-affordance-type
+  :gesso.live.ui/rendered-choreo-affordance)
+
+(def rendered-choreo-affordance-version
+  1)
+
+(def ^:private rendered-choreo-affordance-keys
+  #{:gesso.live.ui/type
+    :gesso.live.ui/version
+    :kind
+    :operation
+    :plan-key
+    :method
+    :path
+    :render-path})
+
 (def optimistic-operation-capabilities-context-key
   "Framework-owned render-context key containing a canonical operation-keyed
    optimistic capability registry.
@@ -118,6 +145,11 @@
   [x]
   (and (string? x)
        (str/blank? x)))
+
+(defn- nonblank-string?
+  [x]
+  (and (string? x)
+       (not (str/blank? x))))
 
 (defn- present?
   [x]
@@ -515,6 +547,184 @@
   ([capability binding]
    (optimistic-action-attrs
     (optimistic-action capability binding))))
+
+(defn- mark-choreo-post-button
+  [hiccup operation]
+  (mapv
+   (fn [node]
+     (if (and (vector? node)
+              (= :button (first node)))
+       (with-meta
+         node
+         (assoc (meta node)
+                choreo-affordance-metadata-key
+                operation))
+       node))
+   hiccup))
+
+(defn rendered-choreo-affordance?
+  "True for one closed rendered Choreo affordance descriptor produced by
+   rendered-choreo-affordances.
+
+   This is a rendered UI declaration, not authority.  :path is the concrete
+   hx-post coordinate present in the Hiccup node; matching that coordinate to a
+   trusted route template is a later application-preflight edge."
+  [value]
+  (and
+   (map? value)
+   (= rendered-choreo-affordance-keys (set (keys value)))
+   (= rendered-choreo-affordance-type
+      (:gesso.live.ui/type value))
+   (= rendered-choreo-affordance-version
+      (:gesso.live.ui/version value))
+   (= :post-button (:kind value))
+   (keyword? (:operation value))
+   (= (:operation value) (:plan-key value))
+   (= :post (:method value))
+   (nonblank-string? (:path value))
+   (vector? (:render-path value))
+   (every? #(and (integer? %) (not (neg? %))) (:render-path value))))
+
+(defn- affordance-ui-error
+  [kind message data]
+  (throw
+   (ex-info
+    message
+    (merge
+     {:error/type :gesso.live.ui/affordance-error
+      :error/kind kind}
+     data))))
+
+(defn- read-affordance-edn
+  [label value render-path]
+  (when-not (string? value)
+    (affordance-ui-error
+     :invalid-rendered-affordance-encoding
+     (str label " must be an EDN string in rendered Hiccup.")
+     {:render-path render-path
+      :value value}))
+  (try
+    (edn/read-string value)
+    (catch Exception cause
+      (throw
+       (ex-info
+        (str label " contains unreadable EDN in rendered Hiccup.")
+        {:error/type :gesso.live.ui/affordance-error
+         :error/kind :invalid-rendered-affordance-encoding
+         :render-path render-path
+         :value value}
+        cause)))))
+
+(defn- node-rendered-choreo-affordance
+  [node render-path]
+  (when (and (vector? node)
+             (contains? (meta node) choreo-affordance-metadata-key))
+    (let [operation
+          (get (meta node) choreo-affordance-metadata-key)]
+      (when-not (and (= :button (first node))
+                     (map? (second node)))
+        (affordance-ui-error
+         :invalid-rendered-affordance-button
+         "gesso.live rendered Choreo affordance metadata must annotate a Hiccup :button with an attrs map."
+         {:render-path render-path
+          :operation operation
+          :node node}))
+      (let [attrs (second node)
+            encoded-action
+            (get attrs optimistic-action-attr)
+            raw-action
+            (read-affordance-edn
+             "gesso.live rendered Choreo optimistic action"
+             encoded-action
+             render-path)
+            action
+            (try
+              (optimistic-action raw-action)
+              (catch Exception cause
+                (throw
+                 (ex-info
+                  "gesso.live rendered Choreo affordance contains an invalid optimistic action."
+                  {:error/type :gesso.live.ui/affordance-error
+                   :error/kind :invalid-rendered-affordance-action
+                   :render-path render-path
+                   :operation operation
+                   :action raw-action}
+                  cause))))
+            path (:hx-post attrs)]
+        (when-not (keyword? operation)
+          (affordance-ui-error
+           :invalid-rendered-affordance-operation
+           "gesso.live rendered Choreo affordance metadata must contain a semantic operation keyword."
+           {:render-path render-path
+            :operation operation}))
+        (when-not (= operation (:operation action))
+          (affordance-ui-error
+           :rendered-affordance-operation-mismatch
+           "gesso.live rendered Choreo affordance metadata does not match its optimistic action operation."
+           {:render-path render-path
+            :operation operation
+            :action-operation (:operation action)}))
+        (when-not (= operation (:plan-key action))
+          (affordance-ui-error
+           :rendered-affordance-plan-mismatch
+           "gesso.live rendered Choreo affordance plan key does not match its semantic operation."
+           {:render-path render-path
+            :operation operation
+            :plan-key (:plan-key action)}))
+        (when-not (= "button" (:type attrs))
+          (affordance-ui-error
+           :invalid-rendered-affordance-button
+           "gesso.live rendered Choreo POST affordance must remain a type=button node."
+           {:render-path render-path
+            :operation operation
+            :type (:type attrs)}))
+        (when-not (nonblank-string? path)
+          (affordance-ui-error
+           :missing-rendered-affordance-path
+           "gesso.live rendered Choreo POST affordance must contain a non-blank hx-post path."
+           {:render-path render-path
+            :operation operation
+            :path path}))
+        {:gesso.live.ui/type rendered-choreo-affordance-type
+         :gesso.live.ui/version rendered-choreo-affordance-version
+         :kind :post-button
+         :operation operation
+         :plan-key (:plan-key action)
+         :method :post
+         :path path
+         :render-path render-path}))))
+
+(defn rendered-choreo-affordances
+  "Enumerate canonical Choreo affordances from ordinary rendered Hiccup.
+
+   post-button derives framework-owned Clojure metadata from the already-validated
+   :choreo/op option.  This scanner joins that metadata to the same node's inert
+   protocol-v3 action and physical hx-post coordinate, so callers do not
+   maintain a second affordance registry.  The metadata is consumed before HTML
+   serialization and does not become a browser protocol or authorization fact.
+
+   The result preserves every rendered occurrence in structural Hiccup order;
+   repeated buttons for the same semantic operation remain separate descriptors
+   with different :render-path values.  Ordinary HTMX buttons and the lower-
+   level :optimistic escape hatch are intentionally not promoted into canonical
+   Choreo affordances.
+
+   Malformed or tampered framework metadata fails closed with structured
+   :gesso.live.ui/affordance-error data rather than disappearing from the scan."
+  [hiccup]
+  (letfn [(walk [value render-path]
+            (lazy-seq
+             (concat
+              (when-let [affordance
+                         (node-rendered-choreo-affordance value render-path)]
+                [affordance])
+              (when (sequential? value)
+                (mapcat
+                 (fn [[index child]]
+                   (walk child (conj render-path index)))
+                 (map-indexed vector value))))))]
+    (vec (walk hiccup []))))
+
 (defn optimistic-settlement-marker
   "Render an inert protocol-v3 settlement marker for an HTMX response.
 
@@ -1056,6 +1266,9 @@
        operation is resolved through the canonical operation-capability registry
        installed in ctx with with-optimistic-operation-capabilities. A view does
        not fetch/pass a capability object and cannot choose a second plan key.
+       The rendered button also carries framework-owned Clojure metadata used by
+       rendered-choreo-affordances before HTML serialization. The metadata is
+       not emitted to the browser and does not change authorization semantics.
 
      :optimistic-binding
        Required with :choreo/op and when :optimistic is an operation capability;
@@ -1083,17 +1296,24 @@
           maybe-opts)
          optimistic-action'
          (resolve-post-button-optimistic ctx opts)
+         choreo-operation
+         (when (contains? opts choreo-operation-option-key)
+           (:operation optimistic-action'))
          opts'
          (dissoc opts :optimistic :optimistic-binding choreo-operation-option-key)]
      (if (nil? optimistic-action')
        (render-ordinary-post-button
         ctx
         opts')
-       (render-post-button
-        ctx
-        (assoc opts'
-               :protocol-attrs
-               (htmx/merge-attrs
-                (:protocol-attrs opts')
-                (optimistic-action-attrs
-                 optimistic-action'))))))))
+       (let [rendered
+             (render-post-button
+              ctx
+              (assoc opts'
+                     :protocol-attrs
+                     (htmx/merge-attrs
+                      (:protocol-attrs opts')
+                      (optimistic-action-attrs
+                       optimistic-action'))))]
+         (if choreo-operation
+           (mark-choreo-post-button rendered choreo-operation)
+           rendered))))))
