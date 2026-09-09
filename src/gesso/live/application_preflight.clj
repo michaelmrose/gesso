@@ -44,8 +44,7 @@
    [clojure.set :as set]
    [clojure.string :as str]
    [gesso.live.browser.build :as browser-build]
-   [gesso.live.operation-acquisition-preflight :as operation-acquisition]
-   [gesso.live.optimistic.execution-preflight :as execution]))
+   [gesso.live.operation-acquisition-preflight :as operation-acquisition]))
 
 ;; =============================================================================
 ;; Identity / closed vocabulary
@@ -93,6 +92,13 @@
     :operation-acquisition-assembly
     :browser-artifact-path
     :browser-receipt-path})
+
+(def ^:private operation-acquisition-assembly-keys
+  #{:gesso.live.operation-acquisition-preflight/type
+    :gesso.live.operation-acquisition-preflight/version
+    :name
+    :execution-assembly
+    :acquisition-assembly})
 
 (def ^:private affordance-open-obligation
   {:kind :static-affordance-closure-not-yet-modeled
@@ -239,37 +245,59 @@
    (sorted-map)
    (:routes route-assembly')))
 
-(declare application-assembly?)
+(declare application-assembly?
+         application-assembly-shape?
+         current-application-report
+         check-application-assembly)
 
-(defn operation-summary
-  "Return one completely derived operation-keyed explanation for a current
-   OperationAcquisitionAssembly.
+(defn- operation-acquisition-assembly-shape?
+  [value]
+  (and
+   (closed-map? operation-acquisition-assembly-keys value)
+   (= operation-acquisition/operation-acquisition-assembly-type
+      (:gesso.live.operation-acquisition-preflight/type value))
+   (= operation-acquisition/preflight-version
+      (:gesso.live.operation-acquisition-preflight/version value))
+   (or (nil? (:name value))
+       (keyword? (:name value)))))
 
-   This is deliberately a view over nested closed products, not another stored
-   registry.  It exposes enough of the current application backbone for tooling
-   and LLM-assisted repair without forcing a consumer to reconstruct the chain
-   manually from several namespaces."
-  [operation-acquisition-assembly]
-  (when-not
-   (operation-acquisition/operation-acquisition-assembly?
-    operation-acquisition-assembly)
-    (throw
-     (preflight-error
-      :invalid-operation-acquisition-assembly
-      "Application operation summary requires a current OperationAcquisitionAssembly."
-      {:operation-acquisition-assembly operation-acquisition-assembly})))
+(defn- current-operation-acquisition-report
+  "Return one freshly derived successful operation-acquisition report when the
+   supplied closed-product shape and both embedded upstream assemblies remain
+   current.  This internal helper deliberately uses the fresh report returned by
+   check-operation-acquisition directly instead of asking report?/valid? to
+   re-derive the same graph a second time."
+  [value]
+  (when (operation-acquisition-assembly-shape? value)
+    (try
+      (let [report
+            (operation-acquisition/check-operation-acquisition
+             {:name (:name value)
+              :execution-assembly (:execution-assembly value)
+              :acquisition-assembly (:acquisition-assembly value)})]
+        (when (true? (:valid? report))
+          report))
+      (catch Exception _
+        nil))))
+
+(defn- operation-summary-from-report
+  [operation-acquisition-assembly operation-acquisition-report]
   (let [execution' (execution-assembly operation-acquisition-assembly)
         route' (route-assembly operation-acquisition-assembly)
         operation' (operation-assembly operation-acquisition-assembly)
         acquisition' (acquisition-assembly operation-acquisition-assembly)
         routes-by-operation (route-realizations-by-operation route')
-        execution-capabilities (execution/execution-capabilities execution')
-        settlement-contracts (execution/settlement-contracts execution')
-        publication (execution/published-change-topics execution')
+        execution-capabilities (:execution-capabilities execution')
+        settlement-contracts (:settlement-contracts execution')
+        publication
+        (get-in operation-acquisition-report
+                [:analysis :published-change-topics-by-operation])
         affected-scopes
-        (operation-acquisition/affected-scopes operation-acquisition-assembly)
+        (get-in operation-acquisition-report
+                [:analysis :affected-scopes-by-operation])
         affected-fragments
-        (operation-acquisition/affected-fragments operation-acquisition-assembly)]
+        (get-in operation-acquisition-report
+                [:analysis :affected-fragments-by-operation])]
     (into
      (sorted-map)
      (map
@@ -312,18 +340,61 @@
               (sort-by pr-str (get affected-fragments operation #{}))))}]))
       (sort-by pr-str (keys (:operations operation')))))))
 
+(defn operation-summary
+  "Return one completely derived operation-keyed explanation for a current
+   OperationAcquisitionAssembly.
+
+   This is deliberately a view over nested closed products, not another stored
+   registry.  It exposes enough of the current application backbone for tooling
+   and LLM-assisted repair without forcing a consumer to reconstruct the chain
+   manually from several namespaces.
+
+   v623 derives one current operation-acquisition report and reuses its analysis
+   instead of recursively re-recognizing the same nested assemblies through
+   several public accessors."
+  [operation-acquisition-assembly]
+  (if-let [report
+           (current-operation-acquisition-report
+            operation-acquisition-assembly)]
+    (operation-summary-from-report
+     operation-acquisition-assembly
+     report)
+    (throw
+     (preflight-error
+      :invalid-operation-acquisition-assembly
+      "Application operation summary requires a current OperationAcquisitionAssembly."
+      {:operation-acquisition-assembly operation-acquisition-assembly}))))
+
 (defn open-obligations
   "Return the currently known whole-application obligations that are not yet
    discharged by the modeled runtime-backbone preflight.
 
-   v622 intentionally reports the missing static affordance-enumeration edge
-   instead of demanding a duplicate application-authored affordance registry."
+   v623 keeps currentness fail-closed while avoiding duplicate full-graph
+   validation during ordinary explanation."
   [application-or-operation-acquisition]
   (cond
-    (application-assembly? application-or-operation-acquisition)
-    [affordance-open-obligation]
+    (application-assembly-shape? application-or-operation-acquisition)
+    (if-let [report
+             (current-application-report
+              application-or-operation-acquisition)]
+      (get-in report [:analysis :open-obligations])
+      (throw
+       (preflight-error
+        :invalid-application-input
+        "Open-obligation inspection requires a current ApplicationAssembly or OperationAcquisitionAssembly."
+        {:value application-or-operation-acquisition})))
 
-    (operation-acquisition/operation-acquisition-assembly?
+    (and (map? application-or-operation-acquisition)
+         (= application-assembly-type
+            (:gesso.live.application-preflight/type
+             application-or-operation-acquisition)))
+    (throw
+     (preflight-error
+      :invalid-application-input
+      "Open-obligation inspection requires a current ApplicationAssembly or OperationAcquisitionAssembly."
+      {:value application-or-operation-acquisition}))
+
+    (current-operation-acquisition-report
      application-or-operation-acquisition)
     [affordance-open-obligation]
 
@@ -394,9 +465,12 @@
                 browser-receipt-path]}
         (validate-options! options)
 
-        operation-acquisition-valid?
-        (operation-acquisition/operation-acquisition-assembly?
+        operation-acquisition-report
+        (current-operation-acquisition-report
          operation-acquisition-assembly)
+
+        operation-acquisition-valid?
+        (some? operation-acquisition-report)
 
         manifest
         (when operation-acquisition-valid?
@@ -426,13 +500,16 @@
 
         operation-summary'
         (if operation-acquisition-valid?
-          (operation-summary operation-acquisition-assembly)
+          (operation-summary-from-report
+           operation-acquisition-assembly
+           operation-acquisition-report)
           (sorted-map))
 
         unhandled-topics
         (if operation-acquisition-valid?
-          (:unhandled-published-change-topics
-           (operation-acquisition/explain operation-acquisition-assembly))
+          (get-in operation-acquisition-report
+                  [:analysis
+                   :unhandled-published-change-topics-by-operation])
           {})
 
         warnings
@@ -516,12 +593,7 @@
 ;; Closed current physical application product
 ;; =============================================================================
 
-(defn application-assembly?
-  "True for one current ApplicationAssembly whose nested semantic/runtime
-   backbone remains closed and whose physical browser artifact still verifies.
-
-   This predicate performs physical file verification by design. Application
-   assemblies are build/start-time currentness objects, not portable certificates."
+(defn- application-assembly-shape?
   [value]
   (and
    (closed-map? assembly-keys value)
@@ -531,21 +603,37 @@
       (:gesso.live.application-preflight/version value))
    (or (nil? (:name value))
        (keyword? (:name value)))
-   (operation-acquisition/operation-acquisition-assembly?
+   (operation-acquisition-assembly-shape?
     (:operation-acquisition-assembly value))
    (nonblank-string? (:browser-artifact-path value))
    (or (nil? (:browser-receipt-path value))
-       (nonblank-string? (:browser-receipt-path value)))
-   (try
-     (valid?
-      (check-application-assembly
-       {:name (:name value)
-        :operation-acquisition-assembly
-        (:operation-acquisition-assembly value)
-        :browser-artifact-path (:browser-artifact-path value)
-        :browser-receipt-path (:browser-receipt-path value)}))
-     (catch Exception _
-       false))))
+       (nonblank-string? (:browser-receipt-path value)))))
+
+(defn- current-application-report
+  [value]
+  (when (application-assembly-shape? value)
+    (try
+      (let [report
+            (check-application-assembly
+             {:name (:name value)
+              :operation-acquisition-assembly
+              (:operation-acquisition-assembly value)
+              :browser-artifact-path (:browser-artifact-path value)
+              :browser-receipt-path (:browser-receipt-path value)})]
+        (when (true? (:valid? report))
+          report))
+      (catch Exception _
+        nil))))
+
+(defn application-assembly?
+  "True for one current ApplicationAssembly whose nested semantic/runtime
+   backbone remains closed and whose physical browser artifact still verifies.
+
+   This predicate performs one fresh whole-application derivation by design.
+   v623 no longer validates the same freshly generated report again through the
+   public report recognizer."
+  [value]
+  (boolean (current-application-report value)))
 
 (defn require-application-assembly!
   "Require the currently modeled application runtime backbone and return one
@@ -564,7 +652,7 @@
 
         report
         (check-application-assembly options')]
-    (when-not (valid? report)
+    (when-not (true? (:valid? report))
       (throw
        (preflight-error
         :application-backbone-preflight-failed
@@ -588,28 +676,29 @@
 
 (defn explain-operation
   "Explain one route-exposed operation through the assembled application
-   backbone without requiring callers to traverse nested preflight products."
+   backbone without requiring callers to traverse nested preflight products.
+
+   Currentness and the full derived operation summary come from the same fresh
+   application report, avoiding a second recursive validation pass."
   [application-assembly operation]
-  (when-not (application-assembly? application-assembly)
+  (if-let [report (current-application-report application-assembly)]
+    (let [summary (get-in report [:analysis :operations])]
+      (when-not (contains? summary operation)
+        (throw
+         (preflight-error
+          :unknown-operation
+          "Application operation explanation references an operation outside the assembled route-exposed application slice."
+          {:operation operation
+           :available-operations (set (keys summary))})))
+      (assoc
+       (get summary operation)
+       :operation operation
+       :guarantee backbone-guarantee))
     (throw
      (preflight-error
       :invalid-application-assembly
       "Operation explanation requires a current ApplicationAssembly."
-      {:application-assembly application-assembly})))
-  (let [summary
-        (operation-summary
-         (:operation-acquisition-assembly application-assembly))]
-    (when-not (contains? summary operation)
-      (throw
-       (preflight-error
-        :unknown-operation
-        "Application operation explanation references an operation outside the assembled route-exposed application slice."
-        {:operation operation
-         :available-operations (set (keys summary))})))
-    (assoc
-     (get summary operation)
-     :operation operation
-     :guarantee backbone-guarantee)))
+      {:application-assembly application-assembly}))))
 
 (defn explain
   "Return one compact whole-application runtime-backbone explanation.
@@ -618,17 +707,14 @@
 
      :guarantee        what the modeled assembly currently closes;
      :open-obligations what still lacks a whole-application preflight model;
-     :trusted-assumptions facts outside the proved/assembly-verified core."
+     :trusted-assumptions facts outside the proved/assembly-verified core.
+
+   v623 reuses one fresh application report rather than recognizing the assembly
+   and then independently recomputing the same report."
   [value]
   (cond
-    (application-assembly? value)
-    (let [report
-          (check-application-assembly
-           {:name (:name value)
-            :operation-acquisition-assembly
-            (:operation-acquisition-assembly value)
-            :browser-artifact-path (:browser-artifact-path value)
-            :browser-receipt-path (:browser-receipt-path value)})]
+    (application-assembly-shape? value)
+    (if-let [report (current-application-report value)]
       {:type application-assembly-type
        :version preflight-version
        :name (:name value)
@@ -648,7 +734,12 @@
                 :name])
        :open-obligations (get-in report [:analysis :open-obligations])
        :trusted-assumptions (get-in report [:analysis :trusted-assumptions])
-       :warnings (:warnings report)})
+       :warnings (:warnings report)}
+      (throw
+       (preflight-error
+        :unrecognized-value
+        "Expected an application preflight report or current ApplicationAssembly."
+        {:value value})))
 
     (report? value)
     {:type report-type
