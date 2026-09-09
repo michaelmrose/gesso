@@ -48,7 +48,7 @@
 ;; Identity
 ;; =============================================================================
 
-(def preflight-version 3)
+(def preflight-version 4)
 
 (def report-type
   :gesso.live.optimistic.preflight/report)
@@ -65,7 +65,16 @@
     :valid?
     :errors
     :warnings
+    :inputs
     :analysis})
+
+(def ^:private analysis-keys
+  #{:name
+    :browser-assembly-name
+    :browser-role
+    :command-transport
+    :browser-operations
+    :registered-server-operations})
 
 (def ^:private assembly-keys
   #{:gesso.live.optimistic.preflight/type
@@ -361,7 +370,8 @@
   (let [{:keys [name
                 browser-assembly
                 operation-capabilities
-                server-operations]}
+                server-operations]
+         :as options'}
         (validate-options! options)
 
         browser-valid?
@@ -435,6 +445,7 @@
      :valid? (empty? errors)
      :errors errors
      :warnings []
+     :inputs options'
      :analysis
      {:name name
       :browser-assembly-name
@@ -454,8 +465,13 @@
         #{})}}))
 
 (defn report?
-  "True when value has the closed shape of a current operation-assembly report
-   and :valid? agrees with its error vector."
+  "True only when value is exactly the current operation-assembly report
+   derivable from its embedded preflight inputs.
+
+   Recognition deliberately re-runs check-operation-assembly.  A caller cannot
+   forge a positive report by editing the derived operation sets, transport,
+   browser identity, errors, or validity while retaining a plausible report
+   shape."
   [value]
   (and
    (map? value)
@@ -467,9 +483,19 @@
    (boolean? (:valid? value))
    (vector? (:errors value))
    (vector? (:warnings value))
+   (map? (:inputs value))
    (map? (:analysis value))
+   (= analysis-keys
+      (set (keys (:analysis value))))
+   (set? (get-in value [:analysis :browser-operations]))
+   (set? (get-in value [:analysis :registered-server-operations]))
    (= (:valid? value)
-      (empty? (:errors value)))))
+      (empty? (:errors value)))
+   (try
+     (= value
+        (check-operation-assembly (:inputs value)))
+     (catch Exception _
+       false))))
 
 (defn valid?
   "True only for a recognized successful operation-assembly report."
