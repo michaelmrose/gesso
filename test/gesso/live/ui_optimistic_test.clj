@@ -7,7 +7,8 @@
    [gesso.choreo.project :as project]
    [gesso.live.optimistic.capability :as capability]
    [gesso.live.optimistic.protocol :as protocol]
-   [gesso.live.ui :as ui]))
+   [gesso.live.ui :as ui]
+   [rum.core :as rum]))
 
 ;; -----------------------------------------------------------------------------
 ;; Fixtures / Hiccup helpers
@@ -434,6 +435,277 @@
     (is (= "#request-list" (:hx-target attrs)))
     (is (= "outerHTML" (:hx-swap attrs)))
     (is (= optimistic-action (decoded-action markup)))))
+
+;; -----------------------------------------------------------------------------
+;; Rendered Choreo affordance enumeration / preflight metadata
+;; -----------------------------------------------------------------------------
+
+(defn- canonical-claim-button
+  ([]
+   (canonical-claim-button "/claim"))
+  ([path]
+   (ui/post-button
+    operation-ctx
+    {:to path
+     :label "Claim"
+     :choreo/op :request/claim
+     :optimistic-binding optimistic-binding})))
+
+(defn- explicit-claim-button
+  [path]
+  (ui/post-button
+   ctx
+   {:to path
+    :label "Claim"
+    :optimistic claim-capability
+    :optimistic-binding optimistic-binding}))
+
+(defn- button-index
+  [markup]
+  (some
+   (fn [[index node]]
+     (when (and (vector? node)
+                (= :button (first node)))
+       index))
+   (map-indexed vector markup)))
+
+(defn- update-button
+  [markup f]
+  (let [index (button-index markup)]
+    (assoc markup index (f (nth markup index)))))
+
+(defn- update-button-attrs
+  [markup f]
+  (update-button
+   markup
+   (fn [node]
+     (assoc node 1 (f (second node))))))
+
+(defn- affordance-error-data
+  [markup]
+  (error-data #(ui/rendered-choreo-affordances markup)))
+
+(deftest rendered-choreo-affordance-is-derived-from-canonical-post-button-test
+  (let [markup (canonical-claim-button)
+        descriptor (first (ui/rendered-choreo-affordances markup))
+        button-node (button markup)]
+    (is (= 1 (count (ui/rendered-choreo-affordances markup))))
+    (is (= {:gesso.live.ui/type ui/rendered-choreo-affordance-type
+            :gesso.live.ui/version ui/rendered-choreo-affordance-version
+            :kind :post-button
+            :operation :request/claim
+            :plan-key :request/claim
+            :method :post
+            :path "/claim"
+            :render-path [3]}
+           descriptor))
+    (is (ui/rendered-choreo-affordance? descriptor))
+    (is (= :request/claim
+           (get (meta button-node)
+                ui/choreo-affordance-metadata-key)))
+    (is (= :request/claim (:operation (decoded-action markup))))
+    (is (= :request/claim (:plan-key (decoded-action markup))))))
+
+(deftest rendered-choreo-affordances-preserve-occurrences-and-structural-order-test
+  (let [first-button (canonical-claim-button "/requests/1/claim")
+        second-button (canonical-claim-button "/requests/2/claim")
+        tree [:main
+              [:section first-button]
+              [:aside
+               [:div second-button]
+               first-button]]
+        affordances (ui/rendered-choreo-affordances tree)]
+    (is (= 3 (count affordances)))
+    (is (= ["/requests/1/claim"
+            "/requests/2/claim"
+            "/requests/1/claim"]
+           (mapv :path affordances)))
+    (is (= [[1 1 3]
+            [2 1 1 3]
+            [2 2 3]]
+           (mapv :render-path affordances)))
+    (is (every? ui/rendered-choreo-affordance? affordances))))
+
+(deftest only-canonical-choreo-operation-path-is-promoted-to-affordance-test
+  (let [ordinary
+        (ui/post-button ctx {:to "/ordinary" :label "Ordinary"})
+        raw
+        (ui/post-button
+         ctx
+         {:to "/raw"
+          :label "Raw"
+          :optimistic optimistic-action})
+        explicit
+        (explicit-claim-button "/explicit")
+        canonical
+        (canonical-claim-button "/canonical")
+        affordances
+        (ui/rendered-choreo-affordances
+         [:div ordinary raw explicit canonical])]
+    (is (= 1 (count affordances)))
+    (is (= :request/claim (:operation (first affordances))))
+    (is (= "/canonical" (:path (first affordances))))
+    (is (nil? (get (meta (button ordinary)) ui/choreo-affordance-metadata-key)))
+    (is (nil? (get (meta (button raw)) ui/choreo-affordance-metadata-key)))
+    (is (nil? (get (meta (button explicit)) ui/choreo-affordance-metadata-key)))
+    (is (= :request/claim
+           (get (meta (button canonical)) ui/choreo-affordance-metadata-key)))))
+
+(deftest canonical-affordance-metadata-does-not-change-rendered-html-test
+  (let [canonical (canonical-claim-button)
+        explicit (explicit-claim-button "/claim")]
+    ;; Clojure equality deliberately ignores metadata, preserving the existing
+    ;; render-equivalence contract.
+    (is (= canonical explicit))
+    (is (some? (get (meta (button canonical)) ui/choreo-affordance-metadata-key)))
+    (is (nil? (get (meta (button explicit)) ui/choreo-affordance-metadata-key)))
+    (is (= (rum/render-static-markup canonical)
+           (rum/render-static-markup explicit)))
+    (is (not (.contains
+              (rum/render-static-markup canonical)
+              "choreo-affordance")))))
+
+(deftest rendered-choreo-affordance-predicate-is-closed-test
+  (let [descriptor (first (ui/rendered-choreo-affordances
+                           (canonical-claim-button)))]
+    (is (ui/rendered-choreo-affordance? descriptor))
+    (doseq [[k v]
+            [[:operation "request/claim"]
+             [:plan-key :request/cancel]
+             [:method :get]
+             [:path ""]
+             [:render-path [-1]]
+             [:kind :ordinary-button]
+             [:gesso.live.ui/version 2]]]
+      (is (not (ui/rendered-choreo-affordance? (assoc descriptor k v)))))
+    (is (not (ui/rendered-choreo-affordance?
+              (assoc descriptor :extra :forged))))))
+
+(deftest tampered-affordance-operation-metadata-fails-closed-test
+  (let [markup
+        (update-button
+         (canonical-claim-button)
+         #(with-meta
+            %
+            (assoc (meta %)
+                   ui/choreo-affordance-metadata-key
+                   :request/cancel)))
+        data (affordance-error-data markup)]
+    (is (= :gesso.live.ui/affordance-error (:error/type data)))
+    (is (= :rendered-affordance-operation-mismatch (:error/kind data)))
+    (is (= :request/cancel (:operation data)))
+    (is (= :request/claim (:action-operation data)))
+    (is (= [3] (:render-path data)))))
+
+(deftest malformed-affordance-operation-metadata-fails-before-correspondence-test
+  (let [markup
+        (update-button
+         (canonical-claim-button)
+         #(with-meta
+            %
+            (assoc (meta %)
+                   ui/choreo-affordance-metadata-key
+                   "request/claim")))
+        data (affordance-error-data markup)]
+    (is (= :gesso.live.ui/affordance-error (:error/type data)))
+    (is (= :invalid-rendered-affordance-operation (:error/kind data)))
+    (is (= "request/claim" (:operation data)))
+    (is (= [3] (:render-path data)))))
+
+(deftest tampered-affordance-plan-key-fails-closed-test
+  (let [markup
+        (update-button-attrs
+         (canonical-claim-button)
+         (fn [attrs]
+           (assoc attrs
+                  ui/optimistic-action-attr
+                  (pr-str
+                   (assoc (edn/read-string
+                           (get attrs ui/optimistic-action-attr))
+                          :plan-key :request/cancel)))))
+        data (affordance-error-data markup)]
+    (is (= :gesso.live.ui/affordance-error (:error/type data)))
+    (is (= :rendered-affordance-plan-mismatch (:error/kind data)))
+    (is (= :request/claim (:operation data)))
+    (is (= :request/cancel (:plan-key data)))
+    (is (= [3] (:render-path data)))))
+
+(deftest malformed-affordance-action-encoding-fails-closed-test
+  (doseq [[encoded expected-kind]
+          [[nil :invalid-rendered-affordance-encoding]
+           [42 :invalid-rendered-affordance-encoding]
+           ["{" :invalid-rendered-affordance-encoding]]]
+    (let [markup
+          (update-button-attrs
+           (canonical-claim-button)
+           #(assoc % ui/optimistic-action-attr encoded))
+          data (affordance-error-data markup)]
+      (is (= :gesso.live.ui/affordance-error (:error/type data)))
+      (is (= expected-kind (:error/kind data)))
+      (is (= [3] (:render-path data))))))
+
+(deftest malformed-affordance-action-fails-closed-test
+  (let [markup
+        (update-button-attrs
+         (canonical-claim-button)
+         #(assoc % ui/optimistic-action-attr
+                 (pr-str {:operation :request/claim})))
+        data (affordance-error-data markup)]
+    (is (= :gesso.live.ui/affordance-error (:error/type data)))
+    (is (= :invalid-rendered-affordance-action (:error/kind data)))
+    (is (= :request/claim (:operation data)))
+    (is (= [3] (:render-path data)))
+    (is (= {:operation :request/claim} (:action data)))))
+
+(deftest affordance-metadata-on-non-button-node-fails-closed-test
+  (doseq [node
+          [(with-meta [:a {:href "/claim"} "Claim"]
+             {ui/choreo-affordance-metadata-key :request/claim})
+           (with-meta [:button "Claim"]
+             {ui/choreo-affordance-metadata-key :request/claim})]]
+    (let [data (affordance-error-data [:div node])]
+      (is (= :gesso.live.ui/affordance-error (:error/type data)))
+      (is (= :invalid-rendered-affordance-button (:error/kind data)))
+      (is (= :request/claim (:operation data)))
+      (is (= [1] (:render-path data))))))
+
+(deftest tampered-affordance-button-type-fails-closed-test
+  (let [markup
+        (update-button-attrs
+         (canonical-claim-button)
+         #(assoc % :type "submit"))
+        data (affordance-error-data markup)]
+    (is (= :gesso.live.ui/affordance-error (:error/type data)))
+    (is (= :invalid-rendered-affordance-button (:error/kind data)))
+    (is (= "submit" (:type data)))
+    (is (= :request/claim (:operation data)))
+    (is (= [3] (:render-path data)))))
+
+(deftest missing-or-blank-affordance-post-path-fails-closed-test
+  (doseq [path [nil "" "   "]]
+    (let [markup
+          (update-button-attrs
+           (canonical-claim-button)
+           #(assoc % :hx-post path))
+          data (affordance-error-data markup)]
+      (is (= :gesso.live.ui/affordance-error (:error/type data)))
+      (is (= :missing-rendered-affordance-path (:error/kind data)))
+      (is (= path (:path data)))
+      (is (= :request/claim (:operation data)))
+      (is (= [3] (:render-path data))))))
+
+(deftest malformed-canonical-descendant-is-not-silently-skipped-test
+  (let [good (canonical-claim-button "/good")
+        bad
+        (update-button-attrs
+         (canonical-claim-button "/bad")
+         #(dissoc % :hx-post))
+        tree [:main good [:section bad] good]
+        data (affordance-error-data tree)]
+    (is (= :gesso.live.ui/affordance-error (:error/type data)))
+    (is (= :missing-rendered-affordance-path (:error/kind data)))
+    (is (= [2 1 3] (:render-path data)))
+    (is (= :request/claim (:operation data)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Protocol-v3 action annotation
