@@ -39,7 +39,7 @@
 ;; Identity
 ;; =============================================================================
 
-(def preflight-version 1)
+(def preflight-version 2)
 
 (def report-type
   :gesso.live.optimistic.route-preflight/report)
@@ -56,7 +56,16 @@
     :valid?
     :errors
     :warnings
+    :inputs
     :analysis})
+
+(def ^:private analysis-keys
+  #{:name
+    :operation-assembly-name
+    :required-operations
+    :required-transports
+    :declared-route-ids
+    :declared-route-operations})
 
 (def ^:private route-capability-keys
   #{:gesso.live.optimistic.route-preflight/type
@@ -474,6 +483,7 @@
      :valid? (empty? errors)
      :errors errors
      :warnings []
+     :inputs options
      :analysis
      {:name name
       :operation-assembly-name
@@ -500,8 +510,13 @@
         #{})}}))
 
 (defn report?
-  "True when value has the closed shape of a current route-preflight report and
-   :valid? agrees with its error vector."
+  "True only when value is exactly the current route-preflight report derivable
+   from its embedded preflight inputs.
+
+   Recognition deliberately re-runs check-route-assembly. A caller cannot forge
+   a positive report by editing derived operation sets, transport requirements,
+   declared route summaries, errors, or validity while retaining a plausible
+   report shape."
   [value]
   (and
    (map? value)
@@ -513,9 +528,21 @@
    (boolean? (:valid? value))
    (vector? (:errors value))
    (vector? (:warnings value))
+   (map? (:inputs value))
    (map? (:analysis value))
+   (= analysis-keys
+      (set (keys (:analysis value))))
+   (set? (get-in value [:analysis :required-operations]))
+   (map? (get-in value [:analysis :required-transports]))
+   (set? (get-in value [:analysis :declared-route-ids]))
+   (set? (get-in value [:analysis :declared-route-operations]))
    (= (:valid? value)
-      (empty? (:errors value)))))
+      (empty? (:errors value)))
+   (try
+     (= value
+        (check-route-assembly (:inputs value)))
+     (catch Exception _
+       false))))
 
 (defn valid?
   "True only for a recognized successful route-preflight report."
