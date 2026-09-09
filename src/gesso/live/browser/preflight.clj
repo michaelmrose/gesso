@@ -59,7 +59,19 @@
     :valid?
     :errors
     :warnings
+    :inputs
     :analysis})
+
+(def ^:private analysis-keys
+  #{:name
+    :browser-role
+    :plan-registry-name
+    :plan-keys
+    :required-plan-keys
+    :plan-roles
+    :features
+    :optimistic-command-transport
+    :bootstrap-entrypoint})
 
 (def ^:private bootstrap-contract-keys
   #{:required?
@@ -434,6 +446,9 @@
      :warnings
      []
 
+     :inputs
+     options'
+
      :analysis
      {:name name
       :browser-role browser-role
@@ -456,8 +471,13 @@
       canonical-bootstrap-entrypoint}}))
 
 (defn report?
-  "True when value has the closed shape of a current browser assembly report and
-   :valid? agrees with the reported errors."
+  "True only when value is exactly the current browser-assembly report
+   derivable from its embedded preflight inputs.
+
+   Recognition deliberately re-runs check-browser-assembly. A caller cannot
+   forge a positive report by editing plan coverage, runtime role, feature or
+   transport summaries, bootstrap metadata, errors, or validity while retaining
+   a plausible report shape."
   [value]
   (and
    (map? value)
@@ -470,9 +490,21 @@
    (boolean? (:valid? value))
    (vector? (:errors value))
    (vector? (:warnings value))
+   (map? (:inputs value))
    (map? (:analysis value))
+   (= analysis-keys
+      (set (keys (:analysis value))))
+   (set? (get-in value [:analysis :plan-keys]))
+   (set? (get-in value [:analysis :required-plan-keys]))
+   (set? (get-in value [:analysis :plan-roles]))
+   (set? (get-in value [:analysis :features]))
    (= (:valid? value)
-      (empty? (:errors value)))))
+      (empty? (:errors value)))
+   (try
+     (= value
+        (check-browser-assembly (:inputs value)))
+     (catch Exception _
+       false))))
 
 (defn valid?
   "True only for a recognized successful browser assembly report."
