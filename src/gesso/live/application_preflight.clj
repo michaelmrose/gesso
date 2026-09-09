@@ -36,6 +36,15 @@
    This is runtime enforcement before browser delivery, not a fabricated static
    proof that every application render producer has been enumerated.
 
+   v632 closes the next structural edge for the canonical Gesso HTML path.
+   wrap-application-handler installs the generic gesso.http pre-serialization
+   guard once around an ordinary handler invocation, so every nested call to the
+   existing gesso.core/html-response / gesso.http/html-response validates its
+   actual Hiccup against the current ApplicationAssembly automatically. This is
+   structural closure relative to the wrapped handler tree, not a claim that
+   arbitrary manually constructed Ring responses or unwrapped entrypoints are
+   impossible.
+
    ApplicationAssembly is intentionally physical rather than portable:
    recognition re-verifies current artifact bytes/receipt and rescans any embedded
    rendered surfaces. A stale generated artifact, malformed canonical affordance,
@@ -50,6 +59,7 @@
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
+   [gesso.http :as http]
    [gesso.live.browser.build :as browser-build]
    [gesso.live.operation-acquisition-preflight :as operation-acquisition]
    [gesso.live.ui :as ui]))
@@ -77,6 +87,9 @@
 
 (def rendered-surface-report-type
   :gesso.live.application-preflight/rendered-surface-report)
+
+(def canonical-html-response-surface
+  :gesso.live.application-preflight/html-response)
 
 (def ^:private option-keys
   #{:name
@@ -150,7 +163,7 @@
    :edge :application->rendered-surfaces
    :status :open
    :message
-   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface through checked-rendered-response! before browser delivery, but does not yet independently prove that every application render producer uses that boundary."})
+   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface before browser delivery. wrap-application-handler can structurally install that check around every nested canonical Gesso HTML response for one handler tree, but ApplicationAssembly alone does not yet prove that every application entrypoint is wrapped or that arbitrary hand-built Ring responses use the canonical Gesso HTML boundary."})
 
 (def ^:private trusted-assumptions
   #{:application-publication-declarations-match-model-publication
@@ -1083,6 +1096,72 @@
        :response-fn response-fn})))
   (require-rendered-surface! application-assembly surface rendered)
   (response-fn rendered))
+
+;; =============================================================================
+;; Canonical application-handler HTML boundary
+;; =============================================================================
+
+(defn- actual-function?
+  [value]
+  (or
+   (fn? value)
+   (and
+    (var? value)
+    (fn? @value))))
+
+(defn- invoke-actual-function
+  [f & args]
+  (apply (if (var? f) @f f) args))
+
+(defn wrap-application-handler
+  "Wrap one ordinary one-argument application/Ring handler so every nested
+   canonical Gesso HTML response is checked against application-assembly before
+   Rum serialization.
+
+   The wrapper installs the generic gesso.http pre-serialization guard once for
+   the dynamic extent of each handler invocation. Existing descendants may keep
+   calling gesso.core/html-response or gesso.http/html-response; they do not need
+   a special response function or an explicit checked-rendered-response! call.
+
+   Each actual Hiccup body is validated with require-rendered-surface! using the
+   stable diagnostic surface canonical-html-response-surface. Semantic operation,
+   browser-plan, method, concrete URL, trusted route, and current artifact
+   correspondence are still derived from the rendered value and current
+   ApplicationAssembly. The surface keyword is diagnostic only and grants no
+   authority.
+
+   This closes the producer -> checked canonical Gesso HTML boundary *relative
+   to this wrapped handler invocation*. It does not claim that arbitrary manual
+   Ring responses containing pre-rendered HTML pass through gesso.http/html-response,
+   nor does ApplicationAssembly by itself prove that every application entrypoint
+   installed this wrapper.
+
+   application-assembly must be current when the wrapper is created. It is also
+   rechecked for every actual HTML response by require-rendered-surface!, so an
+   artifact/receipt that becomes stale after wrapper construction still fails
+   before serialization."
+  [application-assembly handler]
+  (when-not (application-assembly? application-assembly)
+    (throw
+     (preflight-error
+      :invalid-application-handler-assembly
+      "wrap-application-handler requires a current ApplicationAssembly."
+      {:application-assembly application-assembly})))
+  (when-not (actual-function? handler)
+    (throw
+     (preflight-error
+      :invalid-application-handler
+      "wrap-application-handler requires an actual function or a Var currently containing one."
+      {:handler handler})))
+  (fn [request]
+    (http/with-html-response-preflight
+     (fn [rendered]
+       (require-rendered-surface!
+        application-assembly
+        canonical-html-response-surface
+        rendered))
+     (fn []
+       (invoke-actual-function handler request)))))
 
 ;; =============================================================================
 ;; Closed current physical application product
