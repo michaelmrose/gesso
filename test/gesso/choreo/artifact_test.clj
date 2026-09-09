@@ -1039,3 +1039,128 @@
       (is (= :evidence-proof-mismatch
              (:error/kind data))))))
 
+
+(deftest correspondence-evidence-rederives-the-concrete-result-instead-of-trusting-it
+  (let [choreography
+        (artifact-bound-protocol :done)
+
+        emitted
+        (artifact/emit-artifacts choreography)]
+
+    (doseq [[mode check!]
+            [[:lockstep artifact/check-artifact-witness]
+             [:weak artifact/check-artifact-weak-witness]]]
+      (let [evidence
+            (check!
+             emitted
+             choreography
+             artifact-bound-good-witness
+             {:require-complete? true})
+
+            forged-global-outcome
+            (assoc-in evidence
+                      [:correspondence :global-outcome]
+                      :rejected)
+
+            forged-terminal-compatibility
+            (assoc-in evidence
+                      [:correspondence
+                       :terminal-compatibility
+                       :global-outcome]
+                      :rejected)]
+
+        (testing (str "mode " mode " rejects a plausible forged result")
+          ;; These mutations deliberately leave the ordinary correspondence
+          ;; result recognizable and marked valid.  Artifact evidence must not
+          ;; trust that self-description: v2 replays the bound checker inputs
+          ;; and requires the exact derived result.
+          (doseq [forged
+                  [forged-global-outcome
+                   forged-terminal-compatibility]]
+            (is (correspondence/result?
+                 (:correspondence forged)))
+            (is (correspondence/valid?
+                 (:correspondence forged)))
+            (is (false?
+                 (artifact/artifact-correspondence-evidence?
+                  forged)))
+            (is (false?
+                 (artifact/artifact-correspondence-valid?
+                  forged)))
+            (is (false?
+                 (artifact/evidence-matches?
+                  emitted
+                  forged)))
+
+            (let [data
+                  (error-data
+                   #(artifact/require-evidence-match!
+                     emitted
+                     forged))]
+              (is (= :gesso.choreo.artifact/error
+                     (:error/type data)))
+              (is (= :invalid-artifact-correspondence-evidence
+                     (:error/kind data))))))))))
+
+(deftest correspondence-evidence-rejects-tampering-with-rederivation-inputs
+  (let [choreography
+        (artifact-bound-protocol :done)
+
+        emitted
+        (artifact/emit-artifacts choreography)
+
+        evidence
+        (artifact/check-artifact-witness
+         emitted
+         choreography
+         artifact-bound-good-witness
+         {:require-complete? true})
+
+        binding-key
+        :gesso.choreo.artifact/correspondence-inputs
+
+        attacks
+        {:remove-binding
+         (update evidence
+                 :correspondence
+                 dissoc
+                 binding-key)
+
+         :add-binding-field
+         (assoc-in evidence
+                   [:correspondence binding-key :forged]
+                   true)
+
+         :replace-witness
+         (assoc-in evidence
+                   [:correspondence binding-key :witness]
+                   artifact-bound-incomplete-witness)
+
+         :replace-check-options
+         (assoc-in evidence
+                   [:correspondence binding-key :options]
+                   {:require-complete? false})
+
+         :replace-verification-options
+         (assoc-in evidence
+                   [:correspondence binding-key :verification-options]
+                   {:entry-value-keys #{:forged}
+                    :entry-knowledge {}})
+
+         :replace-source-choreography
+         (assoc-in evidence
+                   [:correspondence binding-key :choreography]
+                   (artifact-bound-protocol :rejected))}]
+
+    (is (artifact/artifact-correspondence-evidence? evidence))
+    (is (artifact/evidence-matches? emitted evidence))
+
+    (doseq [[attack-name forged] attacks]
+      (testing (name attack-name)
+        (is (false?
+             (artifact/artifact-correspondence-evidence?
+              forged)))
+        (is (false?
+             (artifact/evidence-matches?
+              emitted
+              forged)))))))
