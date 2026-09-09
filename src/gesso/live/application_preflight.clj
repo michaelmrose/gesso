@@ -47,10 +47,16 @@
    returns a Biff-style system component that replaces the existing
    :biff.ring/handler with the checked wrapper before a server component consumes
    it. Gesso adds no parallel handler key, route registry, or server dependency.
-   This is structural closure relative to a component list containing the Gesso
-   component and a server that consumes :biff.ring/handler; arbitrary manually
-   constructed Ring HTML responses and application startup paths that deliberately
-   bypass that system handler remain outside the guarantee.
+
+   v637 adds the canonical Biff startup path. start-biff-application! delegates to
+   biff.core/start but prepends application-handler-component automatically, so a
+   caller using the Gesso startup API cannot forget to include the preflight
+   component or place a normal server component before it. The handler must exist
+   after Biff module initialization / initial-system merge, before ordinary
+   components run. Arbitrary direct biff.core/start calls, later components that
+   deliberately replace :biff.ring/handler, servers that ignore that key, and
+   manually constructed pre-serialized HTML Ring responses remain explicit escape
+   hatches rather than being mislabeled as closed.
 
    ApplicationAssembly is intentionally physical rather than portable:
    recognition re-verifies current artifact bytes/receipt and rescans any embedded
@@ -65,6 +71,7 @@
    and does not turn browser metadata into authority."
   (:require
    [clojure.set :as set]
+   [com.biffweb.core :as biff]
    [clojure.string :as str]
    [gesso.http :as http]
    [gesso.live.browser.build :as browser-build]
@@ -174,7 +181,7 @@
    :edge :application->rendered-surfaces
    :status :open
    :message
-   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface before browser delivery. application-handler-component can replace the canonical Biff :biff.ring/handler with a wrapper that checks every nested canonical Gesso HTML response before serialization. ApplicationAssembly alone still does not prove that the component is present in every startup path, that every server consumes :biff.ring/handler, or that arbitrary hand-built Ring HTML responses use the canonical Gesso HTML boundary."})
+   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface before browser delivery. start-biff-application! prepends application-handler-component automatically on the canonical Gesso/Biff startup path, so every nested canonical Gesso HTML response beneath :biff.ring/handler is checked before serialization. ApplicationAssembly alone still does not prove that every startup path uses start-biff-application!, that later components do not deliberately replace :biff.ring/handler, that every server consumes that key, or that arbitrary hand-built Ring HTML responses use the canonical Gesso HTML boundary."})
 
 (def ^:private trusted-assumptions
   #{:application-publication-declarations-match-model-publication
@@ -1234,6 +1241,69 @@
        (wrap-application-handler
         application-assembly
         handler)))))
+
+(defn start-biff-application!
+  "Start a Biff 2 application through the canonical Gesso application-preflight
+   boundary.
+
+   This has the same two arities as biff.core/start, with a current
+   ApplicationAssembly prepended:
+
+     (start-biff-application!
+      application-assembly
+      modules-var
+      components)
+
+     (start-biff-application!
+      application-assembly
+      initial-system
+      modules-var
+      components)
+
+   Gesso automatically prepends application-handler-component to the supplied
+   ordinary Biff component sequence before delegating to biff.core/start. Because
+   Biff merges module initialization and initial-system before reducing components,
+   the canonical :biff.ring/handler must already exist at that point. A normal
+   server component therefore cannot accidentally run before Gesso installs the
+   checked wrapper simply because the application author forgot or misplaced the
+   preflight component.
+
+   The supplied component sequence is otherwise preserved exactly and in order.
+   This function does not claim to constrain direct calls to biff.core/start, later
+   components that deliberately replace :biff.ring/handler, servers that ignore
+   that system key, or manually constructed pre-serialized HTML Ring responses.
+   Those remain explicit escape hatches outside the canonical Gesso/Biff path."
+  ([application-assembly modules-var components]
+   (start-biff-application!
+    application-assembly
+    {}
+    modules-var
+    components))
+  ([application-assembly initial-system modules-var components]
+   (when-not (application-assembly? application-assembly)
+     (throw
+      (preflight-error
+       :invalid-biff-application-start-assembly
+       "start-biff-application! requires a current ApplicationAssembly."
+       {:application-assembly application-assembly})))
+   (when-not (map? initial-system)
+     (throw
+      (preflight-error
+       :invalid-biff-application-initial-system
+       "start-biff-application! requires initial-system to be a map."
+       {:initial-system initial-system})))
+   (when-not (sequential? components)
+     (throw
+      (preflight-error
+       :invalid-biff-application-components
+       "start-biff-application! requires a sequential collection of Biff components."
+       {:components components})))
+   (biff/start
+    initial-system
+    modules-var
+    (into
+     [(application-handler-component application-assembly)]
+     components))))
 
 ;; =============================================================================
 ;; Closed current physical application product
