@@ -1780,3 +1780,216 @@
           #(application/application-handler-component
             {:gesso.live.application-preflight/type
              :gesso.live.application-preflight/application-assembly})))))
+
+;; =============================================================================
+;; v638 canonical Gesso/Biff startup boundary
+;; =============================================================================
+
+(defn canonical-start-module-handler
+  [_request]
+  (g/html-response [:main [:p "module-handler"]]))
+
+(def canonical-start-modules
+  [{:biff.core/init
+    (fn [_modules-var]
+      {:biff.ring/handler canonical-start-module-handler})}])
+
+(deftest canonical-biff-start-prepends-preflight-before-user-components
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-closed-application
+      (fn [{:keys [assembly]}]
+        (let [original (valid-component-handler ctx)
+              events (atom [])
+              validation-calls (atom 0)
+              original-require application/require-rendered-surface!
+              observer
+              (fn [system]
+                (swap! events conj :observer)
+                (is (fn? (:biff.ring/handler system)))
+                (is (not (identical? original (:biff.ring/handler system))))
+                system)
+              later
+              (fn [system]
+                (swap! events conj :later)
+                system)
+              started
+              (application/start-biff-application!
+               assembly
+               {:biff.ring/handler original
+                :fixture/preserved 42}
+               #'component-test-modules
+               [observer later])]
+          (is (= [:observer :later] @events))
+          (is (= 42 (:fixture/preserved started)))
+          (with-redefs [application/require-rendered-surface!
+                        (fn [app surface rendered]
+                          (swap! validation-calls inc)
+                          (original-require app surface rendered))]
+            (is (= 200
+                   (:status
+                    ((:biff.ring/handler started) {:uri "/"})))))
+          (is (= 1 @validation-calls)))))))
+
+(deftest canonical-biff-start-short-arity-uses-module-init-handler
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (let [started
+            (application/start-biff-application!
+             assembly
+             #'canonical-start-modules
+             [])
+            response ((:biff.ring/handler started) {:uri "/module"})]
+        (is (fn? (:biff.ring/handler started)))
+        (is (= 200 (:status response)))
+        (is (re-find #"module-handler" (:body response)))))))
+
+(deftest canonical-biff-start-initial-system-handler-overrides-module-init-handler
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (let [initial-handler
+            (fn [_request]
+              (g/html-response [:main [:p "initial-handler"]]))
+            started
+            (application/start-biff-application!
+             assembly
+             {:biff.ring/handler initial-handler
+              :fixture/source :initial-system}
+             #'canonical-start-modules
+             [])
+            response ((:biff.ring/handler started) {:uri "/initial"})]
+        (is (= :initial-system (:fixture/source started)))
+        (is (= 200 (:status response)))
+        (is (re-find #"initial-handler" (:body response)))
+        (is (not (re-find #"module-handler" (:body response))))))))
+
+(deftest canonical-biff-start-requires-handler-before-ordinary-components
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (let [ordinary-component-ran? (atom false)]
+        (is (= :missing-biff-ring-handler
+               (error-kind
+                #(application/start-biff-application!
+                  assembly
+                  {}
+                  #'component-test-modules
+                  [(fn [system]
+                     (reset! ordinary-component-ran? true)
+                     (assoc system
+                            :biff.ring/handler
+                            canonical-start-module-handler))]))))
+        (is (false? @ordinary-component-ran?))))))
+
+(deftest canonical-biff-start-validates-local-startup-inputs
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (is (= :invalid-biff-application-initial-system
+             (error-kind
+              #(application/start-biff-application!
+                assembly
+                42
+                #'component-test-modules
+                []))))
+      (is (= :invalid-biff-application-components
+             (error-kind
+              #(application/start-biff-application!
+                assembly
+                {}
+                #'component-test-modules
+                42))))
+      (is (= :invalid-biff-application-components
+             (error-kind
+              #(application/start-biff-application!
+                assembly
+                {}
+                #'component-test-modules
+                {:not :sequential}))))))
+  (is (= :invalid-biff-application-start-assembly
+         (error-kind
+          #(application/start-biff-application!
+            nil
+            {:biff.ring/handler canonical-start-module-handler}
+            #'component-test-modules
+            [])))))
+
+(deftest canonical-biff-start-rechecks-assembly-currentness-before-start
+  (with-closed-application
+    (fn [{:keys [assembly artifact-path]}]
+      (spit artifact-path "// stale before canonical Biff start\n")
+      (is (= :invalid-biff-application-start-assembly
+             (error-kind
+              #(application/start-biff-application!
+                assembly
+                {:biff.ring/handler canonical-start-module-handler}
+                #'component-test-modules
+                [])))))))
+
+(deftest canonical-biff-start-installed-handler-retains-per-response-currentness
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-closed-application
+      (fn [{:keys [assembly artifact-path]}]
+        (let [started
+              (application/start-biff-application!
+               assembly
+               {:biff.ring/handler (valid-component-handler ctx)}
+               #'component-test-modules
+               [])
+              handler (:biff.ring/handler started)]
+          (is (= 200 (:status (handler {:uri "/before"}))))
+          (spit artifact-path "// stale after canonical Biff start\n")
+          (is (= :rendered-surface-preflight-failed
+                 (error-kind #(handler {:uri "/after"})))))))))
+
+(deftest canonical-biff-start-accepts-sequential-component-list-and-preserves-order
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (let [events (atom [])
+            components
+            (list
+             (fn [system]
+               (swap! events conj :first)
+               (assoc system :fixture/first true))
+             (fn [system]
+               (swap! events conj :second)
+               (assoc system :fixture/second true)))
+            started
+            (application/start-biff-application!
+             assembly
+             {:biff.ring/handler canonical-start-module-handler
+              :fixture/original :kept}
+             #'component-test-modules
+             components)]
+        (is (= [:first :second] @events))
+        (is (= :kept (:fixture/original started)))
+        (is (true? (:fixture/first started)))
+        (is (true? (:fixture/second started)))))))
+
+(deftest later-component-deliberately-replacing-handler-remains-explicit-escape-hatch
+  (let [operations (standard-operations)
+        ctx (render-context operations)]
+    (with-closed-application
+      (fn [{:keys [assembly]}]
+        (let [original (valid-component-handler ctx)
+              replacement (invalid-component-handler ctx)
+              saw-checked-handler? (atom false)
+              started
+              (application/start-biff-application!
+               assembly
+               {:biff.ring/handler original}
+               #'component-test-modules
+               [(fn [system]
+                  (reset!
+                   saw-checked-handler?
+                   (and (fn? (:biff.ring/handler system))
+                        (not (identical?
+                              original
+                              (:biff.ring/handler system)))))
+                  (assoc system :biff.ring/handler replacement))])]
+          (is (true? @saw-checked-handler?))
+          (is (identical? replacement (:biff.ring/handler started)))
+          ;; Deliberate replacement occurs after the canonical Gesso component,
+          ;; so this response is intentionally outside the canonical guarantee.
+          (is (= 200
+                 (:status
+                  ((:biff.ring/handler started) {:uri "/explicit-escape"})))))))))
