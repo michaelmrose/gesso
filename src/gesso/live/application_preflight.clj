@@ -27,6 +27,15 @@
    promoted to whole-application proof. Omitting rendered surfaces preserves the
    earlier runtime-backbone-only preflight behavior.
 
+   v629 additionally owns a pre-browser dynamic render boundary. Arbitrary Clojure
+   route handlers can render state-dependent Hiccup, so current Biff/Reitit route
+   structure cannot honestly enumerate every possible rendered value at static
+   preflight time. check-rendered-surface and checked-rendered-response! therefore
+   let the normal response path validate each actual named Hiccup surface against
+   the current ApplicationAssembly before any response renderer serializes it.
+   This is runtime enforcement before browser delivery, not a fabricated static
+   proof that every application render producer has been enumerated.
+
    ApplicationAssembly is intentionally physical rather than portable:
    recognition re-verifies current artifact bytes/receipt and rescans any embedded
    rendered surfaces. A stale generated artifact, malformed canonical affordance,
@@ -63,6 +72,12 @@
 (def rendered-affordance-guarantee
   :supplied-rendered-affordances-preflight-closed)
 
+(def rendered-surface-guarantee
+  :rendered-surface-pre-browser-preflight-closed)
+
+(def rendered-surface-report-type
+  :gesso.live.application-preflight/rendered-surface-report)
+
 (def ^:private option-keys
   #{:name
     :operation-acquisition-assembly
@@ -77,6 +92,20 @@
     :errors
     :warnings
     :analysis})
+
+(def ^:private rendered-surface-report-keys
+  #{:gesso.live.application-preflight/type
+    :gesso.live.application-preflight/version
+    :valid?
+    :errors
+    :analysis})
+
+(def ^:private rendered-surface-analysis-keys
+  #{:application-assembly
+    :surface
+    :rendered
+    :affordances
+    :guarantee})
 
 (def ^:private analysis-keys
   #{:name
@@ -121,7 +150,7 @@
    :edge :application->rendered-surfaces
    :status :open
    :message
-   "Gesso verifies every canonical Choreo affordance found in the supplied rendered surfaces, but does not yet independently prove that the supplied named surface set enumerates every application render surface."})
+   "Current Biff/Reitit route structure cannot statically enumerate every state-dependent Hiccup value arbitrary Clojure handlers may emit. Gesso verifies supplied snapshots and can enforce each actual named surface through checked-rendered-response! before browser delivery, but does not yet independently prove that every application render producer uses that boundary."})
 
 (def ^:private trusted-assumptions
   #{:application-publication-declarations-match-model-publication
@@ -900,6 +929,160 @@
   (and
    (report? report)
    (true? (:valid? report))))
+
+;; =============================================================================
+;; Dynamic pre-browser rendered-surface boundary
+;; =============================================================================
+
+(defn- validate-rendered-surface-input!
+  [surface rendered]
+  (when-not (keyword? surface)
+    (throw
+     (preflight-error
+      :invalid-rendered-surface-name
+      "Rendered surface name must be a keyword."
+      {:surface surface})))
+  (when (nil? rendered)
+    (throw
+     (preflight-error
+      :invalid-rendered-surface
+      "Rendered surface must be non-nil."
+      {:surface surface
+       :rendered rendered})))
+  true)
+
+(defn check-rendered-surface
+  "Validate one actual named rendered Hiccup/value against a current
+   ApplicationAssembly before browser delivery.
+
+   This is the dynamic counterpart to :rendered-surfaces snapshot preflight.
+   Arbitrary Clojure handlers may render different values for different users,
+   data, and control-flow branches, so current route/page declarations cannot
+   statically enumerate the complete value space. This function closes exactly
+   one actual surface occurrence against the current semantic operation, browser
+   plan, HTTP method, trusted route realization, and current physical browser
+   artifact.
+
+   Success means this rendered value is safe to hand to a response renderer
+   relative to the current ApplicationAssembly. It does not prove that every
+   application handler uses this boundary."
+  [application-assembly surface rendered]
+  (validate-rendered-surface-input! surface rendered)
+  (let [application-report
+        (current-application-report application-assembly)
+
+        application-valid?
+        (some? application-report)
+
+        base-operation-summary
+        (if application-valid?
+          (get-in application-report [:analysis :operations])
+          (sorted-map))
+
+        surface-scan
+        (scan-rendered-surfaces {surface rendered})
+
+        affordance-resolution
+        (resolve-rendered-affordances
+         base-operation-summary
+         (:affordances surface-scan))
+
+        errors
+        (cond-> []
+          (not application-valid?)
+          (conj
+           (issue
+            :invalid-application-assembly
+            "Rendered-surface validation requires a current ApplicationAssembly."
+            {:application-assembly application-assembly
+             :surface surface}))
+
+          (seq (:errors surface-scan))
+          (into (:errors surface-scan))
+
+          (seq (:errors affordance-resolution))
+          (into (:errors affordance-resolution)))
+
+        affordances
+        (vec (:affordances affordance-resolution))]
+    {:gesso.live.application-preflight/type rendered-surface-report-type
+     :gesso.live.application-preflight/version preflight-version
+     :valid? (empty? errors)
+     :errors (vec errors)
+     :analysis
+     {:application-assembly application-assembly
+      :surface surface
+      :rendered rendered
+      :affordances affordances
+      :guarantee (when (empty? errors) rendered-surface-guarantee)}}))
+
+(defn rendered-surface-report?
+  "True only when value is exactly the current rendered-surface report derivable
+   from its embedded ApplicationAssembly, surface name, and rendered value.
+
+   Recognition re-verifies the current physical browser artifact through the
+   embedded ApplicationAssembly and rescans the rendered Hiccup."
+  [value]
+  (and
+   (closed-map? rendered-surface-report-keys value)
+   (= rendered-surface-report-type
+      (:gesso.live.application-preflight/type value))
+   (= preflight-version
+      (:gesso.live.application-preflight/version value))
+   (boolean? (:valid? value))
+   (vector? (:errors value))
+   (closed-map? rendered-surface-analysis-keys (:analysis value))
+   (= (:valid? value) (empty? (:errors value)))
+   (try
+     (let [{:keys [application-assembly surface rendered]} (:analysis value)]
+       (= value
+          (check-rendered-surface application-assembly surface rendered)))
+     (catch Exception _
+       false))))
+
+(defn rendered-surface-valid?
+  "True only for a recognized successful rendered-surface report."
+  [report]
+  (and
+   (rendered-surface-report? report)
+   (true? (:valid? report))))
+
+(defn require-rendered-surface!
+  "Require one actual rendered surface to close against the current
+   ApplicationAssembly and return its recognized report.
+
+   This function performs no HTML serialization and grants no authority."
+  [application-assembly surface rendered]
+  (let [report (check-rendered-surface application-assembly surface rendered)]
+    (when-not (true? (:valid? report))
+      (throw
+       (preflight-error
+        :rendered-surface-preflight-failed
+        "Rendered Choreo surface does not close against the current application backbone."
+        {:surface surface
+         :preflight report})))
+    report))
+
+(defn checked-rendered-response!
+  "Validate one actual rendered surface *before* invoking response-fn.
+
+   response-fn must be a callable node -> Ring-response renderer such as
+   gesso.core/html-response. On validation failure response-fn is never called,
+   so malformed or route-incoherent canonical affordances cannot reach browser
+   serialization through this boundary.
+
+   This is explicit runtime enforcement, not a claim that all application
+   handlers have been statically proven to use the boundary."
+  [application-assembly surface response-fn rendered]
+  (when-not (ifn? response-fn)
+    (throw
+     (preflight-error
+      :invalid-response-renderer
+      "checked-rendered-response! requires a callable response renderer."
+      {:surface surface
+       :response-fn response-fn})))
+  (require-rendered-surface! application-assembly surface rendered)
+  (response-fn rendered))
 
 ;; =============================================================================
 ;; Closed current physical application product
