@@ -15,7 +15,9 @@
 
    With no installed guard html-response preserves its historical behavior.
    Application-level code can install a guard for the dynamic extent of a
-   handler call with with-html-response-preflight."
+   handler call with with-html-response-preflight. Nested installations compose
+   outer-first rather than shadowing an already-active guard, so an inner
+   subsystem cannot silently bypass an outer application boundary."
   (:require
    [rum.core :as rum]))
 
@@ -92,15 +94,44 @@
          {}))
       result)))
 
+(defn- composed-html-response-preflight
+  [outer guard]
+  (if (nil? outer)
+    guard
+    (do
+      (when-not (callable? outer)
+        (preflight-error
+         :invalid-html-response-preflight
+         "Existing Gesso HTML response preflight guard must be an actual function or a Var currently containing one."
+         {:guard outer
+          :guard-position :outer}))
+      (fn [body]
+        ;; Outer boundaries are authoritative over their whole dynamic subtree.
+        ;; Run the outer guard first and short-circuit on explicit rejection so a
+        ;; nested subsystem cannot observe/accept a body that the enclosing
+        ;; application boundary rejected. Exceptions intentionally pass through
+        ;; unchanged and prevent the inner guard from running.
+        (let [outer-result (call outer body)]
+          (when outer-result
+            (call guard body)))))))
+
 (defn with-html-response-preflight
   "Invoke thunk with guard installed for every nested html-response call.
 
    Both guard and thunk must be actual functions (or Vars currently containing
    functions); Clojure's broader IFn values such as keywords/maps are rejected.
-   The binding is thread/dynamic-extent scoped and restores any outer binding
-   afterward.
 
-   This helper installs a guard; it does not itself render or inspect HTML.
+   Nested guard scopes COMPOSE outer-first instead of shadowing one another.
+   Therefore a semantic application boundary installed around a handler tree
+   remains in force even when a nested subsystem installs another legitimate
+   HTML response preflight. Explicit nil/false rejection or an exception from
+   the outer guard prevents the inner guard from running. When both accept, the
+   inner guard runs on the exact same Hiccup value immediately afterward.
+
+   The binding is thread/dynamic-extent scoped and restores the exact outer
+   binding afterward.
+
+   This helper installs guards; it does not itself render or inspect HTML.
    Application preflight can therefore bind one semantic validator around an
    ordinary handler tree while gesso.http remains independent of Live/Choreo."
   [guard thunk]
@@ -108,14 +139,19 @@
     (preflight-error
      :invalid-html-response-preflight
      "Gesso HTML response preflight guard must be an actual function or a Var currently containing one."
-     {:guard guard}))
+     {:guard guard
+      :guard-position :inner}))
   (when-not (callable? thunk)
     (preflight-error
      :invalid-html-response-thunk
      "Gesso HTML response preflight requires an actual function or a Var currently containing one as its thunk."
      {:thunk thunk}))
-  (binding [*html-response-preflight* guard]
-    (call thunk)))
+  (let [effective-guard
+        (composed-html-response-preflight
+         *html-response-preflight*
+         guard)]
+    (binding [*html-response-preflight* effective-guard]
+      (call thunk))))
 
 (defn html-response
   "Render a Hiccup/Rum body to a Ring HTML response.
