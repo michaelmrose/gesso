@@ -46,7 +46,14 @@
     :valid?
     :errors
     :warnings
+    :inputs
     :analysis})
+
+(def ^:private analysis-keys
+  #{:name
+    :plan-keys
+    :roles
+    :digests})
 
 (def ^:private plan-registry-keys
   #{:gesso.choreo/type
@@ -476,6 +483,9 @@
      :warnings
      []
 
+     :inputs
+     options'
+
      :analysis
      {:name name
       :plan-keys actual-keys
@@ -483,8 +493,12 @@
       :digests digests}}))
 
 (defn report?
-  "True when value has the closed shape of a current plan-registry preflight
-   report and :valid? agrees with the error collection."
+  "True only when value is exactly the current plan-registry preflight report
+   derivable from its embedded checker inputs.
+
+   Recognition deliberately re-runs check-plan-registry. A caller cannot forge
+   a positive report by editing plan coverage, roles, digests, name, errors, or
+   validity while retaining a plausible report shape."
   [value]
   (and
    (map? value)
@@ -497,9 +511,20 @@
    (boolean? (:valid? value))
    (vector? (:errors value))
    (vector? (:warnings value))
+   (map? (:inputs value))
    (map? (:analysis value))
+   (= analysis-keys
+      (set (keys (:analysis value))))
+   (set? (get-in value [:analysis :plan-keys]))
+   (set? (get-in value [:analysis :roles]))
+   (map? (get-in value [:analysis :digests]))
    (= (:valid? value)
-      (empty? (:errors value)))))
+      (empty? (:errors value)))
+   (try
+     (= value
+        (check-plan-registry (:inputs value)))
+     (catch Exception _
+       false))))
 
 (defn valid?
   "True only for a recognized successful plan-registry preflight report."
