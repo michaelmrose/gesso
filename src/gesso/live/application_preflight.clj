@@ -597,6 +597,44 @@
               :matching-routes matches})))))
     post-coordinates)))
 
+(defn- enrich-render-scan-errors-with-semantic-routes
+  "Attach physical semantic-route context to rendered-affordance scanner errors.
+
+   Malformed or forged framework metadata already fails closed in
+   ui/rendered-choreo-affordances, but the scanner-local cause alone can obscure
+   an important application fact: the malformed node may also target a route
+   already assembled as a semantic operation.  Preserve the scanner's original
+   error kind/cause while attaching every matching semantic route on that same
+   rendered surface.
+
+   This is diagnostic enrichment only.  It does not reinterpret malformed
+   metadata as an anonymous affordance and therefore does not duplicate or
+   weaken semantic-route-identity-errors."
+  [operation-summary' post-coordinates scan-errors]
+  (mapv
+   (fn [scan-error]
+     (let [surface (:surface scan-error)
+           collisions
+           (->> post-coordinates
+                (filter #(= surface (:surface %)))
+                (mapcat
+                 (fn [{:keys [method path render-path] :as coordinate}]
+                   (map
+                    (fn [match]
+                      (merge
+                       {:surface surface
+                        :render-path render-path
+                        :rendered-method method
+                        :rendered-path path}
+                       match))
+                    (semantic-route-matches operation-summary' coordinate))))
+                (sort-by (juxt :render-path :rendered-path :operation :route-id))
+                vec)]
+       (cond-> scan-error
+         (seq collisions)
+         (assoc :matching-semantic-routes collisions))))
+   scan-errors))
+
 (defn- resolve-rendered-affordances
   [operation-summary' affordances]
   (reduce
@@ -903,6 +941,12 @@
          base-operation-summary
          (:post-coordinates surface-scan))
 
+        surface-scan-errors
+        (enrich-render-scan-errors-with-semantic-routes
+         base-operation-summary
+         (:post-coordinates surface-scan)
+         (:errors surface-scan))
+
         affordance-resolution
         (resolve-rendered-affordances
          base-operation-summary
@@ -930,8 +974,8 @@
           artifact-error
           (conj artifact-error)
 
-          (seq (:errors surface-scan))
-          (into (:errors surface-scan))
+          (seq surface-scan-errors)
+          (into surface-scan-errors)
 
           (seq semantic-route-errors)
           (into semantic-route-errors)
@@ -1120,6 +1164,12 @@
          base-operation-summary
          (:post-coordinates surface-scan))
 
+        surface-scan-errors
+        (enrich-render-scan-errors-with-semantic-routes
+         base-operation-summary
+         (:post-coordinates surface-scan)
+         (:errors surface-scan))
+
         affordance-resolution
         (resolve-rendered-affordances
          base-operation-summary
@@ -1135,8 +1185,8 @@
             {:application-assembly application-assembly
              :surface surface}))
 
-          (seq (:errors surface-scan))
-          (into (:errors surface-scan))
+          (seq surface-scan-errors)
+          (into surface-scan-errors)
 
           (seq semantic-route-errors)
           (into semantic-route-errors)
