@@ -10,6 +10,7 @@
    - thin q/plan-q task wrappers
    - thin submit-tx/execute-tx task wrappers
    - portable XTDB-backed authoritative progression bases/requirements
+   - authoritative request-frontier binding for Biff + Gesso contexts
    - trusted XTDB progression comparison and query-option translation
    - opaque consistency-token encoding for optional transport/event metadata
    - small tx-op constructors
@@ -50,7 +51,7 @@
    [xtdb.api :as xt]
    [xtdb.basis :as xt.basis])
   (:import
-   [java.time Instant]
+   [java.time Instant ZonedDateTime]
    [xtdb.api TransactionKey]))
 
 ;; -----------------------------------------------------------------------------
@@ -68,6 +69,9 @@
 
 (def ^:private ^:dynamic *execute-tx*
   xt/execute-tx)
+
+(def ^:private ^:dynamic *status*
+  xt/status)
 
 ;; -----------------------------------------------------------------------------
 ;; Debug
@@ -626,6 +630,196 @@
         (:biff.xtdb/node x)
         (:biff/node x))
     x))
+
+
+;; -----------------------------------------------------------------------------
+;; Authoritative request frontier
+;; -----------------------------------------------------------------------------
+
+(defn node-from
+  "Return the XTDB2 node required to establish an authoritative request frontier.
+
+   Unlike connectable-from/read-connectable-from, this helper deliberately does
+   not accept request-scoped connections or arbitrary DataSources. XTDB status is
+   node-owned state, and one status snapshot is the trusted source used to bind
+   a matching transaction id and system time.
+
+   Preferred context keys:
+
+     :xtdb/node
+     :biff.xtdb/node
+     :biff/node
+
+   A raw XTDB node may also be supplied directly. XTDB's concrete node currently
+   implements IPersistentMap, so node identity must be recognized before treating
+   a map-like value as an application context."
+  [x]
+  (cond
+    (instance? xtdb.api.Xtdb x)
+    x
+
+    (map? x)
+    (or (:xtdb/node x)
+        (:biff.xtdb/node x)
+        (:biff/node x))
+
+    :else
+    x))
+
+(defn- status-system-time->instant
+  [system-time]
+  (cond
+    (instance? Instant system-time)
+    system-time
+
+    (instance? ZonedDateTime system-time)
+    (.toInstant ^ZonedDateTime system-time)
+
+    :else
+    (throw
+     (ex "XTDB latest-completed transaction has an unsupported system-time type."
+         {:system-time system-time
+          :system-time-class (some-> system-time class .getName)
+          :expected-one-of ["java.time.Instant"
+                            "java.time.ZonedDateTime"]}))))
+
+(defn latest-completed-basis
+  "Return one portable basis for the node's latest completed XTDB transaction.
+
+   The transaction id and system time are read from one xtdb.api/status result,
+   so the resulting basis cannot accidentally pair coordinates observed at two
+   different moments. XTDB 2.2 status currently exposes completed transaction
+   system time as java.time.ZonedDateTime; execute-tx exposes java.time.Instant.
+   Both are normalized to the same Instant coordinate before basis construction.
+   Returns nil only when XTDB reports no completed transaction for the selected
+   database.
+
+   This is a trusted server-side observation boundary. It must not be implemented
+   from wall-clock time, application revisions, browser data, or separate mutable
+   reads of transaction id and system time."
+  ([ctx-or-node]
+   (latest-completed-basis ctx-or-node nil))
+  ([ctx-or-node database]
+   (let [node (node-from ctx-or-node)
+         database-name (normalize-database-name database)]
+     (when-not node
+       (throw
+        (ex "Cannot establish an XTDB request frontier without an XTDB node."
+            {:expected-one-of [:xtdb/node
+                               :biff.xtdb/node
+                               :biff/node]})))
+     (when-some [completed
+                 (first
+                  (get-in
+                   (*status* node)
+                   [:latest-completed-txs database-name]))]
+       (let [tx-id (:tx-id completed)
+             system-time (:system-time completed)]
+         (cond
+           (and (nil? tx-id) (nil? system-time))
+           nil
+
+           (or (nil? tx-id) (nil? system-time))
+           (throw
+            (ex "XTDB latest-completed transaction has incomplete authoritative coordinates."
+                {:database database-name
+                 :latest-completed completed
+                 :tx-id tx-id
+                 :system-time system-time}))
+
+           :else
+           (basis database-name
+                  tx-id
+                  (status-system-time->instant system-time))))))))
+
+(defn- fixed-biff-snapshot-wrapper
+  [existing-wrapper snapshot-token]
+  (fn [f]
+    (when-not (ifn? f)
+      (throw
+       (ex "Biff request snapshot wrapper requires a callable body."
+           {:body f})))
+    (let [fixed-body
+          (fn [ctx]
+            (f
+             (assoc ctx
+                    :biff.xtdb/snapshot-token
+                    snapshot-token)))]
+      (if existing-wrapper
+        (do
+          (when-not (ifn? existing-wrapper)
+            (throw
+             (ex "Existing Biff request snapshot wrapper must be callable."
+                 {:wrapper existing-wrapper})))
+          (existing-wrapper fixed-body))
+        fixed-body))))
+
+(defn- require-frontier-satisfies-existing-xtdb!
+  [frontier existing-requirement]
+  (when existing-requirement
+    (doseq [required (progression/required-bases existing-requirement)
+            :when (and (xtdb-basis? required)
+                       (= (basis-database frontier)
+                          (basis-database required)))]
+      (when (neg? (compare-bases frontier required))
+        (throw
+         (ex "Current XTDB request frontier is behind an existing authoritative progression requirement."
+             {:frontier frontier
+              :required required
+              :database (basis-database frontier)})))))
+  frontier)
+
+(defn bind-request-frontier
+  "Bind one authoritative XTDB request frontier into a Ring/Biff context.
+
+   A successful binding establishes all of the following from one latest-completed
+   XTDB transaction observation:
+
+   - :biff.xtdb/snapshot-token fixes ordinary Biff reads to the same XTDB time;
+   - :gesso.live/progression contains that authoritative basis as a minimum read
+     requirement, conservatively composed with any existing canonical requirement;
+   - :biff.core/wrap-db-snapshot is preserved and wrapped with a fixed frontier
+     so later Biff Graph executions cannot silently drift to a newer snapshot.
+
+   The helper returns ctx unchanged when XTDB has no completed transaction yet.
+   It never fabricates an initial basis.
+
+   If an HTTP/browser progression requirement is relevant, bind it into canonical
+   context before calling this helper. The trusted current XTDB basis is then
+   composed with that pre-existing minimum requirement rather than replacing it.
+   If the node's current frontier is behind an existing requirement for the same
+   XTDB database, binding fails closed instead of installing a stale Biff snapshot.
+
+   The fixed Biff snapshot is the server-observed current frontier. Gesso-aware
+   model reads must continue to apply :gesso.live/progression last, as
+   read-query-opts does, so a stronger pre-existing minimum requirement cannot be
+   weakened by the Biff baseline."
+  ([ctx]
+   (bind-request-frontier ctx nil))
+  ([ctx database]
+   (when-not (map? ctx)
+     (throw
+      (ex "XTDB request frontier binding requires a context map."
+          {:ctx ctx})))
+   (if-some [basis-value (latest-completed-basis ctx database)]
+     (let [existing-requirement (progression-from ctx)
+           _ (require-frontier-satisfies-existing-xtdb!
+              basis-value
+              existing-requirement)
+           snapshot-token (basis-snapshot-token basis-value)
+           current-requirement (progression/requirement basis-value)
+           combined-requirement
+           (progression/compose
+            existing-requirement
+            current-requirement)]
+       (assoc ctx
+              :biff.xtdb/snapshot-token snapshot-token
+              :gesso.live/progression combined-requirement
+              :biff.core/wrap-db-snapshot
+              (fixed-biff-snapshot-wrapper
+               (:biff.core/wrap-db-snapshot ctx)
+               snapshot-token)))
+     ctx)))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options
