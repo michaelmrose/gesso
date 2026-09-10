@@ -25,7 +25,10 @@
 
    Recognition remains physical and fail-closed: current artifact bytes/receipt,
    nested assemblies, rendered metadata, operation/plan identity, route method/path,
-   and authoritative acquisition are revalidated from their source facts. Browser
+   anonymous HTMX POST collisions with assembled semantic routes, and authoritative
+   acquisition are revalidated from their source facts. A semantic command route may
+   never silently degrade into an ordinary unmarked HTMX POST merely because an
+   application failed to construct its canonical :choreo/op binding. Browser
    metadata never grants authority, and trusted application/model declarations remain
    named assumptions rather than being promoted to v4.5 machine-checked proof."
   (:require
@@ -41,7 +44,7 @@
 ;; Identity / closed vocabulary
 ;; =============================================================================
 
-(def preflight-version 2)
+(def preflight-version 3)
 
 (def report-type
   :gesso.live.application-preflight/report)
@@ -458,22 +461,68 @@
        template-segments
        concrete-segments)))))
 
+(defn- rendered-post-coordinates
+  "Enumerate every concrete hx-post coordinate in one rendered Hiccup/value.
+
+   This deliberately scans more broadly than ui/rendered-choreo-affordances.
+   Ordinary HTMX remains legal, but application preflight needs visibility of
+   its physical POST coordinates so an already-assembled semantic command route
+   cannot silently be invoked after application code drops :choreo/op metadata.
+
+   :choreo-operation-declared? records only the framework-owned metadata installed
+   by canonical gesso.live.ui/post-button :choreo/op rendering. It is not browser
+   authority and is consumed before HTML serialization."
+  [rendered]
+  (letfn [(walk [value render-path]
+            (lazy-seq
+             (concat
+              (when (and (vector? value)
+                         (map? (second value))
+                         (contains? (second value) :hx-post))
+                (let [path (:hx-post (second value))]
+                  (when (and (string? path)
+                             (not (str/blank? path)))
+                    [{:method :post
+                      :path path
+                      :render-path render-path
+                      :choreo-operation-declared?
+                      (contains?
+                       (meta value)
+                       ui/choreo-affordance-metadata-key)}])))
+              (when (sequential? value)
+                (mapcat
+                 (fn [[index child]]
+                   (walk child (conj render-path index)))
+                 (map-indexed vector value))))))]
+    (vec (walk rendered []))))
+
 (defn- scan-rendered-surfaces
   [rendered-surfaces]
   (if (nil? rendered-surfaces)
     {:affordances []
+     :post-coordinates []
      :errors []}
     (reduce
-     (fn [{:keys [affordances errors]} surface-name]
-       (let [rendered (get rendered-surfaces surface-name)]
+     (fn [{:keys [affordances post-coordinates errors]} surface-name]
+       (let [rendered
+             (get rendered-surfaces surface-name)
+
+             surface-post-coordinates
+             (into []
+                   (map #(assoc % :surface surface-name))
+                   (rendered-post-coordinates rendered))]
          (try
            {:affordances
             (into affordances
                   (map #(assoc % :surface surface-name))
                   (ui/rendered-choreo-affordances rendered))
+            :post-coordinates
+            (into post-coordinates surface-post-coordinates)
             :errors errors}
            (catch clojure.lang.ExceptionInfo error
              {:affordances affordances
+              :post-coordinates
+              (into post-coordinates surface-post-coordinates)
               :errors
               (conj
                errors
@@ -486,6 +535,8 @@
                  :cause-data (dissoc (ex-data error) :error/type :error/kind)}))})
            (catch Throwable error
              {:affordances affordances
+              :post-coordinates
+              (into post-coordinates surface-post-coordinates)
               :errors
               (conj
                errors
@@ -496,8 +547,55 @@
                  :exception-class (str (class error))
                  :exception-message (.getMessage error)}))}))))
      {:affordances []
+      :post-coordinates []
       :errors []}
      (sort-by pr-str (keys rendered-surfaces)))))
+
+(defn- semantic-route-matches
+  [operation-summary' {:keys [method path]}]
+  (vec
+   (for [[operation operation-entry] operation-summary'
+         route (:routes operation-entry)
+         :when (and (= method (:method route))
+                    (route-template-matches? (:path route) path))]
+     {:operation operation
+      :route-id (:route-id route)
+      :method (:method route)
+      :route-template (:path route)
+      :required-transport (:required-transport route)})))
+
+(defn- semantic-route-identity-errors
+  "Reject anonymous physical POSTs that collide with assembled semantic routes.
+
+   Ordinary HTMX is still allowed for routes outside the semantic operation
+   slice. Once a route is assembled as a realization of a semantic operation,
+   however, every rendered invocation of that route must retain canonical
+   :choreo/op identity. This prevents application code from silently degrading a
+   semantic operation to an ordinary HTMX request when a per-render binding is
+   unavailable."
+  [operation-summary' post-coordinates]
+  (vec
+   (keep
+    (fn [{:keys [surface render-path method path
+                 choreo-operation-declared?]
+          :as coordinate}]
+      (when-not choreo-operation-declared?
+        (let [matches
+              (semantic-route-matches
+               operation-summary'
+               coordinate)]
+          (when (seq matches)
+            (issue
+             :rendered-semantic-route-without-choreo-operation
+             "Rendered HTMX POST targets an assembled semantic operation route but carries no canonical :choreo/op declaration. Semantic operation identity may not silently degrade to ordinary HTMX."
+             {:surface surface
+              :render-path render-path
+              :method method
+              :path path
+              :candidate-operations
+              (set (map :operation matches))
+              :matching-routes matches})))))
+    post-coordinates)))
 
 (defn- resolve-rendered-affordances
   [operation-summary' affordances]
@@ -749,9 +847,12 @@
        Non-empty map of keyword surface-name -> rendered server-side Hiccup/value.
        Canonical :choreo/op affordances are derived from Gesso-owned metadata on
        the ordinary rendered nodes and checked against the assembled operation,
-       browser-plan, HTTP method, and trusted route template. The supplied surface
-       set is itself still an application snapshot; v627 does not independently
-       prove that it enumerates every possible render surface.
+       browser-plan, HTTP method, and trusted route template. Every rendered
+       ordinary hx-post is also compared with the assembled semantic route set; an
+       anonymous POST may not target a semantic operation route after application
+       code dropped :choreo/op identity. The supplied surface set is itself still
+       an application snapshot and does not independently prove that it enumerates
+       every possible render surface.
 
    A valid report means every modeled runtime-backbone edge is closed, the browser
    artifact is current, and every canonical affordance in any supplied snapshot
@@ -797,6 +898,11 @@
         surface-scan
         (scan-rendered-surfaces rendered-surfaces)
 
+        semantic-route-errors
+        (semantic-route-identity-errors
+         base-operation-summary
+         (:post-coordinates surface-scan))
+
         affordance-resolution
         (resolve-rendered-affordances
          base-operation-summary
@@ -826,6 +932,9 @@
 
           (seq (:errors surface-scan))
           (into (:errors surface-scan))
+
+          (seq semantic-route-errors)
+          (into semantic-route-errors)
 
           (seq (:errors affordance-resolution))
           (into (:errors affordance-resolution)))
@@ -868,11 +977,13 @@
         (if supplied-surfaces?
           {:status
            (if (or (seq (:errors surface-scan))
+                   (seq semantic-route-errors)
                    (seq (:errors affordance-resolution)))
              :failed
              :closed-relative-to-supplied-rendered-surfaces)
            :guarantee
            (when (and (empty? (:errors surface-scan))
+                      (empty? semantic-route-errors)
                       (empty? (:errors affordance-resolution)))
              rendered-affordance-guarantee)
            :surface-count (count rendered-surfaces)
@@ -984,8 +1095,10 @@
    artifact.
 
    Success means this rendered value is safe to hand to a response renderer
-   relative to the current ApplicationAssembly. It does not prove that every
-   application handler uses this boundary."
+   relative to the current ApplicationAssembly: canonical semantic affordances
+   resolve exactly and no anonymous ordinary hx-post collides with an assembled
+   semantic operation route. It does not prove that every application handler uses
+   this boundary."
   [application-assembly surface rendered]
   (validate-rendered-surface-input! surface rendered)
   (let [application-report
@@ -1001,6 +1114,11 @@
 
         surface-scan
         (scan-rendered-surfaces {surface rendered})
+
+        semantic-route-errors
+        (semantic-route-identity-errors
+         base-operation-summary
+         (:post-coordinates surface-scan))
 
         affordance-resolution
         (resolve-rendered-affordances
@@ -1019,6 +1137,9 @@
 
           (seq (:errors surface-scan))
           (into (:errors surface-scan))
+
+          (seq semantic-route-errors)
+          (into semantic-route-errors)
 
           (seq (:errors affordance-resolution))
           (into (:errors affordance-resolution)))
