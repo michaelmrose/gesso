@@ -857,6 +857,151 @@
                (when (application/valid? report)
                  (application/require-application-assembly! options))})))))))
 
+(deftest anonymous-post-to-parameterized-semantic-route-is-rejected-before-application-assembly
+  (let [operations
+        {:request/claim
+         (get (standard-operations) :request/claim)}
+        routes
+        (custom-route-capabilities
+         {:humanhelp/claim
+          {:operation :request/claim
+           :path "/app/requests/:request-id/claim"
+           :transports #{:htmx}}})
+        concrete-path
+        "/app/requests/01a0702a-302d-7604-a880-7b421af742a0/claim"
+        surfaces
+        {:request-board
+         [:button {:hx-post concrete-path} "Claim"]}]
+    (with-surfaced-application
+      {:operations operations
+       :route-capabilities routes
+       :rendered-surfaces surfaces}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (not (application/valid? report)))
+        (is (= #{:rendered-semantic-route-without-choreo-operation}
+               (error-kinds report)))
+        (let [error (first (:errors report))]
+          (is (= :request-board (:surface error)))
+          (is (= [] (:render-path error)))
+          (is (= :post (:method error)))
+          (is (= concrete-path (:path error)))
+          (is (= #{:request/claim} (:candidate-operations error)))
+          (is (= [{:operation :request/claim
+                   :route-id :humanhelp/claim
+                   :method :post
+                   :route-template "/app/requests/:request-id/claim"
+                   :required-transport :htmx}]
+                 (:matching-routes error))))))))
+
+(deftest dynamic-pre-browser-boundary-rejects-silent-semantic-route-downgrade-before-rendering
+  (let [rendered
+        [:main
+         [:button {:hx-post "/operations/request/claim"} "Claim"]]
+        calls (atom [])]
+    (with-closed-application
+      (fn [{:keys [assembly]}]
+        (let [report
+              (application/check-rendered-surface
+               assembly
+               :request-board
+               rendered)
+              data
+              (error-data
+               #(application/checked-rendered-response!
+                 assembly
+                 :request-board
+                 (fn [node]
+                   (swap! calls conj node)
+                   {:status 200 :body node})
+                 rendered))]
+          (is (application/rendered-surface-report? report))
+          (is (not (application/rendered-surface-valid? report)))
+          (is (= #{:rendered-semantic-route-without-choreo-operation}
+                 (error-kinds report)))
+          (is (= :rendered-surface-preflight-failed (:error/kind data)))
+          (is (= #{:rendered-semantic-route-without-choreo-operation}
+                 (error-kinds (:preflight data))))
+          (is (empty? @calls)))))))
+
+(deftest semantic-route-identity-guard-does-not-ban-ordinary-htmx-or-canonical-choreo-affordances
+  (let [operations (standard-operations)
+        ctx (render-context operations)
+        ordinary
+        [:main
+         [:button {:hx-post "/ordinary/save"} "Save"]]
+        canonical
+        [:main
+         (rendered-operation-button
+          ctx
+          :request/claim
+          "/operations/request/claim")]]
+    (with-closed-application
+      (fn [{:keys [assembly]}]
+        (let [ordinary-report
+              (application/check-rendered-surface
+               assembly
+               :ordinary-form
+               ordinary)
+              canonical-report
+              (application/check-rendered-surface
+               assembly
+               :request-board
+               canonical)]
+          (is (application/rendered-surface-valid? ordinary-report))
+          (is (empty? (:errors ordinary-report)))
+          (is (application/rendered-surface-valid? canonical-report))
+          (is (empty? (:errors canonical-report)))
+          (is (= :request/claim
+                 (get-in canonical-report
+                         [:analysis :affordances 0 :operation]))))))))
+
+(deftest anonymous-post-does-not-collide-with-semantic-route-of-a-different-http-method
+  (let [operations
+        {:request/claim
+         (get (standard-operations) :request/claim)}
+        routes
+        (custom-route-capabilities
+         {:request/claim-put
+          {:operation :request/claim
+           :method :put
+           :path "/requests/:request-id/claim"
+           :transports #{:htmx}}})]
+    (with-surfaced-application
+      {:operations operations
+       :route-capabilities routes
+       :rendered-surfaces
+       {:request-board
+        [:button {:hx-post "/requests/request-1/claim"} "Ordinary POST"]}}
+      (fn [{:keys [report assembly]}]
+        (is (application/valid? report))
+        (is (application/application-assembly? assembly))
+        (is (empty? (:errors report)))))))
+
+(deftest malformed-framework-affordance-metadata-remains-fail-closed
+  (let [forged
+        (with-meta
+          [:button {:hx-post "/operations/request/claim"} "Claim"]
+          {ui/choreo-affordance-metadata-key :request/claim})]
+    (with-surfaced-application
+      {:request-board forged}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (not (application/valid? report)))
+        ;; v661 already refuses malformed framework metadata rather than letting
+        ;; the node disappear into ordinary HTMX.  A later hardening revision may
+        ;; additionally retain the semantic-route collision diagnostic alongside
+        ;; this scanner-local cause; this regression deliberately forbids only
+        ;; accidental acceptance.
+        (is (contains? (error-kinds report)
+                       :rendered-affordance-scan-failed))
+        (let [error
+              (first
+               (filter #(= :rendered-affordance-scan-failed (:kind %))
+                       (:errors report)))]
+          (is (= :gesso.live.ui/affordance-error (:cause-type error)))
+          (is (= :invalid-rendered-affordance-encoding (:cause-kind error))))))))
+
 (deftest supplied-rendered-surfaces-close-every-discovered-affordance-relative-to-the-snapshot
   (let [operations (standard-operations)
         ctx (render-context operations)
@@ -1716,6 +1861,26 @@
           (is (contains?
                (set (map :kind (:errors (:preflight data))))
                :rendered-affordance-path-mismatch)))))))
+
+(deftest application-handler-component-blocks-silent-semantic-route-downgrade-before-html-delivery
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (let [component
+            (application/application-handler-component assembly)
+            handler
+            (:biff.ring/handler
+             (component
+              {:biff.ring/handler
+               (fn [_request]
+                 (g/html-response
+                  [:main
+                   [:button
+                    {:hx-post "/operations/request/claim"}
+                    "Claim"]]))}))
+            data (error-data #(handler {:uri "/app"}))]
+        (is (= :rendered-surface-preflight-failed (:error/kind data)))
+        (is (= #{:rendered-semantic-route-without-choreo-operation}
+               (error-kinds (:preflight data))))))))
 
 (deftest later-biff-component-observes-already-wrapped-handler
   (let [operations (standard-operations)
