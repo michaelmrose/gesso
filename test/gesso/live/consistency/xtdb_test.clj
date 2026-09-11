@@ -4,8 +4,9 @@
    [gesso.live.consistency.xtdb :as xtdb-live]
    [gesso.live.progression :as progression])
   (:import
-   [java.time Instant]
-   [xtdb.api TransactionKey]))
+   [java.lang.reflect InvocationHandler Proxy]
+   [java.time Instant ZonedDateTime]
+   [xtdb.api DataSource TransactionKey]))
 
 (def sample-query
   '(from :users [{:xt/id id} name]))
@@ -533,6 +534,255 @@
            (xtdb-live/progression-from
             {:progression convenience})))
     (is (nil? (xtdb-live/progression-from :not-a-context)))))
+
+
+;; -----------------------------------------------------------------------------
+;; Authoritative request frontier
+;; -----------------------------------------------------------------------------
+
+(defn data-source-stub
+  []
+  (Proxy/newProxyInstance
+   (.getClassLoader DataSource)
+   (into-array Class [DataSource])
+   (reify InvocationHandler
+     (invoke [_ _ _ _]
+       nil))))
+
+(deftest node-from-accepts-only-authoritative-node-sources-test
+  (let [raw-data-source (data-source-stub)]
+    (is (= :xtdb-node
+           (xtdb-live/node-from
+            {:xtdb/node :xtdb-node
+             :xtdb/conn :request-conn})))
+    (is (= :biff-xtdb-node
+           (xtdb-live/node-from
+            {:biff.xtdb/node :biff-xtdb-node
+             :biff/conn :request-conn})))
+    (is (= :biff-node
+           (xtdb-live/node-from
+            {:biff/node :biff-node})))
+    (is (nil?
+         (xtdb-live/node-from
+          {:xtdb/conn :request-conn
+           :biff/conn :biff-request-conn
+           :xtdb/connectable :shared-connectable})))
+    (is (nil? (xtdb-live/node-from raw-data-source)))))
+
+(deftest latest-completed-basis-uses-one-status-observation-test
+  (let [calls (atom [])
+        zdt (ZonedDateTime/parse "2026-09-10T18:30:00Z")
+        instant (.toInstant zdt)
+        expected (xtdb-live/basis :analytics 101 instant)]
+    (with-xtdb-stub
+      '*status*
+      (fn [node]
+        (swap! calls conj node)
+        {:latest-completed-txs
+         {"analytics" [{:tx-id 101
+                        :system-time zdt}]
+          "xtdb" [{:tx-id 999
+                    :system-time (Instant/parse "2026-09-10T19:00:00Z")}]}})
+      (fn []
+        (is (= expected
+               (xtdb-live/latest-completed-basis
+                {:xtdb/node :authority-node}
+                :analytics)))
+        (is (= [:authority-node] @calls))
+        (is (= instant
+               (xtdb-live/basis-system-time expected)))))))
+
+(deftest latest-completed-basis-accepts-instant-status-coordinate-test
+  (let [instant (Instant/parse "2026-09-10T18:31:00.123456789Z")]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        {:latest-completed-txs
+         {"xtdb" [{:tx-id 102
+                    :system-time instant}]}})
+      (fn []
+        (is (= (xtdb-live/basis :xtdb 102 instant)
+               (xtdb-live/latest-completed-basis
+                {:biff.xtdb/node :authority-node})))))))
+
+(deftest latest-completed-basis-returns-nil-when-no-transaction-completed-test
+  (let [calls (atom 0)]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        (swap! calls inc)
+        {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (is (nil?
+             (xtdb-live/latest-completed-basis
+              {:biff/node :authority-node})))
+        (is (= 1 @calls))))))
+
+(deftest latest-completed-basis-rejects-incomplete-authoritative-coordinates-test
+  (doseq [completed [{:tx-id nil
+                      :system-time (Instant/parse "2026-09-10T18:32:00Z")}
+                     {:tx-id 103
+                      :system-time nil}
+                     {:tx-id nil
+                      :system-time nil}]]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        {:latest-completed-txs {"xtdb" [completed]}})
+      (fn []
+        (let [error
+              (try
+                (xtdb-live/latest-completed-basis
+                 {:xtdb/node :authority-node})
+                nil
+                (catch clojure.lang.ExceptionInfo e
+                  e))]
+          (is (some? error))
+          (when error
+            (is (re-find #"incomplete authoritative coordinates"
+                         (.getMessage error)))
+            (is (= "xtdb" (:database (ex-data error))))
+            (is (= completed (:latest-completed (ex-data error))))))))))
+
+(deftest latest-completed-basis-rejects-unsupported-system-time-test
+  (with-xtdb-stub
+    '*status*
+    (fn [_]
+      {:latest-completed-txs
+       {"xtdb" [{:tx-id 104
+                  :system-time "2026-09-10T18:33:00Z"}]}})
+    (fn []
+      (let [error
+            (try
+              (xtdb-live/latest-completed-basis
+               {:xtdb/node :authority-node})
+              nil
+              (catch clojure.lang.ExceptionInfo e
+                e))]
+        (is (some? error))
+        (is (re-find #"unsupported system-time type"
+                     (.getMessage error)))
+        (is (= "java.lang.String"
+               (:system-time-class (ex-data error))))))))
+
+(deftest bind-request-frontier-binds-matching-biff-and-gesso-frontier-test
+  (let [calls (atom 0)
+        instant (Instant/parse "2026-09-10T18:34:00Z")
+        expected-basis (xtdb-live/basis :xtdb 105 instant)
+        expected-token (xtdb-live/basis-snapshot-token expected-basis)]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        (swap! calls inc)
+        {:latest-completed-txs
+         {"xtdb" [{:tx-id 105
+                    :system-time instant}]}})
+      (fn []
+        (let [bound
+              (xtdb-live/bind-request-frontier
+               {:xtdb/node :authority-node
+                :request/id :request-1})
+
+              run-body
+              ((:biff.core/wrap-db-snapshot bound)
+               (fn [ctx]
+                 {:request-id (:request/id ctx)
+                  :snapshot-token (:biff.xtdb/snapshot-token ctx)}))]
+          (is (= 1 @calls))
+          (is (= :request-1 (:request/id bound)))
+          (is (= expected-token
+                 (:biff.xtdb/snapshot-token bound)))
+          (is (= #{expected-basis}
+                 (progression/required-bases
+                  (:gesso.live/progression bound))))
+          (is (= {:request-id :request-1
+                  :snapshot-token expected-token}
+                 (run-body {:request/id :request-1}))))))))
+
+(deftest bind-request-frontier-preserves-existing-wrapper-and-independent-requirement-test
+  (let [instant (Instant/parse "2026-09-10T18:35:00Z")
+        analytics-time (Instant/parse "2026-09-10T17:00:00Z")
+        frontier (xtdb-live/basis :xtdb 106 instant)
+        analytics-basis (xtdb-live/basis :analytics 77 analytics-time)
+        existing-requirement (progression/requirement analytics-basis)
+        wrapper-calls (atom 0)
+        existing-wrapper
+        (fn [body]
+          (swap! wrapper-calls inc)
+          (fn [ctx]
+            (body (assoc ctx :existing-wrapper-ran? true))))]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        {:latest-completed-txs
+         {"xtdb" [{:tx-id 106
+                    :system-time instant}]}})
+      (fn []
+        (let [bound
+              (xtdb-live/bind-request-frontier
+               {:xtdb/node :authority-node
+                :gesso.live/progression existing-requirement
+                :biff.core/wrap-db-snapshot existing-wrapper})
+
+              run-body
+              ((:biff.core/wrap-db-snapshot bound)
+               (fn [ctx]
+                 (select-keys
+                  ctx
+                  [:existing-wrapper-ran?
+                   :biff.xtdb/snapshot-token])))]
+          (is (= #{analytics-basis frontier}
+                 (progression/required-bases
+                  (:gesso.live/progression bound))))
+          (is (= 1 @wrapper-calls))
+          (is (= {:existing-wrapper-ran? true
+                  :biff.xtdb/snapshot-token
+                  (xtdb-live/basis-snapshot-token frontier)}
+                 (run-body {}))))))))
+
+(deftest bind-request-frontier-rejects-current-frontier-behind-existing-requirement-test
+  (let [current-time (Instant/parse "2026-09-10T18:36:00Z")
+        required-time (Instant/parse "2026-09-10T18:37:00Z")
+        required-basis (xtdb-live/basis :xtdb 108 required-time)
+        existing-requirement (progression/requirement required-basis)]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        {:latest-completed-txs
+         {"xtdb" [{:tx-id 107
+                    :system-time current-time}]}})
+      (fn []
+        (let [error
+              (try
+                (xtdb-live/bind-request-frontier
+                 {:xtdb/node :authority-node
+                  :gesso.live/progression existing-requirement})
+                nil
+                (catch clojure.lang.ExceptionInfo e
+                  e))]
+          (is (some? error))
+          (is (re-find #"behind an existing authoritative progression requirement"
+                       (.getMessage error)))
+          (is (= required-basis (:required (ex-data error))))
+          (is (= (xtdb-live/basis :xtdb 107 current-time)
+                 (:frontier (ex-data error)))))))))
+
+(deftest bind-request-frontier-does-not-fabricate-initial-basis-test
+  (let [ctx {:xtdb/node :authority-node
+             :request/id :request-2}
+        calls (atom 0)]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        (swap! calls inc)
+        {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (let [bound (xtdb-live/bind-request-frontier ctx)]
+          (is (= 1 @calls))
+          (is (identical? ctx bound))
+          (is (nil? (:biff.xtdb/snapshot-token bound)))
+          (is (nil? (:gesso.live/progression bound)))
+          (is (nil? (:biff.core/wrap-db-snapshot bound))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Transaction wrappers
