@@ -664,7 +664,7 @@
         (:biff/node x))
 
     :else
-    x))
+    nil))
 
 (defn- status-system-time->instant
   [system-time]
@@ -715,22 +715,16 @@
                    [:latest-completed-txs database-name]))]
        (let [tx-id (:tx-id completed)
              system-time (:system-time completed)]
-         (cond
-           (and (nil? tx-id) (nil? system-time))
-           nil
-
-           (or (nil? tx-id) (nil? system-time))
+         (when (or (nil? tx-id) (nil? system-time))
            (throw
             (ex "XTDB latest-completed transaction has incomplete authoritative coordinates."
                 {:database database-name
                  :latest-completed completed
                  :tx-id tx-id
-                 :system-time system-time}))
-
-           :else
-           (basis database-name
-                  tx-id
-                  (status-system-time->instant system-time))))))))
+                 :system-time system-time})))
+         (basis database-name
+                tx-id
+                (status-system-time->instant system-time)))))))
 
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper snapshot-token]
