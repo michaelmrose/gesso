@@ -1,9 +1,73 @@
 {:paths ["src" "resources"]
+
  :tasks
- {themes
-  (do
-    (println "running themes task")
-    ((requiring-resolve 'gesso.build.themes/build!)
-     {:input-dir "resources/themes"
-      :output-file "resources/public/gesso/themes.css"})
-    (println "done"))}}
+ {runtime
+  {:doc "Generate the composed Gesso Live browser runtime."
+   :task
+   (shell "clojure"
+          "-M:dev"
+          "-m" "cljs.main"
+          "-O" "advanced"
+          "-co" "{:output-dir \"target/gesso-live-cljs\"}"
+          "-o" "resources/public/js/gesso-live.js"
+          "-c" "gesso.live.browser.runtime")}
+
+  themes
+  {:doc "Build theme CSS."
+   :task
+   (do
+     (println "running themes task")
+     ((requiring-resolve 'gesso.build.themes/build!)
+      {:input-dir "resources/themes"
+       :output-file "resources/public/gesso/themes.css"})
+     (println "done"))}
+
+  test
+  {:doc "Full gate: JVM + Node + Chromium + real-browser integration + advanced compile + themes."
+   :task
+   (shell "bb" "script/gesso_test.clj" "all")}
+
+  test:jvm
+  {:doc "Run all JVM tests. Included by `bb test`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "jvm")}
+
+  test:cljs
+  {:doc "Run all CLJS/browser gates: Node groups + Chromium + real HTTP/HTMX/SSE integration. Included by `bb test`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "cljs")}
+
+  test:node
+  {:doc "Run all Node CLJS tests: portable Choreo + browser semantics. Included by `bb test:cljs`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "node")}
+
+  test:node:choreo
+  {:doc "Run the portable Choreo CLJS/CLJC corpus under Node. Included by `bb test:node`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "node:choreo")}
+
+  test:node:browser
+  {:doc "Run host-independent browser semantic tests under Node. Included by `bb test:node`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "node:browser")}
+
+  test:browser
+  {:doc "Run every CLJS/CLJC test in real headless Chromium. Included by `bb test:cljs`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "browser")}
+
+  test:browser:integration
+  {:doc "Run production gesso-live.js against real Chromium + HTMX/SSE + deterministic HTTP fixtures. Included by `bb test:cljs`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "browser:integration")}
+
+  test:advanced
+  {:doc "Verify the composed production browser runtime advanced-compiles. Included by `bb test`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "advanced")}
+
+  test:themes
+  {:doc "Verify the theme build without overwriting checked-in CSS. Included by `bb test`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "themes")}}}

@@ -44,6 +44,8 @@
   {:id nil
    :event default-event
    :endpoint default-endpoint
+   :max-pending-fragments-per-client 256
+   :max-disconnected-pending-clients 256
    :client (fn [_ctx]
              {:client/scopes #{}})})
 
@@ -75,6 +77,15 @@
          {:key k
           :value f})))
   f)
+
+(defn- require-pos-int!
+  [k value]
+  (when-not (pos-int? value)
+    (throw
+     (ex "gesso.live client channel option must be a positive integer."
+         {:key k
+          :value value})))
+  value)
 
 (defn- event-name
   [event]
@@ -187,6 +198,23 @@
          :pending-path
          :client-id-param
 
+     :max-pending-fragments-per-client
+       Finite per-client entry cap for the ephemeral pending OOB mailbox.
+       Defaults to 256. Overflow drops the oldest pending entries, retaining
+       the newest work and incrementing :pending-overflow-count. Pending OOB is
+       still at-most-once, non-authoritative presentation work; this cap is a
+       retention bound, not a durability or acknowledgement mechanism.
+
+     :max-disconnected-pending-clients
+       Finite global cap on logical client ids that are disconnected while
+       retaining pending OOB work for same-id reconnect recovery. Defaults to
+       256. When the cap is exceeded, disconnected pending mailboxes are
+       evicted until the bound is restored and
+       :disconnected-pending-overflow-count is incremented. Currently connected
+       clients are never part of this eviction class. Eviction order is not a
+       delivery guarantee; pending OOB remains non-authoritative presentation
+       work.
+
      :client
        Function of ctx -> app client descriptor.
 
@@ -200,33 +228,73 @@
   ([options]
    (let [options'  (opts options)
          endpoint' (normalize-endpoint (:endpoint options'))
-         client-fn (require-fn! :client (:client options'))]
+         client-fn (require-fn! :client (:client options'))
+         max-pending-fragments-per-client
+         (require-pos-int!
+          :max-pending-fragments-per-client
+          (:max-pending-fragments-per-client options'))
+         max-disconnected-pending-clients
+         (require-pos-int!
+          :max-disconnected-pending-clients
+          (:max-disconnected-pending-clients options'))]
      {:id (or (:id options') (random-uuid))
       :event (event-name (:event options'))
       :endpoint endpoint'
+      :max-pending-fragments-per-client max-pending-fragments-per-client
+      :max-disconnected-pending-clients max-disconnected-pending-clients
       :client client-fn
       :state (atom {:clients {}
                     :pending {}
+                    :disconnected-pending-order []
                     :latest-client-id nil
                     :created-at (now-ms)
                     :sent-count 0
                     :wakeup-count 0
-                    :dropped-count 0})})))
+                    :dropped-count 0
+                    :pending-overflow-count 0
+                    :disconnected-pending-overflow-count 0})})))
 
 (defn reset-channel!
-  "Close all connected client streams and clear channel state."
+  "Atomically clear logical channel state, then close the displaced streams.
+
+   Reset has one state-linearization point:
+
+   - registrations committed before that point are part of the displaced state
+     and are closed;
+   - registrations committed after that point belong to the new state and
+     survive;
+   - physical stream closure happens only after the logical reset is visible.
+
+   Keeping close-stream! outside swap-vals! is essential because the atomic
+   update function may be retried under contention and stream closure is a
+   physical side effect."
   [channel]
-  (let [old-state @(:state channel)]
-    (doseq [client (vals (:clients old-state))]
-      (close-stream! (:stream client)))
-    (reset! (:state channel)
-            {:clients {}
-             :pending {}
-             :latest-client-id nil
-             :created-at (now-ms)
-             :sent-count 0
-             :wakeup-count 0
-             :dropped-count 0}))
+  (let [reset-state
+        {:clients {}
+         :pending {}
+         :disconnected-pending-order []
+         :latest-client-id nil
+         :created-at (now-ms)
+         :sent-count 0
+         :wakeup-count 0
+         :dropped-count 0
+         :pending-overflow-count 0
+         :disconnected-pending-overflow-count 0}
+
+        [old-state _new-state]
+        (swap-vals!
+         (:state channel)
+         (constantly
+          reset-state))]
+
+    (doseq [client
+            (vals
+             (:clients
+              old-state))]
+      (close-stream!
+       (:stream
+        client))))
+
   :reset)
 
 (defn new-client-id
@@ -279,24 +347,181 @@
 ;; Stream registration
 ;; -----------------------------------------------------------------------------
 
+(defn- without-client-id
+  [client-ids client-id]
+  (into []
+        (remove #(= client-id %))
+        (or client-ids [])))
+
+(defn- canonical-disconnected-pending-order
+  "Return a clean oldest->newest order for disconnected logical clients that
+   still own pending work.
+
+   The derived eligibility check is intentionally authoritative over the cached
+   order vector. This keeps hot-reloaded/legacy channel state safe when the
+   vector is absent or stale, without changing the pending mailbox shape."
+  [state]
+  (let [eligible
+        (set
+         (keep
+          (fn [[client-id fragments]]
+            (when
+             (and
+              (seq fragments)
+              (not
+               (contains?
+                (:clients state)
+                client-id)))
+             client-id))
+          (:pending state)))
+
+        ordered
+        (reduce
+         (fn [result client-id]
+           (if
+            (and
+             (contains? eligible client-id)
+             (not
+              (some #{client-id} result)))
+             (conj result client-id)
+             result))
+         []
+         (or (:disconnected-pending-order state) []))
+
+        ordered-set
+        (set ordered)
+
+        missing
+        (sort-by str
+                 (remove ordered-set eligible))]
+    (into ordered missing)))
+
+(defn- enforce-disconnected-pending-cap
+  "Mark client-id as the most recently disconnected retained mailbox and
+   enforce the channel-wide disconnected mailbox bound.
+
+   Connected client ids are never eligible. Eviction removes only ephemeral
+   pending presentation work; it does not affect an active physical stream.
+   The counter is separate from per-mailbox fragment overflow and wake failure
+   diagnostics."
+  [state channel client-id]
+  (let [capacity
+        (:max-disconnected-pending-clients channel)
+
+        ordered0
+        (canonical-disconnected-pending-order state)
+
+        client-retained?
+        (and
+         (not
+          (contains?
+           (:clients state)
+           client-id))
+         (seq
+          (get-in
+           state
+           [:pending client-id])))
+
+        ordered
+        (if client-retained?
+          (conj
+           (without-client-id ordered0 client-id)
+           client-id)
+          ordered0)
+
+        overflow-count
+        (max
+         0
+         (- (count ordered)
+            capacity))
+
+        evicted-client-ids
+        (take overflow-count ordered)
+
+        retained-order
+        (vec
+         (drop overflow-count ordered))]
+    (-> state
+        (assoc
+         :disconnected-pending-order
+         retained-order)
+        (update
+         :pending
+         #(apply dissoc % evicted-client-ids))
+        (update
+         :disconnected-pending-overflow-count
+         (fnil + 0)
+         overflow-count))))
+
 (defn- remove-client-if-same-stream!
   [channel client-id stream]
   (swap! (:state channel)
          (fn [state]
            (let [client (get-in state [:clients client-id])]
              (if (identical? stream (:stream client))
-               (update state :clients dissoc client-id)
+               (-> state
+                   (update :clients dissoc client-id)
+                   (enforce-disconnected-pending-cap
+                    channel
+                    client-id))
                state))))
   nil)
 
 (defn- register-client!
   [channel ctx client-id stream]
-  (let [client (connected-client channel ctx client-id stream)]
-    (swap! (:state channel)
-           (fn [state]
-             (assoc state
-                    :latest-client-id client-id
-                    :clients (assoc (:clients state) client-id client))))
+  (let [client
+        (connected-client
+         channel
+         ctx
+         client-id
+         stream)
+
+        [old-state _new-state]
+        (swap-vals!
+         (:state channel)
+         (fn [state]
+           (-> state
+               (assoc
+                :latest-client-id
+                client-id
+                :clients
+                (assoc
+                 (:clients state)
+                 client-id
+                 client))
+               ;; A same-id reconnect immediately protects its retained mailbox
+               ;; from disconnected-client eviction at this registration's
+               ;; linearization point.
+               (update
+                :disconnected-pending-order
+                without-client-id
+                client-id))))
+
+        displaced-stream
+        (get-in
+         old-state
+         [:clients
+          client-id
+          :stream])]
+
+    ;; One logical client id has exactly one current physical stream owner.
+    ;;
+    ;; Install the replacement atomically before closing the displaced stream.
+    ;; The old stream's on-closed callback therefore observes the replacement as
+    ;; current and remove-client-if-same-stream! cannot unregister it.
+    ;;
+    ;; Keep the close outside the atomic update function: swap-vals! may invoke
+    ;; that function more than once under contention, and stream closure is a
+    ;; physical side effect that must happen at most once for this registration.
+    (when
+     (and displaced-stream
+          (not
+           (identical?
+            displaced-stream
+            stream)))
+      (close-stream!
+       displaced-stream))
+
     client))
 
 (defn- wake-client-stream!
@@ -346,25 +571,115 @@
 ;; Pending OOB fragments
 ;; -----------------------------------------------------------------------------
 
-;; -----------------------------------------------------------------------------
-;; Pending OOB fragments
-;; -----------------------------------------------------------------------------
+(def ^:private pending-target-stream-key
+  ::pending-target-stream)
+
+(defn- bounded-pending-append
+  [pending fragments capacity]
+  (let [combined
+        (into
+         (vec
+          (or pending []))
+         fragments)
+
+        overflow-count
+        (max
+         0
+         (- (count combined)
+            capacity))
+
+        retained
+        (if (pos? overflow-count)
+          (subvec combined overflow-count)
+          combined)]
+    [retained
+     overflow-count]))
 
 (defn- enqueue-pending!
   [channel client-id fragments]
-  (swap! (:state channel)
-         (fn [state]
-           (-> state
-               (update-in [:pending client-id]
-                          (fnil into [])
-                          fragments)
-               (update :sent-count inc))))
-  client-id)
+  (let [expected-stream
+        (get
+         (meta fragments)
+         pending-target-stream-key)
+
+        capacity
+        (:max-pending-fragments-per-client
+         channel)
+
+        outcome
+        (volatile!
+         nil)]
+
+    (swap!
+     (:state channel)
+     (fn [state]
+       (let [current-stream
+             (get-in
+              state
+              [:clients
+               client-id
+               :stream])]
+         (if
+          (and expected-stream
+               (identical?
+                expected-stream
+                current-stream))
+           (let [pending
+                 (get-in
+                  state
+                  [:pending
+                   client-id])
+
+                 [pending'
+                  overflow-count]
+                 (bounded-pending-append
+                  pending
+                  fragments
+                  capacity)
+
+                 wake?
+                 (and (empty? pending)
+                      (seq pending'))]
+             ;; swap! may retry this function under contention. Reset the
+             ;; volatile on every invocation so the outcome always describes
+             ;; the state transition that actually won. In particular, two
+             ;; concurrent sends against an empty mailbox cannot both claim the
+             ;; empty -> nonempty wake edge: whichever retries observes the
+             ;; first send's pending work and returns :wake? false.
+             (vreset!
+              outcome
+              {:client-id client-id
+               :wake? (boolean wake?)})
+
+             (-> state
+                 (assoc-in
+                  [:pending client-id]
+                  pending')
+                 (update
+                  :sent-count
+                  inc)
+                 (update
+                  :pending-overflow-count
+                  (fnil + 0)
+                  overflow-count)))
+
+           (do
+             (vreset!
+              outcome
+              nil)
+             state)))))
+
+    @outcome))
 
 (defn drain-fragments!
-  "Drain and return pending fragments for client-id.
+  "Claim and return the current pending-fragment batch for client-id.
 
    Returns nil when no fragments are pending.
+
+   This is an intentionally destructive, at-most-once claim boundary. Once a
+   batch has been removed from channel state, receiver-specific rendering does
+   not acknowledge it back into the channel and a later rendering failure does
+   not replay it. Work sent after this claim remains pending for a later drain.
 
    Pending fragments are intentionally not rendered here, because some pending
    entries may be functions that need the receiving request ctx. Rendering
@@ -375,7 +690,12 @@
            (fn [state]
              (let [fragments (get-in state [:pending client-id])]
                (reset! drained fragments)
-               (update state :pending dissoc client-id))))
+               (-> state
+                   (update :pending dissoc client-id)
+                   (update
+                    :disconnected-pending-order
+                    without-client-id
+                    client-id)))))
     (when (seq @drained)
       (vec @drained))))
 
@@ -534,33 +854,74 @@
    work, so they can use that browser's request ctx, params, session, user, and
    included board state.
 
+   Physical SSE wakes are coalesced per client while that client's pending
+   mailbox remains nonempty. The first successful empty -> nonempty enqueue
+   attempts one wake; later sends in the same pending epoch only append work.
+   Draining the mailbox ends the epoch, and stream-response always supplies an
+   unconditional reconnect/open wake so surviving pending work is recoverable.
+
    Returns:
      {:sent ...
       :woke ...
       :woke? ...
       :target ...}"
   [channel {:keys [to fragments] :as request}]
-  (let [fragments' (vec fragments)
-        targets    (clients-matching-target channel to)]
-    (doseq [[client-id _client] targets]
-      (enqueue-pending! channel client-id fragments'))
+  (let [fragments'
+        (vec fragments)
 
-    (let [woke
-          (reduce-kv
-           (fn [n client-id client]
+        selected-targets
+        (clients-matching-target
+         channel
+         to)
+
+        enqueued-targets
+        (reduce-kv
+         (fn [targets client-id client]
+           (let [stream
+                 (:stream client)
+
+                 fragments-for-target
+                 (with-meta
+                  fragments'
+                  {pending-target-stream-key
+                   stream})]
+             (if-let [enqueue-outcome
+                      (enqueue-pending!
+                       channel
+                       client-id
+                       fragments-for-target)]
+               (assoc
+                targets
+                client-id
+                {:client client
+                 :wake? (:wake? enqueue-outcome)})
+               targets)))
+         {}
+         selected-targets)
+
+        woke
+        (reduce-kv
+         (fn [n client-id {:keys [client wake?]}]
+           (if
+            wake?
              (if-let [stream (:stream client)]
                (do
-                 (wake-client-stream! channel client-id stream)
+                 (wake-client-stream!
+                  channel
+                  client-id
+                  stream)
                  (inc n))
-               n))
-           0
-           targets)]
-      {:sent (count targets)
-       :woke woke
-       :woke? (pos? woke)
-       :target to
-       :fragment-count (count fragments')
-       :request request})))
+               n)
+             n))
+         0
+         enqueued-targets)]
+
+    {:sent (count enqueued-targets)
+     :woke woke
+     :woke? (pos? woke)
+     :target to
+     :fragment-count (count fragments')
+     :request request}))
 
 (defn send-to-client!
   "Send complete OOB fragments to one connected browser client."
@@ -606,6 +967,10 @@
   (let [state @(:state channel)]
     {:id (:id channel)
      :event (:event channel)
+     :max-pending-fragments-per-client
+     (:max-pending-fragments-per-client channel)
+     :max-disconnected-pending-clients
+     (:max-disconnected-pending-clients channel)
      :connected-count (count (:clients state))
      :connected-client-ids (vec (keys (:clients state)))
      :latest-client-id (:latest-client-id state)
@@ -613,4 +978,7 @@
      :sent-count (:sent-count state)
      :wakeup-count (:wakeup-count state)
      :dropped-count (:dropped-count state)
+     :pending-overflow-count (:pending-overflow-count state)
+     :disconnected-pending-overflow-count
+     (or (:disconnected-pending-overflow-count state) 0)
      :created-at (:created-at state)}))

@@ -23,6 +23,7 @@
    flow.clj is the cold per-client recipe."
   (:require
    [gesso.live.htmx :as htmx]
+   [gesso.live.progression :as progression]
    [gesso.live.schema :as schema]
    [gesso.live.source :as source]
    [manifold.deferred :as d]
@@ -199,21 +200,31 @@
        Optional static value or function of invalidation.
 
      :consistency-token
-       Optional consistency token attached to the live event."
+       Optional consistency token attached to the live event.
+
+   When the invalidation carries :progression, the live event carries the same
+   normalized requirement at top level. Keeping the requirement explicit on the
+   event lets later transport/browser layers consume it without interpreting the
+   descriptive invalidation payload."
   ([invalidation]
    (invalidation-event invalidation nil))
   ([invalidation options]
    (let [options' (opts options)
          event'   (htmx/event-name (:event options'))
          data'    (data-value (:data options') invalidation)
-         token    (:consistency-token options')
-         value    (cond-> {:event event'
-                           :invalidation invalidation}
-                    (some? data')
-                    (assoc :data data')
+         token       (:consistency-token options')
+         requirement (when (contains? invalidation :progression)
+                       (:progression invalidation))
+         value       (cond-> {:event event'
+                              :invalidation invalidation}
+                       (some? data')
+                       (assoc :data data')
 
-                    (some? token)
-                    (assoc :consistency-token token))]
+                       (contains? invalidation :progression)
+                       (assoc :progression requirement)
+
+                       (some? token)
+                       (assoc :consistency-token token))]
      (schema/validate-live-event! value))))
 
 (defn- safe-interested?
@@ -477,18 +488,69 @@
          :at (now-ms)})
        event))))
 
-(defn relieve
-  "Apply Missionary relief/coalescing to a flow.
+(defn- event-progression
+  [event]
+  (let [top-level?    (contains? event :progression)
+        invalidation  (:invalidation event)
+        nested?       (and (map? invalidation)
+                           (contains? invalidation :progression))
+        top-level     (:progression event)
+        nested        (:progression invalidation)]
+    (when (and top-level?
+               nested?
+               (not= top-level nested))
+      (throw
+       (ex "gesso.live live event progression disagrees with its invalidation."
+           {:event event
+            :event/progression top-level
+            :invalidation/progression nested})))
+    (cond
+      top-level? top-level
+      nested? nested
+      :else nil)))
 
-   With m/relieve, stale pending values can be discarded when the consumer is
-   slower than the producer. This is appropriate for cheap invalidation-first
-   wakeups.
+(defn coalesce-live-events
+  "Collapse two pending live events for Missionary relief.
+
+   The newer event owns ordinary descriptive fields, matching m/relieve's
+   historical latest-value behavior. Authoritative progression is not
+   latest-value state: every suppressed refresh requirement must survive.
+   Compose the two optional requirements conservatively and write the result to
+   both the live event and its nested invalidation.
+
+   The operation is associative because ordinary fields are right-biased and
+   progression/compose is associative. It never compares opaque bases or uses
+   arrival order as authority ordering."
+  [pending incoming]
+  (let [requirement (progression/compose (event-progression pending)
+                                         (event-progression incoming))
+        invalidation (:invalidation incoming)
+        invalidation' (cond-> invalidation
+                        requirement
+                        (assoc :progression requirement)
+
+                        (nil? requirement)
+                        (dissoc :progression))]
+    (cond-> (assoc incoming :invalidation invalidation')
+      requirement
+      (assoc :progression requirement)
+
+      (nil? requirement)
+      (dissoc :progression))))
+
+(defn relieve
+  "Apply progression-safe Missionary relief/coalescing to a live-event flow.
+
+   Missionary relief consumes upstream as fast as possible and combines pending
+   values when downstream is slower. Ordinary event fields remain latest-value,
+   but authoritative progression requirements are composed so relief cannot
+   silently weaken the eventual refresh requirement.
 
    This does not cancel expensive render/data-load work. Rendered stream paths
    should use m/?<= around the render branch when newer invalidations make older
    render work stale."
   [flow]
-  (m/relieve flow))
+  (m/relieve coalesce-live-events flow))
 
 (defn maybe-relieve
   "Apply relief when :relieve? is truthy."

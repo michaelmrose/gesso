@@ -6,11 +6,14 @@
    [gesso.live.flow :as flow]
    [gesso.live.fragment :as fragment]
    [gesso.live.invalidation :as invalidation]
+   [gesso.live.progression :as progression]
    [gesso.live.source :as source]
    [gesso.live.core :as live]
    [manifold.stream :as s]
    [gesso.live.transport.sse :as sse]
-   [missionary.core :as m]))
+   [missionary.core :as m])
+  (:import
+   [java.time Instant]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
@@ -61,37 +64,31 @@
         (future-cancel worker)))))
 
 (defn request-fragment-key
-  [token]
+  [progression-value]
   (fragment/strict-fragment-key
    {:fragment :request-panel
     :scope [:request "req-1"]
     :user-key [:user "u-1"]
     :params {:tab :summary}
-    :consistency-token token}))
+    :progression progression-value}))
 
 (def sample-xtdb-tx
   [[:put-docs :requests {:xt/id "req-1"
                          :status :open}]])
 
-(defn request-panel-key-from-consistency
-  [consistency]
+(defn request-panel-key-from-progression
+  [progression-value]
   (live/strict-fragment-key
-   (xtdb-live/with-consistency-dimension
-     {:fragment :request-panel
-      :scope [:request "req-1"]
-      :user-key [:user "u-1"]
-      :params {:tab :summary}}
-     consistency)))
+   {:fragment :request-panel
+    :scope [:request "req-1"]
+    :user-key [:user "u-1"]
+    :params {:tab :summary}
+    :progression progression-value}))
 
 (defn request-panel-key-from-ctx
   [ctx]
-  (live/strict-fragment-key
-   (xtdb-live/with-consistency-dimension-from
-     {:fragment :request-panel
-      :scope [:request "req-1"]
-      :user-key [:user "u-1"]
-      :params {:tab :summary}}
-     ctx)))
+  (request-panel-key-from-progression
+   (live/progression ctx)))
 
 (defn xtdb-var
   [sym]
@@ -755,7 +752,7 @@
         started-sse (sse/start! live-flow {:encoder (constantly "wake")})
         manager (fragment/create {:ttl-ms 1000})
         render-count (atom 0)
-        key (request-fragment-key "tx-1")]
+        key (request-fragment-key (progression/requirement :basis/tx-1))]
     (try
       (source/emit! src request-change)
       (is (= "event: live-update\ndata: wake\n\n"
@@ -794,7 +791,7 @@
 
 (deftest fragment-singleflight-collapses-concurrent-live-refresh-renders-test
   (let [manager (fragment/create {:ttl-ms 1000})
-        key (request-fragment-key "tx-1")
+        key (request-fragment-key (progression/requirement :basis/tx-1))
         started (promise)
         release (promise)
         cancelled (promise)
@@ -830,7 +827,7 @@
   (let [clock (atom 0)
         manager (fragment/create {:ttl-ms 100
                                   :clock #(deref clock)})
-        key (request-fragment-key "tx-1")
+        key (request-fragment-key (progression/requirement :basis/tx-1))
         render-count (atom 0)
         render-fn (fn []
                     (str "<section>render-" (swap! render-count inc) "</section>"))]
@@ -861,10 +858,10 @@
 
     (is (= 2 @render-count))))
 
-(deftest fragment-consistency-token-partitions-cache-keys-test
+(deftest fragment-progression-partitions-cache-keys-test
   (let [manager (fragment/create {:ttl-ms 1000})
-        key-tx-1 (request-fragment-key "tx-1")
-        key-tx-2 (request-fragment-key "tx-2")
+        key-tx-1 (request-fragment-key (progression/requirement :basis/tx-1))
+        key-tx-2 (request-fragment-key (progression/requirement :basis/tx-2))
         render-count (atom 0)
         render-fn (fn []
                     (str "<section>render-" (swap! render-count inc) "</section>"))]
@@ -904,7 +901,7 @@
               :scope [:store "store-1"]
               :user-key [:manager "mgr-1"]
               :params {:page 1}
-              :consistency-token "tx-1"})
+              :progression (progression/requirement :basis/tx-1)})
         render-count (atom 0)
         rules (request-rules)
         done (promise)
@@ -997,7 +994,7 @@
               :scope [:store "store-1"]
               :user-key [:manager "mgr-1"]
               :params {:page 1}
-              :consistency-token "tx-1"})
+              :progression (progression/requirement :basis/tx-1)})
         render-count (atom 0)]
     (try
       (live/submit-expanded! system ctx request-change)
@@ -1087,20 +1084,20 @@
         (live/cancel-sse! started)
         (live/close! system)))))
 
-(deftest core-vertical-fragment-consistency-token-partitions-cache-test
+(deftest core-vertical-fragment-progression-partitions-cache-test
   (let [system (live/create {:fragment-options {:ttl-ms 1000}})
         key-tx-1 (live/strict-fragment-key
                   {:fragment :request-panel
                    :scope [:request "req-1"]
                    :user-key [:user "u-1"]
                    :params {:tab :summary}
-                   :consistency-token "tx-1"})
+                   :progression (progression/requirement :basis/tx-1)})
         key-tx-2 (live/strict-fragment-key
                   {:fragment :request-panel
                    :scope [:request "req-1"]
                    :user-key [:user "u-1"]
                    :params {:tab :summary}
-                   :consistency-token "tx-2"})
+                   :progression (progression/requirement :basis/tx-2)})
         render-count (atom 0)
         render-fn (fn []
                     (str "<section>render-" (swap! render-count inc) "</section>"))]
@@ -1149,9 +1146,11 @@
                 {:snapshot-time :snapshot-1}]
                @seen))))))
 
-(deftest xtdb-context-consistency-partitions-fragment-cache-test
-  (let [ctx-1 {:gesso.live/consistency {:await-token "await-1"}}
-        ctx-2 {:gesso.live/consistency {:await-token "await-2"}}
+(deftest xtdb-context-progression-partitions-fragment-cache-test
+  (let [ctx-1 {:gesso.live/progression
+               (progression/requirement :basis/await-1)}
+        ctx-2 {:gesso.live/progression
+               (progression/requirement :basis/await-2)}
         system (live/create {:fragment-options {:ttl-ms 1000}})
         render-count (atom 0)
         render-fn (fn []
@@ -1188,9 +1187,10 @@
       (finally
         (live/close! system)))))
 
-(deftest xtdb-write-consistency-feeds-live-wakeup-and-fragment-key-test
+(deftest xtdb-write-progression-feeds-live-wakeup-and-fragment-key-test
   (let [ctx {:biff/conn :stale-request-conn
              :biff/node :shared-node}
+        system-time (Instant/parse "2026-08-25T12:00:42Z")
         system (live/create {:rules (request-rules)
                              :dispatch-options {:threads 1
                                                 :queue-size 8
@@ -1209,23 +1209,41 @@
         (fn [connectable tx-ops opts]
           (reset! seen-tx [connectable tx-ops opts])
           {:tx-id 42
-           :system-time :system-time-42})
+           :system-time system-time})
         (fn []
-          (let [{:keys [consistency] :as tx-result}
+          (let [{:keys [consistency progression] :as tx-result}
                 (xtdb-live/execute-tx-from! ctx sample-xtdb-tx)
 
+                required-basis
+                (first (:bases progression))
+
                 key
-                (request-panel-key-from-consistency consistency)]
+                (request-panel-key-from-progression progression)]
 
             (is (= [:stale-request-conn sample-xtdb-tx {}]
                    @seen-tx))
 
-            (is (= {:tx-result {:tx-id 42
-                                :system-time :system-time-42}
-                    :consistency {:tx-id 42
-                                  :system-time :system-time-42
-                                  :snapshot-time :system-time-42}}
-                   tx-result))
+            (is (= {:tx-id 42
+                    :system-time system-time}
+                   (:tx-result tx-result)))
+
+            (is (= {:tx-id 42
+                    :system-time system-time
+                    :snapshot-time system-time}
+                   consistency))
+
+            ;; The low-level XTDB stub must model a real execute-tx result.
+            ;; Complete committed metadata now also establishes a portable
+            ;; authoritative progression requirement.
+            (is (progression/requirement? progression))
+            (is (= 1 (count (:bases progression))))
+            (is (xtdb-live/xtdb-basis? required-basis))
+            (is (= 42
+                   (xtdb-live/basis-tx-id required-basis)))
+            (is (= "xtdb"
+                   (xtdb-live/basis-database required-basis)))
+            (is (= system-time
+                   (xtdb-live/basis-system-time required-basis)))
 
             (live/submit-expanded! system ctx request-change)
 
@@ -1267,7 +1285,7 @@
         seen-payload (atom nil)
         consistency {:snapshot-time :system-time-42
                      :tx-id 42}
-        consistency-token (xtdb-live/consistency-fragment-dimension consistency)
+        consistency-token (xtdb-live/consistency-token consistency)
         started (live/start-sse!
                  system
                  request-sub
@@ -1320,14 +1338,17 @@
                        :snapshot-time :system-time-100}
         consistency-2 {:tx-id 101
                        :system-time :system-time-101
-                       :snapshot-time :system-time-101}]
+                       :snapshot-time :system-time-101}
+        progression-1 (progression/requirement :basis/tx-100)
+        progression-2 (progression/requirement :basis/tx-101)]
     (try
       (with-redefs [xtdb-live/execute-tx-from!
                     (fn [ctx' tx-ops opts]
                       (swap! tx-calls conj [ctx' tx-ops opts])
                       {:tx-result {:tx-id 100
                                    :system-time :system-time-100}
-                       :consistency consistency-1})]
+                       :consistency consistency-1
+                       :progression progression-1})]
         (let [result (live/transact-and-notify!
                       system
                       ctx
@@ -1337,7 +1358,7 @@
                        :emit :async})
               ctx' (:ctx result)
               change' (first (:changes result))
-              key-1 (request-panel-key-from-consistency (:consistency result))]
+              key-1 (request-panel-key-from-progression (:progression result))]
 
           ;; Transaction went through the app-facing facade.
           (is (= [[ctx sample-xtdb-tx {:database :xtdb}]]
@@ -1346,15 +1367,19 @@
           ;; Returned metadata carries the transaction result and read basis.
           (is (= {:tx-result {:tx-id 100
                               :system-time :system-time-100}
-                  :consistency consistency-1}
-                 (select-keys result [:tx-result :consistency])))
+                  :consistency consistency-1
+                  :progression progression-1}
+                 (select-keys result [:tx-result :consistency :progression])))
 
-          ;; The facade puts consistency onto ctx and the submitted change.
+          ;; The facade puts read consistency plus authoritative transaction
+          ;; progression onto ctx and the submitted change.
           (is (= consistency-1
                  (:gesso.live/consistency ctx')))
+          (is (= progression-1
+                 (:gesso.live/progression ctx')))
           (is (= (assoc request-change
-                        :gesso.live/consistency
-                        consistency-1)
+                        :gesso.live/consistency consistency-1
+                        :progression progression-1)
                  change'))
 
           ;; Async emit goes through submit-expanded! and wakes the subscriber.
@@ -1366,34 +1391,36 @@
           (is (= "event: live-update\ndata: wake\n\n"
                  (take-value (:stream started))))
 
-          ;; The returned consistency can be used to partition fragment rendering.
+          ;; The returned progression partitions fragment rendering.
           (is (= "<section>request 1</section>"
                  (:value
                   (run-task
                    (live/render-task system key-1 render-fn)))))
 
-          ;; Same consistency reuses cache.
+          ;; Same progression reuses cache.
           (is (= "<section>request 1</section>"
                  (:value
                   (run-task
                    (live/render-task system key-1 render-fn)))))))
 
-      ;; A later transaction/read basis should partition the fragment cache.
+      ;; A later authoritative transaction progression should partition the
+      ;; fragment cache.
       ;; Use :emit false here because the wakeup path was already proven above.
       (with-redefs [xtdb-live/execute-tx-from!
                     (fn [ctx' tx-ops opts]
                       (swap! tx-calls conj [ctx' tx-ops opts])
                       {:tx-result {:tx-id 101
                                    :system-time :system-time-101}
-                       :consistency consistency-2})]
+                       :consistency consistency-2
+                       :progression progression-2})]
         (let [result-2 (live/transact-and-notify!
                         system
                         ctx
                         {:tx-ops sample-xtdb-tx
                          :change request-change
                          :emit false})
-              key-1 (request-panel-key-from-consistency consistency-1)
-              key-2 (request-panel-key-from-consistency (:consistency result-2))]
+              key-1 (request-panel-key-from-progression progression-1)
+              key-2 (request-panel-key-from-progression (:progression result-2))]
 
           (is (not= key-1 key-2))
 
@@ -1402,7 +1429,7 @@
                   (run-task
                    (live/render-task system key-2 render-fn)))))
 
-          ;; Same newer consistency now reuses its own cache.
+          ;; Same newer progression now reuses its own cache.
           (is (= "<section>request 2</section>"
                  (:value
                   (run-task

@@ -2,26 +2,7 @@
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
-   [gesso.live.continuity :as continuity]
-   [gesso.live.htmx :as htmx]
-   [gesso.live.ui :as ui]))
-
-;; -----------------------------------------------------------------------------
-;; Hiccup helpers
-;; -----------------------------------------------------------------------------
-
-(defn attrs
-  [node]
-  (when (and (vector? node)
-             (map? (second node)))
-    (second node)))
-
-(defn children
-  [node]
-  (let [xs (rest node)]
-    (if (map? (first xs))
-      (rest xs)
-      xs)))
+   [gesso.live.continuity :as continuity]))
 
 ;; -----------------------------------------------------------------------------
 ;; Continuity constructor tests
@@ -91,6 +72,43 @@
             {:selector "input[data-preserve]"
              :key-attr "name"})))))
 
+(deftest details-open-test
+  (testing "selector shorthand"
+    (is (= {:type "details-open"
+            :selector "details[data-request]"}
+           (continuity/details-open
+            "details[data-request]"))))
+
+  (testing "explicit options preserve browser-facing selector/key metadata"
+    (is (= {:type "details-open"
+            :selector "details[data-request]"
+            :key-attr "data-request-id"}
+           (continuity/details-open
+            {:selector "details[data-request]"
+             :key-attr "data-request-id"}))))
+
+  (testing ":single? normalizes to the browser-facing :single key"
+    (is (= {:type "details-open"
+            :selector "details[data-request]"
+            :single true}
+           (continuity/details-open
+            {:selector "details[data-request]"
+             :single? true}))))
+
+  (testing "existing :single is preserved"
+    (is (= {:type "details-open"
+            :selector "details[data-request]"
+            :single false}
+           (continuity/details-open
+            {:selector "details[data-request]"
+             :single false}))))
+
+  (testing "selector is required"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"details-open requires :selector"
+         (continuity/details-open {})))))
+
 (deftest event-box-test
   (testing "event-backed box"
     (is (= {:type "event"
@@ -103,7 +121,29 @@
             :selector "[data-row]"}
            (continuity/event
             :selected-row
-            {:selector "[data-row]"})))))
+            {:selector "[data-row]"}))))
+
+  (testing "event constructor owns both type and name"
+    (doseq [[opts owned]
+            [[{:type "js"} #{:type}]
+             [{:name "different"} #{:name}]
+             [{:type "js" :name "different"} #{:type :name}]]]
+      (let [error (try
+                    (continuity/event :selected-row opts)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e
+                      e))]
+        (is (some? error))
+        (is (re-find #"cannot override constructor-owned keys"
+                     (ex-message error)))
+        (is (= owned
+               (:owned-keys (ex-data error)))))))
+
+  (testing "event opts must be a map"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"event opts must be a map"
+         (continuity/event :selected-row [:not :a :map])))))
 
 (deftest hyperscript-box-test
   (testing "hyperscript-backed box"
@@ -119,7 +159,22 @@
            (continuity/hyperscript
             :selected-row
             {:capture "capture hs"
-             :restore "restore hs"})))))
+             :restore "restore hs"}))))
+
+  (testing "hyperscript constructor owns both type and name"
+    (doseq [[opts owned]
+            [[{:type "event"} #{:type}]
+             [{:name "different"} #{:name}]]]
+      (let [error (try
+                    (continuity/hyperscript :selected-row opts)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e
+                      e))]
+        (is (some? error))
+        (is (re-find #"cannot override constructor-owned keys"
+                     (ex-message error)))
+        (is (= owned
+               (:owned-keys (ex-data error))))))))
 
 (deftest js-box-test
   (testing "js-backed box"
@@ -160,6 +215,27 @@
            (continuity/box
             'custom.widget
             {:foo "bar"}))))
+
+  (testing "unforeseen application box types remain open-ended"
+    (is (= {:type "future-widget-that-gesso-does-not-know"
+            :mode :special
+            :nested {:application/data [1 2 3]}}
+           (continuity/box
+            "future-widget-that-gesso-does-not-know"
+            {:mode :special
+             :nested {:application/data [1 2 3]}}))))
+
+  (testing "constructor-owned type cannot be replaced through generic options"
+    (let [error (try
+                  (continuity/box :focus {:type "js"})
+                  nil
+                  (catch clojure.lang.ExceptionInfo e
+                    e))]
+      (is (some? error))
+      (is (re-find #"cannot override constructor-owned keys"
+                   (ex-message error)))
+      (is (= #{:type}
+             (:owned-keys (ex-data error))))))
 
   (testing "box opts must be a map"
     (is (thrown-with-msg?
@@ -219,8 +295,10 @@
             nil
             (continuity/focus)))))
 
-  (testing "with-boxes can start from true"
+  (testing "with-boxes preserves the continuity policy represented by true"
     (is (= {:enabled true
+            :preserve {:scroll true
+                       :focus true}
             :boxes [{:type "focus"}]}
            (continuity/with-boxes
             true
@@ -264,7 +342,7 @@
            continuity/hx-preserve-attrs))))
 
 ;; -----------------------------------------------------------------------------
-;; HTMX attr/config contract tests
+;; Continuity wire/config contract tests
 ;; -----------------------------------------------------------------------------
 
 (deftest normalize-client-continuity-test
@@ -275,14 +353,14 @@
     (is (= {:enabled true
             :preserve {:scroll true
                        :focus true}}
-           (htmx/normalize-client-continuity true))))
+           (continuity/normalize-client-continuity true))))
 
   (testing "preserve sugar normalizes into the runtime preserve map"
     (is (= {:enabled true
             :preserve {:scroll true
                        :focus true
                        :inputs {:selector "[data-input]"}}}
-           (htmx/normalize-client-continuity
+           (continuity/normalize-client-continuity
             {:preserve-scroll true
              :preserve-focus true
              :preserve-inputs {:selector "[data-input]"}}))))
@@ -291,20 +369,79 @@
     (is (= {:enabled true
             :preserve {:scroll {:selector "[data-card]"}
                        :focus true}}
-           (htmx/normalize-client-continuity
+           (continuity/normalize-client-continuity
             (continuity/preserve
              {:scroll {:selector "[data-card]"}
               :focus true}))))))
 
+(deftest normalize-client-continuity-shapes-test
+  (testing "disabled forms all normalize to nil"
+    (is (nil? (continuity/normalize-client-continuity nil)))
+    (is (nil? (continuity/normalize-client-continuity false)))
+    (is (nil?
+         (continuity/normalize-client-continuity
+          {:enabled false
+           :preserve {:focus true}}))))
+
+  (testing "sequential shorthand is normalized as explicit boxes"
+    (is (= {:enabled true
+            :boxes [{:type "focus"}
+                    {:type "widget"
+                     :name "app/selection"}]}
+           (continuity/normalize-client-continuity
+            [:focus
+             {:type :application/widget
+              :name :app/selection}]))))
+
+  (testing ":preserve true means the conservative focus-only preserve map"
+    (is (= {:enabled true
+            :preserve {:focus true}}
+           (continuity/normalize-client-continuity
+            {:preserve true}))))
+
+  (testing "unknown map keys remain data for higher-level extensions"
+    (is (= {:enabled true
+            :extension {:mode :custom}}
+           (continuity/normalize-client-continuity
+            {:extension {:mode :custom}})))))
+
+(deftest normalize-client-continuity-validation-test
+  (testing "unsupported top-level shapes fail"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"must be nil, false, true, a map, or a sequential collection"
+         (continuity/normalize-client-continuity 42))))
+
+  (testing "invalid preserve shape fails"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #":preserve must be"
+         (continuity/normalize-client-continuity
+          {:preserve :not-a-map}))))
+
+  (testing "boxes must be sequential"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #":boxes must be a sequential collection"
+         (continuity/normalize-client-continuity
+          {:boxes {:type :focus}}))))
+
+  (testing "individual box entries must be supported data forms"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #":boxes entries must be maps, keywords, symbols, or strings"
+         (continuity/normalize-client-continuity
+          {:boxes [42]})))))
+
 (deftest client-continuity-attrs-test
   (testing "disabled continuity emits no attrs"
     (is (= {}
-           (htmx/client-continuity-attrs
+           (continuity/client-continuity-attrs
             {:fragment-id "request-list"
              :client-continuity false}))))
 
   (testing "raw scroll/focus config is encoded on the stable root"
-    (let [attrs (htmx/client-continuity-attrs
+    (let [attrs (continuity/client-continuity-attrs
                  {:fragment-id "request-list"
                   :client-continuity (continuity/preserve
                                       {:scroll true
@@ -318,7 +455,7 @@
       (is (str/includes? config "\"focus\":true"))))
 
   (testing "anchor selector config is encoded on the stable root"
-    (let [attrs (htmx/client-continuity-attrs
+    (let [attrs (continuity/client-continuity-attrs
                  {:fragment-id "request-list"
                   :client-continuity (continuity/preserve
                                       {:scroll {:selector "[data-card]"}
@@ -328,30 +465,89 @@
       (is (= "request-list" (:data-gesso-live-continuity-fragment attrs)))
       (is (str/includes? config "\"selector\":\"[data-card]\"")))))
 
-(deftest fragment-panel-continuity-contract-test
-  (let [panel (ui/fragment-panel
-               {:id "request-list"
-                :src "/app/fragments/requests"
-                :stream-url "/app/streams/requests"
-                :client-continuity (continuity/preserve
-                                    {:scroll true
-                                     :focus true})})
-        root-attrs (attrs panel)
-        target (first (children panel))
-        target-attrs (attrs target)
-        config (:data-gesso-live-continuity-config root-attrs)]
-    (testing "stable root owns live behavior and continuity config"
-      (is (= :div (first panel)))
-      (is (= "sse" (:hx-ext root-attrs)))
-      (is (= "/app/streams/requests" (:sse-connect root-attrs)))
-      (is (= "/app/fragments/requests" (:hx-get root-attrs)))
-      (is (= "#request-list" (:hx-target root-attrs)))
-      (is (= "outerHTML" (:hx-swap root-attrs)))
-      (is (= "true" (:data-gesso-live-continuity root-attrs)))
-      (is (= "request-list" (:data-gesso-live-continuity-fragment root-attrs)))
-      (is (str/includes? config "\"scroll\":true"))
-      (is (str/includes? config "\"focus\":true")))
+(deftest client-continuity-attrs-exact-wire-test
+  (is (= {:data-gesso-live-continuity "true"
+          :data-gesso-live-continuity-fragment "request-list"
+          :data-gesso-live-continuity-config
+          "{\"enabled\":true,\"preserve\":{\"focus\":true,\"scroll\":true}}"}
+         (continuity/client-continuity-attrs
+          {:fragment-id "request-list"
+           :client-continuity true}))))
 
-    (testing "replaceable target owns only the fragment id by default"
-      (is (= :div (first target)))
-      (is (= {:id "request-list"} target-attrs)))))
+(deftest continuity-wire-attrs-test
+  (testing "continuity owns the exact browser-runtime attribute vocabulary"
+    (is (= :data-gesso-live-continuity
+           continuity/continuity-attr))
+    (is (= :data-gesso-live-continuity-config
+           continuity/continuity-config-attr))
+    (is (= :data-gesso-live-continuity-fragment
+           continuity/continuity-fragment-attr))
+    (is (= #{:data-gesso-live-continuity
+             :data-gesso-live-continuity-config
+             :data-gesso-live-continuity-fragment}
+           continuity/continuity-attrs))))
+
+(deftest client-continuity-json-test
+  (testing "disabled continuity has no wire representation"
+    (is (nil? (continuity/client-continuity-json nil)))
+    (is (nil? (continuity/client-continuity-json false))))
+
+  (testing "JSON encoding is deterministic regardless of input map insertion order"
+    (let [a (array-map
+             :preserve-focus true
+             :preserve-scroll {:selector "[data-card]"}
+             :custom {:z 3 :a 1})
+          b (array-map
+             :custom (array-map :a 1 :z 3)
+             :preserve-scroll {:selector "[data-card]"}
+             :preserve-focus true)]
+      (is (= (continuity/client-continuity-json a)
+             (continuity/client-continuity-json b)))))
+
+  (testing "Clojure functions cannot leak into browser configuration"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"cannot contain Clojure functions"
+         (continuity/client-continuity-json
+          {:boxes [{:type :custom
+                    :capture (fn [] :nope)}]})))))
+
+(deftest client-continuity-json-edge-test
+  (testing "JSON escaping preserves a deterministic valid wire string"
+    (is (= "{\"enabled\":true,\"label\":\"quote=\\\" slash=\\\\ newline=\\n\"}"
+           (continuity/client-continuity-json
+            {:label "quote=\" slash=\\ newline=\n"}))))
+
+  (testing "sets are encoded deterministically"
+    (is (= "{\"enabled\":true,\"values\":[\"a\",\"b\",\"c\"]}"
+           (continuity/client-continuity-json
+            {:values #{:c :a :b}}))))
+
+  (testing "non-finite numbers cannot enter browser configuration"
+    (doseq [value [Double/NaN
+                   Double/POSITIVE_INFINITY
+                   Double/NEGATIVE_INFINITY]]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"cannot encode non-finite numbers"
+           (continuity/client-continuity-json
+            {:value value}))))))
+
+(deftest client-continuity-attrs-validation-test
+  (testing "enabled continuity requires a stable fragment id"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"fragment id must be a non-blank string"
+         (continuity/client-continuity-attrs
+          {:client-continuity true})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"fragment id must be a non-blank string"
+         (continuity/client-continuity-attrs
+          {:fragment-id "   "
+           :client-continuity true}))))
+
+  (testing "disabled continuity does not require a fragment id"
+    (is (= {}
+           (continuity/client-continuity-attrs
+            {:client-continuity false})))))

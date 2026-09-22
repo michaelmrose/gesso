@@ -1,5 +1,6 @@
 (ns gesso.live.htmx-test
   (:require
+   [clojure.string :as str]
    [clojure.test :refer [deftest is testing]]
    [gesso.live.htmx :as h]))
 
@@ -187,6 +188,62 @@
            (h/fragment-trigger
             {:event :live-update
              :jitter-delay-ms 250})))))
+
+(deftest managed-fragment-refresh-trigger-test
+  (testing "managed refresh uses the adapter-owned DOM event only"
+    (is (= "gesso:live-refresh"
+           (h/managed-fragment-refresh-trigger)))
+    (is (not (str/includes?
+              (h/managed-fragment-refresh-trigger)
+              "sse:")))))
+
+(deftest managed-fragment-refresh-attrs-test
+  (testing "managed fragment attrs request only on the adapter refresh event"
+    (is (= {:hx-get "/app/store/queue"
+            :hx-trigger "gesso:live-refresh"
+            :hx-swap "outerHTML"}
+           (h/managed-fragment-refresh-attrs
+            {:src "/app/store/queue"}))))
+
+  (testing "managed fragment attrs normalize targets and accept explicit swap policy"
+    (is (= {:hx-get "/app/store/queue"
+            :hx-trigger "gesso:live-refresh"
+            :hx-target "#store-queue"
+            :hx-swap "innerHTML"
+            :class "target"
+            :aria-live "polite"}
+           (h/managed-fragment-refresh-attrs
+            {:src "/app/store/queue"
+             :target "store-queue"
+             :swap "innerHTML"
+             :attrs {:class "target"
+                     :aria-live "polite"}}))))
+
+  (testing "caller attrs cannot replace managed request ownership"
+    (is (= {:hx-get "/app/store/queue"
+            :hx-trigger "gesso:live-refresh"
+            :hx-target "#store-queue"
+            :hx-swap "outerHTML"
+            :class "target"}
+           (h/managed-fragment-refresh-attrs
+            {:src "/app/store/queue"
+             :target "store-queue"
+             :attrs {:hx-get "/bypass"
+                     :hx-trigger "sse:live-update"
+                     :hx-target "#bypass"
+                     :hx-swap "none"
+                     :class "target"}}))))
+
+  (testing "managed fragment attrs reject missing or blank source URLs"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Fragment source URL is required"
+         (h/managed-fragment-refresh-attrs {})))
+
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Fragment source URL is required"
+         (h/managed-fragment-refresh-attrs {:src ""})))))
 
 (deftest fragment-target-attrs-test
   (testing "fragment-target-attrs builds the live fragment target attrs"

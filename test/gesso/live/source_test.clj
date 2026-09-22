@@ -1,6 +1,7 @@
 (ns gesso.live.source-test
   (:require
    [clojure.test :refer [deftest is]]
+   [gesso.live.progression :as progression]
    [gesso.live.source :as source]
    [manifold.stream :as s]))
 
@@ -256,6 +257,212 @@
          clojure.lang.ExceptionInfo
          #"source is closed"
          (source/emit-many! src [invalidation-1])))))
+
+
+;; -----------------------------------------------------------------------------
+;; Source-level coalescing
+;; -----------------------------------------------------------------------------
+
+(def coalesce-window-ms 100)
+
+(def basis-a
+  {:tx-id "10"
+   :system-time "2026-08-25T20:00:00Z"})
+
+(def basis-b
+  {:tx-id "11"
+   :system-time "2026-08-25T20:00:01Z"})
+
+(def requirement-a
+  (progression/requirement basis-a))
+
+(def requirement-b
+  (progression/requirement basis-b))
+
+(deftest coalescing-is-leading-edge-plus-trailing-edge-test
+  (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
+        tap (source/changes src)
+        leading (assoc invalidation-1 :marker :leading)
+        pending-a (assoc invalidation-1 :marker :pending-a)
+        pending-b (assoc invalidation-1
+                         :marker :pending-b
+                         :change/kind :deleted)]
+    (try
+      (let [leading-result (source/emit! src leading)]
+        (is (= :emitted (:status leading-result)))
+        (is (= :leading (:coalescing leading-result)))
+        (is (false? (:coalesced? leading-result)))
+        (is (= leading (take-value tap))))
+
+      (let [pending-result-a (source/emit! src pending-a)
+            pending-result-b (source/emit! src pending-b)]
+        (is (= :queued (:status pending-result-a)))
+        (is (= :suppressed (:coalescing pending-result-a)))
+        (is (true? (:coalesced? pending-result-a)))
+        (is (= 0 (:attempted pending-result-a)))
+        (is (= :queued (:status pending-result-b)))
+        (is (= :suppressed (:coalescing pending-result-b)))
+        (is (true? (:coalesced? pending-result-b)))
+        (is (= 0 (:attempted pending-result-b))))
+
+      (is (= pending-b (take-value tap)))
+
+      (let [stats (source/stats src)]
+        (is (= 3 (:accepted-count stats)))
+        (is (= 2 (:fanout-count stats)))
+        (is (= 1 (:leading-count stats)))
+        (is (= 1 (:trailing-count stats)))
+        (is (= 2 (:suppressed-count stats)))
+        (is (= 2 (:coalesced-count stats))))
+      (finally
+        (source/close! src)))))
+
+(deftest coalescing-disabled-delivers-every-invalidation-immediately-test
+  (let [src (source/create {:coalesce-window-ms nil})
+        tap (source/changes src)
+        first-value (assoc invalidation-1 :marker :first)
+        second-value (assoc invalidation-1 :marker :second)]
+    (try
+      (is (= :emitted (:status (source/emit! src first-value))))
+      (is (= :emitted (:status (source/emit! src second-value))))
+      (is (= first-value (take-value tap)))
+      (is (= second-value (take-value tap)))
+      (let [stats (source/stats src)]
+        (is (= 2 (:accepted-count stats)))
+        (is (= 2 (:fanout-count stats)))
+        (is (= 0 (:leading-count stats)))
+        (is (= 0 (:trailing-count stats)))
+        (is (= 0 (:suppressed-count stats)))
+        (is (= 0 (:coalesced-count stats))))
+      (finally
+        (source/close! src)))))
+
+(deftest coalescing-is-independent-per-scope-test
+  (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
+        tap (source/changes src)
+        request-leading (assoc invalidation-1 :marker :request-leading)
+        store-leading (assoc invalidation-2 :marker :store-leading)]
+    (try
+      (is (= :leading (:coalescing (source/emit! src request-leading))))
+      (is (= :leading (:coalescing (source/emit! src store-leading))))
+      (is (= request-leading (take-value tap)))
+      (is (= store-leading (take-value tap)))
+      (let [stats (source/stats src)]
+        (is (= 2 (:leading-count stats)))
+        (is (= 0 (:suppressed-count stats)))
+        (is (= 2 (:scheduled-count stats))))
+      (finally
+        (source/close! src)))))
+
+(deftest coalescing-composes-progression-across-suppressed-invalidations-test
+  (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
+        tap (source/changes src)
+        leading (assoc invalidation-1 :marker :leading)
+        pending-a (assoc invalidation-1
+                         :marker :pending-a
+                         :progression requirement-a)
+        pending-b (assoc invalidation-1
+                         :marker :pending-b
+                         :change/kind :deleted
+                         :progression requirement-b)]
+    (try
+      (source/emit! src leading)
+      (is (= leading (take-value tap)))
+      (is (= :queued (:status (source/emit! src pending-a))))
+      (is (= :queued (:status (source/emit! src pending-b))))
+
+      (let [trailing (take-value tap)]
+        (is (= :pending-b (:marker trailing)))
+        (is (= :deleted (:change/kind trailing)))
+        (is (= #{basis-a basis-b}
+               (progression/required-bases (:progression trailing)))))
+      (finally
+        (source/close! src)))))
+
+(deftest leading-progression-is-not-folded-into-trailing-progression-test
+  (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
+        tap (source/changes src)
+        leading (assoc invalidation-1
+                       :marker :leading
+                       :progression requirement-a)
+        pending (assoc invalidation-1
+                       :marker :pending
+                       :progression requirement-b)]
+    (try
+      (source/emit! src leading)
+      (is (= leading (take-value tap)))
+      (is (= :queued (:status (source/emit! src pending))))
+      (let [trailing (take-value tap)]
+        (is (= :pending (:marker trailing)))
+        (is (= #{basis-b}
+               (progression/required-bases (:progression trailing)))))
+      (finally
+        (source/close! src)))))
+
+(deftest pending-progression-survives-newer-descriptive-value-test
+  (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
+        tap (source/changes src)
+        leading (assoc invalidation-1 :marker :leading)
+        pending-with-progression (assoc invalidation-1
+                                        :marker :with-progression
+                                        :progression requirement-a)
+        newest-without-progression (assoc invalidation-1
+                                          :marker :newest
+                                          :change/kind :deleted)]
+    (try
+      (source/emit! src leading)
+      (is (= leading (take-value tap)))
+      (source/emit! src pending-with-progression)
+      (source/emit! src newest-without-progression)
+      (let [trailing (take-value tap)]
+        (is (= :newest (:marker trailing)))
+        (is (= :deleted (:change/kind trailing)))
+        (is (= #{basis-a}
+               (progression/required-bases (:progression trailing)))))
+      (finally
+        (source/close! src)))))
+
+(deftest newer-progression-attaches-to-pending-descriptive-value-test
+  (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
+        tap (source/changes src)
+        leading (assoc invalidation-1 :marker :leading)
+        pending-without-progression (assoc invalidation-1 :marker :older)
+        newest-with-progression (assoc invalidation-1
+                                       :marker :newer
+                                       :progression requirement-b)]
+    (try
+      (source/emit! src leading)
+      (is (= leading (take-value tap)))
+      (source/emit! src pending-without-progression)
+      (source/emit! src newest-with-progression)
+      (let [trailing (take-value tap)]
+        (is (= :newer (:marker trailing)))
+        (is (= #{basis-b}
+               (progression/required-bases (:progression trailing)))))
+      (finally
+        (source/close! src)))))
+
+(deftest repeated-identical-progression-is-idempotent-under-coalescing-test
+  (let [src (source/create {:coalesce-window-ms coalesce-window-ms})
+        tap (source/changes src)
+        leading (assoc invalidation-1 :marker :leading)
+        pending-a (assoc invalidation-1
+                         :marker :a
+                         :progression requirement-a)
+        pending-b (assoc invalidation-1
+                         :marker :b
+                         :progression requirement-a)]
+    (try
+      (source/emit! src leading)
+      (is (= leading (take-value tap)))
+      (source/emit! src pending-a)
+      (source/emit! src pending-b)
+      (let [trailing (take-value tap)]
+        (is (= :b (:marker trailing)))
+        (is (= #{basis-a}
+               (progression/required-bases (:progression trailing)))))
+      (finally
+        (source/close! src)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Errors

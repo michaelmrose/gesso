@@ -1360,6 +1360,142 @@
           ::legacy-live-system
           @seen))))))
 
+(deftest transact-post-commit-delivery-failure-test
+  (testing "the model transaction boundary preserves Live's committed-delivery classification"
+    (let [cause
+          (ex-info
+           "dispatcher unavailable"
+           {:delivery/cause
+            :dispatcher-down})
+
+          delivery-error
+          (ex-info
+           "XTDB transaction committed, but Gesso Live post-commit invalidation delivery failed."
+           {:error/type
+            live/post-commit-delivery-failure-type
+
+            :failure/stage
+            :post-commit-delivery
+
+            :commit/status
+            :committed
+
+            :tx-result
+            ::committed-tx
+
+            :consistency
+            {:biff.xtdb/snapshot-token
+             "committed-snapshot"}
+
+            :progression
+            {:gesso.live.progression/bases
+             ["basis-b"]}
+
+            :delivery/index
+            1
+
+            :delivery/change
+            account-change
+
+            :delivery/completed-results
+            [::widget-delivered]}
+           cause)
+
+          polls
+          (atom 0)]
+
+      (with-redefs
+       [tx/prepare
+        (fn [_ctx _plan]
+          {:plan
+           {:commands
+            [widget-update]
+
+            :guards
+            []
+
+            :assertions
+            []
+
+            :changes
+            [widget-change
+             account-change]
+
+            :emit
+            :async
+
+            :entry
+            nil
+
+            :entry-fn
+            nil
+
+            :tx-options
+            nil}
+
+           :tx-ops
+           [[:formatted
+             :write]]})
+
+        live/transact-and-notify!
+        (fn [_system _ctx _options]
+          (throw
+           delivery-error))]
+
+        (let [caught
+              (try
+                (tx/transact!
+                 {:gesso.live/system
+                  ::live-system
+
+                  :biff.xtdb/poll-now
+                  #(swap!
+                    polls
+                    inc)}
+                 {})
+                nil
+                (catch Throwable error
+                  error))]
+
+          (is
+           (identical?
+            delivery-error
+            caught)
+           "model.tx must not flatten or reclassify the Live post-commit failure")
+
+          (is
+           (live/post-commit-delivery-failure?
+            caught))
+
+          (is
+           (=
+            :committed
+            (:commit/status
+             (ex-data caught))))
+
+          (is
+           (=
+            :post-commit-delivery
+            (:failure/stage
+             (ex-data caught))))
+
+          (is
+           (identical?
+            cause
+            (.getCause
+             ^Throwable caught)))
+
+          (is
+           (=
+            [::widget-delivered]
+            (:delivery/completed-results
+             (ex-data caught))))
+
+          (is
+           (zero?
+            @polls)
+           "the optional success-path listener nudge does not run after a delivery exception"))))))
+
 (deftest listener-poll-failure-test
   (testing "post-commit listener polling is only a latency optimization"
     (with-redefs

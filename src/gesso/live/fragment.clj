@@ -8,7 +8,7 @@
    - singleflight: concurrent renders for the same key share one in-flight result
    - short TTL cache: near-simultaneous requests can reuse fresh rendered output
    - optional cache size bound
-   - consistency-token-aware key helpers
+   - authoritative-progression-aware key helpers
    - Missionary render tasks using m/via-call
    - conditional debug tracing
    - model-backed adapters from gesso.live.model fragment descriptors to
@@ -30,9 +30,10 @@
 
    The caller is responsible for choosing a key that includes every value that
    can affect the rendered HTML, such as user/scope/params/theme/locale and any
-   consistency token."
+   authoritative progression requirement."
   (:require
    [gesso.live.model :as model]
+   [gesso.live.progression :as progression]
    [gesso.live.ui :as ui]
    [missionary.core :as m]))
 
@@ -72,7 +73,7 @@
    :params
    :locale
    :theme
-   :consistency-token])
+   :progression])
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -227,6 +228,26 @@
 ;; Fragment keys
 ;; -----------------------------------------------------------------------------
 
+(def ^:private legacy-consistency-key
+  :consistency-token)
+
+(defn- normalize-key-dimensions!
+  [dimensions]
+  (let [dimensions' (or dimensions {})]
+    (when (contains? dimensions' legacy-consistency-key)
+      (throw
+       (ex
+        "gesso.live fragment keys no longer accept :consistency-token; use a normalized :progression requirement."
+        {:unsupported-dimension legacy-consistency-key
+         :dimensions dimensions'})))
+    (if (contains? dimensions' :progression)
+      (let [requirement
+            (progression/normalize-requirement (:progression dimensions'))]
+        (cond-> (dissoc dimensions' :progression)
+          (some? requirement)
+          (assoc :progression requirement)))
+      dimensions')))
+
 (defn fragment-key
   "Build a stable vector key for a rendered fragment.
 
@@ -241,15 +262,20 @@
      :params
      :locale
      :theme
-     :consistency-token
+     :progression
 
-   The consistency token is just another render-affecting dimension. Including
-   it means strict read-after-write requests do not share stale cached output
-   with requests from an older visibility point."
+   :progression, when present, must be a normalized gesso.live.progression
+   requirement. It is normalized again at this boundary so equivalent orderless
+   requirements produce equal keys. Including it prevents a refresh carrying an
+   authoritative minimum-read requirement from sharing cached or in-flight
+   output with a render that did not carry that requirement.
+
+   The retired :consistency-token dimension is rejected rather than silently
+   ignored so stale callers cannot accidentally weaken render isolation."
   ([base]
    (fragment-key base nil))
   ([base dimensions]
-   (let [dimensions' (or dimensions {})]
+   (let [dimensions' (normalize-key-dimensions! dimensions)]
      (into [:gesso.live.fragment base]
            (mapcat
             (fn [k]
@@ -270,7 +296,7 @@
      :params
      :locale
      :theme
-     :consistency-token
+     :progression
 
    This helper is intended for higher-level app/core APIs where accidentally
    sharing HTML across users/scopes would be dangerous."
@@ -459,7 +485,7 @@
    If an in-flight render exists, its running process is cancelled.
 
    This is mostly useful for tests or explicit invalidation. Normal live refresh
-   paths usually rely on short TTLs and consistency-token-aware keys instead."
+   paths usually rely on short TTLs and progression-aware keys instead."
   [manager key]
   (swap! (:cache manager) dissoc key)
   (when-let [flight (get @(:inflight manager) key)]
@@ -680,12 +706,37 @@
 ;; Model-backed fragment adapters
 ;; -----------------------------------------------------------------------------
 
+(def ^:private unmanaged-runtime-fragment-refresh-option-keys
+  [:trigger :jitter-ms :jitter-delay-ms])
+
+(defn- reject-unmanaged-runtime-fragment-refresh-options!
+  [opts]
+  (let [unsupported
+        (into {}
+              (keep
+               (fn [k]
+                 (let [value (get opts k)]
+                   (when (some? value)
+                     [k value]))))
+              unmanaged-runtime-fragment-refresh-option-keys)]
+    (when (seq unsupported)
+      (throw
+       (ex-info
+        (str
+         "gesso.live model-backed fragments no longer accept direct HTMX "
+         "refresh trigger/jitter options. Refresh intent must enter the "
+         "browser adapter before HTMX requests are emitted.")
+        {:unsupported-options unsupported})))
+    opts))
+
 (defn- runtime-fragment-extra-options
-  "Generic passthrough options accepted by gesso.live.ui/->fragment.
+  "Generic managed-fragment passthrough options accepted by
+   gesso.live.ui/->fragment.
 
    These are intentionally domain-neutral. App-specific needs such as
-   {:target-attrs {:hx-include \"#some-form\"}} belong in the app layer; this
-   adapter merely preserves and forwards the caller's generic UI fragment opts.
+   {:root-attrs {:hx-include \"#some-form\"}} belong in the app layer; this
+   adapter merely preserves and forwards generic UI fragment opts that do not
+   create an independent refresh path.
 
    Client continuity is passed through here as runtime UI metadata, but the
    capture/restore mechanics belong to gesso.live.ui / gesso.live.htmx and the
@@ -696,9 +747,6 @@
                 :root-attrs
                 :target-attrs
                 :event
-                :trigger
-                :jitter-ms
-                :jitter-delay-ms
                 :client-continuity]))
 
 (defn- normalize-fragment-swap
@@ -719,26 +767,28 @@
      :fragment-url
      :stream-url
 
-   Generic UI passthrough opts:
+   Generic managed-fragment passthrough opts:
      :attrs
      :root-attrs
      :target-attrs
      :event
-     :trigger
-     :jitter-ms
-     :jitter-delay-ms
      :client-continuity
 
    :swap may be supplied by opts to override the compiled fragment descriptor's
    :swap value.
 
-   Note: :request-policy and :consistency remain model metadata. They are not
-   passed to ui/->fragment here. Client continuity is runtime UI metadata and is
-   therefore passed through unchanged."
+   Direct refresh :trigger / jitter options are rejected. Adapter-managed
+   fragments obtain refresh intent through the browser adapter and only issue an
+   HTMX GET when that adapter emits gesso:live-refresh.
+
+   Client continuity is runtime UI metadata and is therefore passed through
+   unchanged. Browser request scheduling and authoritative-read interpretation
+   remain outside this render-protection namespace."
   [compiled fragment-name id {:keys [fragment-url
                                      stream-url
                                      swap]
                               :as opts}]
+  (reject-unmanaged-runtime-fragment-refresh-options! opts)
   (when-not (model/present? fragment-url)
     (throw
      (ex-info

@@ -112,11 +112,7 @@
    {:store-queue
     {:scope :store-queue
      :query store-queue-query
-     :render store-queue-render
-     :consistency {:read :after-triggering-write}
-     :request-policy {:in-flight :one
-                      :queued :last
-                      :stale-window-ms 750}}
+     :render store-queue-render}
 
     :helper-panel
     {:scope :helper-panel
@@ -194,9 +190,11 @@
     (testing "fragment defaults"
       (is (= :outerHTML
              (get-in compiled [:fragments :store-queue :swap])))
-      (is (= :default-safe-live-fragment
-             (get-in compiled [:fragments :helper-panel :request-policy])))
-      (is (fn? (get-in compiled [:fragments :store-queue :id-fn]))))
+      (is (fn? (get-in compiled [:fragments :store-queue :id-fn])))
+      (is (not (contains? (get-in compiled [:fragments :store-queue])
+                          :request-policy)))
+      (is (not (contains? (get-in compiled [:fragments :store-queue])
+                          :consistency))))
 
     (testing "compiled rules exist"
       (is (= #{:task/assigned
@@ -230,16 +228,29 @@
              :optional/missing
              :conditional/change}
            (set (:events explained))))
-    (is (= {:read :after-triggering-write}
-           (get-in explained [:fragments :store-queue :consistency])))
-    (is (= {:in-flight :one
-            :queued :last
-            :stale-window-ms 750}
-           (get-in explained [:fragments :store-queue :request-policy])))))
+    (is (= {:name :store-queue
+            :scope :store-queue
+            :swap :outerHTML}
+           (get-in explained [:fragments :store-queue])))
+    (is (not (contains? (get-in explained [:fragments :store-queue])
+                        :consistency)))
+    (is (not (contains? (get-in explained [:fragments :store-queue])
+                        :request-policy)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Malli structural validation
 ;; -----------------------------------------------------------------------------
+
+(deftest fragment-rejects-unenforced-policy-metadata
+  (doseq [stale-key [:request-policy :consistency]]
+    (testing (str "fragment metadata rejects stale " stale-key)
+      (let [bad-app (assoc-in base-app
+                              [:fragments :store-queue stale-key]
+                              {:legacy true})
+            errors (compile-errors bad-app)]
+        (is (has-error? errors
+                        :unsupported-fragment-metadata
+                        [:fragments :store-queue stale-key]))))))
 
 (deftest structural-validation-requires-top-level-keys
   (let [errors (compile-errors {})]

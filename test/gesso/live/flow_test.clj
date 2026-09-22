@@ -2,6 +2,7 @@
   (:require
    [clojure.test :refer [deftest is]]
    [gesso.live.flow :as flow]
+   [gesso.live.progression :as progression]
    [gesso.live.source :as source]
    [manifold.deferred :as d]
    [manifold.stream :as s]
@@ -807,6 +808,158 @@
 
       (finally
         (source/close! src)))))
+
+;; -----------------------------------------------------------------------------
+;; Authoritative progression and relief
+;; -----------------------------------------------------------------------------
+
+(def basis-1
+  {:test/basis :basis-1})
+
+(def basis-2
+  {:test/basis :basis-2})
+
+(def basis-3
+  {:test/basis :basis-3})
+
+(def progression-1
+  (progression/requirement basis-1))
+
+(def progression-2
+  (progression/requirement basis-2))
+
+(def progression-3
+  (progression/requirement basis-3))
+
+(def progressing-request-invalidation
+  (assoc request-invalidation :progression progression-1))
+
+(defn live-event
+  ([event-name invalidation]
+   {:event event-name
+    :invalidation invalidation})
+  ([event-name invalidation requirement]
+   {:event event-name
+    :invalidation (assoc invalidation :progression requirement)
+    :progression requirement}))
+
+(deftest invalidation-event-carries-progression-at-top-level-test
+  (let [event (flow/invalidation-event progressing-request-invalidation)]
+    (is (= progression-1 (:progression event)))
+    (is (= progression-1
+           (get-in event [:invalidation :progression])))
+    (is (= progressing-request-invalidation
+           (:invalidation event)))))
+
+(deftest coalesce-live-events-composes-distinct-progression-test
+  (let [pending (assoc (live-event "pending"
+                                   (assoc request-invalidation :change/kind :pending)
+                                   progression-1)
+                       :data {:value :pending})
+        incoming (assoc (live-event "incoming"
+                                    (assoc request-invalidation :change/kind :incoming)
+                                    progression-2)
+                        :data {:value :incoming})
+        expected-progression (progression/compose progression-1 progression-2)
+        result (flow/coalesce-live-events pending incoming)]
+    (is (= "incoming" (:event result)))
+    (is (= {:value :incoming} (:data result)))
+    (is (= :incoming
+           (get-in result [:invalidation :change/kind])))
+    (is (= expected-progression (:progression result)))
+    (is (= expected-progression
+           (get-in result [:invalidation :progression])))))
+
+(deftest coalesce-live-events-cannot-erase-pending-progression-test
+  (let [pending (live-event "pending" request-invalidation progression-1)
+        incoming {:event "incoming"
+                  :invalidation (assoc request-invalidation
+                                       :change/kind :incoming)
+                  :data {:value :incoming}}
+        result (flow/coalesce-live-events pending incoming)]
+    (is (= "incoming" (:event result)))
+    (is (= {:value :incoming} (:data result)))
+    (is (= progression-1 (:progression result)))
+    (is (= progression-1
+           (get-in result [:invalidation :progression])))))
+
+(deftest coalesce-live-events-preserves-incoming-progression-test
+  (let [pending {:event "pending"
+                 :invalidation request-invalidation}
+        incoming (live-event "incoming" request-invalidation progression-2)
+        result (flow/coalesce-live-events pending incoming)]
+    (is (= progression-2 (:progression result)))
+    (is (= progression-2
+           (get-in result [:invalidation :progression])))))
+
+(deftest coalesce-live-events-is-idempotent-for-repeated-requirement-test
+  (let [pending (live-event "pending" request-invalidation progression-1)
+        incoming (live-event "incoming" request-invalidation progression-1)
+        result (flow/coalesce-live-events pending incoming)]
+    (is (= progression-1 (:progression result)))
+    (is (= progression-1
+           (get-in result [:invalidation :progression])))))
+
+(deftest coalesce-live-events-is-associative-test
+  (let [a (live-event "a" request-invalidation progression-1)
+        b (live-event "b" request-invalidation progression-2)
+        c (assoc (live-event "c" request-invalidation progression-3)
+                 :data {:winner :c})
+        left (flow/coalesce-live-events
+              (flow/coalesce-live-events a b)
+              c)
+        right (flow/coalesce-live-events
+               a
+               (flow/coalesce-live-events b c))]
+    (is (= left right))
+    (is (= "c" (:event left)))
+    (is (= {:winner :c} (:data left)))
+    (is (= (progression/compose progression-1
+                                progression-2
+                                progression-3)
+           (:progression left)))))
+
+(deftest coalesce-live-events-rejects-disagreeing-progression-test
+  (let [bad-event {:event "bad"
+                   :progression progression-1
+                   :invalidation (assoc request-invalidation
+                                        :progression progression-2)}]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"progression disagrees with its invalidation"
+         (flow/coalesce-live-events bad-event
+                                    {:event "incoming"
+                                     :invalidation request-invalidation})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"progression disagrees with its invalidation"
+         (flow/coalesce-live-events
+          {:event "pending"
+           :invalidation request-invalidation}
+          bad-event)))))
+
+(deftest relieve-uses-progression-safe-semigroup-test
+  (let [first-event (live-event "first" request-invalidation progression-1)
+        second-event (live-event "second" request-invalidation progression-2)
+        latest-event {:event "latest"
+                      :invalidation (assoc request-invalidation
+                                           :change/kind :latest)
+                      :data {:winner :latest}}
+        expected-progression (progression/compose progression-1 progression-2)
+        runner (collect-runner
+                (flow/relieve
+                 (m/seed [first-event second-event latest-event])))
+        result (task-result runner)]
+    (is (= :success (:status result)))
+    (is (= 1 (count (:value result))))
+    (let [event (first (:value result))]
+      (is (= "latest" (:event event)))
+      (is (= {:winner :latest} (:data event)))
+      (is (= :latest
+             (get-in event [:invalidation :change/kind])))
+      (is (= expected-progression (:progression event)))
+      (is (= expected-progression
+             (get-in event [:invalidation :progression]))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Relief smoke behavior
