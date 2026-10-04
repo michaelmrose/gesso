@@ -5,27 +5,16 @@
   {:mvn/version "1.12.5"}
 
   com.biffweb/core
-  {:git/url "https://github.com/jacobobryant/biff"
-   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
-   :deps/root "libs/core"}
+  {:mvn/version "2.0.2"}
 
   com.biffweb/fx
-  {:git/url "https://github.com/jacobobryant/biff"
-   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
-   :deps/root "libs/fx"
-   :exclusions [com.biffweb/core]}
+  {:mvn/version "2.0.2"}
 
   com.biffweb/graph
-  {:git/url "https://github.com/jacobobryant/biff"
-   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
-   :deps/root "libs/graph"
-   :exclusions [com.biffweb/core
-                com.biffweb/fx]}
+  {:mvn/version "2.0.2"}
 
   com.biffweb/xtdb
-  {:git/url "https://github.com/jacobobryant/biff"
-   :git/sha "b3abe5b13824af2f83f89ec31c63a430417ac457"
-   :deps/root "libs/xtdb"
+  {:mvn/version "2.0.0"
    :exclusions [com.biffweb/core
                 com.biffweb/fx
                 com.biffweb/graph]}
