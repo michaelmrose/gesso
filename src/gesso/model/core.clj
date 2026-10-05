@@ -935,9 +935,9 @@
          machine-id
 
          :start
-         (fn [{::keys [operation-input]
-               :biff.fx/keys [now seed]
-               :as ctx}]
+         (fn [{:biff.fx/keys [now seed]
+               :as ctx}
+              operation-input]
            (ensure-input-map! operation-key operation-input)
            (when (contains? operation-input :id)
              (fail! ::reserved-create-input
@@ -960,12 +960,12 @@
               :biff.fx/next :finish}))
 
          :finish
-         (fn [{::keys [model-command transaction]}]
+         (fn [_ctx {::keys [model-command transaction]}]
            {:biff.fx/return
             (operation-result result-key model-command transaction)}))]
     (with-meta
       (fn generated-create [ctx input]
-        (machine (assoc ctx ::operation-input input)))
+        (machine ctx input))
       {:gesso.model/entity-type (:entity-type descriptor)
        :gesso.model/operation operation-key
        :gesso.model/operation-id machine-id
@@ -984,7 +984,7 @@
          machine-id
 
          :start
-         (fn [{::keys [operation-input]}]
+         (fn [_ctx operation-input]
            (ensure-input-map! operation-key operation-input)
            (let [id (get operation-input graph-id)]
              (when (nil? id)
@@ -1001,9 +1001,9 @@
               :biff.fx/next :command}))
 
          :command
-         (fn [{::keys [operation-input facts]
-               :biff.fx/keys [now]
-               :as ctx}]
+         (fn [{:biff.fx/keys [now]
+               :as ctx}
+              {::keys [operation-input facts]}]
            (when-not (true? (get facts found-attr))
              (fail! ::document-not-found
                     "Generated update could not find the current document."
@@ -1034,12 +1034,12 @@
               :biff.fx/next :finish}))
 
          :finish
-         (fn [{::keys [model-command transaction]}]
+         (fn [_ctx {::keys [model-command transaction]}]
            {:biff.fx/return
             (operation-result result-key model-command transaction)}))]
     (with-meta
       (fn generated-update [ctx input]
-        (machine (assoc ctx ::operation-input input)))
+        (machine ctx input))
       {:gesso.model/entity-type (:entity-type descriptor)
        :gesso.model/operation operation-key
        :gesso.model/operation-id machine-id
