@@ -11,32 +11,42 @@
      (:import
       [java.util LinkedHashMap])))
 
-(def corpus-version 1)
+(def corpus-version 2)
 
 (def supported-features
   #{:state-transition
+    :machine-arguments
+    :previous-output
     :terminal-return
     :terminal-output
-    :nil-state-result
-    :sequential-state-result
-    :state-input-precedence
+    :non-map-return
+    :explicit-seq
     :handler-resolution
     :effect-detection
     :effect-handler-context
     :effect-result
+    :initial-effect
+    :machine-inspection
     :runtime-error
     :host-value-pass-through
     :numeric-edge-value})
 
 (def excluded-features
-  "Biff features intentionally outside browser-FX differential correspondence.
-   Their absence is an architectural boundary, not an untested omission."
+  "Released-Biff features intentionally outside browser-FX differential
+   correspondence. Their absence is an architectural boundary, not an untested
+   omission."
   #{:default-http-handler
     :module-handler-collection
-    :uuid4
-    :uuid7
+    :random-uuid4-seq
+    :random-uuid7-seq
     :jvm-random-long-width
     :jvm-instant-representation
+    :pipeline
+    ;; Biff 2.0.2 includes its injected infinite UUID sequences in state-error
+    ;; metadata before truncation. Walking that data can exhaust the JVM heap,
+    ;; so state-function exception diagnostics are tested browser-locally rather
+    ;; than executed as a differential case.
+    :state-function-exception-diagnostics
     :async-handler-completion})
 
 ;; -----------------------------------------------------------------------------
@@ -124,6 +134,14 @@
         :fx/contains-ctx?
         (contains? (:ctx env) (first args))
 
+        :fx/=
+        (= (eval-expr env (first args))
+           (eval-expr env (second args)))
+
+        :fx/not=
+        (not= (eval-expr env (first args))
+              (eval-expr env (second args)))
+
         :fx/get
         (get (eval-expr env (first args))
              (second args))
@@ -197,9 +215,9 @@
 
 (defn- state-function
   [case-id state state-spec]
-  (fn [ctx]
+  (fn [ctx & inputs]
     (eval-expr {:ctx ctx
-                :args []
+                :args (vec inputs)
                 :source {:case-id case-id
                          :kind :state
                          :state state}}
@@ -234,13 +252,17 @@
                                   handler-spec)]))
         handler-specs))
 
-(defn machine-args
-  "Return the vararg tail accepted by both Biff and browser fx/machine."
+(defn machine-constructor-args
+  "Return constructor arguments accepted by both released Biff and browser
+   fx/machine, including an optional initial effect descriptor."
   [case]
-  (->> (state-functions case)
-       (sort-by (comp str key))
-       (mapcat identity)
-       vec))
+  (let [state-args (->> (state-functions case)
+                        (sort-by (comp str key))
+                        (mapcat identity)
+                        vec)]
+    (if-some [initial-fx (:initial-fx case)]
+      (into [initial-fx] state-args)
+      state-args)))
 
 (defn context
   "Build the machine context for case-data.
@@ -427,13 +449,15 @@
   "Execute case with machine-constructor and return a portable observation.
 
    machine-constructor must have the same public calling convention as
-   com.biffweb.fx/machine and gesso.live.browser.fx/machine."
+   released com.biffweb.fx/machine and gesso.live.browser.fx/machine."
   [machine-constructor case]
   (try
     (let [machine (apply machine-constructor
                          (:machine-name case)
-                         (machine-args case))
-          result (machine (context case))]
+                         (machine-constructor-args case))
+          result (apply machine
+                        (context case)
+                        (:run-args case))]
       {:status :returned
        :value (normalize-value result)})
     (catch #?(:clj Throwable :cljs :default) error
@@ -460,32 +484,30 @@
 (def cases
   [
    {:id :transition/basic
-    :about "A result sequence feeds an effect and then transitions."
-    :features #{:state-transition :sequential-state-result :effect-result}
+    :about "A state effect is evaluated, then its complete output is passed separately to the next state."
+    :features #{:state-transition :previous-output :effect-result}
     :machine-name :conformance/transition-basic
     :ctx {:from-ctx "ctx"}
     :handlers
     {:test/concat
-     {:result [:fx/str [:fx/ctx :prefix] [:fx/arg 0]]}}
+     {:result [:fx/str [:fx/ctx :from-ctx] [:fx/arg 0]]}}
     :states
     {:start
-     {:result
-      [{:prefix [:fx/ctx :from-ctx]}
-       {:combined [:fx/effect :test/concat [:fx/literal "-effect"]]
-        :biff.fx/next :finish}]}
+     {:result {:combined [:fx/effect :test/concat "-effect"]
+               :biff.fx/next :finish}}
      :finish
      {:result
       {:biff.fx/return
-       {:prefix [:fx/ctx :prefix]
-        :combined [:fx/ctx :combined]}}}}
+       {:ctx [:fx/ctx :from-ctx]
+        :combined [:fx/get [:fx/arg 0] :combined]}}}}
     :expect
     {:status :returned
-     :value {:prefix "ctx"
+     :value {:ctx "ctx"
              :combined "ctx-effect"}}}
 
-   {:id :transition/only-previous-output-is-carried
-    :about "Biff transitions carry the immediately previous state output, not cumulative historical output."
-    :features #{:state-transition}
+   {:id :transition/only-immediately-previous-output-is-passed
+    :about "A later state receives only the immediately previous output as its separate input argument."
+    :features #{:state-transition :previous-output}
     :machine-name :conformance/previous-output
     :ctx {}
     :handlers {}
@@ -494,20 +516,23 @@
      {:result {:from-start :present
                :biff.fx/next :middle}}
      :middle
-     {:result {:from-middle :present
+     {:result {:saw-start [:fx/get [:fx/arg 0] :from-start]
+               :from-middle :present
                :biff.fx/next :finish}}
      :finish
      {:result {:biff.fx/return
-               {:start-visible? [:fx/contains-ctx? :from-start]
-                :middle-visible? [:fx/contains-ctx? :from-middle]}}}}
+               {:start-directly-visible [:fx/get [:fx/arg 0] :from-start]
+                :middle-visible [:fx/get [:fx/arg 0] :from-middle]
+                :middle-carried-start [:fx/get [:fx/arg 0] :saw-start]}}}}
     :expect
     {:status :returned
-     :value {:start-visible? false
-             :middle-visible? true}}}
+     :value {:start-directly-visible {:fx/value :nilish}
+             :middle-visible :present
+             :middle-carried-start :present}}}
 
-   {:id :transition/original-context-remains-visible
-    :about "Original context is merged under each state's carried input."
-    :features #{:state-transition}
+   {:id :transition/original-context-remains-separate
+    :about "Original ctx remains visible while the previous output is supplied independently."
+    :features #{:state-transition :previous-output}
     :machine-name :conformance/original-context
     :ctx {:base 10}
     :handlers {}
@@ -518,16 +543,16 @@
      :finish
      {:result {:biff.fx/return
                {:base [:fx/ctx :base]
-                :derived [:fx/ctx :derived]}}}}
+                :derived [:fx/get [:fx/arg 0] :derived]}}}}
     :expect
     {:status :returned
      :value {:base 10
              :derived 11}}}
 
-   {:id :transition/state-output-overrides-original-context
-    :about "Carried state output has precedence over the original context."
-    :features #{:state-transition :state-input-precedence}
-    :machine-name :conformance/output-precedence
+   {:id :transition/previous-output-does-not-override-context
+    :about "A field in previous output does not overwrite the same field in the original ctx."
+    :features #{:state-transition :previous-output}
+    :machine-name :conformance/separate-input
     :ctx {:value :original}
     :handlers {}
     :states
@@ -535,13 +560,30 @@
      {:result {:value :state
                :biff.fx/next :finish}}
      :finish
-     {:result {:biff.fx/return [:fx/ctx :value]}}}
+     {:result {:biff.fx/return
+               {:ctx-value [:fx/ctx :value]
+                :previous-value [:fx/get [:fx/arg 0] :value]}}}}
     :expect {:status :returned
-             :value :state}}
+             :value {:ctx-value :original
+                     :previous-value :state}}}
+
+   {:id :arguments/start-receives-machine-arguments
+    :about "The :start state receives ordinary machine arguments after ctx."
+    :features #{:machine-arguments}
+    :machine-name :conformance/machine-arguments
+    :ctx {}
+    :run-args [5 7]
+    :handlers {}
+    :states
+    {:start
+     {:result {:biff.fx/return
+               [:fx/add [:fx/arg 0] [:fx/arg 1]]}}}
+    :expect {:status :returned
+             :value 12}}
 
    {:id :transition/injected-keys-override-context
     :about "Per-state now/seed injections override user-provided values."
-    :features #{:state-input-precedence}
+    :features #{}
     :machine-name :conformance/injected-precedence
     :ctx {:biff.fx/now :user-now
           :biff.fx/seed :user-seed}
@@ -550,8 +592,8 @@
     {:start
      {:result
       {:biff.fx/return
-       {:now-is-user? false
-        :seed-is-user? false
+       {:now-is-user? [:fx/= [:fx/ctx :biff.fx/now] :user-now]
+        :seed-is-user? [:fx/= [:fx/ctx :biff.fx/seed] :user-seed]
         :now-present? [:fx/contains-ctx? :biff.fx/now]
         :seed-present? [:fx/contains-ctx? :biff.fx/seed]}}}}
     :expect
@@ -562,7 +604,7 @@
              :seed-present? true}}}
 
    {:id :terminal/plain-output
-    :about "Without next or return, the state output is the machine result."
+    :about "Without next or return, a map state output is the machine result."
     :features #{:terminal-output}
     :machine-name :conformance/plain-output
     :ctx {}
@@ -571,18 +613,28 @@
     :expect {:status :returned
              :value {:answer 42}}}
 
-   {:id :terminal/nil-output
-    :about "A nil state result contributes an empty output map."
-    :features #{:nil-state-result :terminal-output}
+   {:id :terminal/nil-is-return-value
+    :about "A nil state result is a non-map return value, not an empty output map."
+    :features #{:non-map-return :terminal-return}
     :machine-name :conformance/nil-output
     :ctx {}
     :handlers {}
     :states {:start {:result nil}}
     :expect {:status :returned
-             :value {}}}
+             :value {:fx/value :nilish}}}
+
+   {:id :terminal/scalar-is-return-value
+    :about "Any non-map state result becomes :biff.fx/return."
+    :features #{:non-map-return :terminal-return}
+    :machine-name :conformance/scalar-output
+    :ctx {}
+    :handlers {}
+    :states {:start {:result 42}}
+    :expect {:status :returned
+             :value 42}}
 
    {:id :terminal/explicit-nil-return
-    :about "A present return key may return nil."
+    :about "A present return key may explicitly return nil."
     :features #{:terminal-return}
     :machine-name :conformance/nil-return
     :ctx {}
@@ -591,30 +643,65 @@
     :expect {:status :returned
              :value {:fx/value :nilish}}}
 
-   {:id :sequence/later-map-overrides-earlier
-    :about "Sequential state-result maps are reduced left-to-right."
-    :features #{:sequential-state-result}
-    :machine-name :conformance/sequence-override
+   {:id :seq/later-map-overrides-earlier
+    :about "Explicit :biff.fx/seq elements are evaluated left-to-right and merged in order."
+    :features #{:explicit-seq}
+    :machine-name :conformance/seq-override
     :ctx {}
     :handlers {}
     :states
     {:start
-     {:result [{:value :first :kept 1}
-               {:value :second}]}}
+     {:result {:biff.fx/seq [{:value :first :kept 1}
+                             {:value :second}]}}}
     :expect {:status :returned
              :value {:value :second :kept 1}}}
 
-   {:id :sequence/nil-member-is-empty-contribution
-    :about "Nil members in a sequential state result are ignored."
-    :features #{:sequential-state-result :nil-state-result}
-    :machine-name :conformance/sequence-nil
+   {:id :seq/main-output-overrides-sequence
+    :about "The ordinary state output is merged after :biff.fx/seq output."
+    :features #{:explicit-seq}
+    :machine-name :conformance/seq-main-output
     :ctx {}
     :handlers {}
     :states
     {:start
-     {:result [{:a 1} nil {:b 2}]}}
+     {:result {:biff.fx/seq [{:value :sequence
+                              :from-seq true}]
+               :value :main}}}
     :expect {:status :returned
-             :value {:a 1 :b 2}}}
+             :value {:value :main
+                     :from-seq true}}}
+
+   {:id :seq/effects-are-evaluated-per-element
+    :about "Effect maps inside :biff.fx/seq are evaluated before their outputs are merged."
+    :features #{:explicit-seq :effect-result}
+    :machine-name :conformance/seq-effects
+    :ctx {:base 10}
+    :handlers
+    {:test/add {:result [:fx/add [:fx/ctx :base] [:fx/arg 0]]}
+     :test/inc {:result [:fx/inc [:fx/arg 0]]}}
+    :states
+    {:start
+     {:result {:biff.fx/seq [{:left [:fx/effect :test/add 2]}
+                             {:right [:fx/effect :test/inc 9]}]}}}
+    :expect {:status :returned
+             :value {:left 12 :right 10}}}
+
+   {:id :seq/invalid-element-is-rejected
+    :about "A :biff.fx/seq element must be an effect map or registered effect descriptor."
+    :features #{:explicit-seq :runtime-error}
+    :machine-name :conformance/seq-invalid
+    :ctx {}
+    :handlers {}
+    :states
+    {:start {:result {:biff.fx/seq [nil]}}}
+    :expect
+    {:status :threw
+     :error {:thrown? true
+             :state :start
+             :machine-name :conformance/seq-invalid
+             :trace []
+             :available-states nil
+             :handler-args nil}}}
 
    {:id :handlers/dynamic-overrides-explicit
     :about "get-handlers takes precedence over explicitly supplied handlers."
@@ -664,8 +751,19 @@
     :expect {:status :returned
              :value {:answer 42}}}
 
+   {:id :effects/ignored-key-is-not-retained
+    :about "An effect at a key beginning with underscore is executed for effect only and omitted from output."
+    :features #{:effect-result}
+    :machine-name :conformance/ignored-effect-key
+    :ctx {}
+    :handlers {:test/inc {:result [:fx/inc [:fx/arg 0]]}}
+    :states {:start {:result {:_audit [:fx/effect :test/inc 1]
+                              :answer 42}}}
+    :expect {:status :returned
+             :value {:answer 42}}}
+
    {:id :effects/handler-sees-original-context
-    :about "Effect handlers receive original machine context."
+    :about "Effect handlers receive the original machine ctx."
     :features #{:effect-handler-context}
     :machine-name :conformance/handler-original-context
     :ctx {:base "ctx"}
@@ -676,38 +774,38 @@
     :expect {:status :returned
              :value {:answer "ctx-ok"}}}
 
-   {:id :effects/handler-sees-current-non-effect-output
-    :about "Before effects run, non-effect fields from the same result map are visible to handlers."
+   {:id :effects/handler-does-not-see-current-state-output
+    :about "Non-effect fields from the current state output are not merged into handler ctx."
     :features #{:effect-handler-context}
-    :machine-name :conformance/handler-current-output
-    :ctx {}
+    :machine-name :conformance/handler-no-current-output
+    :ctx {:prefix "ctx"}
     :handlers
     {:test/read-prefix {:result [:fx/str [:fx/ctx :prefix] [:fx/arg 0]]}}
     :states
     {:start
-     {:result {:prefix "p"
+     {:result {:prefix "state"
                :answer [:fx/effect :test/read-prefix "-x"]}}}
     :expect {:status :returned
-             :value {:prefix "p"
-                     :answer "p-x"}}}
+             :value {:prefix "state"
+                     :answer "ctx-x"}}}
 
-   {:id :effects/later-sequence-effect-sees-prior-output
-    :about "An effect in a later result-map sees output accumulated from earlier result-maps in the same state."
-    :features #{:effect-handler-context :sequential-state-result}
-    :machine-name :conformance/handler-prior-result
-    :ctx {}
+   {:id :effects/seq-handler-does-not-see-prior-seq-output
+    :about "A handler in a later :biff.fx/seq element still receives only original ctx."
+    :features #{:effect-handler-context :explicit-seq}
+    :machine-name :conformance/handler-no-prior-seq-output
+    :ctx {:prefix "ctx"}
     :handlers
     {:test/read-prefix {:result [:fx/str [:fx/ctx :prefix] [:fx/arg 0]]}}
     :states
     {:start
-     {:result [{:prefix "p"}
-               {:answer [:fx/effect :test/read-prefix "-later"]}]}}
+     {:result {:biff.fx/seq [{:prefix "sequence"}
+                             {:answer [:fx/effect :test/read-prefix "-later"]}]}}}
     :expect {:status :returned
-             :value {:prefix "p"
-                     :answer "p-later"}}}
+             :value {:prefix "sequence"
+                     :answer "ctx-later"}}}
 
    {:id :effects/sibling-handlers-do-not-require-order
-    :about "Sibling effects are compared only by their independent results; neither may depend on sibling execution order."
+    :about "Sibling effects are compared only by independent results; neither depends on sibling order."
     :features #{:effect-handler-context}
     :machine-name :conformance/sibling-effects
     :ctx {:base 5}
@@ -720,6 +818,24 @@
                :right [:fx/effect :test/inc 9]}}}
     :expect {:status :returned
              :value {:left 7 :right 10}}}
+
+   {:id :initial/effect-result-precedes-machine-arguments
+    :about "An initial effect result is passed to :start before ordinary machine arguments."
+    :features #{:initial-effect :machine-arguments}
+    :machine-name :conformance/initial-effect
+    :ctx {:base 40}
+    :initial-fx [:test/add-base 1]
+    :run-args [2]
+    :handlers
+    {:test/add-base {:result [:fx/add [:fx/ctx :base] [:fx/arg 0]]}}
+    :states
+    {:start
+     {:result {:biff.fx/return
+               {:initial-result [:fx/arg 0]
+                :ordinary-arg [:fx/arg 1]}}}}
+    :expect {:status :returned
+             :value {:initial-result 41
+                     :ordinary-arg 2}}}
 
    {:id :host/array-result
     :about "Opaque host arrays may pass through an effect result without becoming FX structure."
@@ -811,23 +927,6 @@
     :expect {:status :returned
              :value {:value 9007199254740991}}}
 
-   {:id :error/state-function-throws
-    :about "A state-function exception is surfaced with state and machine identity."
-    :features #{:runtime-error}
-    :machine-name :conformance/state-throws
-    :ctx {}
-    :handlers {}
-    :states
-    {:start {:result [:fx/throw "state boom"]}}
-    :expect
-    {:status :threw
-     :error {:thrown? true
-             :state :start
-             :machine-name :conformance/state-throws
-             :trace []
-             :available-states nil
-             :handler-args nil}}}
-
    {:id :error/handler-throws
     :about "A handler exception is surfaced with state, machine, trace and handler arguments."
     :features #{:runtime-error}
@@ -875,7 +974,6 @@
     :compare-keys [:status]
     :expect {:status :threw}}
    ])
-
 
 (defn case-by-id
   [case-id]
@@ -944,8 +1042,8 @@
   (testing "the conformance gate never runs a malformed case corpus"
     (is (true? (valid-corpus?))
         (pr-str (corpus-errors)))
-    (is (= 1 corpus-version))
-    (is (= 30 (count cases)))))
+    (is (= 2 corpus-version))
+    (is (= 35 (count cases)))))
 
 (deftest machine-matches-corpus-test
   (doseq [case-data cases]
@@ -957,20 +1055,40 @@
                "\nexpected: " (pr-str (expected case-data))
                "\nactual:   " (pr-str (observation case-data)))))))
 
-(deftest transition-carries-only-immediately-previous-output-test
+(deftest transition-passes-previous-output-separately-test
   (let [case-data (case-by-id
-                   :transition/only-previous-output-is-carried)]
-    (testing "FX transitions carry only the immediately previous state output"
+                   :transition/previous-output-does-not-override-context)]
+    (testing "previous output is a separate state argument, never merged into ctx"
       (is (some? case-data))
       (is (= {:status :returned
-              :value {:start-visible? false
-                      :middle-visible? true}}
+              :value {:ctx-value :original
+                      :previous-value :state}}
              (observation case-data))))))
+
+(deftest machine-zero-arg-call-returns-state-map-test
+  (let [case-data (case-by-id :transition/basic)
+        machine (apply fx/machine
+                       (:machine-name case-data)
+                       (machine-constructor-args case-data))
+        state-map (machine)]
+    (testing "released Biff and browser FX expose the state map for unit inspection"
+      (is (= #{:start :finish}
+             (set (keys state-map))))
+      (is (every? ifn? (vals state-map))))))
+
+(deftest initial-effect-precedes-machine-arguments-test
+  (let [case-data (case-by-id
+                   :initial/effect-result-precedes-machine-arguments)]
+    (is (some? case-data))
+    (is (= {:status :returned
+            :value {:initial-result 41
+                    :ordinary-arg 2}}
+           (observation case-data)))))
 
 (deftest missing-state-retains-transition-trace-test
   (let [case-data (case-by-id
                    :error/transition-to-missing-state)]
-    (testing "a missing transition destination retains the prior trace"
+    (testing "a missing transition destination retains the prior output trace"
       (is (some? case-data))
       (is (= {:status :threw
               :error {:thrown? true
