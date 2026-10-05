@@ -1,27 +1,36 @@
 (ns gesso.live.browser.fx
   "Small synchronous FX runner for Gesso Live browser choreography.
 
-   This intentionally mirrors the useful core semantics of Biff 2 FX without
-   depending on JVM-only Biff implementation code.
+   This mirrors the released Biff 2 FX state-machine semantics that Gesso uses
+   in portable browser code without depending on JVM-only Biff implementation
+   code.
 
    Compatibility goals:
    - machines are maps of keyword state ids to state functions and start at
      :start
-   - each state receives the original ctx merged with only the immediately
-     previous state output, matching Biff transition semantics
+   - :start receives ctx followed by the machine arguments
+   - later states receive ctx and the immediately previous output map as a
+     separate argument; previous output is never merged into ctx
+   - a non-map state result is interpreted as :biff.fx/return
    - effect descriptors are vectors whose first item names a registered handler
-   - handler results replace their descriptor at the descriptor's map key
-   - sequential state results are reduced left-to-right
+   - effect handlers receive the original machine ctx, not the state output
+   - :biff.fx/seq evaluates an explicit left-to-right sequence of effect maps or
+     effect descriptors and merges their outputs in order
    - :biff.fx/next advances to another local FX state
    - :biff.fx/return returns immediately from the FX machine
    - absence of both :biff.fx/next and :biff.fx/return returns the state output
    - :biff.fx/handlers and :biff.fx/get-handlers supply handlers
    - :biff.fx/now and :biff.fx/seed are injected for each state invocation
+   - an optional initial effect descriptor may run before :start, with its result
+     passed to :start before the ordinary machine arguments
+   - calling a machine with no arguments returns its state map
 
    This namespace is deliberately smaller than Biff FX. It does not provide
-   Biff modules, JVM HTTP defaults, UUID helpers, schema registration, or any
-   async facility. Browser async work belongs at choreography suspension/event
-   boundaries, not inside this runner.")
+   Biff modules, JVM HTTP defaults, deterministic UUID helpers, schema
+   registration, pipelines, or any async facility. Browser async work belongs at
+   choreography suspension/event boundaries, not inside this runner."
+  (:require
+   [clojure.string :as str]))
 
 ;; -----------------------------------------------------------------------------
 ;; Public compatibility keys
@@ -38,6 +47,9 @@
 
 (def return-key
   :biff.fx/return)
+
+(def seq-key
+  :biff.fx/seq)
 
 (def now-key
   :biff.fx/now)
@@ -80,25 +92,6 @@
      (ex (str label " must be callable.")
          {:label label
           :value value})))
-  value)
-
-(defn- state-result?
-  [value]
-  (or (nil? value)
-      (map? value)
-      (and (sequential? value)
-           (every? #(or (nil? %)
-                        (map? %))
-                   value))))
-
-(defn- require-state-result!
-  [machine-name state value]
-  (when-not (state-result? value)
-    (throw
-     (ex "FX state function must return a map, nil, or a sequence of maps/nil."
-         {machine-name-key machine-name
-          state-key state
-          :biff.fx/result value})))
   value)
 
 (defn- valid-state-map?
@@ -144,9 +137,9 @@
 (defn- browser-seed
   "Return a browser-safe random integer for :biff.fx/seed compatibility.
 
-   Biff's JVM runner injects a random long. The browser runner does not promise
-   identical RNG width; it only preserves the presence and integer nature of
-   the compatibility key."
+   Released Biff injects a random JVM long. The browser runner does not promise
+   identical RNG width; it preserves the presence and integer nature of the
+   compatibility key."
   []
   (rand-int 2147483647))
 
@@ -169,7 +162,7 @@
       handlers)))
 
 (defn handlers
-  "Resolve the handler map for ctx using Biff-compatible precedence.
+  "Resolve the handler map for ctx using released-Biff precedence.
 
    Explicit :biff.fx/handlers are merged first; handlers returned by
    :biff.fx/get-handlers override them. There are intentionally no browser
@@ -185,15 +178,14 @@
         require-handlers!)))
 
 ;; -----------------------------------------------------------------------------
-;; One Biff-style state step
+;; One released-Biff-style state step
 ;; -----------------------------------------------------------------------------
 
-(defn- effect-key?
-  [handlers result k]
-  (let [value (get result k)]
-    (and (vector? value)
-         (contains? handlers
-                    (first value)))))
+(defn- effect-vector?
+  [handlers value]
+  (and (vector? value)
+       (contains? handlers
+                  (first value))))
 
 (defn- state-function
   ([machine-name state->fn state]
@@ -203,7 +195,7 @@
   ([machine-name state->fn state trace include-trace?]
    (or (get state->fn state)
        (throw
-        (ex "Invalid FX state."
+        (ex "Invalid state"
             (cond->
              {state-key state
               machine-name-key machine-name
@@ -214,95 +206,174 @@
 (defn- invoke-state
   [machine-name state->fn ctx state input trace]
   (let [state-fn (state-function machine-name state->fn state trace)
-        injected (injected-context)
-        state-input (merge ctx input injected)
-        result
-        (try
-          (state-fn state-input)
-          (catch :default e
-            (throw
-             (ex "FX state function threw an exception."
-                 (merge
-                  {state-key state
-                   machine-name-key machine-name
-                   trace-key trace
-                   :biff.fx/exception-message (throwable-message e)}
-                  injected)
-                 e))))]
-    (require-state-result! machine-name state result)))
+        injected (injected-context)]
+    (try
+      (apply state-fn
+             (merge ctx injected)
+             input)
+      (catch :default e
+        (throw
+         (ex "State function threw an exception"
+             (merge
+              {state-key state
+               machine-name-key machine-name
+               trace-key trace
+               :biff.fx/exception-message (throwable-message e)}
+              injected)
+             e))))))
+
+(defn- normalized-state-result
+  [raw-result]
+  (if (map? raw-result)
+    raw-result
+    {return-key raw-result}))
 
 (defn- invoke-handler
-  [machine-name state trace ctx output handler-key args handler]
+  [machine-name state trace ctx result handler-key args handler]
   (try
     (apply handler
-           (merge ctx output)
+           ctx
            args)
     (catch :default e
       (throw
-       (ex "FX handler function threw an exception."
+       (ex "Handler function threw an exception"
            {state-key state
             machine-name-key machine-name
             trace-key trace
-            :biff.fx/output output
+            :biff.fx/output result
             :biff.fx/handler handler-key
             :biff.fx/handler-args args
             :biff.fx/exception-message (throwable-message e)}
            e)))))
 
-(defn- reduce-result
-  [machine-name state trace handlers ctx output result]
-  (if (nil? result)
-    output
-    (let [effect-keys (filterv #(effect-key? handlers result %)
-                               (keys result))
-          output' (merge output
-                         (apply dissoc result effect-keys))]
-      (into
-       output'
-       (map
-        (fn [k]
-          (let [[handler-key & args] (get result k)
-                handler (get handlers handler-key)]
-            [k
-             (invoke-handler machine-name
-                             state
-                             trace
-                             ctx
-                             output'
-                             handler-key
-                             args
-                             handler)]))
-        effect-keys)))))
+(defn- ignored-effect-key?
+  [k]
+  (str/starts-with? (str k) ":_"))
 
-(defn- step
-  [machine-name state->fn handlers ctx state input trace]
-  (let [result (invoke-state machine-name
-                             state->fn
-                             ctx
-                             state
-                             input
-                             trace)
-        results (if (sequential? result)
-                  result
-                  [result])]
-    (reduce
-     (fn [output result]
-       (reduce-result machine-name
+(defn- evaluate-effects
+  [machine-name state trace handlers ctx result]
+  (let [effect-keys
+        (filterv
+         (fn [k]
+           (effect-vector? handlers
+                           (get result k)))
+         (keys result))]
+    (into
+     (apply dissoc result effect-keys)
+     (keep
+      (fn [k]
+        (let [[handler-key & args] (get result k)
+              handler (get handlers handler-key)
+              handler-result
+              (invoke-handler machine-name
+                              state
+                              trace
+                              ctx
+                              result
+                              handler-key
+                              args
+                              handler)]
+          (when-not (ignored-effect-key? k)
+            [k handler-result])))
+      effect-keys))))
+
+(defn- evaluate-seq-element
+  [machine-name state trace handlers ctx element]
+  (cond
+    (map? element)
+    (evaluate-effects machine-name
                       state
                       trace
                       handlers
                       ctx
-                      output
-                      result))
-     {}
-     results)))
+                      element)
+
+    (effect-vector? handlers element)
+    (evaluate-effects machine-name
+                      state
+                      trace
+                      handlers
+                      ctx
+                      {:_ignored element})
+
+    :else
+    (throw
+     (ex "Invalid :biff.fx/seq element"
+         {state-key state
+          machine-name-key machine-name
+          trace-key trace
+          :biff.fx/element element}))))
+
+(defn- step
+  [machine-name state->fn handlers ctx state input trace]
+  (let [raw-result
+        (invoke-state machine-name
+                      state->fn
+                      ctx
+                      state
+                      input
+                      trace)
+
+        result
+        (normalized-state-result raw-result)
+
+        seq-output
+        (mapv
+         #(evaluate-seq-element machine-name
+                                state
+                                trace
+                                handlers
+                                ctx
+                                %)
+         (get result seq-key))
+
+        output
+        (evaluate-effects machine-name
+                          state
+                          trace
+                          handlers
+                          ctx
+                          (dissoc result seq-key))]
+    (apply merge
+           (concat seq-output
+                   [output]))))
 
 ;; -----------------------------------------------------------------------------
 ;; Machine construction
 ;; -----------------------------------------------------------------------------
 
+(defn- parse-machine-args
+  [machine-name args]
+  (let [[initial-fx args]
+        (if (vector? (first args))
+          [(first args) (rest args)]
+          [nil args])
+
+        state->fn
+        (if (and (= 1 (count args))
+                 (map? (first args)))
+          (first args)
+          (apply hash-map args))]
+    (when-not (or (nil? initial-fx)
+                  (keyword? (first initial-fx)))
+      (throw
+       (ex "Initial effect must be a vector starting with a keyword."
+           {:biff.fx/initial-fx initial-fx
+            machine-name-key machine-name})))
+    {:initial-fx initial-fx
+     :state->fn (require-state-map! machine-name state->fn)}))
+
+(defn- initial-handler
+  [handlers handler-key machine-name]
+  (or (get handlers handler-key)
+      (throw
+       (ex "Invalid initial effect handler"
+           {:biff.fx/handler handler-key
+            machine-name-key machine-name
+            :biff.fx/available-handlers (keys handlers)}))))
+
 (defn machine
-  "Return a synchronous browser FX machine with Biff-2-style semantics.
+  "Return a synchronous browser FX machine with released Biff 2 semantics.
 
    Usage:
 
@@ -314,7 +385,7 @@
           {:result [:example.fx/save (:value ctx)]
            :biff.fx/next :done})
         :done
-        (fn [{:keys [result]}]
+        (fn [_ctx {:keys [result]}]
           {:biff.fx/return result})))
 
      (save-machine
@@ -324,52 +395,79 @@
         (fn [_ctx value]
           value)}})
 
-   The returned function has the same two useful arities as Biff FX:
+   Like released Biff FX, the returned function accepts:
 
-     (machine ctx)
-       Runs from :start through :biff.fx/next transitions.
+     (machine)
+       Returns the keyword->state-function map for inspection/testing.
 
-     (machine ctx state)
-       Calls one raw state function directly with ctx. This intentionally does
-       not inject handlers, time, seed, or execute descriptors; it mirrors the
-       JVM Biff FX inspection/testing arity.
+     (machine ctx & args)
+       Runs from :start. :start receives ctx followed by args. Every later state
+       receives ctx and the immediately previous output map as a separate
+       argument.
+
+   An optional initial effect descriptor may be supplied before the state
+   definitions. Its handler result is passed to :start before ordinary machine
+   arguments.
 
    This runner is synchronous. Promise/callback completion must be represented
-   by choreography suspension and a later event, not by an async FX handler."
-  [machine-name & {:as state->fn}]
-  (require-state-map! machine-name state->fn)
-  (fn run
-    ([ctx state]
-     ((state-function machine-name state->fn state)
-      ctx))
-    ([ctx]
-     (let [ctx (require-map! "FX context" ctx)
-           handlers (handlers ctx)]
-       (loop [state :start
-              input {}
-              trace []]
-         (let [output (step machine-name
-                            state->fn
-                            handlers
-                            ctx
-                            state
-                            input
-                            trace)]
-           (cond
-             (get output next-key)
-             (do
-               (when (contains? output return-key)
-                 (throw
-                  (ex "You can't set :biff.fx/next and :biff.fx/return at the same time."
-                      {state-key state
-                       machine-name-key machine-name
-                       :biff.fx/output output})))
-               (recur (get output next-key)
-                      output
-                      (conj trace output)))
+   by choreography suspension and a later event, not by an async FX handler. A
+   Promise returned as ordinary state data is therefore just a host value, as
+   any other non-map state result is."
+  [machine-name & args]
+  (let [{:keys [initial-fx state->fn]}
+        (parse-machine-args machine-name args)]
+    (fn run [& run-args]
+      (if (empty? run-args)
+        state->fn
+        (let [[ctx & machine-args] run-args
+              ctx (require-map! "FX context" ctx)
+              handlers (handlers ctx)
 
-             (contains? output return-key)
-             (get output return-key)
+              initial-result
+              (when initial-fx
+                (let [handler-key (first initial-fx)
+                      handler (initial-handler handlers
+                                               handler-key
+                                               machine-name)
+                      handler-args (rest initial-fx)]
+                  [(invoke-handler machine-name
+                                   :start
+                                   []
+                                   ctx
+                                   {:biff.fx/initial-fx initial-fx}
+                                   handler-key
+                                   handler-args
+                                   handler)]))
 
-             :else
-             output)))))))
+              input
+              (concat initial-result
+                      machine-args)]
+          (loop [state :start
+                 input input
+                 trace []]
+            (let [output
+                  (step machine-name
+                        state->fn
+                        handlers
+                        ctx
+                        state
+                        input
+                        trace)]
+              (cond
+                (get output next-key)
+                (do
+                  (when (contains? output return-key)
+                    (throw
+                     (ex "You can't set :biff.fx/next and :biff.fx/return at the same time."
+                         {state-key state
+                          machine-name-key machine-name
+                          :biff.fx/output output})))
+                  (recur (get output next-key)
+                         [output]
+                         (conj trace output)))
+
+                (contains? output return-key)
+                (get output return-key)
+
+                :else
+                output))))))))
