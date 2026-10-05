@@ -203,9 +203,8 @@
                             :xtdb/read-connectable
                             :xtdb/conn
                             :xtdb/node
-                            :biff.xtdb/node
-                            :biff/conn
-                            :biff/node]})))
+                            :biff.xtdb/connection-pool
+                            :biff.xtdb/node]})))
   connectable)
 
 (defn- transaction-key?
@@ -589,19 +588,17 @@
      :xtdb/conn
      :xtdb/node
 
-   Biff-compatible fallback keys:
+   Released Biff 2 fallback keys:
 
-     :biff.xtdb/node
-     :biff/conn
-     :biff/node"
+     :biff.xtdb/connection-pool
+     :biff.xtdb/node"
   [x]
   (if (map? x)
     (or (:xtdb/connectable x)
         (:xtdb/conn x)
         (:xtdb/node x)
-        (:biff.xtdb/node x)
-        (:biff/conn x)
-        (:biff/node x))
+        (:biff.xtdb/connection-pool x)
+        (:biff.xtdb/node x))
     x))
 
 (defn read-connectable-from
@@ -615,20 +612,18 @@
 
      :xtdb/read-connectable
      :xtdb/conn
-     :biff/conn
      :xtdb/connectable
+     :biff.xtdb/connection-pool
      :xtdb/node
-     :biff.xtdb/node
-     :biff/node"
+     :biff.xtdb/node"
   [x]
   (if (map? x)
     (or (:xtdb/read-connectable x)
         (:xtdb/conn x)
-        (:biff/conn x)
         (:xtdb/connectable x)
+        (:biff.xtdb/connection-pool x)
         (:xtdb/node x)
-        (:biff.xtdb/node x)
-        (:biff/node x))
+        (:biff.xtdb/node x))
     x))
 
 
@@ -648,7 +643,6 @@
 
      :xtdb/node
      :biff.xtdb/node
-     :biff/node
 
    A raw XTDB node may also be supplied directly. XTDB's concrete node currently
    implements IPersistentMap, so node identity must be recognized before treating
@@ -660,8 +654,7 @@
 
     (map? x)
     (or (:xtdb/node x)
-        (:biff.xtdb/node x)
-        (:biff/node x))
+        (:biff.xtdb/node x))
 
     :else
     nil))
@@ -706,8 +699,7 @@
        (throw
         (ex "Cannot establish an XTDB request frontier without an XTDB node."
             {:expected-one-of [:xtdb/node
-                               :biff.xtdb/node
-                               :biff/node]})))
+                               :biff.xtdb/node]})))
      (when-some [completed
                  (first
                   (get-in
