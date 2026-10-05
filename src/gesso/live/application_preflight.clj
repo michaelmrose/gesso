@@ -11,9 +11,9 @@
    than by pretending every possible Hiccup value is statically enumerable.
    check-rendered-surface validates one actual render; wrap-application-handler
    installs that validation around the canonical Gesso HTML response path;
-   application-handler-component lifts the wrapper into Biff's :biff.ring/handler
-   lifecycle; and start-biff-application! makes that component mandatory on the
-   canonical Gesso/Biff startup path.
+   application-handler-module lifts the wrapper into Biff's native module lifecycle;
+   and start-biff-application! requires that stable-ID module to be first in the
+   canonical Gesso/Biff start order.
 
    The resulting guarantee is verified assembly plus pre-browser enforcement for
    canonical Gesso HTML responses when that startup path is used. ApplicationAssembly
@@ -68,8 +68,22 @@
   :gesso.live.application-preflight/html-response)
 
 (def biff-ring-handler-key
-  "Canonical Biff 2 system key consumed by Ring server components."
+  "Canonical Biff 2 system key consumed by Ring server modules."
   :biff.ring/handler)
+
+(def application-handler-module-id
+  "Stable Biff 2 lifecycle ID for Gesso's canonical application-handler module."
+  :gesso.live.application-preflight/use-application-handler)
+
+(def application-assembly-system-key
+  "Temporary canonical-startup system key used to carry the current
+   ApplicationAssembly into application-handler-module.
+
+   start-biff-application! owns this value: caller-supplied initial-system data
+   cannot select or replace the assembly used by the module. The module removes
+   the key before returning so later application modules do not depend on a
+   second long-lived Gesso assembly registry in the Biff system map."
+  :gesso.live.application-preflight/application-assembly)
 
 (def ^:private option-keys
   #{:name
@@ -148,6 +162,7 @@
 (def ^:private canonical-html-enforcement
   {:status :available-on-canonical-gesso-biff-startup
    :startup-boundary :gesso.live.application-preflight/start-biff-application!
+   :biff-module-id application-handler-module-id
    :biff-handler-key biff-ring-handler-key
    :handler-boundary :gesso.live.application-preflight/wrap-application-handler
    :response-boundary :gesso.http/html-response
@@ -158,11 +173,11 @@
   [{:kind :direct-biff-start-bypass
     :boundary :application-startup
     :description
-    "Calling Biff startup directly instead of start-biff-application! can omit the canonical Gesso application-preflight component."}
+    "Calling Biff startup directly instead of start-biff-application! can omit or misorder the canonical Gesso application-preflight module."}
    {:kind :later-handler-replacement
-    :boundary :biff-component-order
+    :boundary :biff-module-start-order
     :description
-    "Arbitrary later Clojure can deliberately replace :biff.ring/handler after Gesso installed the checked handler."}
+    "A later Biff module or arbitrary Clojure can deliberately replace :biff.ring/handler after Gesso installed the checked handler."}
    {:kind :server-ignores-biff-ring-handler
     :boundary :server-integration
     :description
@@ -1341,105 +1356,149 @@
      (fn []
        (invoke-actual-function handler request)))))
 
-(defn application-handler-component
-  "Return a Biff 2-style system component that installs application preflight
-   on the canonical :biff.ring/handler.
-
-   The returned component is an ordinary one-argument system-map transformer,
-   so an application can place it directly in its Biff component vector before
-   the HTTP server component:
-
-     [(application-handler-component application-assembly)
-      use-server]
-
-   At component execution time Gesso requires a system map containing an actual
-   function (or Var currently containing one) at :biff.ring/handler and replaces
-   only that value with wrap-application-handler. All other system entries are
-   preserved exactly. No Gesso-specific system marker is added, avoiding a second
-   handler registry and avoiding Biff schema/registry coupling.
-
-   application-assembly is checked both when this component is constructed and
-   again when the wrapped handler is installed. The installed handler rechecks
-   the assembly for every canonical HTML response, so later artifact/receipt
-   staleness still fails before browser serialization.
-
-   This establishes the canonical Biff handler integration when the returned
-   component is present in the application's component sequence. It does not
-   claim that a server which ignores :biff.ring/handler, a startup path omitting
-   the component, or a manually constructed pre-serialized HTML Ring response is
-   covered by this boundary."
-  [application-assembly]
-  (when-not (application-assembly? application-assembly)
+(defn- install-application-handler
+  [system]
+  (when-not (map? system)
     (throw
      (preflight-error
-      :invalid-application-handler-component-assembly
-      "application-handler-component requires a current ApplicationAssembly."
-      {:application-assembly application-assembly})))
-  (fn [system]
-    (when-not (map? system)
+      :invalid-application-handler-system
+      "Gesso application handler module requires a Biff system map."
+      {:system system})))
+  (let [application-assembly (get system application-assembly-system-key)]
+    (when-not (application-assembly? application-assembly)
       (throw
        (preflight-error
-        :invalid-application-handler-system
-        "Gesso application handler component requires a Biff-style system map."
-        {:system system})))
+        :invalid-application-handler-assembly
+        "Gesso application handler module requires a current ApplicationAssembly supplied by canonical startup."
+        {:application-assembly application-assembly})))
     (when-not (contains? system biff-ring-handler-key)
       (throw
        (preflight-error
         :missing-biff-ring-handler
-        "Gesso application handler component requires :biff.ring/handler in the system map."
+        "Gesso application handler module requires :biff.ring/handler to exist after Biff module initialization and before lifecycle start."
         {:system-keys (set (keys system))})))
     (let [handler (get system biff-ring-handler-key)]
       (when-not (actual-function? handler)
         (throw
          (preflight-error
           :invalid-biff-ring-handler
-          "Gesso application handler component requires :biff.ring/handler to be an actual function or a Var currently containing one."
+          "Gesso application handler module requires :biff.ring/handler to be an actual function or a Var currently containing one."
           {:handler handler})))
-      (assoc
-       system
-       biff-ring-handler-key
-       (wrap-application-handler
-        application-assembly
-        handler)))))
+      (-> system
+          (assoc
+           biff-ring-handler-key
+           (wrap-application-handler application-assembly handler))
+          (dissoc application-assembly-system-key)))))
+
+(def application-handler-module
+  "Native Biff 2 lifecycle module that installs Gesso's canonical HTML
+   application-preflight wrapper.
+
+   Include this exact module in the application's modules Var and place
+   application-handler-module-id first in the Biff start order. Biff runs all
+   :biff.core/init entries before lifecycle start, so :biff.ring/handler must be
+   supplied by module initialization or initial-system before this module starts.
+   A server module may then start later and consume the already wrapped handler.
+
+   The current ApplicationAssembly is supplied by start-biff-application! through
+   application-assembly-system-key. The module rechecks it at installation time,
+   wraps only :biff.ring/handler, and removes the temporary assembly key before
+   returning. The installed handler still rechecks the assembly for every
+   canonical HTML response, preserving fail-closed artifact/render currentness."
+  {:biff.core/id application-handler-module-id
+   :biff.core/start install-application-handler})
+
+(defn- canonical-application-handler-module?
+  [module]
+  (and (= application-handler-module-id (:biff.core/id module))
+       (identical?
+        (:biff.core/start application-handler-module)
+        (:biff.core/start module))))
+
+(defn- require-canonical-application-handler-module!
+  [modules-var]
+  (when-not (var? modules-var)
+    (throw
+     (preflight-error
+      :invalid-biff-application-modules-var
+      "start-biff-application! requires the Biff modules collection as a Var."
+      {:modules-var modules-var})))
+  (let [modules @modules-var
+        candidates
+        (filterv
+         #(= application-handler-module-id (:biff.core/id %))
+         (if (sequential? modules) modules []))]
+    (when-not (= 1 (count candidates))
+      (throw
+       (preflight-error
+        :missing-or-duplicate-application-handler-module
+        "Canonical Gesso/Biff startup requires exactly one application-handler-module in the modules Var."
+        {:module-id application-handler-module-id
+         :matching-module-count (count candidates)})))
+    (when-not (canonical-application-handler-module? (first candidates))
+      (throw
+       (preflight-error
+        :invalid-application-handler-module
+        "The module using Gesso's application-handler module ID is not the canonical Gesso module."
+        {:module-id application-handler-module-id})))))
+
+(defn- require-canonical-start-order!
+  [start-order]
+  (when-not (sequential? start-order)
+    (throw
+     (preflight-error
+      :invalid-biff-application-start-order
+      "start-biff-application! requires a sequential collection of qualified Biff module IDs."
+      {:start-order start-order})))
+  (when-not (= application-handler-module-id (first start-order))
+    (throw
+     (preflight-error
+      :application-handler-module-not-first
+      "Canonical Gesso/Biff startup requires the application-handler module to be first in the Biff lifecycle start order."
+      {:required-first application-handler-module-id
+       :start-order start-order}))))
 
 (defn start-biff-application!
-  "Start a Biff 2 application through the canonical Gesso application-preflight
-   boundary.
+  "Start a released Biff 2 application through Gesso's canonical application-
+   preflight lifecycle boundary.
 
-   This has the same two arities as biff.core/start, with a current
+   This mirrors biff.core/start's two arities with a current
    ApplicationAssembly prepended:
 
      (start-biff-application!
       application-assembly
       modules-var
-      components)
+      start-order)
 
      (start-biff-application!
       application-assembly
       initial-system
       modules-var
-      components)
+      start-order)
 
-   Gesso automatically prepends application-handler-component to the supplied
-   ordinary Biff component sequence before delegating to biff.core/start. Because
-   Biff merges module initialization and initial-system before reducing components,
-   the canonical :biff.ring/handler must already exist at that point. A normal
-   server component therefore cannot accidentally run before Gesso installs the
-   checked wrapper simply because the application author forgot or misplaced the
-   preflight component.
+   modules-var must contain application-handler-module exactly once, and
+   application-handler-module-id must be the first entry in start-order. This is
+   the released Biff 2 lifecycle contract: modules carry stable :biff.core/id and
+   :biff.core/start values, while start-order contains qualified module IDs.
 
-   The supplied component sequence is otherwise preserved exactly and in order.
-   This function does not claim to constrain direct calls to biff.core/start, later
-   components that deliberately replace :biff.ring/handler, servers that ignore
-   that system key, or manually constructed pre-serialized HTML Ring responses.
-   Those remain explicit escape hatches outside the canonical Gesso/Biff path."
-  ([application-assembly modules-var components]
+   Gesso places application-assembly into temporary initial startup state and
+   delegates to biff.core/start without mutating modules-var. Biff first combines
+   all module :biff.core/init values with initial-system. Gesso's first lifecycle
+   module then requires an actual :biff.ring/handler, installs the checked wrapper,
+   removes the temporary assembly key, and returns the system for later modules.
+   Consequently a canonical server module cannot start before preflight.
+
+   Direct calls to biff.core/start, a different start order, a later module that
+   deliberately replaces :biff.ring/handler, a server that ignores that handler,
+   or manually pre-serialized HTML remain explicit boundaries outside this
+   canonical path."
+  ([application-assembly modules-var start-order]
    (start-biff-application!
     application-assembly
     {}
     modules-var
-    components))
-  ([application-assembly initial-system modules-var components]
+    start-order))
+  ([application-assembly initial-system modules-var start-order]
    (when-not (application-assembly? application-assembly)
      (throw
       (preflight-error
@@ -1452,18 +1511,15 @@
        :invalid-biff-application-initial-system
        "start-biff-application! requires initial-system to be a map."
        {:initial-system initial-system})))
-   (when-not (sequential? components)
-     (throw
-      (preflight-error
-       :invalid-biff-application-components
-       "start-biff-application! requires a sequential collection of Biff components."
-       {:components components})))
+   (require-canonical-application-handler-module! modules-var)
+   (require-canonical-start-order! start-order)
    (biff/start
-    initial-system
+    (assoc
+     initial-system
+     application-assembly-system-key
+     application-assembly)
     modules-var
-    (into
-     [(application-handler-component application-assembly)]
-     components))))
+    start-order)))
 
 ;; =============================================================================
 ;; Closed current physical application product
