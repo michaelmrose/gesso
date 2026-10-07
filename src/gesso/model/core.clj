@@ -1129,10 +1129,7 @@
 
 (defn- schema-init
   "Returns a Biff 2 module initializer that installs schemas into the global
-   biff.core registry.
-
-   The module also retains its :schema value during the staged Gesso migration
-   because the current gesso.graph implementation still consumes that key."
+   biff.core registry."
   [schema]
   (fn [_modules-var]
     (biff.core/register
@@ -1147,9 +1144,7 @@
       :resolvers   [...]
       :fx-handlers {...}}
 
-   Schemas are registered with Biff 2 through :biff.core/init. The :schema
-   key remains in the returned module during the staged Gesso migration because
-   current gesso.graph still consumes it.
+   Schemas are registered with Biff 2 through :biff.core/init.
 
    Install (gesso.model.tx/module) separately once for the application."
   ([descriptors]
@@ -1208,10 +1203,7 @@
           ::custom-fx-handler-collision
           "Custom FX handlers must not replace generated model operations.")]
      (cond->
-      {:schema
-       complete-schema
-
-       :biff.core/init
+      {:biff.core/init
        (schema-init
         complete-schema)
 
@@ -1250,10 +1242,7 @@
      :fx-handlers handlers
      :module
      (cond->
-      {:schema
-       schema
-
-       :biff.core/init
+      {:biff.core/init
        (schema-init
         schema)
 
