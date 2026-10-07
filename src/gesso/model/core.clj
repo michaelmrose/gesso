@@ -128,7 +128,7 @@
   (if (instance? clojure.lang.IDeref value) @value value))
 
 (defn- malli-options [ctx]
-  (some-> (:biff/malli-opts ctx) deref-if-needed))
+  (some-> (:gesso.model/malli-options ctx) deref-if-needed))
 
 (defn- duplicates [values]
   (->> values
