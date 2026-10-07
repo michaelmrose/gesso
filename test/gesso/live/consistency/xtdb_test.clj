@@ -53,15 +53,20 @@
           {:xtdb/connectable :explicit
            :xtdb/conn :conn
            :xtdb/node :node
-           :biff/conn :biff-conn
-           :biff/node :biff-node})))
+           :biff.xtdb/connection-pool :biff-pool
+           :biff.xtdb/node :biff-node})))
 
   (is (= :conn
          (xtdb-live/connectable-from
           {:xtdb/conn :conn
            :xtdb/node :node
-           :biff/conn :biff-conn
-           :biff/node :biff-node})))
+           :biff.xtdb/connection-pool :biff-pool
+           :biff.xtdb/node :biff-node})))
+
+  (is (= :biff-pool
+         (xtdb-live/connectable-from
+          {:biff.xtdb/connection-pool :biff-pool
+           :biff.xtdb/node :biff-node})))
 
   (is (= :raw
          (xtdb-live/connectable-from :raw))))
@@ -71,25 +76,24 @@
          (xtdb-live/read-connectable-from
           {:xtdb/read-connectable :read
            :xtdb/conn :conn
-           :biff/conn :biff-conn
            :xtdb/connectable :connectable
+           :biff.xtdb/connection-pool :biff-pool
            :xtdb/node :node
-           :biff/node :biff-node})))
+           :biff.xtdb/node :biff-node})))
 
   (is (= :conn
          (xtdb-live/read-connectable-from
           {:xtdb/conn :conn
-           :biff/conn :biff-conn
            :xtdb/connectable :connectable
+           :biff.xtdb/connection-pool :biff-pool
            :xtdb/node :node
-           :biff/node :biff-node})))
+           :biff.xtdb/node :biff-node})))
 
-  (is (= :biff-conn
+  (is (= :biff-pool
          (xtdb-live/read-connectable-from
-          {:biff/conn :biff-conn
-           :xtdb/connectable :connectable
+          {:biff.xtdb/connection-pool :biff-pool
            :xtdb/node :node
-           :biff/node :biff-node}))))
+           :biff.xtdb/node :biff-node}))))
 
 (deftest require-connectable-throws-on-missing-connectable-test
   (is (thrown-with-msg?
@@ -137,14 +141,14 @@
   (is (= {:await-token "tok-1"}
          (xtdb-live/consistency-from
           {:xtdb/node :shared-node
-           :biff/node :shared-biff-node
+           :biff.xtdb/node :shared-biff-node
            :consistency {:await-token "tok-1"}}))))
 
 (deftest consistency-from-does-not-infer-from-node-state-test
   (is (= {}
          (xtdb-live/consistency-from
           {:xtdb/node :shared-node
-           :biff/node :shared-biff-node}))))
+           :biff.xtdb/node :shared-biff-node}))))
 
 (deftest consistency-from-precedence-test
   (is (= {:snapshot-token "gesso"}
@@ -558,15 +562,16 @@
     (is (= :biff-xtdb-node
            (xtdb-live/node-from
             {:biff.xtdb/node :biff-xtdb-node
-             :biff/conn :request-conn})))
-    (is (= :biff-node
-           (xtdb-live/node-from
-            {:biff/node :biff-node})))
+             :biff.xtdb/connection-pool :request-pool})))
     (is (nil?
          (xtdb-live/node-from
           {:xtdb/conn :request-conn
-           :biff/conn :biff-request-conn
-           :xtdb/connectable :shared-connectable})))
+           :xtdb/connectable :shared-connectable
+           :biff.xtdb/connection-pool :biff-request-pool})))
+    (is (nil?
+         (xtdb-live/node-from
+          {:biff/node :preview-era-node
+           :biff/conn :preview-era-conn})))
     (is (nil? (xtdb-live/node-from raw-data-source)))))
 
 (deftest latest-completed-basis-uses-one-status-observation-test
@@ -615,7 +620,7 @@
       (fn []
         (is (nil?
              (xtdb-live/latest-completed-basis
-              {:biff/node :authority-node})))
+              {:biff.xtdb/node :authority-node})))
         (is (= 1 @calls))))))
 
 (deftest latest-completed-basis-rejects-incomplete-authoritative-coordinates-test

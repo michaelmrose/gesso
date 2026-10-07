@@ -757,7 +757,7 @@
         (descriptor)
 
         ctx
-        {:biff/conn
+        {:biff.xtdb/connection-pool
          :connection
 
          :gesso.live/consistency

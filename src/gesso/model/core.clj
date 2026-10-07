@@ -128,7 +128,7 @@
   (if (instance? clojure.lang.IDeref value) @value value))
 
 (defn- malli-options [ctx]
-  (some-> (:biff/malli-opts ctx) deref-if-needed))
+  (some-> (:gesso.model/malli-options ctx) deref-if-needed))
 
 (defn- duplicates [values]
   (->> values
@@ -935,9 +935,9 @@
          machine-id
 
          :start
-         (fn [{::keys [operation-input]
-               :biff.fx/keys [now seed]
-               :as ctx}]
+         (fn [{:biff.fx/keys [now seed]
+               :as ctx}
+              operation-input]
            (ensure-input-map! operation-key operation-input)
            (when (contains? operation-input :id)
              (fail! ::reserved-create-input
@@ -960,12 +960,12 @@
               :biff.fx/next :finish}))
 
          :finish
-         (fn [{::keys [model-command transaction]}]
+         (fn [_ctx {::keys [model-command transaction]}]
            {:biff.fx/return
             (operation-result result-key model-command transaction)}))]
     (with-meta
       (fn generated-create [ctx input]
-        (machine (assoc ctx ::operation-input input)))
+        (machine ctx input))
       {:gesso.model/entity-type (:entity-type descriptor)
        :gesso.model/operation operation-key
        :gesso.model/operation-id machine-id
@@ -984,7 +984,7 @@
          machine-id
 
          :start
-         (fn [{::keys [operation-input]}]
+         (fn [_ctx operation-input]
            (ensure-input-map! operation-key operation-input)
            (let [id (get operation-input graph-id)]
              (when (nil? id)
@@ -1001,9 +1001,9 @@
               :biff.fx/next :command}))
 
          :command
-         (fn [{::keys [operation-input facts]
-               :biff.fx/keys [now]
-               :as ctx}]
+         (fn [{:biff.fx/keys [now]
+               :as ctx}
+              {::keys [operation-input facts]}]
            (when-not (true? (get facts found-attr))
              (fail! ::document-not-found
                     "Generated update could not find the current document."
@@ -1034,12 +1034,12 @@
               :biff.fx/next :finish}))
 
          :finish
-         (fn [{::keys [model-command transaction]}]
+         (fn [_ctx {::keys [model-command transaction]}]
            {:biff.fx/return
             (operation-result result-key model-command transaction)}))]
     (with-meta
       (fn generated-update [ctx input]
-        (machine (assoc ctx ::operation-input input)))
+        (machine ctx input))
       {:gesso.model/entity-type (:entity-type descriptor)
        :gesso.model/operation operation-key
        :gesso.model/operation-id machine-id
@@ -1129,10 +1129,7 @@
 
 (defn- schema-init
   "Returns a Biff 2 module initializer that installs schemas into the global
-   biff.core registry.
-
-   The module also retains its :schema value during the staged Gesso migration
-   because the current gesso.graph implementation still consumes that key."
+   biff.core registry."
   [schema]
   (fn [_modules-var]
     (biff.core/register
@@ -1147,9 +1144,7 @@
       :resolvers   [...]
       :fx-handlers {...}}
 
-   Schemas are registered with Biff 2 through :biff.core/init. The :schema
-   key remains in the returned module during the staged Gesso migration because
-   current gesso.graph still consumes it.
+   Schemas are registered with Biff 2 through :biff.core/init.
 
    Install (gesso.model.tx/module) separately once for the application."
   ([descriptors]
@@ -1208,10 +1203,7 @@
           ::custom-fx-handler-collision
           "Custom FX handlers must not replace generated model operations.")]
      (cond->
-      {:schema
-       complete-schema
-
-       :biff.core/init
+      {:biff.core/init
        (schema-init
         complete-schema)
 
@@ -1250,10 +1242,7 @@
      :fx-handlers handlers
      :module
      (cond->
-      {:schema
-       schema
-
-       :biff.core/init
+      {:biff.core/init
        (schema-init
         schema)
 
