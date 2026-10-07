@@ -1396,16 +1396,19 @@
       (assoc :database tx-database))))
 
 (defn- live-swap-write-connectable
-  "Return the mutation connectable without misclassifying XTDB record values as ctx maps."
+  "Return the mutation connectable without misclassifying XTDB record values as ctx maps.
+
+   Context maps may use Gesso's explicit XTDB adapter keys or the released
+   Biff 2 XTDB module keys. Preview-era :biff/conn and :biff/node aliases are
+   intentionally unsupported."
   [ctx]
   (if (and (map? ctx)
            (some #(contains? ctx %)
                  [:xtdb/connectable
                   :xtdb/conn
                   :xtdb/node
-                  :biff.xtdb/node
-                  :biff/conn
-                  :biff/node]))
+                  :biff.xtdb/connection-pool
+                  :biff.xtdb/node]))
     (live.xtdb/connectable-from ctx)
     ctx))
 
