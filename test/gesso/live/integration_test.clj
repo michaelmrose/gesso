@@ -1126,8 +1126,8 @@
 ;; -----------------------------------------------------------------------------
 
 (deftest xtdb-consistent-read-uses-explicit-read-connectable-and-consistency-test
-  (let [ctx {:biff/conn :stale-request-conn
-             :biff/node :shared-node
+  (let [ctx {:biff.xtdb/connection-pool :shared-pool
+             :biff.xtdb/node :shared-node
              :xtdb/read-connectable :read-node
              :gesso.live/consistency {:snapshot-time :snapshot-1}}
         query ["SELECT * FROM requests WHERE _id = ?" "req-1"]
@@ -1188,8 +1188,8 @@
         (live/close! system)))))
 
 (deftest xtdb-write-progression-feeds-live-wakeup-and-fragment-key-test
-  (let [ctx {:biff/conn :stale-request-conn
-             :biff/node :shared-node}
+  (let [ctx {:biff.xtdb/connection-pool :shared-pool
+             :biff.xtdb/node :shared-node}
         system-time (Instant/parse "2026-08-25T12:00:42Z")
         system (live/create {:rules (request-rules)
                              :dispatch-options {:threads 1
@@ -1220,7 +1220,7 @@
                 key
                 (request-panel-key-from-progression progression)]
 
-            (is (= [:stale-request-conn sample-xtdb-tx {}]
+            (is (= [:shared-pool sample-xtdb-tx {}]
                    @seen-tx))
 
             (is (= {:tx-id 42
