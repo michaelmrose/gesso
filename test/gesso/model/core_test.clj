@@ -2052,34 +2052,23 @@
           {::custom-operation
            custom-handler}})]
 
-    (testing "generated schemas from several entities and custom derived schemas coexist"
-      (is
-       (=
-        :boolean
-        (get-in
-         module
-         [:schema
-          :widget/derived?])))
-
-      (is
-       (=
-        widget-document-schema
-        (get-in
-         module
-         [:schema
-          :widget])))
-
-      (is
-       (=
-        gadget-document-schema
-        (get-in
-         module
-         [:schema
-          :gadget]))))
-
-    (testing "Biff 2 module init registers the complete generated schema"
+    (testing "generated schemas from several entities and custom derived schemas are registered through Biff 2 init"
       (let [registered
-            (atom nil)]
+            (atom nil)
+
+            expected-schema
+            (merge
+             (model/generated-schema
+              full-descriptor)
+             (model/generated-schema
+              gadget-descriptor)
+             custom-schema)]
+
+        (is
+         (not
+          (contains?
+           module
+           :schema)))
 
         (with-redefs
          [biff.core/register
@@ -2098,9 +2087,26 @@
 
           (is
            (=
-            (:schema
-             module)
-            @registered)))))
+            expected-schema
+            @registered))
+
+          (is
+           (=
+            :boolean
+            (:widget/derived?
+             @registered)))
+
+          (is
+           (=
+            widget-document-schema
+            (:widget
+             @registered)))
+
+          (is
+           (=
+            gadget-document-schema
+            (:gadget
+             @registered))))))
 
     (testing "generated and custom resolvers coexist"
       (is
@@ -2358,15 +2364,13 @@
           (:fx-handlers
            compiled))))))
 
-    (testing "the one-descriptor module is exactly the compiled pieces"
+    (testing "the one-descriptor module exposes native Biff module data while compiled schema remains inspectable"
       (is
-       (=
-        (:schema
-         compiled)
-        (get-in
-         compiled
-         [:module
-          :schema])))
+       (not
+        (contains?
+         (:module
+          compiled)
+         :schema)))
 
       (is
        (ifn?
@@ -2374,6 +2378,33 @@
          compiled
          [:module
           :biff.core/init])))
+
+      (let [registered
+            (atom nil)]
+
+        (with-redefs
+         [biff.core/register
+          (fn [schema]
+            (reset!
+             registered
+             schema))]
+
+          (is
+           (=
+            {}
+            ((get-in
+              compiled
+              [:module
+               :biff.core/init])
+             (atom
+              [(:module
+                compiled)]))))
+
+          (is
+           (=
+            (:schema
+             compiled)
+            @registered))))
 
       (is
        (=
