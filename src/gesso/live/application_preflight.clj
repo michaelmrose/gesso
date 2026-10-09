@@ -476,34 +476,65 @@
        template-segments
        concrete-segments)))))
 
-(defn- rendered-post-coordinates
-  "Enumerate every concrete hx-post coordinate in one rendered Hiccup/value.
+(def ^:private htmx-request-methods
+  [[:hx-get :get]
+   [:hx-post :post]
+   [:hx-put :put]
+   [:hx-patch :patch]
+   [:hx-delete :delete]])
 
-   This deliberately scans more broadly than ui/rendered-choreo-affordances.
-   Ordinary HTMX remains legal, but application preflight needs visibility of
-   its physical POST coordinates so an already-assembled semantic command route
-   cannot silently be invoked after application code drops :choreo/op metadata.
+(defn- native-post-form?
+  [node attrs]
+  (and (vector? node)
+       (let [tag (first node)]
+         (and (or (keyword? tag) (string? tag))
+              (= "form" (first (str/split (name tag) #"[.#]" 2)))))
+       (let [method (:method attrs)]
+         (and (or (keyword? method) (string? method))
+              (= "post" (str/lower-case (name method)))))))
 
-   :choreo-operation-declared? records only the framework-owned metadata installed
-   by canonical gesso.live.ui/post-button :choreo/op rendering. It is not browser
-   authority and is consumed before HTML serialization."
+(defn- rendered-request-coordinates
+  "Enumerate explicit physical request coordinates in rendered Hiccup.
+
+   The inspection includes every named HTMX method and native POST forms with
+   an explicit action. These are independent physical paths to a semantic
+   operation route, even when no :choreo/op annotation was rendered. Ordinary
+   requests to unrelated routes remain legal.
+
+   Native forms without an explicit action, HTML submitter overrides (formaction
+   or formmethod), and indirect JS-initiated requests are NOT enumerated here.
+   Such paths must not be considered exhaustively inspected by this scanner.
+
+   A canonical Gesso Choreo post button carries framework-owned metadata;
+   raw HTML or HTMX does not gain that metadata merely from its URL. This
+   function runs before HTML serialization and makes no authorization claim."
   [rendered]
   (letfn [(walk [value render-path]
             (lazy-seq
              (concat
               (when (and (vector? value)
-                         (map? (second value))
-                         (contains? (second value) :hx-post))
-                (let [path (:hx-post (second value))]
-                  (when (and (string? path)
-                             (not (str/blank? path)))
-                    [{:method :post
-                      :path path
-                      :render-path render-path
-                      :choreo-operation-declared?
+                         (map? (second value)))
+                (let [attrs (second value)
+                      declared?
                       (contains?
                        (meta value)
-                       ui/choreo-affordance-metadata-key)}])))
+                       ui/choreo-affordance-metadata-key)]
+                  (concat
+                   (for [[attribute method] htmx-request-methods
+                         :let [path (get attrs attribute)]
+                         :when (nonblank-string? path)]
+                     {:method method
+                      :path path
+                      :request-source attribute
+                      :render-path render-path
+                      :choreo-operation-declared? declared?})
+                   (when (and (native-post-form? value attrs)
+                              (nonblank-string? (:action attrs)))
+                     [{:method :post
+                       :path (:action attrs)
+                       :request-source :native-form
+                       :render-path render-path
+                       :choreo-operation-declared? declared?}]))))
               (when (sequential? value)
                 (mapcat
                  (fn [[index child]]
@@ -515,29 +546,29 @@
   [rendered-surfaces]
   (if (nil? rendered-surfaces)
     {:affordances []
-     :post-coordinates []
+     :request-coordinates []
      :errors []}
     (reduce
-     (fn [{:keys [affordances post-coordinates errors]} surface-name]
+     (fn [{:keys [affordances request-coordinates errors]} surface-name]
        (let [rendered
              (get rendered-surfaces surface-name)
 
-             surface-post-coordinates
+             surface-request-coordinates
              (into []
                    (map #(assoc % :surface surface-name))
-                   (rendered-post-coordinates rendered))]
+                   (rendered-request-coordinates rendered))]
          (try
            {:affordances
             (into affordances
                   (map #(assoc % :surface surface-name))
                   (ui/rendered-choreo-affordances rendered))
-            :post-coordinates
-            (into post-coordinates surface-post-coordinates)
+            :request-coordinates
+            (into request-coordinates surface-request-coordinates)
             :errors errors}
            (catch clojure.lang.ExceptionInfo error
              {:affordances affordances
-              :post-coordinates
-              (into post-coordinates surface-post-coordinates)
+              :request-coordinates
+              (into request-coordinates surface-request-coordinates)
               :errors
               (conj
                errors
@@ -550,8 +581,8 @@
                  :cause-data (dissoc (ex-data error) :error/type :error/kind)}))})
            (catch Throwable error
              {:affordances affordances
-              :post-coordinates
-              (into post-coordinates surface-post-coordinates)
+              :request-coordinates
+              (into request-coordinates surface-request-coordinates)
               :errors
               (conj
                errors
@@ -562,7 +593,7 @@
                  :exception-class (str (class error))
                  :exception-message (.getMessage error)}))}))))
      {:affordances []
-      :post-coordinates []
+      :request-coordinates []
       :errors []}
      (sort-by pr-str (keys rendered-surfaces)))))
 
@@ -580,18 +611,18 @@
       :required-transport (:required-transport route)})))
 
 (defn- semantic-route-identity-errors
-  "Reject anonymous physical POSTs that collide with assembled semantic routes.
+  "Reject anonymous physical requests that collide with assembled semantic routes.
 
-   Ordinary HTMX is still allowed for routes outside the semantic operation
-   slice. Once a route is assembled as a realization of a semantic operation,
-   however, every rendered invocation of that route must retain canonical
+   Ordinary HTMX and native HTML forms remain legal outside the semantic
+   operation slice. Once a route is an assembled semantic operation, however,
+   every inspected physical invocation of that route must retain canonical
    :choreo/op identity. This prevents application code from silently degrading a
    semantic operation to an ordinary HTMX request when a per-render binding is
    unavailable."
-  [operation-summary' post-coordinates]
+  [operation-summary' request-coordinates]
   (vec
    (keep
-    (fn [{:keys [surface render-path method path
+    (fn [{:keys [surface render-path method path request-source
                  choreo-operation-declared?]
           :as coordinate}]
       (when-not choreo-operation-declared?
@@ -602,15 +633,16 @@
           (when (seq matches)
             (issue
              :rendered-semantic-route-without-choreo-operation
-             "Rendered HTMX POST targets an assembled semantic operation route but carries no canonical :choreo/op declaration. Semantic operation identity may not silently degrade to ordinary HTMX."
+             "Rendered request targets an assembled semantic operation route but carries no canonical :choreo/op declaration. Semantic operation identity may not silently degrade to ordinary HTMX."
              {:surface surface
               :render-path render-path
               :method method
               :path path
+              :request-source request-source
               :candidate-operations
               (set (map :operation matches))
               :matching-routes matches})))))
-    post-coordinates)))
+    request-coordinates)))
 
 (defn- enrich-render-scan-errors-with-semantic-routes
   "Attach physical semantic-route context to rendered-affordance scanner errors.
@@ -625,12 +657,12 @@
    This is diagnostic enrichment only.  It does not reinterpret malformed
    metadata as an anonymous affordance and therefore does not duplicate or
    weaken semantic-route-identity-errors."
-  [operation-summary' post-coordinates scan-errors]
+  [operation-summary' request-coordinates scan-errors]
   (mapv
    (fn [scan-error]
      (let [surface (:surface scan-error)
            collisions
-           (->> post-coordinates
+           (->> request-coordinates
                 (filter #(= surface (:surface %)))
                 (mapcat
                  (fn [{:keys [method path render-path] :as coordinate}]
@@ -901,8 +933,9 @@
        Canonical :choreo/op affordances are derived from Gesso-owned metadata on
        the ordinary rendered nodes and checked against the assembled operation,
        browser-plan, HTTP method, and trusted route template. Every rendered
-       ordinary hx-post is also compared with the assembled semantic route set; an
-       anonymous POST may not target a semantic operation route after application
+       ordinary hx-* request and native form POST with explicit action is compared
+       with the assembled semantic route set; an anonymous request may not target
+       a semantic operation route after application
        code dropped :choreo/op identity. The supplied surface set is itself still
        an application snapshot and does not independently prove that it enumerates
        every possible render surface.
@@ -954,12 +987,12 @@
         semantic-route-errors
         (semantic-route-identity-errors
          base-operation-summary
-         (:post-coordinates surface-scan))
+         (:request-coordinates surface-scan))
 
         surface-scan-errors
         (enrich-render-scan-errors-with-semantic-routes
          base-operation-summary
-         (:post-coordinates surface-scan)
+         (:request-coordinates surface-scan)
          (:errors surface-scan))
 
         affordance-resolution
@@ -1177,12 +1210,12 @@
         semantic-route-errors
         (semantic-route-identity-errors
          base-operation-summary
-         (:post-coordinates surface-scan))
+         (:request-coordinates surface-scan))
 
         surface-scan-errors
         (enrich-render-scan-errors-with-semantic-routes
          base-operation-summary
-         (:post-coordinates surface-scan)
+         (:request-coordinates surface-scan)
          (:errors surface-scan))
 
         affordance-resolution
