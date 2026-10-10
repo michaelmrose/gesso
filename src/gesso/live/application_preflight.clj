@@ -483,12 +483,68 @@
    [:hx-patch :patch]
    [:hx-delete :delete]])
 
+(def ^:private html-scanner-attribute-names
+  "HTML attribute spellings that affect physical request coordinates. Rum
+   serializes both keyword and string Hiccup keys; the preflight scanner must
+   not recognize one while overlooking the other."
+  #{"hx-get" "hx-post" "hx-put" "hx-patch" "hx-delete"
+    "id" "method" "action" "form" "formaction" "formmethod" "type"})
+
+(defn- html-scanner-attrs
+  "Read scanner-relevant attributes from either Hiccup key representation.
+
+   For a keyword/string duplicate, keep the keyword for deterministic scanning;
+   rendered-scanner-attribute-conflicts independently rejects that ambiguous
+   HTML before an application/surface report can be considered valid. Never
+   allow the choice of Hiccup attr-key spelling to hide a physical request."
+  [attrs]
+  (reduce
+   (fn [acc attribute]
+     (let [attribute-keyword (keyword attribute)]
+       (if (and (contains? attrs attribute)
+                (not (contains? attrs attribute-keyword)))
+         (assoc acc attribute-keyword (get attrs attribute))
+         acc)))
+   attrs
+   html-scanner-attribute-names))
+
 (defn- html-tag-name
   [node]
   (when (vector? node)
     (let [tag (first node)]
       (when (or (keyword? tag) (string? tag))
         (first (str/split (name tag) #"[.#]" 2))))))
+
+(defn- rendered-scanner-attribute-conflicts
+  "Reject duplicate keyword/string spellings of request-relevant HTML attrs.
+
+   Rum serializes both keys, creating duplicate physical attributes whose
+   interpretation depends on HTML parsing. Fail closed even if both values are
+   equal; a canonical Choreo affordance cannot acquire ambiguous request
+   coordinates through a second, string-keyed attribute."
+  [rendered surface]
+  (letfn [(walk [value render-path]
+            (lazy-seq
+             (concat
+              (when (and (vector? value)
+                         (html-tag-name value)
+                         (map? (second value)))
+                (let [attrs (second value)]
+                  (for [attribute (sort html-scanner-attribute-names)
+                        :when (and (contains? attrs attribute)
+                                   (contains? attrs (keyword attribute)))]
+                    (issue
+                     :rendered-ambiguous-html-attribute
+                     "Rendered HTML has both string and keyword spellings of a request-relevant attribute. Rum emits duplicate attributes, so the effective physical request cannot be certified."
+                     {:surface surface
+                      :render-path render-path
+                      :attribute (keyword attribute)}))))
+              (when (sequential? value)
+                (mapcat
+                 (fn [[index child]]
+                   (walk child (conj render-path index)))
+                 (map-indexed vector value))))))]
+    (vec (walk rendered []))))
 
 (defn- html-method
   "HTML forms support GET and POST (or the non-submitting dialog method).
@@ -523,7 +579,8 @@
                 ;; A form written as [:form#owner ...] is valid Hiccup even
                 ;; without an attribute map. Detached submitters must still
                 ;; resolve its ID and HTML-default GET method.
-                (let [attrs (if (map? (second value)) (second value) {})]
+                (let [attrs (html-scanner-attrs
+                             (if (map? (second value)) (second value) {}))]
                   (when-let [id (form-identity value attrs)]
                     [[id {:method (html-method (:method attrs))
                           :path (:action attrs)
@@ -560,7 +617,9 @@
    submitter's effective action/method comes from its form owner unless an
    override replaces it; form= may refer to a separate form in this tree.
    A button defaults to type=submit when omitted or invalid, while input
-   requires submit/image. Hiccup forms may omit their attribute map.
+   requires submit/image. Hiccup forms may omit their attribute map. Keyword
+   and string keys for request-relevant Hiccup attributes are both recognized;
+   duplicate spellings are rejected by scan-rendered-surfaces.
 
    Forms without an explicit action and without a usable submitter formaction,
    JavaScript-initiated requests, and forms outside this supplied render tree
@@ -575,7 +634,8 @@
               (lazy-seq
                (let [node? (some? (html-tag-name value))
                      attrs (when node?
-                             (if (map? (second value)) (second value) {}))
+                             (html-scanner-attrs
+                              (if (map? (second value)) (second value) {})))
                      declared? (and node?
                                     (contains?
                                      (meta value)
@@ -658,7 +718,9 @@
              surface-request-coordinates
              (into []
                    (map #(assoc % :surface surface-name))
-                   (rendered-request-coordinates rendered))]
+                   (rendered-request-coordinates rendered))
+             surface-attribute-errors
+             (rendered-scanner-attribute-conflicts rendered surface-name)]
          (try
            {:affordances
             (into affordances
@@ -666,14 +728,14 @@
                   (ui/rendered-choreo-affordances rendered))
             :request-coordinates
             (into request-coordinates surface-request-coordinates)
-            :errors errors}
+            :errors (into errors surface-attribute-errors)}
            (catch clojure.lang.ExceptionInfo error
              {:affordances affordances
               :request-coordinates
               (into request-coordinates surface-request-coordinates)
               :errors
               (conj
-               errors
+               (into errors surface-attribute-errors)
                (issue
                 :rendered-affordance-scan-failed
                 "Application preflight could not enumerate canonical Choreo affordances from a supplied rendered surface."
@@ -687,7 +749,7 @@
               (into request-coordinates surface-request-coordinates)
               :errors
               (conj
-               errors
+               (into errors surface-attribute-errors)
                (issue
                 :rendered-affordance-scan-failed
                 "Application preflight failed while enumerating a supplied rendered surface."
