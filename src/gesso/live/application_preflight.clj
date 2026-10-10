@@ -34,12 +34,11 @@
    named assumptions rather than being promoted to v4.5 machine-checked proof."
   (:require
    [clojure.set :as set]
-   [com.biffweb.core :as biff]
    [clojure.string :as str]
-   [gesso.http :as http]
    [gesso.live.browser.build :as browser-build]
    [gesso.live.operation-acquisition-preflight :as operation-acquisition]
    [gesso.live.application-preflight.affordance :as affordance]
+   [gesso.live.application-preflight.biff :as biff-lifecycle]
    [gesso.live.application-preflight.rendered-surface :as rendered-surface]))
 
 ;; =============================================================================
@@ -67,15 +66,15 @@
   :gesso.live.application-preflight/rendered-surface-report)
 
 (def canonical-html-response-surface
-  :gesso.live.application-preflight/html-response)
+  biff-lifecycle/canonical-html-response-surface)
 
 (def biff-ring-handler-key
   "Canonical Biff 2 system key consumed by Ring server modules."
-  :biff.ring/handler)
+  biff-lifecycle/biff-ring-handler-key)
 
 (def application-handler-module-id
   "Stable Biff 2 lifecycle ID for Gesso's canonical application-handler module."
-  :gesso.live.application-preflight/use-application-handler)
+  biff-lifecycle/application-handler-module-id)
 
 (def application-assembly-system-key
   "Temporary canonical-startup system key used to carry the current
@@ -85,7 +84,7 @@
    cannot select or replace the assembly used by the module. The module removes
    the key before returning so later application modules do not depend on a
    second long-lived Gesso assembly registry in the Biff system map."
-  :gesso.live.application-preflight/application-assembly)
+  biff-lifecycle/application-assembly-system-key)
 
 (def ^:private option-keys
   #{:name
@@ -935,18 +934,6 @@
 ;; Canonical application-handler HTML boundary
 ;; =============================================================================
 
-(defn- actual-function?
-  [value]
-  (or
-   (fn? value)
-   (and
-    (var? value)
-    (fn? @value))))
-
-(defn- invoke-actual-function
-  [f & args]
-  (apply (if (var? f) @f f) args))
-
 (defn wrap-application-handler
   "Wrap one ordinary one-argument application/Ring handler so every nested
    canonical Gesso HTML response is checked against application-assembly before
@@ -975,61 +962,11 @@
    artifact/receipt that becomes stale after wrapper construction still fails
    before serialization."
   [application-assembly handler]
-  (when-not (application-assembly? application-assembly)
-    (throw
-     (preflight-error
-      :invalid-application-handler-assembly
-      "wrap-application-handler requires a current ApplicationAssembly."
-      {:application-assembly application-assembly})))
-  (when-not (actual-function? handler)
-    (throw
-     (preflight-error
-      :invalid-application-handler
-      "wrap-application-handler requires an actual function or a Var currently containing one."
-      {:handler handler})))
-  (fn [request]
-    (http/with-html-response-preflight
-     (fn [rendered]
-       (require-rendered-surface!
-        application-assembly
-        canonical-html-response-surface
-        rendered))
-     (fn []
-       (invoke-actual-function handler request)))))
-
-(defn- install-application-handler
-  [system]
-  (when-not (map? system)
-    (throw
-     (preflight-error
-      :invalid-application-handler-system
-      "Gesso application handler module requires a Biff system map."
-      {:system system})))
-  (let [application-assembly (get system application-assembly-system-key)]
-    (when-not (application-assembly? application-assembly)
-      (throw
-       (preflight-error
-        :invalid-application-handler-assembly
-        "Gesso application handler module requires a current ApplicationAssembly supplied by canonical startup."
-        {:application-assembly application-assembly})))
-    (when-not (contains? system biff-ring-handler-key)
-      (throw
-       (preflight-error
-        :missing-biff-ring-handler
-        "Gesso application handler module requires :biff.ring/handler to exist after Biff module initialization and before lifecycle start."
-        {:system-keys (set (keys system))})))
-    (let [handler (get system biff-ring-handler-key)]
-      (when-not (actual-function? handler)
-        (throw
-         (preflight-error
-          :invalid-biff-ring-handler
-          "Gesso application handler module requires :biff.ring/handler to be an actual function or a Var currently containing one."
-          {:handler handler})))
-      (-> system
-          (assoc
-           biff-ring-handler-key
-           (wrap-application-handler application-assembly handler))
-          (dissoc application-assembly-system-key)))))
+  (biff-lifecycle/wrap-application-handler
+   #'application-assembly?
+   #'require-rendered-surface!
+   application-assembly
+   handler))
 
 (def application-handler-module
   "Native Biff 2 lifecycle module that installs Gesso's canonical HTML
@@ -1046,58 +983,9 @@
    wraps only :biff.ring/handler, and removes the temporary assembly key before
    returning. The installed handler still rechecks the assembly for every
    canonical HTML response, preserving fail-closed artifact/render currentness."
-  {:biff.core/id application-handler-module-id
-   :biff.core/start install-application-handler})
-
-(defn- canonical-application-handler-module?
-  [module]
-  (and (= application-handler-module-id (:biff.core/id module))
-       (identical?
-        (:biff.core/start application-handler-module)
-        (:biff.core/start module))))
-
-(defn- require-canonical-application-handler-module!
-  [modules-var]
-  (when-not (var? modules-var)
-    (throw
-     (preflight-error
-      :invalid-biff-application-modules-var
-      "start-biff-application! requires the Biff modules collection as a Var."
-      {:modules-var modules-var})))
-  (let [modules @modules-var
-        candidates
-        (filterv
-         #(= application-handler-module-id (:biff.core/id %))
-         (if (sequential? modules) modules []))]
-    (when-not (= 1 (count candidates))
-      (throw
-       (preflight-error
-        :missing-or-duplicate-application-handler-module
-        "Canonical Gesso/Biff startup requires exactly one application-handler-module in the modules Var."
-        {:module-id application-handler-module-id
-         :matching-module-count (count candidates)})))
-    (when-not (canonical-application-handler-module? (first candidates))
-      (throw
-       (preflight-error
-        :invalid-application-handler-module
-        "The module using Gesso's application-handler module ID is not the canonical Gesso module."
-        {:module-id application-handler-module-id})))))
-
-(defn- require-canonical-start-order!
-  [start-order]
-  (when-not (sequential? start-order)
-    (throw
-     (preflight-error
-      :invalid-biff-application-start-order
-      "start-biff-application! requires a sequential collection of qualified Biff module IDs."
-      {:start-order start-order})))
-  (when-not (= application-handler-module-id (first start-order))
-    (throw
-     (preflight-error
-      :application-handler-module-not-first
-      "Canonical Gesso/Biff startup requires the application-handler module to be first in the Biff lifecycle start order."
-      {:required-first application-handler-module-id
-       :start-order start-order}))))
+  (biff-lifecycle/make-application-handler-module
+   #'application-assembly?
+   #'require-rendered-surface!))
 
 (defn start-biff-application!
   "Start a released Biff 2 application through Gesso's canonical application-
@@ -1134,31 +1022,18 @@
    or manually pre-serialized HTML remain explicit boundaries outside this
    canonical path."
   ([application-assembly modules-var start-order]
-   (start-biff-application!
+   (biff-lifecycle/start-biff-application!
+    #'application-assembly?
+    application-handler-module
     application-assembly
-    {}
     modules-var
     start-order))
   ([application-assembly initial-system modules-var start-order]
-   (when-not (application-assembly? application-assembly)
-     (throw
-      (preflight-error
-       :invalid-biff-application-start-assembly
-       "start-biff-application! requires a current ApplicationAssembly."
-       {:application-assembly application-assembly})))
-   (when-not (map? initial-system)
-     (throw
-      (preflight-error
-       :invalid-biff-application-initial-system
-       "start-biff-application! requires initial-system to be a map."
-       {:initial-system initial-system})))
-   (require-canonical-application-handler-module! modules-var)
-   (require-canonical-start-order! start-order)
-   (biff/start
-    (assoc
-     initial-system
-     application-assembly-system-key
-     application-assembly)
+   (biff-lifecycle/start-biff-application!
+    #'application-assembly?
+    application-handler-module
+    application-assembly
+    initial-system
     modules-var
     start-order)))
 
