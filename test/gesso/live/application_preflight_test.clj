@@ -1392,6 +1392,170 @@
         (is (= [:request/claim]
                (mapv :operation (get-in report [:analysis :affordances]))))))))
 
+;; =============================================================================
+;; v721 adversarial regression: Hiccup forms without attrs and HTML button types
+;; =============================================================================
+;; v720 closes two scanner omissions: a form ID supplied through Hiccup #id
+;; shorthand must be usable as a detached submitter's owner even if the form
+;; has no attrs map; and invalid button type values have HTML's Submit default.
+;; These checks use application assembly and the checked rendered boundary.
+;; They do not claim to inspect implicit document actions or unsupplied DOM.
+
+(deftest unadorned-hiccup-form-ids-are-resolved-for-detached-submitters
+  (let [claim "/operations/request/claim"
+        rendered
+        [:main
+         [:form#first-owner]
+         [:button {:form "first-owner" :formmethod "POST"
+                   :formaction claim}
+          "First"]
+         ["form#second-owner" [:p "Unadorned string tag"]]
+         [:section
+          [:input {:type "submit" :form "second-owner"
+                   :formmethod :post :formaction claim}]]
+         [:form#third-owner
+          [:button {:formmethod "post" :formaction claim} "Inline"]]]]
+    (with-surfaced-application
+      {:request-board rendered}
+      (fn [{:keys [report assembly]}]
+        (is (application/report? report))
+        (is (nil? assembly))
+        (is (= #{:rendered-semantic-route-without-choreo-operation}
+               (error-kinds report)))
+        (is (= [{:request-source :native-submitter
+                 :method :post
+                 :path claim
+                 :render-path [2]
+                 :form-render-path [1]
+                 :submitter-overrides #{:formaction :formmethod}}
+                {:request-source :native-submitter
+                 :method :post
+                 :path claim
+                 :render-path [4 1]
+                 :form-render-path [3]
+                 :submitter-overrides #{:formaction :formmethod}}
+                {:request-source :native-submitter
+                 :method :post
+                 :path claim
+                 :render-path [5 1]
+                 :form-render-path [5]
+                 :submitter-overrides #{:formaction :formmethod}}]
+               (mapv #(select-keys % [:request-source :method :path
+                                       :render-path :form-render-path
+                                       :submitter-overrides])
+                     (:errors report))))
+        (is (every? #(= #{:request/claim} (:candidate-operations %))
+                    (:errors report)))))))
+
+(deftest invalid-button-types-default-to-submission-on-semantic-post-routes
+  (let [claim "/operations/request/claim"
+        cases [["" :empty]
+               ["unknown" :unknown]
+               ["SUBMITT" :misspelled]
+               [:other :keyword]
+               [42 :non-text]]
+        rendered
+        (into [:main
+               [:form {:method :post :action "/ordinary/save"}
+                [:button {:type :reset :formaction claim} "Reset"]
+                [:button {:type :button :formaction claim} "Non-submit"]]]
+              (map (fn [[button-type label]]
+                     [:form {:method :post :action "/ordinary/save"}
+                      [:button {:type button-type :formaction claim}
+                       (name label)]])
+                   cases))]
+    (with-surfaced-application
+      {:request-board rendered}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (not (application/valid? report)))
+        (is (= #{:rendered-semantic-route-without-choreo-operation}
+               (error-kinds report)))
+        (is (= (count cases) (count (:errors report))))
+        (is (= (mapv (fn [index]
+                       {:request-source :native-submitter
+                        :method :post
+                        :path claim
+                        :render-path [(+ index 2) 2]
+                        :form-render-path [(+ index 2)]
+                        :submitter-overrides #{:formaction}})
+                     (range (count cases)))
+               (mapv #(select-keys % [:request-source :method :path
+                                       :render-path :form-render-path
+                                       :submitter-overrides])
+                     (:errors report))))))))
+
+(deftest default-get-and-nonsubmit-controls-do-not-create-false-collisions
+  (let [claim "/operations/request/claim"
+        rendered
+        [:main
+         [:form#default-get
+          [:button {:formaction claim} "GET does not match semantic POST"]]
+         [:button {:form "default-get" :formaction claim}
+          "Detached GET does not match"]
+         [:form#ordinary
+          [:button {:formmethod "post" :formaction "/ordinary/save"}
+           "Ordinary POST"]]
+         [:form {:method :post :action "/ordinary/save"}
+          [:button {:type :reset :formaction claim} "Reset"]
+          [:button {:type "BuTtOn" :formaction claim} "Button"]
+          [:input {:type :text :formaction claim}]]
+         [:button {:form "unknown" :type "invalid" :formaction claim}
+          "No form owner"]]
+        canonical
+        (rendered-operation-button
+         (render-context (standard-operations))
+         :request/claim claim)]
+    (with-surfaced-application
+      {:request-board [:section canonical rendered]}
+      (fn [{:keys [report assembly]}]
+        (is (application/report? report))
+        (is (application/valid? report))
+        (is (application/application-assembly? assembly))
+        (is (empty? (:errors report)))
+        (is (= [:request/claim]
+               (mapv :operation (get-in report [:analysis :affordances]))))))))
+
+(deftest hiccup-owner-and-invalid-type-reject-before-renderer-executes
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (doseq [[scenario rendered expected-path expected-form-path]
+              [[:unadorned-owner
+                [:main
+                 [:form#owner]
+                 [:button {:form "owner" :formmethod "POST"
+                           :formaction "/operations/request/claim"} "Claim"]]
+                [2] [1]]
+               [:invalid-button-type
+                [:main
+                 [:form {:method :post :action "/ordinary/save"}
+                  [:button {:type "unrecognized"
+                            :formaction "/operations/request/claim"} "Claim"]]]
+                [1 2] [1]]]]
+        (testing (name scenario)
+          (let [render-calls (atom 0)
+                report (application/check-rendered-surface
+                        assembly :request-board rendered)
+                data (error-data
+                      #(application/checked-rendered-response!
+                        assembly :request-board
+                        (fn [_]
+                          (swap! render-calls inc)
+                          {:status 200 :body "must-not-render"})
+                        rendered))
+                error (first (:errors report))]
+            (is (application/rendered-surface-report? report))
+            (is (not (application/rendered-surface-valid? report)))
+            (is (= #{:rendered-semantic-route-without-choreo-operation}
+                   (error-kinds report)))
+            (is (= :native-submitter (:request-source error)))
+            (is (= expected-path (:render-path error)))
+            (is (= expected-form-path (:form-render-path error)))
+            (is (= :rendered-surface-preflight-failed (:error/kind data)))
+            (is (= #{:rendered-semantic-route-without-choreo-operation}
+                   (error-kinds (:preflight data))))
+            (is (zero? @render-calls))))))))
+
 (deftest malformed-framework-affordance-metadata-remains-fail-closed
   (let [forged
         (with-meta
