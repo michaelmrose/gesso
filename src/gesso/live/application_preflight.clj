@@ -519,9 +519,11 @@
   (letfn [(walk [value render-path]
             (lazy-seq
              (concat
-              (when (and (= "form" (html-tag-name value))
-                         (map? (second value)))
-                (let [attrs (second value)]
+              (when (= "form" (html-tag-name value))
+                ;; A form written as [:form#owner ...] is valid Hiccup even
+                ;; without an attribute map. Detached submitters must still
+                ;; resolve its ID and HTML-default GET method.
+                (let [attrs (if (map? (second value)) (second value) {})]
                   (when-let [id (form-identity value attrs)]
                     [[id {:method (html-method (:method attrs))
                           :path (:action attrs)
@@ -544,7 +546,9 @@
                         (string? (:type attrs)))
                 (str/lower-case (name (:type attrs))))]
     (case tag
-      "button" (or (nil? type') (= "submit" type'))
+      ;; HTML's button type defaults to Submit not only when omitted, but
+      ;; also when its value is invalid (including the empty string).
+      "button" (not (contains? #{"button" "reset"} type'))
       "input" (contains? #{"submit" "image"} type')
       false)))
 
@@ -555,7 +559,8 @@
    explicit actions, and submit controls carrying formaction/formmethod. A
    submitter's effective action/method comes from its form owner unless an
    override replaces it; form= may refer to a separate form in this tree.
-   A button defaults to type=submit, while input requires submit/image.
+   A button defaults to type=submit when omitted or invalid, while input
+   requires submit/image. Hiccup forms may omit their attribute map.
 
    Forms without an explicit action and without a usable submitter formaction,
    JavaScript-initiated requests, and forms outside this supplied render tree
@@ -568,8 +573,9 @@
   (let [forms-by-id (rendered-form-contexts rendered)]
     (letfn [(walk [value render-path enclosing-form]
               (lazy-seq
-               (let [node? (and (vector? value) (map? (second value)))
-                     attrs (when node? (second value))
+               (let [node? (some? (html-tag-name value))
+                     attrs (when node?
+                             (if (map? (second value)) (second value) {}))
                      declared? (and node?
                                     (contains?
                                      (meta value)
