@@ -1556,6 +1556,206 @@
                    (error-kinds (:preflight data))))
             (is (zero? @render-calls))))))))
 
+;; =============================================================================
+;; v723 adversarial regression: string-keyed request attrs and duplicate attrs
+;; =============================================================================
+;; Rum accepts both string and keyword HTML attribute keys. v722 closes the
+;; semantic-route collision bypass created when the scanner previously ignored
+;; string-keyed request attributes. Both spellings are checked; duplicates
+;; fail closed even when their values agree. These tests exercise the public
+;; application assembly and dynamic pre-browser response boundaries, without
+;; claiming completeness for JavaScript-generated or unsupplied DOM.
+
+(deftest string-keyed-htmx-requests-cannot-bypass-semantic-routes
+  (let [methods [:get :post :put :patch :delete]
+        path "/requests/request-42/claim?from=string#pending"
+        operations {:request/claim (get (standard-operations) :request/claim)}
+        routes (custom-route-capabilities
+                (into {}
+                      (map (fn [method]
+                             [(keyword "fixture" (str "string-claim-" (name method)))
+                              {:operation :request/claim
+                               :method method
+                               :path "/requests/:request-id/claim"
+                               :transports #{:htmx}}])
+                           methods)))
+        rendered (into [:main]
+                       (map (fn [method]
+                              [:button {(str "hx-" (name method)) path}
+                               (name method)])
+                            methods))]
+    (with-surfaced-application
+      {:operations operations
+       :route-capabilities routes
+       :rendered-surfaces {:request-board rendered}}
+      (fn [{:keys [report assembly]}]
+        (is (application/report? report))
+        (is (nil? assembly))
+        (is (= #{:rendered-semantic-route-without-choreo-operation}
+               (error-kinds report)))
+        (is (= (mapv (fn [index method]
+                       {:surface :request-board
+                        :render-path [index]
+                        :method method
+                        :path path
+                        :request-source (keyword (str "hx-" (name method)))
+                        :candidate-operations #{:request/claim}})
+                     (range 1 (inc (count methods))) methods)
+               (mapv #(select-keys % [:surface :render-path :method :path
+                                       :request-source :candidate-operations])
+                     (:errors report))))))))
+
+(deftest string-and-mixed-keyed-native-form-submissions-are-checked
+  (let [claim "/operations/request/claim"
+        rendered
+        [:main
+         [:form {"method" "POST" "action" claim}
+          [:button {"type" "submit"} "Native"]]
+         [:form {"id" "detached-owner" :method :post
+                 "action" "/ordinary/save"}]
+         [:button {"form" "detached-owner" "formaction" claim
+                   "type" "submit"} "Detached"]
+         [:form {:method :get "action" "/ordinary/list"}
+          [:input {"type" "submit" "formmethod" "POST"
+                   "formaction" claim}]]
+         [:form {"method" "GET" :action claim}
+          [:button "Nonmatching GET"]]]]
+    (with-surfaced-application
+      {:request-board rendered}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (= #{:rendered-semantic-route-without-choreo-operation}
+               (error-kinds report)))
+        (is (= [{:request-source :native-form
+                 :method :post :path claim :render-path [1]}
+                {:request-source :native-submitter
+                 :method :post :path claim :render-path [3]
+                 :form-render-path [2]
+                 :submitter-overrides #{:formaction}}
+                {:request-source :native-submitter
+                 :method :post :path claim :render-path [4 2]
+                 :form-render-path [4]
+                 :submitter-overrides #{:formaction :formmethod}}]
+               (mapv #(select-keys % [:request-source :method :path
+                                       :render-path :form-render-path
+                                       :submitter-overrides])
+                     (:errors report))))))))
+
+(deftest duplicate-keyword-string-html-attributes-are-always-ambiguous
+  (let [attributes ["hx-get" "hx-post" "hx-put" "hx-patch" "hx-delete"
+                    "id" "method" "action" "form" "formaction"
+                    "formmethod" "type"]
+        rendered
+        (into [:main]
+              (mapcat (fn [attribute]
+                        [[:div {(keyword attribute) "/ordinary/no-op"
+                                attribute "/ordinary/no-op"}]
+                         [:div {(keyword attribute) "/ordinary/first"
+                                attribute "/ordinary/second"}]])
+                      attributes))]
+    (with-surfaced-application
+      {:request-board rendered}
+      (fn [{:keys [report assembly]}]
+        (is (application/report? report))
+        (is (nil? assembly))
+        (is (= #{:rendered-ambiguous-html-attribute}
+               (error-kinds report)))
+        (is (= (* 2 (count attributes)) (count (:errors report))))
+        (is (= (mapv (fn [index attribute]
+                       {:surface :request-board
+                        :render-path [(inc index)]
+                        :attribute (keyword attribute)})
+                     (range (* 2 (count attributes)))
+                     (mapcat #(repeat 2 %) attributes))
+               (mapv #(select-keys % [:surface :render-path :attribute])
+                     (:errors report))))))))
+
+(deftest duplicate-html-attributes-on-canonical-choreo-are-rejected
+  (let [ctx (render-context (standard-operations))
+        canonical (rendered-operation-button
+                   ctx :request/claim "/operations/request/claim")
+        button-index (first (keep-indexed
+                             (fn [index node]
+                               (when (and (vector? node)
+                                          (= :button (first node))) index))
+                             canonical))
+        ambiguous (update-in canonical [button-index 1]
+                             assoc "hx-post" "/operations/request/claim")]
+    (is (some? button-index))
+    (with-surfaced-application
+      {:request-board [:main ambiguous]}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (not (application/valid? report)))
+        (is (contains? (error-kinds report)
+                       :rendered-ambiguous-html-attribute))
+        (is (some (fn [error]
+                    (and (= :rendered-ambiguous-html-attribute (:kind error))
+                         (= :request-board (:surface error))
+                         (= :hx-post (:attribute error))
+                         (= [1 button-index] (:render-path error))))
+                  (:errors report)))))))
+
+(deftest string-keyed-requests-and-duplicate-attrs-fail-before-rendering
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (doseq [[scenario rendered expected-kind]
+              [[:string-htmx
+                [:button {"hx-post" "/operations/request/claim"} "Claim"]
+                :rendered-semantic-route-without-choreo-operation]
+               [:string-native-post
+                [:form {"method" "POST" "action" "/operations/request/claim"}
+                 [:button "Claim"]]
+                :rendered-semantic-route-without-choreo-operation]
+               [:duplicate-ordinary-attrs
+                [:div {:id "unique" "id" "unique"}]
+                :rendered-ambiguous-html-attribute]]]
+        (testing (name scenario)
+          (let [calls (atom 0)
+                report (application/check-rendered-surface
+                        assembly :request-board rendered)
+                failure (error-data
+                         #(application/checked-rendered-response!
+                           assembly :request-board
+                           (fn [_]
+                             (swap! calls inc)
+                             {:status 200})
+                           rendered))]
+            (is (application/rendered-surface-report? report))
+            (is (not (application/rendered-surface-valid? report)))
+            (is (contains? (error-kinds report) expected-kind))
+            (is (= :rendered-surface-preflight-failed (:error/kind failure)))
+            (is (contains? (error-kinds (:preflight failure)) expected-kind))
+            (is (zero? @calls))))))))
+
+(deftest string-keyed-ordinary-requests-coexist-with-canonical-choreo
+  (let [claim "/operations/request/claim"
+        canonical (rendered-operation-button
+                   (render-context (standard-operations)) :request/claim claim)
+        rendered
+        [:main canonical
+         [:button {"hx-get" "/ordinary/list"} "List"]
+         [:button {"hx-post" "/ordinary/save"} "Save"]
+         [:button {"hx-put" "/ordinary/replace"} "Replace"]
+         [:button {"hx-patch" "/ordinary/edit"} "Edit"]
+         [:button {"hx-delete" "/ordinary/delete"} "Delete"]
+         [:form {"id" "form-1" "method" "POST"
+                 "action" "/ordinary/save"}
+          [:button {"type" "submit"} "Submit"]]
+         [:button {"form" "form-1" "formaction" "/ordinary/other"}
+          "Detached save"]
+         [:form {"method" "GET" "action" claim}
+          [:button "Nonmatching GET"]]]]
+    (with-surfaced-application
+      {:request-board rendered}
+      (fn [{:keys [report assembly]}]
+        (is (application/report? report))
+        (is (application/valid? report))
+        (is (application/application-assembly? assembly))
+        (is (empty? (:errors report)))
+        (is (= [:request/claim]
+               (mapv :operation (get-in report [:analysis :affordances]))))))))
+
 (deftest malformed-framework-affordance-metadata-remains-fail-closed
   (let [forged
         (with-meta
