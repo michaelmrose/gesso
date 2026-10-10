@@ -25,7 +25,8 @@
 
    Recognition remains physical and fail-closed: current artifact bytes/receipt,
    nested assemblies, rendered metadata, operation/plan identity, route method/path,
-   anonymous physical request collisions with assembled semantic routes, and authoritative
+   anonymous physical request collisions with assembled semantic routes, canonical
+   node request-to-affordance correspondence, and authoritative
    acquisition are revalidated from their source facts. A semantic command route may
    never silently degrade into an unmarked physical request merely because an
    application failed to construct its canonical :choreo/op binding. Browser
@@ -775,40 +776,64 @@
       :required-transport (:required-transport route)})))
 
 (defn- semantic-route-identity-errors
-  "Reject anonymous physical requests that collide with assembled semantic routes.
+  "Reject anonymous requests to semantic routes AND physical requests that do
+   not correspond to the actual canonical Choreo affordance on their node.
 
-   Ordinary HTMX and native HTML forms remain legal outside the semantic
-   operation slice. Once a route is an assembled semantic operation, however,
-   every inspected physical invocation of that route must retain canonical
-   :choreo/op identity. This prevents application code from silently degrading a
-   semantic operation to an ordinary HTMX request when a per-render binding is
-   unavailable."
-  [operation-summary' request-coordinates]
-  (vec
-   (keep
-    (fn [{:keys [surface render-path method path request-source
-                 choreo-operation-declared?]
-          :as coordinate}]
-      (when-not choreo-operation-declared?
-        (let [matches
-              (semantic-route-matches
-               operation-summary'
-               coordinate)]
-          (when (seq matches)
-            (issue
-             :rendered-semantic-route-without-choreo-operation
-             "Rendered request targets an assembled semantic operation route but carries no canonical :choreo/op declaration. Semantic operation identity may not silently degrade to an ordinary physical request."
-             (merge
-              {:surface surface
-               :render-path render-path
-               :method method
-               :path path
-               :request-source request-source
-               :candidate-operations
-               (set (map :operation matches))
-               :matching-routes matches}
-              (select-keys coordinate [:form-render-path :submitter-overrides])))))))
-    request-coordinates)))
+   Metadata marks the node where a validated :choreo/op was constructed; it
+   does not confer a blanket exemption on every HTMX or native request on that
+   node. Only the exact hx-post method/path for the rendered canonical
+   affordance may use that mark. Otherwise, adding hx-get/hx-put/etc. to a
+   canonical button would allow a second physical action to bypass semantic
+   route inspection without any associated operation declaration.
+
+   For unmarked requests, preserve the existing route-sensitive rule: ordinary
+   HTML requests are legal unless their method and URL match an assembled
+   semantic operation. Invalid or forged metadata is independently rejected by
+   the rendered-affordance scanner; no metadata means no exemption."
+  [operation-summary' request-coordinates affordances]
+  (let [canonical-by-location
+        (group-by (juxt :surface :render-path) affordances)]
+    (vec
+     (keep
+      (fn [{:keys [surface render-path method path request-source
+                   choreo-operation-declared?]
+            :as coordinate}]
+        (let [matches (semantic-route-matches operation-summary' coordinate)]
+          (if choreo-operation-declared?
+            (let [expected (get canonical-by-location [surface render-path])]
+              (when-not (and (= 1 (count expected))
+                             (= :hx-post request-source)
+                             (= method (:method (first expected)))
+                             (= path (:path (first expected))))
+                (issue
+                 :rendered-choreo-physical-request-mismatch
+                 "A node marked as a canonical Choreo affordance emits a physical request that is not its certified hx-post action. Choreo metadata cannot exempt additional or altered requests from application preflight."
+                 (merge
+                  {:surface surface
+                   :render-path render-path
+                   :method method
+                   :path path
+                   :request-source request-source
+                   :canonical-affordances (vec expected)
+                   :matching-routes matches}
+                  (select-keys coordinate
+                               [:form-render-path :submitter-overrides])))))
+            (when (seq matches)
+              (issue
+               :rendered-semantic-route-without-choreo-operation
+               "Rendered request targets an assembled semantic operation route but carries no canonical :choreo/op declaration. Semantic operation identity may not silently degrade to an ordinary physical request."
+               (merge
+                {:surface surface
+                 :render-path render-path
+                 :method method
+                 :path path
+                 :request-source request-source
+                 :candidate-operations
+                 (set (map :operation matches))
+                 :matching-routes matches}
+                (select-keys coordinate
+                             [:form-render-path :submitter-overrides])))))))
+      request-coordinates))))
 
 (defn- enrich-render-scan-errors-with-semantic-routes
   "Attach physical semantic-route context to rendered-affordance scanner errors.
@@ -1153,7 +1178,8 @@
         semantic-route-errors
         (semantic-route-identity-errors
          base-operation-summary
-         (:request-coordinates surface-scan))
+         (:request-coordinates surface-scan)
+         (:affordances surface-scan))
 
         surface-scan-errors
         (enrich-render-scan-errors-with-semantic-routes
@@ -1376,7 +1402,8 @@
         semantic-route-errors
         (semantic-route-identity-errors
          base-operation-summary
-         (:request-coordinates surface-scan))
+         (:request-coordinates surface-scan)
+         (:affordances surface-scan))
 
         surface-scan-errors
         (enrich-render-scan-errors-with-semantic-routes
