@@ -1756,6 +1756,187 @@
         (is (= [:request/claim]
                (mapv :operation (get-in report [:analysis :affordances]))))))))
 
+;; =============================================================================
+;; v725 adversarial regression: canonical physical request correspondence
+;; =============================================================================
+;; A validated :choreo/op only admits the corresponding physical hx-post on the
+;; marked button. It does not whitelist other request attributes on that node.
+;; These scenarios check the public static assembly and dynamic pre-render
+;; boundary, including method/path evidence and healthy ordinary requests.
+
+(defn- add-request-attrs-to-canonical-button
+  "Mutate Hiccup test data without rebuilding (or inventing) Choreo metadata."
+  [canonical attrs]
+  (let [button-index
+        (first
+         (keep-indexed
+          (fn [index node]
+            (when (and (vector? node)
+                       (= :button (first node)))
+              index))
+          canonical))]
+    (assert (some? button-index) "Expected a canonical Gesso POST button")
+    (update-in canonical [button-index 1] merge attrs)))
+
+(deftest canonical-mark-does-not-exempt-additional-htmx-methods
+  (let [canonical (rendered-operation-button
+                   (render-context (standard-operations))
+                   :request/claim "/operations/request/claim")
+        extra-requests
+        {:hx-get "/ordinary/read"
+         :hx-put "/ordinary/replace"
+         :hx-patch "/ordinary/update"
+         :hx-delete "/ordinary/remove"}
+        rendered [:main (add-request-attrs-to-canonical-button
+                         canonical extra-requests)]]
+    (with-surfaced-application
+      {:request-board rendered}
+      (fn [{:keys [report assembly]}]
+        (is (application/report? report))
+        (is (nil? assembly))
+        (is (= #{:rendered-choreo-physical-request-mismatch}
+               (error-kinds report)))
+        (let [errors (:errors report)]
+          (is (= 4 (count errors)))
+          (is (= [[:get :hx-get "/ordinary/read"]
+                  [:put :hx-put "/ordinary/replace"]
+                  [:patch :hx-patch "/ordinary/update"]
+                  [:delete :hx-delete "/ordinary/remove"]]
+                 (mapv (juxt :method :request-source :path) errors)))
+          (is (every? #(= :request-board (:surface %)) errors))
+          (is (= 1 (count (set (map :render-path errors)))))
+          (is (every? #(= [{:operation :request/claim
+                            :method :post
+                            :path "/operations/request/claim"}]
+                          (mapv (fn [a]
+                                  (select-keys a [:operation :method :path]))
+                                (:canonical-affordances %)))
+                      errors))
+          (is (every? (comp empty? :matching-routes) errors)))))))
+
+(deftest canonical-extra-semantic-route-carries-matching-route-evidence
+  (let [operations (standard-operations)
+        routes (custom-route-capabilities
+                {:request/claim
+                 {:operation :request/claim
+                  :method :post :path "/operations/request/claim"}
+                 :request/cancel-read
+                 {:operation :request/cancel
+                  :method :get :path "/operations/request/cancel"}
+                 :request/reassign
+                 {:operation :request/reassign
+                  :method :post :path "/operations/request/reassign"}})
+        canonical (rendered-operation-button
+                   (render-context operations)
+                   :request/claim "/operations/request/claim")
+        offending (add-request-attrs-to-canonical-button
+                   canonical {:hx-get "/operations/request/cancel?from=claim"})]
+    (with-surfaced-application
+      {:operations operations
+       :route-capabilities routes
+       :rendered-surfaces {:request-board [:main offending]}}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (= #{:rendered-choreo-physical-request-mismatch}
+               (error-kinds report)))
+        (let [error (first (:errors report))]
+          (is (= :hx-get (:request-source error)))
+          (is (= :get (:method error)))
+          (is (= "/operations/request/cancel?from=claim" (:path error)))
+          (is (= [{:operation :request/cancel
+                   :route-id :request/cancel-read
+                   :method :get
+                   :route-template "/operations/request/cancel"
+                   :required-transport :htmx}]
+                 (:matching-routes error)))
+          (is (= :request/claim
+                 (:operation (first (:canonical-affordances error)))))))))
+
+(deftest canonical-physical-request-mismatches-are-occurrence-local
+  (let [ctx (render-context (standard-operations))
+        canonical (rendered-operation-button
+                   ctx :request/claim "/operations/request/claim")
+        bad-a (add-request-attrs-to-canonical-button
+               canonical {:hx-get "/ordinary/first"})
+        bad-b (add-request-attrs-to-canonical-button
+               canonical {"hx-delete" "/ordinary/second"})]
+    (with-surfaced-application
+      {:alpha [:main canonical bad-a]
+       :beta [:section bad-b canonical]}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (= #{:rendered-choreo-physical-request-mismatch}
+               (error-kinds report)))
+        (is (= [[:alpha [2 3] :hx-get "/ordinary/first"]
+                [:beta [1 3] :hx-delete "/ordinary/second"]]
+               (mapv (juxt :surface :render-path :request-source :path)
+                     (:errors report))))
+        (is (= 4 (count (get-in report [:analysis :affordances]))))
+        (is (= #{:request/claim}
+               (set (map :operation (get-in report [:analysis :affordances]))))))))))
+
+(deftest canonical-extra-request-fails-before-html-rendering
+  (with-closed-application
+    (fn [{:keys [assembly]}]
+      (let [ctx (render-context (standard-operations))
+            canonical (rendered-operation-button
+                       ctx :request/claim "/operations/request/claim")
+            invalid [:main (add-request-attrs-to-canonical-button
+                            canonical {:hx-delete "/ordinary/delete"})]
+            valid [:main canonical [:button {:hx-get "/ordinary/list"} "List"]]
+            calls (atom 0)
+            invalid-report (application/check-rendered-surface
+                            assembly :request-board invalid)
+            failure (error-data
+                     #(application/checked-rendered-response!
+                       assembly :request-board
+                       (fn [_]
+                         (swap! calls inc)
+                         {:status 200})
+                       invalid))
+            valid-report (application/check-rendered-surface
+                          assembly :request-board valid)
+            response (application/checked-rendered-response!
+                      assembly :request-board
+                      (fn [_]
+                        (swap! calls inc)
+                        {:status 200 :body "accepted"})
+                      valid)]
+        (is (application/rendered-surface-report? invalid-report))
+        (is (= #{:rendered-choreo-physical-request-mismatch}
+               (error-kinds invalid-report)))
+        (is (= :rendered-surface-preflight-failed (:error/kind failure)))
+        (is (= #{:rendered-choreo-physical-request-mismatch}
+               (error-kinds (:preflight failure))))
+        (is (application/rendered-surface-valid? valid-report))
+        (is (= {:status 200 :body "accepted"} response))
+        (is (= 1 @calls))))))
+
+(deftest canonical-mark-does-not-hide-anonymous-sibling-semantic-route
+  (let [ctx (render-context (standard-operations))
+        canonical (rendered-operation-button
+                   ctx :request/claim "/operations/request/claim")
+        rendered [:main
+                  canonical
+                  [:button {:hx-post "/operations/request/claim"}
+                   "Anonymous claim"]
+                  [:button {:hx-get "/ordinary/list"} "Ordinary GET"]]]
+    (with-surfaced-application
+      {:request-board rendered}
+      (fn [{:keys [report assembly]}]
+        (is (nil? assembly))
+        (is (= #{:rendered-semantic-route-without-choreo-operation}
+               (error-kinds report)))
+        (is (= [{:surface :request-board
+                 :render-path [2]
+                 :method :post
+                 :path "/operations/request/claim"
+                 :request-source :hx-post
+                 :candidate-operations #{:request/claim}}]
+               (mapv #(select-keys % [:surface :render-path :method :path
+                                       :request-source :candidate-operations])
+                     (:errors report))))))))
+
 (deftest malformed-framework-affordance-metadata-remains-fail-closed
   (let [forged
         (with-meta
