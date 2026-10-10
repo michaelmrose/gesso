@@ -2234,12 +2234,26 @@
       surfaces
       (fn [{:keys [report]}]
         (is (not (application/valid? report)))
-        (is (= #{:rendered-affordance-scan-failed}
-               (error-kinds report)))
-        (let [error (first (:errors report))]
-          (is (= :bad (:surface error)))
-          (is (= :gesso.live.ui/affordance-error (:cause-type error)))
-          (is (keyword? (:cause-kind error))))))))
+        (testing "malformed metadata and its uncertified physical action both fail closed"
+          (is (= [:rendered-affordance-scan-failed
+                  :rendered-choreo-physical-request-mismatch]
+                 (mapv :kind (:errors report))))
+          (let [[scan-error physical-error] (:errors report)]
+            (is (= :bad (:surface scan-error)))
+            (is (= :gesso.live.ui/affordance-error (:cause-type scan-error)))
+            (is (keyword? (:cause-kind scan-error)))
+            (is (= :bad (:surface physical-error)))
+            (is (= :post (:method physical-error)))
+            (is (= :hx-post (:request-source physical-error)))
+            (is (= "/operations/request/cancel" (:path physical-error)))
+            (is (empty? (:canonical-affordances physical-error)))
+            (is (= #{:request/cancel}
+                   (set (map :operation (:matching-routes physical-error)))))))
+        (testing "the valid surface remains independently discoverable"
+          (is (= :request/claim
+                 (:operation
+                  (some #(when (= :good (:surface %)) %)
+                        (get-in report [:analysis :affordances]))))))))))
 
 (deftest rendered-surface-report-and-assembly-tampering-fail-rederivation
   (let [operations (standard-operations)
