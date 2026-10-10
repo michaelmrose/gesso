@@ -25,9 +25,9 @@
 
    Recognition remains physical and fail-closed: current artifact bytes/receipt,
    nested assemblies, rendered metadata, operation/plan identity, route method/path,
-   anonymous HTMX POST collisions with assembled semantic routes, and authoritative
+   anonymous physical request collisions with assembled semantic routes, and authoritative
    acquisition are revalidated from their source facts. A semantic command route may
-   never silently degrade into an ordinary unmarked HTMX POST merely because an
+   never silently degrade into an unmarked physical request merely because an
    application failed to construct its canonical :choreo/op binding. Browser
    metadata never grants authority, and trusted application/model declarations remain
    named assumptions rather than being promoted to v4.5 machine-checked proof."
@@ -483,64 +483,160 @@
    [:hx-patch :patch]
    [:hx-delete :delete]])
 
-(defn- native-post-form?
+(defn- html-tag-name
+  [node]
+  (when (vector? node)
+    (let [tag (first node)]
+      (when (or (keyword? tag) (string? tag))
+        (first (str/split (name tag) #"[.#]" 2))))))
+
+(defn- html-method
+  "HTML forms support GET and POST (or the non-submitting dialog method).
+   Unknown/missing values use HTML's default GET rather than being promoted to
+   an HTTP method supported only by HTMX."
+  [value]
+  (let [value' (when (or (keyword? value) (string? value))
+                 (str/lower-case (name value)))]
+    (case value'
+      "post" :post
+      "dialog" :dialog
+      :get)))
+
+(defn- form-identity
+  "Recognize an explicit form ID, including ordinary Hiccup #id shorthand."
   [node attrs]
-  (and (vector? node)
-       (let [tag (first node)]
-         (and (or (keyword? tag) (string? tag))
-              (= "form" (first (str/split (name tag) #"[.#]" 2)))))
-       (let [method (:method attrs)]
-         (and (or (keyword? method) (string? method))
-              (= "post" (str/lower-case (name method)))))))
+  (let [tag (first node)
+        shorthand (when (or (keyword? tag) (string? tag))
+                    (second (re-find #"#([^.#]+)" (name tag))))]
+    (or (when (nonblank-string? (:id attrs)) (:id attrs))
+        shorthand)))
 
-(defn- rendered-request-coordinates
-  "Enumerate explicit physical request coordinates in rendered Hiccup.
-
-   The inspection includes every named HTMX method and native POST forms with
-   an explicit action. These are independent physical paths to a semantic
-   operation route, even when no :choreo/op annotation was rendered. Ordinary
-   requests to unrelated routes remain legal.
-
-   Native forms without an explicit action, HTML submitter overrides (formaction
-   or formmethod), and indirect JS-initiated requests are NOT enumerated here.
-   Such paths must not be considered exhaustively inspected by this scanner.
-
-   A canonical Gesso Choreo post button carries framework-owned metadata;
-   raw HTML or HTMX does not gain that metadata merely from its URL. This
-   function runs before HTML serialization and makes no authorization claim."
+(defn- rendered-form-contexts
+  "Index forms by explicit ID for submit controls using HTML's form= attribute.
+   Retain the first occurrence of duplicate IDs, matching HTML's form-owner
+   resolution for that ID in the document order of the supplied Hiccup tree."
   [rendered]
   (letfn [(walk [value render-path]
             (lazy-seq
              (concat
-              (when (and (vector? value)
+              (when (and (= "form" (html-tag-name value))
                          (map? (second value)))
-                (let [attrs (second value)
-                      declared?
-                      (contains?
-                       (meta value)
-                       ui/choreo-affordance-metadata-key)]
-                  (concat
-                   (for [[attribute method] htmx-request-methods
-                         :let [path (get attrs attribute)]
-                         :when (nonblank-string? path)]
-                     {:method method
-                      :path path
-                      :request-source attribute
-                      :render-path render-path
-                      :choreo-operation-declared? declared?})
-                   (when (and (native-post-form? value attrs)
-                              (nonblank-string? (:action attrs)))
-                     [{:method :post
-                       :path (:action attrs)
-                       :request-source :native-form
-                       :render-path render-path
-                       :choreo-operation-declared? declared?}]))))
+                (let [attrs (second value)]
+                  (when-let [id (form-identity value attrs)]
+                    [[id {:method (html-method (:method attrs))
+                          :path (:action attrs)
+                          :render-path render-path}]])))
               (when (sequential? value)
                 (mapcat
                  (fn [[index child]]
                    (walk child (conj render-path index)))
                  (map-indexed vector value))))))]
-    (vec (walk rendered []))))
+    (reduce
+     (fn [forms [id form]]
+       (if (contains? forms id) forms (assoc forms id form)))
+     {}
+     (walk rendered []))))
+
+(defn- native-submitter?
+  [node attrs]
+  (let [tag (html-tag-name node)
+        type' (when (or (keyword? (:type attrs))
+                        (string? (:type attrs)))
+                (str/lower-case (name (:type attrs))))]
+    (case tag
+      "button" (or (nil? type') (= "submit" type'))
+      "input" (contains? #{"submit" "image"} type')
+      false)))
+
+(defn- rendered-request-coordinates
+  "Enumerate explicit physical request coordinates in rendered Hiccup.
+
+   This includes all five named HTMX request methods, native POST forms with
+   explicit actions, and submit controls carrying formaction/formmethod. A
+   submitter's effective action/method comes from its form owner unless an
+   override replaces it; form= may refer to a separate form in this tree.
+   A button defaults to type=submit, while input requires submit/image.
+
+   Forms without an explicit action and without a usable submitter formaction,
+   JavaScript-initiated requests, and forms outside this supplied render tree
+   are not enumerated. This scanner makes no HTML validity, deployment,
+   authorization, or completeness claim about surfaces that were not supplied.
+
+   Canonical Gesso Choreo post buttons carry framework-owned metadata;
+   arbitrary Hiccup/HTMX does not acquire this metadata from its URL."
+  [rendered]
+  (let [forms-by-id (rendered-form-contexts rendered)]
+    (letfn [(walk [value render-path enclosing-form]
+              (lazy-seq
+               (let [node? (and (vector? value) (map? (second value)))
+                     attrs (when node? (second value))
+                     declared? (and node?
+                                    (contains?
+                                     (meta value)
+                                     ui/choreo-affordance-metadata-key))
+                     form? (and node? (= "form" (html-tag-name value)))
+                     active-form (if form?
+                                   {:method (html-method (:method attrs))
+                                    :path (:action attrs)
+                                    :render-path render-path}
+                                   enclosing-form)
+                     submitter? (and node?
+                                     (native-submitter? value attrs)
+                                     (or (contains? attrs :formaction)
+                                         (contains? attrs :formmethod)))
+                     submitter-form
+                     (when submitter?
+                       (if (contains? attrs :form)
+                         (get forms-by-id (:form attrs))
+                         enclosing-form))
+                     submitter-method
+                     (when submitter-form
+                       (if (contains? attrs :formmethod)
+                         (html-method (:formmethod attrs))
+                         (:method submitter-form)))
+                     submitter-path
+                     (when submitter-form
+                       (if (contains? attrs :formaction)
+                         (:formaction attrs)
+                         (:path submitter-form)))]
+                 (concat
+                  (when node?
+                    (concat
+                     (for [[attribute method] htmx-request-methods
+                           :let [path (get attrs attribute)]
+                           :when (nonblank-string? path)]
+                       {:method method
+                        :path path
+                        :request-source attribute
+                        :render-path render-path
+                        :choreo-operation-declared? declared?})
+                     (when (and form?
+                                (= :post (:method active-form))
+                                (nonblank-string? (:path active-form)))
+                       [{:method :post
+                         :path (:path active-form)
+                         :request-source :native-form
+                         :render-path render-path
+                         :choreo-operation-declared? declared?}])
+                     (when (and submitter?
+                                (#{:get :post} submitter-method)
+                                (nonblank-string? submitter-path))
+                       [{:method submitter-method
+                         :path submitter-path
+                         :request-source :native-submitter
+                         :render-path render-path
+                         :form-render-path (:render-path submitter-form)
+                         :submitter-overrides
+                         (cond-> #{}
+                           (contains? attrs :formaction) (conj :formaction)
+                           (contains? attrs :formmethod) (conj :formmethod))
+                         :choreo-operation-declared? declared?}])))
+                  (when (sequential? value)
+                    (mapcat
+                     (fn [[index child]]
+                       (walk child (conj render-path index) active-form))
+                     (map-indexed vector value)))))))]
+      (vec (walk rendered [] nil)))))
 
 (defn- scan-rendered-surfaces
   [rendered-surfaces]
@@ -633,15 +729,17 @@
           (when (seq matches)
             (issue
              :rendered-semantic-route-without-choreo-operation
-             "Rendered request targets an assembled semantic operation route but carries no canonical :choreo/op declaration. Semantic operation identity may not silently degrade to ordinary HTMX."
-             {:surface surface
-              :render-path render-path
-              :method method
-              :path path
-              :request-source request-source
-              :candidate-operations
-              (set (map :operation matches))
-              :matching-routes matches})))))
+             "Rendered request targets an assembled semantic operation route but carries no canonical :choreo/op declaration. Semantic operation identity may not silently degrade to an ordinary physical request."
+             (merge
+              {:surface surface
+               :render-path render-path
+               :method method
+               :path path
+               :request-source request-source
+               :candidate-operations
+               (set (map :operation matches))
+               :matching-routes matches}
+              (select-keys coordinate [:form-render-path :submitter-overrides])))))))
     request-coordinates)))
 
 (defn- enrich-render-scan-errors-with-semantic-routes
@@ -933,7 +1031,7 @@
        Canonical :choreo/op affordances are derived from Gesso-owned metadata on
        the ordinary rendered nodes and checked against the assembled operation,
        browser-plan, HTTP method, and trusted route template. Every rendered
-       ordinary hx-* request and native form POST with explicit action is compared
+       ordinary hx-* request, native form POST, and submitter override is compared
        with the assembled semantic route set; an anonymous request may not target
        a semantic operation route after application
        code dropped :choreo/op identity. The supplied surface set is itself still
@@ -1188,7 +1286,7 @@
 
    Success means this rendered value is safe to hand to a response renderer
    relative to the current ApplicationAssembly: canonical semantic affordances
-   resolve exactly and no anonymous ordinary hx-post collides with an assembled
+   resolve exactly and no anonymous inspected physical request collides with an assembled
    semantic operation route. It does not prove that every application handler uses
    this boundary."
   [application-assembly surface rendered]
