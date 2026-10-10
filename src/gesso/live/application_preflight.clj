@@ -40,8 +40,7 @@
    [gesso.live.browser.build :as browser-build]
    [gesso.live.operation-acquisition-preflight :as operation-acquisition]
    [gesso.live.application-preflight.affordance :as affordance]
-   [gesso.live.application-preflight.rendered-request :as rendered-request]
-   [gesso.live.ui :as ui]))
+   [gesso.live.application-preflight.rendered-surface :as rendered-surface]))
 
 ;; =============================================================================
 ;; Identity / closed vocabulary
@@ -443,69 +442,10 @@
       (sort-by pr-str (keys (:operations operation')))))))
 
 
-;; The physical request parser lives in application-preflight.rendered-request;
-;; the semantic route/affordance correspondence checks live in
-;; application-preflight.affordance. Application assembly and the dynamic
-;; pre-render boundary both use those same checks, retaining one shared
-;; acceptance and diagnostic vocabulary.
-
-(defn- scan-rendered-surfaces
-  [rendered-surfaces]
-  (if (nil? rendered-surfaces)
-    {:affordances []
-     :request-coordinates []
-     :errors []}
-    (reduce
-     (fn [{:keys [affordances request-coordinates errors]} surface-name]
-       (let [rendered
-             (get rendered-surfaces surface-name)
-
-             surface-request-coordinates
-             (into []
-                   (map #(assoc % :surface surface-name))
-                   (rendered-request/request-coordinates rendered))
-             surface-attribute-errors
-             (rendered-request/attribute-conflicts rendered surface-name)]
-         (try
-           {:affordances
-            (into affordances
-                  (map #(assoc % :surface surface-name))
-                  (ui/rendered-choreo-affordances rendered))
-            :request-coordinates
-            (into request-coordinates surface-request-coordinates)
-            :errors (into errors surface-attribute-errors)}
-           (catch clojure.lang.ExceptionInfo error
-             {:affordances affordances
-              :request-coordinates
-              (into request-coordinates surface-request-coordinates)
-              :errors
-              (conj
-               (into errors surface-attribute-errors)
-               (issue
-                :rendered-affordance-scan-failed
-                "Application preflight could not enumerate canonical Choreo affordances from a supplied rendered surface."
-                {:surface surface-name
-                 :cause-type (:error/type (ex-data error))
-                 :cause-kind (:error/kind (ex-data error))
-                 :cause-data (dissoc (ex-data error) :error/type :error/kind)}))})
-           (catch Throwable error
-             {:affordances affordances
-              :request-coordinates
-              (into request-coordinates surface-request-coordinates)
-              :errors
-              (conj
-               (into errors surface-attribute-errors)
-               (issue
-                :rendered-affordance-scan-failed
-                "Application preflight failed while enumerating a supplied rendered surface."
-                {:surface surface-name
-                 :exception-class (str (class error))
-                 :exception-message (.getMessage error)}))}))))
-     {:affordances []
-      :request-coordinates []
-      :errors []}
-     (sort-by pr-str (keys rendered-surfaces)))))
-
+;; Physical request enumeration and semantic affordance correspondence are
+;; implemented by application-preflight.rendered-surface. Static snapshots and
+;; dynamic pre-render validation deliberately share the same analysis; the
+;; application-assembly boundary remains responsible for report authority.
 
 (defn operation-summary
   "Return one completely derived operation-keyed explanation for a current
@@ -683,28 +623,19 @@
            operation-acquisition-report)
           (sorted-map))
 
+        surface-analysis
+        (rendered-surface/analyze-rendered-surfaces
+         base-operation-summary
+         rendered-surfaces)
+
         surface-scan
-        (scan-rendered-surfaces rendered-surfaces)
+        (:scan surface-analysis)
 
         semantic-route-errors
-        (affordance/semantic-route-identity-errors
-         base-operation-summary
-         (:request-coordinates surface-scan)
-         (:affordances surface-scan))
-
-        surface-scan-errors
-        (affordance/enrich-render-scan-errors-with-semantic-routes
-         base-operation-summary
-         (:request-coordinates surface-scan)
-         (:errors surface-scan))
-
-        affordance-resolution
-        (affordance/resolve-rendered-affordances
-         base-operation-summary
-         (:affordances surface-scan))
+        (:semantic-route-errors surface-analysis)
 
         affordances
-        (:affordances affordance-resolution)
+        (:affordances surface-analysis)
 
         operation-summary'
         (if (some? rendered-surfaces)
@@ -725,14 +656,8 @@
           artifact-error
           (conj artifact-error)
 
-          (seq surface-scan-errors)
-          (into surface-scan-errors)
-
-          (seq semantic-route-errors)
-          (into semantic-route-errors)
-
-          (seq (:errors affordance-resolution))
-          (into (:errors affordance-resolution)))
+          (seq (:errors surface-analysis))
+          (into (:errors surface-analysis)))
 
         unhandled-topics
         (if operation-acquisition-valid?
@@ -773,13 +698,13 @@
           {:status
            (if (or (seq (:errors surface-scan))
                    (seq semantic-route-errors)
-                   (seq (:errors affordance-resolution)))
+                   (seq (:resolution-errors surface-analysis)))
              :failed
              :closed-relative-to-supplied-rendered-surfaces)
            :guarantee
            (when (and (empty? (:errors surface-scan))
                       (empty? semantic-route-errors)
-                      (empty? (:errors affordance-resolution)))
+                      (empty? (:resolution-errors surface-analysis)))
              rendered-affordance-guarantee)
            :surface-count (count rendered-surfaces)
            :affordance-count (count affordances)}
@@ -907,25 +832,10 @@
           (get-in application-report [:analysis :operations])
           (sorted-map))
 
-        surface-scan
-        (scan-rendered-surfaces {surface rendered})
-
-        semantic-route-errors
-        (affordance/semantic-route-identity-errors
+        surface-analysis
+        (rendered-surface/analyze-rendered-surfaces
          base-operation-summary
-         (:request-coordinates surface-scan)
-         (:affordances surface-scan))
-
-        surface-scan-errors
-        (affordance/enrich-render-scan-errors-with-semantic-routes
-         base-operation-summary
-         (:request-coordinates surface-scan)
-         (:errors surface-scan))
-
-        affordance-resolution
-        (affordance/resolve-rendered-affordances
-         base-operation-summary
-         (:affordances surface-scan))
+         {surface rendered})
 
         errors
         (cond-> []
@@ -937,17 +847,11 @@
             {:application-assembly application-assembly
              :surface surface}))
 
-          (seq surface-scan-errors)
-          (into surface-scan-errors)
-
-          (seq semantic-route-errors)
-          (into semantic-route-errors)
-
-          (seq (:errors affordance-resolution))
-          (into (:errors affordance-resolution)))
+          (seq (:errors surface-analysis))
+          (into (:errors surface-analysis)))
 
         affordances
-        (vec (:affordances affordance-resolution))]
+        (:affordances surface-analysis)]
     {:gesso.live.application-preflight/type rendered-surface-report-type
      :gesso.live.application-preflight/version preflight-version
      :valid? (empty? errors)
