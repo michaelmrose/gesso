@@ -29,8 +29,8 @@
    (java.nio.file Files)))
 
 ;; Test-only fixture construction.  Public bindings are deliberately shared
-;; across future independent integration-test namespaces; private helpers
-;; remain local to this namespace.
+;; across independent integration-test namespaces.  Only construction details
+;; without external fixture consumers remain private to this namespace.
 
 (defn- exception-info-data
   [error]
@@ -86,7 +86,8 @@
   [dir child]
   (str (.resolve (.toPath dir) child)))
 
-(defn- allow?
+(defn allow?
+  "A permissive authorization predicate for test-only live scopes."
   [_ctx _id]
   true)
 
@@ -196,7 +197,8 @@
         :reason :test-only})}
     overrides)))
 
-(defn- standard-operations
+(defn standard-operations
+  "Construct the three standard trusted test operations."
   []
   {:request/claim
    (trusted-operation
@@ -214,7 +216,8 @@
     :request/cancel
     {:published-change-topics #{}})})
 
-(defn- browser-plan
+(defn browser-plan
+  "Derive the browser command plan for a prepared test operation."
   [prepared-operation]
   (optimistic-choreo/command-plan
    {:name (:name prepared-operation)
@@ -223,7 +226,8 @@
     :authority-role (:authority-role prepared-operation)}
    :browser))
 
-(defn- browser-assembly
+(defn browser-assembly
+  "Construct a closed browser assembly from prepared test operations."
   [operations]
   (let [plans
         (into
