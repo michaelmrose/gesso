@@ -3,115 +3,25 @@
    [clojure.test :refer [deftest is testing]]
    [com.biffweb.core :as biff]
    [gesso.core :as g]
-   [gesso.choreo.preflight :as choreo-preflight]
    [gesso.live.acquisition-preflight :as acquisition]
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.fixture
     :refer [error-data error-kind error-kinds warning-kinds with-temp-dir child-path
             html-response generic-query generic-render acquisition-assembly trusted-principal trusted-operation
             operation-assembly operation-acquisition-assembly standard-operation-acquisition record-artifact! application-options
-            with-closed-application rendered-basis render-context rendered-operation-button custom-route-capabilities with-surfaced-application]]
+            with-closed-application rendered-basis render-context rendered-operation-button custom-route-capabilities with-surfaced-application
+            allow? standard-operations browser-plan browser-assembly
+            route-capabilities execution-assembly]]
    [gesso.live.browser.build :as browser-build]
    [gesso.live.browser.preflight :as browser-preflight]
    [gesso.live.model :as model]
    [gesso.live.operation-acquisition-preflight :as operation-acquisition]
    [gesso.live.ui :as ui]
    [gesso.live.optimistic.capability :as capability]
-   [gesso.live.optimistic.choreo :as optimistic-choreo]
    [gesso.live.optimistic.execution-preflight :as execution-preflight]
    [gesso.live.optimistic.preflight :as operation-preflight]
    [gesso.live.optimistic.route-preflight :as route-preflight]
    [gesso.live.optimistic.server :as server]))
-
-;; =============================================================================
-;; Test-local builders still private to the shared fixture implementation
-;; (the remaining helpers use the public fixture contracts above).
-;; =============================================================================
-
-(defn- allow?
-  [_ctx _id]
-  true)
-
-(defn- standard-operations
-  []
-  {:request/claim
-   (trusted-operation
-    :request/claim
-    {:published-change-topics #{:request}})
-
-   :request/reassign
-   (trusted-operation
-    :request/reassign
-    {:published-change-topics
-     #{:request :request-assignment :audit :external/audit}})
-
-   :request/cancel
-   (trusted-operation
-    :request/cancel
-    {:published-change-topics #{}})})
-
-(defn- browser-plan
-  [prepared-operation]
-  (optimistic-choreo/command-plan
-   {:name (:name prepared-operation)
-    :operation (:operation prepared-operation)
-    :browser-role (:browser-role prepared-operation)
-    :authority-role (:authority-role prepared-operation)}
-   :browser))
-
-(defn- browser-assembly
-  [operations]
-  (let [plans
-        (into
-         (sorted-map)
-         (map (fn [[operation entry]]
-                [operation (browser-plan entry)]))
-         operations)
-        plan-registry
-        (choreo-preflight/require-plan-registry!
-         {:name :fixture/application-preflight-plans
-          :plans plans
-          :required-keys (set (keys plans))
-          :single-role? true
-          :expected-role :browser})]
-    (browser-preflight/require-browser-assembly!
-     {:name :fixture/application-preflight-browser
-      :plan-registry plan-registry
-      :browser-role :browser
-      :required-plan-keys (set (keys plans))
-      :optimistic? true
-      :optimistic-htmx? true})))
-
-(defn- route-capabilities
-  [operations]
-  (into
-   (sorted-map)
-   (map
-    (fn [operation]
-      [operation
-       (route-preflight/route-capability
-        {:operation operation
-         :method :post
-         :path (str "/operations/" (namespace operation) "/" (name operation))
-         :transports #{:htmx}})]))
-   (keys operations)))
-
-(defn- execution-assembly
-  [operations]
-  (let [operation-assembly' (operation-assembly operations)
-        route-assembly'
-        (route-preflight/require-route-assembly!
-         {:name :fixture/application-preflight-routes
-          :operation-assembly operation-assembly'
-          :route-capabilities (route-capabilities operations)})
-        prepared-server
-        (server/server
-         {:principal-fn (fn [_] trusted-principal)
-          :operations operations})]
-    (execution-preflight/require-execution-assembly!
-     {:name :fixture/application-preflight-execution
-      :route-assembly route-assembly'
-      :server prepared-server})))
 
 ;; =============================================================================
 ;; Canonical whole-application backbone closure
