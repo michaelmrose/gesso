@@ -38,6 +38,7 @@
    [gesso.live.browser.build :as browser-build]
    [gesso.live.application-preflight.operation-summary :as operation-summary]
    [gesso.live.application-preflight.assurance :as assurance]
+   [gesso.live.application-preflight.semantic-audit :as semantic-audit]
    [gesso.live.application-preflight.affordance :as affordance]
    [gesso.live.application-preflight.biff :as biff-lifecycle]
    [gesso.live.application-preflight.rendered-surface :as rendered-surface]))
@@ -937,12 +938,20 @@
      :trusted-assumptions        named facts outside the verified assembly core;
      :explicit-escape-hatches    deliberate ways arbitrary Clojure can bypass the canonical path.
 
+   Successful explanations additionally expose a source-derived semantic audit.
+   The audit identifies operation-local trusted model boundaries and explicitly
+   unknown business-rule coverage; it does not imply certification of opaque
+   Clojure code. Recognized unsuccessful reports retain their existing failure
+   explanation without claiming a successful semantic audit.
+
    One fresh application report is reused throughout the explanation."
   [value]
   (cond
     (application-assembly-shape? value)
     (if-let [report (current-application-report value)]
-      (assurance/explain-application-from-report value report)
+      (assoc (assurance/explain-application-from-report value report)
+             :semantic-audit
+             (semantic-audit/audit-from-current-report report))
       (throw
        (preflight-error
         :unrecognized-value
@@ -950,7 +959,10 @@
         {:value value})))
 
     (report? value)
-    (assurance/explain-report-from-report value)
+    (cond-> (assurance/explain-report-from-report value)
+      (:valid? value)
+      (assoc :semantic-audit
+             (semantic-audit/audit-from-current-report value)))
 
     :else
     (throw
