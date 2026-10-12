@@ -56,6 +56,22 @@
   [operation-acquisition-assembly]
   (:acquisition-assembly operation-acquisition-assembly))
 
+(defn- required-capabilities-for-operation
+  "Project a concrete operation's prerequisites from the *checked* execution
+   assembly. The canonical product nests the per-operation sets beneath
+   :required-by-operation; :supplied is a separate server-wide set and must
+   never be mistaken for an operation's requirements.
+
+   Keep the earlier flat projection as compatibility for callers that provide
+   the legacy shape in controlled summary fixtures. Canonical execution
+   assemblies always use the nested shape; this helper never treats either
+   shape as evidence that the declared capabilities are actually satisfied by
+   opaque host services beyond execution-preflight's stated contract."
+  [execution-capabilities operation]
+  (if (contains? execution-capabilities :required-by-operation)
+    (get-in execution-capabilities [:required-by-operation operation])
+    (get execution-capabilities operation)))
+
 (defn- route-realizations-by-operation
   [route-assembly']
   (reduce-kv
@@ -138,7 +154,8 @@
             :command-transport (:transport route-requirement)
             :routes (vec (sort-by (juxt :path :route-id)
                                   (get routes-by-operation operation [])))
-            :execution-capabilities (get execution-capabilities operation)
+            :execution-capabilities
+            (required-capabilities-for-operation execution-capabilities operation)
             :settlement-contract (get settlement-contracts operation)
             :published-change-topics (get publication operation)
             :affected-scopes (get affected-scopes operation #{})
