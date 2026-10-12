@@ -369,3 +369,274 @@
     (is (= :trusted
            (:class (first (:opaque-model-boundaries result)))))
     (is (false? (:discharged? (first (:opaque-model-boundaries result)))))))
+
+;; v773: Declared Live-impact relationships. These are relationships between
+;; admitted declarations, not evidence of shared database state, model
+;; publication, transactional conflict, or business-policy dependencies.
+
+(def ^:private declared-impact-nonclaims
+  #{:business-rule-dependency
+    :shared-authoritative-state
+    :transaction-conflict
+    :actual-model-publication
+    :absence-of-undeclared-effects})
+
+(defn- impact-overlaps
+  [result operation]
+  (get-in result [:operation-cards operation :declared-live-overlaps]))
+
+(defn- overlap-with
+  [result operation other-operation]
+  (some #(when (= other-operation (:operation %)) %)
+        (:operations (impact-overlaps result operation))))
+
+(deftest declared-live-overlaps-have-explicit-limited-scope
+  (let [result (audit {:request/claim claim-summary
+                       :request/cancel cancel-summary})]
+    (doseq [operation [:request/claim :request/cancel]]
+      (let [overlaps (impact-overlaps result operation)]
+        (is (= :derived-from-checked-declarations (:status overlaps)))
+        (is (= :shared-declared-live-impact-only (:scope overlaps)))
+        (is (= declared-impact-nonclaims (:does-not-establish overlaps)))
+        (is (vector? (:operations overlaps)))
+        (is (not-any? #(= operation (:operation %)) (:operations overlaps)))))))
+
+(deftest topic-only-overlap-has-exact-source-and-empty-other-dimensions
+  (let [result (audit {:request/claim claim-summary
+                       :request/cancel cancel-summary})
+        forward (overlap-with result :request/claim :request/cancel)
+        reverse (overlap-with result :request/cancel :request/claim)]
+    (is (= {:operation :request/cancel
+            :derived-from [[:analysis :operations :request/claim]
+                           [:analysis :operations :request/cancel]]
+            :shared-published-change-topics [:request/change]
+            :shared-affected-scopes []
+            :shared-affected-fragments []}
+           forward))
+    (is (= {:operation :request/claim
+            :derived-from [[:analysis :operations :request/cancel]
+                           [:analysis :operations :request/claim]]
+            :shared-published-change-topics [:request/change]
+            :shared-affected-scopes []
+            :shared-affected-fragments []}
+           reverse))
+    (is (= [:request/cancel]
+           (mapv :operation (:operations (impact-overlaps result :request/claim)))))
+    (is (= [:request/claim]
+           (mapv :operation (:operations (impact-overlaps result :request/cancel)))))))
+
+(deftest overlap-in-each-live-dimension-is-discovered-independently
+  (let [operations {:request/source
+                    {:published-change-topics #{:topic/shared}
+                     :affected-scopes #{[:scope :shared]}
+                     :affected-fragments #{:fragment/shared}}
+                    :request/topic {:published-change-topics #{:topic/shared}}
+                    :request/scope {:affected-scopes #{[:scope :shared]}}
+                    :request/fragment {:affected-fragments #{:fragment/shared}}}
+        result (audit operations)
+        overlaps (impact-overlaps result :request/source)]
+    (is (= [:request/fragment :request/scope :request/topic]
+           (mapv :operation (:operations overlaps))))
+    (is (= {:topics [] :scopes [] :fragments [:fragment/shared]}
+           (let [match (overlap-with result :request/source :request/fragment)]
+             {:topics (:shared-published-change-topics match)
+              :scopes (:shared-affected-scopes match)
+              :fragments (:shared-affected-fragments match)})))
+    (is (= [:topic/shared]
+           (:shared-published-change-topics
+            (overlap-with result :request/source :request/topic))))
+    (is (= []
+           (:shared-affected-fragments
+            (overlap-with result :request/source :request/topic))))
+    (is (= [[:scope :shared]]
+           (:shared-affected-scopes
+            (overlap-with result :request/source :request/scope))))
+    (doseq [operation [:request/topic :request/scope :request/fragment]]
+      (is (= [:request/source]
+             (mapv :operation (:operations (impact-overlaps result operation))))))))
+
+(deftest multiple-shared-declarations-are-sorted-by-printable-identity
+  (let [a {:published-change-topics #{:z/change :a/change :only/a}
+           :affected-scopes #{[:z] [:a] [:only-a]}
+           :affected-fragments #{:z-fragment :a-fragment :only-a}}
+        b {:published-change-topics #{:a/change :z/change :only/b}
+           :affected-scopes #{[:a] [:z] [:only-b]}
+           :affected-fragments #{:a-fragment :z-fragment :only-b}}
+        entry (overlap-with (audit {:request/a a :request/b b})
+                            :request/a :request/b)]
+    (is (= [:a/change :z/change]
+           (:shared-published-change-topics entry)))
+    (is (= [[:a] [:z]] (:shared-affected-scopes entry)))
+    (is (= [:a-fragment :z-fragment]
+           (:shared-affected-fragments entry)))
+    (is (every? vector?
+                ((juxt :shared-published-change-topics
+                       :shared-affected-scopes
+                       :shared-affected-fragments) entry)))))
+
+(deftest unrelated-operation-declarations-do-not-produce-a-pair
+  (let [result (audit {:request/a {:published-change-topics #{:topic/a}
+                                    :affected-scopes #{[:scope/a]}
+                                    :affected-fragments #{:fragment/a}}
+                       :request/b {:published-change-topics #{:topic/b}
+                                    :affected-scopes #{[:scope/b]}
+                                    :affected-fragments #{:fragment/b}}})]
+    (is (= [] (:operations (impact-overlaps result :request/a))))
+    (is (= [] (:operations (impact-overlaps result :request/b))))
+    (is (= 2 (:operation-count result)))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))))
+
+(deftest absent-or-nil-declarations-produce-no-declared-overlap
+  (let [result (audit {:request/absent {}
+                       :request/nil {:published-change-topics nil
+                                     :affected-scopes nil
+                                     :affected-fragments nil}
+                       :request/empty {:published-change-topics #{}
+                                       :affected-scopes #{}
+                                       :affected-fragments #{}}})]
+    (doseq [operation [:request/absent :request/nil :request/empty]]
+      (let [view (impact-overlaps result operation)]
+        (is (= [] (:operations view)))
+        (is (= declared-impact-nonclaims (:does-not-establish view)))))
+    (is (= :not-derivable-from-current-operation-summary
+           (get-in result [:business-rule-catalog :status])))))
+
+(deftest partial-or-non-set-declarations-are-not-treated-as-overlap-evidence
+  (let [result (audit {:request/typed {:published-change-topics #{:topic/shared}
+                                        :affected-scopes #{[:scope/shared]}
+                                        :affected-fragments #{:fragment/shared}}
+                       :request/vector {:published-change-topics [:topic/shared]
+                                        :affected-scopes [[:scope/shared]]
+                                        :affected-fragments [:fragment/shared]}
+                       :request/list {:published-change-topics '(:topic/shared)
+                                      :affected-scopes '([:scope/shared])
+                                      :affected-fragments '(:fragment/shared)}})]
+    (is (= [] (:operations (impact-overlaps result :request/typed))))
+    (is (= [] (:operations (impact-overlaps result :request/vector))))
+    (is (= [] (:operations (impact-overlaps result :request/list))))
+    ;; The audit is a projection, not the upstream validator: it does not
+    ;; reclassify malformed declarations into credible checked sets.
+    (is (= [:topic/shared]
+           (get-in result [:operation-cards :request/vector
+                           :contract :published-change-topics])))))
+
+(deftest overlapping-routes-or-model-identities-are-not-live-impact-evidence
+  (let [common {:trusted-operation-name 'request-model/update!
+                :routes [{:method :post :path "/request/:id"}]
+                :settlement-contract {:success :committed}}
+        result (audit {:request/one (assoc common :published-change-topics #{:topic/one})
+                       :request/two (assoc common :published-change-topics #{:topic/two})})]
+    (is (= [] (:operations (impact-overlaps result :request/one))))
+    (is (= [] (:operations (impact-overlaps result :request/two))))
+    (is (= 2 (count (:opaque-model-boundaries result))))
+    (is (every? (comp #{:trusted} :class)
+                (:opaque-model-boundaries result)))))
+
+(deftest per-operation-overlap-views-are-symmetric-with-local-source-paths
+  (let [operations {:request/a {:published-change-topics #{:topic/a :topic/shared}
+                                :affected-scopes #{[:scope/shared]}}
+                    :request/b {:published-change-topics #{:topic/b :topic/shared}
+                                :affected-fragments #{:fragment/shared}}
+                    :request/c {:affected-scopes #{[:scope/shared]}
+                                :affected-fragments #{:fragment/shared}}
+                    :request/d {:published-change-topics #{:topic/other}}}
+        result (audit operations)]
+    (doseq [left (keys operations)
+            right (keys operations)
+            :when (not= left right)]
+      (let [a (overlap-with result left right)
+            b (overlap-with result right left)]
+        (is (= (boolean a) (boolean b)) (str left " / " right))
+        (when a
+          (is (= (:shared-published-change-topics a)
+                 (:shared-published-change-topics b)))
+          (is (= (:shared-affected-scopes a)
+                 (:shared-affected-scopes b)))
+          (is (= (:shared-affected-fragments a)
+                 (:shared-affected-fragments b)))
+          (is (= [[:analysis :operations left] [:analysis :operations right]]
+                 (:derived-from a)))
+          (is (= [[:analysis :operations right] [:analysis :operations left]]
+                 (:derived-from b))))))))
+
+(deftest declared-overlap-order-is-independent-of-operation-insertion-order
+  (let [a {:published-change-topics #{:shared}}
+        b {:published-change-topics #{:shared}}
+        c {:published-change-topics #{:shared}}
+        d {:published-change-topics #{:isolated}}
+        first-input (array-map :request/z a :request/b b :request/a c :request/d d)
+        second-input (array-map :request/a c :request/d d :request/z a :request/b b)
+        result (audit first-input)]
+    (is (= result (audit second-input)))
+    (is (= [:request/a :request/b]
+           (mapv :operation (:operations (impact-overlaps result :request/z)))))
+    (is (= [:request/b :request/z]
+           (mapv :operation (:operations (impact-overlaps result :request/a)))))
+    (is (= [] (:operations (impact-overlaps result :request/d))))))
+
+(deftest singleton-and-empty-audits-have-no-other-operation-overlaps
+  (let [empty-audit (audit {})
+        solo (audit {:request/only {:published-change-topics #{:topic/one}
+                                    :affected-scopes #{[:scope/one]}
+                                    :affected-fragments #{:fragment/one}}})]
+    (is (empty? (:operation-cards empty-audit)))
+    (is (= 0 (:operation-count empty-audit)))
+    (is (= [] (:operations (impact-overlaps solo :request/only))))
+    (is (= :shared-declared-live-impact-only
+           (:scope (impact-overlaps solo :request/only))))))
+
+(deftest unadmitted-overlap-claims-are-ignored-in-source-summaries
+  (let [summary (assoc claim-summary
+                       :declared-live-overlaps
+                       {:status :certified
+                        :operations [{:operation :request/cancel
+                                      :shared-authoritative-state true}]}
+                       :claimed-business-dependencies #{:request/cancel})
+        result (audit {:request/claim summary
+                       :request/cancel (assoc cancel-summary
+                                              :published-change-topics #{:unrelated})})
+        card (get-in result [:operation-cards :request/claim])]
+    (is (= [] (get-in card [:declared-live-overlaps :operations])))
+    (is (= :derived-from-checked-declarations
+           (get-in card [:declared-live-overlaps :status])))
+    (is (= declared-impact-nonclaims
+           (get-in card [:declared-live-overlaps :does-not-establish])))
+    (is (not (contains? (:contract card) :claimed-business-dependencies)))
+    (is (not (contains? (:contract card) :declared-live-overlaps)))
+    (is (= :not-inspected (get-in result [:rule-dependencies :status])))))
+
+(deftest overlap-derivation-does-not-upgrade-trust-or-policy-coverage
+  (let [result (audit {:request/claim claim-summary
+                       :request/cancel cancel-summary})
+        coverage (:assurance-coverage result)]
+    (is (some? (overlap-with result :request/claim :request/cancel)))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))
+    (is (= :not-inspected (get-in result [:rule-dependencies :status])))
+    (is (false? (get-in result [:inspection-scope
+                                :complete-business-policy-inventory?])))
+    (is (false? (get-in result [:inspection-scope
+                                :zero-undetected-policy-escapes-established?])))
+    (is (= 2 (count (filter #(= :trusted (:class %)) coverage))))
+    (is (= 2 (count (filter #(= :assembly-verified (:class %)) coverage))))
+    (is (every? false? (map :discharged? (:opaque-model-boundaries result))))
+    (is (not-any? #(#{:proved :certified} (:class %)) coverage))))
+
+(deftest modifying-one-declared-impact-only-changes-related-views
+  (let [base {:request/a {:published-change-topics #{:topic/shared}}
+              :request/b {:published-change-topics #{:topic/shared}}
+              :request/c {:affected-fragments #{:independent}}}
+        before (audit base)
+        after (audit (assoc-in base [:request/b :published-change-topics]
+                               #{:topic/other}))]
+    (is (some? (overlap-with before :request/a :request/b)))
+    (is (some? (overlap-with before :request/b :request/a)))
+    (is (= [] (:operations (impact-overlaps after :request/a))))
+    (is (= [] (:operations (impact-overlaps after :request/b))))
+    (is (= (impact-overlaps before :request/c)
+           (impact-overlaps after :request/c)))
+    (is (= (:opaque-model-boundaries before)
+           (:opaque-model-boundaries after)))
+    (is (= (:assurance-coverage before)
+           (:assurance-coverage after)))
+    (is (= (:business-rule-catalog before)
+           (:business-rule-catalog after)))))
