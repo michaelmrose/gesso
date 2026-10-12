@@ -9,6 +9,7 @@
    application authorization, or opaque model policy."
   (:require
    [clojure.test :refer [deftest is testing]]
+   [clojure.set :as set]
    [gesso.live.application-preflight.operation-summary :as summary]
    [gesso.live.operation-acquisition-preflight :as operation-acquisition]))
 
@@ -373,3 +374,156 @@
     (is (= #{} (:affected-scopes claim)))
     (is (= #{} (:affected-fragments claim)))
     (is (= {} (:authoritative-acquisitions claim)))))
+
+;; Canonical execution-preflight products store per-operation prerequisites under
+;; :required-by-operation, separate from the server-wide :supplied capability set.
+;; These projection tests deliberately use a controlled upstream checker, so
+;; they cannot establish that opaque host capabilities really exist or work.
+(def ^:private canonical-execution-capabilities
+  {:supplied #{:authenticated-principal :clock :database :unused/server}
+   :required-by-operation
+   {:request/claim #{:authenticated-principal :clock}
+    :request/cancel #{:authenticated-principal :database}}})
+
+(defn- with-execution-capabilities
+  [capabilities]
+  (assoc-in fixture [:execution-assembly :execution-capabilities] capabilities))
+
+(defn- canonical-summary
+  ([] (canonical-summary canonical-execution-capabilities))
+  ([capabilities]
+   (checked-summary (with-execution-capabilities capabilities) current-report)))
+
+(deftest canonical-nested-capabilities-are-projected-by-operation
+  (let [result (canonical-summary)]
+    (is (= #{:authenticated-principal :clock}
+           (get-in result [:request/claim :execution-capabilities])))
+    (is (= #{:authenticated-principal :database}
+           (get-in result [:request/cancel :execution-capabilities])))
+    (is (= #{:request/cancel :request/claim} (set (keys result))))))
+
+(deftest supplied-capabilities-are-not-projected-as-operation-requirements
+  (let [result (canonical-summary)]
+    (doseq [operation [:request/claim :request/cancel]]
+      (let [required (get-in result [operation :execution-capabilities])]
+        (is (set? required))
+        (is (not (contains? required :unused/server)))
+        (is (not= (:supplied canonical-execution-capabilities) required))))
+    (is (not (contains? (:request/claim result) :supplied)))
+    (is (not (contains? (:request/cancel result) :supplied)))))
+
+(deftest distinct-operations-do-not-inherit-one-anothers-requirements
+  (let [result (canonical-summary)]
+    (is (not (contains? (get-in result [:request/claim :execution-capabilities])
+                        :database)))
+    (is (not (contains? (get-in result [:request/cancel :execution-capabilities])
+                        :clock)))
+    (is (= #{:authenticated-principal}
+           (set/intersection
+            (get-in result [:request/claim :execution-capabilities])
+            (get-in result [:request/cancel :execution-capabilities]))))))
+
+(deftest changing-supplied-capabilities-does-not-change-required-projection
+  (let [baseline (canonical-summary)
+        changed (canonical-summary
+                 (assoc canonical-execution-capabilities
+                        :supplied #{:unrelated/server-only}))]
+    (is (= baseline changed))
+    (is (= #{:authenticated-principal :clock}
+           (get-in changed [:request/claim :execution-capabilities])))))
+
+(deftest changing-one-required-set-affects-only-its-operation
+  (let [baseline (canonical-summary)
+        modified (canonical-summary
+                  (assoc-in canonical-execution-capabilities
+                            [:required-by-operation :request/claim]
+                            #{:new/claim-requirement}))]
+    (is (= #{:new/claim-requirement}
+           (get-in modified [:request/claim :execution-capabilities])))
+    (is (= (get-in baseline [:request/cancel :execution-capabilities])
+           (get-in modified [:request/cancel :execution-capabilities])))
+    (is (= (dissoc (:request/claim baseline) :execution-capabilities)
+           (dissoc (:request/claim modified) :execution-capabilities)))))
+
+(deftest canonical-empty-requirement-set-remains-empty-not-supplied
+  (let [result (canonical-summary
+                (assoc-in canonical-execution-capabilities
+                          [:required-by-operation :request/cancel]
+                          #{}))]
+    (is (= #{} (get-in result [:request/cancel :execution-capabilities])))
+    (is (some? (get-in result [:request/cancel :execution-capabilities])))
+    (is (= #{:authenticated-principal :clock}
+           (get-in result [:request/claim :execution-capabilities])))))
+
+(deftest missing-operation-requirement-is-not-replaced-by-global-supply
+  (let [result (canonical-summary
+                (update canonical-execution-capabilities
+                        :required-by-operation dissoc :request/cancel))]
+    (is (nil? (get-in result [:request/cancel :execution-capabilities])))
+    (is (= #{:authenticated-principal :clock}
+           (get-in result [:request/claim :execution-capabilities])))
+    (is (not= (:supplied canonical-execution-capabilities)
+              (get-in result [:request/cancel :execution-capabilities])))))
+
+(deftest canonical-nesting-takes-precedence-over-flat-legacy-keys
+  (let [ambiguous (assoc canonical-execution-capabilities
+                         :request/claim #{:incorrect/flat-claim}
+                         :request/cancel #{:incorrect/flat-cancel})
+        result (canonical-summary ambiguous)]
+    (is (= (canonical-summary) result))
+    (is (not (contains? (get-in result [:request/claim :execution-capabilities])
+                        :incorrect/flat-claim)))))
+
+(deftest canonical-empty-mapping-does-not-fall-back-to-flat-keys
+  (let [result (canonical-summary
+                {:supplied #{:authenticated-principal}
+                 :required-by-operation {}
+                 :request/claim #{:incorrect/flat-claim}})]
+    (is (nil? (get-in result [:request/claim :execution-capabilities])))
+    (is (nil? (get-in result [:request/cancel :execution-capabilities])))))
+
+(deftest requirements-for-nonassembled-operations-are-not-invented
+  (let [result (canonical-summary
+                (assoc-in canonical-execution-capabilities
+                          [:required-by-operation :request/unknown]
+                          #{:unknown/requirement}))]
+    (is (= #{:request/claim :request/cancel} (set (keys result))))
+    (is (not (contains? result :request/unknown)))
+    (is (= (canonical-summary) result))))
+
+(deftest canonical-capabilities-retain-the-legacy-summary-contract
+  (let [canonical (canonical-summary)
+        legacy (checked-summary)]
+    (is (= #{:fixture/capability}
+           (set (keys (get-in legacy [:request/claim :execution-capabilities])))))
+    (is (= #{:authenticated-principal :clock}
+           (get-in canonical [:request/claim :execution-capabilities])))
+    (is (= (dissoc (:request/claim legacy) :execution-capabilities)
+           (dissoc (:request/claim canonical) :execution-capabilities)))
+    (is (= (dissoc (:request/cancel legacy) :execution-capabilities)
+           (dissoc (:request/cancel canonical) :execution-capabilities)))))
+
+(deftest canonical-capability-projection-does-not-mutate-source
+  (let [before canonical-execution-capabilities
+        result-a (canonical-summary)
+        result-b (canonical-summary)]
+    (is (= before canonical-execution-capabilities))
+    (is (= result-a result-b))
+    (is (= #{:authenticated-principal :database}
+           (get-in result-b [:request/cancel :execution-capabilities])))))
+
+(deftest canonical-summary-uses-one-fresh-upstream-check-per-invocation
+  (let [calls (atom 0)
+        assembly (with-execution-capabilities canonical-execution-capabilities)]
+    (with-redefs [operation-acquisition/check-operation-acquisition
+                  (fn [_]
+                    (swap! calls inc)
+                    current-report)]
+      (is (= #{:authenticated-principal :clock}
+             (get-in (summary/operation-summary assembly)
+                     [:request/claim :execution-capabilities])))
+      (is (= 1 @calls))
+      (is (= #{:authenticated-principal :database}
+             (get-in (summary/operation-summary assembly)
+                     [:request/cancel :execution-capabilities])))
+      (is (= 2 @calls)))))
