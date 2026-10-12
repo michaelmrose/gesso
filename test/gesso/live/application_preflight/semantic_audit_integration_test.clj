@@ -256,3 +256,79 @@
           (is (not (contains? explanation :semantic-audit)))
           (is (not= :application-runtime-backbone-preflight-closed
                     (:guarantee explanation))))))))
+
+
+;; Regression for v778: the execution assembly places operation-specific
+;; prerequisites beneath :required-by-operation. The public report and semantic
+;; audit must preserve those checked prerequisites, never the global :supplied
+;; capability set in their place.
+(deftest canonical-execution-capabilities-reach-all-public-explanations
+  (with-closed-application
+    (fn [{:keys [assembly report operation-acquisition-assembly]}]
+      (let [capabilities (get-in operation-acquisition-assembly
+                                 [:execution-assembly :execution-capabilities])
+            required (:required-by-operation capabilities)
+            supplied (:supplied capabilities)
+            report-operations (get-in report [:analysis :operations])
+            assembly-explanation (application/explain assembly)
+            report-explanation (application/explain report)
+            cards (get-in assembly-explanation [:semantic-audit :operation-cards])]
+        (is (true? (:valid? report)))
+        (is (= #{:authenticated-principal} supplied))
+        (is (= #{:request/claim :request/reassign :request/cancel}
+               (set (keys required))))
+        (is (= (set (keys required)) (set (keys report-operations))))
+        (is (= (set (keys required)) (set (keys cards))))
+        (is (= (:semantic-audit assembly-explanation)
+               (:semantic-audit report-explanation)))
+        (doseq [[operation prerequisites] required]
+          (testing (str "canonical execution prerequisites for " operation)
+            (is (set? prerequisites))
+            (is (contains? prerequisites :authenticated-principal))
+            (is (= prerequisites
+                   (get-in report-operations [operation :execution-capabilities])))
+            (is (= prerequisites
+                   (get-in assembly-explanation
+                           [:operations operation :execution-capabilities])))
+            (is (= prerequisites
+                   (get-in report-explanation
+                           [:analysis :operations operation :execution-capabilities])))
+            (is (= prerequisites
+                   (get-in cards [operation :contract :execution-capabilities])))
+            (is (= prerequisites
+                   (:execution-capabilities
+                    (application/explain-operation assembly operation))))))
+        ;; Prerequisites describe construction, not proof that opaque host
+        ;; predicates, services, and transaction guards meet those contracts.
+        (is (= :unknown
+               (get-in assembly-explanation
+                       [:semantic-audit :business-rule-catalog :count])))
+        (is (every? (fn [card]
+                      (= :opaque-host-implementation
+                         (:model-policy-inspection card)))
+                    (vals cards)))))))
+
+(deftest forged-execution-capability-evidence-cannot-gain-a-public-audit
+  (with-closed-application
+    (fn [{:keys [assembly report]}]
+      (let [forged-assembly
+            (assoc-in assembly
+                      [:operation-acquisition-assembly
+                       :execution-assembly
+                       :execution-capabilities
+                       :required-by-operation
+                       :request/claim]
+                      #{:fixture/forged-capability})
+            forged-report
+            (assoc-in report
+                      [:analysis :operations :request/claim
+                       :execution-capabilities]
+                      #{:fixture/forged-capability})]
+        (is (= :unrecognized-value
+               (error-kind #(application/explain forged-assembly))))
+        (is (= :unrecognized-value
+               (error-kind #(application/explain forged-report))))
+        (is (= :invalid-application-assembly
+               (error-kind
+                #(application/explain-operation forged-assembly
+                                                :request/claim))))))))
