@@ -640,3 +640,281 @@
            (:assurance-coverage after)))
     (is (= (:business-rule-catalog before)
            (:business-rule-catalog after)))))
+
+;; v775: Reported Live-declaration completeness. Coverage describes the shape
+;; and comparison of operation-summary *reported sets*. It does not establish
+;; explicit source declarations, actual effects, or business-rule independence.
+
+(def ^:private reported-live-fields
+  #{:published-change-topics :affected-scopes :affected-fragments})
+
+(def ^:private reported-live-nonclaims
+  #{:explicit-source-declaration
+    :actual-model-effects
+    :absence-of-undeclared-effects
+    :business-rule-independence
+    :transactional-independence})
+
+(defn- reported-coverage
+  [result operation]
+  (get-in result [:operation-cards operation
+                  :reported-live-declaration-coverage]))
+
+(defn- reported-comparison
+  [result operation other-operation]
+  (some #(when (= other-operation (:operation %)) %)
+        (:comparisons (reported-coverage result operation))))
+
+(defn- reported-status
+  [result operation field]
+  (get-in (reported-coverage result operation) [:fields field :status]))
+
+(defn- fully-reported-live-summary
+  [topics scopes fragments]
+  {:published-change-topics topics
+   :affected-scopes scopes
+   :affected-fragments fragments})
+
+(deftest reported-live-coverage-has-an-explicit-narrow-scope
+  (let [result (audit {:request/claim claim-summary})
+        coverage (reported-coverage result :request/claim)]
+    (is (= :derived-from-checked-operation-summary (:status coverage)))
+    (is (= :presence-and-shape-of-reported-live-sets-only
+           (:scope coverage)))
+    (is (= reported-live-nonclaims (:does-not-establish coverage)))
+    (is (= reported-live-fields (set (keys (:fields coverage)))))
+    (is (true? (:all-fields-reported-as-sets? coverage)))
+    (is (= [] (:comparisons coverage)))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))
+    (is (false? (get-in result [:inspection-scope
+                               :complete-business-policy-inventory?])))))
+
+(deftest reported-nonempty-sets-have-correct-counts-and-source-paths
+  (let [result (audit {:request/claim claim-summary})
+        coverage (reported-coverage result :request/claim)]
+    (doseq [field reported-live-fields]
+      (testing (str field)
+        (is (= {:status :reported-nonempty-set
+                :derived-from [:analysis :operations :request/claim field]
+                :reported-count 1}
+               (get-in coverage [:fields field])))))
+    (is (true? (:all-fields-reported-as-sets? coverage)))))
+
+(deftest reported-empty-sets-are-not-confused-with-missing-fields
+  (let [result (audit {:request/empty (fully-reported-live-summary #{} #{} #{})
+                       :request/missing {}})]
+    (doseq [field reported-live-fields]
+      (is (= {:status :reported-empty-set
+              :derived-from [:analysis :operations :request/empty field]
+              :reported-count 0}
+             (get-in (reported-coverage result :request/empty) [:fields field])))
+      (is (= {:status :not-reported
+              :derived-from [:analysis :operations :request/missing field]}
+             (get-in (reported-coverage result :request/missing) [:fields field]))))
+    (is (true? (:all-fields-reported-as-sets?
+                (reported-coverage result :request/empty))))
+    (is (false? (:all-fields-reported-as-sets?
+                 (reported-coverage result :request/missing))))
+    (is (= :no-comparable-reported-sets
+           (:status (reported-comparison result :request/empty :request/missing))))
+    (is (= :unknown
+           (:no-shared-reported-values?
+            (reported-comparison result :request/empty :request/missing))))))
+
+(deftest reported-nil-is-not-treated-as-an-empty-declaration
+  (let [result (audit {:a {:published-change-topics nil
+                          :affected-scopes #{}
+                          :affected-fragments nil}
+                       :b (fully-reported-live-summary #{} #{} #{})})
+        coverage (reported-coverage result :a)
+        comparison (reported-comparison result :a :b)]
+    (is (= :reported-nil (reported-status result :a :published-change-topics)))
+    (is (= :reported-empty-set (reported-status result :a :affected-scopes)))
+    (is (= :reported-nil (reported-status result :a :affected-fragments)))
+    (is (not (contains? (get-in coverage [:fields :published-change-topics])
+                        :reported-count)))
+    (is (false? (:all-fields-reported-as-sets? coverage)))
+    (is (= #{:affected-scopes} (:comparable-fields comparison)))
+    (is (= :partially-comparable (:status comparison)))
+    (is (= :unknown (:no-shared-reported-values? comparison)))))
+
+(deftest malformed-declaration-values-remain-unsupported-not-empty
+  (let [bad-values [[1] '(1) {:unexpected true} "x" false 0]
+        baseline (fully-reported-live-summary #{} #{} #{})]
+    (doseq [bad bad-values]
+      (let [result (audit {:a (assoc baseline :published-change-topics bad)
+                           :b baseline})
+            field (get-in (reported-coverage result :a)
+                          [:fields :published-change-topics])
+            comparison (reported-comparison result :a :b)]
+        (testing (pr-str bad)
+          (is (= :unsupported-reported-shape (:status field)))
+          (is (not (contains? field :reported-count)))
+          (is (false? (:all-fields-reported-as-sets?
+                       (reported-coverage result :a))))
+          (is (= :partially-comparable (:status comparison)))
+          (is (= :unknown (:no-shared-reported-values? comparison))))))))
+
+(deftest two-complete-empty-reports-support-only-a-reported-set-absence
+  (let [empty-impact (fully-reported-live-summary #{} #{} #{})
+        result (audit {:a empty-impact :b empty-impact})
+        ab (reported-comparison result :a :b)]
+    (is (= :all-reported-sets-comparable (:status ab)))
+    (is (= reported-live-fields (:comparable-fields ab)))
+    (is (true? (:no-shared-reported-values? ab)))
+    (is (= #{} (set (map :operation (:operations (impact-overlaps result :a))))))
+    (is (= #{:actual-model-effects :absence-of-undeclared-effects
+             :explicit-source-declaration :business-rule-independence
+             :transactional-independence}
+           (:does-not-establish (reported-coverage result :a))))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))))
+
+(deftest complete-disjoint-nonempty-reports-are-fully-comparable
+  (let [result (audit {:a (fully-reported-live-summary #{:topic/a} #{:scope/a} #{:fragment/a})
+                       :b (fully-reported-live-summary #{:topic/b} #{:scope/b} #{:fragment/b})})
+        comparison (reported-comparison result :a :b)]
+    (is (= :all-reported-sets-comparable (:status comparison)))
+    (is (= reported-live-fields (:comparable-fields comparison)))
+    (is (true? (:no-shared-reported-values? comparison)))
+    (is (empty? (:operations (impact-overlaps result :a))))
+    (is (empty? (:operations (impact-overlaps result :b))))))
+
+(deftest complete-overlap-disproves-no-shared-reported-values
+  (let [result (audit {:a (fully-reported-live-summary #{:topic/shared}
+                                                      #{:scope/a} #{:fragment/a})
+                       :b (fully-reported-live-summary #{:topic/shared}
+                                                      #{:scope/b} #{:fragment/b})})
+        comparison (reported-comparison result :a :b)]
+    (is (= :all-reported-sets-comparable (:status comparison)))
+    (is (false? (:no-shared-reported-values? comparison)))
+    (is (= [:topic/shared]
+           (:shared-published-change-topics (overlap-with result :a :b))))
+    (is (= [] (:shared-affected-scopes (overlap-with result :a :b))))
+    (is (= [] (:shared-affected-fragments (overlap-with result :a :b))))))
+
+(deftest partially-comparable-without-overlap-has-unknown-conclusion
+  (let [result (audit {:a {:published-change-topics #{:a}
+                           :affected-scopes #{[:scope 1]}}
+                       :b {:published-change-topics #{:b}
+                           :affected-scopes #{[:scope 2]}
+                           :affected-fragments #{:card}}})
+        comparison (reported-comparison result :a :b)]
+    (is (= :partially-comparable (:status comparison)))
+    (is (= #{:published-change-topics :affected-scopes}
+           (:comparable-fields comparison)))
+    (is (= :not-reported (get-in comparison [:fields :affected-fragments :left])))
+    (is (= :reported-nonempty-set
+           (get-in comparison [:fields :affected-fragments :right])))
+    (is (false? (get-in comparison [:fields :affected-fragments :comparable?])))
+    (is (= :unknown (:no-shared-reported-values? comparison)))
+    (is (empty? (:operations (impact-overlaps result :a))))))
+
+(deftest observed-overlap-remains-conclusive-despite-incomplete-dimensions
+  (let [result (audit {:a {:published-change-topics #{:shared}}
+                       :b {:published-change-topics #{:shared}
+                           :affected-scopes nil
+                           :affected-fragments "invalid"}})
+        comparison (reported-comparison result :a :b)]
+    (is (= :partially-comparable (:status comparison)))
+    (is (= #{:published-change-topics} (:comparable-fields comparison)))
+    (is (false? (:no-shared-reported-values? comparison)))
+    (is (= [:shared] (:shared-published-change-topics
+                      (overlap-with result :a :b))))
+    (is (= :reported-nil (get-in comparison [:fields :affected-scopes :right])))
+    (is (= :unsupported-reported-shape
+           (get-in comparison [:fields :affected-fragments :right])))))
+
+(deftest pair-with-no-comparable-fields-remains-unknown
+  (let [result (audit {:a {:published-change-topics nil
+                           :affected-scopes :invalid}
+                       :b {:affected-fragments #{:card}}})
+        comparison (reported-comparison result :a :b)]
+    (is (= :no-comparable-reported-sets (:status comparison)))
+    (is (= #{} (:comparable-fields comparison)))
+    (is (= :unknown (:no-shared-reported-values? comparison)))
+    (is (every? (comp false? :comparable? val) (:fields comparison)))
+    (is (empty? (:operations (impact-overlaps result :a))))
+    (is (empty? (:operations (impact-overlaps result :b))))))
+
+(deftest pairwise-comparisons-are-local-symmetric-and-source-traceable
+  (let [result (audit {:request/a {:published-change-topics #{:shared}}
+                       :request/b {:published-change-topics #{:shared}
+                                   :affected-scopes #{}
+                                   :affected-fragments #{}}})
+        ab (reported-comparison result :request/a :request/b)
+        ba (reported-comparison result :request/b :request/a)]
+    (is (= :request/b (:operation ab)))
+    (is (= :request/a (:operation ba)))
+    (is (= [[:analysis :operations :request/a]
+            [:analysis :operations :request/b]] (:derived-from ab)))
+    (is (= [[:analysis :operations :request/b]
+            [:analysis :operations :request/a]] (:derived-from ba)))
+    (is (= (:comparable-fields ab) (:comparable-fields ba)))
+    (is (= (:no-shared-reported-values? ab) (:no-shared-reported-values? ba)))
+    (doseq [field reported-live-fields]
+      (is (= (get-in ab [:fields field :left])
+             (get-in ba [:fields field :right])))
+      (is (= (get-in ab [:fields field :right])
+             (get-in ba [:fields field :left])))
+      (is (= (get-in ab [:fields field :comparable?])
+             (get-in ba [:fields field :comparable?]))))))
+
+(deftest deterministic-pair-ordering-is-independent-of-insertion-order
+  (let [a (fully-reported-live-summary #{:shared} #{} #{})
+        b {:published-change-topics #{:shared}}
+        c (fully-reported-live-summary #{} #{} #{})
+        left (audit (array-map :z c :a a :m b))
+        right (audit (array-map :m b :z c :a a))]
+    (is (= left right))
+    (is (= [:m :z] (mapv :operation (:comparisons
+                                   (reported-coverage left :a)))))
+    (is (= [:a :z] (mapv :operation (:comparisons
+                                   (reported-coverage left :m)))))
+    (is (= [:a :m] (mapv :operation (:comparisons
+                                   (reported-coverage left :z)))))
+    (is (false? (:no-shared-reported-values?
+                 (reported-comparison left :a :m))))
+    (is (true? (:no-shared-reported-values?
+                (reported-comparison left :a :z))))
+    (is (= :unknown (:no-shared-reported-values?
+                     (reported-comparison left :m :z))))))
+
+(deftest unrelated-operations-retain-their-own-pairwise-evidence
+  (let [operations {:a (fully-reported-live-summary #{:topic/x} #{} #{})
+                    :b (fully-reported-live-summary #{:topic/x} #{} #{})
+                    :c {:affected-fragments #{:solo}}}
+        before (audit operations)
+        after (audit (assoc-in operations [:b :published-change-topics]
+                               #{:topic/changed}))]
+    (is (false? (:no-shared-reported-values?
+                 (reported-comparison before :a :b))))
+    (is (true? (:no-shared-reported-values?
+                (reported-comparison after :a :b))))
+    (is (= (reported-coverage before :c)
+           (reported-coverage after :c)))
+    (is (= (reported-comparison before :a :c)
+           (reported-comparison after :a :c)))
+    (is (= (:opaque-model-boundaries before)
+           (:opaque-model-boundaries after)))
+    (is (= (:assurance-coverage before)
+           (:assurance-coverage after)))))
+
+(deftest reported-coverage-does-not-promote-opaque-business-semantics
+  (let [result (audit {:a (fully-reported-live-summary #{} #{} #{})
+                       :b (fully-reported-live-summary #{} #{} #{})})
+        comparison (reported-comparison result :a :b)]
+    (is (true? (:no-shared-reported-values? comparison)))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))
+    (is (= :not-inspected (get-in result [:rule-dependencies :status])))
+    (is (= :not-inspected
+           (get-in result [:authorization-disclosure-view :status])))
+    (is (= :not-inspected (get-in result [:lifecycle-transition-view :status])))
+    (is (every? false? (map :discharged? (:opaque-model-boundaries result))))
+    (is (= #{:trusted :assembly-verified}
+           (set (map :class (:assurance-coverage result)))))
+    (is (not-any? #{:proved :certified}
+                  (map :class (:assurance-coverage result))))
+    (is (false? (get-in result [:inspection-scope
+                                :complete-business-policy-inventory?])))
+    (is (false? (get-in result [:inspection-scope
+                                :zero-undetected-policy-escapes-established?])))))
