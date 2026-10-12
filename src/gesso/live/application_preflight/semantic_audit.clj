@@ -207,6 +207,65 @@
                                                other-operation other-summary))))
            ordered-operation-summaries)}))
 
+;; The checked construction already distinguishes the three Live-impact
+;; fields more strongly than simple set-shape inspection:
+;;
+;; - publication topics are operation-owned metadata. optimistic.server/operation
+;;   preserves omission as nil and never supplies an implicit empty set. The
+;;   operation-acquisition gate rejects nil, requiring a set (including #{}).
+;; - affected scopes are computed from the compiled Live invalidation graph.
+;; - affected fragments are computed from the matching authoritative-acquisition
+;;   obligations. An empty derived set is not an explicit negative declaration
+;;   by application code.
+;;
+;; This is a description of the *known construction path* under the caller's
+;; current-report precondition. It does not verify the opaque execute! function,
+;; nor does it establish whether a set was written literally by a developer.
+(def ^:private live-impact-construction-origins
+  {:published-change-topics
+   {:origin :prepared-optimistic-operation-metadata
+    :derivation :carried-through-execution-and-operation-acquisition
+    :source-empty-default? false}
+   :affected-scopes
+   {:origin :compiled-live-invalidation-graph
+    :derivation :projected-from-reported-publication-topics}
+   :affected-fragments
+   {:origin :compiled-authoritative-acquisition-obligations
+    :derivation :projected-from-reported-publication-topics}})
+
+(defn- reported-live-impact-provenance
+  [operation summary]
+  {:status :classified-from-known-construction-path
+   :scope :reported-live-impact-origin-only
+   :requires :current-canonical-application-preflight-report
+   :does-not-establish
+   #{:developer-wrote-an-explicit-source-literal
+     :actual-model-publication
+     :complete-model-effects
+     :transactional-independence
+     :business-rule-dependency}
+   :fields
+   (into
+    (sorted-map)
+    (map
+     (fn [field]
+       (let [state (reported-set-state summary field)
+             available? (reported-set? state)]
+         [field
+          (merge
+           {:reported-state state
+            :derived-from [:analysis :operations operation field]
+            :status (if available?
+                      :construction-origin-classified
+                      :not-established)
+            :origin (if available?
+                      (get-in live-impact-construction-origins [field :origin])
+                      :unknown)}
+           (when available?
+             (select-keys (get live-impact-construction-origins field)
+                          [:derivation :source-empty-default?])))]))
+     declared-live-impact-fields))})
+
 (defn- operation-card
   [[operation summary] ordered-operation-summaries]
   {:operation operation
@@ -216,6 +275,8 @@
    (declared-live-overlaps operation summary ordered-operation-summaries)
    :reported-live-declaration-coverage
    (reported-live-declaration-coverage operation summary ordered-operation-summaries)
+   :reported-live-impact-provenance
+   (reported-live-impact-provenance operation summary)
    :model-policy-inspection :opaque-host-implementation
    :model-policy-premise opaque-model-premise})
 
@@ -260,7 +321,11 @@
    emission, a domain rule dependency, or the absence of other effects.
    Reported-set coverage distinguishes a typed empty set from missing, nil, or
    malformed report values; it does not assert that the original app explicitly
-   declared these sets or that missing real-world effects have been ruled out."
+   declared these sets or that missing real-world effects have been ruled out.
+   Live-impact provenance separately identifies which reported values originate
+   in trusted operation metadata and which are derived from the Live graph and
+   acquisition obligations. It requires a current report and does not prove
+   that any Clojure model actually publishes or accesses the reported values."
   [report]
   (let [report' (require-report-shape! report)
         analysis (:analysis report')
