@@ -119,6 +119,94 @@
               :shared-affected-fragments fragments})))))
     ordered-operation-summaries)})
 
+;; Coverage concerns the *reported* Live-impact sets, not the Clojure model's
+;; actual effects. An operation summary may synthesize an empty set as a
+;; default, so an empty reported set must not be described as an explicit
+;; negative declaration by the application author.
+(defn- reported-set-state
+  [summary field]
+  (let [value (get summary field)]
+    (cond
+      (not (contains? summary field)) :not-reported
+      (nil? value) :reported-nil
+      (not (set? value)) :unsupported-reported-shape
+      (empty? value) :reported-empty-set
+      :else :reported-nonempty-set)))
+
+(defn- reported-set?
+  [state]
+  (contains? #{:reported-empty-set :reported-nonempty-set} state))
+
+(defn- reported-live-field-coverage
+  [summary operation field]
+  (let [state (reported-set-state summary field)]
+    (cond-> {:status state
+             :derived-from [:analysis :operations operation field]}
+      (reported-set? state)
+      (assoc :reported-count (count (get summary field))))))
+
+(defn- reported-live-comparison
+  [operation summary other-operation other-summary]
+  (let [fields (into (sorted-map)
+                     (map (fn [field]
+                            (let [left (reported-set-state summary field)
+                                  right (reported-set-state other-summary field)]
+                              [field {:left left
+                                      :right right
+                                      :comparable? (and (reported-set? left)
+                                                        (reported-set? right))}])))
+                     declared-live-impact-fields)
+        comparable (into #{} (keep (fn [[field x]]
+                                    (when (:comparable? x) field))) fields)
+        complete? (= (count comparable) (count declared-live-impact-fields))
+        any-shared? (boolean
+                     (some (fn [field]
+                             (seq (shared-declared-values summary other-summary field)))
+                           declared-live-impact-fields))]
+    {:operation other-operation
+     :derived-from [[:analysis :operations operation]
+                    [:analysis :operations other-operation]]
+     :fields fields
+     :status (cond
+               complete? :all-reported-sets-comparable
+               (seq comparable) :partially-comparable
+               :else :no-comparable-reported-sets)
+     :comparable-fields comparable
+     ;; Three-valued result: observed overlap disproves no-overlap even when
+     ;; other dimensions are missing; otherwise an incomplete comparison
+     ;; remains unknown, never an assertion of independence.
+     :no-shared-reported-values?
+     (cond
+       any-shared? false
+       complete? true
+       :else :unknown)}))
+
+(defn- reported-live-declaration-coverage
+  [operation summary ordered-operation-summaries]
+  (let [fields (into (sorted-map)
+                     (map (fn [field]
+                            [field (reported-live-field-coverage
+                                    summary operation field)]))
+                     declared-live-impact-fields)]
+    {:status :derived-from-checked-operation-summary
+     :scope :presence-and-shape-of-reported-live-sets-only
+     :does-not-establish
+     #{:explicit-source-declaration
+       :actual-model-effects
+       :absence-of-undeclared-effects
+       :business-rule-independence
+       :transactional-independence}
+     :fields fields
+     :all-fields-reported-as-sets?
+     (every? (comp reported-set? :status val) fields)
+     :comparisons
+     (into []
+           (keep (fn [[other-operation other-summary]]
+                   (when-not (= operation other-operation)
+                     (reported-live-comparison operation summary
+                                               other-operation other-summary))))
+           ordered-operation-summaries)}))
+
 (defn- operation-card
   [[operation summary] ordered-operation-summaries]
   {:operation operation
@@ -126,6 +214,8 @@
    :contract (select-keys summary operation-card-fields)
    :declared-live-overlaps
    (declared-live-overlaps operation summary ordered-operation-summaries)
+   :reported-live-declaration-coverage
+   (reported-live-declaration-coverage operation summary ordered-operation-summaries)
    :model-policy-inspection :opaque-host-implementation
    :model-policy-premise opaque-model-premise})
 
@@ -167,7 +257,10 @@
    never counted as zero or mechanically verified. The operation cards can
    identify shared declared publication topics, affected scopes and fragments;
    those relationships do not imply shared authoritative state, actual model
-   emission, a domain rule dependency, or the absence of other effects."
+   emission, a domain rule dependency, or the absence of other effects.
+   Reported-set coverage distinguishes a typed empty set from missing, nil, or
+   malformed report values; it does not assert that the original app explicitly
+   declared these sets or that missing real-world effects have been ruled out."
   [report]
   (let [report' (require-report-shape! report)
         analysis (:analysis report')
