@@ -918,3 +918,236 @@
                                 :complete-business-policy-inventory?])))
     (is (false? (get-in result [:inspection-scope
                                 :zero-undetected-policy-escapes-established?])))))
+
+;; v777: provenance describes the known construction path of *reported* Live
+;; effects. It is neither evidence that Clojure model code emitted those
+;; effects nor proof of a developer's literal source declaration.
+(def ^:private reported-provenance-nonclaims
+  #{:developer-wrote-an-explicit-source-literal
+    :actual-model-publication
+    :complete-model-effects
+    :transactional-independence
+    :business-rule-dependency})
+
+(defn- impact-provenance
+  [result operation]
+  (get-in result [:operation-cards operation :reported-live-impact-provenance]))
+
+(defn- provenance-field
+  [result operation field]
+  (get-in result [:operation-cards operation
+                  :reported-live-impact-provenance :fields field]))
+
+(deftest provenance-report-has-explicit-precondition-and-nonclaims
+  (let [provenance (impact-provenance
+                    (audit {:request/claim claim-summary}) :request/claim)]
+    (is (= :classified-from-known-construction-path (:status provenance)))
+    (is (= :reported-live-impact-origin-only (:scope provenance)))
+    (is (= :current-canonical-application-preflight-report
+           (:requires provenance)))
+    (is (= reported-provenance-nonclaims (:does-not-establish provenance)))
+    (is (= (set reported-live-fields)
+           (set (keys (:fields provenance)))))))
+
+(deftest provenance-classifies-the-three-known-construction-origins
+  (let [result (audit {:request/claim claim-summary})]
+    (is (= {:reported-state :reported-nonempty-set
+            :derived-from [:analysis :operations :request/claim
+                           :published-change-topics]
+            :status :construction-origin-classified
+            :origin :prepared-optimistic-operation-metadata
+            :derivation :carried-through-execution-and-operation-acquisition
+            :source-empty-default? false}
+           (provenance-field result :request/claim :published-change-topics)))
+    (is (= {:reported-state :reported-nonempty-set
+            :derived-from [:analysis :operations :request/claim :affected-scopes]
+            :status :construction-origin-classified
+            :origin :compiled-live-invalidation-graph
+            :derivation :projected-from-reported-publication-topics}
+           (provenance-field result :request/claim :affected-scopes)))
+    (is (= {:reported-state :reported-nonempty-set
+            :derived-from [:analysis :operations :request/claim :affected-fragments]
+            :status :construction-origin-classified
+            :origin :compiled-authoritative-acquisition-obligations
+            :derivation :projected-from-reported-publication-topics}
+           (provenance-field result :request/claim :affected-fragments)))))
+
+(deftest explicitly-empty-reported-topics-retain-operation-owned-origin
+  (let [result (audit {:a {:published-change-topics #{}}})
+        field (provenance-field result :a :published-change-topics)]
+    (is (= :reported-empty-set (:reported-state field)))
+    (is (= :construction-origin-classified (:status field)))
+    (is (= :prepared-optimistic-operation-metadata (:origin field)))
+    (is (false? (:source-empty-default? field)))
+    (is (not (contains? field :source-explicit-literal?)))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))))
+
+(deftest empty-derived-sets-retain-derived-origin-not-source-authorship
+  (let [result (audit {:a (fully-reported-live-summary #{} #{} #{})})
+        scopes (provenance-field result :a :affected-scopes)
+        fragments (provenance-field result :a :affected-fragments)]
+    (doseq [[value origin] [[scopes :compiled-live-invalidation-graph]
+                            [fragments :compiled-authoritative-acquisition-obligations]]]
+      (is (= :reported-empty-set (:reported-state value)))
+      (is (= :construction-origin-classified (:status value)))
+      (is (= origin (:origin value)))
+      (is (= :projected-from-reported-publication-topics (:derivation value)))
+      (is (not (contains? value :source-empty-default?)))
+      (is (not (contains? value :developer-declared-empty?))))))
+
+(deftest absent-live-fields-do-not-acquire-a-synthetic-provenance
+  (let [result (audit {:a {}})]
+    (doseq [field reported-live-fields]
+      (let [entry (provenance-field result :a field)]
+        (is (= :not-reported (:reported-state entry)))
+        (is (= :not-established (:status entry)))
+        (is (= :unknown (:origin entry)))
+        (is (= [:analysis :operations :a field] (:derived-from entry)))
+        (is (not (contains? entry :derivation)))
+        (is (not (contains? entry :source-empty-default?)))))))
+
+(deftest nil-reported-live-fields-are-not-described-as-operation-declarations
+  (let [result (audit {:a {:published-change-topics nil
+                           :affected-scopes nil
+                           :affected-fragments nil}})]
+    (doseq [field reported-live-fields]
+      (let [entry (provenance-field result :a field)]
+        (is (= :reported-nil (:reported-state entry)))
+        (is (= :not-established (:status entry)))
+        (is (= :unknown (:origin entry)))
+        (is (not (contains? entry :derivation)))))))
+
+(deftest malformed-live-fields-never-establish-construction-origins
+  (doseq [bad [[] [:topic] {:topic true} "topic" 123 false]
+          field reported-live-fields]
+    (let [result (audit {:a {field bad}})
+          entry (provenance-field result :a field)]
+      (testing (str field " / " (pr-str bad))
+        (is (= :unsupported-reported-shape (:reported-state entry)))
+        (is (= :not-established (:status entry)))
+        (is (= :unknown (:origin entry)))
+        (is (not (contains? entry :derivation)))))))
+
+(deftest mixed-evidence-is-classified-independently-per-field
+  (let [result (audit {:a {:published-change-topics #{:topic/known}
+                           :affected-scopes nil
+                           :affected-fragments []}})]
+    (is (= :construction-origin-classified
+           (:status (provenance-field result :a :published-change-topics))))
+    (is (= :not-established
+           (:status (provenance-field result :a :affected-scopes))))
+    (is (= :not-established
+           (:status (provenance-field result :a :affected-fragments))))
+    (is (false? (get-in result [:operation-cards :a
+                               :reported-live-declaration-coverage
+                               :all-fields-reported-as-sets?])))))
+
+(deftest operation-local-provenance-tracks-source-paths-without-leaking
+  (let [result (audit {:request/claim claim-summary
+                       :request/cancel cancel-summary})]
+    (doseq [operation [:request/claim :request/cancel]
+            field reported-live-fields]
+      (is (= [:analysis :operations operation field]
+             (:derived-from (provenance-field result operation field)))))
+    (is (= :construction-origin-classified
+           (:status (provenance-field result :request/claim :affected-scopes))))
+    (is (= :not-established
+           (:status (provenance-field result :request/cancel :affected-scopes))))
+    (is (= :construction-origin-classified
+           (:status (provenance-field result :request/cancel :published-change-topics))))
+    (is (not (contains? (get-in result [:operation-cards :request/claim :contract])
+                        :private-implementation)))))
+
+(deftest publication-origin-does-not-depend-on-derived-effect-availability
+  (let [left (audit {:a {:published-change-topics #{:topic}}})
+        right (audit {:a (fully-reported-live-summary #{:topic}
+                                                      #{[:scope :a]}
+                                                      #{:fragment/a})})]
+    (is (= (provenance-field left :a :published-change-topics)
+           (provenance-field right :a :published-change-topics)))
+    (is (= :not-established
+           (:status (provenance-field left :a :affected-scopes))))
+    (is (= :construction-origin-classified
+           (:status (provenance-field right :a :affected-scopes))))))
+
+(deftest spurious-provenance-claims-in-summaries-are-never-published
+  (let [summary (assoc claim-summary
+                       :reported-live-impact-provenance
+                       {:status :proved
+                        :fields {:published-change-topics
+                                 {:origin :verified-model-side-effect}}}
+                       :model-effect-proof {:proved true})
+        result (audit {:request/claim summary})
+        provenance (impact-provenance result :request/claim)]
+    (is (= :classified-from-known-construction-path (:status provenance)))
+    (is (= :prepared-optimistic-operation-metadata
+           (:origin (provenance-field result :request/claim
+                                      :published-change-topics))))
+    (is (not (contains? (get-in result [:operation-cards :request/claim :contract])
+                        :model-effect-proof)))
+    (is (not= :proved (:status provenance)))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))))
+
+(deftest provenance-is-deterministic-across-operation-insertion-orders
+  (let [a (fully-reported-live-summary #{:topic/a} #{[:scope :a]} #{})
+        b {:published-change-topics #{}
+           :affected-scopes nil
+           :affected-fragments [:wrong-shape]}
+        c {}
+        first-result (audit (array-map :z c :a a :m b))
+        second-result (audit (array-map :m b :z c :a a))]
+    (is (= first-result second-result))
+    (is (= [:a :m :z] (vec (keys (:operation-cards first-result)))))
+    (doseq [operation [:a :m :z]]
+      (is (= (impact-provenance first-result operation)
+             (impact-provenance second-result operation))))))
+
+(deftest provenance-is-independent-of-other-operation-effects
+  (let [a (fully-reported-live-summary #{:topic/a} #{[:scope :a]} #{:a})
+        b (fully-reported-live-summary #{:topic/a} #{[:scope :b]} #{:b})
+        before (audit {:a a :b b})
+        after (audit {:a a :b (assoc b :published-change-topics #{:other})})]
+    (is (= (impact-provenance before :a)
+           (impact-provenance after :a)))
+    (is (= (impact-provenance before :b)
+           (impact-provenance after :b)))
+    (is (not= (impact-overlaps before :a)
+              (impact-overlaps after :a)))))
+
+(deftest provenance-does-not-discharge-trusted-business-policy
+  (let [result (audit {:a (fully-reported-live-summary #{} #{} #{})
+                       :b (fully-reported-live-summary #{:topic} #{:scope} #{:fragment})})]
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))
+    (is (= :not-inspected (get-in result [:rule-dependencies :status])))
+    (is (= :not-inspected
+           (get-in result [:authorization-disclosure-view :status])))
+    (is (= :not-inspected
+           (get-in result [:lifecycle-transition-view :status])))
+    (is (every? (comp false? :discharged?) (:opaque-model-boundaries result)))
+    (is (= #{:trusted :assembly-verified}
+           (set (map :class (:assurance-coverage result)))))
+    (is (not-any? #{:proved :certified}
+                  (map :class (:assurance-coverage result))))
+    (is (every? #(= reported-provenance-nonclaims (:does-not-establish %))
+                (map (partial impact-provenance result) [:a :b])))))
+
+(deftest provenance-for-empty-application-creates-no-phantom-operations
+  (let [result (audit {})]
+    (is (= 0 (:operation-count result)))
+    (is (empty? (:operation-cards result)))
+    (is (empty? (:opaque-model-boundaries result)))
+    (is (= :unknown (get-in result [:business-rule-catalog :count])))))
+
+(deftest malformed-report-inputs-still-fail-before-provenance-projection
+  (let [original (report {:a claim-summary})
+        variants [(dissoc original :analysis)
+                  (assoc original :valid? false)
+                  (assoc-in original [:analysis :trusted-assumptions] #{})
+                  (assoc original :gesso.live.application-preflight/version 4)]]
+    (doseq [candidate variants]
+      (let [data (exception-data
+                  #(semantic-audit/audit-from-current-report candidate))]
+        (is (= :invalid-semantic-audit-input (:error/kind data)))
+        (is (contains? #{:unsupported-or-unsuccessful-report
+                         :missing-declared-model-conformance-premise}
+                       (:reason data)))))))
