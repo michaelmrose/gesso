@@ -13,7 +13,11 @@
    Only a successful, definitive single-attempt diagnostic run yields an opaque
    process-local evidence handle. inspect-evidence accepts only that exact
    handle, not an application-supplied report or copied function metadata.
-   It returns an ordinary informative map; the map itself is NOT a credential.
+   inspect-evidence-for-executor additionally requires the SAME executor object
+   that actually ran. Application reporting can use that check against the
+   executor recovered from a freshly checked application assembly; reports
+   must never infer this identity link from a matching operation keyword.
+   These functions return explanatory maps, not transferable certificates.
 
    The diagnostic observer never submits or retries commands. The executor
    does submit through its existing ordinary path. If the operation or Live
@@ -47,7 +51,8 @@
               :physical-attempt-event-pair
               :independent-bounded-xtdb-state-correspondence
               :no-evidence-on-unknown-outcome-or-replay
-              :opaque-process-local-evidence-handle}
+              :opaque-process-local-evidence-handle
+              :exact-executed-adapter-identity-bound-to-evidence-handle}
    :assumed #{:trusted-server-and-request-context
               :trusted-v798-runtime-construction-registry
               :actual-v809-transaction-event-hook
@@ -71,13 +76,25 @@
                    :error/kind kind
                    :error/details details})))
 
-(defn- record-evidence! [result]
+(defn- record-evidence! [executor operation result]
+  ;; Weak references to both the handle and executor avoid retaining hot-reload
+  ;; generations. The executor is NOT recovered from function metadata: it is
+  ;; the exact object invoked through the real Live boundary.
   (let [handle (Object.)]
     (locking registered-evidence
       (.put registered-evidence handle
             {:identity (WeakReference. handle)
+             :executor-reference (WeakReference. executor)
+             :operation operation
              :result result}))
     handle))
+
+(defn- evidence-entry [handle]
+  (when (some? handle)
+    (locking registered-evidence
+      (let [{:keys [identity] :as entry} (.get registered-evidence handle)]
+        (when (and identity (identical? handle (.get ^WeakReference identity)))
+          entry)))))
 
 (defn inspect-evidence
   "Inspect a handle issued by a completed run-and-check! in this JVM/namespace
@@ -85,10 +102,32 @@
    maps are explanatory DATA, not portable certificates or trusted evidence
    when detached from the opaque handle and this live registry."
   [handle]
-  (when (some? handle)
-    (locking registered-evidence
-      (let [{:keys [identity result]} (.get registered-evidence handle)]
-        (when (and identity (identical? handle (.get ^WeakReference identity)))
+  (:result (evidence-entry handle)))
+
+(defn inspect-evidence-for-executor
+  "Return bounded execution evidence ONLY when the supplied executor is the
+   exact adapter object that produced this handle. No application-reported
+   operation ID, copied metadata, new wrapper or separate adapter for the same
+   operation can substitute for the original executor.
+
+   The caller must obtain `executor` from the CURRENT checked application
+   assembly before using this result in application assurance. This function
+   does not itself establish registry currentness, test freshness, policy
+   validity, a truthful projector, or universal execution correctness. If an
+   executor has been replaced, the old handle is no evidence about the new
+   registration. Returns nil if the link cannot be established."
+  [handle executor]
+  (when (fn? executor)
+    (when-let [{:keys [executor-reference operation result]} (evidence-entry handle)]
+      (let [current-construction (adapter/construction-evidence executor)]
+        (when (and executor-reference
+                   (identical? executor (.get ^WeakReference executor-reference))
+                   (= :bounded-execution-correspondence (:status result))
+                   (= operation (get-in result [:binding :operation]))
+                   (= operation (:operation current-construction))
+                   (= :constructed-by-live-resolved-operation-adapter
+                      (:status current-construction))
+                   (= current-construction (:adapter-construction result)))
           result)))))
 
 (defn run-and-check!
@@ -158,6 +197,7 @@
                  {:reason (get-in checked [:evidence :reason])}))
         {:prepared-send prepared-send
          :evidence (record-evidence!
+                    executor operation
                     {:status :bounded-execution-correspondence
                      :scope assurance-scope
                      :adapter-construction provenance
