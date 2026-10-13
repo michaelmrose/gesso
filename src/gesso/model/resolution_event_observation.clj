@@ -30,6 +30,9 @@
    Use solely in a controlled diagnostic window without unrelated writes."
   (:require
    [gesso.model.command-resolution :as resolution]
+   [gesso.model.command :as command]
+   [gesso.choreo.identity :as identity]
+   [gesso.model.tx-model :as model]
    [gesso.model.resolution-passive-observation :as passive]
    [gesso.model.resolved-operation :as resolved]))
 
@@ -199,6 +202,10 @@
                 (let [status (definitive-status! outcome)
                       result (passive/complete-observation! capture [status])]
                   (assoc result
+                         :submitted-incorporation
+                         {:plan (:plan prepared)
+                          :record (:record prepared)
+                          :scope resolution/assurance-scope}
                          :bridge-scope observation-scope
                          :attempt-id (:attempt-id prepared)
                          :binding binding
@@ -206,3 +213,113 @@
                                     :source (:physical/source outcome)
                                     :receipt (:physical/receipt outcome)})))))]
       {:observe! observe! :complete! complete!})))
+
+
+;; Deliberately kept separate from the physical witness verdict. The former
+;; establishes only consistency with a submitted plan; this comparison checks
+;; that a *developer-authored* finite operation model prepared that same plan.
+(def family-correspondence-scope
+  {:checker :gesso.model.resolution-event-observation/family-preparation-v1
+   :checked #{:actual-event-pair-submitted-plan
+              :physical-finite-execution-witness
+              :modeled-enablement-for-observed-state
+              :exact-modeled-domain-plan-and-guards}
+   :assumed #{:trusted-controlled-event-source
+              :truthful-finite-family-callbacks
+              :observed-initial-state-covers-model-dependencies
+              :actual-submission-is-from-correlated-event-hook}
+   :not-established #{:authenticity-of-detached-observation-maps
+                      :model-coverage-of-all-application-executors
+                      :complete-principal-or-argument-domains
+                      :correctness-of-business-policy-or-guards
+                      :behavior-of-other-reachable-states
+                      :unbounded-refinement-or-certification}})
+
+(defn- require-model-callback! [value label]
+  (when-not (fn? value)
+    (fail! :invalid-family-callback
+           "Modeled operation callbacks must be actual functions."
+           {:callback label}))
+  value)
+
+(defn compare-family-preparation
+  "Compare a finite family's single state-dependent preparation with the
+   EXACT domain transaction plan observed at one controlled physical attempt.
+
+   Input: (completed-session {:enabled? fn :prepare fn} principal arguments).
+   Callbacks receive (initial-state principal arguments). The initial state
+   comes from XTDB before the actual transaction submission, and the actual
+   plan from the same pair of v809 events accepted by start-session!/complete!.
+   The single command-result create is removed *only* after verifying that the
+   observed incorporation has the canonical command-record shape and binding.
+   All other commands and dependency guards must match exactly after
+   transaction-plan normalization.
+
+   Returns :matched or a :counterexample with :reason, not a certificate.
+   This function accepts a detached diagnostic result and cannot authenticate
+   that result or prove that the supplied callback is a registered executor.
+   Use only with trusted controlled sessions. No database writes occur here."
+  [observation family principal arguments]
+  (when-not (and (map? observation)
+                 (= observation-scope (:bridge-scope observation))
+                 (= :consistent (get-in observation [:evidence :status]))
+                 (= :matched-serial-reference
+                    (get-in observation [:evidence :reason]))
+                 (= #{:enabled? :prepare} (set (keys family)))
+                 (map? arguments)
+                 (= arguments (get-in observation [:binding :arguments]))
+                 (or (= principal (get-in observation [:binding :principal]))
+                     (= principal (identity/raw-value
+                                   (get-in observation [:binding :principal])))))
+    (fail! :invalid-comparison
+           "Require a consistent controlled observation and closed model callbacks."
+           {}))
+  (let [enabled? (require-model-callback! (:enabled? family) :enabled?)
+        prepare (require-model-callback! (:prepare family) :prepare)
+        {:keys [plan record scope]} (:submitted-incorporation observation)
+        _ (when-not (= scope resolution/assurance-scope)
+            (fail! :invalid-submitted-incorporation
+                   "Observed plan must carry the canonical incorporation scope."
+                   {}))
+        _ (resolution/require-record record)
+        _ (when-not (= (:gesso.command/binding record) (:binding observation))
+            (fail! :incorporation-binding-mismatch
+                   "Observed command-record binding does not match the physical attempt."
+                   {}))
+        actual (model/admitted-plan plan)
+        record-commands (filterv #(= resolution/command-entity-type
+                                     (first (command/target %)))
+                                 (:commands actual))
+        _ (when-not (and (= 1 (count record-commands))
+                         (command/create? (first record-commands))
+                         (= (command/after (first record-commands)) record)
+                         (= [resolution/command-entity-type (:xt/id record)]
+                            (command/target (first record-commands))))
+            (fail! :invalid-submitted-incorporation
+                   "The observed transaction must contain its exact durable record create."
+                   {}))
+        state (:initial-state observation)
+        _ (model/require-state state)
+        enabled (enabled? state principal arguments)
+        _ (when-not (or (true? enabled) (false? enabled))
+            (fail! :non-boolean-enablement
+                   "A modeled enabled? must return a Boolean." {}))]
+    (if (false? enabled)
+      {:status :counterexample
+       :reason :actual-execution-while-model-disabled
+       :scope family-correspondence-scope}
+      (let [expected (model/admitted-plan (prepare state principal arguments))
+            domain (model/admitted-plan
+                    (update actual :commands
+                            (fn [commands]
+                              (filterv #(not= resolution/command-entity-type
+                                               (first (command/target %)))
+                                       commands))))]
+        {:status (if (= expected domain) :matched :counterexample)
+         :reason (if (= expected domain)
+                   :exact-observed-domain-plan-match
+                   :modeled-and-submitted-plans-disagree)
+         :scope family-correspondence-scope
+         :physical-status (get-in observation [:physical :status])
+         :matching-guards? (= (:guards expected) (:guards domain))
+         :matching-commands? (= (:commands expected) (:commands domain))}))))
