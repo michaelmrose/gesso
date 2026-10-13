@@ -26,6 +26,12 @@
    cannot become a :failed settlement, even if publication/projection later
    throws. An error must propagate without inventing a semantic rejection.
 
+   The exact function object returned by build-executor is remembered in a
+   private weak registry. construction-evidence can therefore distinguish a
+   registered adapter object from copied function metadata, provided the
+   running namespace instance and its private registry are trusted. This is
+   NOT proof of the underlying model operation or application policy.
+
    This adapter DOES NOT make function metadata into authenticated proof,
    establish the completeness of domain guards, authenticate principals, make
    notifications durable, or prove whole-application settlement correspondence.
@@ -36,7 +42,10 @@
    [gesso.live.optimistic.protocol :as protocol]
    [gesso.live.optimistic.server :as server]
    [gesso.model.command-resolution :as command-resolution]
-   [gesso.model.resolved-operation :as resolved-operation]))
+   [gesso.model.resolved-operation :as resolved-operation])
+  (:import
+   (java.lang.ref WeakReference)
+   (java.util WeakHashMap)))
 
 (def configuration-keys
   #{:operation :resolved-operation :submission-mode! :project!})
@@ -163,9 +172,60 @@
   ;; the ordinary server/settlement-contract verifies their declared relation.
   (assoc result :commit/status server/committed-status))
 
+(def ^:private ^WeakHashMap constructed-executors
+  ;; Weak keys avoid retaining every executor ever built during hot reload.
+  ;; The value must not retain its key strongly; even its identity witness is
+  ;; weak. Accesses are synchronized because builders and preflight may run on
+  ;; different threads. Construction-time registration is not a domain effect.
+  (WeakHashMap.))
+
+(defn construction-evidence
+  "Return bounded, runtime-held construction evidence only for the EXACT
+   function object returned by this namespace's build-executor.
+
+   Copied metadata, with-meta copies, and unrelated wrappers are not accepted.
+   A WeakHashMap alone compares via equals; an explicit identical? check on
+   a weak reference prevents a function with a custom equals implementation
+   from impersonating a different registered function.
+
+   This attests the local adapter builder and its operation parameter, not
+   the origin of the supplied v792 callback, semantic correctness, durable
+   incorporation, authorization, or any externally verifiable certificate.
+   After a process or namespace reload the evidence may be absent. Do not
+   transform absence into a claim of malformed application semantics."
+  [executor]
+  (when (fn? executor)
+    (locking constructed-executors
+      (let [{:keys [executor-reference evidence]}
+            (.get constructed-executors executor)]
+        (when (and executor-reference
+                   (identical? executor (.get ^WeakReference executor-reference)))
+          evidence)))))
+
+(defn- register-executor!
+  [executor operation]
+  (locking constructed-executors
+    (.put constructed-executors
+          executor
+          {:executor-reference (WeakReference. executor)
+           :evidence
+           {:status :constructed-by-live-resolved-operation-adapter
+            :evidence-source :private-runtime-construction-registry
+            :operation operation
+            :construction (:construction assurance-scope)
+            :adapter-assurance-scope assurance-scope
+            :model-operation-origin :unverified-function-metadata
+            :domain-invariants :not-established
+            :application-execution-correspondence :not-established}}))
+  executor)
+
 (defn build-executor
-  "Create an ordinary optimistic.server :execute! function, with the same
-   unverified durable-construction indication understood by v794 preflight.
+  "Create an ordinary optimistic.server :execute! function, with untrusted
+   informational metadata plus independently queryable local provenance.
+
+   construction-evidence recognizes the exact returned function identity;
+   metadata alone cannot spoof that evidence. This authenticates neither the
+   supplied v792 resolved-operation callback nor any business policy.
 
    This is an application-owned trusted adapter. Its mode callback cannot be
    selected by the browser; it must use independent server-side evidence to
@@ -179,21 +239,24 @@
    protocol rather than translating them to :failed after an unknown commit."
   [config]
   (let [{:keys [operation resolved-operation submission-mode! project!]}
-        (require-configuration config)]
-    (with-meta
-      (fn execute-resolved! [context]
-        (let [binding (require-context operation context)
-              mode (require-mode (submission-mode! context))
-              result (resolved-operation (:ctx context)
-                                         {:binding binding :mode mode})
-              status (:status result)]
-          (if (contains? #{:incorporated :replay} status)
-            (require-projection context status (project! context result))
-            (fail! :resolution-not-settleable
-                   "Authoritative command resolution is not settleable; reconciliation or trusted recovery is required."
-                   {:status status}))))
-      ;; Metadata is an indication only. v794 must not promote it to a proof.
-      {:gesso.model/operation-id operation
-       :gesso.model/resolution :durable-command-v1
-       :gesso.model/assurance-scope resolved-operation/assurance-scope
-       :gesso.live.optimistic.resolved-operation/assurance-scope assurance-scope})))
+        (require-configuration config)
+        executor
+        (with-meta
+          (fn execute-resolved! [context]
+            (let [binding (require-context operation context)
+                  mode (require-mode (submission-mode! context))
+                  result (resolved-operation (:ctx context)
+                                             {:binding binding :mode mode})
+                  status (:status result)]
+              (if (contains? #{:incorporated :replay} status)
+                (require-projection context status (project! context result))
+                (fail! :resolution-not-settleable
+                       "Authoritative command resolution is not settleable; reconciliation or trusted recovery is required."
+                       {:status status}))))
+          ;; This metadata is advisory and can be copied. It is NOT the
+          ;; identity witness stored by the private construction registry.
+          {:gesso.model/operation-id operation
+           :gesso.model/resolution :durable-command-v1
+           :gesso.model/assurance-scope resolved-operation/assurance-scope
+           :gesso.live.optimistic.resolved-operation/assurance-scope assurance-scope})]
+    (register-executor! executor operation)))
