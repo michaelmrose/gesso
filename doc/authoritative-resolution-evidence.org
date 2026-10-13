@@ -1,0 +1,301 @@
+#+title: Gesso Authoritative Resolution — Evidence Map and First Verification Target
+#+subtitle: v783 — R4 implementation investigation, not a canonical design amendment
+#+date: 2026-10-12
+#+startup: overview
+
+* Status and source boundary
+
+This is an *implementation evidence map*, not a claim that a new resolution
+mechanism or HumanHelp operation has been admitted, checked, or proved. It is
+intended for =doc/authoritative-resolution-evidence.org= in Gesso.
+
+Inspected baseline:
+- Branch: =application-assurance=; snapshot HEAD =af4a44f0295d=.
+- Latest installed code artifact in the snapshot: v780.
+- Canonical authority: split Gesso R4, especially Parts II, IV, VII, IX, X,
+  and XII. The exploratory v781 resolution-template note is *non-binding*.
+- Companion evidence: application-assurance handover v782.
+- The snapshot includes Gesso, not the current HumanHelp source. Therefore
+  HumanHelp Claim, Create, and Cancel below are *candidate classifications*,
+  not findings about the actual production operations.
+
+Execution evidence is separate: the developer reported a green local JVM
+suite. Other sandbox runs showed environment-dependent errors, and this note
+makes no claim that a full release gate was rerun at v783. No code is changed
+by this artifact.
+
+* Current Gesso construction and execution boundary
+
+** Entity and generated operation definitions
+
+Source: =src/gesso/model/core.clj=.
+
+An entity descriptor owns:
+- =:document-schema= — Malli structure, not domain transition semantics;
+- =:identity= and =:version= — storage identity and version vocabulary;
+- =:operations= — operation name and host callable =:command=; and
+- =:live= — optional semantic change function, entry/entry-fn, emit and
+  transaction options.
+
+=:operations= admits conventional =:create= or =:update=, not a declared
+business-rule relation. =operation-config= enforces the structural API.
+Generated update execution resolves the document through Graph, calls an
+ordinary Clojure domain command function, checks the returned command's
+shape/version/document schema, then supplies a =gesso.model.tx= effect.
+
+Consequences:
+- The generated operation *does not inspect* the actual Clojure command
+  predicate or its decision-relevant reads.
+- =:live/:change-fn= is also an opaque callable. The published semantic
+  changes are not mechanically derived from the domain transition.
+- Complex multi-entity operations are explicitly delegated to ordinary
+  handwritten FX workflows using the same generic command and transaction
+  primitives.
+
+** Command and guard representations
+
+Source: =src/gesso/model/command.clj=.
+
+=command/create= denotes a versioned new document. =command/update-command=
+denotes a single valid revision progression of one existing document.
+=command/guard= captures a versioned dependency on another document.
+=expected-version= describes field comparisons; these are persistence
+concurrency checks rather than certified business-rule predicates.
+
+CRITICAL NAME DISTINCTION: the =gesso.model.command= "command" is a generic
+*document mutation description*. It is not, by itself, the durable,
+principal-bound, idempotency-keyed *application command record* described in
+R4's authoritative-command protocol. Treating these as interchangeable would
+be a false guarantee.
+
+** Transaction construction
+
+Source: =src/gesso/model/tx.clj=.
+
+The existing plan vocabulary is:
+
+#+begin_src clojure
+{:commands   [...]
+ :guards     [...]
+ :assertions [...]
+ :changes    [...]
+ :emit       :async} ; or :sync or false
+#+end_src
+
+- =fragment= validates the generic container and constituent shapes.
+- =compose= concatenates fragments losslessly.
+- =normalize-guards= eliminates identical dependency guards and rejects
+  conflicting expected snapshots of the same target.
+- =effective-guards= rejects contradictory guards on mutated targets and
+  omits a guard already discharged by that target's update precondition.
+- =normalize-plan= rejects duplicate mutation targets, missing commands,
+  invalid emit mode, and publishing plans without semantic changes.
+- =transaction-ops= places explicit assertions, dependency-guard assertions,
+  and command preconditions *before* document writes.
+- =prepare= normalizes/validates and lowers those operations to XTDB2 forms.
+- =transact!= delegates to =gesso.live.core/transact-and-notify!= and
+  preserves its consistency-bearing result.
+
+An asserted version is an enforceable dependency *provided the backend
+executes it atomically with the writes under the required isolation*. But:
+- The =:assertions= vector accepts raw HoneySQL ASSERT maps. This does not
+  establish that their meaning matches an intended business predicate.
+- Nothing in the generic plan describes *all* decision-relevant reads or
+  certifies that each read is guarded at commit.
+- The generic model plan does not require a durable command-result record,
+  compatible-replay lookup, or durable after-commit delivery-debt record.
+- An empty =:changes= with =:emit false= is valid; the framework does not
+  infer publication completeness from persisted writes.
+- Document version checks alone do not protect absent rows, predicate-query
+  phantoms, policy conditions, or relationships whose dependencies were not
+  explicitly carried to the commit boundary.
+
+Those omissions are *current assurance boundaries*, not evidence that every
+application violates them. Individual applications can already implement
+additional guarantees using the generic primitives, but Gesso has not
+established them generically.
+
+** Optimistic operation boundary and browser knowledge
+
+Sources:
+- =src/gesso/live/optimistic/server.clj=
+- =src/gesso/live/optimistic/execution_preflight.clj=
+- =src/gesso/live/operation_acquisition_preflight.clj=
+
+A trusted operation registry entry binds its semantic operation identity,
+roles, required execution capabilities, optional settlement contract, optional
+published-change topics, and an =execute!= function.
+
+The trusted server boundary validates protocol identity and hands the
+operation a principal, command/command-id, execution-id, and arguments. But
+=execute!= must *independently* reread authoritative conditions, authorize,
+invoke the public model operation, and return truthful commit/progression
+witnesses. The settlement contract checks reported outcome shape/evidence;
+it does not prove the external transaction or claimed publication occurred.
+
+The operation/acquisition preflight traces *declared* topic -> Live graph ->
+fragment acquisition. It deliberately does not infer the actual transaction
+reads, writes, authorization predicates or notifications of =execute!=.
+
+** Post-commit effect boundary
+
+Source: =src/gesso/live/core.clj=.
+
+=transact-and-notify!= distinguishes committed mutation from failed
+post-commit notification delivery, including a classified error with
+=:commit/status :committed=. This prevents one important false failure claim.
+It does *not by itself* prove a durable, atomically recorded delivery debt or
+idempotent recovery mechanism for every application operation.
+
+** Application semantic audit
+
+Source: =src/gesso/live/application_preflight/semantic_audit.clj=.
+
+The audit explicitly reports unknown business-rule inventory, uninspected
+model predicates, opaque transaction guards, and unproved cross-operation
+domain invariants. It derives Live impact overlap only from checked declared
+publication data. Consequently the next improvement should make *new
+semantic evidence available*, not merely add another reporting field.
+
+* Known facts versus missing semantic facts
+
+| Concern | Existing source-owned representation | What is not yet established |
+|---------+--------------------------------------+-----------------------------|
+| Entity shape | Malli document schema | Domain-policy invariants |
+| Operation name | Descriptor / trusted operation entry | Semantics of opaque command/execute! |
+| Version dependency | model.command expected-version / guard | Completeness of all decision reads |
+| Transaction writes | model.tx commands lowered to put-docs | Domain meaning and interference closure |
+| Additional ASSERT | Raw HoneySQL map | Admitted predicate and faithful lowering |
+| Principal / command correlation | Trusted optimistic server protocol | Durable binding / permission to replay outcome |
+| Outcome witness | Optional settlement contract | Truth of external execution evidence |
+| Live publication | Declared topics, normalized changes | Complete actual emitted effects / durable debt |
+| Acquired UI | Closed acquisition / preflight outputs | Universal domain invariant preservation |
+
+* First target: guarded authoritative Claim (candidate, not yet inspected)
+
+** Domain intent to elicit from current HumanHelp source
+
+Before defining any public template API, inspect the actual production
+=net.humanhelp.site.model.request.*= implementation, plus the Membership,
+Organization, and Request-Organization definitions and the functions it calls.
+For Claim, obtain the authoritative answer to *each* of the following:
+
+1. Which Request status and owner fields may change, and to what values?
+2. Which Membership state and Organization policy make this principal
+   eligible *at incorporation time*?
+3. How is the Request linked to the intended Organization, and is that link
+   checked in the same transaction as ownership?
+4. Which facts are read in preparation, and which are rechecked by XTDB
+   ASSERT / versioned guard at commit? Include queried absence/uniqueness.
+5. Where is the stable command ID first established, how are principal,
+   operation and arguments bound, and where is replay checked?
+6. Is a command result *recorded durably with the ownership change*?
+7. What durable effect/debt survives failed notification after commit?
+8. Which other operations can change a field or rule needed by Claim?
+9. How is outcome information disclosed to a retrying or different principal?
+10. What are the precise returned results for guard rejection, replay,
+    indeterminate delivery and successful incorporation?
+
+Do not infer these answers from names, R4 examples, stale HumanHelp test
+fixtures, or the generic Gesso code alone.
+
+** Provisional resolution classification
+
+| Candidate operation | Plausible mechanism | Distinct obligation to inspect |
+|---------------------+---------------------+--------------------------------|
+| Request Claim | Guarded atomic transition | Ownership exclusivity, eligibility, durable command result |
+| Request Create | Conditional creation | Identifier/uniqueness, initial state, replay of creation |
+| Request Cancel | Guarded atomic transition | Claim/Cancel interference, lifecycle finality and authorization |
+
+These labels classify *hypotheses*. They do not certify that the current
+operations satisfy the expected semantics.
+
+** First formal subject (model-checking candidate)
+
+State of an intentionally *small* abstract model:
+
+#+begin_example
+Request:  status, owner, organization
+Membership: helper, organization, active
+Policy: organization, claimPermitted
+Commands: id -> bound principal/operation/arguments/outcome
+Delivery: unknown | acknowledged (separate from incorporation)
+#+end_example
+
+Admitted transitions must be explicitly listed: fresh Claim, competing
+Claim, compatible replay, incompatible ID reuse, policy/Membership change,
+Cancel, and acknowledgement loss/recovery. Specify initiality and all
+writers; do not silently assume competing operations do not exist.
+
+First safety properties:
+- A Request has at most one *current authoritative* owner.
+- An incorporated Claim records the bound command outcome in the *same*
+  atomic action as the ownership transition (under stated backend premises).
+- An incompatible command-id reuse never executes or discloses another
+  principal's result.
+- A retry of an incorporated command cannot incorporate its effect again.
+
+Historic eligibility requires claim-time witnesses; don't replace this with
+"the current Membership is active" after policy/Membership changes.
+
+Liveness (eventual acknowledgement/reconciliation) is a *separate* property
+with scheduler, delivery and fairness assumptions.
+
+** Model / implementation correspondence requirement
+
+The first successful model-checking run is not a proof of Clojure/XTDB.
+Choose one of two explicit correspondence strategies before claiming it:
+
+A. *Generate/interpret* the transactional realization from admitted semantic
+   rules, then verify the interpreter/lowering boundary; or
+B. *Validate* that the independent hand-written production transaction has
+   the exact admitted guards/writes/outcome effects, using machine-checkable
+   evidence plus adversarial real-XTDB tests.
+
+Neither automatically discharges XTDB atomicity and query-isolation premises.
+In particular, a successful prepared-read test is not evidence that the guard
+was protected at the commit boundary.
+
+The checking backend is private to Gesso (Recife, Quint/TLC/Apalache, another
+checker, or a combination). No downstream developer writes separate formal
+specification code to use Gesso.
+
+* Acceptance gates for the first working implementation
+
+1. Read the *current* HumanHelp Claim source and enumerate its actual reads,
+   guards, writes, replay and effects; record unknown/opaque decisions.
+2. An admitted construction expresses a real Claim property without two
+   manually maintained versions of the business policy.
+3. Malformed/missing decision dependencies cause an explicit admission
+   failure; a trusted opaque predicate remains an explicit premise.
+4. A bounded checker explores a declared finite universe with at least two
+   helpers, conflicting Claims, replay, rejection and policy changes. Report
+   its *bounded* scope exactly.
+5. Deliberately removing the owner guard or allowing a duplicate effect
+   yields a reproducible counterexample.
+6. The executable transaction path is tested against XTDB, including
+   simultaneous attempts, altered Membership/Organization policy, and
+   acknowledgement loss; outcomes distinguish committed, rejected, unknown.
+7. Cross-operation Claim/Cancel interference is checked against the same
+   ownership invariant, not treated as independent success.
+8. The returned assurance distinguishes *structurally valid*, *model
+   checked within bound*, *execution correspondence tested*, *trusted*, and
+   *not established*. No silent promotion to unbounded proof.
+9. A second real operation reuses most of the resolution mechanism or the
+   abstraction is reconsidered before expanding it.
+
+* Next implementation decision
+
+The immediate prerequisite is the *current* HumanHelp production model source.
+The present Gesso archive alone cannot identify a real Claim guard, command
+record, required policy/relationship reads, or transaction implementation.
+
+On receipt of that source, select one narrow first implementation file from
+its demonstrated missing obligations, preferring an admitted *semantic object*
+over a hand-maintained proof specification or a presentation-only audit field.
+Do not install a guessed =gesso.model.resolution= DSL before checking whether
+existing model/FX structures can carry the required semantics without
+redundancy.
+
+This document is a Phase-A Gesso-side inventory. It is not completion of v781
+Phase A's *HumanHelp-specific* inventory and not completion of any R4 gate.
