@@ -39,6 +39,7 @@
    [gesso.live.application-preflight.operation-summary :as operation-summary]
    [gesso.live.application-preflight.assurance :as assurance]
    [gesso.live.application-preflight.semantic-audit :as semantic-audit]
+   [gesso.live.optimistic.resolution-assurance :as resolution-assurance]
    [gesso.live.application-preflight.affordance :as affordance]
    [gesso.live.application-preflight.biff :as biff-lifecycle]
    [gesso.live.application-preflight.rendered-surface :as rendered-surface]))
@@ -970,3 +971,139 @@
       :unrecognized-value
       "Expected an application preflight report or current ApplicationAssembly."
       {:value value}))))
+
+
+;; A physical execution witness is deliberately NOT included in the ordinary
+;; application explanation. Diagnostic executions are optional, process-local,
+;; and cannot establish the application's behavior in general. The caller must
+;; opt in with opaque handles issued by resolution-assurance/run-and-check!.
+(def ^:private execution-observation-executor-root
+  [:analysis :operation-acquisition-assembly
+   :execution-assembly :server :operations])
+
+(defn- invalid-execution-observation!
+  [kind details]
+  (throw
+   (preflight-error
+    kind
+    "Execution observations require a current assembly and exact executor-bound diagnostic handles."
+    details)))
+
+(defn- require-execution-observation-input!
+  [report observations]
+  (let [operations (set (keys (get-in report [:analysis :operations])))]
+    (when-not (and (map? observations)
+                   (every? (fn [[operation handles]]
+                             (and (contains? operations operation)
+                                  (vector? handles)
+                                  (seq handles)
+                                  (every? some? handles)))
+                           observations))
+      (invalid-execution-observation!
+       :invalid-execution-observation-request
+       {:expected :map-of-registered-operation-to-nonempty-handle-vector
+        :registered-operations operations
+        :supplied-operations (when (map? observations)
+                               (set (keys observations)))}))
+    observations))
+
+(defn- checked-operation-observations
+  [report operation handles]
+  (let [executor (get-in report
+                         (conj execution-observation-executor-root
+                               operation :execute!))
+        observations
+        (mapv
+         (fn [index handle]
+           ;; Only opaque handles from the v815 process-local registry can pass,
+           ;; and only for this exact currently registered executor. Never
+           ;; accept a copied report, matching operation keyword or metadata.
+           (let [result (resolution-assurance/inspect-evidence-for-executor
+                         handle executor)]
+             (when-not (and (= :bounded-execution-correspondence
+                               (:status result))
+                            (= operation (get-in result [:binding :operation]))
+                            (= :consistent
+                               (get-in result [:observation :evidence :status]))
+                            (contains? #{:committed :rejected}
+                                       (get-in result [:observation :physical :status])))
+               (invalid-execution-observation!
+                :unrecognized-execution-observation
+                {:operation operation :observation-index index}))
+             ;; Do not leak opaque handles, principal, arguments, raw database
+             ;; snapshots or transaction receipts through application reports.
+             {:index index
+              :status :bounded-correspondence-observed
+              :physical-status (get-in result [:observation :physical :status])
+              :finite-reference-status
+              (get-in result [:observation :evidence :status])}))
+         (range (count handles))
+         handles)]
+    {:status :bounded-process-local-execution-observations
+     :evidence-class :exact-registered-executor-diagnostic-handle
+     :observation-count (count observations)
+     :observations observations
+     :scope resolution-assurance/assurance-scope
+     :assurance-class :bounded-observation-not-proof
+     :universal-guarantees :not-established}))
+
+(defn explain-with-execution-evidence
+  "Explain a CURRENT ApplicationAssembly together with separately collected
+   bounded diagnostic execution observations.
+
+   `observations` is {registered-operation [opaque-handle ...]} using handles
+   issued by resolution-assurance/run-and-check! in this JVM. The evidence is
+   inspected against the EXACT executor obtained from the freshly rechecked
+   assembly. Invalid, stale, forged, cloned, cross-operation or cross-adapter
+   handles FAIL CLOSED. This API deliberately refuses bare preflight reports:
+   report-shaped data is not a current assembly or an executor-identity proof.
+
+   An explicit empty map is permitted and means NO executions were observed.
+   No observation is implied for other operations. These observations are
+   diagnostic facts about FINITE executions, never whole-application proof,
+   authorization proof, projection correctness or universal command replay.
+   This function executes no business callback and never submits transactions.
+
+   The original explain function remains unchanged and does not acquire a
+   process-local diagnostic dependency. Returned explanations contain only
+   redacted observational summaries, not handles, command bindings, receipts,
+   transaction plans, principals, or actual database document contents."
+  [assembly observations]
+  (if-let [report (current-application-report assembly)]
+    (let [observations (require-execution-observation-input!
+                        report observations)
+          ;; Build from the SAME freshly checked report used to inspect each
+          ;; operation's exact registered executor. Preserve every existing
+          ;; assurance class and open business-policy obligation unchanged.
+          audit (semantic-audit/audit-from-current-report report)
+          checked (into {}
+                        (map (fn [[operation handles]]
+                               [operation (checked-operation-observations
+                                           report operation handles)]))
+                        observations)
+          audit' (-> audit
+                     (assoc :execution-observation-summary
+                            {:status :diagnostic-execution-observations-only
+                             :observed-operation-count (count checked)
+                             :observation-count
+                             (reduce + 0 (map :observation-count (vals checked)))
+                             :source :current-assembly-exact-executor-registry
+                             :not-established
+                             #{:all-executions-observed
+                               :complete-business-policy-guards
+                               :authorization-correctness
+                               :truthful-application-projections
+                               :universal-refinement-or-certification}})
+                     (update :operation-cards
+                             (fn [cards]
+                               (reduce-kv
+                                (fn [cards operation evidence]
+                                  (assoc-in cards
+                                            [operation :runtime-execution-observations]
+                                            evidence))
+                                cards checked))))]
+      (assoc (assurance/explain-application-from-report assembly report)
+             :semantic-audit audit'))
+    (invalid-execution-observation!
+     :invalid-or-stale-observation-assembly
+     {:reason :requires-current-application-assembly})))
