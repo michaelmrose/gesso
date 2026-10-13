@@ -35,6 +35,7 @@
    promise durable notification delivery. It is NOT a proof certificate and
    does not register an application operation with Choreo/Live preflight."
   (:require
+   [gesso.live.core :as live]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx :as tx]))
 
@@ -77,6 +78,95 @@
                   {:error/type ::invalid-operation
                    :error/kind kind
                    :error/details details})))
+
+
+;; An *optional*, trusted-context observation hook. This is deliberately not
+;; part of the browser command or the operation configuration: the server may
+;; install it for controlled diagnostics and disable it in normal operation.
+;; No sink, including a sink managed by Gesso, is a transaction oracle.
+(def observation-context-key ::observe-transaction!)
+
+(def execution-observation-scope
+  {:capture :gesso.model.resolved-operation/transaction-attempt-v1
+   :observed #{:submitted-incorporation-plan-at-operation-boundary
+               :command-record-and-binding-correlation
+               :acknowledged-transaction-result
+               :explicit-xtdb-assertion-rejection
+               :classified-post-commit-delivery-failure
+               :indeterminate-transaction-result}
+   :assumed #{:trusted-server-injection-of-observer
+              :observer-receives-events-without-loss-or-alteration
+              :gesso-model-tx-transact-is-the-real-commit-boundary}
+   :not-established #{:observer-event-authentication
+                      :physical-transaction-id-for-every-attempt
+                      :observer-event-durability
+                      :automatic-before-after-xtdb-snapshot
+                      :proof-that-tx-was-physically-submitted
+                      :complete-application-authorization
+                      :policy-guard-completeness
+                      :universal-linearizability}})
+
+(defn- observer-for! [ctx]
+  (when (and (map? ctx) (contains? ctx observation-context-key))
+    (let [observer (get ctx observation-context-key)]
+      (when-not (fn? observer)
+        (fail! :invalid-observer
+               "Transaction observation hook must be a trusted function."
+               {:context-key observation-context-key}))
+      observer)))
+
+(defn- publish-observation! [observer event]
+  ;; The observer must never become part of the authoritative transaction
+  ;; boundary. In particular, a callback error *after* commit cannot turn a
+  ;; completed mutation into a reported failure. Missing events therefore
+  ;; mean NO evidence; consumers must verify complete paired observations.
+  (when observer
+    (try
+      (observer (assoc event :scope execution-observation-scope))
+      (catch Throwable _
+        nil))))
+
+(defn- physical-result [transaction error]
+  (cond
+    (and (nil? error) (= :committed (:commit/status transaction)))
+    {:physical/status :committed
+     :physical/source :gesso-model-transaction-ack
+     :physical/receipt (:tx-result transaction)}
+
+    (and error (live/post-commit-delivery-failure? error))
+    {:physical/status :committed
+     :physical/source :gesso-live-classified-post-commit-failure
+     :physical/receipt (:tx-result (ex-data error))}
+
+    (and error (= :xtdb/assert-failed
+                  (:xtdb.error/code (ex-data error))))
+    {:physical/status :rejected
+     :physical/source :xtdb-explicit-assertion-failure}
+
+    :else
+    {:physical/status :indeterminate
+     :physical/source (if error :unclassified-transaction-exception
+                          :unrecognized-transaction-response)}))
+
+(defn- transact-observed! [ctx incorporated binding observer]
+  (let [attempt-id (random-uuid)
+        base {:attempt-id attempt-id
+              :operation (:operation binding)
+              :binding binding
+              :record (:record incorporated)
+              :plan (:plan incorporated)}]
+    ;; This event says what THIS wrapper handed to tx/transact!, not what
+    ;; XTDB necessarily received. In particular, there is no fabricated
+    ;; physical tx-id when a rejection has no receipt.
+    (publish-observation! observer (assoc base :phase :prepared))
+    (let [executed (try
+                     {:transaction (tx/transact! ctx (:plan incorporated))}
+                     (catch Exception exception
+                       {:error exception}))
+          result (physical-result (:transaction executed) (:error executed))]
+      (publish-observation! observer
+                            (merge base {:phase :physical-outcome} result))
+      executed)))
 
 (defn- exact-map! [value expected-keys kind]
   (when-not (and (map? value) (= expected-keys (set (keys value))))
@@ -176,26 +266,27 @@
             (returned prior)
 
             :else
-            (let [{:keys [now plan outcome]} (construction! construct! ctx binding)
+            (let [observer (observer-for! ctx)
+                  {:keys [now plan outcome]} (construction! construct! ctx binding)
                   incorporated (resolution/incorporation-plan
                                 {:binding binding
                                  :now now
                                  :plan plan
-                                 :outcome outcome})]
-              (try
-                (let [transaction (tx/transact! ctx (:plan incorporated))]
-                  (if (= :committed (:commit/status transaction))
-                    (returned {:status :incorporated
-                               :outcome outcome
-                               :transaction transaction
-                               :scope resolution/assurance-scope})
-                    (after-commit-error read-record! may-disclose? ctx binding)))
-                (catch Exception _commit-error
-                  ;; XTDB conflicts, lost acknowledgements, or failed delivery
-                  ;; are not interchangeable with typed business rejection.
-                  ;; A failed authoritative read propagates; it cannot be
-                  ;; treated as proof that no record exists.
-                  (after-commit-error read-record! may-disclose? ctx binding)))))))
+                                 :outcome outcome})
+                  {:keys [transaction error]}
+                  (transact-observed! ctx incorporated binding observer)]
+              (if (and (nil? error)
+                       (= :committed (:commit/status transaction)))
+                (returned {:status :incorporated
+                           :outcome outcome
+                           :transaction transaction
+                           :scope resolution/assurance-scope})
+                ;; A physical assertion rejection, a delivery failure after
+                ;; commit, and an indeterminate exception all require the
+                ;; same *authoritative* reconciliation before returning an
+                ;; application-level resolution. They are NOT interchangeable
+                ;; physical results. An authoritative read error propagates.
+                (after-commit-error read-record! may-disclose? ctx binding))))))
       {:gesso.model/operation-id operation
        :gesso.model/resolution :durable-command-v1
        :gesso.model/assurance-scope assurance-scope})))
