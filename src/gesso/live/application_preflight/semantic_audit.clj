@@ -16,7 +16,12 @@
    the checked operation summary. Such overlap is not an inferred business-rule,
    shared-state, or transaction dependency. Future source-owned rule declarations
    can enrich the same view
-   without making this projection a separately maintained policy registry.")
+   without making this projection a separately maintained policy registry.
+
+   v794 additionally inspects ONLY the registered trusted function's optional
+   durable-resolution metadata. That metadata is advisory and unauthenticated:
+   the executable adapter and domain obligations remain unestablished."
+  (:require [clojure.set :as set]))
 
 (def ^:private operation-card-fields
   [:choreography-name
@@ -266,8 +271,78 @@
                           [:derivation :source-empty-default?])))]))
      declared-live-impact-fields))})
 
+;; v794: a narrow, opt-in bridge from a registered trusted :execute! back to
+;; the durable-resolution construction metadata emitted by
+;; gesso.model.resolved-operation/build-operation.
+;;
+;; This is NOT construction authentication. Function metadata can be copied or
+;; forged by application code, and a wrapper/adaptor can lose it. More
+;; importantly, resolved-operation's [ctx input] call/return contract is not
+;; the optimistic server's one-argument :execute! contract. Even perfectly
+;; matching metadata establishes neither adapter correspondence nor domain
+;; policy. We report the claimed scope only, and leave the pre-existing opaque
+;; model conformance premise open. No app registry, extra field in a closed
+;; assembly, or separate assurance certificate is introduced here.
+(def ^:private resolution-metadata-keys
+  #{:gesso.model/operation-id
+    :gesso.model/resolution
+    :gesso.model/assurance-scope})
+
+(def ^:private resolution-executor-path
+  [:analysis :operation-acquisition-assembly
+   :execution-assembly :server :operations])
+
+(defn- scope-shape?
+  [scope]
+  (and (map? scope)
+       (= :gesso.model.resolved-operation/operation-v1
+          (:construction scope))
+       (set? (:checked scope))
+       (set? (:assumed scope))
+       (set? (:not-established scope))))
+
+(defn- operation-resolution-indication
+  [report operation]
+  (let [path (conj resolution-executor-path operation :execute!)
+        executor (get-in report path)
+        metadata (when (instance? clojure.lang.IMeta executor)
+                   (meta executor))
+        present (if (map? metadata)
+                  (set/intersection
+                   resolution-metadata-keys (set (keys metadata)))
+                  #{})
+        metadata-present? (seq present)
+        claimed-operation (:gesso.model/operation-id metadata)
+        claimed-kind (:gesso.model/resolution metadata)
+        claimed-scope (:gesso.model/assurance-scope metadata)
+        complete? (= present resolution-metadata-keys)
+        consistent? (and complete?
+                         (= operation claimed-operation)
+                         (= :durable-command-v1 claimed-kind)
+                         (scope-shape? claimed-scope))]
+    (cond->
+     {:status (cond
+                (not (fn? executor)) :no-inspectable-registered-executor
+                (not metadata-present?) :no-resolution-construction-metadata
+                consistent? :consistent-unverified-resolution-metadata
+                :else :inconsistent-resolution-metadata)
+      :derived-from path
+      :evidence-class :untrusted-function-metadata
+      :operation-id-consistent? (when metadata-present?
+                                  (= operation claimed-operation))
+      :construction-authenticated? false
+      :execution-adapter-correspondence :not-established
+      :domain-invariants :not-established
+      :command-replay-guarantee :not-established
+      :scope :metadata-indication-only}
+      consistent?
+      (assoc :claimed-construction (:construction claimed-scope)
+             :claimed-checks (:checked claimed-scope)
+             :claimed-assumptions (:assumed claimed-scope)
+             :claimed-unestablished (:not-established claimed-scope)))))
+
 (defn- operation-card
-  [[operation summary] ordered-operation-summaries]
+  [report [operation summary] ordered-operation-summaries]
   {:operation operation
    :derived-from [:analysis :operations operation]
    :contract (select-keys summary operation-card-fields)
@@ -277,6 +352,8 @@
    (reported-live-declaration-coverage operation summary ordered-operation-summaries)
    :reported-live-impact-provenance
    (reported-live-impact-provenance operation summary)
+   :resolved-operation-construction
+   (operation-resolution-indication report operation)
    :model-policy-inspection :opaque-host-implementation
    :model-policy-premise opaque-model-premise})
 
@@ -325,14 +402,17 @@
    Live-impact provenance separately identifies which reported values originate
    in trusted operation metadata and which are derived from the Live graph and
    acquisition obligations. It requires a current report and does not prove
-   that any Clojure model actually publishes or accesses the reported values."
+   that any Clojure model actually publishes or accesses the reported values.
+   A registered executor may carry v792 durable-resolution metadata. Its
+   consistency is reported as an indication, not as proof of the construction,
+   execution adapter, replay behavior, or opaque domain policy."
   [report]
   (let [report' (require-report-shape! report)
         analysis (:analysis report')
         operations (ordered-operations (:operations analysis))
         cards (into (sorted-map-by #(compare (pr-str %1) (pr-str %2)))
                     (map (fn [[operation :as entry]]
-                           [operation (operation-card entry operations)]))
+                           [operation (operation-card report' entry operations)]))
                     operations)
         boundaries (mapv opaque-model-boundary operations)
         coverage (vec (mapcat assurance-coverage operations))]
