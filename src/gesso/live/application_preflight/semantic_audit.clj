@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.semantic-audit
-  "Pure, deliberately scope-limited semantic audit projection for an application
+  "Read-only, deliberately scope-limited semantic audit for an application
    that has already passed canonical ApplicationAssembly preflight.
 
    This module reads the operation summaries, trusted assumptions, and open
@@ -18,10 +18,14 @@
    can enrich the same view
    without making this projection a separately maintained policy registry.
 
-   v794 additionally inspects ONLY the registered trusted function's optional
-   durable-resolution metadata. That metadata is advisory and unauthenticated:
-   the executable adapter and domain obligations remain unestablished."
-  (:require [clojure.set :as set]))
+   v794 inspects registered executors' optional durable-resolution metadata,
+   which is advisory and unauthenticated. v799 additionally consults the
+   v798 local, private adapter-construction registry. Only the exact registered
+   executor can carry that bounded construction evidence; copied metadata and
+   wrappers do not inherit it. This does not certify model callbacks, guards,
+   authorization, durable replay, or runtime business-rule correctness."
+  (:require [clojure.set :as set]
+            [gesso.live.optimistic.resolved-operation :as live-resolved]))
 
 (def ^:private operation-card-fields
   [:choreography-name
@@ -271,18 +275,13 @@
                           [:derivation :source-empty-default?])))]))
      declared-live-impact-fields))})
 
-;; v794: a narrow, opt-in bridge from a registered trusted :execute! back to
-;; the durable-resolution construction metadata emitted by
-;; gesso.model.resolved-operation/build-operation.
-;;
-;; This is NOT construction authentication. Function metadata can be copied or
-;; forged by application code, and a wrapper/adaptor can lose it. More
-;; importantly, resolved-operation's [ctx input] call/return contract is not
-;; the optimistic server's one-argument :execute! contract. Even perfectly
-;; matching metadata establishes neither adapter correspondence nor domain
-;; policy. We report the claimed scope only, and leave the pre-existing opaque
-;; model conformance premise open. No app registry, extra field in a closed
-;; assembly, or separate assurance certificate is introduced here.
+;; Source-derived construction inspection. Metadata is user-copyable and
+;; untrusted. The v798 Live adapter exposes separate local construction
+;; provenance for the EXACT function object emitted by build-executor. We may
+;; describe that construction, but must never promote the supplied v792
+;; callback, opaque policy, transaction guards or settlement correspondence to
+;; a proved or certified guarantee. The report passed to this function must
+;; already be freshly checked by the application coordinator.
 (def ^:private resolution-metadata-keys
   #{:gesso.model/operation-id
     :gesso.model/resolution
@@ -301,6 +300,22 @@
        (set? (:assumed scope))
        (set? (:not-established scope))))
 
+(defn- adapter-registry-match?
+  [operation evidence]
+  ;; A result comes exclusively from the adapter's private registry; verify
+  ;; the advertised version and operation anyway. Evidence for a different
+  ;; registered operation must never be silently transferred to this card.
+  (and (map? evidence)
+       (= :constructed-by-live-resolved-operation-adapter
+          (:status evidence))
+       (= :private-runtime-construction-registry
+          (:evidence-source evidence))
+       (= operation (:operation evidence))
+       (= (:construction live-resolved/assurance-scope)
+          (:construction evidence))
+       (= live-resolved/assurance-scope
+          (:adapter-assurance-scope evidence))))
+
 (defn- operation-resolution-indication
   [report operation]
   (let [path (conj resolution-executor-path operation :execute!)
@@ -308,10 +323,10 @@
         metadata (when (instance? clojure.lang.IMeta executor)
                    (meta executor))
         present (if (map? metadata)
-                  (set/intersection
-                   resolution-metadata-keys (set (keys metadata)))
+                  (set/intersection resolution-metadata-keys
+                                    (set (keys metadata)))
                   #{})
-        metadata-present? (seq present)
+        metadata-present? (boolean (seq present))
         claimed-operation (:gesso.model/operation-id metadata)
         claimed-kind (:gesso.model/resolution metadata)
         claimed-scope (:gesso.model/assurance-scope metadata)
@@ -319,27 +334,63 @@
         consistent? (and complete?
                          (= operation claimed-operation)
                          (= :durable-command-v1 claimed-kind)
-                         (scope-shape? claimed-scope))]
+                         (scope-shape? claimed-scope))
+        local-evidence (live-resolved/construction-evidence executor)
+        registry-match? (adapter-registry-match? operation local-evidence)
+        ;; Both source claims and runtime construction identity must agree.
+        ;; Runtime construction provenance says nothing about the policy
+        ;; predicates inside the application-supplied resolved-operation.
+        recognized? (boolean (and consistent? registry-match?))]
     (cond->
      {:status (cond
                 (not (fn? executor)) :no-inspectable-registered-executor
+                (and local-evidence (not registry-match?))
+                :registered-adapter-operation-mismatch
+                (and local-evidence (not consistent?))
+                :inconsistent-resolution-metadata
+                recognized? :recognized-live-resolved-operation-adapter
                 (not metadata-present?) :no-resolution-construction-metadata
                 consistent? :consistent-unverified-resolution-metadata
                 :else :inconsistent-resolution-metadata)
       :derived-from path
-      :evidence-class :untrusted-function-metadata
+      :evidence-class (if recognized?
+                        :private-runtime-construction-registry
+                        :untrusted-function-metadata)
       :operation-id-consistent? (when metadata-present?
                                   (= operation claimed-operation))
+      :adapter-construction-recognized? recognized?
+      :adapter-construction-status
+      (cond
+        recognized? :exact-executor-identity-recognized
+        (and local-evidence (not registry-match?))
+        :registered-operation-mismatch
+        (some? local-evidence) :inconsistent-registered-metadata
+        :else :not-established)
+      ;; The local registry attests builder invocation only. It is not an
+      ;; authenticated portable certificate or evidence that the application
+      ;; executed any domain command correctly.
       :construction-authenticated? false
       :execution-adapter-correspondence :not-established
       :domain-invariants :not-established
       :command-replay-guarantee :not-established
-      :scope :metadata-indication-only}
+      :scope (if recognized?
+               :local-adapter-construction-only
+               :metadata-indication-only)}
       consistent?
       (assoc :claimed-construction (:construction claimed-scope)
              :claimed-checks (:checked claimed-scope)
              :claimed-assumptions (:assumed claimed-scope)
-             :claimed-unestablished (:not-established claimed-scope)))))
+             :claimed-unestablished (:not-established claimed-scope))
+      recognized?
+      (assoc :adapter-construction-evidence
+             {:source :private-runtime-construction-registry
+              :operation operation
+              :construction (:construction local-evidence)
+              :adapter-assurance-scope
+              (:adapter-assurance-scope local-evidence)
+              :model-operation-origin :unverified-function-metadata
+              :domain-invariants :not-established
+              :application-execution-correspondence :not-established}))))
 
 (defn- operation-card
   [report [operation summary] ordered-operation-summaries]
@@ -403,9 +454,11 @@
    in trusted operation metadata and which are derived from the Live graph and
    acquisition obligations. It requires a current report and does not prove
    that any Clojure model actually publishes or accesses the reported values.
-   A registered executor may carry v792 durable-resolution metadata. Its
-   consistency is reported as an indication, not as proof of the construction,
-   execution adapter, replay behavior, or opaque domain policy."
+   A registered executor may carry v792 durable-resolution metadata. Such
+   metadata remains untrusted. An exact executor built through the v798 Live
+   adapter additionally has local, private-registry construction evidence,
+   which establishes neither the correctness of its supplied callback nor
+   authorization, replay, settlement correspondence, or domain policy."
   [report]
   (let [report' (require-report-shape! report)
         analysis (:analysis report')
