@@ -164,3 +164,213 @@
      ;; ordering, including rejected transactions (which preserve state).
      (+ 1 (reduce + (map (comp count :trace) paths)))
      :scope assurance-scope}))
+
+;; Unlike check-prepared, the following bounded search re-invokes each enabled
+;; operation's plan builder from the state actually reached by preceding steps.
+;; It intentionally models serial, atomic attempts. It does not infer the set
+;; of application operations, callers, parameters, or enabled states.
+(def reachable-assurance-scope
+  {:checker :gesso.model.invariant-check/finite-reachable-serial-v1
+   :checked #{:initial-state-rule-evaluation
+              :rule-preservation-after-every-attempted-operation
+              :all-enabled-choices-through-declared-depth
+              :state-dependent-plan-reconstruction
+              :shortest-named-counterexamples}
+   :assumed #{:pure-total-truthful-rule-predicates
+              :pure-total-truthful-operation-builders
+              :complete-modeled-operation-and-argument-instances
+              :truthful-operation-enablement
+              :complete-finite-state-universe
+              :serial-atomic-commit-semantics}
+   :not-established #{:truth-of-authored-business-rules
+                      :completeness-of-available-operations-or-arguments
+                      :source-derived-completeness-of-policy-dependencies
+                      :arbitrary-clojure-predicate-verification
+                      :unbounded-invariant-preservation
+                      :real-xtdb-execution-correspondence
+                      :concurrent-execution-linearizability
+                      :durable-application-command-replay
+                      :authorization-of-actual-principals
+                      :application-certification}})
+
+(defn- require-operations [operations]
+  (when-not (and (vector? operations)
+                 (<= 1 (count operations) 6))
+    (fail! :invalid-operations
+           "Reachability checking requires one to six operation instances in a vector."
+           {:operations operations :maximum 6}))
+  (doseq [[index operation] (map-indexed vector operations)]
+    (when-not (and (map? operation)
+                   (= #{:id :enabled? :prepare} (set (keys operation)))
+                   (qualified-keyword? (:id operation))
+                   (fn? (:enabled? operation))
+                   (fn? (:prepare operation)))
+      (fail! :invalid-operation
+             "Each operation requires a qualified :id, an :enabled? function, and a :prepare function."
+             {:index index :operation operation})))
+  (when-not (= (count operations) (count (set (map :id operations))))
+    (fail! :duplicate-operation
+           "Modeled operation instance identifiers must be unique."
+           {:ids (mapv :id operations)}))
+  operations)
+
+(defn- require-reachable-options [options]
+  (when-not (and (map? options)
+                 (= #{:max-depth :max-transitions} (set (keys options)))
+                 (integer? (:max-depth options))
+                 (<= 1 (:max-depth options) 6)
+                 (integer? (:max-transitions options))
+                 (<= 1 (:max-transitions options) 10000))
+    (fail! :invalid-reachability-bound
+           "Specify :max-depth (1–6) and :max-transitions (1–10000); exceeding the latter aborts the check."
+           {:options options}))
+  options)
+
+(defn- invoke-operation! [operation phase callback state]
+  (try
+    (callback state)
+    (catch Exception cause
+      (throw (ex-info
+              "Modeled operation evaluation failed; no reachability verdict is established."
+              {:error/type ::operation-evaluation-failed
+               :operation-id (:id operation)
+               :phase phase}
+              cause)))))
+
+(defn- admitted-operation-plan [operation state]
+  (let [plan (invoke-operation! operation :prepare (:prepare operation) state)]
+    (when-not (and (map? plan) (seq (:commands plan)))
+      (fail! :invalid-operation-plan
+             "An enabled operation must prepare a nonempty authoritative document-command plan."
+             {:operation-id (:id operation) :plan plan}))
+    ;; Preserve tx-model's strict rejection of uninterpreted assertions,
+    ;; transaction hooks, and custom transaction options.
+    (reference/admitted-plan plan)))
+
+(defn- evaluate-operations-enabled! [operation state]
+  (let [answer (invoke-operation! operation :enabled? (:enabled? operation) state)]
+    (when-not (or (true? answer) (false? answer))
+      (fail! :non-boolean-operation-enablement
+             "Modeled operation enablement must return exactly true or false."
+             {:operation-id (:id operation) :result answer}))
+    answer))
+
+(defn- initial-rule-violations [rules initial-state]
+  (reduce (fn [found rule]
+            (if (evaluate-rule! rule initial-state)
+              found
+              (assoc found (:id rule)
+                     {:rule-id (:id rule)
+                      :at :initial-state
+                      :depth 0
+                      :operation-id nil
+                      :status nil
+                      :trace []
+                      :state initial-state})))
+          {}
+          rules))
+
+(defn- next-rule-violations [found rules trace state]
+  ;; Evaluate EVERY rule at EVERY reachable occurrence, including on an
+  ;; assertion-rejected (unchanged) state. A previously found violation
+  ;; remains the first/shortest one because exploration is breadth-first.
+  (reduce (fn [found rule]
+            (let [valid? (evaluate-rule! rule state)
+                  id (:id rule)]
+              (if (or valid? (contains? found id))
+                found
+                (assoc found id
+                       {:rule-id id
+                        :at :after-operation
+                        :depth (count trace)
+                        :operation-id (:operation-id (peek trace))
+                        :status (:status (peek trace))
+                        :trace trace
+                        :state state}))))
+          found rules))
+
+(defn check-reachable
+  "Exhaustively explore *state-dependent* operation instances through a
+   finite serial depth, checking named application invariants initially and
+   after EVERY attempted transaction (committed or rejected).
+
+   Each operation is ordinary Clojure data:
+     {:id :request/claim-helper-a
+      :enabled? (fn [current-state] ... boolean ...)
+      :prepare (fn [current-state] ... gesso.model.tx plan ...)}
+
+   An operation instance represents ONE particular choice of arguments and
+   principal. The caller must enumerate every choice it wants analyzed; an
+   omitted instance or falsely disabled operation is invisible to this model.
+   Enabled operations MUST prepare admitted, nonempty document-command plans.
+   Plans are rebuilt for each reached state, not reused from the root.
+
+   Options must be {:max-depth 1..6 :max-transitions 1..10000}. The latter
+   is a strict fail-closed budget for attempted transitions, not permission
+   to return a partial successful verdict. The exploration is breadth-first
+   and deterministic in declared operation order; it records one shortest
+   counterexample per rule. Repeated states are NOT deduplicated, so no
+   transitions are pruned merely because a state has appeared elsewhere.
+
+   This function neither executes XTDB transactions nor proves its host
+   predicates, builders, enablement decisions, or coverage of possible
+   operations. A passing verdict refers ONLY to the fully explored finite
+   search tree under the explicit assumptions in :scope."
+  [initial-state operations rules options]
+  (let [initial-state (reference/require-state initial-state)
+        operations (require-operations operations)
+        rules (require-rules rules)
+        {:keys [max-depth max-transitions]} (require-reachable-options options)
+        initial-found (initial-rule-violations rules initial-state)]
+    (loop [depth 0
+           frontier [{:state initial-state :trace []}]
+           transitions 0
+           found initial-found]
+      (if (or (= depth max-depth) (empty? frontier))
+        {:status (if (seq found) :counterexample :holds-in-explored-model)
+         :violations (into [] (keep found) (map :id rules))
+         :rule-ids (mapv :id rules)
+         :exploration {:kind :bounded-reachable-serial-operations
+                       :operation-ids (mapv :id operations)
+                       :max-depth max-depth
+                       :max-transitions max-transitions
+                       :reached-depth depth
+                       :attempted-transitions transitions
+                       :visited-state-occurrences (inc transitions)
+                       :frontier-exhausted? (empty? frontier)}
+         :scope reachable-assurance-scope}
+        (let [{next-frontier :frontier
+               next-transitions :transitions
+               next-found :found}
+              (reduce
+               (fn [acc node]
+                 (reduce
+                  (fn [acc operation]
+                    (if-not (evaluate-operations-enabled! operation (:state node))
+                      acc
+                      (do
+                        (when (>= (:transitions acc) max-transitions)
+                          (fail! :exploration-budget-exhausted
+                                 "The reachability budget was exhausted; no verdict is established."
+                                 {:max-depth max-depth
+                                  :max-transitions max-transitions
+                                  :attempted-transitions (:transitions acc)
+                                  :depth depth}))
+                        (let [plan (admitted-operation-plan operation (:state node))
+                              outcome (reference/step (:state node) plan)
+                              new-state (:after outcome)
+                              trace (conj (:trace node)
+                                          {:operation-id (:id operation)
+                                           :status (:status outcome)
+                                           :plan plan
+                                           :failed-precondition (:failed-precondition outcome)
+                                           :state new-state})]
+                          (-> acc
+                              (update :frontier conj {:state new-state
+                                                      :trace trace})
+                              (update :transitions inc)
+                              (update :found next-rule-violations rules trace new-state))))))
+                  acc operations))
+               {:frontier [] :transitions transitions :found found}
+               frontier)]
+          (recur (inc depth) next-frontier next-transitions next-found))))))
