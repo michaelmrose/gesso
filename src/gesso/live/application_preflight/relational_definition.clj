@@ -24,6 +24,9 @@
    An optional :require-attempted-operation-ids gate rejects registered
    operations with no enabled attempts inside the explored finite model;
    rejected transactions count as attempts, but disabled operations do not.
+   A separate optional :require-operation-outcomes map requires selected
+   registered operations to exercise committed and/or rejected outcomes in
+   the finite model; exercising one outcome never implies the other.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -49,7 +52,8 @@
               :source-matching-coverage-over-visited-model-states
               :optional-source-owned-rule-exercise-admission-gate
               :source-owned-modeled-operation-choice-exercise-reporting
-              :optional-source-owned-operation-attempt-admission-gate}
+              :optional-source-owned-operation-attempt-admission-gate
+              :optional-source-owned-operation-outcome-admission-gate}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -67,11 +71,13 @@
                       :whole-application-certification
                       :rule-exercise-does-not-establish-all-predicate-branches
                       :modeled-operation-exercise-does-not-establish-production-execution
-                      :operation-attempts-do-not-establish-successful-commits}})
+                      :operation-attempts-do-not-establish-successful-commits
+                      :modeled-operation-outcomes-do-not-establish-production-outcomes}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-keys
-  #{:require-exercised-rule-ids :require-attempted-operation-ids})
+  #{:require-exercised-rule-ids :require-attempted-operation-ids
+    :require-operation-outcomes})
 
 ;; Weak keys avoid keeping a discarded development-generation alive. No stored
 ;; value may reference the handle; the identity-bearing Object itself is the
@@ -237,6 +243,48 @@
                  {:unattempted-operation-ids unattempted
                   :scope :declared-bounded-explored-states}))))))
 
+(def ^:private admitted-operation-outcomes [:committed :rejected])
+(def ^:private outcome-counter-keys
+  {:committed :committed-attempts
+   :rejected :rejected-attempts})
+
+(defn- require-operation-outcomes!
+  "Demand actual finite-check observations of each explicitly selected outcome.
+   Validate operation identity against the same admitted registry and read ONLY
+   its already verified v848 per-operation counters. A rejected transaction
+   demonstrates a modeled rejected branch, NOT a production rejection, and
+   none of these observations prove exhaustive branching or fairness."
+  [requirements registered-ids operation-exercise]
+  (let [known (set registered-ids)
+        unknown (->> (keys requirements) (remove known) (sort-by pr-str) vec)]
+    (when (seq unknown)
+      (fail! :unknown-required-operation-outcome-ids
+             {:unknown-operation-ids unknown}))
+    (let [families (:registered-operation-exercise operation-exercise)
+          by-id (into {} (map (juxt :registered-operation-id identity)) families)]
+      (when-not (and (= known (set (keys by-id)))
+                     (= (count registered-ids) (count families)))
+        (fail! :incomplete-modeled-operation-exercise
+               {:registered-operation-ids registered-ids}))
+      (let [missing
+            (->> registered-ids
+                 (keep (fn [id]
+                         (when-let [required (get requirements id)]
+                           (let [unseen (->> admitted-operation-outcomes
+                                             (filter required)
+                                             (remove (fn [outcome]
+                                                       (pos? (get-in by-id
+                                                                     [id (outcome-counter-keys outcome)]
+                                                                     0))))
+                                             vec)]
+                             (when (seq unseen)
+                               {:operation-id id :unobserved-outcomes unseen})))))
+                 vec)]
+        (when (seq missing)
+          (fail! :required-operation-outcomes-unobserved
+                 {:unobserved-operation-outcomes missing
+                  :scope :declared-bounded-explored-states}))))))
+
 (defn- require-exercised-rules!
   "Reject an explicit, source-owned coverage obligation when its declared
    rules never have matching source documents in the actual explored states.
@@ -274,14 +322,18 @@
       :relational-model {:initial-state ... :families ...
                          :declarations ... :options ...}
       :require-exercised-rule-ids #{:request/owner-membership-active}
-      :require-attempted-operation-ids #{:request/claim}}
+      :require-attempted-operation-ids #{:request/claim}
+      :require-operation-outcomes {:request/claim #{:committed :rejected}}}
 
    Validate the canonical assembly, exactly cover the registered operations,
    exhaustively check declared finite relations, optionally require selected
-   rules to match a source and registered operations to receive enabled attempts
-   in the explored model, and bind the admitted callbacks to the actual
-   registered executors for subsequent diagnostic comparisons. Neither exercise
+   rules to match a source, operations to receive enabled attempts, and
+   selected operation outcomes to occur within the explored model; bind the
+   admitted callbacks to the actual
+   registered executors for subsequent diagnostic comparisons. No exercise
    gate establishes real-world coverage or production executor invocation.
+   Outcome requirements distinguish modeled commits from guard rejections,
+   neither of which establishes a corresponding production execution.
 
    Returns an opaque PROCESS-LOCAL handle. No raw state, callbacks, or command
    bindings can be recovered through inspection. This function does not start
@@ -297,7 +349,19 @@
             :provided-keys (when (map? definition)
                              (set (keys definition)))}))
   (let [required-rules (get definition :require-exercised-rule-ids #{})
-        required-operations (get definition :require-attempted-operation-ids #{})]
+        required-operations (get definition :require-attempted-operation-ids #{})
+        required-outcomes (get definition :require-operation-outcomes {})]
+    (when-not (and (map? required-outcomes)
+                   (every? qualified-keyword? (keys required-outcomes))
+                   (every? (fn [requested]
+                             (and (set? requested)
+                                  (seq requested)
+                                  (every? (set admitted-operation-outcomes)
+                                          requested)))
+                           (vals required-outcomes)))
+      (fail! :invalid-required-operation-outcomes
+             {:required-form :map-of-qualified-operation-ids-to-nonempty-outcome-sets
+              :allowed-outcomes admitted-operation-outcomes}))
     (when-not (and (set? required-rules)
                    (every? qualified-keyword? required-rules))
       (fail! :invalid-required-rule-ids
@@ -309,6 +373,7 @@
   (let [{:keys [application-options relational-model]} definition
         required-rules (get definition :require-exercised-rule-ids #{})
         required-operations (get definition :require-attempted-operation-ids #{})
+        required-outcomes (get definition :require-operation-outcomes {})
         {:keys [application-assembly finite-relational-verdict]}
         (relational-app/require-relational-application!
          application-options relational-model)
@@ -325,6 +390,8 @@
                             finite-relational-verdict operation-ids)
         _ (require-attempted-operations! required-operations
                                          operation-ids operation-exercise)
+        _ (require-operation-outcomes! required-outcomes
+                                       operation-ids operation-exercise)
         ;; Constructed from the *same* assembly and declarations. This repeats
         ;; the finite check (and thus assumes deterministic pure callbacks),
         ;; but also creates the bound physical-comparison capability before
@@ -345,6 +412,14 @@
              (->> declarations (map :id) (filter required-rules) vec)
              :required-attempted-operation-ids
              (->> operation-ids (filter required-operations) vec)
+             :required-operation-outcomes
+             (into (array-map)
+                   (keep (fn [id]
+                           (when-let [requested (get required-outcomes id)]
+                             [id (->> admitted-operation-outcomes
+                                      (filter requested)
+                                      vec)])))
+                   operation-ids)
              :initial-rule-coverage (:initial-state-rule-coverage
                                      relational-coverage)
              :reachable-rule-coverage (:reachable-state-rule-coverage
@@ -382,13 +457,15 @@
    per-rule matching counts and per-choice modeled-operation exercise are
    visible without reevaluating callbacks. The operation-attempt gate records
    requested IDs in registered order and counts rejected attempts as attempts.
+   The independent outcome gate reports required committed/rejected branches
+   by registered operation and never treats an attempt as proof of a commit.
    Principal and argument values, callbacks, modeled documents, and executor
    handles are never exposed."
   [handle]
   (let [{:keys [assembly declarations initial-rule-coverage
                 reachable-rule-coverage operation-ids finite-exploration
                 operation-exercise required-exercised-rule-ids
-                required-attempted-operation-ids]}
+                required-attempted-operation-ids required-operation-outcomes]}
         (current-construction! handle)
         ;; application/explain derives a fresh, current semantic audit from the
         ;; actual admitted assembly; never trust a stored or caller-authored
@@ -448,6 +525,11 @@
                    :modeled-operation-exercise operation-exercise
                    :required-attempted-operation-ids
                    required-attempted-operation-ids
+                   :required-operation-outcomes required-operation-outcomes
+                   :operation-outcome-gate
+                   (if (seq required-operation-outcomes)
+                     :required-outcomes-observed-in-explored-model
+                     :not-requested)
                    :operation-attempt-gate
                    (if (seq required-attempted-operation-ids)
                      :required-operations-attempted-in-explored-model
