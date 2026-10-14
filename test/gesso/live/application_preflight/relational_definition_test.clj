@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v880 regressions for relational construction and captured adjacency.
+  "v882 regressions for root-anchored modeled sequence correspondence.
 
    Preserve earlier admission, comparator, startup, and explanation tests.
    Verify that actual visited-state matching from v842 is retained by the
@@ -3628,3 +3628,197 @@
                (get-in r [:joint-path-and-captured-adjacency
                           :observed-execution-chronology])))
         (is (not (.contains (pr-str r) request-id)))))))
+
+
+;; v882: the v881 root-anchor join reuses the first compare! result. These
+;; classification tests stub the downstream controlled comparator and pair
+;; comparator, but keep real admitted application, family and transition-tree
+;; construction. The last test uses executor-issued embedded XTDB evidence.
+;; A matching root anchor is a bounded diagnostic, never authenticated
+;; chronology, pinned XTDB isolation, or production trace refinement.
+
+(defn- with-v882-root-anchor
+  ([f] (with-v882-root-anchor definition f))
+  ([make-definition f]
+   (with-v880-adjacency
+     make-definition
+     (fn [{:keys [responses a first-edge] :as environment}]
+       (swap! responses update a merge
+              {:declared-root-state-comparison matching-root-observation
+               :declared-root-poststate-comparison v872-matched-poststate})
+       (is (= (:model-instance-id first-edge)
+              (:family-instance-id (get @responses a))))
+       (f environment)))))
+
+(defn- v882-anchor [report]
+  (:initial-root-step-and-captured-adjacency report))
+
+(deftest v882-matched-first-root-step-and-adjacency-are-reported-together
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b calls pair-calls]}]
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])
+            anchor (v882-anchor report)]
+        (is (= :initial-root-step-and-captured-adjacencies-match (:status anchor)))
+        (is (= :matching-captured-root-step-before-and-after
+               (:first-observation-local-root-step-status anchor)))
+        (is (= :matching-captured-root-step-before-and-after
+               (get-in report [:first-observation-local-root-step :status])))
+        (is (= :caller-ordered-choice-outcome-path-explored (:status report)))
+        (is (= :modeled-path-and-captured-adjacencies-match
+               (get-in report [:joint-path-and-captured-adjacency :status])))
+        (is (= :all-captured-adjacencies-match
+               (get-in report [:captured-dependency-adjacency :status])))
+        (is (= [a b] @calls))
+        (is (= 1 (count @pair-calls)))
+        (is (= :already-compared-first-executor-bound-observation (:source anchor)))
+        (is (false? (:additional-model-callbacks? anchor)))
+        (is (false? (:additional-xtdb-reads? anchor)))))))
+
+(deftest v882-missing-first-poststate-cannot-establish-a-root-anchor
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b responses]}]
+      (swap! responses update a dissoc :declared-root-poststate-comparison)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :initial-controlled-root-step-not-established
+               (:status (v882-anchor report))))
+        (is (= :captured-poststate-not-established
+               (get-in report [:first-observation-local-root-step :status])))
+        (is (= :modeled-path-and-captured-adjacencies-match
+               (get-in report [:joint-path-and-captured-adjacency :status])))))))
+
+(deftest v882-mismatched-initial-state-is-not-rehabilitated-by-adjacency
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b responses]}]
+      (swap! responses assoc-in [a :declared-root-state-comparison :status]
+             :differs-from-captured-pretransaction-state)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :initial-controlled-root-step-not-established
+               (:status (v882-anchor report))))
+        (is (= :all-captured-adjacencies-match
+               (get-in report [:captured-dependency-adjacency :status])))
+        (is (= :caller-ordered-choice-outcome-path-explored (:status report)))))))
+
+(deftest v882-mismatched-first-poststate-is-not-a-successful-root-anchor
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b responses]}]
+      (swap! responses assoc-in [a :declared-root-poststate-comparison :status]
+             :differs-from-captured-posttransaction-dependencies)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :initial-controlled-root-step-not-established
+               (:status (v882-anchor report))))
+        (is (= :captured-poststate-differs
+               (get-in report [:first-observation-local-root-step :status])))
+        (is (= :all-captured-adjacencies-match
+               (get-in report [:captured-dependency-adjacency :status])))))))
+
+(deftest v882-unmatched-modeled-path-precedes-any-root-anchor-claim
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b responses]}]
+      (swap! responses assoc-in [b :status] :counterexample)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :one-or-more-submitted-plans-not-matched (:status report)))
+        (is (= :modeled-path-not-established
+               (:status (v882-anchor report))))
+        (is (= :matching-captured-root-step-before-and-after
+               (get-in report [:first-observation-local-root-step :status])))
+        (is (= :all-captured-adjacencies-match
+               (get-in report [:captured-dependency-adjacency :status])))))))
+
+(deftest v882-captured-state-disagreement-remains-distinct-from-root-agreement
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b pair-response]}]
+      (reset! pair-response {:status :captured-domain-documents-differ
+                             :dependency-key-set-comparison :same-captured-keys})
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :matching-captured-root-step-before-and-after
+               (get-in report [:first-observation-local-root-step :status])))
+        (is (= :captured-adjacency-equality-not-established
+               (:status (v882-anchor report))))
+        (is (= :one-or-more-captured-adjacencies-differ
+               (get-in report [:captured-dependency-adjacency :status])))
+        (is (= :modeled-path-without-captured-adjacency-agreement
+               (get-in report [:joint-path-and-captured-adjacency :status])))))))
+
+(deftest v882-different-or-empty-dependency-domains-cannot-anchor-a-history
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b pair-response]}]
+      (doseq [pair [{:status :captured-dependency-key-sets-differ
+                     :dependency-key-set-comparison :different-captured-keys}
+                    {:status :no-common-nonempty-captured-domain
+                     :dependency-key-set-comparison :same-captured-keys}]]
+        (reset! pair-response pair)
+        (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                      handle [a b])]
+          (is (= :captured-adjacency-equality-not-established
+                 (:status (v882-anchor report))))
+          (is (= (:status pair)
+                 (get-in report [:captured-dependency-adjacency :pairs 0 :status])))
+          (is (= :caller-ordered-choice-outcome-path-explored
+                 (:status report))))))))
+
+(deftest v882-one-real-rooted-observation-has-no-invented-adjacency
+  (with-real-xtdb-root-step
+    (fn [{:keys [handle evidence request-id]}]
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [evidence])
+            anchor (v882-anchor report)]
+        (is (= :matching-captured-root-step-before-and-after
+               (:first-observation-local-root-step-status anchor)))
+        (is (= :no-adjacent-observations (:status anchor)))
+        (is (= :caller-ordered-choice-outcome-path-explored (:status report)))
+        (is (= :no-adjacent-observations
+               (get-in report [:captured-dependency-adjacency :status])))
+        (is (= :not-established (:observed-execution-chronology anchor)))
+        (is (not (.contains (pr-str report) request-id)))))))
+
+(deftest v882-no-reported-outcome-does-not-fabricate-a-rooted-transition
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b responses]}]
+      (swap! responses assoc-in [a :physical-status] nil)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :one-or-more-physical-outcomes-unavailable (:status report)))
+        (is (= :modeled-path-not-established (:status (v882-anchor report))))
+        (is (= :root-step-not-established
+               (get-in report [:first-observation-local-root-step :status])))))))
+
+(deftest v882-root-anchor-report-is-redacted-inert-and-does-not-prove-history
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b calls pair-calls]}]
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])
+            anchor (v882-anchor report)
+            visible (pr-str anchor)]
+        (is (= :bounded-root-step-plus-captured-adjacency-diagnostic
+               (:evidence-class anchor)))
+        (is (false? (:state-contents-exposed? anchor)))
+        (is (every? #(= :not-established (get anchor %))
+                    [:observed-execution-chronology
+                     :absence-of-intervening-writes
+                     :complete-dependency-coverage
+                     :pinned-xtdb-snapshot
+                     :production-trace-refinement
+                     :application-certification]))
+        (is (not (re-find #"#object\[|:initial-state|:commands|:arguments|:principals" visible)))
+        (is (= :unknown-construction
+               (error-kind #(sut/explain anchor))))
+        (is (= :unknown-construction
+               (error-kind #(sut/compare! anchor a))))
+        (is (= [a b] @calls))
+        (is (= 1 (count @pair-calls)))))))
+
+(deftest v882-stale-assembly-blocks-root-anchored-comparison-before-observation
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b artifact-path calls pair-calls]}]
+      (spit artifact-path "v882-stale-physical-artifact\n")
+      (is (= :stale-application-assembly
+             (error-kind #(sut/compare-observation-sequence-with-captured-adjacency!
+                            handle [a b]))))
+      (is (empty? @calls))
+      (is (empty? @pair-calls)))))
