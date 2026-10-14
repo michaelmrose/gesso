@@ -1,0 +1,331 @@
+#+TITLE: Gesso Claim Formal-Proof Pilot — Obligations and Production Bindings
+#+SUBTITLE: v894 — pre-theorem ledger; one proposed refinement slice, no certification claim
+#+DATE: 2026-10-14
+#+STARTUP: overview
+#+OPTIONS: toc:3 num:t
+
+* Status, decision, and provenance
+
+This note is the next, *non-normative* implementation artifact after the v893
+formal-proof handover.  Install it as =doc/claim-proof-obligation-ledger.org=.
+It is NOT a replacement for any part of the canonical 12-part R4 design and
+NOT a proof certificate.  It contains no new Gesso runtime APIs.  The user
+continues to author ordinary Clojure and Gesso constructions, never Quint,
+Recife, TLA+, or a Gesso-specific proof DSL as an application requirement.
+
+Inspected source: the 2026-10-14 Gesso archive, branch
+=application-assurance=, HEAD =0415a69= (v892 installed).  Its full test gates
+were reported passing by the developer.  This note neither reruns those gates
+nor treats them as a mathematical proof.  HumanHelp source is *not* in the
+supplied archive; paths or bindings from R4's illustrative Claim example are
+requirements/candidates, NOT independently checked production facts.
+
+Normative anchors:
+- R4 Part IV: authoritative operations, trusted command identity, commit
+  guards, duplicate/retry outcomes and progression.
+- R4 Part VIII: Claim, especially the production lifecycle path, the worked
+  Claim example and browser/advisory behavior.
+- R4 Part IX: proof obligations, dependencies, reusable evidence and honest
+  assumptions.
+- R4 Part X: "Worked correspondence slice: HumanHelp Claim has one production
+  meaning" and "Formal obligations must return to executable production
+  boundaries".
+- R4 Part XII: Gates B, D, E, K, M, N and O, plus the staged proof pilot.
+- v893 handover: the proof-first priority, before further diagnostic wrappers.
+- Exploratory v781: generic resolution templates are a possible reuse
+  mechanism, NOT a required new abstraction or an established theorem.
+
+** Decision for the first mechanically checked subject
+
+Pilot exactly ONE Request and TWO competing helpers.  Check the *server-side
+atomic Claim incorporation and stable command-result binding* first.  Include
+membership revocation as an interfering transition and duplicate/retry of an
+existing command.  Deliberately exclude Unclaim, Cancel, Reassign, transport,
+SSE, DOM and liveness from the FIRST theorem; those need separate proofs and
+refinement maps, not silent assumptions about this theorem.
+
+The important theorem is NOT merely "the owner field is scalar."  The pilot
+must establish that *at most one distinct initial-epoch Claim command can be
+incorporated*, even with two helpers, stale preparation, retries, and a
+membership-revocation race; an incorporated command's binding and recorded
+outcome remain stable.  A model admitting two successful Claim incorporations
+before an Unclaim/epoch change must produce a counterexample.
+
+All Claims below refer to a single Request in an initial, still-open ownership
+epoch.  A later lifecycle extension must introduce an explicit ownership epoch
+or release/reopen semantics; a Request can legitimately be claimed again in a
+new epoch.  No current Gesso API is claimed to generate the pilot model.
+
+* Precise abstract machine to formalize
+
+** State and constants
+
+| Symbol | Kind | Semantics / origin |
+|--------+------+--------------------|
+| =RequestId= | constant | One Request identity; R4 Part VIII |
+| =Helpers= | finite set | Exactly two distinct helpers in the first TLC instance |
+| =CommandIds= | finite set | At least two command IDs and a compatible retry of one |
+| =OrganizationId= | constant | Request's Organization; no independently chosen browser authority |
+| =owner= | =None= or helper | Current authoritative Request owner |
+| =requestStatus= | =open= or =claimed= | Persisted Request state in this first epoch |
+| =memberStatus[h]= | =active= or =inactive= | Current authoritative Membership status |
+| =memberOrg[h]= | Organization ID | Membership-to-Request association |
+| =organizationPolicy= | finite policy value | Mutable policy determining Claim eligibility |
+| =ledger= | partial function command ID -> record | Incorporated authoritative command-result records |
+| =acceptedEvents= | sequence of ghost events | MODEL-ONLY audit history of accepted Claims; NOT claimed production storage |
+| =attempts= | sequence or finite queue | MODEL-ONLY submitted/retried command bindings; never authoritative identity |
+
+Each semantic command *binding* is a tuple of =command-id=,
+=authenticated-principal=, =:request/claim=, and arguments containing the
+Request ID.  The browser may carry its command ID and arguments, but the
+principal is obtained from a trusted server context; never trust a principal
+sent as browser bytes.  In the model, an attempted binding is constructed at
+the trusted boundary.  If comparing to physical requests, model command-ID
+validation and trusted binding are explicit separate obligations.
+
+An accepted event has =command-id=, =principal=, =request-id=, and the
+pre-commit eligibility decision.  It is a ghost variable for specifying a
+history property.  It does NOT assert that existing =gesso_commands= records
+persist the entire eligibility snapshot.  In particular, an accepted Claim
+remains valid history if the helper's Membership is revoked AFTER the commit.
+
+First-model assumptions to state explicitly, not infer:
+- Initially Request is open/unclaimed, ledger and acceptedEvents are empty.
+- Exactly one Request and one ownership epoch are modeled.
+- Each server-side resolution sees a coherent *prestate* for all admission
+  dependencies, and commit of the guarded Request change PLUS one durable
+  command-result record is atomic/serializable.
+- Only admitted resolution transitions can write the ledger or Request owner.
+  The real application's other writers are NOT thereby proved absent.
+- Membership revocation and Organization policy changes are serialized with
+  resolution at the modeled authority boundary, not arbitrarily interleaved
+  halfway through its guards/writes.
+- The =AllowsClaim= predicate is a *named, application-owned* policy premise.
+  The proof checks its use, not whether that policy is socially desirable or
+  whether the production Clojure implementation faithfully computes it.
+- A compatible retry can observe an incorporated record; a missing record is
+  =unknown/unresolved= rather than proof of rejection or permission to resend
+  unchanged assumptions indefinitely.
+
+** Actions (candidate formal vocabulary)
+
+=ClaimNew(c, h)= is admitted only when there is NO incorporated record for =c=
+and the trusted binding is for =h=, =:request/claim= and this Request.
+Eligibility must be checked against the state participating in the SAME
+atomic commit:
+
+#+begin_example
+requestStatus = open
+owner = None
+memberStatus[h] = active
+memberOrg[h] = OrganizationId
+AllowsClaim(organizationPolicy, h, RequestId)
+no conflicting command ledger entry for c
+#+end_example
+
+If satisfied, ONE abstract atomic transition changes:
+
+#+begin_example
+requestStatus' = claimed
+owner' = h
+ledger'[c] = {binding: (c,h,:request/claim,RequestId),
+              disposition: accepted, outcome: accepted-claim}
+acceptedEvents' = Append(acceptedEvents, matching ghost event)
+#+end_example
+
+The exact outcome shape is an application-model question; the above is not an
+assertion that production records already have that schema.  A failed guard
+must NOT write ownership or a success record.  Model a rejected *attempt* as
+state-preserving for Request/ledger, with a non-authorizing rejection result;
+the first proof does not require durable recording of every rejection.  A
+separately specified policy is needed for duplicate or rejected-command IDs
+that are not yet incorporated.
+
+=Replay(c, presentedBinding)=, if an authoritative record exists, leaves
+Request and ledger unchanged.  It exposes the recorded outcome ONLY after
+trusted disclosure authorization and an exact binding match.  Incompatible
+reuse and unauthorized disclosure never execute a fresh domain mutation.
+Withheld results must not leak a record's private binding or contents.
+
+=RevokeMembership(h)= changes membership state, not the existing ownership
+history.  If it occurs BEFORE =ClaimNew=, the Claim cannot incorporate; if it
+occurs AFTER =ClaimNew=, the accepted event still describes eligibility at
+incorporation.  =ChangeOrganizationPolicy= similarly tests the policy race.
+
+=EnqueueAttempt=, =LoseReply=, =DuplicateAttempt= and =DeliverAttempt= are
+OPTIONAL model-environment actions for finite concurrency exploration; they
+must not be confused with server authority.  The initial safety theorem may
+use a finite nondeterministic choice of Claim/replay/revoke/policy actions
+without modeling a full network queue.
+
+** Proof obligations, not merely executable examples
+
+| ID | Obligation | Intended proof boundary | Status at v894 |
+|----+------------+-------------------------+----------------|
+| CLM-S1 | Every accepted event arose at a commit where trusted principal, open Request, active associated Membership and policy admitted Claim | One abstract atomic authority step; application policy assumed truthful | not proved |
+| CLM-S2 | In the initial epoch no two *distinct* Claim command IDs have accepted events for this Request | Domain safety, concurrent helpers / stale preparation | not proved |
+| CLM-S3 | One incorporated command ID never changes binding or recorded outcome | Generic durable resolution template | not proved |
+| CLM-S4 | A matching replay does not cause a second domain effect; mismatched reuse never admits a fresh claim | Durable lookup and resolver action | not proved |
+| CLM-S5 | Rejection, disclosure denial and unresolved delivery cannot create owner/authority facts | Authority / knowledge separation at server boundary | not proved |
+| CLM-R1 | Every Gesso abstract transaction step maps to one ClaimDomain action or allowed stuttering, *provided its modeled premises match* | Reference =tx-model= versus chosen Claim spec | not established |
+| CLM-R2 | Every actual admitted XTDB Claim commit/rejection refines one abstract Claim step or stutters | Physical transaction isolation + Gesso model lowering + HumanHelp callback | not established |
+| CLM-B1 | Provisional Claim UI cannot become authoritative without appropriate authoritative evidence | Browser adapter/participant projection | deferred, not established |
+| CLM-G1 | Composed server/browser/network observable traces refine the admitted global choreography | Whole-system refinement | deferred, not established |
+| CLM-L1 | Claim eventually settles or recovers under explicit delivery/fairness/availability assumptions | Temporal liveness | deferred, not established |
+
+A *successful finite TLC check* for two helpers and finite commands would
+establish that no reachable counterexample exists in the admitted finite
+instance, subject to its exact modeled assumptions.  A *checked inductive
+invariant theorem* would support a more general claim over the defined
+transition relation, but STILL NOT establish the Clojure, XTDB, or browser
+refinement obligations.  Keep the evidence classes separate.
+
+** Concrete adversarial mutations expected to fail
+
+- Mutant M1: remove the Request-open/current-owner guard from incorporation.
+  The second helper can commit after the first; CLM-S2 fails even though
+  =owner= still stores a single helper at a time.
+- Mutant M2: allow an existing ledger entry to be replaced when the same
+  command ID arrives with different arguments; CLM-S3 fails.
+- Mutant M3: check Membership eligibility before a revocation, then write
+  without validating the Membership/Organization dependencies at the commit;
+  CLM-S1 fails under a revocation/claim interleaving in a *concrete two-phase*
+  model.  A purely atomic specification cannot catch a concrete TOCTOU flaw
+  by itself; CLM-R2 must expose it.
+- Mutant M4: treat a missing command record following network uncertainty as
+  definitive business rejection; violates future participant-knowledge
+  obligations, not necessarily CLM-S1/S2.  Do not misclassify it as a server
+  ownership-safety counterexample.
+
+A useful first formal model MUST fail M1 and M2.  M3 belongs in the concrete
+server/refinement companion; M4 belongs in the later browser/network model.
+
+* Real implementation bindings and missing evidence
+
+Each row identifies an *actual inspected Gesso source boundary*.  It is not a
+claim that current HumanHelp executes through that boundary.  A production
+Claim operation must be inspected before any server-refinement claim.
+
+| Formal element / obligation | Current source or API | Evidence class and residual gap |
+|-----------------------------+-----------------------+---------------------------------|
+| Document mutation and dependency versions | =src/gesso/model/command.clj=: =create=, =update-command=, =guard= | Executable plan structure; does not express complete business policy |
+| Transaction normalization and asserted current state | =src/gesso/model/tx.clj=: =normalize-plan=, =transaction-ops=, =prepare= | Assertions precede writes; XTDB serializability / complete guard scope not thereby proved |
+| Actual transaction dispatch and postcommit Live behavior | =gesso.model.tx/transact!= -> =gesso.live.core/transact-and-notify!= | Concrete runtime path, but not a proof that every Claim uses it |
+| Serial abstract transaction reference | =src/gesso/model/tx_model.clj=: =admitted-plan=, =step= | Strict supported subset: commands and version guards; raw SQL assertions, options, hooks unsupported |
+| Durable command-result record construction | =src/gesso/model/command_resolution.clj=: =incorporation-plan= | Adds command record to same normalized plan; assumes authoritative binding and correct domain plan |
+| Pure replay classification | =gesso.model.command-resolution/reconcile= | Exact binding + caller-supplied trusted disclosure predicate; not itself a stored-record lookup/driver |
+| Trusted protocol command boundary | =src/gesso/live/optimistic/server.clj= | Authenticated principal capability and controlled operation registry; business authorization is delegated |
+| Bounded rule exploration | =src/gesso/model/invariant_check.clj=: =check-reachable= | Bounded Clojure predicate/model exploration, not independent proof |
+| Same-assembly application admission | =src/gesso/live/application_preflight/relational_definition.clj=: =construct!= / =start-biff!= | Opt-in finite gate; not universal startup or proof release gate |
+| v891/v892 executor/model occurrence diagnostic | =gesso.live.application-preflight.relational-definition/compare-observation-with-modeled-predecessor!= | Local, controlled equality with PRIVATE modeled occurrence; no authenticated physical chronology |
+| Browser semantic state/effects | =src/gesso/live/browser/adapter.cljc=: =step= | Portable reducer; shell/HTMX/DOM/refinement still separate |
+| Public HumanHelp Claim model operation | Canonical R4 example =net.humanhelp.site.model.request.core/claim= | **UNINSPECTED** in this Gesso-only snapshot; exact name and call graph need source verification |
+| HumanHelp Membership, Organization and Request-Organization guards | Production HumanHelp source needed | **UNINSPECTED**; precise schema and policy cannot be inferred from illustrative R4 data |
+| HumanHelp command outcome and persistence schema | Production HumanHelp source needed | **UNINSPECTED**; does it use =gesso_commands= and =incorporation-plan=? unknown |
+| HumanHelp Claim browser binding and Choreo | Production HumanHelp source needed | **UNINSPECTED**; existing Gesso adapter alone does not prove this realization |
+
+** Production-assumption ledger
+
+| Assumption | Production obligation | Current disposition |
+|------------+-----------------------+---------------------|
+| ATOMIC-COMMIT | Command-result insert, guarded Request ownership write and all declared predicates are one atomic/serializable XTDB transaction | Open; Gesso plan construction exists, no inspected HumanHelp binding |
+| COMMAND-ID | Browser correlation ID bound to trusted principal, operation and arguments, and checked on retry | Partially supported by trusted protocol and =command_resolution=; application storage/replay path open |
+| PERMISSION | Principal authentication and disclosure of prior result are server-owned | Trusted boundary exists; application permission predicate open |
+| COMPLETE-GUARDS | Request, Membership, Organization, association and any other policy dependencies guarded at incorporation | Open; no complete production policy inventory |
+| COHERENT-PRESTATE | Gesso's observed dependencies and modeled reference correspond to one suitable authority point | Not established by v891/v892 predecessor comparisons |
+| FULL-WRITER-SET | No alternate production writer can violate Request/ledger invariants | Open; whole-application write inventory needed |
+| RECORD-IMMUTABILITY | Once incorporated, no path overwrites command binding/outcome | =incorporation-plan= prevents duplicate create; global table writer closure not proved |
+| CALLBACK-FAITHFULNESS | Model =enabled?= / =prepare= / policy and actual trusted execute callback have the same critical semantics | Open; independently authored callbacks can agree on samples but diverge elsewhere |
+| FINITE-REPRESENTATIVE | Two-helper finite input reflects claimed bounded theorem scope | Only a bounded-model premise, never production completeness |
+| BROWSER-EFFECTS | Shell realizes normalized browser adapter events/effects correctly | Deferred; tests and real Chromium are needed but do not prove all traces |
+| NETWORK-PROGRESS | Delivery/recovery assumptions adequate for stated conditional liveness | Deferred; no unconditional eventual success claim |
+
+No hash, certificate-looking map, correlated outcome, or caller-selected
+modeled predecessor upgrades an open assumption to discharged status.
+
+* Refinement direction and the v891/v892 evidence
+
+Formal safety is a property of the abstract transition relation.  For a
+TRANSFERRED implementation claim, define an abstraction function =alpha=
+from concrete durable Request/Membership/Organization/command records (plus
+trusted protocol context) to the formal state.  A suitable simulation
+obligation is:
+
+#+begin_example
+InitConcrete(c0) => InitAbstract(alpha(c0))
+
+ConcreteStep(c, c') =>
+  AbstractNext(alpha(c), alpha(c'))
+  OR alpha(c) = alpha(c')    ; explicit allowed stuttering
+#+end_example
+
+The relation must quantify over admitted server effects, conflicting writers,
+retries, result lookup/disclosure and any execution path that can change the
+abstract variables.  An observed matching plan alone is insufficient.
+
+The existing v891/v892 controlled comparator contributes ONE useful premise:
+it can compare an executor-bound captured prestate with the private state at
+one chosen finite modeled occurrence, and compare the relevant modeled edge
+and submitted plan under its declared scope.  It does not prove that the
+physical execution started there, that every read was captured, that no write
+intervened, or that the formal model's transitions are complete.  Thus it is
+*local correspondence-test evidence*, not a proof of the simulation formula.
+
+The first formal theorem should consume the *same semantic subject* as the
+chosen production Claim operation, with explicit provenance and a declared
+lowering/refinement boundary.  A separately hand-authored TLA Claim model
+that happens to resemble an independently authored Clojure callback is useful
+for discovery, but cannot satisfy Gate B without correspondence evidence.
+
+* Formal backend and next two concrete artifacts
+
+No external formal checker was run for v894.  This artifact specifies the
+obligations and identifies their production consumers.  The initial proof
+engineering can use hand-authored TLA+ while the automatic elaboration path
+is under development; it must remain clearly classified as *prototype*.
+
+** v895 — first executable formal subject
+
+Create exactly one finite TLC-checkable =ClaimDomainSpec.tla= (or a
+justified equivalent) with =Init=, =Next=, the Claim, Replay, Revocation and
+PolicyChange actions, and named CLM-S1 through CLM-S4.  Fix the state universe
+to one Request, two helpers and at least two command IDs.  Include bad mutants
+M1/M2 as checkable negative configurations, not edits to the canonical
+semantics.  Record exact tool version, config, bound, exploration result and
+counterexample for each mutant.  No checked result before a real checker run.
+
+If a formal toolchain is unavailable, keep the model artifact and mark checker
+execution blocked; do not fabricate a successful theorem or substitute unit
+tests.  The model is a research prototype, not a new application authoring
+interface or independent source of HumanHelp policy truth.
+
+** v896 or later — concrete correspondence slice
+
+Before claiming a physical refinement, obtain current HumanHelp production
+Request/Membership/Organization source or a verified operation binding and
+inspect the *actual* Claim command, guards, typed settlement and durable
+record path.  Either develop a genuinely checked bridge for the supported
+transaction subset, use runtime conformance with its weaker evidence class,
+or retain the implementation boundary as an explicit premise.
+
+The next browser obligation should abstract =gesso.live.browser.adapter/step=
+with separate provisional, advisory and authoritative knowledge.  It must not
+reinterpret timeout/unknown delivery as rejected business truth, and must
+keep the formal/prod bridge honest about HTMX and DOM shell behavior.
+
+* Completion check for this planning revision
+
+- [X] One nontrivial safety property chosen with an explicit first-epoch scope.
+- [X] Current Gesso source functions and the v891/v892 evidence located.
+- [X] Exact proof, refinement and runtime-observation claims distinguished.
+- [X] HumanHelp production semantics explicitly left unverified.
+- [X] Expected counterexample mutants and their proper checking layers listed.
+- [X] Formal backend left replaceable; downstream API remains Clojure/Gesso.
+- [ ] Formal model authored and run in a genuine checker.
+- [ ] Checked theorem obtained.
+- [ ] Concrete HumanHelp source/bindings examined.
+- [ ] Production and browser refinement established.
+- [ ] Release proof gate exists.
+
+This is planning/provenance evidence only.  It does not discharge CLM-S1..S5,
+CLM-R1/R2, CLM-B1, CLM-G1 or CLM-L1.
