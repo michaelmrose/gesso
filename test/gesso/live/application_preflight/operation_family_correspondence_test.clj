@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.operation-family-correspondence-test
-  "Permanent v829, v866, and v870 regressions for registered operation-family correspondence.
+  "Permanent v829–v878 regressions for registered operation-family correspondence.
 
    A finite operation family must match the exact executor from a freshly
    checked application assembly. An observed XTDB transaction can demonstrate
@@ -16,6 +16,7 @@
    [gesso.live.optimistic.resolution-assurance :as assurance]
    [gesso.live.optimistic.server :as server]
    [gesso.model.command :as command]
+   [gesso.model.command-resolution :as resolution]
    [gesso.model.tx-model :as tx-model]
    [gesso.model.resolved-operation :as resolved]
    [xtdb.api :as xt]
@@ -883,3 +884,213 @@
           (is (= :not-established (:production-trace-refinement post)))
           (is (= :one-controlled-serial-root-step-vs-captured-dependencies
                  (:scope post))))))))
+
+;; v878 reconstructs the public pair-observation contract at the boundary of
+;; executor-issued evidence. The synthetic cases isolate redacted state-map
+;; comparison; the last cases exercise genuine, separately issued XTDB handles.
+
+(defn- pair-synthetic-fixture
+  "No real execution is claimed by this fixture: only the capture comparison
+   classification is isolated with controlled reports."
+  [earlier-before earlier-after later-before later-after]
+  (let [earlier (Object.)
+        later (Object.)
+        unknown (Object.)
+        executor (fn [_] nil)
+        earlier-command-id "v878-earlier-command-private"
+        later-command-id "v878-later-command-private"
+        state-record (fn [id] {:xt/id id})
+        observation (fn [initial final command-id]
+                      {:observation
+                       {:initial-state initial
+                        :submitted-incorporation {:record (state-record command-id)}
+                        :observations
+                        {:state (assoc final
+                                       [resolution/command-entity-type command-id]
+                                       (state-record command-id))}}})
+        !observations (atom {earlier (observation earlier-before earlier-after earlier-command-id)
+                             later (observation later-before later-after later-command-id)})
+        !inspections (atom 0)
+        !callbacks (atom 0)
+        run! (fn [f]
+               (with-redefs-fn
+                 {#'application/application-assembly? (constantly true)
+                  #'application/check-application-assembly
+                  (fn [_] {:analysis {:operations {:request/claim {}}}})
+                  #'correspondence/current-executors!
+                  (fn [_ _] {:request/claim executor})
+                  #'assurance/inspect-evidence-for-executor
+                  (fn [handle expected]
+                    (swap! !inspections inc)
+                    (when (identical? executor expected)
+                      (get @!observations handle)))
+                  #'resolution/require-record identity}
+                 f))]
+    {:earlier earlier :later later :unknown unknown
+     :observations !observations :inspections !inspections :callbacks !callbacks
+     :run! run!
+     :compare! (fn [a b] (run! #(correspondence/compare-observation-pair! {} a b)))}))
+
+(def ^:private pair-request-key [:requests "v878-request-private"])
+(def ^:private pair-auxiliary-key [:memberships "v878-membership-private"])
+(def ^:private pair-before {:xt/id "v878-request-private" :value 0})
+(def ^:private pair-after {:xt/id "v878-request-private" :value 1})
+
+(deftest pair-matching-captured-domain-documents-test
+  (let [initial {pair-request-key pair-before}
+        after {pair-request-key pair-after}
+        {:keys [earlier later compare!]} (pair-synthetic-fixture initial after after after)
+        result (compare! earlier later)]
+    (is (= :captured-domain-documents-match (:status result)))
+    (is (= :same-captured-keys (:dependency-key-set-comparison result)))
+    (is (= :two-caller-ordered-executor-bound-dependency-observations (:scope result)))
+    (is (= :exact-clojure-captured-domain-document-map-equality (:relation result)))
+    (is (false? (:state-contents-exposed? result)))
+    (is (false? (:additional-xtdb-reads? result)))
+    (is (false? (:comparison-ran-model-callbacks? result)))))
+
+(deftest pair-differing-captured-document-values-test
+  (let [initial {pair-request-key pair-before}
+        after {pair-request-key pair-after}
+        {:keys [earlier later compare!]} (pair-synthetic-fixture initial after initial initial)
+        result (compare! earlier later)]
+    (is (= :captured-domain-documents-differ (:status result)))
+    (is (= :same-captured-keys (:dependency-key-set-comparison result)))
+    (is (false? (:state-contents-exposed? result)))))
+
+(deftest pair-different-dependency-keys-are-not-equal-test
+  (let [initial {pair-request-key pair-before}
+        after {pair-request-key pair-after}
+        later-state {pair-auxiliary-key {:xt/id "v878-membership-private" :active true}}
+        {:keys [earlier later compare!]} (pair-synthetic-fixture initial after later-state later-state)
+        result (compare! earlier later)]
+    (is (= :captured-dependency-key-sets-differ (:status result)))
+    (is (= :different-captured-keys (:dependency-key-set-comparison result)))))
+
+(deftest pair-empty-captured-domain-cannot-match-test
+  (doseq [[before after] [[{} {}]
+                          [{pair-request-key pair-before} {}]
+                          [{} {pair-request-key pair-after}]]]
+    (let [{:keys [earlier later compare!]}
+          (pair-synthetic-fixture {} before after after)
+          result (compare! earlier later)]
+      (is (= :no-common-nonempty-captured-domain (:status result)))
+      (is (false? (:state-contents-exposed? result))))))
+
+(deftest pair-command-record-exclusion-is-narrow-test
+  (let [initial {pair-request-key pair-before}
+        after {pair-request-key pair-after pair-auxiliary-key
+               {:xt/id "v878-membership-private" :active true}}
+        {:keys [earlier later compare!]}
+        (pair-synthetic-fixture initial after after after)
+        result (compare! earlier later)]
+    ;; The genuine command-result target is inserted by the fixture; it must
+    ;; not force a mismatch. Other domain documents must remain compared.
+    (is (= :captured-domain-documents-match (:status result)))
+    (is (= :same-captured-keys (:dependency-key-set-comparison result)))
+    (let [{:keys [earlier later compare!]}
+          (pair-synthetic-fixture initial after
+                                  {pair-request-key pair-after}
+                                  {pair-request-key pair-after})]
+      (is (= :captured-dependency-key-sets-differ
+             (:status (compare! earlier later)))))))
+
+(deftest pair-order-is-caller-specified-and-not-proven-chronology-test
+  (let [initial {pair-request-key pair-before}
+        after {pair-request-key pair-after}
+        {:keys [earlier later compare!]} (pair-synthetic-fixture initial after after after)
+        forward (compare! earlier later)
+        backward (compare! later earlier)]
+    (is (= :captured-domain-documents-match (:status forward)))
+    (is (= :captured-domain-documents-differ (:status backward)))
+    (doseq [r [forward backward]]
+      (is (= :not-established (:observed-execution-chronology r)))
+      (is (= :not-established (:no-intervening-writes r)))
+      (is (= :not-established (:pinned-xtdb-snapshot r)))
+      (is (= :not-established (:complete-domain-dependency-coverage r)))
+      (is (= :not-established (:production-trace-refinement r)))
+      (is (= :not-established (:application-certification r))))))
+
+(deftest pair-requires-two-distinct-evidence-handles-before-inspection-test
+  (let [initial {pair-request-key pair-before}
+        {:keys [earlier later compare! inspections]}
+        (pair-synthetic-fixture initial initial initial initial)]
+    (doseq [[a b] [[nil later] [earlier nil] [earlier earlier]]]
+      (is (= :invalid-observation-pair (kind #(compare! a b)))))
+    (is (zero? @inspections))
+    (is (= :captured-domain-documents-match
+           (:status (compare! earlier later))))))
+
+(deftest pair-rejects-unknown-and-detached-evidence-test
+  (let [initial {pair-request-key pair-before}
+        {:keys [earlier later unknown compare! observations]}
+        (pair-synthetic-fixture initial initial initial initial)]
+    (doseq [fake [unknown {} (Object.) (get @observations earlier)]]
+      (is (= :unrecognized-executor-bound-evidence
+             (kind #(compare! earlier fake)))))))
+
+(deftest pair-explanation-is-redacted-and-inert-test
+  (let [secret "v878-should-never-disclose-private-document"
+        before {pair-request-key {:xt/id "v878-request-private"
+                                  :secret secret :value 0}}
+        after {pair-request-key {:xt/id "v878-request-private"
+                                 :secret secret :value 1}}
+        {:keys [earlier later compare! callbacks inspections]}
+        (pair-synthetic-fixture before after after after)
+        first-result (compare! earlier later)
+        second-result (compare! earlier later)]
+    (is (= first-result second-result))
+    (is (= :captured-domain-documents-match (:status first-result)))
+    (is (not (.contains (pr-str first-result) secret)))
+    (is (not (.contains (pr-str first-result) "v878-request-private")))
+    (is (zero? @callbacks))
+    (is (= 4 @inspections))
+    (doseq [field [:observation :observations :initial-state :submitted-incorporation
+                   :record :documents :before :after]]
+      (is (not (contains? first-result field))))))
+
+(deftest pair-genuine-xtdb-observations-detect-intervening-write-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [first-handle (:evidence (invoke! example))
+              ;; A real, deliberately intervening domain write makes the
+              ;; second independently issued Claim observe the prior value.
+              _ (xt/execute-tx @!node [[:put-docs :requests (:before example)]])
+              second-command (assoc (:command example)
+                                    :command-id (identity/command-id
+                                                 (str "v878-second-command-" (random-uuid)))
+                                    :execution-id (identity/execution-id
+                                                   (str "v878-second-execution-" (random-uuid))))
+              second-handle (:evidence
+                             (assurance/run-and-check!
+                              {:server (:server example)
+                               :ctx {:biff.xtdb/node @!node
+                                     :authenticated-principal principal}
+                               :command second-command}))
+              result (correspondence/compare-observation-pair!
+                      assembly first-handle second-handle)]
+          (is (not (identical? first-handle second-handle)))
+          (is (= :captured-domain-documents-differ (:status result)))
+          (is (= :same-captured-keys (:dependency-key-set-comparison result)))
+          (is (= :not-established (:no-intervening-writes result)))
+          (is (= :not-established (:observed-execution-chronology result)))
+          (is (false? (:state-contents-exposed? result)))
+          (is (= :invalid-observation-pair
+                 (kind #(correspondence/compare-observation-pair!
+                         assembly first-handle first-handle))))
+          (is (= :unrecognized-executor-bound-evidence
+                 (kind #(correspondence/compare-observation-pair!
+                         assembly first-handle (Object.))))))))))
+
+(deftest pair-application-staleness-blocks-genuine-observations-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly artifact-path]}]
+        (let [first-handle (:evidence (invoke! example))]
+          (spit artifact-path "v878-artifact-tampered\n")
+          (is (not (application/application-assembly? assembly)))
+          (is (some? (try (correspondence/compare-observation-pair!
+                          assembly first-handle (Object.))
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e)))))))))
