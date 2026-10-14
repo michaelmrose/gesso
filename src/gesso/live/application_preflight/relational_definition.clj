@@ -30,6 +30,9 @@
    The admitted v856 transition prefix tree is joined back to registered
    operation names, checked against per-instance outcomes, and explained as
    redacted, non-authorizing bounded MODEL transitions, not production traces.
+   A genuine executor-bound comparison also identifies explored MODEL tree nodes
+   with the same admitted choice and definitive physical outcome, if any. It
+   does not assert those modeled nodes have the observed XTDB starting state.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -58,7 +61,8 @@
               :optional-source-owned-operation-attempt-admission-gate
               :optional-source-owned-operation-outcome-admission-gate
               :source-bound-bounded-transition-tree-in-explanation
-              :transition-tree-cross-checked-against-exercise-counts}
+              :transition-tree-cross-checked-against-exercise-counts
+              :executor-bound-comparison-linked-to-bounded-model-choice-outcomes}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -79,6 +83,8 @@
                       :operation-attempts-do-not-establish-successful-commits
                       :modeled-operation-outcomes-do-not-establish-production-outcomes
                       :modeled-transition-tree-is-not-production-execution
+                      :equal-concrete-and-modeled-states-for-linked-nodes
+                      :physical-execution-trace-refines-modeled-tree
                       :complete-real-application-state-machine}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
@@ -662,13 +668,68 @@
         (update-in [:semantic-audit :assurance-coverage]
                    into rule-coverage))))
 
+(defn- modeled-transition-context!
+  "From an already executor-bound comparison, find only the recorded finite
+   tree occurrences with the same synthetic model-choice ID and physical
+   outcome. Node IDs are diagnostic locators into explain's admitted model
+   tree, NOT a claim about the XTDB state preceding the physical attempt.
+
+   A matching preparation plan does not establish state correspondence; no
+   transition candidate (including when the comparator found a counterexample)
+   can change the underlying comparison status. Missing modeled occurrences
+   are likewise not grounds to reject an otherwise valid physical attempt."
+  [operation-exercise transition-tree comparison]
+  (let [instance-id (:family-instance-id comparison)
+        operation-id (:operation comparison)
+        physical-status (:physical-status comparison)
+        instances (:modeled-instance-exercise operation-exercise)
+        instance (first (filter #(= instance-id (:model-instance-id %)) instances))]
+    (when-not (and instance
+                   (= operation-id (:registered-operation-id instance))
+                   (or (nil? physical-status)
+                       (#{:committed :rejected} physical-status)))
+      (fail! :invalid-execution-transition-identity
+             {:registered-operation-id operation-id
+              :physical-outcome-available? (some? physical-status)}))
+    (let [candidates
+          (if (nil? physical-status)
+            []
+            (->> (:edges transition-tree)
+                 (filter (fn [edge]
+                           (and (= instance-id (:model-instance-id edge))
+                                (= physical-status (:status edge)))))
+                 (mapv :node-id)))]
+      {:status (cond
+                 (nil? physical-status) :physical-outcome-not-reported
+                 (seq candidates) :same-choice-and-outcome-explored
+                 :else :same-choice-and-outcome-not-explored)
+       :modeled-transition-node-ids candidates
+       :matching-dimensions
+       (if (nil? physical-status) #{:admitted-model-choice}
+           #{:admitted-model-choice :physical-outcome})
+       :scope :declared-finite-operation-family-reachable-states
+       :modeled-state-equals-observed-state? :not-established
+       :production-trace-refinement :not-established
+       :not-established
+       #{:equality-of-modeled-and-observed-pretransition-state
+         :stateful-refinement-of-real-execution
+         :production-sequence-or-concurrency-correspondence
+         :unbounded-model-coverage}})))
+
 (defn compare!
   "Check one genuine executor-bound execution handle against the admitted
    finite family callback, without accepting replacement source declarations.
-   The comparison remains a bounded, diagnostic result, not universal proof."
+   Its :modeled-transition-context only LOCATES finite model tree occurrences
+   with the same choice and observed outcome; it does not establish equality
+   of modeled and XTDB states or change the comparator's verdict. Neither a
+   matching node nor a missing node proves production trace correspondence."
   [handle execution-evidence-handle]
-  (let [{:keys [comparator]} (current-construction! handle)]
-    (comparator execution-evidence-handle)))
+  (let [{:keys [comparator operation-exercise transition-tree]}
+        (current-construction! handle)
+        comparison (comparator execution-evidence-handle)]
+    (assoc comparison :modeled-transition-context
+           (modeled-transition-context!
+            operation-exercise transition-tree comparison))))
 
 (defn start-biff!
   "Start Biff through the canonical Gesso lifecycle with EXACTLY the checked
