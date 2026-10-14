@@ -44,6 +44,10 @@
    equality with its captured after-read dependency documents. This remains
    local to one attempt and does not prove a pinned XTDB snapshot or trace
    refinement.
+   A caller-ordered collection of individually executor-bound observations
+   may also be compared to a ROOTED path of modeled operation choices and
+   outcomes, without treating caller order as observed chronology or the
+   modeled path as evidence of concrete inter-step state continuity.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -77,7 +81,8 @@
               :matched-model-transition-prefix-witnesses
               :observed-root-local-model-step-candidate-linkage
               :observed-root-step-vs-captured-domain-poststate-comparison
-              :controlled-local-root-step-before-and-after-observation}
+              :controlled-local-root-step-before-and-after-observation
+              :caller-ordered-executor-observations-vs-bounded-model-path}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -102,7 +107,9 @@
                       :physical-execution-trace-refines-modeled-tree
                       :modeled-prefix-witnesses-are-not-physical-history
                       :matching-captured-dependencies-is-not-pinned-xtdb-isolation
-                      :complete-real-application-state-machine}})
+                      :complete-real-application-state-machine
+                      :caller-supplied-observation-order-is-not-proven-chronology
+                      :modeled-path-is-not-observed-state-continuity}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-keys
@@ -953,6 +960,96 @@
     (assoc comparison :modeled-transition-context
            (modeled-transition-context!
             operation-exercise transition-tree comparison))))
+
+
+(defn compare-observation-sequence!
+  "Compare a CALLER-ORDERED vector of DISTINCT executor-bound execution
+   handles with rooted choice/outcome paths in the admitted finite model.
+   Every handle is passed through compare!'s genuine-executor, currentness,
+   identity and plan checks before any sequence result can be returned.
+
+   This is a diagnostic *path feasibility* check, NOT evidence that the
+   observations really occurred in that order or consecutively. Even an
+   explored model path with individually matching physical plans does NOT
+   establish equality of adjacent concrete states, XTDB snapshot isolation,
+   cross-execution atomicity, or production trace refinement. A repeated
+   physical evidence handle is not a second observed execution.
+
+   The sequence is constrained to the model's admitted maximum depth. Nothing
+   replays model transitions or returns state, submitted plans, arguments,
+   principals, or the underlying execution evidence handles."
+  [handle ordered-evidence-handles]
+  (let [{:keys [finite-exploration transition-tree]}
+        (current-construction! handle)
+        max-depth (:max-depth finite-exploration)]
+    (when-not
+        (and (vector? ordered-evidence-handles)
+             (seq ordered-evidence-handles)
+             (pos-int? max-depth)
+             (<= (count ordered-evidence-handles) max-depth)
+             (every? some? ordered-evidence-handles)
+             (every? (fn [i]
+                       (not-any? #(identical? (nth ordered-evidence-handles i) %)
+                                 (subvec ordered-evidence-handles 0 i)))
+                     (range (count ordered-evidence-handles))))
+      (fail! :invalid-observation-sequence
+             {:required-form :nonempty-vector-of-distinct-execution-evidence-handles
+              :max-model-depth max-depth}))
+    ;; Each comparison verifies a genuine controlled observation through the
+    ;; existing comparator. No new caller-provided operation/model callbacks.
+    (let [comparisons (mapv #(compare! handle %) ordered-evidence-handles)
+          children (group-by :parent-node-id (:edges transition-tree))
+          root (:root-node-id transition-tree)
+          {:keys [current step-results]}
+          (reduce
+           (fn [{:keys [current step-results]} [index comparison]]
+             (let [operation (:operation comparison)
+                   instance-id (:family-instance-id comparison)
+                   outcome (:physical-status comparison)
+                   plan-matched? (= :matched (:status comparison))
+                   matches
+                   (if (and plan-matched? (#{:committed :rejected} outcome))
+                     (->> current
+                          (mapcat #(get children % []))
+                          (filter #(and (= instance-id (:model-instance-id %))
+                                        (= operation (:registered-operation-id %))
+                                        (= outcome (:status %))))
+                          (mapv :node-id))
+                     [])]
+               {:current matches
+                :step-results
+                (conj step-results
+                      {:step-index index
+                       :registered-operation-id operation
+                       :model-instance-id instance-id
+                       :physical-outcome outcome
+                       :plan-comparison-status (:status comparison)
+                       :reachable-modeled-node-ids matches})}))
+           {:current [root] :step-results []}
+           (map-indexed vector comparisons))
+          comparisons-match? (every? #(= :matched (:status %)) comparisons)
+          outcomes-known? (every? #(#{:committed :rejected}
+                                      (:physical-status %)) comparisons)]
+      {:status (cond
+                 (not comparisons-match?) :one-or-more-submitted-plans-not-matched
+                 (not outcomes-known?) :one-or-more-physical-outcomes-unavailable
+                 (seq current) :caller-ordered-choice-outcome-path-explored
+                 :else :caller-ordered-choice-outcome-path-not-explored)
+       :scope :caller-ordered-executor-observations-vs-declared-finite-model
+       :observation-count (count comparisons)
+       :model-max-depth max-depth
+       :steps step-results
+       :matching-final-modeled-node-ids current
+       :modeled-prefix-witnesses
+       (modeled-prefix-witnesses! transition-tree current)
+       :source-order :caller-supplied-not-observed-chronology
+       :evidence-class :bounded-model-choice-outcome-path-diagnostic
+       :state-contents-exposed? false
+       :physical-observation-order :not-established
+       :physical-inter-step-state-continuity :not-established
+       :pinned-xtdb-snapshot :not-established
+       :production-trace-refinement :not-established
+       :application-certification :not-established})))
 
 (defn start-biff!
   "Start Biff through the canonical Gesso lifecycle with EXACTLY the checked
