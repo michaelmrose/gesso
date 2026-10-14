@@ -176,6 +176,7 @@
               :all-enabled-choices-through-declared-depth
               :state-dependent-plan-reconstruction
               :per-declared-operation-exercise-counts
+              :redacted-bounded-transition-prefix-tree
               :shortest-named-counterexamples}
    :assumed #{:pure-total-truthful-rule-predicates
               :pure-total-truthful-operation-builders
@@ -183,7 +184,9 @@
               :truthful-operation-enablement
               :complete-finite-state-universe
               :serial-atomic-commit-semantics}
-   :not-established #{:truth-of-authored-business-rules
+   :not-established #{:replay-correspondence-to-production-executors
+                      :concrete-state-identity-or-deduplication
+                      :truth-of-authored-business-rules
                       :completeness-of-available-operations-or-arguments
                       :source-derived-completeness-of-policy-dependencies
                       :arbitrary-clojure-predicate-verification
@@ -339,6 +342,13 @@
    committed attempts, and rejected attempts for each modeled operation.
    This can reveal declared choices never attempted inside the finite search;
    it does NOT establish completeness of real operations or their domains.
+   The :transition-tree is an exhaustive prefix tree of *attempted*
+   transitions within the declared depth and budget: root node 0, with
+   breadth-first occurrence IDs, parent IDs, synthetic operation IDs,
+   outcomes, and depths. It contains NO modeled documents, transaction plans,
+   callbacks, principals, or arguments. Identical concrete states are NOT
+   merged; this is not an automatically minimized state-machine graph, a
+   production trace, or independent implementation-correspondence evidence.
    The exploration is breadth-first
    and deterministic in declared operation order; it records one shortest
    counterexample per rule. Repeated states are NOT deduplicated, so no
@@ -355,15 +365,23 @@
         {:keys [max-depth max-transitions]} (require-reachable-options options)
         initial-found (initial-rule-violations rules initial-state)]
     (loop [depth 0
-           frontier [{:state initial-state :trace []}]
+           frontier [{:state initial-state :trace [] :node-id 0}]
            transitions 0
            found initial-found
-           exercise (zero-operation-exercise operations)]
+           exercise (zero-operation-exercise operations)
+           edges []]
       (if (or (= depth max-depth) (empty? frontier))
         {:status (if (seq found) :counterexample :holds-in-explored-model)
          :violations (into [] (keep found) (map :id rules))
          :rule-ids (mapv :id rules)
          :operation-exercise (operation-exercise-summary operations exercise)
+         :transition-tree
+         {:kind :bounded-reachable-transition-prefix-tree
+          :root-node-id 0
+          :node-count (inc transitions)
+          :edges edges
+          :state-identity :occurrences-not-deduplicated
+          :production-correspondence :not-established}
          :exploration {:kind :bounded-reachable-serial-operations
                        :operation-ids (mapv :id operations)
                        :max-depth max-depth
@@ -376,7 +394,8 @@
         (let [{next-frontier :frontier
                next-transitions :transitions
                next-found :found
-               next-exercise :exercise}
+               next-exercise :exercise
+               next-edges :edges}
               (reduce
                (fn [acc node]
                  (reduce
@@ -398,6 +417,7 @@
                           (let [plan (admitted-operation-plan operation (:state node))
                                 outcome (reference/step (:state node) plan)
                                 new-state (:after outcome)
+                                new-node-id (inc (:transitions acc))
                                 trace (conj (:trace node)
                                             {:operation-id id
                                              :status (:status outcome)
@@ -409,13 +429,20 @@
                                              :rejected :rejected-attempts)]
                             (-> acc
                                 (update :frontier conj {:state new-state
-                                                        :trace trace})
+                                                        :trace trace
+                                                        :node-id new-node-id})
+                                (update :edges conj
+                                        {:parent-node-id (:node-id node)
+                                         :node-id new-node-id
+                                         :depth (inc depth)
+                                         :operation-id id
+                                         :status (:status outcome)})
                                 (update :transitions inc)
                                 (update :found next-rule-violations rules trace new-state)
                                 (update-in [:exercise id status-key] inc)))))))
                   acc operations))
                {:frontier [] :transitions transitions :found found
-                :exercise exercise}
+                :exercise exercise :edges edges}
                frontier)]
           (recur (inc depth) next-frontier next-transitions next-found
-                 next-exercise))))))
+                 next-exercise next-edges))))))
