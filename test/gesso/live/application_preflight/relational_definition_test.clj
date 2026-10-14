@@ -1,16 +1,18 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v845 regressions for source-owned relational construction and explanation.
+  "v851 regressions for source-owned relational construction and explanation.
 
    Preserve earlier admission, comparator, startup, and explanation tests.
    Verify that actual visited-state matching from v842 is retained by the
    handle-only semantic audit without reinterpreting policy declarations.
-   Matching counts remain bounded diagnostic evidence, not policy completeness,
-   unbounded proof, or all-executions production correspondence."
+   Matching counts and operation-exercise counts remain bounded diagnostic
+   evidence, not policy completeness, unbounded proof, or all-executions
+   production correspondence."
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-application :as relational-app]
+   [gesso.live.application-preflight.relational-rule-coverage :as relations]
    [gesso.live.application-preflight.relational-definition :as sut]
    [gesso.model.command :as command]))
 
@@ -893,3 +895,258 @@
           (is (= :required-relational-rules-unexercised
                  (error-kind #(sut/construct! base))))
           (is (zero? @comparator-calls)))))))
+
+
+;; v851: v850 exposes the v848 checker's source-ordered operation exercise
+;; through the actual admitted application. This is about modeled choices
+;; *evaluated within bounds*, not complete real input or production coverage.
+
+(defn- modeled-operation-exercise
+  [handle]
+  (get-in (relational-audit handle)
+          [:relational-assurance :modeled-operation-exercise]))
+
+(def ^:private expected-operation-count-keys
+  #{:enablement-checks :disabled-checks :enabled-attempts
+    :committed-attempts :rejected-attempts})
+
+(deftest admitted-explanation-reports-exact-operation-exercise
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            report (modeled-operation-exercise handle)
+            families (:registered-operation-exercise report)
+            instances (:modeled-instance-exercise report)
+            ids (get-in (sut/inspect handle) [:registered-operation-ids])]
+        (is (= :observed-in-declared-bounded-model (:status report)))
+        (is (= :declared-finite-operation-family-reachable-states
+               (:scope report)))
+        (is (= ids (mapv :registered-operation-id families)))
+        (is (= 3 (count families) (count instances)))
+        (is (= 12 (get-in (finite-exploration handle)
+                          [:attempted-transitions])))
+        (is (= 12 (reduce + (map :enabled-attempts families))))
+        (is (= 12 (reduce + (map :committed-attempts instances))))
+        (is (= 0 (reduce + (map :rejected-attempts instances))))
+        (doseq [[i family-entry instance-entry] (map vector (range)
+                                                     families instances)]
+          (is (= 1 (:modeled-instance-count family-entry)))
+          (is (= (select-keys family-entry expected-operation-count-keys)
+                 (select-keys instance-entry expected-operation-count-keys)))
+          (is (= {:enablement-checks 4 :disabled-checks 0
+                  :enabled-attempts 4 :committed-attempts 4
+                  :rejected-attempts 0}
+                 (select-keys instance-entry expected-operation-count-keys)))
+          (is (= (keyword "gesso.model.operation-family"
+                          (str "choice-" i "-0-0"))
+                 (:model-instance-id instance-entry)))
+          (is (= 0 (:principal-choice-index instance-entry)))
+          (is (= 0 (:argument-choice-index instance-entry)))
+          (is (true? (:ever-attempted-in-explored-states? family-entry)))
+          (is (true? (:ever-attempted-in-explored-states? instance-entry))))
+        (is (= [] (:never-attempted-registered-operation-ids report)))
+        (is (= [] (:never-attempted-modeled-instance-ids report)))
+        (is (= #{:completeness-of-real-principals-or-arguments
+                 :faithfulness-of-family-callbacks-to-registered-executors
+                 :exercise-in-production :unbounded-operation-coverage}
+               (:not-established report)))
+        (is (contains? (:not-established sut/assurance-scope)
+                       :modeled-operation-exercise-does-not-establish-production-execution))
+        (is (= :not-established
+               (get-in (relational-audit handle)
+                       [:business-rule-catalog :completeness])))))))
+
+(deftest fully-disabled-families-are-not-reported-as-exercised
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [declared (update-in (definition options) [:relational-model :families]
+                                (fn [families]
+                                  (mapv #(assoc % :enabled? (constantly false)
+                                                  :prepare (fn [& _]
+                                                             (throw (ex-info "Disabled operation prepared" {}))))
+                                        families)))
+            handle (sut/construct! declared)
+            report (modeled-operation-exercise handle)
+            families (:registered-operation-exercise report)
+            instances (:modeled-instance-exercise report)]
+        (is (= 0 (:attempted-transitions (finite-exploration handle))))
+        (is (true? (:frontier-exhausted? (finite-exploration handle))))
+        (is (= 3 (count families) (count instances)))
+        (is (= (mapv :registered-operation-id families)
+               (:never-attempted-registered-operation-ids report)))
+        (is (= (mapv :model-instance-id instances)
+               (:never-attempted-modeled-instance-ids report)))
+        (doseq [entry (concat families instances)]
+          (is (= {:enablement-checks 1 :disabled-checks 1
+                  :enabled-attempts 0 :committed-attempts 0
+                  :rejected-attempts 0}
+                 (select-keys entry expected-operation-count-keys)))
+          (is (false? (:ever-attempted-in-explored-states? entry))))))))
+
+(deftest mixed-principal-choices-keep-family-totals-without-leaking-inputs
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [private-principal :helper/private-person-token-851
+            private-arguments {:delta 1 :opaque-input "private-arg-token-851"}
+            declared (-> (definition options)
+                         (assoc-in [:relational-model :options :max-depth] 1)
+                         (assoc-in [:relational-model :families 0 :principals]
+                                   [:helper/a private-principal])
+                         (assoc-in [:relational-model :families 0 :arguments]
+                                   [private-arguments])
+                         (assoc-in [:relational-model :families 0 :enabled?]
+                                   (fn [_ principal _]
+                                     (not= principal private-principal))))
+            handle (sut/construct! declared)
+            report (modeled-operation-exercise handle)
+            families (:registered-operation-exercise report)
+            instances (:modeled-instance-exercise report)
+            claim (first (filter #(= :request/claim (:registered-operation-id %)) families))
+            claim-choices (filterv #(= :request/claim
+                                       (:registered-operation-id %)) instances)
+            printed (pr-str (sut/explain handle))]
+        (is (= 4 (count instances)))
+        (is (= 2 (:modeled-instance-count claim)))
+        (is (= 1 (:enabled-attempts claim)))
+        (is (= 1 (:disabled-checks claim)))
+        (is (= [0 1] (mapv :principal-choice-index claim-choices)))
+        (is (= [0 0] (mapv :argument-choice-index claim-choices)))
+        (is (= [1 0] (mapv :enabled-attempts claim-choices)))
+        (is (= [0 1] (mapv :disabled-checks claim-choices)))
+        (is (= [:request/claim] (->> instances
+                                  (filter (complement :ever-attempted-in-explored-states?))
+                                  (mapv :registered-operation-id))))
+        (is (= [(:model-instance-id (second claim-choices))]
+               (:never-attempted-modeled-instance-ids report)))
+        (is (= [] (:never-attempted-registered-operation-ids report))
+            "One disabled choice must not mark its whole family unexercised")
+        (is (= 3 (get-in (finite-exploration handle)
+                         [:attempted-transitions])))
+        (is (= 3 (reduce + (map :enabled-attempts instances))))
+        (is (not (.contains printed "private-person-token-851")))
+        (is (not (.contains printed "private-arg-token-851")))
+        (is (not (contains? (first instances) :principal)))
+        (is (not (contains? (first instances) :arguments)))
+        (is (not (.contains printed "#object[")))))))
+
+(deftest rejected-model-attempts-are-attempted-not-disabled
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [aux-key [:counters :aux]
+            aux-doc (assoc (get initial-state counter-key) :xt/id :aux)
+            stale (assoc aux-doc :revision 99 :updated-at :stale)
+            guard (command/guard :counters stale version-keys)
+            declared (-> (definition options)
+                         (assoc-in [:relational-model :options :max-depth] 1)
+                         (assoc-in [:relational-model :initial-state aux-key] aux-doc)
+                         (update-in [:relational-model :families 0 :prepare]
+                                    (fn [prepare]
+                                      (fn [& args]
+                                        (update (apply prepare args) :guards
+                                                conj guard)))))
+            handle (sut/construct! declared)
+            report (modeled-operation-exercise handle)
+            claim (first (filter #(= :request/claim (:registered-operation-id %))
+                                 (:registered-operation-exercise report)))
+            instance (first (filter #(= :request/claim (:registered-operation-id %))
+                                    (:modeled-instance-exercise report)))]
+        (is (= 3 (:attempted-transitions (finite-exploration handle))))
+        (is (= 1 (:enablement-checks claim)))
+        (is (= 0 (:disabled-checks claim)))
+        (is (= 1 (:enabled-attempts claim)))
+        (is (= 0 (:committed-attempts claim)))
+        (is (= 1 (:rejected-attempts claim)))
+        (is (= (select-keys claim expected-operation-count-keys)
+               (select-keys instance expected-operation-count-keys)))
+        (is (true? (:ever-attempted-in-explored-states? claim)))
+        (is (= [] (:never-attempted-registered-operation-ids report)))
+        (is (= :not-established
+               (get-in (relational-audit handle)
+                       [:business-rule-catalog :completeness])))))))
+
+(deftest operation-exercise-summary-fails-closed-before-comparator-admission
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [declared (definition options)
+            original (relational-app/require-relational-application!
+                      (:application-options declared)
+                      (:relational-model declared))
+            counts (get-in original [:finite-relational-verdict :operation-exercise])
+            verdict (:finite-relational-verdict original)
+            mutations [(fn [result]
+                         (update-in result [:finite-relational-verdict
+                                            :operation-exercise] pop))
+                       (fn [result]
+                         (update-in result [:finite-relational-verdict
+                                            :operation-exercise 0 :operation-id]
+                                    (constantly :other/instance)))
+                       (fn [result]
+                         (update-in result [:finite-relational-verdict
+                                            :operation-exercise 0 :enabled-attempts] inc))
+                       (fn [result]
+                         (update-in result [:finite-relational-verdict
+                                            :exploration :attempted-transitions] inc))
+                       (fn [result]
+                         (update-in result [:finite-relational-verdict
+                                            :operation-exercise 0 :disabled-checks] inc))
+                       (fn [result]
+                         (update-in result [:finite-relational-verdict
+                                            :family-expansion :instances 0 :instance-id]
+                                    (constantly :other/choice)))]
+            comparator-calls (atom 0)]
+        (is (= 3 (count counts)))
+        (is (= 12 (get-in verdict [:exploration :attempted-transitions])))
+        (with-redefs [relations/build-comparator
+                      (fn [& _]
+                        (swap! comparator-calls inc)
+                        (throw (ex-info "Comparator should not run" {})))]
+          (doseq [mutate mutations]
+            (let [spoofed (mutate original)]
+              (with-redefs [relational-app/require-relational-application!
+                            (fn [& _] spoofed)]
+                (let [failure (error-data #(sut/construct! declared))]
+                  (is (= :incomplete-modeled-operation-exercise
+                         (:error/kind failure)))
+                  (is (not (contains? (:error/details failure) :initial-state)))
+                  (is (not (contains? (:error/details failure) :families)))))))
+          (is (zero? @comparator-calls)))))))
+
+(deftest reported-operation-exercise-is-inert-and-does-not-reexecute-callbacks
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [private-marker "v851-private-callback-capture"
+            calls (atom {:enabled 0 :prepare 0})
+            declared (update-in (definition options)
+                                [:relational-model :families]
+                                (fn [families]
+                                  (mapv (fn [family]
+                                          (-> family
+                                              (update :enabled?
+                                                      (fn [original]
+                                                        (fn [& args]
+                                                          (swap! calls update :enabled inc)
+                                                          (let [_ private-marker]
+                                                            (apply original args)))))
+                                              (update :prepare
+                                                      (fn [original]
+                                                        (fn [& args]
+                                                          (swap! calls update :prepare inc)
+                                                          (let [_ private-marker]
+                                                            (apply original args)))))))
+                                        families)))
+            handle (sut/construct! declared)
+            after-admission @calls
+            report (modeled-operation-exercise handle)
+            printed (pr-str (sut/explain handle))]
+        (is (pos? (:enabled after-admission)))
+        (is (pos? (:prepare after-admission)))
+        (is (= after-admission @calls))
+        (is (= report (modeled-operation-exercise handle)))
+        (is (= after-admission @calls))
+        (is (not (.contains printed private-marker)))
+        (is (not (.contains printed ":initial-state")))
+        (is (not (.contains printed "#object[")))
+        (is (= :unknown-construction
+               (error-kind #(sut/inspect report))))
+        (is (= :unknown-construction
+               (error-kind #(sut/explain report))))))))
