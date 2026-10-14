@@ -20,9 +20,9 @@
    In particular, this does NOT establish completeness of declared business
    policies, modeled documents, principals or arguments; correspondence of
    the authored family callbacks to all production behavior; or unbounded
-   invariant preservation. Initial-state vacuity is reported, not silently
-   misrepresented as proof that a relation has been exercised. A family may
-   create source documents in later states even when none exist initially.
+   invariant preservation. Both initial-state vacuity and source-matching
+   across actually explored states are reported without claiming complete
+   domains. A family may create matching documents after the initial state.
 
    Neither API executes a database transaction or invokes a real registered
    authoritative executor. Both perform bounded Clojure-model exploration;
@@ -42,6 +42,7 @@
               :full-declared-principal-argument-enumeration
               :bounded-state-dependent-relational-invariant-checking
               :explicit-initial-state-rule-vacuity-reporting
+              :actual-visited-state-source-matching-coverage
               :executor-bound-single-attempt-comparison-when-requested}
    :assumed #{:complete-and-truthful-declared-business-relationships
               :truthful-pure-total-operation-family-callbacks
@@ -77,6 +78,69 @@
              :initially-holds? (:holds? inspection)}))
         declarations))
 
+(defn- tracked-relational-rules
+  "Supply the checker with Gesso-interpreted rules while retaining only
+   aggregate source-matching observations. The checker evaluates each rule on
+   the initial state and EVERY reached state occurrence, including repeated
+   or rejected states. Observations are local to this one admission check.
+   This is diagnostic instrumentation, NOT an extra trusted policy callback."
+  [declarations]
+  ;; Fail closed on malformed/duplicate declarations before establishing
+  ;; observers, rather than hiding source-level interpretation behind a user
+  ;; predicate. The subsequent per-state inspect uses the same interpreter.
+  (relational/compile-rules declarations)
+  (let [observed (atom (into {}
+                             (map (fn [{:keys [id]}]
+                                    [id {:evaluated-state-occurrences 0
+                                         :state-occurrences-with-matching-sources 0
+                                         :matching-source-occurrences 0}]))
+                             declarations))]
+    {:rules
+     (mapv (fn [{:keys [id] :as declaration}]
+             {:id id
+              :holds? (fn [state]
+                        (let [{:keys [holds? inspected-source-count]}
+                              (relational/inspect state declaration)]
+                          (swap! observed update id
+                                 (fn [counts]
+                                   (cond-> (-> counts
+                                               (update :evaluated-state-occurrences inc)
+                                               (update :matching-source-occurrences
+                                                       + inspected-source-count))
+                                     (pos? inspected-source-count)
+                                     (update :state-occurrences-with-matching-sources
+                                             inc))))
+                          holds?))})
+           declarations)
+     :observed observed}))
+
+(defn- reachable-coverage!
+  "Read only completed checker-side counts. Check that every rule was
+   evaluated on every visited state occurrence, so a future checker change
+   cannot silently turn partial telemetry into apparent coverage evidence."
+  [verdict declarations observed]
+  (let [expected (get-in verdict [:exploration :visited-state-occurrences])
+        counts @observed]
+    (mapv (fn [{:keys [id]}]
+            (let [{:keys [evaluated-state-occurrences
+                          state-occurrences-with-matching-sources
+                          matching-source-occurrences] :as observation}
+                  (get counts id)]
+              (when-not (= expected evaluated-state-occurrences)
+                (throw (ex-info
+                        "Incomplete reachable-state relational rule observation."
+                        {:error/type ::incomplete-relational-observation
+                         :error/kind :incomplete-rule-observation
+                         :error/details {:rule-id id
+                                         :expected-state-occurrences expected
+                                         :observed-state-occurrences
+                                         evaluated-state-occurrences}})))
+              (assoc observation
+                     :rule-id id
+                     :ever-matched-source-in-explored-states?
+                     (pos? matching-source-occurrences))))
+          declarations)))
+
 (defn check-registered-relations
   "Check declared relational rules against the exact operation-ID inventory
    obtained from a freshly rechecked ApplicationAssembly.
@@ -90,15 +154,20 @@
    explored within the caller's strict depth and transition budgets.
 
    Returns the existing registry+family finite verdict, augmented with the
-   canonical declarations, initial-state rule coverage, and explicit scopes.
+   canonical declarations, initial-state rule coverage, and *visited-state*
+   source-matching totals for each rule. Counts include repeated/rejected
+   state occurrences, not unique concrete states or full predicate-branch
+   coverage. These are descriptive facts only, not proof of nonvacuity outside
+   the explored finite model, policy completeness, or implemented behavior.
    A :counterexample is a finite-model violation, not an exception. Malformed
    declarations, registry mismatches, stale assemblies and budget exhaustion
    fail closed. Passing does NOT certify actual application business rules."
   [assembly initial-state families declarations options]
-  (let [rules (relational/compile-rules declarations)
+  (let [{:keys [rules observed]} (tracked-relational-rules declarations)
         verdict (coverage/check-registered-families
                  assembly initial-state families rules options)
-        root-facts (describe-initial-rules initial-state declarations)]
+        root-facts (describe-initial-rules initial-state declarations)
+        reached-facts (reachable-coverage! verdict declarations observed)]
     (assoc verdict
            :relational-declarations declarations
            :relational-coverage
@@ -107,6 +176,11 @@
             :initial-state-rule-coverage root-facts
             :initially-unexercised-rule-ids
             (mapv :rule-id (remove :initially-exercised? root-facts))
+            :reachable-state-rule-coverage reached-facts
+            :never-matched-in-explored-states-rule-ids
+            (mapv :rule-id
+                  (remove :ever-matched-source-in-explored-states?
+                          reached-facts))
             :declaration-completeness :not-established
             :registered-executor-correspondence :not-established}
            :relational-scope relational/assurance-scope
