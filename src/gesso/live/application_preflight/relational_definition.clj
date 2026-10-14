@@ -13,7 +13,8 @@
    accept new families or rules. explain joins the admitted declared rules to
    the fresh canonical semantic audit without inventing policy completeness.
    The comparator rechecks application/current executor identity before
-   checking an observed attempt.
+   checking an observed attempt. Its explanation reports the exact admitted
+   finite exploration bounds and visitation counts, never modeled states.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -34,7 +35,8 @@
               :frozen-comparator-callback-and-rule-selection
               :executor-identity-recheck-on-observed-comparison
               :no-caller-supplied-replacement-model-at-comparison
-              :source-owned-relational-rules-in-current-semantic-explanation}
+              :source-owned-relational-rules-in-current-semantic-explanation
+              :exact-admitted-finite-exploration-scope-in-explanation}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -46,6 +48,7 @@
                       :equality-of-modeled-and-observed-initial-states
                       :all-executions-correspond-to-model
                       :unbounded-invariant-preservation
+                      :unmodeled-state-and-transition-completeness
                       :actual-xtdb-enforcement-of-business-invariants
                       :correctness-of-projection-callbacks
                       :whole-application-certification}})
@@ -75,6 +78,32 @@
     (when-not (application/application-assembly? assembly)
       (fail! :stale-application-assembly {}))
     entry))
+
+(defn- finite-exploration-summary
+  "Redact the already admitted finite verdict into a *descriptive*,
+   non-authorizing exploration boundary. NEVER return :family-expansion,
+   modeled states, prepared plans, callbacks, or untrusted verdict objects.
+   Reusing the recorded check prevents explanation from reexecuting builders.
+   A depth-limited search is complete only *through* that depth, not beyond."
+  [finite-relational-verdict]
+  (let [{:keys [kind max-depth max-transitions reached-depth
+                attempted-transitions visited-state-occurrences
+                frontier-exhausted?]} (:exploration finite-relational-verdict)]
+    {:kind kind
+     :status :fully-explored-within-declared-bounds
+     :max-depth max-depth
+     :max-transitions max-transitions
+     :reached-depth reached-depth
+     :attempted-transitions attempted-transitions
+     :visited-state-occurrences visited-state-occurrences
+     :frontier-exhausted? frontier-exhausted?
+     :depth-limited? (and (= max-depth reached-depth)
+                          (not frontier-exhausted?))
+     :modeled-operation-instance-count
+     (get-in finite-relational-verdict
+             [:registry-coverage :expanded-instance-count])
+     :domain-completeness :not-established
+     :production-correspondence :not-established}))
 
 (defn construct!
   "Admit a single declaration:
@@ -123,7 +152,9 @@
              :operation-ids operation-ids
              :declarations declarations
              :initial-rule-coverage (:initial-state-rule-coverage
-                                     relational-coverage)}))
+                                     relational-coverage)
+             :finite-exploration
+             (finite-exploration-summary finite-relational-verdict)}))
     handle))
 
 (defn inspect
@@ -149,11 +180,13 @@
 
    A forged explanation carries no admission authority. Only the opaque handle
    can retrieve this view, and every call checks the same physical artifact
-   and current application assembly used for startup and comparison. No
-   application callbacks, modeled documents, or executor handles are exposed."
+   and current application assembly used for startup and comparison. The
+   admitted exploration depth, strict budget, visits, and frontier limit are
+   made visible without reevaluating any model callback. No application
+   callbacks, modeled documents, or executor handles are exposed."
   [handle]
   (let [{:keys [assembly declarations initial-rule-coverage
-                operation-ids]} (current-construction! handle)
+                operation-ids finite-exploration]} (current-construction! handle)
         ;; application/explain derives a fresh, current semantic audit from the
         ;; actual admitted assembly; never trust a stored or caller-authored
         ;; successful application-report map.
@@ -189,6 +222,7 @@
                    :source :current-relational-definition
                    :registered-operation-ids operation-ids
                    :relational-rule-ids (mapv :id declarations)
+                   :finite-exploration finite-exploration
                    :initially-unexercised-rule-ids
                    (mapv :rule-id
                          (remove :initially-exercised? initial-rule-coverage))
