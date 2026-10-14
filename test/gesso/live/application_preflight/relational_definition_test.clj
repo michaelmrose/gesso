@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v855 regressions for source-owned relational construction and outcome gates.
+  "v860 regressions for admitted relational construction and transition trees.
 
    Preserve earlier admission, comparator, startup, and explanation tests.
    Verify that actual visited-state matching from v842 is retained by the
@@ -1637,3 +1637,286 @@
         (is (not (.contains serialized "#object[")))
         (is (= :unknown-construction
                (error-kind #(sut/explain audit))))))))
+
+
+;; v860: v859 joins the checker-owned bounded transition prefix tree to the
+;; registered operations through the admitted finite family expansion. Test
+;; the PUBLIC opaque-handle explanation and fail-before-comparator boundary,
+;; not a separately crafted explanation or a model passed by the caller.
+
+(defn- modeled-transition-tree [handle]
+  (get-in (relational-audit handle)
+          [:relational-assurance :modeled-transition-tree]))
+
+(deftest transition-tree-explanation-has-an-exact-redacted-boundary
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            tree (modeled-transition-tree handle)
+            edges (:edges tree)
+            summary (finite-exploration handle)
+            expected-edge-keys #{:node-id :parent-node-id :depth
+                                 :model-instance-id :registered-operation-id
+                                 :status}]
+        (is (= #{:kind :status :scope :root-node-id :node-count :edges
+                 :state-identity :domain-completeness
+                 :production-correspondence :not-established}
+               (set (keys tree))))
+        (is (= :bounded-reachable-transition-prefix-tree (:kind tree)))
+        (is (= :observed-in-declared-bounded-model (:status tree)))
+        (is (= :declared-finite-operation-family-reachable-states (:scope tree)))
+        (is (zero? (:root-node-id tree)))
+        (is (= 13 (:node-count tree)))
+        (is (= 12 (count edges)))
+        (is (= (:node-count tree) (:visited-state-occurrences summary)))
+        (is (= (count edges) (:attempted-transitions summary)))
+        (is (= :occurrences-not-deduplicated (:state-identity tree)))
+        (is (every? #(= expected-edge-keys (set (keys %))) edges))
+        (is (= (vec (range 1 13)) (mapv :node-id edges)))
+        (is (= :not-established (:domain-completeness tree)))
+        (is (= :not-established (:production-correspondence tree)))
+        (is (contains? (:not-established tree)
+                       :production-implementation-correspondence))))))
+
+(deftest transition-tree-preserves-exploration-order-and-parent-depths
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            edges (:edges (modeled-transition-tree handle))
+            depth-by-id (into {0 0} (map (juxt :node-id :depth)) edges)
+            registered (:registered-operation-ids (sut/inspect handle))
+            declared-order (mapv :id (get-in (definition options)
+                                             [:relational-model :families]))]
+        (is (= [1 1 1] (mapv :depth (take 3 edges))))
+        (is (= [0 0 0] (mapv :parent-node-id (take 3 edges))))
+        (is (= declared-order (mapv :registered-operation-id (take 3 edges))))
+        (is (= (set registered) (set declared-order)))
+        (is (= (vec (repeat 9 2)) (mapv :depth (drop 3 edges))))
+        (is (= (vec (mapcat #(repeat 3 %) [1 2 3]))
+               (mapv :parent-node-id (drop 3 edges))))
+        (is (every? (fn [{:keys [parent-node-id depth]}]
+                      (= (inc (get depth-by-id parent-node-id)) depth))
+                    edges))
+        (is (= #{:committed} (set (map :status edges))))
+        ;; The finite search records occurrences, not a deduplicated graph:
+        ;; paths A->B and B->A are both present.
+        (is (= 13 (count (conj (mapv :node-id edges) 0))))
+        (is (= (modeled-transition-tree handle)
+               (modeled-transition-tree handle)))))))
+
+(deftest transition-tree-uses-registered-operation-identities-and-counts
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            audit (get (relational-audit handle) :relational-assurance)
+            tree (:modeled-transition-tree audit)
+            exercise (:modeled-operation-exercise audit)
+            instances (:modeled-instance-exercise exercise)
+            mapped (into {} (map (juxt :model-instance-id
+                                      :registered-operation-id)) instances)]
+        (is (= (count instances) (count mapped)))
+        (is (every? (fn [{:keys [model-instance-id
+                                  registered-operation-id]}]
+                      (= registered-operation-id (get mapped model-instance-id)))
+                    (:edges tree)))
+        (doseq [{:keys [model-instance-id committed-attempts
+                        rejected-attempts]} instances]
+          (let [edges (filter #(= model-instance-id (:model-instance-id %))
+                              (:edges tree))]
+            (is (= committed-attempts
+                   (count (filter #(= :committed (:status %)) edges))))
+            (is (= rejected-attempts
+                   (count (filter #(= :rejected (:status %)) edges))))))
+        (is (= (set (:registered-operation-ids (sut/inspect handle)))
+               (set (map :registered-operation-id (:edges tree)))))))))
+
+(deftest completely-disabled-model-has-only-a-root-occurrence
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [declared (update-in (definition options)
+                                [:relational-model :families]
+                                (fn [families]
+                                  (mapv (fn [family]
+                                          (assoc family
+                                                 :enabled? (constantly false)
+                                                 :prepare (fn [& _]
+                                                            (throw (ex-info
+                                                                    "disabled callback ran" {})))))
+                                        families)))
+            handle (sut/construct! declared)
+            tree (modeled-transition-tree handle)
+            summary (finite-exploration handle)]
+        (is (= 0 (:root-node-id tree)))
+        (is (= 1 (:node-count tree)))
+        (is (= [] (:edges tree)))
+        (is (zero? (:attempted-transitions summary)))
+        (is (true? (:frontier-exhausted? summary)))
+        (is (= [] (filter :ever-attempted-in-explored-states?
+                          (:registered-operation-exercise
+                           (modeled-operation-exercise handle)))))))))
+
+(deftest transition-tree-respects-declared-depth-one-boundary
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [declared (assoc-in (definition options)
+                               [:relational-model :options :max-depth] 1)
+            handle (sut/construct! declared)
+            tree (modeled-transition-tree handle)
+            summary (finite-exploration handle)]
+        (is (= 4 (:node-count tree)))
+        (is (= 3 (count (:edges tree))))
+        (is (= [0 0 0] (mapv :parent-node-id (:edges tree))))
+        (is (= [1 1 1] (mapv :depth (:edges tree))))
+        (is (true? (:depth-limited? summary)))
+        (is (false? (:frontier-exhausted? summary)))
+        (is (= :not-established (:domain-completeness tree)))))))
+
+(deftest rejected-model-attempt-appears-in-tree-without-pretending-to-commit
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct!
+                    (stale-guard-definition (definition options)))
+            tree (modeled-transition-tree handle)
+            edges (:edges tree)
+            claim-edge (first (filter #(= :request/claim
+                                          (:registered-operation-id %)) edges))
+            claim-exercise (first
+                            (filter #(= :request/claim
+                                        (:registered-operation-id %))
+                                    (:registered-operation-exercise
+                                     (modeled-operation-exercise handle))))]
+        (is (= 3 (count edges)))
+        (is (= :rejected (:status claim-edge)))
+        (is (= 1 (:rejected-attempts claim-exercise)))
+        (is (zero? (:committed-attempts claim-exercise)))
+        (is (= 2 (count (filter #(= :committed (:status %)) edges))))
+        (is (= :not-established (:production-correspondence tree)))))))
+
+(deftest transition-tree-explanation-redacts-principals-arguments-and-state
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [secret-state "v860-private-state-payload"
+            secret-principal :helper/private-v860-token
+            secret-argument "v860-private-argument-token"
+            declared (-> (definition options)
+                         (assoc-in [:relational-model :initial-state
+                                    counter-key :private-token] secret-state)
+                         (assoc-in [:relational-model :families 0 :principals]
+                                   [:helper/a secret-principal])
+                         (assoc-in [:relational-model :families 0 :arguments]
+                                   [{:delta 1 :private secret-argument}])
+                         (assoc-in [:relational-model :options :max-depth] 1))
+            handle (sut/construct! declared)
+            tree (modeled-transition-tree handle)
+            rendered (pr-str tree)
+            instances (:modeled-instance-exercise
+                       (modeled-operation-exercise handle))]
+        (is (= 4 (count instances)))
+        (is (= 4 (count (:edges tree))))
+        (is (every? #(contains? % :model-instance-id) (:edges tree)))
+        (is (not (.contains rendered secret-state)))
+        (is (not (.contains rendered (name secret-principal))))
+        (is (not (.contains rendered secret-argument)))
+        (is (not (.contains rendered "#object[")))
+        (is (not (.contains rendered ":initial-state")))
+        (is (not (.contains rendered ":prepare")))
+        (is (not (.contains rendered ":arguments")))))))
+
+(deftest transition-tree-is-inert-and-not-an-admission-capability
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [calls (atom 0)
+            declared (update-in (definition options)
+                                [:relational-model :families]
+                                (fn [families]
+                                  (mapv (fn [family]
+                                          (update family :prepare
+                                                  (fn [prepare]
+                                                    (fn [& args]
+                                                      (swap! calls inc)
+                                                      (apply prepare args)))))
+                                        families)))
+            handle (sut/construct! declared)
+            before @calls
+            tree (modeled-transition-tree handle)
+            explanation (sut/explain handle)
+            forged (assoc-in explanation
+                             [:semantic-audit :relational-assurance
+                              :modeled-transition-tree :production-correspondence]
+                             :proved)]
+        (is (pos? before))
+        (is (= before @calls))
+        (is (= tree (modeled-transition-tree handle)))
+        (is (= before @calls))
+        (doseq [candidate [tree explanation forged]]
+          (is (= :unknown-construction (error-kind #(sut/explain candidate))))
+          (is (= :unknown-construction (error-kind #(sut/inspect candidate)))))
+        (is (= tree (modeled-transition-tree handle)))))))
+
+(deftest transition-tree-evidence-tampering-fails-before-physical-comparator
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [declared (definition options)
+            original (relational-app/require-relational-application!
+                      (:application-options declared)
+                      (:relational-model declared))
+            mutations [[:missing-tree #(update % :finite-relational-verdict
+                                              dissoc :transition-tree)]
+                       [:missing-edge #(update-in % [:finite-relational-verdict
+                                                     :transition-tree :edges] pop)]
+                       [:extra-edge #(update-in % [:finite-relational-verdict
+                                                   :transition-tree :edges]
+                                                conj {:node-id 99})]
+                       [:incorrect-outcome #(assoc-in % [:finite-relational-verdict
+                                                         :transition-tree :edges 0
+                                                         :status] :rejected)]
+                       [:invented-outcome #(assoc-in % [:finite-relational-verdict
+                                                        :transition-tree :edges 0
+                                                        :status] :pending)]
+                       [:forged-model-choice #(assoc-in % [:finite-relational-verdict
+                                                           :transition-tree :edges 0
+                                                           :operation-id]
+                                                        :forged/operation)]
+                       [:wrong-parent #(assoc-in % [:finite-relational-verdict
+                                                    :transition-tree :edges 1
+                                                    :parent-node-id] 999)]
+                       [:wrong-depth #(assoc-in % [:finite-relational-verdict
+                                                   :transition-tree :edges 1
+                                                   :depth] 99)]
+                       [:duplicate-node-id #(assoc-in % [:finite-relational-verdict
+                                                         :transition-tree :edges 1
+                                                         :node-id] 1)]
+                       [:incorrect-node-count #(assoc-in % [:finite-relational-verdict
+                                                             :transition-tree :node-count] 500)]
+                       [:unknown-edge-key #(assoc-in % [:finite-relational-verdict
+                                                        :transition-tree :edges 0
+                                                        :trusted?] true)]]
+            comparator-calls (atom 0)]
+        (is (= 12 (count (get-in original
+                                 [:finite-relational-verdict :transition-tree
+                                  :edges]))))
+        (with-redefs [relations/build-comparator
+                      (fn [& _]
+                        (swap! comparator-calls inc)
+                        (throw (ex-info "invalid comparator construction" {})))]
+          (doseq [[label mutation] mutations]
+            (testing (name label)
+              (with-redefs [relational-app/require-relational-application!
+                            (fn [& _] (mutation original))]
+                (let [error (error-data #(sut/construct! declared))]
+                  (is (= :incomplete-modeled-transition-tree (:error/kind error)))
+                  (is (not (contains? (:error/details error) :initial-state)))
+                  (is (not (contains? (:error/details error) :families)))))))
+          (is (zero? @comparator-calls)))))))
+
+(deftest transition-tree-explanation-rejects-stale-browser-artifacts
+  (fixture/with-closed-application
+    (fn [{:keys [options artifact-path]}]
+      (let [handle (sut/construct! (definition options))]
+        (is (= :bounded-reachable-transition-prefix-tree
+               (:kind (modeled-transition-tree handle))))
+        (spit artifact-path "v860 changed after admission\n")
+        (is (= :stale-application-assembly
+               (error-kind #(sut/explain handle))))
+        (is (= :stale-application-assembly
+               (error-kind #(sut/inspect handle))))))))
