@@ -32,7 +32,10 @@
    redacted, non-authorizing bounded MODEL transitions, not production traces.
    A genuine executor-bound comparison also identifies explored MODEL tree nodes
    with the same admitted choice and definitive physical outcome, if any. It
-   does not assert those modeled nodes have the observed XTDB starting state.
+   reconstructs each candidate's redacted MODEL prefix through the admitted
+   tree, so a candidate can be understood in its modeled predecessor context.
+   These prefixes are NOT observed physical histories, and do not establish
+   that a modeled predecessor equals the observed XTDB starting state.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -62,7 +65,8 @@
               :optional-source-owned-operation-outcome-admission-gate
               :source-bound-bounded-transition-tree-in-explanation
               :transition-tree-cross-checked-against-exercise-counts
-              :executor-bound-comparison-linked-to-bounded-model-choice-outcomes}
+              :executor-bound-comparison-linked-to-bounded-model-choice-outcomes
+              :matched-model-transition-prefix-witnesses}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -85,6 +89,7 @@
                       :modeled-transition-tree-is-not-production-execution
                       :equal-concrete-and-modeled-states-for-linked-nodes
                       :physical-execution-trace-refines-modeled-tree
+                      :modeled-prefix-witnesses-are-not-physical-history
                       :complete-real-application-state-machine}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
@@ -668,6 +673,36 @@
         (update-in [:semantic-audit :assurance-coverage]
                    into rule-coverage))))
 
+(defn- modeled-prefix-witnesses!
+  "Recover the MODEL-ONLY path from root to each matching node in the admitted
+   bounded occurrence tree. The validated tree's parent IDs point strictly to
+   earlier nodes. Only the already redacted operation IDs, outcome and depth
+   are emitted; no concrete state, inputs, guards, or callbacks are consulted.
+   This is a possible modeled predecessor history, not observed execution."
+  [transition-tree node-ids]
+  (let [root (:root-node-id transition-tree)
+        by-node (into {} (map (juxt :node-id identity))
+                      (:edges transition-tree))]
+    (mapv
+     (fn [node-id]
+       (loop [cursor node-id
+              prefix ()]
+         (if (= root cursor)
+           {:matched-node-id node-id
+            :steps (vec prefix)}
+           (let [edge (get by-node cursor)]
+             (when-not edge
+               (fail! :incomplete-modeled-transition-tree
+                      {:reason :missing-model-prefix-node
+                       :matched-node-id node-id}))
+             (recur (:parent-node-id edge)
+                    (conj prefix (select-keys
+                                  edge
+                                  [:node-id :parent-node-id :depth
+                                   :model-instance-id
+                                   :registered-operation-id :status])))))))
+     node-ids)))
+
 (defn- modeled-transition-context!
   "From an already executor-bound comparison, find only the recorded finite
    tree occurrences with the same synthetic model-choice ID and physical
@@ -677,7 +712,9 @@
    A matching preparation plan does not establish state correspondence; no
    transition candidate (including when the comparator found a counterexample)
    can change the underlying comparison status. Missing modeled occurrences
-   are likewise not grounds to reject an otherwise valid physical attempt."
+   are likewise not grounds to reject an otherwise valid physical attempt.
+   Returned prefixes describe only modeled predecessor steps, never physical
+   state, execution history, or a refinement proof."
   [operation-exercise transition-tree comparison]
   (let [instance-id (:family-instance-id comparison)
         operation-id (:operation comparison)
@@ -704,6 +741,9 @@
                  (seq candidates) :same-choice-and-outcome-explored
                  :else :same-choice-and-outcome-not-explored)
        :modeled-transition-node-ids candidates
+       :modeled-prefix-witnesses
+       (modeled-prefix-witnesses! transition-tree candidates)
+       :prefix-evidence :modeled-occurrence-tree-only
        :matching-dimensions
        (if (nil? physical-status) #{:admitted-model-choice}
            #{:admitted-model-choice :physical-outcome})
@@ -714,15 +754,17 @@
        #{:equality-of-modeled-and-observed-pretransition-state
          :stateful-refinement-of-real-execution
          :production-sequence-or-concurrency-correspondence
+         :model-prefix-is-not-observed-physical-history
          :unbounded-model-coverage}})))
 
 (defn compare!
   "Check one genuine executor-bound execution handle against the admitted
    finite family callback, without accepting replacement source declarations.
    Its :modeled-transition-context only LOCATES finite model tree occurrences
-   with the same choice and observed outcome; it does not establish equality
-   of modeled and XTDB states or change the comparator's verdict. Neither a
-   matching node nor a missing node proves production trace correspondence."
+   with the same choice and observed outcome; each matching node now carries
+   an inert, redacted prefix of MODEL-only predecessors. No prefix establishes
+   equality of modeled and XTDB states or changes the comparator's verdict.
+   Neither a matching node nor a missing node proves trace correspondence."
   [handle execution-evidence-handle]
   (let [{:keys [comparator operation-exercise transition-tree]}
         (current-construction! handle)
