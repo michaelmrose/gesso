@@ -7,8 +7,8 @@
    exploration limits, and fail-closed admission. A passing result concerns
    the enumerated abstract serial machine only; it does not establish
    authorization, operation completeness, actual XTDB behavior, or proof of
-   the host predicates themselves. v858 additionally checks the inert, redacted
-   transition tree produced by the v856 reachable checker."
+   the host predicates themselves. v858 checks the inert, redacted transition tree; v888 adds permanent
+   checks for the v887 private modeled-occurrence state witnesses."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.model.command :as command]
             [gesso.model.invariant-check :as invariant]
@@ -817,3 +817,256 @@
     (is (string? (pr-str (:transition-tree result))))
     (is (= 2 (count (get-in result [:transition-tree :edges]))))
     (is (= before [@enabled-count @prepared-count @predicate-count]))))
+
+;; v888: The v887 node-state capability is a private, process-local witness
+;; for a *modeled occurrence*, not production evidence, an exposed state
+;; snapshot, or a proof that the modeled prefix happened in production.
+(defn- v888-compare [result node-id state]
+  (invariant/compare-reachable-occurrence-state! result node-id state))
+
+(defn- v888-safe-check
+  ([operations] (v888-safe-check initial-state operations))
+  ([state operations]
+   (check state operations [(max-counter 999)]
+          {:max-depth 2 :max-transitions 8})))
+
+(defn- v888-modeled-next [operation state]
+  (:after (reference/step state ((:prepare operation) state))))
+
+(deftest v888-root-and-distinct-one-step-occurrences-test
+  (let [result (v888-safe-check [increment-one increment-two])
+        one (v888-modeled-next increment-one initial-state)
+        two (v888-modeled-next increment-two initial-state)
+        root (v888-compare result 0 initial-state)
+        first-step (v888-compare result 1 one)
+        second-step (v888-compare result 2 two)]
+    (is (= 7 (get-in result [:transition-tree :node-count])))
+    (is (= [0 0] (mapv :parent-node-id
+                       (take 2 (get-in result [:transition-tree :edges])))))
+    (is (= [1 2] (mapv :node-id
+                       (take 2 (get-in result [:transition-tree :edges])))))
+    (is (= :matches-modeled-occurrence-state (:status root)))
+    (is (= :matches-modeled-occurrence-state (:status first-step)))
+    (is (= :matches-modeled-occurrence-state (:status second-step)))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 1 two))))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 2 one))))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 1 initial-state))))))
+
+(deftest v888-nonroot-state-witnesses-follow-exact-tree-node-ids-test
+  (let [result (v888-safe-check [increment-one increment-two])
+        one (v888-modeled-next increment-one initial-state)
+        two (v888-modeled-next increment-two initial-state)
+        one-one (v888-modeled-next increment-one one)
+        one-two (v888-modeled-next increment-two one)
+        two-one (v888-modeled-next increment-one two)
+        two-two (v888-modeled-next increment-two two)
+        edges (get-in result [:transition-tree :edges])]
+    (is (= [[1 3] [1 4] [2 5] [2 6]]
+           (mapv (juxt :parent-node-id :node-id) (drop 2 edges))))
+    (doseq [[node-id expected] [[3 one-one] [4 one-two]
+                                [5 two-one] [6 two-two]]]
+      (is (= :matches-modeled-occurrence-state
+             (:status (v888-compare result node-id expected)))
+          (str "node " node-id)))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 3 two-two))))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 6 one-one))))))
+
+(deftest v888-repeated-equal-documents-remain-distinct-occurrences-test
+  (let [result (v888-safe-check [increment-one increment-two])
+        a (v888-modeled-next increment-one initial-state)
+        b (v888-modeled-next increment-two initial-state)
+        ab (v888-modeled-next increment-two a)
+        ba (v888-modeled-next increment-one b)]
+    (is (= ab ba))
+    (is (not= 4 5))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare result 4 ab))))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare result 5 ba))))
+    (is (= 4 (:model-node-id (v888-compare result 4 ba))))
+    (is (= 5 (:model-node-id (v888-compare result 5 ab))))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 3 ab))))))
+
+(deftest v888-assertion-rejected-attempt-has-unchanged-modeled-state-test
+  (let [stale-operation {:id :counter/stale-guard
+                         :enabled? (constantly true)
+                         :prepare (fn [state]
+                                    (assoc ((:prepare increment-one) state)
+                                           :guards [(command/guard
+                                                     :membership
+                                                     (assoc (get state member-target)
+                                                            :revision 999)
+                                                     version)]))}
+        result (v888-safe-check [stale-operation])
+        edges (get-in result [:transition-tree :edges])]
+    (is (= [:rejected :rejected] (mapv :status edges)))
+    (is (= [0 1] (mapv :parent-node-id edges)))
+    (is (= 3 (get-in result [:transition-tree :node-count])))
+    (doseq [node-id [0 1 2]]
+      (is (= :matches-modeled-occurrence-state
+             (:status (v888-compare result node-id initial-state)))))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 2
+                                  (v888-modeled-next increment-one initial-state)))))))
+
+(deftest v888-disabled-operation-provides-root-only-witness-test
+  (let [disabled {:id :counter/never-enabled
+                  :enabled? (constantly false)
+                  :prepare (fn [_] (throw (ex-info "must not run" {})))}
+        result (v888-safe-check [disabled])]
+    (is (= 1 (get-in result [:transition-tree :node-count])))
+    (is (= [] (get-in result [:transition-tree :edges])))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare result 0 initial-state))))
+    (is (= :invalid-occurrence-state-witness
+           (kind-of #(v888-compare result 1 initial-state))))))
+
+(deftest v888-counterexample-results-keep-their-occurrence-witness-test
+  (let [result (check initial-state [increment-one]
+                      [(max-counter 0)]
+                      {:max-depth 2 :max-transitions 2})
+        one (v888-modeled-next increment-one initial-state)
+        two (v888-modeled-next increment-one one)]
+    (is (= :counterexample (:status result)))
+    (is (= 1 (get-in result [:violations 0 :depth])))
+    (is (= 3 (get-in result [:transition-tree :node-count])))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare result 0 initial-state))))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare result 1 one))))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare result 2 two))))
+    (is (= :differs-from-modeled-occurrence-state
+           (:status (v888-compare result 2 one))))))
+
+(deftest v888-comparison-is-inert-after-reachability-exploration-test
+  (let [enable-count (atom 0)
+        prepare-count (atom 0)
+        rule-count (atom 0)
+        operation {:id :counter/observed-for-witness
+                   :enabled? (fn [_] (swap! enable-count inc) true)
+                   :prepare (fn [state]
+                              (swap! prepare-count inc)
+                              ((:prepare increment-one) state))}
+        rule {:id :counter/witness-rule
+              :holds? (fn [_] (swap! rule-count inc) true)}
+        result (check initial-state [operation] [rule]
+                      {:max-depth 2 :max-transitions 2})
+        after-check [@enable-count @prepare-count @rule-count]
+        state-one (v888-modeled-next increment-one initial-state)]
+    (is (= [2 2 3] after-check))
+    (dotimes [_ 3]
+      (is (= :matches-modeled-occurrence-state
+             (:status (v888-compare result 0 initial-state))))
+      (is (= :matches-modeled-occurrence-state
+             (:status (v888-compare result 1 state-one))))
+      (is (= :differs-from-modeled-occurrence-state
+             (:status (v888-compare result 1 initial-state)))))
+    (is (= after-check [@enable-count @prepare-count @rule-count]))))
+
+(deftest v888-witness-result-redacts-private-model-documents-test
+  (let [secret "v888-private-document-marker-4ea6c41d"
+        state (assoc-in initial-state [counter-target :secret] secret)
+        result (v888-safe-check state [increment-one])
+        status (v888-compare result 1 (v888-modeled-next increment-one state))
+        mismatched (v888-compare result 1 state)
+        surface (pr-str result)]
+    (is (= :holds-in-explored-model (:status result)))
+    (is (not (.contains surface secret)))
+    (is (not (.contains (pr-str (:transition-tree result)) secret)))
+    (is (not (.contains (pr-str status) secret)))
+    (is (not (.contains (pr-str mismatched) secret)))
+    (is (= :matches-modeled-occurrence-state (:status status)))
+    (is (= :differs-from-modeled-occurrence-state (:status mismatched)))
+    (is (= false (:state-contents-exposed? status)))
+    (is (= false (:model-callbacks-reexecuted? status)))
+    (is (not-any? #{:state :modeled-state :observed-state :document-map}
+                  (keys status)))
+    (is (= (:scope status) (:scope mismatched)))))
+
+(deftest v888-comparison-reports-limits-without-asserting-history-test
+  (let [result (v888-safe-check [increment-one])
+        answer (v888-compare result 1
+                             (v888-modeled-next increment-one initial-state))]
+    (is (= :matches-modeled-occurrence-state (:status answer)))
+    (is (= 1 (:model-node-id answer)))
+    (is (= :one-finite-modeled-occurrence-versus-caller-supplied-document-map
+           (:scope answer)))
+    (is (= :exact-clojure-domain-document-map-equality
+           (:relation answer)))
+    (doseq [key [:observed-state-authenticity
+                 :model-prefix-observed-in-production
+                 :execution-chronology
+                 :production-trace-refinement]]
+      (is (= :not-established (get answer key)) (str key)))
+    (is (= false (:state-contents-exposed? answer)))
+    (is (= false (:model-callbacks-reexecuted? answer)))
+    (is (contains? (:checked invariant/reachable-assurance-scope)
+                   :private-exact-state-witnesses-for-reachable-occurrences))
+    (is (contains? (:not-established invariant/reachable-assurance-scope)
+                   :authenticity-of-caller-supplied-observed-states))))
+
+(deftest v888-fail-closed-on-invalid-node-ids-and-detached-results-test
+  (let [result (v888-safe-check [increment-one])]
+    (doseq [node-id [-10 -1 3 999 nil :node "1" 1/2 1.0]]
+      (is (= :invalid-occurrence-state-witness
+             (kind-of #(v888-compare result node-id initial-state)))
+          (pr-str node-id)))
+    (doseq [bad-result [nil {} (dissoc result :occurrence-state-witness)
+                        (assoc result :occurrence-state-witness nil)
+                        (assoc result :occurrence-state-witness (Object.))]]
+      (is (= :invalid-occurrence-state-witness
+             (kind-of #(v888-compare bad-result 0 initial-state)))))))
+
+(deftest v888-tampering-with-any-checker-owned-field-rejects-witness-test
+  (let [result (v888-safe-check [increment-one])
+        altered [(assoc result :status :counterexample)
+                 (assoc result :violations [{:rule-id :forged/violation}])
+                 (assoc result :rule-ids [:forged/rule])
+                 (assoc-in result [:transition-tree :node-count] 99)
+                 (assoc-in result [:transition-tree :edges 0 :status] :forged)
+                 (assoc-in result [:exploration :attempted-transitions] 42)
+                 (assoc result :operation-exercise [])
+                 (assoc result :scope {})]]
+    (doseq [candidate altered]
+      (is (= :invalid-occurrence-state-witness
+             (kind-of #(v888-compare candidate 0 initial-state)))
+          (pr-str (keys candidate))))
+    (let [with-downstream-report (assoc result :downstream/assessment {:pass? false})]
+      (is (= :matches-modeled-occurrence-state
+             (:status (v888-compare with-downstream-report 0 initial-state)))))))
+
+(deftest v888-witness-handles-reject-incompatible-completed-checks-test
+  (let [first-result (v888-safe-check [increment-one])
+        second-result (v888-safe-check [increment-two])
+        one (v888-modeled-next increment-one initial-state)
+        two (v888-modeled-next increment-two initial-state)]
+    (is (not (identical? (:occurrence-state-witness first-result)
+                         (:occurrence-state-witness second-result))))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare first-result 1 one))))
+    (is (= :matches-modeled-occurrence-state
+           (:status (v888-compare second-result 1 two))))
+    (is (= :invalid-occurrence-state-witness
+           (kind-of #(v888-compare
+                      (assoc first-result :occurrence-state-witness
+                             (:occurrence-state-witness second-result))
+                      0 initial-state))))))
+
+(deftest v888-rejects-malformed-caller-state-without-guessing-equality-test
+  (let [result (v888-safe-check [increment-one])
+        invalid-states [nil [] #{:x} {[:counter :counter-1] nil}
+                        {[:counter :counter-1] {:xt/id :someone-else}}
+                        {:counter {:xt/id :counter-1}}
+                        {[nil :counter-1] {:xt/id :counter-1}}]]
+    (doseq [observed invalid-states]
+      (is (= :gesso.model.tx-model/invalid-state
+             (some-> (error-of #(v888-compare result 1 observed))
+                     ex-data :error/type))
+          (pr-str observed)))))
