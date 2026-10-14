@@ -7,7 +7,8 @@
    exploration limits, and fail-closed admission. A passing result concerns
    the enumerated abstract serial machine only; it does not establish
    authorization, operation completeness, actual XTDB behavior, or proof of
-   the host predicates themselves."
+   the host predicates themselves. v858 additionally checks the inert, redacted
+   transition tree produced by the v856 reachable checker."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.model.command :as command]
             [gesso.model.invariant-check :as invariant]
@@ -600,3 +601,219 @@
     (is (string? (pr-str (:operation-exercise result))))
     (is (= 2 @enabled-calls))
     (is (= 2 @prepare-calls))))
+
+
+;; v858: the transition tree is a redacted record of attempted *occurrences*
+;; in a finite search, not a concrete state graph, trace of production, or
+;; evidence of complete application policy. The test cases below assert the
+;; actual public tree contract without reconstructing private checker internals.
+
+(defn- tree-edges [result]
+  (get-in result [:transition-tree :edges]))
+
+(deftest transition-tree-assurance-scope-and-exact-shape-test
+  (let [result (check initial-state [increment-one] [(max-counter 9)]
+                      {:max-depth 1 :max-transitions 1})
+        tree (:transition-tree result)]
+    (is (contains? (:checked (:scope result))
+                   :redacted-bounded-transition-prefix-tree))
+    (is (contains? (:not-established (:scope result))
+                   :replay-correspondence-to-production-executors))
+    (is (contains? (:not-established (:scope result))
+                   :concrete-state-identity-or-deduplication))
+    (is (= #{:kind :root-node-id :node-count :edges :state-identity
+             :production-correspondence}
+           (set (keys tree))))
+    (is (= :bounded-reachable-transition-prefix-tree (:kind tree)))
+    (is (= 0 (:root-node-id tree)))
+    (is (= :occurrences-not-deduplicated (:state-identity tree)))
+    (is (= :not-established (:production-correspondence tree)))
+    (is (= 2 (:node-count tree)))
+    (is (vector? (:edges tree)))
+    (is (= #{:parent-node-id :node-id :depth :operation-id :status}
+           (set (keys (first (:edges tree))))))))
+
+(deftest transition-tree-linear-chain-retains-parent-and-depth-test
+  (let [result (check initial-state [increment-one] [(max-counter 9)]
+                      {:max-depth 3 :max-transitions 3})]
+    (is (= [{:parent-node-id 0 :node-id 1 :depth 1
+             :operation-id :counter/one :status :committed}
+            {:parent-node-id 1 :node-id 2 :depth 2
+             :operation-id :counter/one :status :committed}
+            {:parent-node-id 2 :node-id 3 :depth 3
+             :operation-id :counter/one :status :committed}]
+           (tree-edges result)))
+    (is (= 4 (get-in result [:transition-tree :node-count])))
+    (is (= 3 (get-in result [:exploration :attempted-transitions])))
+    (is (false? (get-in result [:exploration :frontier-exhausted?])))))
+
+(deftest transition-tree-branching-follows-breadth-first-source-order-test
+  (let [options {:max-depth 2 :max-transitions 6}
+        result (check initial-state [increment-one increment-two]
+                      [(max-counter 9)] options)
+        edges (tree-edges result)
+        second-run (check initial-state [increment-one increment-two]
+                          [(max-counter 9)] options)]
+    (is (= [0 0 1 1 2 2] (mapv :parent-node-id edges)))
+    (is (= [1 2 3 4 5 6] (mapv :node-id edges)))
+    (is (= [1 1 2 2 2 2] (mapv :depth edges)))
+    (is (= [:counter/one :counter/two
+            :counter/one :counter/two
+            :counter/one :counter/two]
+           (mapv :operation-id edges)))
+    (is (= (repeat 6 :committed) (mapv :status edges)))
+    (is (= (:transition-tree result) (:transition-tree second-run)))
+    (is (= 7 (get-in result [:transition-tree :node-count])))
+    (is (= (count edges)
+           (reduce + (map :enabled-attempts (:operation-exercise result)))))
+    ;; Distinct paths one→two and two→one reach the same *entire*
+    ;; concrete state, yet both modeled occurrences survive.
+    (let [one (:after (reference/step initial-state
+                                      ((:prepare increment-one) initial-state)))
+          two (:after (reference/step initial-state
+                                      ((:prepare increment-two) initial-state)))
+          one-two (:after (reference/step one ((:prepare increment-two) one)))
+          two-one (:after (reference/step two ((:prepare increment-one) two)))]
+      (is (= one-two two-one))
+      (is (= [[1 4] [2 5]]
+             (mapv (juxt :parent-node-id :node-id)
+                   (filter #(contains? #{4 5} (:node-id %)) edges)))))))
+
+(deftest transition-tree-does-not-invent-edges-for-disabled-operations-test
+  (let [prepare-count (atom 0)
+        disabled {:id :counter/disabled
+                  :enabled? (constantly false)
+                  :prepare (fn [_] (swap! prepare-count inc)
+                             (throw (ex-info "Unexpected preparation" {})))}
+        result (check initial-state [disabled] [(max-counter 9)]
+                      {:max-depth 6 :max-transitions 1})]
+    (is (= [] (tree-edges result)))
+    (is (= 1 (get-in result [:transition-tree :node-count])))
+    (is (= 1 (get-in result [:exploration :reached-depth])))
+    (is (true? (get-in result [:exploration :frontier-exhausted?])))
+    (is (= 0 (get-in result [:exploration :attempted-transitions])))
+    (is (zero? @prepare-count))))
+
+(deftest transition-tree-rejected-attempts-create-new-occurrences-test
+  (let [state (assoc initial-state member-target
+                     (after-document membership {:active? false}))
+        stale-guard (command/guard :membership membership version)
+        op {:id :request/rejected-claim
+            :enabled? (constantly true)
+            :prepare (fn [current]
+                       (tx-plan [(update-command :request :claim
+                                                 (get current request-target)
+                                                 {:owner :helper-a})]
+                                [stale-guard]))}
+        result (check state [op] [owner-active]
+                      {:max-depth 2 :max-transitions 2})]
+    (is (= [{:parent-node-id 0 :node-id 1 :depth 1
+             :operation-id :request/rejected-claim :status :rejected}
+            {:parent-node-id 1 :node-id 2 :depth 2
+             :operation-id :request/rejected-claim :status :rejected}]
+           (tree-edges result)))
+    (is (= 2 (get-in result [:operation-exercise 0 :rejected-attempts])))
+    (is (= 0 (get-in result [:operation-exercise 0 :committed-attempts])))
+    (is (= :holds-in-explored-model (:status result)))))
+
+(deftest transition-tree-depth-cutoff-excludes-unevaluated-children-test
+  (let [result (check initial-state [increment-one increment-two]
+                      [(max-counter 9)]
+                      {:max-depth 1 :max-transitions 2})]
+    (is (= [0 0] (mapv :parent-node-id (tree-edges result))))
+    (is (= [1 2] (mapv :node-id (tree-edges result))))
+    (is (= [1 1] (mapv :depth (tree-edges result))))
+    (is (= 3 (get-in result [:transition-tree :node-count])))
+    (is (= 1 (get-in result [:exploration :reached-depth])))
+    (is (false? (get-in result [:exploration :frontier-exhausted?])))))
+
+(deftest transition-tree-preserves-disabled-after-transition-branch-shape-test
+  (let [result (check initial-state [claim (revocation false)]
+                      [owner-active] {:max-depth 2 :max-transitions 10})]
+    (is (= [{:parent-node-id 0 :node-id 1 :depth 1
+             :operation-id :request/claim :status :committed}
+            {:parent-node-id 0 :node-id 2 :depth 1
+             :operation-id :membership/revoke :status :committed}
+            {:parent-node-id 1 :node-id 3 :depth 2
+             :operation-id :membership/revoke :status :committed}]
+           (tree-edges result)))
+    (is (= 4 (get-in result [:transition-tree :node-count])))
+    (is (= 3 (get-in result [:exploration :attempted-transitions])))
+    (is (= :counterexample (:status result)))))
+
+(deftest transition-tree-has-path-for-shortest-counterexample-test
+  (let [result (check [claim (revocation false)] [owner-active])
+        witness (violation-for result (:id owner-active))
+        edges (tree-edges result)
+        node-ids (reduce
+                  (fn [ids {:keys [operation-id status]}]
+                    (let [parent (peek ids)
+                          matching (filter #(and (= parent (:parent-node-id %))
+                                                 (= operation-id (:operation-id %))
+                                                 (= status (:status %)))
+                                           edges)]
+                      (is (= 1 (count matching)))
+                      (conj ids (:node-id (first matching)))))
+                  [0] (:trace witness))]
+    (is (= [:request/claim :membership/revoke]
+           (mapv :operation-id (:trace witness))))
+    (is (= 2 (:depth witness)))
+    (is (= 3 (count node-ids)))
+    (is (= 2 (:depth (first (filter #(= (peek node-ids) (:node-id %)) edges)))))
+    (is (= :counterexample (:status result)))))
+
+(deftest transition-tree-budget-exhaustion-never-returns-partial-tree-test
+  (let [error (error-of #(check initial-state
+                                [increment-one increment-two]
+                                [(max-counter 9)]
+                                {:max-depth 2 :max-transitions 2}))]
+    (is (instance? clojure.lang.ExceptionInfo error))
+    (is (= :exploration-budget-exhausted (:error/kind (ex-data error))))
+    (is (= 2 (get-in (ex-data error)
+                     [:error/details :attempted-transitions])))
+    (is (not (contains? (ex-data error) :transition-tree)))))
+
+(deftest transition-tree-leaves-concrete-state-and-callbacks-private-test
+  (let [secret "private-transition-tree-marker-9fd802"
+        secret-state (assoc-in initial-state [counter-target :secret] secret)
+        private-value (Object.)
+        op {:id :counter/redacted
+            :enabled? (fn [_] (let [_ private-value] true))
+            :prepare (fn [state] (let [_ private-value]
+                                   ((:prepare increment-one) state)))}
+        result (check secret-state [op] [(max-counter 9)]
+                      {:max-depth 2 :max-transitions 2})
+        tree (:transition-tree result)
+        serialized (pr-str tree)]
+    (is (= [1 2] (mapv :node-id (:edges tree))))
+    (is (not (.contains serialized secret)))
+    (is (not (.contains serialized "private-value")))
+    (is (every? (fn [edge]
+                  (= #{:parent-node-id :node-id :depth :operation-id :status}
+                     (set (keys edge))))
+                (:edges tree)))
+    (is (every? (fn [edge]
+                  (every? (complement fn?) (vals edge)))
+                (:edges tree)))
+    (is (not-any? #(identical? private-value %)
+                  (mapcat vals (:edges tree))))))
+
+(deftest reading-transition-tree-does-not-reexecute-model-functions-test
+  (let [enabled-count (atom 0)
+        prepared-count (atom 0)
+        predicate-count (atom 0)
+        op {:id :counter/observed-transition
+            :enabled? (fn [_] (swap! enabled-count inc) true)
+            :prepare (fn [state]
+                       (swap! prepared-count inc)
+                       ((:prepare increment-one) state))}
+        rule {:id :counter/observed-invariant
+              :holds? (fn [_] (swap! predicate-count inc) true)}
+        result (check initial-state [op] [rule]
+                      {:max-depth 2 :max-transitions 2})
+        before [@enabled-count @prepared-count @predicate-count]]
+    (is (= [2 2 3] before))
+    (is (= 2 (count (get-in result [:transition-tree :edges]))))
+    (is (string? (pr-str (:transition-tree result))))
+    (is (= 2 (count (get-in result [:transition-tree :edges]))))
+    (is (= before [@enabled-count @prepared-count @predicate-count]))))
