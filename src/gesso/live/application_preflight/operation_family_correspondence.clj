@@ -32,6 +32,12 @@
    authenticated database history, complete application semantics, or general
    refinement. compare-observation-pair! also compares two genuine captured
    dependency snapshots without inferring their chronology or causality.
+   For EACH executor-bound observation, a separate local reference step can
+   now start from its captured pretransaction dependency map, even when that
+   map differs from the declared finite MODEL root. This checks only whether
+   the admitted submitted domain plan, evaluated once by the PURE reference
+   model, agrees with the controlled captured after-read. It does NOT equate
+   that state with a reachable model-tree node or establish execution history.
    No business callbacks or XTDB transactions are run by this module except
    the admitted finite checks at construction time."
   (:require
@@ -57,7 +63,8 @@
               :exact-declared-principal-and-argument-choice
               :modeled-enabledness-and-submitted-transaction-plan-match
               :declared-root-vs-observed-pretransaction-state-value-equality
-              :single-root-step-vs-observed-posttransaction-dependency-values}
+              :single-root-step-vs-observed-posttransaction-dependency-values
+              :single-captured-input-step-vs-observed-posttransaction-dependency-values}
    :assumed #{:truthful-pure-total-family-and-invariant-callbacks
               :correct-current-application-assembly
               :representative-finite-initial-state-and-input-domains
@@ -69,6 +76,8 @@
                       :invariants-of-states-outside-the-finite-model
                       :equality-of-modeled-and-observed-initial-states
                       :posttransaction-equality-for-non-root-model-states
+                      :local-step-equality-is-not-reachable-model-node-equality
+                      :local-step-equality-does-not-prove-dependency-completeness
                       :authenticated-xtdb-history-or-global-isolation
                       :correctness-of-projection-callbacks
                       :unbounded-execution-refinement
@@ -169,6 +178,35 @@
           :else
           (assoc result-scope :status :differs-from-captured-posttransaction-dependencies))))))
 
+(defn- compare-captured-local-poststate!
+  "Perform the SAME pure serial reference-step check as the root-specific
+   comparison, but start from this execution's captured dependency state.
+
+   The previously verified family callback/observed plan correspondence is a
+   prerequisite for a positive result; this does not re-run the callback.
+   A matched result is about one unpinned observed before/after pair, not
+   equality with a non-root finite-model node, complete read coverage,
+   authenticated chronology, or a refinement proof. No document is returned."
+  [observation record comparison root-matched? root-poststate]
+  (let [result (if root-matched?
+                 ;; The declared root is exactly the captured before-state.
+                 ;; Reuse its already computed pure reference step instead of
+                 ;; evaluating the same step twice for a single comparison.
+                 root-poststate
+                 (let [captured-before (:initial-state observation)
+                       _ (tx-model/require-state captured-before)]
+                   (compare-root-poststate! captured-before observation record
+                                                 comparison true)))]
+    (assoc result
+           :scope :one-controlled-serial-step-from-captured-pretransaction-dependencies
+           :input-source :controlled-observation-pretransaction-dependencies
+           :declared-model-root-equality-required? false
+           :additional-model-callbacks? false
+           :additional-xtdb-reads? false
+           :complete-dependency-coverage :not-established
+           :equality-with-reachable-non-root-model-state :not-established
+           :authenticated-execution-history :not-established)))
+
 (defn build-comparator
   "Admit complete finite registered families, then return a ONE-ARGUMENT
    diagnostic comparator `(fn [opaque-execution-handle] result)`.
@@ -195,6 +233,10 @@
    excluding the durable command-result record. It performs no extra reads,
    physical submission, or application callback invocation. Neither before-
    nor after-state equality is a global snapshot, isolation or refinement proof.
+   The separate captured-local-poststate result evaluates one pure reference
+   step from THIS observation's pretransaction dependency documents even when
+   the declared finite model root differs. It is not a claimed match with a
+   non-root modeled state or the next step of an authenticated history.
 
    This is intentionally not an application startup certificate. Calling this
    again with different authored families creates a DIFFERENT diagnostic
@@ -249,13 +291,19 @@
                                 (:principal choice) (:arguments choice))
                     root-matched? (= initial-state
                                      (get-in record [:observation :initial-state]))
+                    command-record (get-in record
+                                           [:observation :submitted-incorporation :record])
                     poststate (compare-root-poststate!
                                initial-state (:observation record)
-                               (get-in record [:observation :submitted-incorporation :record])
-                               comparison root-matched?)]
+                               command-record comparison root-matched?)
+                    captured-local-poststate
+                    (compare-captured-local-poststate!
+                     (:observation record) command-record comparison
+                     root-matched? poststate)]
                 (select-keys
                  (assoc comparison
                         :declared-root-poststate-comparison poststate
+                        :captured-local-poststate-comparison captured-local-poststate
                         ;; The trusted observation supplies the captured
                         ;; dependency-document state *before* the physical
                         ;; transaction. Compare with the exact declared root;
@@ -279,6 +327,7 @@
                   :physical-status :matching-guards? :matching-commands?
                   :declared-root-state-comparison
                   :declared-root-poststate-comparison
+                  :captured-local-poststate-comparison
                   :registered-coverage :bounded-invariant-model
                   :executor-correspondence :assurance-scope])))))))))
 
