@@ -8,7 +8,8 @@
    the enumerated abstract serial machine only; it does not establish
    authorization, operation completeness, actual XTDB behavior, or proof of
    the host predicates themselves. v858 checks the inert, redacted transition tree; v888 adds permanent
-   checks for the v887 private modeled-occurrence state witnesses."
+   checks for the v887 private modeled-occurrence state witnesses; v890
+   locks down the v889 result-instance provenance binding."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.model.command :as command]
             [gesso.model.invariant-check :as invariant]
@@ -1070,3 +1071,272 @@
              (some-> (error-of #(v888-compare result 1 observed))
                      ex-data :error/type))
           (pr-str observed)))))
+
+;; v890: Permanent result-instance provenance regressions for v889. The
+;; provenance strengthens local integrity of ordinary result handling; it is
+;; not an authorization boundary against arbitrary code in the same JVM.
+(defn- v890-check
+  [state]
+  (check state [increment-one] [(max-counter 1000)]
+         {:max-depth 2 :max-transitions 2}))
+
+(defn- v890-state
+  [detail]
+  (assoc-in initial-state [counter-target :private-model-detail] detail))
+
+(defn- v890-status
+  [result node-id state]
+  (:status (v888-compare result node-id state)))
+
+(defn- v890-invalid?
+  [result node-id state]
+  (= :invalid-occurrence-state-witness
+     (kind-of #(v888-compare result node-id state))))
+
+(deftest v890-identical-redacted-verdicts-retain-distinct-provenance-test
+  (let [left-state (v890-state :left)
+        right-state (v890-state :right)
+        left (v890-check left-state)
+        right (v890-check right-state)
+        marker ::invariant/occurrence-result-provenance]
+    (is (= (dissoc left :occurrence-state-witness)
+           (dissoc right :occurrence-state-witness)))
+    (is (not (identical? left right)))
+    (is (not (identical? (:occurrence-state-witness left)
+                         (:occurrence-state-witness right))))
+    (is (some? (get (meta left) marker)))
+    (is (some? (get (meta right) marker)))
+    (is (not (identical? (get (meta left) marker)
+                         (get (meta right) marker))))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status left 0 left-state)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status right 0 right-state)))
+    (is (= :differs-from-modeled-occurrence-state
+           (v890-status left 0 right-state)))
+    (is (= :differs-from-modeled-occurrence-state
+           (v890-status right 0 left-state)))))
+
+(deftest v890-identical-public-verdict-witness-swaps-fail-at-root-and-nonroot-test
+  (let [left-state (v890-state :left)
+        right-state (v890-state :right)
+        left (v890-check left-state)
+        right (v890-check right-state)
+        exchanged-left (assoc left :occurrence-state-witness
+                              (:occurrence-state-witness right))
+        exchanged-right (assoc right :occurrence-state-witness
+                               (:occurrence-state-witness left))]
+    (is (= (dissoc left :occurrence-state-witness)
+           (dissoc right :occurrence-state-witness)))
+    (doseq [node-id [0 1 2]]
+      (is (v890-invalid? exchanged-left node-id right-state)
+          (str "exchanged right witness at node " node-id))
+      (is (v890-invalid? exchanged-right node-id left-state)
+          (str "exchanged left witness at node " node-id)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status left 1 (v888-modeled-next increment-one left-state))))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status right 1 (v888-modeled-next increment-one right-state))))))
+
+(deftest v890-two-identical-checks-still-cannot-exchange-handles-test
+  (let [a (v890-check initial-state)
+        b (v890-check initial-state)]
+    (is (= (dissoc a :occurrence-state-witness)
+           (dissoc b :occurrence-state-witness)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status a 0 initial-state)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status b 0 initial-state)))
+    (is (v890-invalid? (assoc a :occurrence-state-witness
+                             (:occurrence-state-witness b))
+                       0 initial-state))
+    (is (v890-invalid? (assoc b :occurrence-state-witness
+                             (:occurrence-state-witness a))
+                       0 initial-state))))
+
+(deftest v890-metadata-alone-cannot-be-borrowed-from-another-result-test
+  (let [a (v890-check (v890-state :a))
+        b (v890-check (v890-state :b))]
+    (is (= :matches-modeled-occurrence-state
+           (v890-status a 0 (v890-state :a))))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status b 0 (v890-state :b))))
+    (is (v890-invalid? (with-meta a (meta b)) 0 (v890-state :a)))
+    (is (v890-invalid? (with-meta b (meta a)) 0 (v890-state :b)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status a 0 (v890-state :a))))))
+
+(deftest v890-stripping-or-erasing-provenance-fails-closed-test
+  (let [result (v890-check initial-state)
+        stripped [(with-meta result nil)
+                  (with-meta result {})
+                  (into {} result)
+                  (with-meta (select-keys result (keys result)) nil)
+                  (with-meta result {:other/metadata :present})]]
+    (is (= :matches-modeled-occurrence-state
+           (v890-status result 0 initial-state)))
+    (doseq [candidate stripped]
+      (is (= (into {} result) (into {} candidate)))
+      (is (v890-invalid? candidate 0 initial-state)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status result 1 (v888-modeled-next increment-one initial-state))))))
+
+(deftest v890-ordinary-assoc-enrichment-preserves-witness-binding-test
+  (let [result (v890-check initial-state)
+        enriched (-> result
+                     (assoc :downstream/diagnostic {:status :not-established})
+                     (assoc :downstream/sequence {:checked? true}))
+        once (v888-modeled-next increment-one initial-state)]
+    (is (not (identical? result enriched)))
+    (is (identical? (::invariant/occurrence-result-provenance (meta result))
+                    (::invariant/occurrence-result-provenance (meta enriched))))
+    (is (identical? (:occurrence-state-witness result)
+                    (:occurrence-state-witness enriched)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status enriched 0 initial-state)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status enriched 1 once)))
+    (is (= :differs-from-modeled-occurrence-state
+           (v890-status enriched 1 initial-state)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status result 1 once)))))
+
+(deftest v890-updates-and-removal-of-extra-reports-preserve-binding-test
+  (let [result (v890-check initial-state)
+        enriched (-> result
+                     (assoc :downstream/status :unknown)
+                     (update :downstream/status (constantly :checked))
+                     (dissoc :downstream/status))]
+    (is (= result enriched))
+    (is (not (identical? result enriched)))
+    (is (identical? (::invariant/occurrence-result-provenance (meta result))
+                    (::invariant/occurrence-result-provenance (meta enriched))))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status enriched 0 initial-state)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status enriched 2
+                        (v888-modeled-next
+                         increment-one
+                         (v888-modeled-next increment-one initial-state)))))))
+
+(deftest v890-provenance-does-not-override-original-verdict-field-integrity-test
+  (let [result (v890-check initial-state)
+        candidates [(assoc result :status :counterexample)
+                    (assoc-in result [:transition-tree :node-count] 999)
+                    (assoc-in result [:transition-tree :edges 0 :status] :forged)
+                    (assoc result :scope {:false :scope})
+                    (assoc result :exploration {})]]
+    (is (= :matches-modeled-occurrence-state
+           (v890-status result 0 initial-state)))
+    (doseq [candidate candidates]
+      (is (identical? (::invariant/occurrence-result-provenance (meta result))
+                      (::invariant/occurrence-result-provenance (meta candidate))))
+      (is (v890-invalid? candidate 0 initial-state)))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status result 0 initial-state)))))
+
+(deftest v890-counterexample-results-also-bind-witness-to-origin-test
+  (let [a-state (v890-state :a)
+        b-state (v890-state :b)
+        check-counterexample (fn [state]
+                               (check state [increment-one] [(max-counter 0)]
+                                      {:max-depth 2 :max-transitions 2}))
+        a (check-counterexample a-state)
+        b (check-counterexample b-state)]
+    (is (= :counterexample (:status a)))
+    (is (= :counterexample (:status b)))
+    ;; Counterexample results deliberately include concrete failure traces,
+    ;; unlike their otherwise equivalent redacted exploration trees.
+    (is (= (select-keys a [:status :rule-ids :operation-exercise
+                           :transition-tree :exploration :scope])
+           (select-keys b [:status :rule-ids :operation-exercise
+                           :transition-tree :exploration :scope])))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status a 1 (v888-modeled-next increment-one a-state))))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status b 1 (v888-modeled-next increment-one b-state))))
+    (is (v890-invalid? (assoc a :occurrence-state-witness
+                             (:occurrence-state-witness b))
+                       1 (v888-modeled-next increment-one b-state)))
+    (is (v890-invalid? (assoc b :occurrence-state-witness
+                             (:occurrence-state-witness a))
+                       1 (v888-modeled-next increment-one a-state)))))
+
+(deftest v890-disabled-operations-issue-separate-root-only-provenance-test
+  (let [disabled {:id :counter/never
+                  :enabled? (constantly false)
+                  :prepare (fn [_] (throw (ex-info "disabled" {})))}
+        a (check (v890-state :a) [disabled] [(max-counter 1000)] opts)
+        b (check (v890-state :b) [disabled] [(max-counter 1000)] opts)]
+    (is (= (dissoc a :occurrence-state-witness)
+           (dissoc b :occurrence-state-witness)))
+    (is (= 1 (get-in a [:transition-tree :node-count])))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status a 0 (v890-state :a))))
+    (is (= :matches-modeled-occurrence-state
+           (v890-status b 0 (v890-state :b))))
+    (is (v890-invalid? (assoc a :occurrence-state-witness
+                             (:occurrence-state-witness b))
+                       0 (v890-state :b)))
+    (is (v890-invalid? (assoc b :occurrence-state-witness
+                             (:occurrence-state-witness a))
+                       0 (v890-state :a)))))
+
+(deftest v890-provenance-checks-run-no-additional-model-callbacks-test
+  (let [prepare-count (atom 0)
+        enabled-count (atom 0)
+        operation (-> increment-one
+                      (update :prepare (fn [prepare]
+                                         (fn [state]
+                                           (swap! prepare-count inc)
+                                           (prepare state))))
+                      (assoc :enabled? (fn [_]
+                                         (swap! enabled-count inc)
+                                         true)))
+        state-a (v890-state :a)
+        state-b (v890-state :b)
+        a (check state-a [operation] [(max-counter 1000)] {:max-depth 2 :max-transitions 2})
+        b (check state-b [operation] [(max-counter 1000)] {:max-depth 2 :max-transitions 2})
+        before [@prepare-count @enabled-count]
+        forged (assoc a :occurrence-state-witness
+                      (:occurrence-state-witness b))]
+    (is (= [4 4] before))
+    (dotimes [_ 3]
+      (is (= :matches-modeled-occurrence-state
+             (v890-status a 0 state-a)))
+      (is (v890-invalid? forged 0 state-b))
+      (is (v890-invalid? (with-meta a nil) 0 state-a)))
+    (is (= before [@prepare-count @enabled-count]))))
+
+(deftest v890-failed-provenance-checks-redact-modeled-state-test
+  (let [secret "v890-private-witness-data-0f68c6"
+        state (v890-state secret)
+        a (v890-check state)
+        b (v890-check (v890-state :other))
+        invalid (error-of #(v888-compare
+                            (assoc a :occurrence-state-witness
+                                   (:occurrence-state-witness b))
+                            0 state))
+        result (v888-compare a 0 state)]
+    (is (instance? clojure.lang.ExceptionInfo invalid))
+    (is (= :invalid-occurrence-state-witness
+           (:error/kind (ex-data invalid))))
+    (doseq [surface [(pr-str a)
+                     (pr-str b)
+                     (pr-str result)
+                     (pr-str (ex-data invalid))]]
+      (is (not (.contains surface secret))))
+    (is (= false (:state-contents-exposed? result)))
+    (is (= false (:model-callbacks-reexecuted? result)))))
+
+(deftest v890-provenance-validity-is-not-production-state-authenticity-test
+  (let [a (v890-check initial-state)
+        same (v888-compare a 1 (v888-modeled-next increment-one initial-state))
+        different (v888-compare a 1 initial-state)]
+    (is (= :matches-modeled-occurrence-state (:status same)))
+    (is (= :differs-from-modeled-occurrence-state (:status different)))
+    (doseq [report [same different]]
+      (is (= :not-established (:observed-state-authenticity report)))
+      (is (= :not-established (:model-prefix-observed-in-production report)))
+      (is (= :not-established (:execution-chronology report)))
+      (is (= :not-established (:production-trace-refinement report))))))
