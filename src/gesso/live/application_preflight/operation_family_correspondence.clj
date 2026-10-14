@@ -21,9 +21,12 @@
    run need not have started from the observed XTDB state. Each comparison now
    separately reports whether the declared finite ROOT state exactly equals
    the captured pre-transaction document map of this one controlled attempt;
-   no modeled transitions are replayed and no state data are disclosed. Such
-   equality is about the captured dependency documents, not a pinned XTDB
-   snapshot, another reachable state, or the physical execution history.
+   no modeled transitions are replayed and no state data are disclosed. A
+   pure single-step reference comparison can also report whether the final
+   captured dependency documents equal the modeled root's after-state, after
+   excluding the separate durable command-result record. Such equality is
+   about controlled unpinned reads, not a pinned XTDB snapshot, another
+   reachable state, or the physical execution history.
    The final result is local diagnostic evidence for ONE observed attempt,
    not a proof certificate,
    authenticated database history, complete application semantics, or general
@@ -36,7 +39,10 @@
    [gesso.live.application-preflight.operation-family-coverage :as coverage]
    [gesso.live.optimistic.resolution-assurance :as execution]
    [gesso.model.operation-family :as families]
-   [gesso.model.resolution-event-observation :as correspondence]))
+   [gesso.model.resolution-event-observation :as correspondence]
+   [gesso.model.tx-model :as tx-model]
+   [gesso.model.command :as command]
+   [gesso.model.command-resolution :as resolution]))
 
 (def assurance-scope
   {:checker :gesso.live.application-preflight.operation-family-correspondence/registered-attempt-v1
@@ -48,7 +54,8 @@
               :exact-executor-bound-physical-evidence-handle
               :exact-declared-principal-and-argument-choice
               :modeled-enabledness-and-submitted-transaction-plan-match
-              :declared-root-vs-observed-pretransaction-state-value-equality}
+              :declared-root-vs-observed-pretransaction-state-value-equality
+              :single-root-step-vs-observed-posttransaction-dependency-values}
    :assumed #{:truthful-pure-total-family-and-invariant-callbacks
               :correct-current-application-assembly
               :representative-finite-initial-state-and-input-domains
@@ -59,6 +66,7 @@
                       :correctness-or-completeness-of-business-policy-guards
                       :invariants-of-states-outside-the-finite-model
                       :equality-of-modeled-and-observed-initial-states
+                      :posttransaction-equality-for-non-root-model-states
                       :authenticated-xtdb-history-or-global-isolation
                       :correctness-of-projection-callbacks
                       :unbounded-execution-refinement
@@ -106,6 +114,59 @@
       (and (identity/principal? observed)
            (= declared (identity/raw-value observed)))))
 
+(defn- compare-root-poststate!
+  "Compare exactly ONE serial reference step against the final dependency
+   documents captured by the same trusted controlled execution. The observed
+   durable command-result document is separate from the domain plan and must
+   not be confused with a modeled domain write.
+
+   Never replay model callbacks, read XTDB, or expose documents. Equality is
+   reported only when the declared model root matches the captured before
+   snapshot, its family plan matches the physical submitted domain plan, and
+   the reference/physical outcome agrees. This is not a pinned snapshot,
+   proof of isolation, or correspondence for non-root model transitions."
+  [root-state observation record comparison root-matched?]
+  (let [physical (:physical-status comparison)
+        result-scope {:scope :one-controlled-serial-root-step-vs-captured-dependencies
+                      :relation :exact-clojure-domain-document-map-equality
+                      :poststate-data-exposed? false
+                      :pinned-xtdb-snapshot :not-established
+                      :production-trace-refinement :not-established}]
+    (cond
+      (not= :matched (:status comparison))
+      (assoc result-scope :status :submitted-plan-not-matched)
+
+      (not root-matched?)
+      (assoc result-scope :status :declared-root-not-established-equal-to-observation)
+
+      (not (#{:committed :rejected} physical))
+      (assoc result-scope :status :physical-outcome-not-reported)
+
+      :else
+      (let [submitted (tx-model/admitted-plan
+                       (get-in observation [:submitted-incorporation :plan]))
+            ;; The exact canonical durable record create is validated by the
+            ;; controlled family comparator before this function is called.
+            domain (tx-model/admitted-plan
+                    (update submitted :commands
+                            (fn [commands]
+                              (filterv #(not= resolution/command-entity-type
+                                               (first (command/target %)))
+                                       commands))))
+            step (tx-model/step root-state domain)
+            actual-state (get-in observation [:observations :state])
+            _ (tx-model/require-state actual-state)
+            command-target [resolution/command-entity-type (:xt/id record)]]
+        (cond
+          (not= physical (:status step))
+          (assoc result-scope :status :modeled-and-physical-outcomes-disagree)
+
+          (= (:after step) (dissoc actual-state command-target))
+          (assoc result-scope :status :matches-captured-posttransaction-dependencies)
+
+          :else
+          (assoc result-scope :status :differs-from-captured-posttransaction-dependencies))))))
+
 (defn build-comparator
   "Admit complete finite registered families, then return a ONE-ARGUMENT
    diagnostic comparator `(fn [opaque-execution-handle] result)`.
@@ -126,6 +187,12 @@
    comparison is redacted and does not replay models or equate arbitrary
    reachable tree nodes with XTDB. A matched root is NOT evidence of pinned
    snapshots, authenticated history, or subsequent trace refinement.
+
+   An additional root-poststate result compares the existing controlled
+   after-read to one reference step of the admitted submitted domain plan,
+   excluding the durable command-result record. It performs no extra reads,
+   physical submission, or application callback invocation. Neither before-
+   nor after-state equality is a global snapshot, isolation or refinement proof.
 
    This is intentionally not an application startup certificate. Calling this
    again with different authored families creates a DIFFERENT diagnostic
@@ -177,17 +244,23 @@
                     comparison (correspondence/compare-family-preparation
                                 (:observation record)
                                 (select-keys family [:enabled? :prepare])
-                                (:principal choice) (:arguments choice))]
+                                (:principal choice) (:arguments choice))
+                    root-matched? (= initial-state
+                                     (get-in record [:observation :initial-state]))
+                    poststate (compare-root-poststate!
+                               initial-state (:observation record)
+                               (get-in record [:observation :submitted-incorporation :record])
+                               comparison root-matched?)]
                 (select-keys
                  (assoc comparison
+                        :declared-root-poststate-comparison poststate
                         ;; The trusted observation supplies the captured
                         ;; dependency-document state *before* the physical
                         ;; transaction. Compare with the exact declared root;
                         ;; do not infer this from an operation/outcome match
                         ;; in the separately explored finite tree.
                         :declared-root-state-comparison
-                        {:status (if (= initial-state
-                                        (get-in record [:observation :initial-state]))
+                        {:status (if root-matched?
                                    :matches-captured-pretransaction-state
                                    :differs-from-captured-pretransaction-state)
                          :relation :exact-clojure-state-map-equality
@@ -203,5 +276,6 @@
                  [:status :reason :operation :family-instance-id
                   :physical-status :matching-guards? :matching-commands?
                   :declared-root-state-comparison
+                  :declared-root-poststate-comparison
                   :registered-coverage :bounded-invariant-model
                   :executor-correspondence :assurance-scope])))))))))
