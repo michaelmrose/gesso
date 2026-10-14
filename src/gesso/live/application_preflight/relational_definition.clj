@@ -15,7 +15,10 @@
    The comparator rechecks application/current executor identity before
    checking an observed attempt. Its explanation reports the exact admitted
    finite exploration bounds, visitation counts, and per-rule source matching
-   across visited states, never modeled states.
+   across visited states, never modeled states. An optional, source-owned
+   :require-exercised-rule-ids gate rejects an admitted model if any named
+   rule never matches a source in the explored states; it does not establish
+   domain completeness or guarantee those rules are exercised in production.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -38,7 +41,8 @@
               :no-caller-supplied-replacement-model-at-comparison
               :source-owned-relational-rules-in-current-semantic-explanation
               :exact-admitted-finite-exploration-scope-in-explanation
-              :source-matching-coverage-over-visited-model-states}
+              :source-matching-coverage-over-visited-model-states
+              :optional-source-owned-rule-exercise-admission-gate}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -53,9 +57,11 @@
                       :unmodeled-state-and-transition-completeness
                       :actual-xtdb-enforcement-of-business-invariants
                       :correctness-of-projection-callbacks
-                      :whole-application-certification}})
+                      :whole-application-certification
+                      :rule-exercise-does-not-establish-all-predicate-branches}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
+(def ^:private optional-definition-key :require-exercised-rule-ids)
 
 ;; Weak keys avoid keeping a discarded development-generation alive. No stored
 ;; value may reference the handle; the identity-bearing Object itself is the
@@ -107,15 +113,47 @@
      :domain-completeness :not-established
      :production-correspondence :not-established}))
 
+(defn- require-exercised-rules!
+  "Reject an explicit, source-owned coverage obligation when its declared
+   rules never have matching source documents in the actual explored states.
+   This is a bounded nonvacuity gate, NOT completeness of predicates, input
+   domains, operation families, or the real database. Never leak documents."
+  [required-ids declarations relational-coverage]
+  (let [declared (set (map :id declarations))]
+    (when-not (every? declared required-ids)
+      (fail! :unknown-required-rule-ids
+             {:unknown-rule-ids (->> required-ids
+                                     (remove declared)
+                                     (sort-by pr-str)
+                                     vec)}))
+    (let [reachable (:reachable-state-rule-coverage relational-coverage)
+          reached-by-id (into {} (map (juxt :rule-id identity)) reachable)]
+      (when-not (and (= declared (set (keys reached-by-id)))
+                     (= (count declared) (count reachable)))
+        (fail! :incomplete-relational-coverage
+               {:declared-rule-ids (mapv :id declarations)}))
+      (let [unexercised (->> declarations
+                             (map :id)
+                             (filter required-ids)
+                             (remove #(true? (:ever-matched-source-in-explored-states?
+                                              (get reached-by-id %))))
+                             vec)]
+        (when (seq unexercised)
+          (fail! :required-relational-rules-unexercised
+                 {:unexercised-rule-ids unexercised
+                  :scope :declared-bounded-explored-states}))))))
+
 (defn construct!
   "Admit a single declaration:
 
      {:application-options <canonical ApplicationAssembly options>
       :relational-model {:initial-state ... :families ...
-                         :declarations ... :options ...}}
+                         :declarations ... :options ...}
+      :require-exercised-rule-ids #{:request/owner-membership-active}}
 
    Validate the canonical assembly, exactly cover the registered operations,
-   exhaustively check declared finite relations, and bind the admitted callbacks
+   exhaustively check declared finite relations, optionally require selected
+   rules to match a source in the explored model, and bind the admitted callbacks
    to the actual registered executors for subsequent diagnostic comparisons.
 
    Returns an opaque PROCESS-LOCAL handle. No raw state, callbacks, or command
@@ -124,16 +162,29 @@
    construction, rather than editing or replacing a report in place."
   [definition]
   (when-not (and (map? definition)
-                 (= definition-keys (set (keys definition))))
+                 (= definition-keys
+                    (disj (set (keys definition)) optional-definition-key)))
     (fail! :invalid-definition
            {:required-keys definition-keys
+            :optional-key optional-definition-key
             :provided-keys (when (map? definition)
                              (set (keys definition)))}))
-  (let [{:keys [application-options relational-model]} definition
+  (let [required (get definition optional-definition-key #{})]
+    (when-not (and (set? required)
+                   (every? qualified-keyword? required))
+      (fail! :invalid-required-rule-ids
+             {:required-form :set-of-qualified-rule-ids})))
+  (let [{:keys [application-options relational-model
+                require-exercised-rule-ids]} definition
+        required (get definition optional-definition-key #{})
         {:keys [application-assembly finite-relational-verdict]}
         (relational-app/require-relational-application!
          application-options relational-model)
         {:keys [initial-state families declarations options]} relational-model
+        relational-coverage (:relational-coverage finite-relational-verdict)
+        ;; Check source-owned exercise obligations BEFORE building the second
+        ;; comparator. A failing obligation can never produce an opaque handle.
+        _ (require-exercised-rules! required declarations relational-coverage)
         ;; Constructed from the *same* assembly and declarations. This repeats
         ;; the finite check (and thus assumes deterministic pure callbacks),
         ;; but also creates the bound physical-comparison capability before
@@ -141,7 +192,6 @@
         comparator (relations/build-comparator
                     application-assembly initial-state families declarations
                     options)
-        relational-coverage (:relational-coverage finite-relational-verdict)
         rule-ids (:rule-ids relational-coverage)
         operation-ids (get-in finite-relational-verdict
                               [:registry-coverage :registered-operation-ids])
@@ -153,6 +203,8 @@
              :rule-ids rule-ids
              :operation-ids operation-ids
              :declarations declarations
+             :required-exercised-rule-ids
+             (->> declarations (map :id) (filter required) vec)
              :initial-rule-coverage (:initial-state-rule-coverage
                                      relational-coverage)
              :reachable-rule-coverage (:reachable-state-rule-coverage
@@ -190,7 +242,8 @@
    callbacks, modeled documents, or executor handles are exposed."
   [handle]
   (let [{:keys [assembly declarations initial-rule-coverage
-                reachable-rule-coverage operation-ids finite-exploration]}
+                reachable-rule-coverage operation-ids finite-exploration
+                required-exercised-rule-ids]}
         (current-construction! handle)
         ;; application/explain derives a fresh, current semantic audit from the
         ;; actual admitted assembly; never trust a stored or caller-authored
@@ -247,6 +300,11 @@
                    :registered-operation-ids operation-ids
                    :relational-rule-ids (mapv :id declarations)
                    :finite-exploration finite-exploration
+                   :required-exercised-rule-ids required-exercised-rule-ids
+                   :rule-exercise-gate
+                   (if (seq required-exercised-rule-ids)
+                     :required-rules-matched-in-explored-model
+                     :not-requested)
                    :initially-unexercised-rule-ids
                    (mapv :rule-id
                          (remove :initially-exercised? initial-rule-coverage))
