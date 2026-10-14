@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v860 regressions for admitted relational construction and transition trees.
+  "v862 regressions for admitted relational construction and comparison links.
 
    Preserve earlier admission, comparator, startup, and explanation tests.
    Verify that actual visited-state matching from v842 is retained by the
@@ -1920,3 +1920,231 @@
                (error-kind #(sut/explain handle))))
         (is (= :stale-application-assembly
                (error-kind #(sut/inspect handle))))))))
+
+
+;; v862: v861's compare! adds a NON-AUTHORIZING link from executor-bound
+;; comparison metadata to nodes already visited by the admitted finite model.
+;; For these integration tests, stub ONLY the downstream physical comparator;
+;; the application assembly, opaque handle, finite checker, registry identities,
+;; and tree are all genuine. These stubs are NOT physical XTDB evidence tests.
+
+(defn- with-stubbed-transition-comparison
+  [make-declaration f]
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [physical-comparison (atom nil)
+            comparator-calls (atom 0)
+            comparator-evidence (atom [])]
+        (with-redefs [relations/build-comparator
+                      (fn [& _]
+                        (fn [evidence]
+                          (swap! comparator-calls inc)
+                          (swap! comparator-evidence conj evidence)
+                          @physical-comparison))]
+          (let [handle (sut/construct! (make-declaration options))
+                tree (modeled-transition-tree handle)]
+            (f {:handle handle
+                :tree tree
+                :physical-comparison physical-comparison
+                :comparator-calls comparator-calls
+                :comparator-evidence comparator-evidence})))))))
+
+(defn- comparison-for-edge
+  [edge]
+  {:status :matched
+   :reason :exact-observed-domain-plan-match
+   :operation (:registered-operation-id edge)
+   :family-instance-id (:model-instance-id edge)
+   :physical-status (:status edge)})
+
+(deftest physical-comparison-locates-exact-admitted-choice-and-outcome-occurrences
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison comparator-calls
+                 comparator-evidence]}]
+      (let [edge (first (:edges tree))
+            stub-result (comparison-for-edge edge)
+            expected-nodes (->> (:edges tree)
+                                (filter #(and (= (:model-instance-id edge)
+                                                 (:model-instance-id %))
+                                              (= (:status edge) (:status %))))
+                                (mapv :node-id))
+            evidence (Object.)]
+        (reset! physical-comparison stub-result)
+        (let [result (sut/compare! handle evidence)
+              context (:modeled-transition-context result)]
+          (is (= stub-result (dissoc result :modeled-transition-context)))
+          (is (= :same-choice-and-outcome-explored (:status context)))
+          (is (= expected-nodes (:modeled-transition-node-ids context)))
+          (is (= #{:admitted-model-choice :physical-outcome}
+                 (:matching-dimensions context)))
+          (is (= :declared-finite-operation-family-reachable-states
+                 (:scope context)))
+          (is (= :not-established
+                 (:modeled-state-equals-observed-state? context)))
+          (is (= :not-established (:production-trace-refinement context)))
+          (is (contains? (:not-established context)
+                         :production-sequence-or-concurrency-correspondence))
+          (is (= 1 @comparator-calls))
+          (is (identical? evidence (first @comparator-evidence))))))))
+
+(deftest comparison-matches-the-synthetic-choice-not-just-operation-name
+  (with-stubbed-transition-comparison
+    (fn [options]
+      (-> (definition options)
+          (assoc-in [:relational-model :families 0 :principals]
+                    [:helper/a :helper/hidden-b])))
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [claim-edges (filterv #(= :request/claim
+                                    (:registered-operation-id %))
+                                 (:edges tree))
+            choices (distinct (map :model-instance-id claim-edges))]
+        (is (= 2 (count choices)))
+        (doseq [instance-id choices]
+          (let [edge (first (filter #(= instance-id (:model-instance-id %))
+                                    claim-edges))
+                expected (->> claim-edges
+                              (filter #(and (= instance-id (:model-instance-id %))
+                                            (= :committed (:status %))))
+                              (mapv :node-id))]
+            (reset! physical-comparison (comparison-for-edge edge))
+            (is (= expected
+                   (get-in (sut/compare! handle (Object.))
+                           [:modeled-transition-context
+                            :modeled-transition-node-ids])))))))))
+
+(deftest comparator-match-with-unexplored-outcome-keeps-comparison-verdict
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            other-outcome (if (= :committed (:status edge)) :rejected :committed)
+            stub-result (assoc (comparison-for-edge edge)
+                               :physical-status other-outcome)]
+        (reset! physical-comparison stub-result)
+        (let [result (sut/compare! handle (Object.))
+              context (:modeled-transition-context result)]
+          (is (= stub-result (dissoc result :modeled-transition-context)))
+          (is (= :matched (:status result)))
+          (is (= :same-choice-and-outcome-not-explored (:status context)))
+          (is (= [] (:modeled-transition-node-ids context)))
+          (is (= #{:admitted-model-choice :physical-outcome}
+                 (:matching-dimensions context)))
+          (is (= :not-established (:production-trace-refinement context))))))))
+
+(deftest comparator-counterexample-without-physical-outcome-remains-a-counterexample
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            stub-result (-> (comparison-for-edge edge)
+                            (dissoc :physical-status)
+                            (assoc :status :counterexample
+                                   :reason :actual-execution-while-model-disabled))]
+        (reset! physical-comparison stub-result)
+        (let [result (sut/compare! handle (Object.))
+              context (:modeled-transition-context result)]
+          (is (= stub-result (dissoc result :modeled-transition-context)))
+          (is (= :counterexample (:status result)))
+          (is (= :physical-outcome-not-reported (:status context)))
+          (is (= [] (:modeled-transition-node-ids context)))
+          (is (= #{:admitted-model-choice} (:matching-dimensions context)))
+          (is (= :not-established
+                 (:modeled-state-equals-observed-state? context))))))))
+
+(deftest physically-rejected-outcome-links-to-a-rejected-modeled-occurrence
+  (with-stubbed-transition-comparison
+    (fn [options] (stale-guard-definition (definition options)))
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [rejected (filterv #(= :rejected (:status %)) (:edges tree))
+            edge (first rejected)]
+        (is (seq rejected))
+        (reset! physical-comparison (comparison-for-edge edge))
+        (let [result (sut/compare! handle (Object.))
+              context (:modeled-transition-context result)]
+          (is (= :matched (:status result)))
+          (is (= :same-choice-and-outcome-explored (:status context)))
+          (is (= (mapv :node-id
+                       (filter #(= (:model-instance-id edge)
+                                   (:model-instance-id %)) rejected))
+                 (:modeled-transition-node-ids context)))
+          (is (= :not-established (:production-trace-refinement context))))))))
+
+(deftest executor-bound-identity-mismatch-rejects-a-forged-comparison
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison comparator-calls]}]
+      (let [edge (first (:edges tree))
+            correct (comparison-for-edge edge)]
+        (doseq [mutant [(assoc correct :operation :invented/operation)
+                        (assoc correct :operation nil)
+                        (assoc correct :family-instance-id :invented/choice)
+                        (assoc correct :family-instance-id nil)
+                        (dissoc correct :family-instance-id)]]
+          (reset! physical-comparison mutant)
+          (is (= :invalid-execution-transition-identity
+                 (error-kind #(sut/compare! handle (Object.))))))
+        (is (= 5 @comparator-calls))))))
+
+(deftest unsupported-physical-outcomes-fail-closed-without-promoting-unknown
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            correct (comparison-for-edge edge)]
+        (doseq [invalid [:pending :unknown :aborted "committed" false]]
+          (reset! physical-comparison (assoc correct :physical-status invalid))
+          (is (= :invalid-execution-transition-identity
+                 (error-kind #(sut/compare! handle (Object.))))))
+        ;; A genuinely missing outcome is not the same as a made-up outcome.
+        (reset! physical-comparison (assoc correct :physical-status nil))
+        (is (= :physical-outcome-not-reported
+               (get-in (sut/compare! handle (Object.))
+                       [:modeled-transition-context :status])))))))
+
+(deftest modeled-transition-link-is-redacted-inert-and-non-authorizing
+  (with-stubbed-transition-comparison
+    (fn [options]
+      (-> (definition options)
+          (assoc-in [:relational-model :initial-state counter-key :private]
+                    "v862-secret-state")
+          (assoc-in [:relational-model :families 0 :principals]
+                    [:helper/v862-secret-principal])
+          (assoc-in [:relational-model :families 0 :arguments]
+                    [{:delta 1 :private "v862-secret-argument"}])))
+    (fn [{:keys [handle tree physical-comparison comparator-calls]}]
+      (let [edge (first (:edges tree))
+            comparison (comparison-for-edge edge)]
+        (reset! physical-comparison comparison)
+        (let [first-result (sut/compare! handle (Object.))
+              context (:modeled-transition-context first-result)
+              serialized (pr-str context)
+              forged (assoc context :production-trace-refinement :proved)]
+          (is (= 1 @comparator-calls))
+          (is (= context (:modeled-transition-context
+                          (sut/compare! handle (Object.)))))
+          (is (= 2 @comparator-calls))
+          (is (not (.contains serialized "v862-secret-state")))
+          (is (not (.contains serialized "v862-secret-principal")))
+          (is (not (.contains serialized "v862-secret-argument")))
+          (is (not (.contains serialized "#object[")))
+          (is (not (.contains serialized ":initial-state")))
+          (is (not (.contains serialized ":prepare")))
+          (is (= :unknown-construction (error-kind #(sut/explain context))))
+          (is (= :unknown-construction (error-kind #(sut/inspect forged))))
+          (is (= :unknown-construction
+                 (error-kind #(sut/compare! forged (Object.))))))))))
+
+(deftest current-assembly-is-required-before-comparison-or-transition-linking
+  (fixture/with-closed-application
+    (fn [{:keys [options artifact-path]}]
+      (let [calls (atom 0)]
+        (with-redefs [relations/build-comparator
+                      (fn [& _]
+                        (fn [_] (swap! calls inc)
+                          (throw (ex-info "Must not compare stale assembly" {}))))]
+          (let [handle (sut/construct! (definition options))]
+            (spit artifact-path "v862 stale browser artifact\n")
+            (is (= :stale-application-assembly
+                   (error-kind #(sut/compare! handle (Object.)))))
+            (is (zero? @calls))))))))
