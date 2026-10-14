@@ -91,7 +91,8 @@
               :controlled-local-root-step-before-and-after-observation
               :caller-ordered-executor-observations-vs-bounded-model-path
               :opt-in-captured-adjacency-comparison-for-modeled-sequences
-              :first-controlled-root-step-anchor-for-modeled-sequences}
+              :first-controlled-root-step-anchor-for-modeled-sequences
+              :per-observation-captured-local-step-checks-for-modeled-sequences}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -121,7 +122,8 @@
                       :modeled-path-is-not-observed-state-continuity
                       :equal-captured-adjacencies-do-not-establish-chronology
                       :captured-adjacency-does-not-establish-complete-dependencies
-                      :root-anchored-adjacency-does-not-establish-chronology}})
+                      :root-anchored-adjacency-does-not-establish-chronology
+                      :captured-local-step-equality-does-not-establish-reachable-model-node-equality}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-keys
@@ -974,6 +976,50 @@
             operation-exercise transition-tree comparison))))
 
 
+(def ^:private captured-local-poststate-statuses
+  #{:matches-captured-posttransaction-dependencies
+    :differs-from-captured-posttransaction-dependencies
+    :modeled-and-physical-outcomes-disagree
+    :submitted-plan-not-matched
+    :physical-outcome-not-reported})
+
+(defn- captured-local-poststate-status!
+  "Extract only an already controlled comparison's REDACTED local-step verdict.
+   Old diagnostic comparator doubles may omit the v883 field; omission means
+   :not-reported, never a match. A supplied malformed field fails closed.
+   This does not recalculate modeled steps or inspect captured documents."
+  [comparison step-index]
+  (let [evidence (:captured-local-poststate-comparison comparison)]
+    (if (nil? evidence)
+      :not-reported
+      (do
+        (when-not
+         (and (map? evidence)
+              (contains? captured-local-poststate-statuses (:status evidence))
+              (= :one-controlled-serial-step-from-captured-pretransaction-dependencies
+                 (:scope evidence))
+              (= :exact-clojure-domain-document-map-equality (:relation evidence))
+              (= :controlled-observation-pretransaction-dependencies
+                 (:input-source evidence))
+              (false? (:declared-model-root-equality-required? evidence))
+              (false? (:poststate-data-exposed? evidence))
+              (false? (:additional-model-callbacks? evidence))
+              (false? (:additional-xtdb-reads? evidence))
+              (= :not-established (:pinned-xtdb-snapshot evidence))
+              (= :not-established (:complete-dependency-coverage evidence))
+              (= :not-established
+                 (:equality-with-reachable-non-root-model-state evidence))
+              (= :not-established (:authenticated-execution-history evidence))
+              (= :not-established (:production-trace-refinement evidence))
+              (or (not= :matches-captured-posttransaction-dependencies
+                        (:status evidence))
+                  (and (= :matched (:status comparison))
+                       (#{:committed :rejected} (:physical-status comparison)))))
+          (fail! :invalid-captured-local-step-evidence
+                 {:step-index step-index
+                  :reported-status (:status evidence)}))
+        (:status evidence)))))
+
 (defn compare-observation-sequence!
   "Compare a CALLER-ORDERED vector of DISTINCT executor-bound execution
    handles with rooted choice/outcome paths in the admitted finite model.
@@ -987,7 +1033,11 @@
    cross-execution atomicity, or production trace refinement. A repeated
    physical evidence handle is not a second observed execution.
 
-   The sequence is constrained to the model's admitted maximum depth. Nothing
+   The sequence is constrained to the model's admitted maximum depth. Each
+   step also reports the existing captured-local poststate comparison's redacted
+   status (or :not-reported for older diagnostic doubles). This result is
+   separate from the matched finite-model node: it does not prove that the
+   observed before-state equals that node's modeled before-state. Nothing
    replays model transitions or returns state, submitted plans, arguments,
    principals, or the underlying execution evidence handles."
   [handle ordered-evidence-handles]
@@ -1036,6 +1086,8 @@
                        :model-instance-id instance-id
                        :physical-outcome outcome
                        :plan-comparison-status (:status comparison)
+                       :captured-local-poststate-status
+                       (captured-local-poststate-status! comparison index)
                        :reachable-modeled-node-ids matches})}))
            {:current [root] :step-results []}
            (map-indexed vector comparisons))
@@ -1097,8 +1149,13 @@
    actual modeled ROOT transition before and after the operation. It reuses
    the first already-run comparator result; unknown root evidence stays
    unknown, never successful. This still does not authenticate the remainder
-   of the purported history. Reports contain no captured documents, executor
-   handles, principals, arguments, or model callbacks."
+   of the purported history. A separate captured-local-step diagnostic joins
+   each already-observed step's before/after reference-model comparison to the
+   modeled path and captured adjacency, WITHOUT identifying concrete states
+   with non-root finite-model nodes or proving chronology. Older comparator
+   doubles without the local-step field remain inconclusive. Reports contain
+   no captured documents, executor handles, principals, arguments, or model
+   callbacks."
   [handle ordered-evidence-handles]
   (let [path (compare-observation-sequence! handle ordered-evidence-handles)
         {:keys [assembly]} (current-construction! handle)
@@ -1142,8 +1199,34 @@
                 first-local-status) :initial-controlled-root-step-not-established
           (empty? pair-results) :no-adjacent-observations
           (not all-pairs-match?) :captured-adjacency-equality-not-established
-          :else :initial-root-step-and-captured-adjacencies-match)]
+          :else :initial-root-step-and-captured-adjacencies-match)
+        local-step-statuses (mapv :captured-local-poststate-status (:steps path))
+        all-local-steps-match?
+        (every? #(= :matches-captured-posttransaction-dependencies %)
+                local-step-statuses)
+        local-joint-status
+        (cond
+          (not model-path-matches?) :modeled-path-not-established
+          (not all-local-steps-match?) :one-or-more-captured-local-steps-not-established
+          (empty? pair-results) :no-adjacent-observations
+          (not all-pairs-match?) :captured-adjacency-equality-not-established
+          :else :modeled-path-and-captured-local-steps-and-adjacencies-match)]
     (assoc path
+           :captured-local-steps-and-adjacency
+           {:status local-joint-status
+            :captured-local-poststate-statuses local-step-statuses
+            :source :already-checked-individual-controlled-observations
+            :scope :caller-ordered-captured-local-steps-vs-modeled-path-and-adjacency
+            :additional-model-callbacks? false
+            :additional-xtdb-reads? false
+            :state-contents-exposed? false
+            :equality-with-reachable-non-root-model-nodes :not-established
+            :execution-chronology :not-established
+            :absence-of-intervening-writes :not-established
+            :complete-dependency-coverage :not-established
+            :pinned-xtdb-snapshot :not-established
+            :production-trace-refinement :not-established
+            :application-certification :not-established}
            :captured-dependency-adjacency
            {:status adjacency-status
             :pair-count (count pair-results)
