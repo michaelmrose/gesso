@@ -138,6 +138,7 @@
     (is (= :gesso.model.invariant-check/finite-reachable-serial-v1
            (:checker scope)))
     (doseq [property [:initial-state-rule-evaluation
+                     :per-declared-operation-exercise-counts
                      :rule-preservation-after-every-attempted-operation
                      :all-enabled-choices-through-declared-depth
                      :state-dependent-plan-reconstruction
@@ -448,3 +449,154 @@
     (is (= :counterexample (:status expanded)))
     (is (contains? (get-in partial [:scope :not-established])
                    :completeness-of-available-operations-or-arguments))))
+
+;; v849: permanent evidence tests for the bounded per-operation exercise
+;; summary. Counters describe only choices in this finite search tree; they do
+;; not certify that every production operation or argument was enumerated.
+
+(defn- exercise-for [result id]
+  (some #(when (= id (:operation-id %)) %) (:operation-exercise result)))
+
+(deftest operation-exercise-counts-every-branch-occurrence-test
+  (let [result (check initial-state [increment-one increment-two]
+                      [(max-counter 999)] opts)
+        counts (:operation-exercise result)]
+    ;; At depth three, 1 + 2 + 4 state occurrences have outgoing choices;
+    ;; an operation is evaluated once per occurrence, NOT once per unique state.
+    (is (= [{:operation-id :counter/one
+             :enablement-checks 7 :disabled-checks 0
+             :enabled-attempts 7 :committed-attempts 7
+             :rejected-attempts 0}
+            {:operation-id :counter/two
+             :enablement-checks 7 :disabled-checks 0
+             :enabled-attempts 7 :committed-attempts 7
+             :rejected-attempts 0}]
+           counts))
+    (is (= 14 (get-in result [:exploration :attempted-transitions])))
+    (is (= 14 (reduce + (map :enabled-attempts counts))))
+    (is (= 15 (get-in result [:exploration :visited-state-occurrences])))
+    (is (= (set [:enablement-checks :disabled-checks :enabled-attempts
+                 :committed-attempts :rejected-attempts :operation-id])
+           (set (keys (first counts)))))))
+
+(deftest operation-exercise-preserves-declaration-order-and-disabled-choices-test
+  (let [prepare-invocations (atom 0)
+        disabled {:id :counter/never
+                  :enabled? (constantly false)
+                  :prepare (fn [_]
+                             (swap! prepare-invocations inc)
+                             (throw (ex-info "Disabled operation was prepared" {})))}
+        result (check initial-state [disabled increment-one]
+                      [(max-counter 999)]
+                      {:max-depth 2 :max-transitions 2})]
+    (is (= [:counter/never :counter/one]
+           (mapv :operation-id (:operation-exercise result))))
+    (is (= {:operation-id :counter/never
+            :enablement-checks 2 :disabled-checks 2
+            :enabled-attempts 0 :committed-attempts 0 :rejected-attempts 0}
+           (exercise-for result :counter/never)))
+    (is (= {:operation-id :counter/one
+            :enablement-checks 2 :disabled-checks 0
+            :enabled-attempts 2 :committed-attempts 2 :rejected-attempts 0}
+           (exercise-for result :counter/one)))
+    (is (zero? @prepare-invocations))
+    (is (= :holds-in-explored-model (:status result)))))
+
+(deftest operation-exercise-differentiates-disabled-after-transition-test
+  (let [result (check initial-state [claim (revocation false)]
+                      [owner-active] {:max-depth 2 :max-transitions 10})]
+    ;; Root: both enabled. After claim: claim disabled, revoke enabled.
+    ;; After revoke: both disabled. No deduplication or hidden pruning.
+    (is (= {:operation-id :request/claim
+            :enablement-checks 3 :disabled-checks 2
+            :enabled-attempts 1 :committed-attempts 1 :rejected-attempts 0}
+           (exercise-for result :request/claim)))
+    (is (= {:operation-id :membership/revoke
+            :enablement-checks 3 :disabled-checks 1
+            :enabled-attempts 2 :committed-attempts 2 :rejected-attempts 0}
+           (exercise-for result :membership/revoke)))
+    (is (= 3 (get-in result [:exploration :attempted-transitions])))
+    (is (= :counterexample (:status result)))
+    (is (= :membership/revoke
+           (:operation-id (violation-for result (:id owner-active)))))))
+
+(deftest operation-exercise-counts-rejected-attempts-without-calling-them-disabled-test
+  (let [revoked (assoc initial-state member-target
+                       (after-document membership {:active? false}))
+        stale-guard (command/guard :membership membership version)
+        rejected {:id :request/stale-claim
+                  :enabled? (constantly true)
+                  :prepare (fn [state]
+                             (tx-plan [(update-command :request :claim
+                                                       (get state request-target)
+                                                       {:owner :helper-a})]
+                                      [stale-guard]))}
+        result (check revoked [rejected] [owner-active]
+                      {:max-depth 2 :max-transitions 2})]
+    (is (= :holds-in-explored-model (:status result)))
+    (is (= {:operation-id :request/stale-claim
+            :enablement-checks 2 :disabled-checks 0
+            :enabled-attempts 2 :committed-attempts 0 :rejected-attempts 2}
+           (exercise-for result :request/stale-claim)))
+    (is (= 2 (get-in result [:exploration :attempted-transitions])))
+    (is (= 3 (get-in result [:exploration :visited-state-occurrences])))))
+
+(deftest operation-exercise-depth-cutoff-does-not-count-unexplored-frontier-test
+  (let [shallow (check initial-state [increment-one] [(max-counter 999)]
+                       {:max-depth 1 :max-transitions 1})
+        deep (check initial-state [increment-one] [(max-counter 999)]
+                    {:max-depth 3 :max-transitions 3})]
+    (is (= {:operation-id :counter/one
+            :enablement-checks 1 :disabled-checks 0
+            :enabled-attempts 1 :committed-attempts 1 :rejected-attempts 0}
+           (exercise-for shallow :counter/one)))
+    (is (= 3 (:enablement-checks (exercise-for deep :counter/one))))
+    (is (false? (get-in shallow [:exploration :frontier-exhausted?])))
+    (is (= :holds-in-explored-model (:status shallow)))))
+
+(deftest operation-exercise-exhausted-frontier-has-no-imaginary-attempts-test
+  (let [invocations (atom 0)
+        disabled {:id :counter/never
+                  :enabled? (fn [_] (swap! invocations inc) false)
+                  :prepare (fn [_] (throw (ex-info "Unexpected prepare" {})))}
+        result (check initial-state [disabled] [(max-counter 0)]
+                      {:max-depth 6 :max-transitions 1})]
+    (is (= {:operation-id :counter/never
+            :enablement-checks 1 :disabled-checks 1
+            :enabled-attempts 0 :committed-attempts 0 :rejected-attempts 0}
+           (exercise-for result :counter/never)))
+    (is (= 1 @invocations))
+    (is (= 0 (get-in result [:exploration :attempted-transitions])))
+    (is (= 1 (get-in result [:exploration :visited-state-occurrences])))
+    (is (true? (get-in result [:exploration :frontier-exhausted?])))))
+
+(deftest operation-exercise-reports-evaluation-not-predicate-inference-test
+  (let [enabled-calls (atom 0)
+        prepare-calls (atom 0)
+        secret (Object.)
+        operation {:id :counter/observed
+                   :enabled? (fn [_]
+                               (swap! enabled-calls inc)
+                               true)
+                   :prepare (fn [state]
+                              (swap! prepare-calls inc)
+                              ;; Closure captures data that must never enter
+                              ;; the public count summary.
+                              (let [_ secret]
+                                ((:prepare increment-one) state)))}
+        result (check initial-state [operation] [(max-counter 999)]
+                      {:max-depth 2 :max-transitions 2})
+        observation (exercise-for result :counter/observed)]
+    (is (= 2 @enabled-calls))
+    (is (= 2 @prepare-calls))
+    (is (= @enabled-calls (:enablement-checks observation)))
+    (is (= @prepare-calls (:enabled-attempts observation)))
+    (is (= #{:operation-id :enablement-checks :disabled-checks
+             :enabled-attempts :committed-attempts :rejected-attempts}
+           (set (keys observation))))
+    (is (every? (complement fn?) (vals observation)))
+    (is (not-any? #(identical? secret %) (vals observation)))
+    ;; Reading or printing the inert summary must not reevaluate callbacks.
+    (is (string? (pr-str (:operation-exercise result))))
+    (is (= 2 @enabled-calls))
+    (is (= 2 @prepare-calls))))
