@@ -14,7 +14,8 @@
    the fresh canonical semantic audit without inventing policy completeness.
    The comparator rechecks application/current executor identity before
    checking an observed attempt. Its explanation reports the exact admitted
-   finite exploration bounds and visitation counts, never modeled states.
+   finite exploration bounds, visitation counts, and per-rule source matching
+   across visited states, never modeled states.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -36,7 +37,8 @@
               :executor-identity-recheck-on-observed-comparison
               :no-caller-supplied-replacement-model-at-comparison
               :source-owned-relational-rules-in-current-semantic-explanation
-              :exact-admitted-finite-exploration-scope-in-explanation}
+              :exact-admitted-finite-exploration-scope-in-explanation
+              :source-matching-coverage-over-visited-model-states}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -153,6 +155,8 @@
              :declarations declarations
              :initial-rule-coverage (:initial-state-rule-coverage
                                      relational-coverage)
+             :reachable-rule-coverage (:reachable-state-rule-coverage
+                                       relational-coverage)
              :finite-exploration
              (finite-exploration-summary finite-relational-verdict)}))
     handle))
@@ -174,28 +178,42 @@
    The ordinary ApplicationAssembly's semantic audit cannot infer arbitrary
    Clojure business policy. This *explicit*, opt-in construction possesses
    additional validated finite relational declarations, so it can report
-   precisely those rules, their initial modeled coverage, and their bounded
-   model-checking evidence. The assembly's opaque operation-model premises,
+   precisely those rules, their initial modeled coverage, source matching
+   across actually visited states, and their bounded model-checking evidence. The assembly's opaque operation-model premises,
    unknown policy inventory, unmodeled rules, and open obligations remain.
 
    A forged explanation carries no admission authority. Only the opaque handle
    can retrieve this view, and every call checks the same physical artifact
    and current application assembly used for startup and comparison. The
-   admitted exploration depth, strict budget, visits, and frontier limit are
-   made visible without reevaluating any model callback. No application
+   admitted exploration depth, strict budget, visits, frontier limit, and
+   per-rule matching counts are visible without reevaluating any callback. No application
    callbacks, modeled documents, or executor handles are exposed."
   [handle]
   (let [{:keys [assembly declarations initial-rule-coverage
-                operation-ids finite-exploration]} (current-construction! handle)
+                reachable-rule-coverage operation-ids finite-exploration]}
+        (current-construction! handle)
         ;; application/explain derives a fresh, current semantic audit from the
         ;; actual admitted assembly; never trust a stored or caller-authored
         ;; successful application-report map.
         explanation (application/explain assembly)
         initial-by-id (into {} (map (juxt :rule-id identity))
                             initial-rule-coverage)
+        reached-by-id (into {} (map (juxt :rule-id identity))
+                            reachable-rule-coverage)
+        ;; Both fact sets originate from the already admitted finite verdict.
+        ;; Retain the same source-order IDs so a rule cannot silently acquire
+        ;; another rule's observation if the producer changes its shape.
+        ids (mapv :id declarations)
+        _ (when-not (and (= (set ids) (set (keys initial-by-id)))
+                         (= (set ids) (set (keys reached-by-id)))
+                         (= (count ids) (count initial-rule-coverage)
+                            (count reachable-rule-coverage)))
+            (fail! :incomplete-relational-coverage
+                   {:declared-rule-ids ids}))
         rules (mapv (fn [declaration]
-                      (assoc declaration :initial-model-coverage
-                             (get initial-by-id (:id declaration))))
+                      (let [id (:id declaration)]
+                        (assoc declaration
+                               :initial-model-coverage (get initial-by-id id))))
                     declarations)
         rule-coverage
         (mapv (fn [{:keys [id initial-model-coverage]}]
@@ -205,6 +223,9 @@
                  :scope :declared-finite-operation-family-reachable-states
                  :initially-exercised?
                  (:initially-exercised? initial-model-coverage)
+                 :ever-matched-source-in-explored-states?
+                 (:ever-matched-source-in-explored-states?
+                  (get reached-by-id id))
                  :not-established
                  #{:unbounded-invariant-preservation
                    :production-implementation-correspondence
@@ -214,7 +235,10 @@
                  :declared-count (count rules)
                  :total-business-rule-count :unknown
                  :completeness :not-established
-                 :rules rules}]
+                 :rules rules
+                 ;; Additive, ID-keyed observations preserve the existing
+                 ;; declaration-plus-initial-coverage shape of :rules.
+                 :reachable-state-rule-coverage reachable-rule-coverage}]
     (-> explanation
         (assoc-in [:semantic-audit :business-rule-catalog] catalog)
         (assoc-in [:semantic-audit :relational-assurance]
@@ -226,6 +250,18 @@
                    :initially-unexercised-rule-ids
                    (mapv :rule-id
                          (remove :initially-exercised? initial-rule-coverage))
+                   :became-exercised-during-exploration-rule-ids
+                   (mapv :id
+                         (filter (fn [{:keys [id initial-model-coverage]}]
+                                   (and (not (:initially-exercised?
+                                              initial-model-coverage))
+                                        (:ever-matched-source-in-explored-states?
+                                         (get reached-by-id id))))
+                                 rules))
+                   :never-matched-in-explored-states-rule-ids
+                   (mapv :rule-id
+                         (remove :ever-matched-source-in-explored-states?
+                                 reachable-rule-coverage))
                    :assurance-scope assurance-scope})
         (update-in [:semantic-audit :assurance-coverage]
                    into rule-coverage))))
