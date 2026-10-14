@@ -54,6 +54,12 @@
    ALREADY PERFORMED comparison, not from a fresh callback or XTDB read.
    Even a matched anchor plus matched captured adjacencies cannot establish
    the supplied order, a complete dependency inventory or absence of writes.
+   A further opt-in comparison binds one authenticated controlled observation
+   to the PRIVATE modeled state at a specified finite predecessor occurrence.
+   This compares captured before-read documents without exporting the finite
+   verdict, re-evaluating modeled callbacks FOR THE WITNESS COMPARISON, or
+   claiming observed chronology. The pre-existing controlled comparator may
+   evaluate its own pure reference step.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -64,6 +70,8 @@
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.relational-application :as relational-app]
    [gesso.live.application-preflight.operation-family-correspondence :as physical-correspondence]
+   [gesso.live.optimistic.resolution-assurance :as execution]
+   [gesso.model.invariant-check :as invariant]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]))
 
 (def assurance-scope
@@ -92,7 +100,8 @@
               :caller-ordered-executor-observations-vs-bounded-model-path
               :opt-in-captured-adjacency-comparison-for-modeled-sequences
               :first-controlled-root-step-anchor-for-modeled-sequences
-              :per-observation-captured-local-step-checks-for-modeled-sequences}
+              :per-observation-captured-local-step-checks-for-modeled-sequences
+              :admitted-private-modeled-predecessor-vs-executor-bound-prestate}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -123,7 +132,8 @@
                       :equal-captured-adjacencies-do-not-establish-chronology
                       :captured-adjacency-does-not-establish-complete-dependencies
                       :root-anchored-adjacency-does-not-establish-chronology
-                      :captured-local-step-equality-does-not-establish-reachable-model-node-equality}})
+                      :captured-local-step-equality-does-not-establish-reachable-model-node-equality
+                      :matching-modeled-predecessor-is-not-observed-execution-history}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-keys
@@ -552,6 +562,9 @@
              :operation-ids operation-ids
              :operation-exercise operation-exercise
              :transition-tree transition-tree
+             ;; Internal only: preserve ORIGINAL checker provenance and states.
+             ;; Never return this verdict from inspect, explain, or comparisons.
+             :finite-relational-verdict finite-relational-verdict
              :declarations declarations
              :required-exercised-rule-ids
              (->> declarations (map :id) (filter required-rules) vec)
@@ -975,6 +988,101 @@
            (modeled-transition-context!
             operation-exercise transition-tree comparison))))
 
+
+(def ^:private executor-registry-path
+  [:analysis :operation-acquisition-assembly
+   :execution-assembly :server :operations])
+
+(def ^:private assembly-recheck-keys
+  [:name :operation-acquisition-assembly :browser-artifact-path
+   :browser-receipt-path :rendered-surfaces])
+
+(defn compare-observation-with-modeled-predecessor!
+  "Compare ONE controlled operation's captured PRE-transaction dependency state
+   to the PRIVATE state of a caller-selected modeled predecessor occurrence.
+
+   The modeled occurrence comes exclusively from THIS construction's admitted
+   finite checker result; callers supply only a modeled node ID and a genuine
+   opaque execution-evidence handle, never states, callbacks, or a second model.
+   The existing compare! first verifies the executor, admitted family choice,
+   principal, arguments, current assembly and submitted plan. A fresh checked
+   registry then locates the SAME bound executor's captured before-read.
+
+   An applicable predecessor has an explored outgoing edge for the observed
+   admitted choice and definitive physical outcome. Prestate equality alone
+   does not establish such an edge, submitted-plan agreement, the modeled
+   predecessor's occurrence in physical history, or correctness of the
+   modeled transition. Distinct repeated-state occurrences stay distinct.
+   This adds no modeled callback evaluation beyond compare! and no extra
+   XTDB reads; compare! may itself evaluate its pure reference model step.
+   It does NOT pin XTDB snapshots, establish complete captured dependencies,
+   authenticate the caller-selected temporal position or certify refinement.
+   Returns only a redacted classification and modeled node IDs."
+  [construction-handle modeled-predecessor-node-id evidence-handle]
+  (let [{:keys [assembly finite-relational-verdict transition-tree]}
+        (current-construction! construction-handle)
+        ;; Reject unknown/forged evidence before touching the model witness.
+        comparison (compare! construction-handle evidence-handle)
+        operation (:operation comparison)
+        report (application/check-application-assembly
+                (select-keys assembly assembly-recheck-keys))
+        registry (get-in report executor-registry-path)
+        executor (get-in registry [operation :execute!])]
+    (when-not (and (application/valid? report)
+                   (= (set (keys registry))
+                      (set (keys (get-in report [:analysis :operations] {}))))
+                   (fn? executor))
+      (fail! :current-executor-registry-unavailable
+             {:registered-operation-id operation}))
+    (let [bound (execution/inspect-evidence-for-executor evidence-handle executor)]
+      (when-not bound
+        (fail! :unrecognized-executor-bound-evidence
+               {:registered-operation-id operation}))
+      (let [;; The private v887/v889 witness checks provenance and exact node
+            ;; ownership. The observed state is obtained only from the bound
+            ;; executor, never supplied by the caller.
+            witnessed (invariant/compare-reachable-occurrence-state!
+                       finite-relational-verdict modeled-predecessor-node-id
+                       (get-in bound [:observation :initial-state]))
+            admitted-instance (:family-instance-id comparison)
+            physical-outcome (:physical-status comparison)
+            possible-children
+            (->> (:edges transition-tree)
+                 (filterv (fn [edge]
+                            (and (= modeled-predecessor-node-id
+                                    (:parent-node-id edge))
+                                 (= operation (:registered-operation-id edge))
+                                 (= admitted-instance (:model-instance-id edge))
+                                 (= physical-outcome (:status edge)))))
+                 (mapv :node-id))
+            plan-matched? (= :matched (:status comparison))
+            state-matched? (= :matches-modeled-occurrence-state
+                              (:status witnessed))
+            status (cond
+                     (not plan-matched?) :submitted-plan-not-matched
+                     (not (#{:committed :rejected} physical-outcome))
+                     :physical-outcome-unavailable
+                     (empty? possible-children) :no-corresponding-modeled-transition
+                     (not state-matched?) :differs-from-modeled-predecessor-state
+                     :else :matches-modeled-predecessor-state)]
+        {:status status
+         :modeled-predecessor-node-id modeled-predecessor-node-id
+         :possible-modeled-successor-node-ids possible-children
+         :modeled-predecessor-state-comparison (:status witnessed)
+         :submitted-plan-comparison-status (:status comparison)
+         :physical-outcome physical-outcome
+         :scope :one-admitted-modeled-predecessor-vs-one-executor-bound-prestate
+         :relation :exact-clojure-captured-dependency-document-map-equality
+         :modeled-state-data-exposed? false
+         :observed-state-data-exposed? false
+         :additional-model-callbacks-for-witness? false
+         :additional-xtdb-reads? false
+         :caller-supplied-order :not-authenticated
+         :modeled-predecessor-reached-in-production :not-established
+         :pinned-xtdb-snapshot :not-established
+         :complete-dependency-coverage :not-established
+         :production-trace-refinement :not-established
+         :application-certification :not-established}))))
 
 (def ^:private captured-local-poststate-statuses
   #{:matches-captured-posttransaction-dependencies
