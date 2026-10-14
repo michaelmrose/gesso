@@ -177,6 +177,7 @@
               :state-dependent-plan-reconstruction
               :per-declared-operation-exercise-counts
               :redacted-bounded-transition-prefix-tree
+              :private-exact-state-witnesses-for-reachable-occurrences
               :shortest-named-counterexamples}
    :assumed #{:pure-total-truthful-rule-predicates
               :pure-total-truthful-operation-builders
@@ -192,6 +193,7 @@
                       :arbitrary-clojure-predicate-verification
                       :unbounded-invariant-preservation
                       :real-xtdb-execution-correspondence
+                      :authenticity-of-caller-supplied-observed-states
                       :concurrent-execution-linearizability
                       :durable-application-command-replay
                       :authorization-of-actual-principals
@@ -319,6 +321,75 @@
              :rejected-attempts rejected-attempts}))
         operations))
 
+;; An occurrence's modeled documents must never be placed in the public
+;; transition tree or its reports. Retain the *actual* state at each explored
+;; occurrence, instead of reconstructing it by invoking application-supplied
+;; plan builders a second time. A weak, identity-based object key means that
+;; dropping the checker result also permits its private state snapshots to be
+;; collected. The value never references its key.
+(def ^:private occurrence-state-witnesses (java.util.WeakHashMap.))
+
+(defn- retain-occurrence-states! [verdict states]
+  (let [tree (:transition-tree verdict)
+        exploration (:exploration verdict)]
+    (when-not (= (:node-count tree) (count states)
+                 (:visited-state-occurrences exploration))
+      (fail! :incomplete-occurrence-state-witnesses
+             "Every explored node must retain exactly one private modeled state."
+             {:node-count (:node-count tree)
+              :state-count (count states)}))
+    (let [handle (Object.)]
+      (locking occurrence-state-witnesses
+        ;; The original core fields are bound to this exact witness. Higher
+        ;; layers may *add* registry or relational reports, but cannot edit
+        ;; a checker field and retain its comparison capability.
+        (.put occurrence-state-witnesses handle
+              {:states states :verdict verdict}))
+      handle)))
+
+(defn compare-reachable-occurrence-state!
+  "Compare one modeled node's private state to an EXACT caller-supplied
+   document map. The node must belong to an actual, completed reachable check;
+   it is not regenerated from modeled callbacks or an invented graph node.
+
+   Only an equality classification is returned, never modeled documents,
+   hashes, transaction plans or predicates. A forged/detached result, stale
+   process-local handle, malformed tree, or unknown node fails closed. The
+   observed document map is NOT authenticated here: use a trusted executor-
+   bound observation boundary before claiming any production correspondence.
+   Even exact equality proves neither execution chronology nor that this
+   observed state was reached by the displayed modeled prefix."
+  [reachable-result node-id observed-state]
+  (let [handle (:occurrence-state-witness reachable-result)
+        retained (locking occurrence-state-witnesses
+                   (.get occurrence-state-witnesses handle))
+        {:keys [states verdict]} retained]
+    (when-not (and retained
+                   (instance? Object handle)
+                   ;; The registry and relational layers add their own keys
+                   ;; with assoc. Compare ALL original checker-owned fields
+                   ;; while permitting these extra non-authorizing reports.
+                   (= verdict (select-keys reachable-result (keys verdict)))
+                   (integer? node-id)
+                   (<= 0 node-id)
+                   (< node-id (count states)))
+      (fail! :invalid-occurrence-state-witness
+             "A current completed check and one of its actual node IDs are required."
+             {:node-id node-id}))
+    (let [observed (reference/require-state observed-state)]
+      {:status (if (= (nth states node-id) observed)
+                 :matches-modeled-occurrence-state
+                 :differs-from-modeled-occurrence-state)
+       :model-node-id node-id
+       :scope :one-finite-modeled-occurrence-versus-caller-supplied-document-map
+       :relation :exact-clojure-domain-document-map-equality
+       :state-contents-exposed? false
+       :model-callbacks-reexecuted? false
+       :observed-state-authenticity :not-established
+       :model-prefix-observed-in-production :not-established
+       :execution-chronology :not-established
+       :production-trace-refinement :not-established})))
+
 (defn check-reachable
   "Exhaustively explore *state-dependent* operation instances through a
    finite serial depth, checking named application invariants initially and
@@ -369,33 +440,41 @@
            transitions 0
            found initial-found
            exercise (zero-operation-exercise operations)
-           edges []]
+           edges []
+           occurrence-states [initial-state]]
       (if (or (= depth max-depth) (empty? frontier))
-        {:status (if (seq found) :counterexample :holds-in-explored-model)
-         :violations (into [] (keep found) (map :id rules))
-         :rule-ids (mapv :id rules)
-         :operation-exercise (operation-exercise-summary operations exercise)
-         :transition-tree
-         {:kind :bounded-reachable-transition-prefix-tree
-          :root-node-id 0
-          :node-count (inc transitions)
-          :edges edges
-          :state-identity :occurrences-not-deduplicated
-          :production-correspondence :not-established}
-         :exploration {:kind :bounded-reachable-serial-operations
-                       :operation-ids (mapv :id operations)
-                       :max-depth max-depth
-                       :max-transitions max-transitions
-                       :reached-depth depth
-                       :attempted-transitions transitions
-                       :visited-state-occurrences (inc transitions)
-                       :frontier-exhausted? (empty? frontier)}
-         :scope reachable-assurance-scope}
+        (let [status (if (seq found) :counterexample :holds-in-explored-model)
+              tree {:kind :bounded-reachable-transition-prefix-tree
+                    :root-node-id 0
+                    :node-count (inc transitions)
+                    :edges edges
+                    :state-identity :occurrences-not-deduplicated
+                    :production-correspondence :not-established}
+              exploration {:kind :bounded-reachable-serial-operations
+                           :operation-ids (mapv :id operations)
+                           :max-depth max-depth
+                           :max-transitions max-transitions
+                           :reached-depth depth
+                           :attempted-transitions transitions
+                           :visited-state-occurrences (inc transitions)
+                           :frontier-exhausted? (empty? frontier)}]
+        (let [verdict {:status status
+                       :violations (into [] (keep found) (map :id rules))
+                       :rule-ids (mapv :id rules)
+                       :operation-exercise
+                       (operation-exercise-summary operations exercise)
+                       :transition-tree tree
+                       :exploration exploration
+                       :scope reachable-assurance-scope}]
+          ;; Opaque, process-local witness identity; NEVER a modeled state.
+          (assoc verdict :occurrence-state-witness
+                 (retain-occurrence-states! verdict occurrence-states))))
         (let [{next-frontier :frontier
                next-transitions :transitions
                next-found :found
                next-exercise :exercise
-               next-edges :edges}
+               next-edges :edges
+               next-occurrence-states :occurrence-states}
               (reduce
                (fn [acc node]
                  (reduce
@@ -431,6 +510,7 @@
                                 (update :frontier conj {:state new-state
                                                         :trace trace
                                                         :node-id new-node-id})
+                                (update :occurrence-states conj new-state)
                                 (update :edges conj
                                         {:parent-node-id (:node-id node)
                                          :node-id new-node-id
@@ -442,7 +522,8 @@
                                 (update-in [:exercise id status-key] inc)))))))
                   acc operations))
                {:frontier [] :transitions transitions :found found
-                :exercise exercise :edges edges}
+                :exercise exercise :edges edges
+                :occurrence-states occurrence-states}
                frontier)]
           (recur (inc depth) next-frontier next-transitions next-found
-                 next-exercise next-edges))))))
+                 next-exercise next-edges next-occurrence-states))))))
