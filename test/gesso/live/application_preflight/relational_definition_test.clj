@@ -1,11 +1,11 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v841 regressions for the source-owned relational construction and explanation.
+  "v845 regressions for source-owned relational construction and explanation.
 
-   Preserve the earlier admission, comparator, and startup tests, and cover
-   v838's handle-only integration of declared relational rules with the
-   canonical application semantic audit. A successful bounded exploration
-   does not establish business-policy completeness, unbounded invariants,
-   or correspondence of every physical execution to application callbacks."
+   Preserve earlier admission, comparator, startup, and explanation tests.
+   Verify that actual visited-state matching from v842 is retained by the
+   handle-only semantic audit without reinterpreting policy declarations.
+   Matching counts remain bounded diagnostic evidence, not policy completeness,
+   unbounded proof, or all-executions production correspondence."
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.live.application-preflight :as application]
@@ -534,3 +534,163 @@
         (is (= initial-count @invoked))
         (is (= :unknown-construction
                (error-kind #(sut/start-biff! summary nil []))))))))
+
+
+;; v845: v844's explanation preserves the original declared-rule map shape
+;; while joining the admitted v842 visited-state observation by :rule-id.
+;; These counters record state *occurrences*, including repeated states, not
+;; unique database states or proof that every real-world input was exercised.
+
+(defn- reachable-model-facts [handle]
+  (get-in (relational-audit handle)
+          [:business-rule-catalog :reachable-state-rule-coverage]))
+
+(deftest explanation-reports-actual-reachable-state-observations
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            audit (relational-audit handle)
+            catalog (:business-rule-catalog audit)
+            facts (reachable-model-facts handle)
+            fact (first facts)
+            summary (finite-exploration handle)
+            evidence (last (:assurance-coverage audit))]
+        (is (= :holds-in-explored-model
+               (get-in audit [:relational-assurance :status])))
+        (is (= [:counter/parent-active] (mapv :rule-id facts)))
+        (is (= (:visited-state-occurrences summary)
+               (:evaluated-state-occurrences fact)))
+        (is (= 13 (:evaluated-state-occurrences fact)))
+        (is (= 13 (:state-occurrences-with-matching-sources fact)))
+        (is (= 13 (:matching-source-occurrences fact)))
+        (is (true? (:ever-matched-source-in-explored-states? fact)))
+        (is (= [] (get-in audit [:relational-assurance
+                                :became-exercised-during-exploration-rule-ids])))
+        (is (= [] (get-in audit [:relational-assurance
+                                :never-matched-in-explored-states-rule-ids])))
+        (is (true? (:ever-matched-source-in-explored-states? evidence)))
+        (is (= :bounded-model-checked (:class evidence)))
+        ;; The catalog still presents existing declarations and their initial
+        ;; observations with no surprise change to callers of v838.
+        (is (not (contains? (first (:rules catalog))
+                            :reachable-model-coverage)))
+        (is (= #{:counter/parent-active}
+               (set (map :id (:rules catalog)))))
+        (is (= :not-established (:completeness catalog)))
+        (is (contains? (:not-established sut/assurance-scope)
+                       :all-executions-correspond-to-model))))))
+
+(deftest initially-vacuous-rule-can-become-exercised-only-after-a-transition
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [later (assoc parent-rule :id :counter/after-one
+                         :source-where {:n 1})
+            never (assoc parent-rule :id :counter/never-ninety-nine
+                         :source-where {:n 99})
+            changed (assoc-in (definition options)
+                              [:relational-model :declarations]
+                              [later never])
+            handle (sut/construct! changed)
+            audit (relational-audit handle)
+            catalog (:business-rule-catalog audit)
+            facts (into {} (map (juxt :rule-id identity))
+                        (:reachable-state-rule-coverage catalog))
+            evidence (into {} (map (fn [entry]
+                                     [(second (:subject entry)) entry]))
+                           (filter #(= :bounded-model-checked (:class %))
+                                   (:assurance-coverage audit)))]
+        (is (= 2 (:declared-count catalog)))
+        (is (= [:counter/after-one :counter/never-ninety-nine]
+               (mapv :id (:rules catalog))))
+        (is (= [:counter/after-one :counter/never-ninety-nine]
+               (get-in audit [:relational-assurance
+                              :initially-unexercised-rule-ids])))
+        (is (= [:counter/after-one]
+               (get-in audit [:relational-assurance
+                              :became-exercised-during-exploration-rule-ids])))
+        (is (= [:counter/never-ninety-nine]
+               (get-in audit [:relational-assurance
+                              :never-matched-in-explored-states-rule-ids])))
+        (is (= 0 (get-in catalog [:rules 0 :initial-model-coverage
+                                 :initially-matching-source-count])))
+        (is (= 13 (get-in facts [:counter/after-one
+                                :evaluated-state-occurrences])))
+        (is (= 3 (get-in facts [:counter/after-one
+                               :state-occurrences-with-matching-sources])))
+        (is (= 3 (get-in facts [:counter/after-one
+                               :matching-source-occurrences])))
+        (is (true? (get-in facts [:counter/after-one
+                                 :ever-matched-source-in-explored-states?])))
+        (is (= 13 (get-in facts [:counter/never-ninety-nine
+                                :evaluated-state-occurrences])))
+        (is (zero? (get-in facts [:counter/never-ninety-nine
+                                 :matching-source-occurrences])))
+        (is (false? (get-in facts [:counter/never-ninety-nine
+                                  :ever-matched-source-in-explored-states?])))
+        (is (true? (get-in evidence [:counter/after-one
+                                    :ever-matched-source-in-explored-states?])))
+        (is (false? (get-in evidence [:counter/never-ninety-nine
+                                     :ever-matched-source-in-explored-states?])))
+        (is (= :not-established (:completeness catalog)))))))
+
+(deftest explanation-does-not-extrapolate-beyond-admitted-depth
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [after-two (assoc parent-rule :id :counter/after-two
+                             :source-where {:n 2})
+            short (-> (definition options)
+                      (assoc-in [:relational-model :declarations] [after-two])
+                      (assoc-in [:relational-model :options :max-depth] 1))
+            handle (sut/construct! short)
+            audit (relational-audit handle)
+            facts (first (reachable-model-facts handle))
+            summary (finite-exploration handle)]
+        (is (= 1 (:reached-depth summary)))
+        (is (:depth-limited? summary))
+        (is (= 4 (:visited-state-occurrences summary)))
+        (is (= 4 (:evaluated-state-occurrences facts)))
+        (is (= 0 (:state-occurrences-with-matching-sources facts)))
+        (is (= 0 (:matching-source-occurrences facts)))
+        (is (false? (:ever-matched-source-in-explored-states? facts)))
+        (is (= [:counter/after-two]
+               (get-in audit [:relational-assurance
+                              :never-matched-in-explored-states-rule-ids])))
+        (is (= []
+               (get-in audit [:relational-assurance
+                              :became-exercised-during-exploration-rule-ids])))
+        (is (= :not-established
+               (get-in audit [:business-rule-catalog :completeness])))))))
+
+(deftest reachable-explanation-does-not-rerun-model-or-leak-state
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [secret "v845-model-state-not-public"
+            calls (atom 0)
+            declared (-> (definition options)
+                         (assoc-in [:relational-model :initial-state counter-key
+                                    :hidden-attribute] secret)
+                         (update-in [:relational-model :families]
+                                    (fn [families]
+                                      (mapv (fn [f]
+                                              (update f :prepare
+                                                      (fn [prepare]
+                                                        (fn [& args]
+                                                          (swap! calls inc)
+                                                          (apply prepare args)))))
+                                            families))))
+            handle (sut/construct! declared)
+            after-construction @calls
+            report (sut/explain handle)
+            catalog (get-in report [:semantic-audit :business-rule-catalog])
+            facts (:reachable-state-rule-coverage catalog)]
+        (is (pos? after-construction))
+        (is (seq facts))
+        (is (= 13 (:evaluated-state-occurrences (first facts))))
+        (is (= after-construction @calls))
+        (is (= report (sut/explain handle)))
+        (is (= after-construction @calls))
+        (is (not (.contains (pr-str report) secret)))
+        (is (not (.contains (pr-str facts) "#object[")))
+        (is (not (.contains (pr-str facts) ":prepare")))
+        (is (= :unknown-construction
+               (error-kind #(sut/compare! facts nil))))))))
