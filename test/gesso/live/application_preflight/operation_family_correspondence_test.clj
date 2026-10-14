@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.operation-family-correspondence-test
-  "Permanent v829 regressions for registered operation-family correspondence.
+  "Permanent v829 and v866 regressions for registered operation-family correspondence.
 
    A finite operation family must match the exact executor from a freshly
    checked application assembly. An observed XTDB transaction can demonstrate
@@ -488,3 +488,182 @@
                                     :authoritative :projection :request/owner])))
           (is (contains? (get-in comparison [:assurance-scope :not-established])
                          :correctness-of-projection-callbacks)))))))
+
+;; v866 reconstructs the controlled pre-transaction comparison contract added
+;; in v865. These are observations of an actual executor-bound XTDB attempt,
+;; not a proof that the modeled root came from a pinned database snapshot.
+
+(def ^:private root-state-key :declared-root-state-comparison)
+
+(defn- root-comparison [result]
+  (get result root-state-key))
+
+(deftest declared-root-equals-genuine-pretransaction-dependencies-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [comparator (build! assembly example)
+              result (comparator (:evidence (invoke! example)))
+              root (root-comparison result)]
+          (is (= :matched (:status result)))
+          (is (= :committed (:physical-status result)))
+          (is (= :matches-captured-pretransaction-state (:status root)))
+          (is (= :exact-clojure-state-map-equality (:relation root)))
+          (is (= :declared-model-root-vs-controlled-dependency-snapshot
+                 (:scope root)))
+          ;; A successful transaction changed XTDB, but the observation was
+          ;; captured *before* the authoritative transaction was submitted.
+          (is (= (:claimed example) (row :requests (:request-id example))))
+          (is (= "unclaimed"
+                 (:owner (get (model-state example)
+                              [:requests (:request-id example)]))))
+          (is (not (contains? result :observation))))))))
+
+(deftest additional-declared-root-document-breaks-exact-equality-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [extra [:private/unobserved "v866-extra-private"]
+              root (assoc (model-state example)
+                          extra {:xt/id "v866-extra-private" :private/secret "not-public"})
+              comparator (correspondence/build-comparator
+                          assembly root (modeled-families example)
+                          (model-rules example) small-options)
+              result (comparator (:evidence (invoke! example)))]
+          (is (= :matched (:status result)))
+          (is (true? (:matching-guards? result)))
+          (is (true? (:matching-commands? result)))
+          (is (= :differs-from-captured-pretransaction-state
+                 (get-in result [root-state-key :status])))
+          (is (not (contains? result :initial-state)))
+          (is (not (.contains (pr-str result) "v866-extra-private")))
+          (is (not (.contains (pr-str result) "not-public"))))))))
+
+(deftest altered-declared-root-document-value-breaks-equality-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [request-key [:requests (:request-id example)]
+              root (assoc-in (model-state example)
+                             [request-key :updated-at] "v866-modeled-only-timestamp")
+              comparator (correspondence/build-comparator
+                          assembly root (modeled-families example)
+                          (model-rules example) small-options)
+              result (comparator (:evidence (invoke! example)))]
+          (is (= :matched (:status result)))
+          (is (= :differs-from-captured-pretransaction-state
+                 (get-in result [root-state-key :status])))
+          (is (not (.contains (pr-str result) "v866-modeled-only-timestamp"))))))))
+
+(deftest root-equality-does-not-turn-plan-counterexample-into-success-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [families (update-in (modeled-families example) [0 :prepare]
+                                  (fn [original]
+                                    (fn [state who args]
+                                      (assoc (original state who args) :guards []))))
+              comparator (correspondence/build-comparator
+                          assembly (model-state example) families
+                          (model-rules example) small-options)
+              result (comparator (:evidence (invoke! example)))]
+          (is (= :counterexample (:status result)))
+          (is (= :modeled-and-submitted-plans-disagree (:reason result)))
+          (is (false? (:matching-guards? result)))
+          (is (= :matches-captured-pretransaction-state
+                 (get-in result [root-state-key :status])))
+          (is (= :not-established
+                 (get-in result [root-state-key :production-trace-refinement]))))))))
+
+(deftest root-state-report-adds-no-extra-model-or-physical-execution-test
+  (let [example (test-operation)
+        model-evaluations (atom 0)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [families (update-in (modeled-families example) [0 :prepare]
+                                  (fn [original]
+                                    (fn [state who args]
+                                      (swap! model-evaluations inc)
+                                      (original state who args))))
+              comparator (correspondence/build-comparator
+                          assembly (model-state example) families
+                          (model-rules example) small-options)
+              handle (:evidence (invoke! example))
+              callbacks-before @(:calls example)
+              model-before @model-evaluations
+              first-result (comparator handle)
+              after-first @model-evaluations
+              second-result (comparator handle)
+              after-second @model-evaluations]
+          (is (pos? model-before))
+          ;; The established plan comparator deliberately runs :prepare once
+          ;; per observation. Root equality must not cause an *extra* run.
+          (is (= 1 (- after-first model-before)))
+          (is (= 1 (- after-second after-first)))
+          (is (= callbacks-before @(:calls example)))
+          (is (= :matches-captured-pretransaction-state
+                 (get-in first-result [root-state-key :status])))
+          (is (= (root-comparison first-result)
+                 (root-comparison second-result)))
+          (is (= :matched (:status second-result))))))))
+
+(deftest matching-root-does-not-certify-incorrect-live-projection-test
+  (let [example (test-operation {:false-projection? true})]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [comparator (build! assembly example)
+              result (comparator (:evidence (invoke! example)))]
+          (is (= :matched (:status result)))
+          (is (= :matches-captured-pretransaction-state
+                 (get-in result [root-state-key :status])))
+          (is (contains? (get-in result [:assurance-scope :not-established])
+                         :correctness-of-projection-callbacks))
+          (is (= :not-established
+                 (get-in result [root-state-key :non-root-state-correspondence]))))))))
+
+(deftest root-state-scope-does-not-promote-global-xtdb-or-trace-claims-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [result ((build! assembly example) (:evidence (invoke! example)))
+              scope (:assurance-scope result)]
+          (is (= correspondence/assurance-scope scope))
+          (is (contains? (:checked scope)
+                         :declared-root-vs-observed-pretransaction-state-value-equality))
+          (is (contains? (:assumed scope)
+                         :controlled-execution-observation-and-unpinned-xtdb-reads))
+          (doseq [limit [:authenticated-xtdb-history-or-global-isolation
+                         :unbounded-execution-refinement
+                         :whole-application-certification]]
+            (is (contains? (:not-established scope) limit)))
+          (is (= :not-established
+                 (get-in result [root-state-key :production-trace-refinement]))))))))
+
+(deftest arbitrary-values-and-detached-reports-cannot-obtain-root-equality-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [comparator (build! assembly example)
+              handle (:evidence (invoke! example))
+              report (assurance/inspect-evidence handle)]
+          (doseq [forged [nil (Object.) {} report
+                          {:declared-root-state-comparison
+                           {:status :matches-captured-pretransaction-state}}]]
+            (is (= :unrecognized-executor-bound-evidence
+                   (kind #(comparator forged)))))
+          (is (= :matches-captured-pretransaction-state
+                 (get-in (comparator handle) [root-state-key :status]))))))))
+
+(deftest stale-application-blocks-root-comparison-before-observation-use-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly artifact-path]}]
+        (let [comparator (build! assembly example)
+              handle (:evidence (invoke! example))]
+          (is (= :matches-captured-pretransaction-state
+                 (get-in (comparator handle) [root-state-key :status])))
+          (spit artifact-path "v866-tampered-runtime-artifact\n")
+          (is (not (application/application-assembly? assembly)))
+          (is (some? (try (comparator handle)
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e)))))))))
