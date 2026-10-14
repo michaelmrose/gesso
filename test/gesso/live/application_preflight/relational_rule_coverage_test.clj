@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.relational-rule-coverage-test
-  "Permanent v833 integration regressions for source-interpreted relational
+  "Permanent v843 integration regressions for source-interpreted relational
    rules admitted through a CURRENT Gesso application registry.
 
    The tests deliberately distinguish: exact registered operation-ID coverage,
@@ -11,6 +11,8 @@
    [gesso.choreo.identity :as identity]
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.fixture :as fixture]
+   [gesso.live.application-preflight.operation-family-coverage
+    :as registry-coverage]
    [gesso.live.application-preflight.relational-rule-coverage :as coverage]
    [gesso.live.optimistic.protocol :as protocol]
    [gesso.live.optimistic.resolved-operation :as adapter]
@@ -469,3 +471,112 @@
               handle (:evidence (run-real! sample))]
           (spit artifact-path "changed after comparator admission\n")
           (is (some? (problem #(compare! handle)))))))))
+
+
+;; v842 extends relational checking with source-matching observations gathered
+;; while the finite checker actually evaluates the visited state occurrences.
+;; These are diagnostic coverage facts, never a proof of complete policies,
+;; complete input domains, or actual production execution correspondence.
+
+(defn- reachable-facts [result]
+  (get-in result [:relational-coverage :reachable-state-rule-coverage]))
+
+(deftest reachable-coverage-measures-actual-state-occurrences-test
+  (with-standard-application
+    (fn [{:keys [assembly]}]
+      (let [result (check-counter assembly)
+            fact (first (reachable-facts result))]
+        (is (= :holds-in-explored-model (:status result)))
+        (is (= 13 (get-in result [:exploration :visited-state-occurrences])))
+        (is (= :counters/parent-active (:rule-id fact)))
+        (is (= 13 (:evaluated-state-occurrences fact)))
+        (is (= 13 (:state-occurrences-with-matching-sources fact)))
+        (is (= 13 (:matching-source-occurrences fact)))
+        (is (true? (:ever-matched-source-in-explored-states? fact)))
+        (is (empty? (get-in result [:relational-coverage
+                                   :never-matched-in-explored-states-rule-ids])))
+        (is (= :not-established
+               (get-in result [:relational-coverage :declaration-completeness])))
+        (is (not (contains? fact :state)))
+        (is (not (contains? fact :documents)))))))
+
+(deftest initially-unexercised-rule-can-become-reachable-test
+  (with-standard-application
+    (fn [{:keys [assembly]}]
+      (let [rule (assoc counter-relation
+                        :id :counters/parent-after-increment
+                        :source-where {:n 1})
+            result (check-counter assembly (counter-families) [rule] options)
+            fact (first (reachable-facts result))]
+        (is (= :holds-in-explored-model (:status result)))
+        (is (= [:counters/parent-after-increment]
+               (get-in result [:relational-coverage
+                               :initially-unexercised-rule-ids])))
+        (is (= 0 (get-in result [:relational-coverage
+                                :initial-state-rule-coverage 0
+                                :initially-matching-source-count])))
+        (is (= 13 (:evaluated-state-occurrences fact)))
+        (is (= 3 (:state-occurrences-with-matching-sources fact)))
+        (is (= 3 (:matching-source-occurrences fact)))
+        (is (true? (:ever-matched-source-in-explored-states? fact)))
+        (is (empty? (get-in result [:relational-coverage
+                                   :never-matched-in-explored-states-rule-ids])))))))
+
+(deftest permanently-vacuous-rules-remain-explicit-in-exploration-test
+  (with-standard-application
+    (fn [{:keys [assembly]}]
+      (let [later (assoc counter-relation :id :counters/after-one
+                         :source-where {:n 1})
+            never (assoc counter-relation :id :counters/after-ninety-nine
+                         :source-where {:n 99})
+            result (check-counter assembly (counter-families)
+                                  [later never] options)
+            [later-fact never-fact] (reachable-facts result)]
+        (is (= [:counters/after-one :counters/after-ninety-nine]
+               (get-in result [:relational-coverage :rule-ids])))
+        (is (= [:counters/after-one :counters/after-ninety-nine]
+               (get-in result [:relational-coverage
+                               :initially-unexercised-rule-ids])))
+        (is (= 13 (:evaluated-state-occurrences later-fact)))
+        (is (= 13 (:evaluated-state-occurrences never-fact)))
+        (is (= 3 (:matching-source-occurrences later-fact)))
+        (is (= 0 (:matching-source-occurrences never-fact)))
+        (is (= 0 (:state-occurrences-with-matching-sources never-fact)))
+        (is (false? (:ever-matched-source-in-explored-states? never-fact)))
+        (is (= [:counters/after-ninety-nine]
+               (get-in result [:relational-coverage
+                               :never-matched-in-explored-states-rule-ids])))))))
+
+(deftest reachable-coverage-honors-actual-depth-bound-test
+  (with-standard-application
+    (fn [{:keys [assembly]}]
+      (let [rule (assoc counter-relation :id :counters/after-two
+                         :source-where {:n 2})
+            result (check-counter assembly (counter-families) [rule]
+                                  {:max-depth 1 :max-transitions 40})
+            fact (first (reachable-facts result))]
+        (is (= :holds-in-explored-model (:status result)))
+        (is (= 1 (get-in result [:exploration :reached-depth])))
+        (is (= 4 (:evaluated-state-occurrences fact)))
+        (is (= 0 (:matching-source-occurrences fact)))
+        (is (false? (:ever-matched-source-in-explored-states? fact)))
+        (is (= [:counters/after-two]
+               (get-in result [:relational-coverage
+                               :never-matched-in-explored-states-rule-ids])))
+        (is (= :not-established
+               (get-in result [:relational-coverage
+                               :registered-executor-correspondence])))))))
+
+
+(deftest incomplete-reachable-rule-observation-cannot-pass-as-coverage-test
+  (with-standard-application
+    (fn [{:keys [assembly]}]
+      ;; Simulate an accidentally changed upstream checker that returns a
+      ;; superficially successful visit count but does not evaluate rules.
+      ;; No partial diagnostic coverage must be admitted as a successful run.
+      (with-redefs [registry-coverage/check-registered-families
+                    (fn [& _]
+                      {:status :holds-in-explored-model
+                       :exploration {:visited-state-occurrences 1}})]
+        (is (= :incomplete-rule-observation
+               (kind #(check-counter assembly))))))))
