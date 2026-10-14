@@ -324,12 +324,21 @@
 ;; An occurrence's modeled documents must never be placed in the public
 ;; transition tree or its reports. Retain the *actual* state at each explored
 ;; occurrence, instead of reconstructing it by invoking application-supplied
-;; plan builders a second time. A weak, identity-based object key means that
-;; dropping the checker result also permits its private state snapshots to be
-;; collected. The value never references its key.
+;; plan builders a second time. The opaque handle is a weak object key: the
+;; private value never references the handle, allowing collection when the
+;; returned result and its derived copies are no longer retained.
+;;
+;; Public checker fields are not sufficient to identify a *particular*
+;; completed exploration: two different inputs can produce equal redacted
+;; verdicts yet have different private states. Give every result a distinct
+;; provenance object, retained only as metadata on the result and as a
+;; registry value. Normal persistent-map assoc enrichment preserves metadata;
+;; copying or discarding it explicitly is outside this local integrity check.
+;; This is NOT a tamper-proof authority boundary against code with access to
+;; both results (which could deliberately copy metadata and handles).
 (def ^:private occurrence-state-witnesses (java.util.WeakHashMap.))
 
-(defn- retain-occurrence-states! [verdict states]
+(defn- retain-occurrence-states! [verdict states provenance]
   (let [tree (:transition-tree verdict)
         exploration (:exploration verdict)]
     (when-not (= (:node-count tree) (count states)
@@ -340,11 +349,11 @@
               :state-count (count states)}))
     (let [handle (Object.)]
       (locking occurrence-state-witnesses
-        ;; The original core fields are bound to this exact witness. Higher
-        ;; layers may *add* registry or relational reports, but cannot edit
-        ;; a checker field and retain its comparison capability.
+        ;; The original core fields AND result-instance provenance belong to
+        ;; this handle. Reports may be added to the result without changing
+        ;; either binding; a different equal-shaped result cannot borrow it.
         (.put occurrence-state-witnesses handle
-              {:states states :verdict verdict}))
+              {:states states :verdict verdict :provenance provenance}))
       handle)))
 
 (defn compare-reachable-occurrence-state!
@@ -353,8 +362,11 @@
    it is not regenerated from modeled callbacks or an invented graph node.
 
    Only an equality classification is returned, never modeled documents,
-   hashes, transaction plans or predicates. A forged/detached result, stale
-   process-local handle, malformed tree, or unknown node fails closed. The
+   hashes, transaction plans or predicates. The handle must belong to the
+   originating check's result provenance (preserved by normal assoc). An
+   incompatible or detached handle, missing provenance, malformed tree, or
+   unknown node fails closed. Deliberate copying of metadata and handles by
+   untrusted in-process code is not prevented; this is not authorization. The
    observed document map is NOT authenticated here: use a trusted executor-
    bound observation boundary before claiming any production correspondence.
    Even exact equality proves neither execution chronology nor that this
@@ -363,9 +375,12 @@
   (let [handle (:occurrence-state-witness reachable-result)
         retained (locking occurrence-state-witnesses
                    (.get occurrence-state-witnesses handle))
-        {:keys [states verdict]} retained]
+        {:keys [states verdict provenance]} retained]
     (when-not (and retained
                    (instance? Object handle)
+                   (identical? provenance
+                               (::occurrence-result-provenance
+                                (meta reachable-result)))
                    ;; The registry and relational layers add their own keys
                    ;; with assoc. Compare ALL original checker-owned fields
                    ;; while permitting these extra non-authorizing reports.
@@ -466,9 +481,15 @@
                        :transition-tree tree
                        :exploration exploration
                        :scope reachable-assurance-scope}]
-          ;; Opaque, process-local witness identity; NEVER a modeled state.
-          (assoc verdict :occurrence-state-witness
-                 (retain-occurrence-states! verdict occurrence-states))))
+          ;; Distinguish separate checks even when all public checker-owned
+          ;; fields are equal. Assoc retains the private provenance metadata.
+          (let [provenance (Object.)
+                issued (with-meta verdict
+                         (assoc (meta verdict)
+                                ::occurrence-result-provenance provenance))]
+            (assoc issued :occurrence-state-witness
+                   (retain-occurrence-states! verdict occurrence-states
+                                              provenance)))))
         (let [{next-frontier :frontier
                next-transitions :transitions
                next-found :found
