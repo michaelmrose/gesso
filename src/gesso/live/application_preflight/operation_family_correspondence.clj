@@ -18,8 +18,14 @@
    The family construction and its initial abstract state are STILL authored by
    the developer. Closure of family declarations does not prove their truth,
    purity, policy completeness or representativeness. The bounded invariant
-   run need not have started from the observed XTDB state. The final result is
-   local diagnostic evidence for ONE observed attempt, not a proof certificate,
+   run need not have started from the observed XTDB state. Each comparison now
+   separately reports whether the declared finite ROOT state exactly equals
+   the captured pre-transaction document map of this one controlled attempt;
+   no modeled transitions are replayed and no state data are disclosed. Such
+   equality is about the captured dependency documents, not a pinned XTDB
+   snapshot, another reachable state, or the physical execution history.
+   The final result is local diagnostic evidence for ONE observed attempt,
+   not a proof certificate,
    authenticated database history, complete application semantics, or general
    refinement. No business callbacks or XTDB transactions are run by this
    module except the admitted finite checks at construction time."
@@ -41,7 +47,8 @@
               :current-registered-executor-object-identity
               :exact-executor-bound-physical-evidence-handle
               :exact-declared-principal-and-argument-choice
-              :modeled-enabledness-and-submitted-transaction-plan-match}
+              :modeled-enabledness-and-submitted-transaction-plan-match
+              :declared-root-vs-observed-pretransaction-state-value-equality}
    :assumed #{:truthful-pure-total-family-and-invariant-callbacks
               :correct-current-application-assembly
               :representative-finite-initial-state-and-input-domains
@@ -113,6 +120,13 @@
    admitted finite choice. Comparison delegates to v826; mismatching plans
    return an explicit counterexample, not an assurance success.
 
+   In addition to the existing observed-state plan check, the result describes
+   exact Clojure value equality between the declared finite ROOT state and
+   the controlled observer's pre-transaction dependency-document map. This
+   comparison is redacted and does not replay models or equate arbitrary
+   reachable tree nodes with XTDB. A matched root is NOT evidence of pinned
+   snapshots, authenticated history, or subsequent trace refinement.
+
    This is intentionally not an application startup certificate. Calling this
    again with different authored families creates a DIFFERENT diagnostic
    comparator; the framework does not claim to derive callback logic from
@@ -166,6 +180,20 @@
                                 (:principal choice) (:arguments choice))]
                 (select-keys
                  (assoc comparison
+                        ;; The trusted observation supplies the captured
+                        ;; dependency-document state *before* the physical
+                        ;; transaction. Compare with the exact declared root;
+                        ;; do not infer this from an operation/outcome match
+                        ;; in the separately explored finite tree.
+                        :declared-root-state-comparison
+                        {:status (if (= initial-state
+                                        (get-in record [:observation :initial-state]))
+                                   :matches-captured-pretransaction-state
+                                   :differs-from-captured-pretransaction-state)
+                         :relation :exact-clojure-state-map-equality
+                         :scope :declared-model-root-vs-controlled-dependency-snapshot
+                         :non-root-state-correspondence :not-established
+                         :production-trace-refinement :not-established}
                         :operation operation
                         :family-instance-id (:instance-id choice)
                         :registered-coverage :exact
@@ -174,5 +202,6 @@
                         :assurance-scope assurance-scope)
                  [:status :reason :operation :family-instance-id
                   :physical-status :matching-guards? :matching-commands?
+                  :declared-root-state-comparison
                   :registered-coverage :bounded-invariant-model
                   :executor-correspondence :assurance-scope])))))))))
