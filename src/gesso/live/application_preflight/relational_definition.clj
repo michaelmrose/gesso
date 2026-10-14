@@ -39,7 +39,11 @@
    A ROOT-only diagnostic now combines a genuine observed-root equality with
    successful domain-plan comparison and a matching root-child modeled
    choice/outcome; this supports only one locally matched preparation step,
-   not a physical history or equality of post-transaction states.
+   not a physical history. When the controlled comparator supplies v869's
+   separate root-poststate check, the ROOT candidate can additionally report
+   equality with its captured after-read dependency documents. This remains
+   local to one attempt and does not prove a pinned XTDB snapshot or trace
+   refinement.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -71,7 +75,8 @@
               :transition-tree-cross-checked-against-exercise-counts
               :executor-bound-comparison-linked-to-bounded-model-choice-outcomes
               :matched-model-transition-prefix-witnesses
-              :observed-root-local-model-step-candidate-linkage}
+              :observed-root-local-model-step-candidate-linkage
+              :observed-root-step-vs-captured-domain-poststate-comparison}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -95,7 +100,7 @@
                       :equal-concrete-and-modeled-states-for-linked-nodes
                       :physical-execution-trace-refines-modeled-tree
                       :modeled-prefix-witnesses-are-not-physical-history
-                      :matched-root-step-does-not-establish-physical-poststate-equality
+                      :matching-captured-dependencies-is-not-pinned-xtdb-isolation
                       :complete-real-application-state-machine}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
@@ -709,6 +714,53 @@
                                    :registered-operation-id :status])))))))
      node-ids)))
 
+(def ^:private root-poststate-statuses
+  #{:matches-captured-posttransaction-dependencies
+    :differs-from-captured-posttransaction-dependencies
+    :modeled-and-physical-outcomes-disagree
+    :declared-root-not-established-equal-to-observation
+    :submitted-plan-not-matched
+    :physical-outcome-not-reported})
+
+(defn- captured-root-poststate-context!
+  "Join ONLY an already established finite ROOT child to the controlled
+   comparator's v869 dependency after-read. A missing result (for example an
+   older comparator stub) is unknown, not agreement. Metadata from the
+   trusted comparator must be valid before using even a descriptive status.
+   Never inspect or return modeled/concrete documents, and never rerun a model
+   callback, database query, or transaction here."
+  [comparison root-step-status]
+  (let [poststate (:declared-root-poststate-comparison comparison)
+        base {:scope :one-controlled-root-step-vs-captured-domain-dependencies
+              :relation :exact-clojure-domain-document-map-equality
+              :observed-dependencies-only? true
+              :domain-state-exposed? false
+              :pinned-xtdb-snapshot :not-established
+              :physical-trace-refinement :not-established}]
+    (when (some? poststate)
+      (when-not
+       (and (map? poststate)
+            (contains? root-poststate-statuses (:status poststate))
+            (= :one-controlled-serial-root-step-vs-captured-dependencies
+               (:scope poststate))
+            (= :exact-clojure-domain-document-map-equality
+               (:relation poststate))
+            (false? (:poststate-data-exposed? poststate))
+            (= :not-established (:pinned-xtdb-snapshot poststate))
+            (= :not-established (:production-trace-refinement poststate)))
+        (fail! :invalid-controlled-root-poststate-evidence
+               {:status (:status poststate)})))
+    (assoc base :status
+           (cond
+             (not= :matching-root-step-explored root-step-status)
+             :modeled-root-step-not-established
+
+             (nil? poststate)
+             :captured-poststate-not-reported
+
+             :else
+             (:status poststate)))))
+
 (defn- root-step-context!
   "A narrowly scoped, MODEL-root-only diagnostic. Do not conflate finding
    any matching modeled occurrence with finding one that starts at the
@@ -718,8 +770,9 @@
    model edge for this admitted operation choice and outcome.
 
    The resulting node ID identifies an explored abstract serial step. Even
-   when all conditions hold, no equality of physical and modeled poststates,
-   authenticated XTDB history, or physical trace refinement is established."
+   when all conditions hold, no general physical trace refinement is
+   established. The separate captured-posttransaction result can add a
+   narrowly scoped after-read comparison without changing this verdict."
   [transition-tree comparison candidates]
   (let [root (get transition-tree :root-node-id)
         root-comparison (:declared-root-state-comparison comparison)
@@ -764,6 +817,8 @@
        #{})
      :scope :single-controlled-execution-versus-declared-finite-model-root
      :modeled-poststate-equals-observed-poststate? :not-established
+     :captured-posttransaction-dependency-comparison
+     (captured-root-poststate-context! comparison status)
      :physical-trace-refinement :not-established
      :not-established
      #{:pinned-xtdb-snapshot
@@ -838,7 +893,10 @@
    The nested :root-step-correspondence reports a stronger, *local* candidate
    only when the observed dependency state matches the declared model root,
    the submitted plan matches, and the choice/outcome was explored directly
-   from that root. This still cannot establish post-state or trace refinement."
+   from that root. The nested :captured-posttransaction-dependency-comparison
+   can then describe equality of one modeled serial step's after-state with
+   the controlled after-read of the same dependency documents. Such equality
+   neither pins XTDB snapshots nor proves isolation or trace refinement."
   [handle execution-evidence-handle]
   (let [{:keys [comparator operation-exercise transition-tree]}
         (current-construction! handle)
