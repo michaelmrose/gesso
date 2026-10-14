@@ -36,6 +36,10 @@
    tree, so a candidate can be understood in its modeled predecessor context.
    These prefixes are NOT observed physical histories, and do not establish
    that a modeled predecessor equals the observed XTDB starting state.
+   A ROOT-only diagnostic now combines a genuine observed-root equality with
+   successful domain-plan comparison and a matching root-child modeled
+   choice/outcome; this supports only one locally matched preparation step,
+   not a physical history or equality of post-transaction states.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -66,7 +70,8 @@
               :source-bound-bounded-transition-tree-in-explanation
               :transition-tree-cross-checked-against-exercise-counts
               :executor-bound-comparison-linked-to-bounded-model-choice-outcomes
-              :matched-model-transition-prefix-witnesses}
+              :matched-model-transition-prefix-witnesses
+              :observed-root-local-model-step-candidate-linkage}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -90,6 +95,7 @@
                       :equal-concrete-and-modeled-states-for-linked-nodes
                       :physical-execution-trace-refines-modeled-tree
                       :modeled-prefix-witnesses-are-not-physical-history
+                      :matched-root-step-does-not-establish-physical-poststate-equality
                       :complete-real-application-state-machine}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
@@ -703,6 +709,69 @@
                                    :registered-operation-id :status])))))))
      node-ids)))
 
+(defn- root-step-context!
+  "A narrowly scoped, MODEL-root-only diagnostic. Do not conflate finding
+   any matching modeled occurrence with finding one that starts at the
+   *observed* pre-transaction dependency state. A candidate requires all of:
+   an executor-bound exact submitted-plan match, equal declared/observed
+   root document maps, a definitive physical outcome, and a directly rooted
+   model edge for this admitted operation choice and outcome.
+
+   The resulting node ID identifies an explored abstract serial step. Even
+   when all conditions hold, no equality of physical and modeled poststates,
+   authenticated XTDB history, or physical trace refinement is established."
+  [transition-tree comparison candidates]
+  (let [root (get transition-tree :root-node-id)
+        root-comparison (:declared-root-state-comparison comparison)
+        root-matched?
+        (and (= :matches-captured-pretransaction-state
+                (:status root-comparison))
+             (= :exact-clojure-state-map-equality
+                (:relation root-comparison))
+             (= :declared-model-root-vs-controlled-dependency-snapshot
+                (:scope root-comparison)))
+        root-children
+        (->> (:edges transition-tree)
+             (filter (fn [edge]
+                       (and (= root (:parent-node-id edge))
+                            (some #{(:node-id edge)} candidates))))
+             (mapv :node-id))
+        status
+        (cond
+          (not= :matched (:status comparison))
+          :submitted-plan-not-matched
+
+          (not root-matched?)
+          :declared-root-not-established-equal-to-observation
+
+          (nil? (:physical-status comparison))
+          :physical-outcome-not-reported
+
+          (seq root-children)
+          :matching-root-step-explored
+
+          :else
+          :same-choice-outcome-not-explored-at-root)]
+    {:status status
+     :matched-root-transition-node-ids
+     (if (= :matching-root-step-explored status) root-children [])
+     :evidence-dimensions
+     (if (= :matching-root-step-explored status)
+       #{:admitted-operation-choice
+         :definitive-physical-outcome
+         :exact-declared-root-vs-captured-dependencies
+         :exact-observed-domain-preparation-plan}
+       #{})
+     :scope :single-controlled-execution-versus-declared-finite-model-root
+     :modeled-poststate-equals-observed-poststate? :not-established
+     :physical-trace-refinement :not-established
+     :not-established
+     #{:pinned-xtdb-snapshot
+       :posttransaction-model-state-equality
+       :complete-executor-behavioral-correspondence
+       :unbounded-invariant-preservation
+       :production-trace-refinement}}))
+
 (defn- modeled-transition-context!
   "From an already executor-bound comparison, find only the recorded finite
    tree occurrences with the same synthetic model-choice ID and physical
@@ -743,6 +812,8 @@
        :modeled-transition-node-ids candidates
        :modeled-prefix-witnesses
        (modeled-prefix-witnesses! transition-tree candidates)
+       :root-step-correspondence
+       (root-step-context! transition-tree comparison candidates)
        :prefix-evidence :modeled-occurrence-tree-only
        :matching-dimensions
        (if (nil? physical-status) #{:admitted-model-choice}
@@ -764,7 +835,10 @@
    with the same choice and observed outcome; each matching node now carries
    an inert, redacted prefix of MODEL-only predecessors. No prefix establishes
    equality of modeled and XTDB states or changes the comparator's verdict.
-   Neither a matching node nor a missing node proves trace correspondence."
+   The nested :root-step-correspondence reports a stronger, *local* candidate
+   only when the observed dependency state matches the declared model root,
+   the submitted plan matches, and the choice/outcome was explored directly
+   from that root. This still cannot establish post-state or trace refinement."
   [handle execution-evidence-handle]
   (let [{:keys [comparator operation-exercise transition-tree]}
         (current-construction! handle)
