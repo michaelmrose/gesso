@@ -57,6 +57,7 @@
   (:require
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.relational-application :as relational-app]
+   [gesso.live.application-preflight.operation-family-correspondence :as physical-correspondence]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]))
 
 (def assurance-scope
@@ -82,7 +83,8 @@
               :observed-root-local-model-step-candidate-linkage
               :observed-root-step-vs-captured-domain-poststate-comparison
               :controlled-local-root-step-before-and-after-observation
-              :caller-ordered-executor-observations-vs-bounded-model-path}
+              :caller-ordered-executor-observations-vs-bounded-model-path
+              :opt-in-captured-adjacency-comparison-for-modeled-sequences}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -109,7 +111,9 @@
                       :matching-captured-dependencies-is-not-pinned-xtdb-isolation
                       :complete-real-application-state-machine
                       :caller-supplied-observation-order-is-not-proven-chronology
-                      :modeled-path-is-not-observed-state-continuity}})
+                      :modeled-path-is-not-observed-state-continuity
+                      :equal-captured-adjacencies-do-not-establish-chronology
+                      :captured-adjacency-does-not-establish-complete-dependencies}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-keys
@@ -1050,6 +1054,76 @@
        :pinned-xtdb-snapshot :not-established
        :production-trace-refinement :not-established
        :application-certification :not-established})))
+
+(defn compare-observation-sequence-with-captured-adjacency!
+  "Join the existing ROOTED, caller-ordered modeled-path diagnostic with
+   separate executor-bound CAPTURED dependency-state comparisons for each
+   adjacent supplied pair. The input is a nonempty vector of distinct, genuine
+   controlled execution handles, and the assembly must remain current.
+
+   This is an EXPLICIT stronger diagnostic, not a changed contract for
+   compare-observation-sequence!: callers using the original model-path-only
+   function continue to get the same results. Each adjacent comparison
+   revalidates the genuine evidence and the current executor registry through
+   operation-family-correspondence/compare-observation-pair!; neither the pair
+   check nor this wrapper runs operations or performs additional XTDB reads.
+
+   The MODEL path and the CAPTURED equalities are separate observations. Even
+   when both match, the caller has NOT established execution chronology,
+   absence of intervening writes, complete dependency coverage, pinned XTDB
+   snapshots, or production trace refinement. Reports contain no captured
+   documents, executor handles, principals, arguments, or model callbacks."
+  [handle ordered-evidence-handles]
+  (let [path (compare-observation-sequence! handle ordered-evidence-handles)
+        {:keys [assembly]} (current-construction! handle)
+        pair-results
+        (mapv (fn [index]
+                (let [comparison
+                      (physical-correspondence/compare-observation-pair!
+                       assembly
+                       (nth ordered-evidence-handles index)
+                       (nth ordered-evidence-handles (inc index)))]
+                  {:earlier-step-index index
+                   :later-step-index (inc index)
+                   :status (:status comparison)
+                   :dependency-key-set-comparison
+                   (:dependency-key-set-comparison comparison)}))
+              (range (dec (count ordered-evidence-handles))))
+        all-pairs-match? (and (seq pair-results)
+                              (every? #(= :captured-domain-documents-match
+                                          (:status %)) pair-results))
+        model-path-matches?
+        (= :caller-ordered-choice-outcome-path-explored (:status path))
+        adjacency-status
+        (cond
+          (empty? pair-results) :no-adjacent-observations
+          all-pairs-match? :all-captured-adjacencies-match
+          (some #(= :captured-domain-documents-differ (:status %)) pair-results)
+          :one-or-more-captured-adjacencies-differ
+          :else :captured-adjacency-equality-not-established)
+        joint-status
+        (cond
+          (not model-path-matches?) :modeled-path-not-established
+          (empty? pair-results) :no-adjacent-observations
+          all-pairs-match? :modeled-path-and-captured-adjacencies-match
+          :else :modeled-path-without-captured-adjacency-agreement)]
+    (assoc path
+           :captured-dependency-adjacency
+           {:status adjacency-status
+            :pair-count (count pair-results)
+            :pairs pair-results
+            :scope :caller-ordered-executor-bound-captured-dependency-pairs
+            :chronology :not-established
+            :complete-dependency-coverage :not-established
+            :pinned-xtdb-snapshot :not-established}
+           :joint-path-and-captured-adjacency
+           {:status joint-status
+            :evidence-class :bounded-model-path-plus-captured-dependency-equality
+            :state-contents-exposed? false
+            :observed-execution-chronology :not-established
+            :absence-of-intervening-writes :not-established
+            :production-trace-refinement :not-established
+            :application-certification :not-established})))
 
 (defn start-biff!
   "Start Biff through the canonical Gesso lifecycle with EXACTLY the checked
