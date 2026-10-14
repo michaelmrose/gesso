@@ -27,6 +27,9 @@
    A separate optional :require-operation-outcomes map requires selected
    registered operations to exercise committed and/or rejected outcomes in
    the finite model; exercising one outcome never implies the other.
+   The admitted v856 transition prefix tree is joined back to registered
+   operation names, checked against per-instance outcomes, and explained as
+   redacted, non-authorizing bounded MODEL transitions, not production traces.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -53,7 +56,9 @@
               :optional-source-owned-rule-exercise-admission-gate
               :source-owned-modeled-operation-choice-exercise-reporting
               :optional-source-owned-operation-attempt-admission-gate
-              :optional-source-owned-operation-outcome-admission-gate}
+              :optional-source-owned-operation-outcome-admission-gate
+              :source-bound-bounded-transition-tree-in-explanation
+              :transition-tree-cross-checked-against-exercise-counts}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -72,7 +77,9 @@
                       :rule-exercise-does-not-establish-all-predicate-branches
                       :modeled-operation-exercise-does-not-establish-production-execution
                       :operation-attempts-do-not-establish-successful-commits
-                      :modeled-operation-outcomes-do-not-establish-production-outcomes}})
+                      :modeled-operation-outcomes-do-not-establish-production-outcomes
+                      :modeled-transition-tree-is-not-production-execution
+                      :complete-real-application-state-machine}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-keys
@@ -212,6 +219,97 @@
          :faithfulness-of-family-callbacks-to-registered-executors
          :exercise-in-production
          :unbounded-operation-coverage}})))
+
+(defn- admitted-transition-tree!
+  "Join the v856 checker-owned transition prefix tree to admitted, redacted
+   instance identities. Cross-check every node and outcome with the v848
+   exercise counts before publishing an inert application explanation.
+
+   The checker may retain concrete state and callback-bearing diagnostic
+   traces elsewhere in its verdict. Nothing from those traces or from the
+   family expansion is returned here. Repeated states are distinct nodes."
+  [verdict operation-exercise]
+  (let [tree (:transition-tree verdict)
+        edges (:edges tree)
+        instances (:modeled-instance-exercise operation-exercise)
+        by-id (into {} (map (juxt :model-instance-id identity)) instances)
+        {:keys [attempted-transitions visited-state-occurrences
+                max-depth]} (:exploration verdict)]
+    (when-not
+        (and (map? tree)
+             (= :bounded-reachable-transition-prefix-tree (:kind tree))
+             (= 0 (:root-node-id tree))
+             (= :occurrences-not-deduplicated (:state-identity tree))
+             (= :not-established (:production-correspondence tree))
+             (vector? edges)
+             (integer? attempted-transitions)
+             (<= 0 attempted-transitions)
+             (= attempted-transitions (count edges))
+             (= (inc attempted-transitions)
+                (:node-count tree) visited-state-occurrences)
+             (pos-int? max-depth)
+             (= (count by-id) (count instances)))
+      (fail! :incomplete-modeled-transition-tree
+             {:reason :invalid-tree-boundary}))
+    (let [{:keys [depths counts safe-edges]}
+          (reduce
+           (fn [{:keys [depths] :as acc} [index edge]]
+             (let [{:keys [node-id parent-node-id depth operation-id status]} edge
+                   parent-depth (get depths parent-node-id)
+                   instance (get by-id operation-id)]
+               (when-not
+                   (and (map? edge)
+                        (= #{:node-id :parent-node-id :depth
+                             :operation-id :status} (set (keys edge)))
+                        (= (inc index) node-id)
+                        (integer? parent-node-id)
+                        (< -1 parent-node-id node-id)
+                        (integer? parent-depth)
+                        (= (inc parent-depth) depth)
+                        (<= depth max-depth)
+                        (#{:committed :rejected} status)
+                        instance)
+                 (fail! :incomplete-modeled-transition-tree
+                        {:reason :invalid-transition
+                         :transition-index index}))
+               (-> acc
+                   (assoc-in [:depths node-id] depth)
+                   (update-in [:counts operation-id status] (fnil inc 0))
+                   (update :safe-edges conj
+                           {:node-id node-id
+                            :parent-node-id parent-node-id
+                            :depth depth
+                            :model-instance-id operation-id
+                            :registered-operation-id
+                            (:registered-operation-id instance)
+                            :status status}))))
+           {:depths {0 0} :counts {} :safe-edges []}
+           (map-indexed vector edges))]
+      (when-not
+          (every?
+           (fn [{:keys [model-instance-id committed-attempts
+                        rejected-attempts]}]
+             (= {:committed committed-attempts
+                 :rejected rejected-attempts}
+                (merge {:committed 0 :rejected 0}
+                       (get counts model-instance-id))))
+           instances)
+        (fail! :incomplete-modeled-transition-tree
+               {:reason :outcomes-disagree-with-exercise}))
+      {:kind :bounded-reachable-transition-prefix-tree
+       :status :observed-in-declared-bounded-model
+       :scope :declared-finite-operation-family-reachable-states
+       :root-node-id 0
+       :node-count (:node-count tree)
+       :edges safe-edges
+       :state-identity :occurrences-not-deduplicated
+       :domain-completeness :not-established
+       :production-correspondence :not-established
+       :not-established
+       #{:actual-executor-traces
+         :complete-real-application-state-machine
+         :unbounded-invariant-preservation
+         :production-implementation-correspondence}})))
 
 (defn- require-attempted-operations!
   "Reject explicit operation nonvacuity requirements unless each specified
@@ -388,6 +486,8 @@
         ;; Invalid or missing v848 coverage fails before comparator creation.
         operation-exercise (admitted-operation-exercise!
                             finite-relational-verdict operation-ids)
+        transition-tree (admitted-transition-tree!
+                         finite-relational-verdict operation-exercise)
         _ (require-attempted-operations! required-operations
                                          operation-ids operation-exercise)
         _ (require-operation-outcomes! required-outcomes
@@ -407,6 +507,7 @@
              :rule-ids rule-ids
              :operation-ids operation-ids
              :operation-exercise operation-exercise
+             :transition-tree transition-tree
              :declarations declarations
              :required-exercised-rule-ids
              (->> declarations (map :id) (filter required-rules) vec)
@@ -459,12 +560,14 @@
    requested IDs in registered order and counts rejected attempts as attempts.
    The independent outcome gate reports required committed/rejected branches
    by registered operation and never treats an attempt as proof of a commit.
-   Principal and argument values, callbacks, modeled documents, and executor
-   handles are never exposed."
+   The model transition tree is cross-checked with recorded outcome counts;
+   it exposes synthetic instance and registered operation IDs, not state or
+   production traces. Principal and argument values, callbacks, modeled
+   documents, and executor handles are never exposed."
   [handle]
   (let [{:keys [assembly declarations initial-rule-coverage
                 reachable-rule-coverage operation-ids finite-exploration
-                operation-exercise required-exercised-rule-ids
+                operation-exercise transition-tree required-exercised-rule-ids
                 required-attempted-operation-ids required-operation-outcomes]}
         (current-construction! handle)
         ;; application/explain derives a fresh, current semantic audit from the
@@ -523,6 +626,7 @@
                    :relational-rule-ids (mapv :id declarations)
                    :finite-exploration finite-exploration
                    :modeled-operation-exercise operation-exercise
+                   :modeled-transition-tree transition-tree
                    :required-attempted-operation-ids
                    required-attempted-operation-ids
                    :required-operation-outcomes required-operation-outcomes
