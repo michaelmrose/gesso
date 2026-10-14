@@ -19,6 +19,8 @@
    :require-exercised-rule-ids gate rejects an admitted model if any named
    rule never matches a source in the explored states; it does not establish
    domain completeness or guarantee those rules are exercised in production.
+   The finite verdict also retains source-ordered, redacted operation-choice
+   exercise counts tied to the admitted registry and expanded family choices.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -42,7 +44,8 @@
               :source-owned-relational-rules-in-current-semantic-explanation
               :exact-admitted-finite-exploration-scope-in-explanation
               :source-matching-coverage-over-visited-model-states
-              :optional-source-owned-rule-exercise-admission-gate}
+              :optional-source-owned-rule-exercise-admission-gate
+              :source-owned-modeled-operation-choice-exercise-reporting}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -58,7 +61,8 @@
                       :actual-xtdb-enforcement-of-business-invariants
                       :correctness-of-projection-callbacks
                       :whole-application-certification
-                      :rule-exercise-does-not-establish-all-predicate-branches}})
+                      :rule-exercise-does-not-establish-all-predicate-branches
+                      :modeled-operation-exercise-does-not-establish-production-execution}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-key :require-exercised-rule-ids)
@@ -112,6 +116,90 @@
              [:registry-coverage :expanded-instance-count])
      :domain-completeness :not-established
      :production-correspondence :not-established}))
+
+(def ^:private operation-count-keys
+  [:enablement-checks :disabled-checks :enabled-attempts
+   :committed-attempts :rejected-attempts])
+
+(defn- admitted-operation-exercise!
+  "Summarize the v848 reachable check's ACTUAL recorded instance counts.
+   Join only via the exact synthetic IDs in the already admitted expansion.
+   The expansion contains principals and arguments; neither leaves this
+   boundary. Fail rather than publish plausible but incomplete telemetry."
+  [verdict operation-ids]
+  (let [choices (get-in verdict [:family-expansion :instances])
+        instances (:operation-exercise verdict)
+        expected (get-in verdict [:registry-coverage :expanded-instance-count])
+        attempted (get-in verdict [:exploration :attempted-transitions])
+        family-ids (mapv :family-id choices)
+        valid-counts?
+        (fn [entry]
+          (and (every? (fn [key]
+                         (let [value (get entry key)]
+                           (and (integer? value) (<= 0 value))))
+                       operation-count-keys)
+               (= (:enablement-checks entry)
+                  (+ (:disabled-checks entry) (:enabled-attempts entry)))
+               (= (:enabled-attempts entry)
+                  (+ (:committed-attempts entry) (:rejected-attempts entry)))))]
+    (when-not
+        (and (vector? choices)
+             (vector? instances)
+             (pos-int? expected)
+             (= expected (count choices) (count instances))
+             (= (mapv :instance-id choices)
+                (mapv :operation-id instances))
+             (every? qualified-keyword? family-ids)
+             (= (set operation-ids) (set family-ids))
+             (= (count family-ids)
+                (count (distinct (map :instance-id choices))))
+             (every? valid-counts? instances)
+             (integer? attempted)
+             (<= 0 attempted)
+             (= attempted (reduce + (map :enabled-attempts instances))))
+      (fail! :incomplete-modeled-operation-exercise
+             {:expected-model-instance-count expected
+              :registered-operation-ids operation-ids}))
+    (let [safe-instances
+          (mapv (fn [choice counts]
+                  (merge
+                   {:model-instance-id (:instance-id choice)
+                    :registered-operation-id (:family-id choice)
+                    :principal-choice-index (:principal-index choice)
+                    :argument-choice-index (:argument-index choice)}
+                   (select-keys counts operation-count-keys)
+                   {:ever-attempted-in-explored-states?
+                    (pos? (:enabled-attempts counts))}))
+                choices instances)
+          families
+          (mapv (fn [id]
+                  (let [matching (filterv #(= id (:registered-operation-id %))
+                                          safe-instances)
+                        totals (into {}
+                                     (map (fn [key]
+                                            [key (reduce + (map key matching))]))
+                                     operation-count-keys)]
+                    (assoc totals
+                           :registered-operation-id id
+                           :modeled-instance-count (count matching)
+                           :ever-attempted-in-explored-states?
+                           (pos? (:enabled-attempts totals)))))
+                operation-ids)]
+      {:status :observed-in-declared-bounded-model
+       :scope :declared-finite-operation-family-reachable-states
+       :registered-operation-exercise families
+       :modeled-instance-exercise safe-instances
+       :never-attempted-registered-operation-ids
+       (mapv :registered-operation-id
+             (remove :ever-attempted-in-explored-states? families))
+       :never-attempted-modeled-instance-ids
+       (mapv :model-instance-id
+             (remove :ever-attempted-in-explored-states? safe-instances))
+       :not-established
+       #{:completeness-of-real-principals-or-arguments
+         :faithfulness-of-family-callbacks-to-registered-executors
+         :exercise-in-production
+         :unbounded-operation-coverage}})))
 
 (defn- require-exercised-rules!
   "Reject an explicit, source-owned coverage obligation when its declared
@@ -185,6 +273,12 @@
         ;; Check source-owned exercise obligations BEFORE building the second
         ;; comparator. A failing obligation can never produce an opaque handle.
         _ (require-exercised-rules! required declarations relational-coverage)
+        rule-ids (:rule-ids relational-coverage)
+        operation-ids (get-in finite-relational-verdict
+                              [:registry-coverage :registered-operation-ids])
+        ;; Invalid or missing v848 coverage fails before comparator creation.
+        operation-exercise (admitted-operation-exercise!
+                            finite-relational-verdict operation-ids)
         ;; Constructed from the *same* assembly and declarations. This repeats
         ;; the finite check (and thus assumes deterministic pure callbacks),
         ;; but also creates the bound physical-comparison capability before
@@ -192,9 +286,6 @@
         comparator (relations/build-comparator
                     application-assembly initial-state families declarations
                     options)
-        rule-ids (:rule-ids relational-coverage)
-        operation-ids (get-in finite-relational-verdict
-                              [:registry-coverage :registered-operation-ids])
         handle (Object.)]
     (locking constructions
       (.put constructions handle
@@ -202,6 +293,7 @@
              :comparator comparator
              :rule-ids rule-ids
              :operation-ids operation-ids
+             :operation-exercise operation-exercise
              :declarations declarations
              :required-exercised-rule-ids
              (->> declarations (map :id) (filter required) vec)
@@ -231,19 +323,21 @@
    Clojure business policy. This *explicit*, opt-in construction possesses
    additional validated finite relational declarations, so it can report
    precisely those rules, their initial modeled coverage, source matching
-   across actually visited states, and their bounded model-checking evidence. The assembly's opaque operation-model premises,
-   unknown policy inventory, unmodeled rules, and open obligations remain.
+   across actually visited states, and their bounded model-checking evidence.
+   The assembly's opaque operation-model premises, unknown policy inventory,
+   unmodeled rules, and open obligations remain.
 
    A forged explanation carries no admission authority. Only the opaque handle
    can retrieve this view, and every call checks the same physical artifact
    and current application assembly used for startup and comparison. The
    admitted exploration depth, strict budget, visits, frontier limit, and
-   per-rule matching counts are visible without reevaluating any callback. No application
-   callbacks, modeled documents, or executor handles are exposed."
+   per-rule matching counts and per-choice modeled-operation exercise are
+   visible without reevaluating callbacks. Principal and argument values,
+   callbacks, modeled documents, and executor handles are never exposed."
   [handle]
   (let [{:keys [assembly declarations initial-rule-coverage
                 reachable-rule-coverage operation-ids finite-exploration
-                required-exercised-rule-ids]}
+                operation-exercise required-exercised-rule-ids]}
         (current-construction! handle)
         ;; application/explain derives a fresh, current semantic audit from the
         ;; actual admitted assembly; never trust a stored or caller-authored
@@ -300,6 +394,7 @@
                    :registered-operation-ids operation-ids
                    :relational-rule-ids (mapv :id declarations)
                    :finite-exploration finite-exploration
+                   :modeled-operation-exercise operation-exercise
                    :required-exercised-rule-ids required-exercised-rule-ids
                    :rule-exercise-gate
                    (if (seq required-exercised-rule-ids)
