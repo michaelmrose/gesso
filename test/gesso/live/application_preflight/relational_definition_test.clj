@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v839 regressions for the source-owned relational construction and explanation.
+  "v841 regressions for the source-owned relational construction and explanation.
 
    Preserve the earlier admission, comparator, and startup tests, and cover
    v838's handle-only integration of declared relational rules with the
@@ -437,3 +437,100 @@
         (spit artifact-path "v839 replaced after admission\n")
         (is (= :stale-application-assembly
                (error-kind #(sut/explain handle))))))))
+
+
+;; v840 adds the actual finite search boundary to the explanation, rather
+;; than only displaying the very broad label :bounded-model-checked.  These
+;; facts are captured from the successful admission; reading the report does
+;; not run new modeled transitions and cannot promote it to a certificate.
+
+(defn- finite-exploration [handle]
+  (get-in (sut/explain handle)
+          [:semantic-audit :relational-assurance :finite-exploration]))
+
+(deftest explanation-identifies-exact-bounded-state-space
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            summary (finite-exploration handle)]
+        (is (= #{:kind :status :max-depth :max-transitions :reached-depth
+                 :attempted-transitions :visited-state-occurrences
+                 :frontier-exhausted? :depth-limited?
+                 :modeled-operation-instance-count :domain-completeness
+                 :production-correspondence}
+               (set (keys summary))))
+        (is (= :bounded-reachable-serial-operations (:kind summary)))
+        (is (= :fully-explored-within-declared-bounds (:status summary)))
+        (is (= 2 (:max-depth summary)))
+        (is (= 50 (:max-transitions summary)))
+        (is (= 2 (:reached-depth summary)))
+        (is (= 12 (:attempted-transitions summary)))
+        (is (= 13 (:visited-state-occurrences summary)))
+        (is (= 3 (:modeled-operation-instance-count summary)))
+        (is (true? (:depth-limited? summary)))
+        (is (false? (:frontier-exhausted? summary)))
+        (is (= :not-established (:domain-completeness summary)))
+        (is (= :not-established (:production-correspondence summary)))
+        ;; Returned maps are inert snapshots, not mutable admission evidence.
+        (is (not= (assoc summary :status :universally-proved)
+                  (finite-exploration handle)))
+        (is (= summary (finite-exploration handle)))
+        (is (= :unknown-construction
+               (error-kind #(sut/explain (sut/explain handle)))))))))
+
+(deftest explanation-distinguishes-depth-limited-and-frontier-exhausted
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [short (assoc-in (definition options)
+                            [:relational-model :options :max-depth] 1)
+            exhaustive (update-in short [:relational-model :families]
+                                  (fn [families]
+                                    (mapv #(assoc % :enabled?
+                                                  (fn [& _] false)) families)))
+            short-summary (finite-exploration (sut/construct! short))
+            exhausted-summary (finite-exploration
+                               (sut/construct! exhaustive))]
+        (is (= 1 (:max-depth short-summary)))
+        (is (= 1 (:reached-depth short-summary)))
+        (is (= 3 (:attempted-transitions short-summary)))
+        (is (= 4 (:visited-state-occurrences short-summary)))
+        (is (true? (:depth-limited? short-summary)))
+        (is (false? (:frontier-exhausted? short-summary)))
+        (is (= 0 (:attempted-transitions exhausted-summary)))
+        (is (= 1 (:visited-state-occurrences exhausted-summary)))
+        (is (true? (:frontier-exhausted? exhausted-summary)))
+        (is (false? (:depth-limited? exhausted-summary)))
+        (is (= 3 (:modeled-operation-instance-count exhausted-summary)))
+        (is (= :not-established (:domain-completeness exhausted-summary)))))))
+
+(deftest finite-exploration-report-is-redacted-and-does-not-run-callbacks
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [secret "v841-sensitive-model-marker"
+            invoked (atom 0)
+            declared (-> (definition options)
+                         (assoc-in [:relational-model :initial-state counter-key
+                                    :unpublished-secret] secret)
+                         (update-in [:relational-model :families]
+                                    (fn [families]
+                                      (mapv (fn [family]
+                                              (update family :prepare
+                                                      (fn [prepare]
+                                                        (fn [& args]
+                                                          (swap! invoked inc)
+                                                          (apply prepare args)))))
+                                            families))))
+            handle (sut/construct! declared)
+            initial-count @invoked
+            explained (sut/explain handle)
+            summary (finite-exploration handle)]
+        (is (pos? initial-count))
+        (is (= initial-count @invoked))
+        (is (not (.contains (pr-str explained) secret)))
+        (is (not (.contains (pr-str summary) ":initial-state")))
+        (is (not (.contains (pr-str summary) ":prepare")))
+        (is (not (.contains (pr-str summary) "#object[")))
+        (is (= 12 (:attempted-transitions summary)))
+        (is (= initial-count @invoked))
+        (is (= :unknown-construction
+               (error-kind #(sut/start-biff! summary nil []))))))))
