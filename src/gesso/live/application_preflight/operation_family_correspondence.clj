@@ -30,8 +30,10 @@
    The final result is local diagnostic evidence for ONE observed attempt,
    not a proof certificate,
    authenticated database history, complete application semantics, or general
-   refinement. No business callbacks or XTDB transactions are run by this
-   module except the admitted finite checks at construction time."
+   refinement. compare-observation-pair! also compares two genuine captured
+   dependency snapshots without inferring their chronology or causality.
+   No business callbacks or XTDB transactions are run by this module except
+   the admitted finite checks at construction time."
   (:require
    [clojure.set :as set]
    [gesso.choreo.identity :as identity]
@@ -279,3 +281,92 @@
                   :declared-root-poststate-comparison
                   :registered-coverage :bounded-invariant-model
                   :executor-correspondence :assurance-scope])))))))))
+
+(defn compare-observation-pair!
+  "Compare the captured dependency documents at the boundary between TWO
+   distinct, genuinely executor-bound diagnostic observations of a CURRENT
+   application assembly.
+
+   The caller supplies the order. Each opaque handle must resolve to exactly
+   one presently registered executor; detached reports, old executors, and
+   repeated handles cannot substitute. This function inspects already captured
+   values: it does not run modeled callbacks, execute transactions, or read
+   XTDB. The earlier after-read has only its canonical command-result document
+   removed; other domain documents and their keys are compared exactly to the
+   later before-read. Both captured dependency key sets must be nonempty and
+   equal before document-value equality is considered.
+
+   Equal captured values are *not* evidence of observed chronology, absence
+   of intervening writes, consistent/pinned snapshots, a complete dependency
+   inventory, or model trace refinement. The returned report is redacted and
+   cannot authorize an operation or certify an application."
+  [assembly earlier-handle later-handle]
+  (when (or (nil? earlier-handle)
+            (nil? later-handle)
+            (identical? earlier-handle later-handle))
+    (fail! :invalid-observation-pair
+           {:reason :requires-two-distinct-opaque-evidence-handles}))
+  ;; Never trust a caller-supplied executor list or operation label. Rebuild
+  ;; the registry from the exact assembly and check its physical currentness.
+  (when-not (application/application-assembly? assembly)
+    (fail! :stale-application-assembly {}))
+  (let [options (select-keys assembly assembly-option-keys)
+        report (application/check-application-assembly options)
+        operations (get-in report [:analysis :operations])
+        ids (if (map? operations) (set (keys operations)) #{})
+        executors (current-executors! assembly ids)
+        inspect!
+        (fn [handle]
+          (let [matches
+                (keep (fn [[operation executor]]
+                        (when-let [result
+                                   (execution/inspect-evidence-for-executor
+                                    handle executor)]
+                          [operation result]))
+                      executors)]
+            (when-not (= 1 (count matches))
+              (fail! :unrecognized-executor-bound-evidence
+                     {:matching-registered-executors (count matches)}))
+            (second (first matches))))
+        earlier (inspect! earlier-handle)
+        later (inspect! later-handle)
+        earlier-observation (:observation earlier)
+        later-observation (:observation later)
+        command-record (get-in earlier-observation
+                               [:submitted-incorporation :record])
+        _ (resolution/require-record command-record)
+        command-target [resolution/command-entity-type (:xt/id command-record)]
+        earlier-after (get-in earlier-observation [:observations :state])
+        later-before (:initial-state later-observation)
+        _ (tx-model/require-state earlier-after)
+        _ (tx-model/require-state later-before)
+        earlier-domain (dissoc earlier-after command-target)
+        earlier-keys (set (keys earlier-domain))
+        later-keys (set (keys later-before))
+        scope-matches? (= earlier-keys later-keys)
+        status (cond
+                 (or (empty? earlier-keys) (empty? later-keys))
+                 :no-common-nonempty-captured-domain
+
+                 (not scope-matches?)
+                 :captured-dependency-key-sets-differ
+
+                 (= earlier-domain later-before)
+                 :captured-domain-documents-match
+
+                 :else
+                 :captured-domain-documents-differ)]
+    {:status status
+     :scope :two-caller-ordered-executor-bound-dependency-observations
+     :relation :exact-clojure-captured-domain-document-map-equality
+     :dependency-key-set-comparison
+     (if scope-matches? :same-captured-keys :different-captured-keys)
+     :state-contents-exposed? false
+     :comparison-ran-model-callbacks? false
+     :additional-xtdb-reads? false
+     :observed-execution-chronology :not-established
+     :no-intervening-writes :not-established
+     :pinned-xtdb-snapshot :not-established
+     :complete-domain-dependency-coverage :not-established
+     :production-trace-refinement :not-established
+     :application-certification :not-established}))
