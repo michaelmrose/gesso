@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v876 regressions for relational construction and bounded modeled paths.
+  "v880 regressions for relational construction and captured adjacency.
 
    Preserve earlier admission, comparator, startup, and explanation tests.
    Verify that actual visited-state matching from v842 is retained by the
@@ -3429,3 +3429,202 @@
         (is (= :not-established (:physical-inter-step-state-continuity result)))
         (is (= :not-established (:production-trace-refinement result)))
         (is (not (.contains (pr-str result) request-id)))))))
+
+;; v880: the opt-in v879 join reports bounded model-path feasibility beside
+;; controlled captured-dependency adjacency. These are distinct observations.
+;; None authenticates caller order, excludes intervening writes, or proves
+;; a concrete production trace. Stub the PAIR comparator for classification;
+;; the single-observation integration below uses real executor-issued XTDB
+;; evidence, and the physical pair comparator is tested in its own namespace.
+
+(defn- with-v880-adjacency
+  ([f] (with-v880-adjacency definition f))
+  ([make-definition f]
+   (with-sequence-comparator
+     make-definition
+     (fn [{:keys [handle tree responses calls artifact-path]}]
+       (let [first-edge (sequence-root-edge tree)
+             second-edge (sequence-child-edge tree first-edge)
+             a (Object.)
+             b (Object.)
+             c (Object.)
+             pair-calls (atom [])
+             pair-response (atom {:status :captured-domain-documents-match
+                                  :dependency-key-set-comparison :same-captured-keys})]
+         (set-sequence-response! responses a first-edge)
+         (set-sequence-response! responses b second-edge)
+         (set-sequence-response! responses c first-edge)
+         (with-redefs [gesso.live.application-preflight.operation-family-correspondence/compare-observation-pair!
+                       (fn [assembly earlier later]
+                         (swap! pair-calls conj {:assembly assembly
+                                                 :earlier earlier :later later})
+                         @pair-response)]
+           (f {:handle handle :tree tree :first-edge first-edge
+               :second-edge second-edge :a a :b b :c c
+               :responses responses :calls calls :pair-calls pair-calls
+               :pair-response pair-response :artifact-path artifact-path})))))))
+
+(deftest v880-admitted-model-path-and-matching-captured-adjacency-are-separately-reported
+  (with-v880-adjacency
+    (fn [{:keys [handle a b calls pair-calls]}]
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency!
+               handle [a b])
+            captured (:captured-dependency-adjacency r)
+            joined (:joint-path-and-captured-adjacency r)]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status r)))
+        (is (= :all-captured-adjacencies-match (:status captured)))
+        (is (= :modeled-path-and-captured-adjacencies-match (:status joined)))
+        (is (= 2 (:observation-count r)))
+        (is (= 1 (:pair-count captured)))
+        (is (= [{:earlier-step-index 0 :later-step-index 1
+                 :status :captured-domain-documents-match
+                 :dependency-key-set-comparison :same-captured-keys}]
+               (:pairs captured)))
+        (is (= [a b] @calls))
+        (is (= 1 (count @pair-calls)))
+        (is (identical? a (:earlier (first @pair-calls))))
+        (is (identical? b (:later (first @pair-calls))))
+        (is (= :not-established (:chronology captured)))
+        (is (= :not-established (:complete-dependency-coverage captured)))
+        (is (= :not-established (:observed-execution-chronology joined)))
+        (is (= :not-established (:absence-of-intervening-writes joined)))
+        (is (= :not-established (:production-trace-refinement joined)))
+        (is (= :not-established (:application-certification joined)))))))
+
+(deftest v880-different-captured-values-do-not-change-modeled-path-verdict
+  (with-v880-adjacency
+    (fn [{:keys [handle a b pair-response]}]
+      (reset! pair-response {:status :captured-domain-documents-differ
+                             :dependency-key-set-comparison :same-captured-keys})
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency! handle [a b])]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status r)))
+        (is (seq (:matching-final-modeled-node-ids r)))
+        (is (= :one-or-more-captured-adjacencies-differ
+               (get-in r [:captured-dependency-adjacency :status])))
+        (is (= :modeled-path-without-captured-adjacency-agreement
+               (get-in r [:joint-path-and-captured-adjacency :status])))))))
+
+(deftest v880-incompatible-dependency-domains-are-never-equal
+  (with-v880-adjacency
+    (fn [{:keys [handle a b pair-response]}]
+      (reset! pair-response {:status :captured-dependency-key-sets-differ
+                             :dependency-key-set-comparison :different-captured-keys})
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency! handle [a b])]
+        (is (= :captured-adjacency-equality-not-established
+               (get-in r [:captured-dependency-adjacency :status])))
+        (is (= :different-captured-keys
+               (get-in r [:captured-dependency-adjacency :pairs 0
+                          :dependency-key-set-comparison])))
+        (is (= :modeled-path-without-captured-adjacency-agreement
+               (get-in r [:joint-path-and-captured-adjacency :status])))))))
+
+(deftest v880-empty-captured-domains-remain-inconclusive
+  (with-v880-adjacency
+    (fn [{:keys [handle a b pair-response]}]
+      (reset! pair-response {:status :no-common-nonempty-captured-domain
+                             :dependency-key-set-comparison :same-captured-keys})
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency! handle [a b])]
+        (is (= :captured-adjacency-equality-not-established
+               (get-in r [:captured-dependency-adjacency :status])))
+        (is (= :modeled-path-without-captured-adjacency-agreement
+               (get-in r [:joint-path-and-captured-adjacency :status])))))))
+
+(deftest v880-captured-equality-cannot-rescue-unexplored-model-sequence
+  (with-v880-adjacency
+    (fn [options]
+      (-> (definition options)
+          (assoc-in [:relational-model :families 0 :enabled?]
+                    (fn [state _ _] (zero? (:n (get state counter-key)))))
+          (assoc-in [:relational-model :families 1 :enabled?]
+                    (fn [state _ _] (pos? (:n (get state counter-key)))))
+          (assoc-in [:relational-model :families 2 :enabled?]
+                    (fn [& _] false))))
+    (fn [{:keys [handle a b pair-calls]}]
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency! handle [b a])]
+        (is (= :caller-ordered-choice-outcome-path-not-explored (:status r)))
+        (is (= :all-captured-adjacencies-match
+               (get-in r [:captured-dependency-adjacency :status])))
+        (is (= :modeled-path-not-established
+               (get-in r [:joint-path-and-captured-adjacency :status])))
+        (is (= 1 (count @pair-calls)))))))
+
+(deftest v880-plan-counterexample-stays-a-counterexample-even-with-adjacency
+  (with-v880-adjacency
+    (fn [{:keys [handle a b second-edge responses pair-calls]}]
+      (swap! responses assoc b (assoc (comparison-for-edge second-edge)
+                                      :status :counterexample))
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency!
+               handle [a b])]
+        (is (= :one-or-more-submitted-plans-not-matched (:status r)))
+        (is (= :all-captured-adjacencies-match
+               (get-in r [:captured-dependency-adjacency :status])))
+        (is (= :modeled-path-not-established
+               (get-in r [:joint-path-and-captured-adjacency :status])))
+        (is (= 1 (count @pair-calls)))))))
+
+(deftest v880-single-observation-never-produces-vacuous-adjacency-success
+  (with-v880-adjacency
+    (fn [{:keys [handle a pair-calls]}]
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency!
+               handle [a])]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status r)))
+        (is (= :no-adjacent-observations
+               (get-in r [:captured-dependency-adjacency :status])))
+        (is (= 0 (get-in r [:captured-dependency-adjacency :pair-count])))
+        (is (= [] (get-in r [:captured-dependency-adjacency :pairs])))
+        (is (= :no-adjacent-observations
+               (get-in r [:joint-path-and-captured-adjacency :status])))
+        (is (empty? @pair-calls))))))
+
+(deftest v880-invalid-or-repeated-handle-rejected-before-pair-inspection
+  (with-v880-adjacency
+    (fn [{:keys [handle a pair-calls calls]}]
+      (doseq [bad [nil [] [nil] [a a] [a nil] (list a)]]
+        (is (= :invalid-observation-sequence
+               (error-kind #(sut/compare-observation-sequence-with-captured-adjacency!
+                              handle bad)))))
+      (is (empty? @pair-calls))
+      (is (empty? @calls)))))
+
+(deftest v880-adjacency-diagnostic-is-redacted-inert-and-not-an-authority-handle
+  (with-v880-adjacency
+    (fn [{:keys [handle a b pair-calls]}]
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency!
+               handle [a b])
+            text (pr-str r)
+            bogus (assoc-in r [:joint-path-and-captured-adjacency :status]
+                            :proved)]
+        (is (false? (get-in r [:joint-path-and-captured-adjacency
+                               :state-contents-exposed?])))
+        (is (not (re-find #"#object\[|:initial-state|:submitted-incorporation|:commands|:arguments|:principals" text)))
+        (is (= :unknown-construction (error-kind #(sut/explain bogus))))
+        (is (= :unknown-construction (error-kind #(sut/compare! r a))))
+        (is (= 1 (count @pair-calls)))))))
+
+(deftest v880-stale-artifact-blocks-comparison-before-adjacency-inspection
+  (with-v880-adjacency
+    (fn [{:keys [handle a b artifact-path pair-calls calls]}]
+      (spit artifact-path "v880-stale-runtime\n")
+      (is (= :stale-application-assembly
+             (error-kind #(sut/compare-observation-sequence-with-captured-adjacency!
+                            handle [a b]))))
+      (is (empty? @pair-calls))
+      (is (empty? @calls)))))
+
+(deftest v880-genuine-xtdb-executor-observation-has-no-imaginary-second-step
+  (with-real-xtdb-root-step
+    (fn [{:keys [handle evidence request-id]}]
+      (let [r (sut/compare-observation-sequence-with-captured-adjacency!
+               handle [evidence])]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status r)))
+        (is (= :committed (get-in r [:steps 0 :physical-outcome])))
+        (is (= :matched (get-in r [:steps 0 :plan-comparison-status])))
+        (is (= :no-adjacent-observations
+               (get-in r [:captured-dependency-adjacency :status])))
+        (is (= [] (get-in r [:captured-dependency-adjacency :pairs])))
+        (is (= :no-adjacent-observations
+               (get-in r [:joint-path-and-captured-adjacency :status])))
+        (is (= :not-established
+               (get-in r [:joint-path-and-captured-adjacency
+                          :observed-execution-chronology])))
+        (is (not (.contains (pr-str r) request-id)))))))
