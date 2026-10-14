@@ -76,7 +76,8 @@
               :executor-bound-comparison-linked-to-bounded-model-choice-outcomes
               :matched-model-transition-prefix-witnesses
               :observed-root-local-model-step-candidate-linkage
-              :observed-root-step-vs-captured-domain-poststate-comparison}
+              :observed-root-step-vs-captured-domain-poststate-comparison
+              :controlled-local-root-step-before-and-after-observation}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -761,6 +762,50 @@
              :else
              (:status poststate)))))
 
+(defn- local-root-step-observation
+  "Combine the already checked root-child correspondence and captured
+   dependency after-read into ONE descriptive local conclusion. In particular,
+   a model path reached only after previous steps cannot borrow equality from
+   a root-state comparison. The result is inert and must not be interpreted as
+   a runtime authorization, a pinned snapshot, or a refinement certificate."
+  [root-step-status root-node-ids poststate]
+  (let [post-status (:status poststate)
+        matched? (and (= :matching-root-step-explored root-step-status)
+                      (= :matches-captured-posttransaction-dependencies
+                         post-status))]
+    {:status
+     (cond
+       (not= :matching-root-step-explored root-step-status)
+       :root-step-not-established
+
+       matched?
+       :matching-captured-root-step-before-and-after
+
+       (= :differs-from-captured-posttransaction-dependencies post-status)
+       :captured-poststate-differs
+
+       (= :modeled-and-physical-outcomes-disagree post-status)
+       :modeled-and-physical-outcomes-disagree
+
+       :else :captured-poststate-not-established)
+     :matched-root-transition-node-ids
+     (if matched? root-node-ids [])
+     :established-dimensions
+     (if matched?
+       #{:same-admitted-model-choice
+         :definitive-matching-outcome
+         :modeled-root-vs-observed-pretransaction-dependencies
+         :submitted-domain-plan-agreement
+         :modeled-root-step-vs-observed-posttransaction-dependencies}
+       #{})
+     :scope :one-executor-bound-attempt-vs-one-modeled-root-step
+     :evidence-class :bounded-controlled-execution-observation
+     :state-contents-exposed? false
+     :pinned-xtdb-snapshot :not-established
+     :non-root-step-correspondence :not-established
+     :physical-trace-refinement :not-established
+     :application-certification :not-established}))
+
 (defn- root-step-context!
   "A narrowly scoped, MODEL-root-only diagnostic. Do not conflate finding
    any matching modeled occurrence with finding one that starts at the
@@ -804,7 +849,8 @@
           :matching-root-step-explored
 
           :else
-          :same-choice-outcome-not-explored-at-root)]
+          :same-choice-outcome-not-explored-at-root)
+        poststate (captured-root-poststate-context! comparison status)]
     {:status status
      :matched-root-transition-node-ids
      (if (= :matching-root-step-explored status) root-children [])
@@ -817,8 +863,9 @@
        #{})
      :scope :single-controlled-execution-versus-declared-finite-model-root
      :modeled-poststate-equals-observed-poststate? :not-established
-     :captured-posttransaction-dependency-comparison
-     (captured-root-poststate-context! comparison status)
+     :captured-posttransaction-dependency-comparison poststate
+     :local-step-observation
+     (local-root-step-observation status root-children poststate)
      :physical-trace-refinement :not-established
      :not-established
      #{:pinned-xtdb-snapshot
@@ -895,8 +942,10 @@
    the submitted plan matches, and the choice/outcome was explored directly
    from that root. The nested :captured-posttransaction-dependency-comparison
    can then describe equality of one modeled serial step's after-state with
-   the controlled after-read of the same dependency documents. Such equality
-   neither pins XTDB snapshots nor proves isolation or trace refinement."
+   the controlled after-read of the same dependency documents. A separate
+   :local-step-observation combines the prerequisites without upgrading the
+   physical comparison verdict. Such equality neither pins XTDB snapshots
+   nor proves isolation or trace refinement."
   [handle execution-evidence-handle]
   (let [{:keys [comparator operation-exercise transition-tree]}
         (current-construction! handle)
