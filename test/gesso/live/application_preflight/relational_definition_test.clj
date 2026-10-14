@@ -1,13 +1,13 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v837 regressions for the opt-in, source-owned relational application handle.
+  "v839 regressions for the source-owned relational construction and explanation.
 
-   These tests check that the v836 one-source construction admits the same
-   finite rules and registered operations for startup and later diagnostic
-   comparison, without exposing or accepting caller-edited assurance reports.
-   A passing bounded model is neither a policy-completeness claim nor proof
-   that arbitrary production executions refine its Clojure callbacks."
+   Preserve the earlier admission, comparator, and startup tests, and cover
+   v838's handle-only integration of declared relational rules with the
+   canonical application semantic audit. A successful bounded exploration
+   does not establish business-policy completeness, unbounded invariants,
+   or correspondence of every physical execution to application callbacks."
   (:require
-   [clojure.test :refer [deftest is]]
+   [clojure.test :refer [deftest is testing]]
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-definition :as sut]
@@ -212,3 +212,228 @@
           (is (= :stale-application-assembly
                  (error-kind #(sut/start-biff! handle nil []))))
           (is (zero? @starts)))))))
+
+
+;; The following tests exercise the v838 explanation as a PUBLIC capability,
+;; rather than calling semantic-audit implementation helpers or reconstructing
+;; a success report from caller-editable metadata.
+
+(def ^:private unexercised-parent-rule
+  (assoc parent-rule
+         :id :counter/parent-at-ninety-nine
+         :source-where {:n 99}))
+
+(defn- relational-audit
+  [handle]
+  (:semantic-audit (sut/explain handle)))
+
+(deftest explanation-retains-source-owned-rules-without-policy-completeness
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            explained (sut/explain handle)
+            audit (:semantic-audit explained)
+            catalog (:business-rule-catalog audit)
+            rule (first (:rules catalog))
+            coverage (:assurance-coverage audit)
+            relation-evidence (last coverage)]
+        (is (= :application-runtime-backbone-preflight-closed
+               (:guarantee explained)))
+        (is (= :partial-source-owned-relational-catalog (:status catalog)))
+        (is (= 1 (:declared-count catalog)))
+        (is (= :unknown (:total-business-rule-count catalog)))
+        (is (= :not-established (:completeness catalog)))
+        (is (= [(assoc parent-rule :initial-model-coverage
+                       {:rule-id :counter/parent-active
+                        :source-kind :counters
+                        :target-kind :counters
+                        :initially-matching-source-count 1
+                        :initially-exercised? true
+                        :initially-holds? true})]
+               (:rules catalog)))
+        (is (= :counter/parent-active (:id rule)))
+        (is (= :holds-in-explored-model
+               (get-in audit [:relational-assurance :status])))
+        (is (= :current-relational-definition
+               (get-in audit [:relational-assurance :source])))
+        (is (= #{:request/claim :request/reassign :request/cancel}
+               (set (get-in audit [:relational-assurance
+                                   :registered-operation-ids]))))
+        (is (= [:counter/parent-active]
+               (get-in audit [:relational-assurance :relational-rule-ids])))
+        (is (= [] (get-in audit [:relational-assurance
+                                :initially-unexercised-rule-ids])))
+        (is (= sut/assurance-scope
+               (get-in audit [:relational-assurance :assurance-scope])))
+        (is (= [:relational-rule :counter/parent-active
+                :finite-invariant-preservation]
+               (:subject relation-evidence)))
+        (is (= :bounded-model-checked (:class relation-evidence)))
+        (is (= :admitted-source-interpreted-relational-model
+               (:evidence relation-evidence)))
+        (is (= :declared-finite-operation-family-reachable-states
+               (:scope relation-evidence)))
+        (is (true? (:initially-exercised? relation-evidence)))
+        (is (= #{:unbounded-invariant-preservation
+                 :production-implementation-correspondence
+                 :business-policy-completeness}
+               (:not-established relation-evidence)))
+        (is (= 7 (count coverage)))
+        (is (= explained (sut/explain handle)))))))
+
+(deftest explanation-preserves-canonical-audit-unknowns-and-trusted-boundaries
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      ;; Capture the exact canonical explanation that v838 extends. Checking
+      ;; source-identical fields avoids substituting a second, forged report.
+      (let [original-explain application/explain
+            canonical (atom nil)]
+        (with-redefs [application/explain
+                      (fn [assembly]
+                        (let [result (original-explain assembly)]
+                          (reset! canonical result)
+                          result))]
+          (let [handle (sut/construct! (definition options))
+                explained (sut/explain handle)
+                audit (:semantic-audit explained)
+                base (:semantic-audit @canonical)
+                adjusted (-> base
+                             (dissoc :business-rule-catalog
+                                     :assurance-coverage))
+                retained (dissoc audit
+                                 :business-rule-catalog
+                                 :assurance-coverage
+                                 :relational-assurance)]
+            (is (some? @canonical))
+            (is (= (dissoc @canonical :semantic-audit)
+                   (dissoc explained :semantic-audit)))
+            (is (= adjusted retained))
+            (is (= (:assurance-coverage base)
+                   (subvec (:assurance-coverage audit)
+                           0 (count (:assurance-coverage base)))))
+            (is (= :not-inspected (get-in audit [:rule-dependencies :status])))
+            (is (= :not-inspected
+                   (get-in audit [:authorization-disclosure-view :status])))
+            (is (= :not-inspected
+                   (get-in audit [:lifecycle-transition-view :status])))
+            (is (false? (get-in audit [:inspection-scope
+                                      :complete-business-policy-inventory?])))
+            (is (false? (get-in audit [:inspection-scope
+                                      :zero-undetected-policy-escapes-established?])))
+            (is (= 3 (count (:opaque-model-boundaries audit))))
+            (is (every? #(= :trusted (:class %))
+                        (:opaque-model-boundaries audit)))
+            (is (= :opaque-host-implementation
+                   (get-in audit [:operation-cards :request/claim
+                                  :model-policy-inspection])))
+            (is (contains? (:not-established sut/assurance-scope)
+                           :all-executions-correspond-to-model))))))))
+
+(deftest unexercised-rule-is-visible-but-not-treated-as-exercised
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [definition (update-in (definition options)
+                                  [:relational-model :declarations]
+                                  conj unexercised-parent-rule)
+            handle (sut/construct! definition)
+            audit (relational-audit handle)
+            catalog (:business-rule-catalog audit)
+            by-id (into {} (map (juxt :id identity)) (:rules catalog))
+            evidence (->> (:assurance-coverage audit)
+                          (filter #(= :bounded-model-checked (:class %)))
+                          (into {} (map (fn [entry]
+                                          [(second (:subject entry)) entry]))))]
+        (is (= 2 (:declared-count catalog)))
+        (is (= [:counter/parent-active :counter/parent-at-ninety-nine]
+               (mapv :id (:rules catalog))))
+        (is (= :unknown (:total-business-rule-count catalog)))
+        (is (= :not-established (:completeness catalog)))
+        (is (= [:counter/parent-at-ninety-nine]
+               (get-in audit [:relational-assurance
+                              :initially-unexercised-rule-ids])))
+        (is (= 1 (get-in by-id [:counter/parent-active
+                               :initial-model-coverage
+                               :initially-matching-source-count])))
+        (is (true? (get-in by-id [:counter/parent-active
+                                 :initial-model-coverage
+                                 :initially-exercised?])))
+        (is (= 0 (get-in by-id [:counter/parent-at-ninety-nine
+                               :initial-model-coverage
+                               :initially-matching-source-count])))
+        (is (false? (get-in by-id [:counter/parent-at-ninety-nine
+                                  :initial-model-coverage
+                                  :initially-exercised?])))
+        (is (true? (get-in by-id [:counter/parent-at-ninety-nine
+                                 :initial-model-coverage
+                                 :initially-holds?])))
+        (is (= #{:counter/parent-active :counter/parent-at-ninety-nine}
+               (set (keys evidence))))
+        (is (true? (get-in evidence [:counter/parent-active
+                                    :initially-exercised?])))
+        (is (false? (get-in evidence [:counter/parent-at-ninety-nine
+                                     :initially-exercised?])))
+        (is (= (get-in evidence [:counter/parent-active :not-established])
+               (get-in evidence [:counter/parent-at-ninety-nine
+                                 :not-established])))))))
+
+(deftest explanation-leaks-neither-modeled-state-nor-callbacks
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [secret "v839-opaque-model-state-token"
+            prepared (atom 0)
+            definition (-> (definition options)
+                           (assoc-in [:relational-model :initial-state counter-key
+                                      :private-state-token] secret)
+                           (update-in [:relational-model :families]
+                                      (fn [families]
+                                        (mapv (fn [family]
+                                                (update family :prepare
+                                                        (fn [prepare]
+                                                          (fn [& args]
+                                                            (swap! prepared inc)
+                                                            (apply prepare args)))))
+                                              families))))
+            handle (sut/construct! definition)
+            at-admission @prepared
+            explained (sut/explain handle)
+            printed (pr-str explained)]
+        (is (pos? at-admission))
+        (is (= at-admission @prepared)
+            "Audit must not rerun the model's operation callbacks")
+        (is (= explained (sut/explain handle)))
+        (is (= at-admission @prepared))
+        (is (not (.contains printed secret)))
+        (is (not (.contains printed ":initial-state")))
+        (is (not (.contains printed ":private-state-token")))
+        (is (not (.contains printed "#object[")))
+        (is (not (contains? (:semantic-audit explained) :initial-state)))
+        (is (not (contains? (:semantic-audit explained) :families)))))))
+
+(deftest explanation-metadata-does-not-act-as-an-admission-handle
+  (fixture/with-closed-application
+    (fn [{:keys [options]}]
+      (let [handle (sut/construct! (definition options))
+            explanation (sut/explain handle)
+            tampered (-> explanation
+                         (assoc :guarantee :whole-application-certified)
+                         (assoc-in [:semantic-audit :business-rule-catalog
+                                    :completeness] :proved))]
+        (doseq [candidate [nil (Object.) explanation tampered {}]]
+          (testing (str "explanation cannot grant authority: "
+                        (if (map? candidate) :map (type candidate)))
+            (is (= :unknown-construction
+                   (error-kind #(sut/explain candidate))))
+            (is (= :unknown-construction
+                   (error-kind #(sut/inspect candidate))))))
+        (is (= explanation (sut/explain handle)))))))
+
+(deftest explanation-rechecks-physical-artifact-currentness
+  (fixture/with-closed-application
+    (fn [{:keys [options artifact-path]}]
+      (let [handle (sut/construct! (definition options))]
+        (is (= :partial-source-owned-relational-catalog
+               (get-in (sut/explain handle)
+                       [:semantic-audit :business-rule-catalog :status])))
+        (spit artifact-path "v839 replaced after admission\n")
+        (is (= :stale-application-assembly
+               (error-kind #(sut/explain handle))))))))
