@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v882 regressions for root-anchored modeled sequence correspondence.
+  "v886 regressions for captured-local-step and adjacency correspondence.
 
    Preserve earlier admission, comparator, startup, and explanation tests.
    Verify that actual visited-state matching from v842 is retained by the
@@ -3822,3 +3822,275 @@
                             handle [a b]))))
       (is (empty? @calls))
       (is (empty? @pair-calls)))))
+
+
+;; v886: v885 joins individual executor-bound captured-local-step outcomes
+;; with a rooted finite-model path and captured dependency adjacency.  These
+;; are separate bounded diagnostics; none authenticates execution chronology
+;; or identifies non-root concrete states with nodes of the finite model.
+
+(def ^:private v886-matching-captured-local-step
+  {:status :matches-captured-posttransaction-dependencies
+   :scope :one-controlled-serial-step-from-captured-pretransaction-dependencies
+   :relation :exact-clojure-domain-document-map-equality
+   :input-source :controlled-observation-pretransaction-dependencies
+   :declared-model-root-equality-required? false
+   :poststate-data-exposed? false
+   :additional-model-callbacks? false
+   :additional-xtdb-reads? false
+   :pinned-xtdb-snapshot :not-established
+   :complete-dependency-coverage :not-established
+   :equality-with-reachable-non-root-model-state :not-established
+   :authenticated-execution-history :not-established
+   :production-trace-refinement :not-established})
+
+(defn- v886-local-joint [report]
+  (:captured-local-steps-and-adjacency report))
+
+(defn- v886-set-local! [responses evidence local]
+  (swap! responses assoc-in [evidence :captured-local-poststate-comparison]
+         local))
+
+(deftest v886-two-matching-local-steps-and-adjacency-form-scoped-diagnostic
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses calls pair-calls]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])
+            local (v886-local-joint report)]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status report)))
+        (is (= :modeled-path-and-captured-local-steps-and-adjacencies-match
+               (:status local)))
+        (is (= [:matches-captured-posttransaction-dependencies
+                :matches-captured-posttransaction-dependencies]
+               (:captured-local-poststate-statuses local)))
+        (is (= :all-captured-adjacencies-match
+               (get-in report [:captured-dependency-adjacency :status])))
+        (is (= [a b] @calls))
+        (is (= 1 (count @pair-calls)))
+        (is (= :already-checked-individual-controlled-observations
+               (:source local)))
+        (is (= :caller-ordered-captured-local-steps-vs-modeled-path-and-adjacency
+               (:scope local)))
+        (is (false? (:additional-model-callbacks? local)))
+        (is (false? (:additional-xtdb-reads? local)))
+        (is (false? (:state-contents-exposed? local)))))))
+
+(deftest v886-legacy-comparison-without-local-step-evidence-remains-inconclusive
+  (with-v880-adjacency
+    (fn [{:keys [handle a b]}]
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])
+            local (v886-local-joint report)]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status report)))
+        (is (= :modeled-path-and-captured-adjacencies-match
+               (get-in report [:joint-path-and-captured-adjacency :status])))
+        (is (= [:not-reported :not-reported]
+               (:captured-local-poststate-statuses local)))
+        (is (= :one-or-more-captured-local-steps-not-established
+               (:status local)))))))
+
+(deftest v886-mismatched-or-rejected-local-poststate-cannot-claim-joint-match
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (doseq [failed-status [:differs-from-captured-posttransaction-dependencies
+                            :modeled-and-physical-outcomes-disagree
+                            :submitted-plan-not-matched
+                            :physical-outcome-not-reported]]
+        (v886-set-local! responses b
+                         (assoc v886-matching-captured-local-step
+                                :status failed-status))
+        (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                      handle [a b])
+              local (v886-local-joint report)]
+          (is (= :one-or-more-captured-local-steps-not-established
+                 (:status local)))
+          (is (= [:matches-captured-posttransaction-dependencies failed-status]
+                 (:captured-local-poststate-statuses local)))
+          (is (= :all-captured-adjacencies-match
+                 (get-in report [:captured-dependency-adjacency :status]))))))))
+
+(deftest v886-an-unexplored-model-path-stays-unexplored-despite-local-matches
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b
+                       (assoc v886-matching-captured-local-step
+                              :status :submitted-plan-not-matched))
+      (swap! responses assoc-in [b :status] :counterexample)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :one-or-more-submitted-plans-not-matched (:status report)))
+        (is (= :modeled-path-not-established
+               (:status (v886-local-joint report))))
+        (is (= :all-captured-adjacencies-match
+               (get-in report [:captured-dependency-adjacency :status])))))))
+
+(deftest v886-agreeing-local-steps-do-not-override-captured-state-disagreement
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses pair-response]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (reset! pair-response {:status :captured-domain-documents-differ
+                             :dependency-key-set-comparison :same-captured-keys})
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])]
+        (is (= :captured-adjacency-equality-not-established
+               (:status (v886-local-joint report))))
+        (is (= :one-or-more-captured-adjacencies-differ
+               (get-in report [:captured-dependency-adjacency :status])))
+        (is (= [:matches-captured-posttransaction-dependencies
+                :matches-captured-posttransaction-dependencies]
+               (get-in report [:captured-local-steps-and-adjacency
+                               :captured-local-poststate-statuses])))))))
+
+(deftest v886-different-or-empty-captured-dependency-domains-prevent-joint-match
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses pair-response]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (doseq [pair [{:status :captured-dependency-key-sets-differ
+                     :dependency-key-set-comparison :different-captured-keys}
+                    {:status :no-common-nonempty-captured-domain
+                     :dependency-key-set-comparison :same-captured-keys}]]
+        (reset! pair-response pair)
+        (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                      handle [a b])]
+          (is (= :captured-adjacency-equality-not-established
+                 (:status (v886-local-joint report))))
+          (is (= (:status pair)
+                 (get-in report [:captured-dependency-adjacency :pairs 0
+                                 :status]))))))))
+
+(deftest v886-root-anchor-is-independent-of-subsequent-local-step-matches
+  (with-v882-root-anchor
+    (fn [{:keys [handle a b responses]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (let [matching (sut/compare-observation-sequence-with-captured-adjacency!
+                      handle [a b])]
+        (is (= :initial-root-step-and-captured-adjacencies-match
+               (get-in matching [:initial-root-step-and-captured-adjacency :status])))
+        (is (= :modeled-path-and-captured-local-steps-and-adjacencies-match
+               (:status (v886-local-joint matching)))))
+      (swap! responses update a dissoc :declared-root-poststate-comparison)
+      (let [without-root (sut/compare-observation-sequence-with-captured-adjacency!
+                          handle [a b])]
+        (is (= :initial-controlled-root-step-not-established
+               (get-in without-root [:initial-root-step-and-captured-adjacency :status])))
+        (is (= :modeled-path-and-captured-local-steps-and-adjacencies-match
+               (:status (v886-local-joint without-root))))))))
+
+(deftest v886-single-observation-never-invents-captured-adjacency
+  (with-v880-adjacency
+    (fn [{:keys [handle a responses pair-calls]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a])]
+        (is (= :no-adjacent-observations
+               (:status (v886-local-joint report))))
+        (is (= [:matches-captured-posttransaction-dependencies]
+               (:captured-local-poststate-statuses (v886-local-joint report))))
+        (is (= 0 (count @pair-calls)))
+        (is (= 1 (:observation-count report)))))))
+
+(deftest v886-invalid-controlled-local-step-metadata-rejects-before-pair-comparison
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses calls pair-calls]}]
+      (doseq [invalid [(assoc v886-matching-captured-local-step :scope :untrusted)
+                       (assoc v886-matching-captured-local-step :relation :hash-equality)
+                       (assoc v886-matching-captured-local-step :status :unknown)
+                       (assoc v886-matching-captured-local-step :poststate-data-exposed? true)
+                       (assoc v886-matching-captured-local-step :additional-xtdb-reads? true)
+                       (assoc v886-matching-captured-local-step :pinned-xtdb-snapshot :proved)
+                       (assoc v886-matching-captured-local-step :production-trace-refinement :proved)
+                       (dissoc v886-matching-captured-local-step :input-source)]]
+        (v886-set-local! responses a invalid)
+        (is (= :invalid-captured-local-step-evidence
+               (error-kind #(sut/compare-observation-sequence-with-captured-adjacency!
+                              handle [a b])))))
+      (is (empty? @pair-calls))
+      (is (= (* 8 2) (count @calls)))
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (is (= :modeled-path-and-captured-local-steps-and-adjacencies-match
+             (:status (v886-local-joint
+                       (sut/compare-observation-sequence-with-captured-adjacency!
+                        handle [a b]))))))))
+
+(deftest v886-success-requires-consistent-plan-outcome-and-local-state-evidence
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses pair-calls]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (swap! responses assoc-in [b :status] :counterexample)
+      (is (= :invalid-captured-local-step-evidence
+             (error-kind #(sut/compare-observation-sequence-with-captured-adjacency!
+                            handle [a b]))))
+      (is (empty? @pair-calls)))))
+
+(deftest v886-joined-report-remains-redacted-and-cannot-authorize
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses calls pair-calls]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [a b])
+            local (v886-local-joint report)
+            printed (pr-str local)]
+        (is (every? #(= :not-established (get local %))
+                    [:equality-with-reachable-non-root-model-nodes
+                     :execution-chronology :absence-of-intervening-writes
+                     :complete-dependency-coverage :pinned-xtdb-snapshot
+                     :production-trace-refinement :application-certification]))
+        (is (not (re-find #"#object\[|:initial-state|:commands|:arguments|:principals"
+                          printed)))
+        (is (= :unknown-construction (error-kind #(sut/explain local))))
+        (is (= :unknown-construction (error-kind #(sut/compare! local a))))
+        (is (= [a b] @calls))
+        (is (= 1 (count @pair-calls)))))))
+
+(deftest v886-stale-assembly-rejects-before-inspecting-local-or-pair-evidence
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses artifact-path calls pair-calls]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (spit artifact-path "v886-stale-browser-runtime\n")
+      (is (= :stale-application-assembly
+             (error-kind #(sut/compare-observation-sequence-with-captured-adjacency!
+                            handle [a b]))))
+      (is (empty? @calls))
+      (is (empty? @pair-calls)))))
+
+(deftest v886-existing-path-only-sequence-api-keeps-its-previous-contract
+  (with-v880-adjacency
+    (fn [{:keys [handle a b responses pair-calls]}]
+      (v886-set-local! responses a v886-matching-captured-local-step)
+      (v886-set-local! responses b v886-matching-captured-local-step)
+      (let [path (sut/compare-observation-sequence! handle [a b])]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status path)))
+        (is (= [:matches-captured-posttransaction-dependencies
+                :matches-captured-posttransaction-dependencies]
+               (mapv :captured-local-poststate-status (:steps path))))
+        (is (not (contains? path :captured-local-steps-and-adjacency)))
+        (is (not (contains? path :captured-dependency-adjacency)))
+        (is (empty? @pair-calls))))))
+
+(deftest v886-real-executor-bound-xtdb-single-step-is-not-a-history
+  (with-real-xtdb-root-step
+    (fn [{:keys [handle evidence request-id]}]
+      (let [report (sut/compare-observation-sequence-with-captured-adjacency!
+                    handle [evidence])
+            local (v886-local-joint report)]
+        (is (= :caller-ordered-choice-outcome-path-explored (:status report)))
+        (is (= [:matches-captured-posttransaction-dependencies]
+               (:captured-local-poststate-statuses local)))
+        (is (= :no-adjacent-observations (:status local)))
+        (is (= :matching-captured-root-step-before-and-after
+               (get-in report [:first-observation-local-root-step :status])))
+        (is (= :no-adjacent-observations
+               (get-in report [:captured-dependency-adjacency :status])))
+        (is (= :not-established (:execution-chronology local)))
+        (is (not (.contains (pr-str local) request-id)))))))
