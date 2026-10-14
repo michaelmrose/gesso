@@ -10,8 +10,10 @@
 
    start-biff! uses precisely the assembly admitted by construct!; compare!
    accepts a genuine v815 executor-bound physical evidence handle and does not
-   accept new families or rules. The comparator rechecks application/current
-   executor identity before checking an observed attempt.
+   accept new families or rules. explain joins the admitted declared rules to
+   the fresh canonical semantic audit without inventing policy completeness.
+   The comparator rechecks application/current executor identity before
+   checking an observed attempt.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -31,7 +33,8 @@
               :bounded-source-interpreted-relational-invariants-on-admission
               :frozen-comparator-callback-and-rule-selection
               :executor-identity-recheck-on-observed-comparison
-              :no-caller-supplied-replacement-model-at-comparison}
+              :no-caller-supplied-replacement-model-at-comparison
+              :source-owned-relational-rules-in-current-semantic-explanation}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -107,8 +110,8 @@
         comparator (relations/build-comparator
                     application-assembly initial-state families declarations
                     options)
-        rule-ids (get-in finite-relational-verdict
-                         [:relational-coverage :rule-ids])
+        relational-coverage (:relational-coverage finite-relational-verdict)
+        rule-ids (:rule-ids relational-coverage)
         operation-ids (get-in finite-relational-verdict
                               [:registry-coverage :registered-operation-ids])
         handle (Object.)]
@@ -117,7 +120,10 @@
             {:assembly application-assembly
              :comparator comparator
              :rule-ids rule-ids
-             :operation-ids operation-ids}))
+             :operation-ids operation-ids
+             :declarations declarations
+             :initial-rule-coverage (:initial-state-rule-coverage
+                                     relational-coverage)}))
     handle))
 
 (defn inspect
@@ -129,6 +135,66 @@
      :registered-operation-ids operation-ids
      :relational-rule-ids rule-ids
      :assurance-scope assurance-scope}))
+
+(defn explain
+  "Explain this current relational construction with its source-owned business
+   rule declarations inside the canonical application semantic audit.
+
+   The ordinary ApplicationAssembly's semantic audit cannot infer arbitrary
+   Clojure business policy. This *explicit*, opt-in construction possesses
+   additional validated finite relational declarations, so it can report
+   precisely those rules, their initial modeled coverage, and their bounded
+   model-checking evidence. The assembly's opaque operation-model premises,
+   unknown policy inventory, unmodeled rules, and open obligations remain.
+
+   A forged explanation carries no admission authority. Only the opaque handle
+   can retrieve this view, and every call checks the same physical artifact
+   and current application assembly used for startup and comparison. No
+   application callbacks, modeled documents, or executor handles are exposed."
+  [handle]
+  (let [{:keys [assembly declarations initial-rule-coverage
+                operation-ids]} (current-construction! handle)
+        ;; application/explain derives a fresh, current semantic audit from the
+        ;; actual admitted assembly; never trust a stored or caller-authored
+        ;; successful application-report map.
+        explanation (application/explain assembly)
+        initial-by-id (into {} (map (juxt :rule-id identity))
+                            initial-rule-coverage)
+        rules (mapv (fn [declaration]
+                      (assoc declaration :initial-model-coverage
+                             (get initial-by-id (:id declaration))))
+                    declarations)
+        rule-coverage
+        (mapv (fn [{:keys [id initial-model-coverage]}]
+                {:subject [:relational-rule id :finite-invariant-preservation]
+                 :class :bounded-model-checked
+                 :evidence :admitted-source-interpreted-relational-model
+                 :scope :declared-finite-operation-family-reachable-states
+                 :initially-exercised?
+                 (:initially-exercised? initial-model-coverage)
+                 :not-established
+                 #{:unbounded-invariant-preservation
+                   :production-implementation-correspondence
+                   :business-policy-completeness}})
+              rules)
+        catalog {:status :partial-source-owned-relational-catalog
+                 :declared-count (count rules)
+                 :total-business-rule-count :unknown
+                 :completeness :not-established
+                 :rules rules}]
+    (-> explanation
+        (assoc-in [:semantic-audit :business-rule-catalog] catalog)
+        (assoc-in [:semantic-audit :relational-assurance]
+                  {:status :holds-in-explored-model
+                   :source :current-relational-definition
+                   :registered-operation-ids operation-ids
+                   :relational-rule-ids (mapv :id declarations)
+                   :initially-unexercised-rule-ids
+                   (mapv :rule-id
+                         (remove :initially-exercised? initial-rule-coverage))
+                   :assurance-scope assurance-scope})
+        (update-in [:semantic-audit :assurance-coverage]
+                   into rule-coverage))))
 
 (defn compare!
   "Check one genuine executor-bound execution handle against the admitted
