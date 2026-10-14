@@ -1,12 +1,12 @@
 (ns gesso.live.application-preflight.relational-definition-test
-  "v862 regressions for admitted relational construction and comparison links.
+  "v868 regressions for admitted relational construction and root-step correspondence.
 
    Preserve earlier admission, comparator, startup, and explanation tests.
    Verify that actual visited-state matching from v842 is retained by the
    handle-only semantic audit without reinterpreting policy declarations.
    Matching counts and operation-exercise counts remain bounded diagnostic
-   evidence, not policy completeness, unbounded proof, or all-executions
-   production correspondence."
+   evidence. Root-step matches establish only a local declared-root candidate,
+   never physical post-state equality or trace refinement."
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.live.application-preflight :as application]
@@ -14,7 +14,15 @@
    [gesso.live.application-preflight.relational-application :as relational-app]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]
    [gesso.live.application-preflight.relational-definition :as sut]
-   [gesso.model.command :as command]))
+   [gesso.model.command :as command]
+   [gesso.choreo.identity :as identity]
+   [gesso.live.optimistic.protocol :as protocol]
+   [gesso.live.optimistic.resolved-operation :as resolved-adapter]
+   [gesso.live.optimistic.resolution-assurance :as resolution-assurance]
+   [gesso.live.optimistic.server :as optimistic-server]
+   [gesso.model.resolved-operation :as resolved-model]
+   [xtdb.api :as xt]
+   [xtdb.node :as xtn]))
 
 (def ^:private version-keys
   {:revision-key :revision
@@ -2148,3 +2156,532 @@
             (is (= :stale-application-assembly
                    (error-kind #(sut/compare! handle (Object.)))))
             (is (zero? @calls))))))))
+
+
+;; v864: v863 makes the already bounded and redacted occurrence tree useful as
+;; MODEL-ONLY predecessor histories for candidate observed comparisons.
+;; These tests exercise the public API on genuine admitted constructions; only
+;; the downstream physical comparator is stubbed. They do NOT establish a real
+;; XTDB execution trace or a simulation/refinement relation.
+
+(defn- prefix-context-for!
+  [handle tree comparison-result edge]
+  (reset! comparison-result (comparison-for-edge edge))
+  (:modeled-transition-context (sut/compare! handle (Object.))))
+
+(deftest candidate-prefix-reconstructs-the-full-depth-two-model-history
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison comparator-calls]}]
+      (let [by-id (into {} (map (juxt :node-id identity)) (:edges tree))
+            deep (first (filter #(= 2 (:depth %)) (:edges tree)))
+            parent (get by-id (:parent-node-id deep))
+            expected-steps (mapv #(select-keys % [:node-id :parent-node-id :depth
+                                                  :model-instance-id
+                                                  :registered-operation-id :status])
+                                 [parent deep])]
+        (is (some? deep))
+        (is (= 1 (:depth parent)))
+        (let [ctx (prefix-context-for! handle tree physical-comparison deep)
+              witness (first (filter #(= (:node-id deep) (:matched-node-id %))
+                                     (:modeled-prefix-witnesses ctx)))]
+          (is (= :same-choice-and-outcome-explored (:status ctx)))
+          (is (= (:node-id deep) (:matched-node-id witness)))
+          (is (= expected-steps (:steps witness)))
+          (is (= [1 2] (mapv :depth (:steps witness))))
+          (is (= (:root-node-id tree)
+                 (:parent-node-id (first (:steps witness)))))
+          (is (= :modeled-occurrence-tree-only (:prefix-evidence ctx)))
+          (is (= :not-established (:production-trace-refinement ctx)))
+          (is (= 1 @comparator-calls)))))))
+
+(deftest every-matching-occurrence-gets-a-distinct-correct-model-prefix
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edges (:edges tree)
+            matched (first edges)
+            matching (filterv #(and (= (:model-instance-id matched)
+                                      (:model-instance-id %))
+                                    (= (:status matched) (:status %))) edges)
+            by-id (into {} (map (juxt :node-id identity)) edges)
+            ctx (prefix-context-for! handle tree physical-comparison matched)
+            witnesses (:modeled-prefix-witnesses ctx)]
+        (is (> (count matching) 1))
+        (is (= (mapv :node-id matching) (:modeled-transition-node-ids ctx)))
+        (is (= (mapv :node-id matching) (mapv :matched-node-id witnesses)))
+        (is (= (count matching) (count witnesses)))
+        (doseq [{:keys [matched-node-id steps]} witnesses]
+          (is (= (count steps) (:depth (by-id matched-node-id))))
+          (is (= (vec (range 1 (inc (count steps)))) (mapv :depth steps)))
+          (is (= matched-node-id (:node-id (last steps))))
+          (is (= (:root-node-id tree) (:parent-node-id (first steps))))
+          (doseq [[prior current] (partition 2 1 steps)]
+            (is (= (:node-id prior) (:parent-node-id current)))))
+        (is (= :not-established (:modeled-state-equals-observed-state? ctx)))))))
+
+(deftest prefix-witnesses-are-scoped-to-the-exact-expanded-model-choice
+  (with-stubbed-transition-comparison
+    (fn [options]
+      (assoc-in (definition options) [:relational-model :families 0 :principals]
+                [:helper/a :helper/other]))
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [claim-edges (filterv #(= :request/claim
+                                    (:registered-operation-id %)) (:edges tree))
+            choices (distinct (map :model-instance-id claim-edges))]
+        (is (= 2 (count choices)))
+        (doseq [choice choices]
+          (let [edge (first (filter #(= choice (:model-instance-id %)) claim-edges))
+                ctx (prefix-context-for! handle tree physical-comparison edge)
+                witnesses (:modeled-prefix-witnesses ctx)]
+            (is (seq witnesses))
+            (is (= (->> claim-edges
+                        (filter #(and (= choice (:model-instance-id %))
+                                      (= (:status edge) (:status %))))
+                        (mapv :node-id))
+                   (mapv :matched-node-id witnesses)))
+            (is (every? #(= choice (-> % :steps last :model-instance-id))
+                        witnesses))
+            (is (= :not-established (:production-trace-refinement ctx)))))))))
+
+(deftest rejected-modeled-attempts-produce-rejected-terminal-prefix-steps
+  (with-stubbed-transition-comparison
+    (fn [options] (stale-guard-definition (definition options)))
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [rejected (filterv #(= :rejected (:status %)) (:edges tree))
+            edge (first rejected)]
+        (is (seq rejected))
+        (let [ctx (prefix-context-for! handle tree physical-comparison edge)]
+          (is (= :same-choice-and-outcome-explored (:status ctx)))
+          (is (seq (:modeled-prefix-witnesses ctx)))
+          (doseq [{:keys [matched-node-id steps]} (:modeled-prefix-witnesses ctx)]
+            (is (= matched-node-id (:node-id (last steps))))
+            (is (= :rejected (:status (last steps)))))
+          (is (contains? (:not-established ctx)
+                         :model-prefix-is-not-observed-physical-history)))))))
+
+(deftest missing-physical-outcome-does-not-fabricate-model-history
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            counterexample (-> (comparison-for-edge edge)
+                               (dissoc :physical-status)
+                               (assoc :status :counterexample
+                                      :reason :observed-while-model-disabled))]
+        (reset! physical-comparison counterexample)
+        (let [result (sut/compare! handle (Object.))
+              ctx (:modeled-transition-context result)]
+          (is (= counterexample (dissoc result :modeled-transition-context)))
+          (is (= :counterexample (:status result)))
+          (is (= :physical-outcome-not-reported (:status ctx)))
+          (is (= [] (:modeled-transition-node-ids ctx)))
+          (is (= [] (:modeled-prefix-witnesses ctx)))
+          (is (= #{:admitted-model-choice} (:matching-dimensions ctx)))
+          (is (= :not-established (:production-trace-refinement ctx))))))))
+
+(deftest unvisited-choice-outcome-has-no-prefix-but-preserves-comparison
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            opposite (if (= :committed (:status edge)) :rejected :committed)
+            comparison (assoc (comparison-for-edge edge) :physical-status opposite)]
+        (reset! physical-comparison comparison)
+        (let [result (sut/compare! handle (Object.))
+              ctx (:modeled-transition-context result)]
+          (is (= comparison (dissoc result :modeled-transition-context)))
+          (is (= :matched (:status result)))
+          (is (= :same-choice-and-outcome-not-explored (:status ctx)))
+          (is (= [] (:modeled-transition-node-ids ctx)))
+          (is (= [] (:modeled-prefix-witnesses ctx)))
+          (is (= #{:admitted-model-choice :physical-outcome}
+                 (:matching-dimensions ctx)))
+          (is (= :not-established (:modeled-state-equals-observed-state? ctx))))))))
+
+(deftest prefix-witnesses-are-inert-redacted-and-not-admission-handles
+  (with-stubbed-transition-comparison
+    (fn [options]
+      (-> (definition options)
+          (assoc-in [:relational-model :initial-state counter-key :private]
+                    "v864-hidden-state")
+          (assoc-in [:relational-model :families 0 :principals]
+                    [:helper/v864-secret-principal])
+          (assoc-in [:relational-model :families 0 :arguments]
+                    [{:delta 1 :private "v864-secret-argument"}])))
+    (fn [{:keys [handle tree physical-comparison comparator-calls]}]
+      (let [edge (first (:edges tree))
+            comparison (comparison-for-edge edge)]
+        (reset! physical-comparison comparison)
+        (let [one (sut/compare! handle (Object.))
+              two (sut/compare! handle (Object.))
+              ctx (:modeled-transition-context one)
+              witnesses (:modeled-prefix-witnesses ctx)
+              printed (pr-str witnesses)]
+          (is (= ctx (:modeled-transition-context two)))
+          (is (= 2 @comparator-calls))
+          (is (seq witnesses))
+          (is (not (re-find #"v864-hidden-state|v864-secret-principal|v864-secret-argument" printed)))
+          (is (not (re-find #"#object\[|:initial-state|:prepare|:arguments|:principals|:commands" printed)))
+          (is (= :unknown-construction (error-kind #(sut/explain witnesses))))
+          (is (= :unknown-construction
+                 (error-kind #(sut/compare! (first witnesses) (Object.)))))
+          (is (= :not-established (:production-trace-refinement ctx)))
+          (is (contains? (:not-established ctx)
+                         :production-sequence-or-concurrency-correspondence)))))))
+
+(deftest stale-admitted-assembly-prevents-comparison-and-prefix-construction
+  (fixture/with-closed-application
+    (fn [{:keys [options artifact-path]}]
+      (let [comparator-calls (atom 0)]
+        (with-redefs [relations/build-comparator
+                      (fn [& _]
+                        (fn [_] (swap! comparator-calls inc)
+                          (throw (ex-info "stale assembly must not compare" {}))))]
+          (let [handle (sut/construct! (definition options))]
+            (spit artifact-path "v864 invalidated browser artifact\n")
+            (is (= :stale-application-assembly
+                   (error-kind #(sut/compare! handle (Object.)))))
+            (is (zero? @comparator-calls))))))))
+
+
+;; v868: public root-step correspondence checks. The controlled comparator
+;; stubs below isolate the classification logic; only the final test uses
+;; genuine executor-bound XTDB evidence. Neither kind proves trace refinement.
+
+(def ^:private matching-root-observation
+  {:status :matches-captured-pretransaction-state
+   :relation :exact-clojure-state-map-equality
+   :scope :declared-model-root-vs-controlled-dependency-snapshot})
+
+(defn- root-step-for!
+  [handle physical-comparison edge comparison]
+  (reset! physical-comparison (merge (comparison-for-edge edge)
+                                     {:declared-root-state-comparison
+                                      matching-root-observation}
+                                     comparison))
+  (get-in (sut/compare! handle (Object.))
+          [:modeled-transition-context :root-step-correspondence]))
+
+(deftest matching-root-child-requires-all-four-admitted-dimensions
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [root (:root-node-id tree)
+            edge (first (filter #(= root (:parent-node-id %)) (:edges tree)))
+            report (root-step-for! handle physical-comparison edge {})]
+        (is (= :matching-root-step-explored (:status report)))
+        (is (some #{(:node-id edge)}
+                  (:matched-root-transition-node-ids report)))
+        (is (every? (fn [node-id]
+                      (some #(and (= node-id (:node-id %))
+                                  (= root (:parent-node-id %)))
+                            (:edges tree)))
+                    (:matched-root-transition-node-ids report)))
+        (is (= #{:admitted-operation-choice
+                 :definitive-physical-outcome
+                 :exact-declared-root-vs-captured-dependencies
+                 :exact-observed-domain-preparation-plan}
+               (:evidence-dimensions report)))
+        (is (= :single-controlled-execution-versus-declared-finite-model-root
+               (:scope report)))
+        (is (= :not-established
+               (:modeled-poststate-equals-observed-poststate? report)))
+        (is (= :not-established (:physical-trace-refinement report)))
+        (is (contains? (:not-established report)
+                       :posttransaction-model-state-equality))))))
+
+(deftest wrong-declared-root-never-qualifies-as-root-step
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            report (root-step-for!
+                    handle physical-comparison edge
+                    {:declared-root-state-comparison
+                     (assoc matching-root-observation
+                            :status :differs-from-captured-pretransaction-state)})]
+        (is (= :declared-root-not-established-equal-to-observation
+               (:status report)))
+        (is (= [] (:matched-root-transition-node-ids report)))
+        (is (= #{} (:evidence-dimensions report)))))))
+
+(deftest incomplete-or-wrongly-scoped-root-evidence-never-qualifies
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))]
+        (doseq [root [nil {}
+                      (dissoc matching-root-observation :relation)
+                      (assoc matching-root-observation :scope :unbound-root)
+                      (assoc matching-root-observation :relation :hash-equality)]]
+          (let [report (root-step-for!
+                        handle physical-comparison edge
+                        {:declared-root-state-comparison root})]
+            (is (= :declared-root-not-established-equal-to-observation
+                   (:status report)))
+            (is (empty? (:matched-root-transition-node-ids report)))
+            (is (empty? (:evidence-dimensions report)))))))))
+
+(deftest mismatched-submitted-plan-remains-a-counterexample
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            comparator (merge (comparison-for-edge edge)
+                              {:status :counterexample
+                               :reason :modeled-and-submitted-plans-disagree
+                               :declared-root-state-comparison matching-root-observation})]
+        (reset! physical-comparison comparator)
+        (let [actual (sut/compare! handle (Object.))
+              report (get-in actual
+                             [:modeled-transition-context :root-step-correspondence])]
+          (is (= :counterexample (:status actual)))
+          (is (= :modeled-and-submitted-plans-disagree (:reason actual)))
+          (is (= comparator (dissoc actual :modeled-transition-context)))
+          (is (= :submitted-plan-not-matched (:status report)))
+          (is (empty? (:matched-root-transition-node-ids report))))))))
+
+(deftest missing-physical-outcome-cannot-produce-a-root-step
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            report (root-step-for! handle physical-comparison edge
+                                   {:physical-status nil})]
+        (is (= :physical-outcome-not-reported (:status report)))
+        (is (= [] (:matched-root-transition-node-ids report)))
+        (is (= #{} (:evidence-dimensions report)))))))
+
+(deftest matching-deeper-transition-does-not-imply-matching-root-step
+  (with-stubbed-transition-comparison
+    (fn [options]
+      (assoc-in (definition options) [:relational-model :families 0 :enabled?]
+                (fn [state _ _] (pos? (:n (get state counter-key))))))
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [root (:root-node-id tree)
+            edge (first (filter #(and (= :request/claim
+                                        (:registered-operation-id %))
+                                      (not= root (:parent-node-id %)))
+                                (:edges tree)))]
+        (is (some? edge))
+        (when edge
+          (let [report (root-step-for! handle physical-comparison edge {})]
+            (is (= :same-choice-outcome-not-explored-at-root
+                   (:status report)))
+            (is (empty? (:matched-root-transition-node-ids report)))
+            (is (empty? (:evidence-dimensions report)))
+            (is (= :not-established (:physical-trace-refinement report)))))))))
+
+(deftest unexplored-outcome-preserves-matched-plan-verdict
+  (with-stubbed-transition-comparison
+    definition
+    (fn [{:keys [handle tree physical-comparison]}]
+      (let [edge (first (:edges tree))
+            opposite (if (= :committed (:status edge)) :rejected :committed)
+            report (root-step-for! handle physical-comparison edge
+                                   {:physical-status opposite})]
+        (is (= :same-choice-outcome-not-explored-at-root (:status report)))
+        (is (= [] (:matched-root-transition-node-ids report)))
+        (is (= #{} (:evidence-dimensions report)))))))
+
+(deftest root-step-report-is-inert-redacted-and-currentness-bound
+  (fixture/with-closed-application
+    (fn [{:keys [options artifact-path]}]
+      (let [comparison (atom nil)
+            comparator-calls (atom 0)]
+        (with-redefs [relations/build-comparator
+                      (fn [& _]
+                        (fn [_]
+                          (swap! comparator-calls inc)
+                          @comparison))]
+          (let [model (-> (definition options)
+                          (assoc-in [:relational-model :initial-state counter-key :secret]
+                                    "v868-secret-state")
+                          (assoc-in [:relational-model :families 0 :arguments]
+                                    [{:delta 1 :secret "v868-secret-input"}]))
+                handle (sut/construct! model)
+                edge (first (:edges (modeled-transition-tree handle)))
+                _ (reset! comparison
+                          (assoc (comparison-for-edge edge)
+                                 :declared-root-state-comparison
+                                 matching-root-observation))
+                one (sut/compare! handle (Object.))
+                two (sut/compare! handle (Object.))
+                report (get-in one [:modeled-transition-context
+                                    :root-step-correspondence])]
+            (is (= report
+                   (get-in two [:modeled-transition-context
+                                :root-step-correspondence])))
+            (is (= 2 @comparator-calls))
+            (is (not (re-find #"v868-secret-state|v868-secret-input|#object\["
+                              (pr-str report))))
+            (is (= :unknown-construction (error-kind #(sut/explain report))))
+            (is (= :unknown-construction
+                   (error-kind #(sut/compare! report (Object.)))))
+            (spit artifact-path "v868-invalid-runtime-artifact\n")
+            (is (= :stale-application-assembly
+                   (error-kind #(sut/compare! handle (Object.)))))
+            (is (= 2 @comparator-calls))))))))
+
+(defn- with-real-xtdb-root-step
+  "Use the same actual resolved-operation -> executor -> resolution-assurance
+   path as the operation-family-correspondence test, but submit the genuine
+   evidence to a relational-definition handle. Each invocation owns its node."
+  [f]
+  (with-open [node (xtn/start-node {})]
+    (let [suffix (str (random-uuid))
+          request-id (str "v868-request-" suffix)
+          member-id (str "v868-member-" suffix)
+          principal-label "v868-private-helper"
+          now "2026-10-13T12:00:00Z"
+          before {:xt/id request-id :revision 0
+                  :created-at "t0" :updated-at "t0" :owner "unclaimed"}
+          member {:xt/id member-id :revision 0
+                  :created-at "t0" :updated-at "t0" :active true}
+          claimed (assoc before :revision 1 :updated-at now
+                         :owner principal-label :membership-id member-id)
+          principal (identity/principal principal-label)
+          command-wire
+          (protocol/command
+           {:command-id (identity/command-id (str "v868-command-" suffix))
+            :execution-id (identity/execution-id (str "v868-execution-" suffix))
+            :operation :request/claim
+            :arguments {:request-id request-id}
+            :observed-basis {:tx-id 1 :system-time now}
+            :scope [:request request-id]})
+          operation
+          (resolved-model/build-operation
+           {:operation :request/claim
+            :read-record! (fn [_ id]
+                            (first (xt/q node
+                                         ["SELECT * FROM gesso_commands WHERE _id = ?"
+                                          id])))
+            :may-disclose? (fn [& _] true)
+            :construct! (fn [& _]
+                          {:now now
+                           :outcome {:status :claimed}
+                           :plan {:commands [(command/update-command
+                                              :requests :claim before claimed
+                                              version-keys)]
+                                  :guards [(command/guard :memberships member
+                                                          version-keys)]
+                                  :emit false}})})
+          executor
+          (resolved-adapter/build-executor
+           {:operation :request/claim
+            :resolved-operation operation
+            :submission-mode! (fn [_] :submit)
+            :project! (fn [_ _]
+                        {:resolution :confirmed
+                         :authoritative
+                         (protocol/authoritative
+                          {:presence :present
+                           :basis {:tx-id 2 :system-time now}
+                           :projection {:request/owner principal-label}})
+                         :outcome :request/claimed})})
+          server
+          (optimistic-server/server
+           {:principal-fn (fn [ctx] (:authenticated-principal ctx))
+            :operations
+            {:request/claim
+             (optimistic-server/operation
+              {:name :v868-claim-optimistic
+               :operation :request/claim
+               :execute! executor
+               :settlement-contract
+               {:confirmed {:outcomes #{:request/claimed}
+                            :commit/status :committed}
+                :already-incorporated {:outcomes #{:request/claimed}
+                                       :commit/status :committed}}})}})
+          modeled-state {[:requests request-id] before
+                         [:memberships member-id] member}
+          families
+          [{:id :request/claim
+            :principals [principal-label]
+            :arguments [{:request-id request-id}]
+            :enabled? (fn [state who {:keys [request-id]}]
+                        (and (= principal-label who)
+                             (= "unclaimed"
+                                (:owner (get state [:requests request-id])))
+                             (true? (:active (get state [:memberships member-id])))))
+            :prepare (fn [state _ {:keys [request-id]}]
+                       {:commands [(command/update-command
+                                    :requests :claim
+                                    (get state [:requests request-id])
+                                    claimed version-keys)]
+                        :guards [(command/guard
+                                  :memberships (get state [:memberships member-id])
+                                  version-keys)]
+                        :emit false})}
+           {:id :request/reassign
+            :principals [:manager] :arguments [{:request-id request-id}]
+            :enabled? (fn [& _] false)
+            :prepare (fn [& _] (throw (ex-info "Disabled" {})))}
+           {:id :request/cancel
+            :principals [:manager] :arguments [{:request-id request-id}]
+            :enabled? (fn [& _] false)
+            :prepare (fn [& _] (throw (ex-info "Disabled" {})))}]
+          relational-model
+          {:initial-state modeled-state
+           :families families
+           :declarations [{:id :request/owner-member-active
+                           :source-kind :requests
+                           :source-where {:owner principal-label}
+                           :reference-attr :membership-id
+                           :allow-unset? false
+                           :target-kind :memberships
+                           :target-where {:active true}}]
+           :options {:max-depth 1 :max-transitions 10}}]
+      (xt/execute-tx node [[:put-docs :requests before]
+                           [:put-docs :memberships member]])
+      (fixture/with-closed-application
+        {:operations
+         (assoc (fixture/standard-operations)
+                :request/claim
+                (fixture/trusted-operation
+                 :request/claim
+                 {:published-change-topics #{:request}
+                  :execute! executor}))}
+        (fn [{:keys [options]}]
+          (let [handle (sut/construct!
+                        {:application-options options
+                         :relational-model relational-model})
+                evidence
+                (:evidence
+                 (resolution-assurance/run-and-check!
+                  {:server server
+                   :ctx {:biff.xtdb/node node
+                         :authenticated-principal principal}
+                   :command command-wire}))]
+            (f {:handle handle
+                :evidence evidence
+                :request-id request-id
+                :modeled-state modeled-state})))))))
+
+(deftest genuine-xtdb-execution-can-correspond-to-admitted-model-root-step
+  (with-real-xtdb-root-step
+    (fn [{:keys [handle evidence request-id]}]
+      (let [result (sut/compare! handle evidence)
+            context (:modeled-transition-context result)
+            root-step (:root-step-correspondence context)
+            tree (modeled-transition-tree handle)
+            root (:root-node-id tree)
+            children (->> (:edges tree)
+                          (filterv #(and (= root (:parent-node-id %))
+                                         (= :request/claim
+                                            (:registered-operation-id %))
+                                         (= :committed (:status %))))
+                          (mapv :node-id))]
+        (is (= :matched (:status result)))
+        (is (= :committed (:physical-status result)))
+        (is (= :matches-captured-pretransaction-state
+               (get-in result [:declared-root-state-comparison :status])))
+        (is (= :matching-root-step-explored (:status root-step)))
+        (is (= children (:matched-root-transition-node-ids root-step)))
+        (is (seq children))
+        (is (= :not-established
+               (:modeled-poststate-equals-observed-poststate? root-step)))
+        (is (= :not-established (:physical-trace-refinement root-step)))
+        (is (not (re-find (re-pattern (java.util.regex.Pattern/quote request-id))
+                          (pr-str root-step))))))))
