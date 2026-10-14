@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.operation-family-correspondence-test
-  "Permanent v829–v878 regressions for registered operation-family correspondence.
+  "Permanent v829–v884 regressions for registered operation-family correspondence.
 
    A finite operation family must match the exact executor from a freshly
    checked application assembly. An observed XTDB transaction can demonstrate
@@ -1094,3 +1094,164 @@
                           assembly first-handle (Object.))
                           nil
                           (catch clojure.lang.ExceptionInfo e e)))))))))
+
+
+;; v884: Compare a PURE single-step transition from the captured before-state,
+;; without requiring that before-state to equal the admitted finite model root.
+;; These are local diagnostic observations, not reachability, causality, or
+;; complete-dependency proof certificates.
+
+(def ^:private local-poststate-key :captured-local-poststate-comparison)
+
+(defn- v884-pure-local-fixture []
+  (let [document {:xt/id "v884-private-create" :revision 0
+                  :created-at "t0" :updated-at "t0"
+                  :secret "v884-must-remain-private"}
+        plan {:commands [(command/create :requests document version)]
+              :guards [] :emit false}
+        expected (:after (tx-model/step {} plan))
+        record {:xt/id "v884-private-command"}
+        record-key [resolution/command-entity-type (:xt/id record)]
+        observe (fn [before final]
+                  {:initial-state before
+                   :submitted-incorporation {:plan plan}
+                   :observations {:state (assoc final record-key record)}})
+        compare! (fn [before final comparison]
+                   (#'correspondence/compare-captured-local-poststate!
+                    (observe before final) record comparison false nil))]
+    {:document document
+     :expected expected
+     :compare! compare!}))
+
+(deftest v884-real-xtdb-root-local-poststate-match-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [result ((build! assembly example) (:evidence (invoke! example)))
+              local (get result local-poststate-key)]
+          (is (= :matched (:status result)))
+          (is (= :matches-captured-pretransaction-state
+                 (get-in result [root-state-key :status])))
+          (is (= :matches-captured-posttransaction-dependencies
+                 (get-in result [poststate-key :status])))
+          (is (= :matches-captured-posttransaction-dependencies (:status local)))
+          (is (= :controlled-observation-pretransaction-dependencies
+                 (:input-source local)))
+          (is (false? (:declared-model-root-equality-required? local)))
+          (is (false? (:additional-xtdb-reads? local)))
+          (is (false? (:additional-model-callbacks? local)))
+          (is (false? (:poststate-data-exposed? local))))))))
+
+(deftest v884-real-xtdb-nonroot-local-poststate-match-test
+  (let [example (test-operation)
+        secret "v884-extra-model-root-secret"]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [root (assoc (model-state example)
+                          [:extra secret] {:xt/id secret :secret secret})
+              comparator (correspondence/build-comparator
+                          assembly root (modeled-families example)
+                          (model-rules example) small-options)
+              result (comparator (:evidence (invoke! example)))
+              local (get result local-poststate-key)]
+          (is (= :matched (:status result)))
+          (is (= :differs-from-captured-pretransaction-state
+                 (get-in result [root-state-key :status])))
+          (is (= :declared-root-not-established-equal-to-observation
+                 (get-in result [poststate-key :status])))
+          (is (= :matches-captured-posttransaction-dependencies (:status local)))
+          (is (= :not-established (:equality-with-reachable-non-root-model-state local)))
+          (is (not (.contains (pr-str result) secret))))))))
+
+(deftest v884-pure-local-matching-and-unrelated-documents-test
+  (let [{:keys [expected compare!]} (v884-pure-local-fixture)
+        matched {:status :matched :physical-status :committed}
+        result (compare! {} expected matched)]
+    (is (= :matches-captured-posttransaction-dependencies (:status result)))
+    (is (= :one-controlled-serial-step-from-captured-pretransaction-dependencies
+           (:scope result)))
+    (is (= :not-established (:complete-dependency-coverage result)))
+    (is (= :not-established (:authenticated-execution-history result)))
+    (is (= :differs-from-captured-posttransaction-dependencies
+           (:status (compare! {} (assoc expected [:requests "unrelated"]
+                                          {:xt/id "unrelated"}) matched))))
+    (is (= :differs-from-captured-posttransaction-dependencies
+           (:status (compare! {} {} matched))))))
+
+(deftest v884-pure-local-physical-outcome-and-plan-disagreement-test
+  (let [{:keys [expected compare!]} (v884-pure-local-fixture)
+        matched {:status :matched :physical-status :committed}]
+    (is (= :modeled-and-physical-outcomes-disagree
+           (:status (compare! {} expected (assoc matched :physical-status :rejected)))))
+    (is (= :physical-outcome-not-reported
+           (:status (compare! {} expected (dissoc matched :physical-status)))))
+    (is (= :submitted-plan-not-matched
+           (:status (compare! {} expected (assoc matched :status :counterexample)))))
+    (is (= :matches-captured-posttransaction-dependencies
+           (:status (compare! {} expected matched))))))
+
+(deftest v884-pure-local-rejection-preserves-captured-state-test
+  (let [{:keys [document compare!]} (v884-pure-local-fixture)
+        before {[:requests (:xt/id document)] document}
+        result (compare! before before {:status :matched :physical-status :rejected})]
+    (is (= :matches-captured-posttransaction-dependencies (:status result)))
+    (is (= :controlled-observation-pretransaction-dependencies
+           (:input-source result)))
+    (is (= :not-established (:pinned-xtdb-snapshot result)))
+    (is (false? (:poststate-data-exposed? result)))))
+
+(deftest v884-captured-local-report-is-redacted-and-non-authorizing-test
+  (let [{:keys [expected compare!]} (v884-pure-local-fixture)
+        result (compare! {} expected {:status :matched :physical-status :committed})
+        printed (pr-str result)]
+    (doseq [secret ["v884-must-remain-private" "v884-private-create"
+                    "v884-private-command"]]
+      (is (not (.contains printed secret))))
+    (doseq [field [:initial-state :observations :record :plan :commands
+                   :before :after :binding :admission-handle]]
+      (is (not (contains? result field))))
+    (is (= :not-established (:production-trace-refinement result)))
+    (is (= :not-established (:equality-with-reachable-non-root-model-state result)))
+    (is (false? (:declared-model-root-equality-required? result)))))
+
+(deftest v884-comparator-does-not-reexecute-business-operation-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [cmp (build! assembly example)
+              evidence (:evidence (invoke! example))
+              executed @(:calls example)
+              result (cmp evidence)]
+          (is (= executed @(:calls example)))
+          (is (= :matches-captured-posttransaction-dependencies
+                 (get-in result [local-poststate-key :status])))
+          (is (false? (get-in result [local-poststate-key :additional-model-callbacks?])))
+          (is (false? (get-in result [local-poststate-key :additional-xtdb-reads?]))))))))
+
+(deftest v884-local-result-respects-stale-and-forged-evidence-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly artifact-path]}]
+        (let [cmp (build! assembly example)
+              evidence (:evidence (invoke! example))]
+          (is (= :matches-captured-posttransaction-dependencies
+                 (get-in (cmp evidence) [local-poststate-key :status])))
+          (is (= :unrecognized-executor-bound-evidence (kind #(cmp (Object.)))))
+          (is (= :unrecognized-executor-bound-evidence
+                 (kind #(cmp (assurance/inspect-evidence evidence)))))
+          (spit artifact-path "v884-stale-browser-artifact\n")
+          (is (not (application/application-assembly? assembly)))
+          (is (some? (try (cmp evidence)
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e)))))))))
+
+(deftest v884-assurance-scope-explicitly-bounds-local-check-test
+  (let [scope correspondence/assurance-scope]
+    (is (contains? (:checked scope)
+                   :single-captured-input-step-vs-observed-posttransaction-dependency-values))
+    (doseq [limit [:local-step-equality-is-not-reachable-model-node-equality
+                   :local-step-equality-does-not-prove-dependency-completeness
+                   :authenticated-xtdb-history-or-global-isolation
+                   :unbounded-execution-refinement
+                   :whole-application-certification]]
+      (is (contains? (:not-established scope) limit)))))
