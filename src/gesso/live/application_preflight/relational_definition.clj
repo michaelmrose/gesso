@@ -47,7 +47,13 @@
    A caller-ordered collection of individually executor-bound observations
    may also be compared to a ROOTED path of modeled operation choices and
    outcomes, without treating caller order as observed chronology or the
-   modeled path as evidence of concrete inter-step state continuity.
+   modeled path as evidence of concrete inter-step state continuity. The
+   opt-in captured-adjacency comparison additionally records whether the
+   FIRST actual controlled observation agrees with a modeled ROOT step,
+   including its captured after-state. This root anchor is derived from the
+   ALREADY PERFORMED comparison, not from a fresh callback or XTDB read.
+   Even a matched anchor plus matched captured adjacencies cannot establish
+   the supplied order, a complete dependency inventory or absence of writes.
 
    THIS DOES NOT make arbitrary Clojure callbacks analyzable, establish
    completeness of finite domains or business policies, ensure the modeled
@@ -84,7 +90,8 @@
               :observed-root-step-vs-captured-domain-poststate-comparison
               :controlled-local-root-step-before-and-after-observation
               :caller-ordered-executor-observations-vs-bounded-model-path
-              :opt-in-captured-adjacency-comparison-for-modeled-sequences}
+              :opt-in-captured-adjacency-comparison-for-modeled-sequences
+              :first-controlled-root-step-anchor-for-modeled-sequences}
    :assumed #{:explicit-opt-in-to-this-construction-and-startup
               :truthful-pure-total-family-callbacks
               :representative-finite-modeled-state-principals-and-arguments
@@ -113,7 +120,8 @@
                       :caller-supplied-observation-order-is-not-proven-chronology
                       :modeled-path-is-not-observed-state-continuity
                       :equal-captured-adjacencies-do-not-establish-chronology
-                      :captured-adjacency-does-not-establish-complete-dependencies}})
+                      :captured-adjacency-does-not-establish-complete-dependencies
+                      :root-anchored-adjacency-does-not-establish-chronology}})
 
 (def ^:private definition-keys #{:application-options :relational-model})
 (def ^:private optional-definition-keys
@@ -1033,8 +1041,21 @@
            (map-indexed vector comparisons))
           comparisons-match? (every? #(= :matched (:status %)) comparisons)
           outcomes-known? (every? #(#{:committed :rejected}
-                                      (:physical-status %)) comparisons)]
-      {:status (cond
+                                      (:physical-status %)) comparisons)
+          ;; v881: reuse the FIRST compare!'s already verified local-step
+          ;; diagnostic; this adds no modeled callback or physical observation.
+          first-local-status
+          (get-in (first comparisons)
+                  [:modeled-transition-context :root-step-correspondence
+                   :local-step-observation :status])]
+      {:first-observation-local-root-step
+       {:status (or first-local-status :not-reported)
+        :scope :first-controlled-observation-vs-declared-model-root
+        :source :existing-single-observation-comparison
+        :observed-chronology :not-established
+        :pinned-xtdb-snapshot :not-established
+        :production-trace-refinement :not-established}
+       :status (cond
                  (not comparisons-match?) :one-or-more-submitted-plans-not-matched
                  (not outcomes-known?) :one-or-more-physical-outcomes-unavailable
                  (seq current) :caller-ordered-choice-outcome-path-explored
@@ -1071,8 +1092,13 @@
    The MODEL path and the CAPTURED equalities are separate observations. Even
    when both match, the caller has NOT established execution chronology,
    absence of intervening writes, complete dependency coverage, pinned XTDB
-   snapshots, or production trace refinement. Reports contain no captured
-   documents, executor handles, principals, arguments, or model callbacks."
+   snapshots, or production trace refinement. The additional v881 root-anchored
+   result requires the FIRST executor-bound observation to agree with one
+   actual modeled ROOT transition before and after the operation. It reuses
+   the first already-run comparator result; unknown root evidence stays
+   unknown, never successful. This still does not authenticate the remainder
+   of the purported history. Reports contain no captured documents, executor
+   handles, principals, arguments, or model callbacks."
   [handle ordered-evidence-handles]
   (let [path (compare-observation-sequence! handle ordered-evidence-handles)
         {:keys [assembly]} (current-construction! handle)
@@ -1106,7 +1132,17 @@
           (not model-path-matches?) :modeled-path-not-established
           (empty? pair-results) :no-adjacent-observations
           all-pairs-match? :modeled-path-and-captured-adjacencies-match
-          :else :modeled-path-without-captured-adjacency-agreement)]
+          :else :modeled-path-without-captured-adjacency-agreement)
+        first-local-status (get-in path [:first-observation-local-root-step
+                                         :status])
+        anchored-status
+        (cond
+          (not model-path-matches?) :modeled-path-not-established
+          (not= :matching-captured-root-step-before-and-after
+                first-local-status) :initial-controlled-root-step-not-established
+          (empty? pair-results) :no-adjacent-observations
+          (not all-pairs-match?) :captured-adjacency-equality-not-established
+          :else :initial-root-step-and-captured-adjacencies-match)]
     (assoc path
            :captured-dependency-adjacency
            {:status adjacency-status
@@ -1116,6 +1152,20 @@
             :chronology :not-established
             :complete-dependency-coverage :not-established
             :pinned-xtdb-snapshot :not-established}
+           :initial-root-step-and-captured-adjacency
+           {:status anchored-status
+            :first-observation-local-root-step-status first-local-status
+            :evidence-class :bounded-root-step-plus-captured-adjacency-diagnostic
+            :source :already-compared-first-executor-bound-observation
+            :additional-model-callbacks? false
+            :additional-xtdb-reads? false
+            :state-contents-exposed? false
+            :observed-execution-chronology :not-established
+            :absence-of-intervening-writes :not-established
+            :complete-dependency-coverage :not-established
+            :pinned-xtdb-snapshot :not-established
+            :production-trace-refinement :not-established
+            :application-certification :not-established}
            :joint-path-and-captured-adjacency
            {:status joint-status
             :evidence-class :bounded-model-path-plus-captured-dependency-equality
