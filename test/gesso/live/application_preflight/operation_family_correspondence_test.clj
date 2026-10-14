@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.operation-family-correspondence-test
-  "Permanent v829 and v866 regressions for registered operation-family correspondence.
+  "Permanent v829, v866, and v870 regressions for registered operation-family correspondence.
 
    A finite operation family must match the exact executor from a freshly
    checked application assembly. An observed XTDB transaction can demonstrate
@@ -16,6 +16,7 @@
    [gesso.live.optimistic.resolution-assurance :as assurance]
    [gesso.live.optimistic.server :as server]
    [gesso.model.command :as command]
+   [gesso.model.tx-model :as tx-model]
    [gesso.model.resolved-operation :as resolved]
    [xtdb.api :as xt]
    [xtdb.node :as xtn]))
@@ -667,3 +668,218 @@
           (is (some? (try (comparator handle)
                           nil
                           (catch clojure.lang.ExceptionInfo e e)))))))))
+
+;; v870: root-poststate correspondence is a local value comparison on a
+;; controlled observation. Keep a genuine XTDB path and separately exercise
+;; the pure status branches that cannot be injected through opaque handles.
+
+(def ^:private poststate-key :declared-root-poststate-comparison)
+
+(defn- poststate-comparison [result]
+  (get result poststate-key))
+
+(deftest genuine-xtdb-commit-matches-modeled-poststate-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [handle (:evidence (invoke! example))
+              comparison ((build! assembly example) handle)
+              post (poststate-comparison comparison)]
+          (is (= :matched (:status comparison)))
+          (is (= :committed (:physical-status comparison)))
+          (is (= :matches-captured-pretransaction-state
+                 (get-in comparison [root-state-key :status])))
+          (is (= :matches-captured-posttransaction-dependencies (:status post)))
+          (is (= :exact-clojure-domain-document-map-equality (:relation post)))
+          (is (= :one-controlled-serial-root-step-vs-captured-dependencies
+                 (:scope post)))
+          (is (= (:claimed example) (row :requests (:request-id example))))
+          (is (false? (:poststate-data-exposed? post)))
+          (is (not (contains? comparison :observations))))))))
+
+(deftest mismatched-declared-root-withholds-poststate-equality-test
+  (let [example (test-operation)
+        secret "v870-model-only-private-document"]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [root (assoc (model-state example)
+                          [:private/extra secret]
+                          {:xt/id secret :secret "v870-do-not-disclose"})
+              comparator (correspondence/build-comparator
+                          assembly root (modeled-families example)
+                          (model-rules example) small-options)
+              comparison (comparator (:evidence (invoke! example)))]
+          (is (= :matched (:status comparison)))
+          (is (= :differs-from-captured-pretransaction-state
+                 (get-in comparison [root-state-key :status])))
+          (is (= :declared-root-not-established-equal-to-observation
+                 (get-in comparison [poststate-key :status])))
+          (is (not (.contains (pr-str comparison) secret)))
+          (is (not (.contains (pr-str comparison) "v870-do-not-disclose"))))))))
+
+(deftest plan-counterexample-cannot-be-promoted-by-matching-root-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [families (update-in (modeled-families example) [0 :prepare]
+                                  (fn [original]
+                                    (fn [state who args]
+                                      (assoc (original state who args)
+                                             :guards []))))
+              comparator (correspondence/build-comparator
+                          assembly (model-state example) families
+                          (model-rules example) small-options)
+              comparison (comparator (:evidence (invoke! example)))]
+          (is (= :counterexample (:status comparison)))
+          (is (= :modeled-and-submitted-plans-disagree (:reason comparison)))
+          (is (= :matches-captured-pretransaction-state
+                 (get-in comparison [root-state-key :status])))
+          (is (= :submitted-plan-not-matched
+                 (get-in comparison [poststate-key :status]))))))))
+
+(deftest matching-poststate-does-not-certify-live-projection-test
+  (let [example (test-operation {:false-projection? true})]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [comparison ((build! assembly example)
+                          (:evidence (invoke! example)))]
+          (is (= :matched (:status comparison)))
+          (is (= :matches-captured-posttransaction-dependencies
+                 (get-in comparison [poststate-key :status])))
+          (is (contains? (get-in comparison [:assurance-scope :not-established])
+                         :correctness-of-projection-callbacks))
+          (is (= :not-established
+                 (get-in comparison [poststate-key :production-trace-refinement]))))))))
+
+(deftest poststate-check-does-not-reexecute-model-or-domain-test
+  (let [example (test-operation)
+        !prepares (atom 0)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [families (update-in (modeled-families example) [0 :prepare]
+                                  (fn [original]
+                                    (fn [state who args]
+                                      (swap! !prepares inc)
+                                      (original state who args))))
+              comparator (correspondence/build-comparator
+                          assembly (model-state example) families
+                          (model-rules example) small-options)
+              handle (:evidence (invoke! example))
+              domain-before @(:calls example)
+              before @!prepares
+              first-result (comparator handle)
+              middle @!prepares
+              second-result (comparator handle)]
+          ;; compare-family-preparation intentionally invokes :prepare once
+          ;; per comparison. The new reference step must NOT invoke it again.
+          (is (= 1 (- middle before)))
+          (is (= 1 (- @!prepares middle)))
+          (is (= domain-before @(:calls example)))
+          (is (= (poststate-comparison first-result)
+                 (poststate-comparison second-result)))
+          (is (= :matches-captured-posttransaction-dependencies
+                 (get-in second-result [poststate-key :status]))))))))
+
+(deftest poststate-evidence-rejects-forgeries-and-stale-assembly-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly artifact-path]}]
+        (let [comparator (build! assembly example)
+              handle (:evidence (invoke! example))
+              detached (assurance/inspect-evidence handle)]
+          (doseq [fake [nil {} (Object.) detached
+                        {poststate-key {:status :matches-captured-posttransaction-dependencies}}]]
+            (is (= :unrecognized-executor-bound-evidence
+                   (kind #(comparator fake)))))
+          (is (= :matches-captured-posttransaction-dependencies
+                 (get-in (comparator handle) [poststate-key :status])))
+          (spit artifact-path "v870-modified-artifact\n")
+          (is (not (application/application-assembly? assembly)))
+          (is (some? (try (comparator handle)
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e)))))))))
+
+(defn- pure-poststate-fixture []
+  (let [document {:xt/id "v870-private-pure-document" :revision 0
+                  :created-at "t0" :updated-at "t0" :secret "v870-secret-value"}
+        plan {:commands [(command/create :requests document version)]
+              :guards [] :emit false}
+        expected (get-in (tx-model/step {} plan) [:after])
+        record {:xt/id "v870-private-command"}
+        after-with-record (assoc expected [:gesso_commands (:xt/id record)] record)
+        observation (fn [state]
+                      {:submitted-incorporation {:plan plan}
+                       :observations {:state state}})
+        compare! (fn [state comparison root-match?]
+                   (#'correspondence/compare-root-poststate!
+                    {} (observation state) record comparison root-match?))]
+    {:expected expected :with-record after-with-record
+     :compare! compare!}))
+
+(deftest pure-reference-branch-statuses-distinguish-state-and-outcome-test
+  (let [{:keys [expected with-record compare!]} (pure-poststate-fixture)
+        matched {:status :matched :physical-status :committed}]
+    (is (= :matches-captured-posttransaction-dependencies
+           (:status (compare! expected matched true))))
+    ;; Ignore only the canonical separate durable command-result target.
+    (is (= :matches-captured-posttransaction-dependencies
+           (:status (compare! with-record matched true))))
+    ;; An unrelated domain document must NOT be silently discarded along
+    ;; with the canonical command-result record.
+    (is (= :differs-from-captured-posttransaction-dependencies
+           (:status (compare! (assoc with-record
+                                     [:requests "unexpected"]
+                                     {:xt/id "unexpected"})
+                              matched true))))
+    (is (= :differs-from-captured-posttransaction-dependencies
+           (:status (compare! {} matched true))))
+    (is (= :modeled-and-physical-outcomes-disagree
+           (:status (compare! {} (assoc matched :physical-status :rejected) true))))
+    (is (= :physical-outcome-not-reported
+           (:status (compare! {} (dissoc matched :physical-status) true))))
+    (is (= :submitted-plan-not-matched
+           (:status (compare! {} (assoc matched :status :counterexample) true))))
+    (is (= :declared-root-not-established-equal-to-observation
+           (:status (compare! {} matched false))))))
+
+(deftest pure-reference-rejected-step-and-redaction-test
+  (let [document {:xt/id "v870-existing-document" :revision 0
+                  :created-at "t0" :updated-at "t0" :secret "v870-private-rejection"}
+        target [:requests (:xt/id document)]
+        state {target document}
+        plan {:commands [(command/create :requests document version)]
+              :guards [] :emit false}
+        record {:xt/id "v870-command-rejected"}
+        observation {:submitted-incorporation {:plan plan}
+                     :observations {:state (assoc state
+                                                 [:gesso_commands (:xt/id record)]
+                                                 record)}}
+        result (#'correspondence/compare-root-poststate!
+                state observation record
+                {:status :matched :physical-status :rejected} true)]
+    (is (= :matches-captured-posttransaction-dependencies (:status result)))
+    (is (false? (:poststate-data-exposed? result)))
+    (is (not (.contains (pr-str result) "v870-private-rejection")))
+    (is (= :not-established (:pinned-xtdb-snapshot result)))
+    (is (= :not-established (:production-trace-refinement result)))))
+
+(deftest poststate-assurance-scope-remains-finite-and-local-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [comparison ((build! assembly example)
+                          (:evidence (invoke! example)))
+              scope (:assurance-scope comparison)
+              post (poststate-comparison comparison)]
+          (is (= correspondence/assurance-scope scope))
+          (is (contains? (:checked scope)
+                         :single-root-step-vs-observed-posttransaction-dependency-values))
+          (doseq [limit [:posttransaction-equality-for-non-root-model-states
+                         :authenticated-xtdb-history-or-global-isolation
+                         :unbounded-execution-refinement
+                         :whole-application-certification]]
+            (is (contains? (:not-established scope) limit)))
+          (is (= :not-established (:pinned-xtdb-snapshot post)))
+          (is (= :not-established (:production-trace-refinement post)))
+          (is (= :one-controlled-serial-root-step-vs-captured-dependencies
+                 (:scope post))))))))
