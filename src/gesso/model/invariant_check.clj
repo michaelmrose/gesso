@@ -175,6 +175,7 @@
               :rule-preservation-after-every-attempted-operation
               :all-enabled-choices-through-declared-depth
               :state-dependent-plan-reconstruction
+              :per-declared-operation-exercise-counts
               :shortest-named-counterexamples}
    :assumed #{:pure-total-truthful-rule-predicates
               :pure-total-truthful-operation-builders
@@ -289,6 +290,32 @@
                         :state state}))))
           found rules))
 
+(defn- zero-operation-exercise [operations]
+  ;; Store only counts keyed by already validated operation identifiers.
+  ;; No callback, transaction plan, or modeled document enters the summary.
+  (into {}
+        (map (fn [{:keys [id]}]
+               [id {:enablement-checks 0
+                    :disabled-checks 0
+                    :committed-attempts 0
+                    :rejected-attempts 0}]))
+        operations))
+
+(defn- operation-exercise-summary [operations counters]
+  ;; Preserve declaration order, not map iteration order. An enabled attempt
+  ;; includes BOTH committed and rejected serial-atomic reference outcomes.
+  (mapv (fn [{:keys [id]}]
+          (let [{:keys [enablement-checks disabled-checks
+                        committed-attempts rejected-attempts]}
+                (get counters id)]
+            {:operation-id id
+             :enablement-checks enablement-checks
+             :disabled-checks disabled-checks
+             :enabled-attempts (+ committed-attempts rejected-attempts)
+             :committed-attempts committed-attempts
+             :rejected-attempts rejected-attempts}))
+        operations))
+
 (defn check-reachable
   "Exhaustively explore *state-dependent* operation instances through a
    finite serial depth, checking named application invariants initially and
@@ -307,7 +334,12 @@
 
    Options must be {:max-depth 1..6 :max-transitions 1..10000}. The latter
    is a strict fail-closed budget for attempted transitions, not permission
-   to return a partial successful verdict. The exploration is breadth-first
+   to return a partial successful verdict. A redacted, source-order
+   :operation-exercise summary counts enablement checks, disabled choices,
+   committed attempts, and rejected attempts for each modeled operation.
+   This can reveal declared choices never attempted inside the finite search;
+   it does NOT establish completeness of real operations or their domains.
+   The exploration is breadth-first
    and deterministic in declared operation order; it records one shortest
    counterexample per rule. Repeated states are NOT deduplicated, so no
    transitions are pruned merely because a state has appeared elsewhere.
@@ -325,11 +357,13 @@
     (loop [depth 0
            frontier [{:state initial-state :trace []}]
            transitions 0
-           found initial-found]
+           found initial-found
+           exercise (zero-operation-exercise operations)]
       (if (or (= depth max-depth) (empty? frontier))
         {:status (if (seq found) :counterexample :holds-in-explored-model)
          :violations (into [] (keep found) (map :id rules))
          :rule-ids (mapv :id rules)
+         :operation-exercise (operation-exercise-summary operations exercise)
          :exploration {:kind :bounded-reachable-serial-operations
                        :operation-ids (mapv :id operations)
                        :max-depth max-depth
@@ -341,36 +375,47 @@
          :scope reachable-assurance-scope}
         (let [{next-frontier :frontier
                next-transitions :transitions
-               next-found :found}
+               next-found :found
+               next-exercise :exercise}
               (reduce
                (fn [acc node]
                  (reduce
                   (fn [acc operation]
-                    (if-not (evaluate-operations-enabled! operation (:state node))
-                      acc
-                      (do
-                        (when (>= (:transitions acc) max-transitions)
-                          (fail! :exploration-budget-exhausted
-                                 "The reachability budget was exhausted; no verdict is established."
-                                 {:max-depth max-depth
-                                  :max-transitions max-transitions
-                                  :attempted-transitions (:transitions acc)
-                                  :depth depth}))
-                        (let [plan (admitted-operation-plan operation (:state node))
-                              outcome (reference/step (:state node) plan)
-                              new-state (:after outcome)
-                              trace (conj (:trace node)
-                                          {:operation-id (:id operation)
-                                           :status (:status outcome)
-                                           :plan plan
-                                           :failed-precondition (:failed-precondition outcome)
-                                           :state new-state})]
-                          (-> acc
-                              (update :frontier conj {:state new-state
-                                                      :trace trace})
-                              (update :transitions inc)
-                              (update :found next-rule-violations rules trace new-state))))))
+                    (let [id (:id operation)
+                          enabled? (evaluate-operations-enabled!
+                                    operation (:state node))
+                          acc (update-in acc [:exercise id :enablement-checks] inc)]
+                      (if-not enabled?
+                        (update-in acc [:exercise id :disabled-checks] inc)
+                        (do
+                          (when (>= (:transitions acc) max-transitions)
+                            (fail! :exploration-budget-exhausted
+                                   "The reachability budget was exhausted; no verdict is established."
+                                   {:max-depth max-depth
+                                    :max-transitions max-transitions
+                                    :attempted-transitions (:transitions acc)
+                                    :depth depth}))
+                          (let [plan (admitted-operation-plan operation (:state node))
+                                outcome (reference/step (:state node) plan)
+                                new-state (:after outcome)
+                                trace (conj (:trace node)
+                                            {:operation-id id
+                                             :status (:status outcome)
+                                             :plan plan
+                                             :failed-precondition (:failed-precondition outcome)
+                                             :state new-state})
+                                status-key (case (:status outcome)
+                                             :committed :committed-attempts
+                                             :rejected :rejected-attempts)]
+                            (-> acc
+                                (update :frontier conj {:state new-state
+                                                        :trace trace})
+                                (update :transitions inc)
+                                (update :found next-rule-violations rules trace new-state)
+                                (update-in [:exercise id status-key] inc)))))))
                   acc operations))
-               {:frontier [] :transitions transitions :found found}
+               {:frontier [] :transitions transitions :found found
+                :exercise exercise}
                frontier)]
-          (recur (inc depth) next-frontier next-transitions next-found))))))
+          (recur (inc depth) next-frontier next-transitions next-found
+                 next-exercise))))))
