@@ -47,20 +47,16 @@
   {:mvn/version "0.9.12"}
 
   com.zaxxer/HikariCP
-  {:mvn/version "7.0.2"}}
+  {:mvn/version "7.0.2"}
+
+  pfeodrippe/recife
+  {:mvn/version "0.22.0"}}
 
  :aliases
  {:dev
   {:extra-deps
    {org.clojure/clojurescript
     {:mvn/version "1.12.145"}}}
-
-  :proof
-  {:extra-paths ["script"]
-
-   :extra-deps
-   {pfeodrippe/recife
-    {:mvn/version "0.22.0"}}}
 
   :test
   {:extra-paths ["test"]
