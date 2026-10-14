@@ -55,6 +55,13 @@
    {org.clojure/clojurescript
     {:mvn/version "1.12.145"}}}
 
+  :proof
+  {:extra-paths ["script"]
+
+   :extra-deps
+   {pfeodrippe/recife
+    {:mvn/version "0.22.0"}}}
+
   :test
   {:extra-paths ["test"]
 
