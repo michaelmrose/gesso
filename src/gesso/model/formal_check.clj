@@ -15,10 +15,11 @@
    assurance merely because a returned map has :status :checked.
 
    Recife 0.22.0 does not faithfully transport arbitrary Clojure strings or
-   underscores in keyword names. A reversible finite token codec is therefore
-   applied only at the TLC boundary; the real transition and predicates always
-   receive decoded Clojure values. Model checks are serialized because Recife
-   controls process-wide model-checking machinery. Session data is removed on
+   underscores in keyword names, or nil document values. A reversible finite
+   token codec is therefore applied only at the TLC boundary; the real
+   transition and predicates always receive decoded Clojure values. Model
+   checks are serialized because Recife controls process-wide model-checking
+   machinery. Session data is removed on
    completion, failure, or interruption. No application callbacks execute."
   (:require [clojure.walk :as walk]
             [gesso.model.formal-obligation :as obligation]
@@ -66,15 +67,21 @@
 (defn- codec-for [subject]
   (let [values [(:plans subject) (:initial-state subject)]
         all-keywords (set (values-matching keyword? values))
-        originals (concat (values-matching string? values)
+        ;; Encode nil unconditionally: tx-model/step may introduce nil
+        ;; :failed-precondition in an observation even if no submitted plan or
+        ;; initial document contained nil. Recife/TLA cannot reliably carry
+        ;; unboxed Clojure nil inside nested map values or observations.
+        originals (concat [nil]
+                          (values-matching string? values)
                           (values-matching lossy-keyword? values))
         forward
-        (loop [xs originals next-index 0 taken all-keywords mapping {}]
-          (if-let [x (first xs)]
-            (let [candidate (keyword "gessoformalcodec" (str "v" next-index))]
+        (loop [xs (seq originals) next-index 0 taken all-keywords mapping {}]
+          (if (seq xs)
+            (let [x (first xs)
+                  candidate (keyword "gessoformalcodec" (str "v" next-index))]
               (if (contains? taken candidate)
                 (recur xs (inc next-index) taken mapping)
-                (recur (rest xs) (inc next-index) (conj taken candidate)
+                (recur (next xs) (inc next-index) (conj taken candidate)
                        (assoc mapping x candidate))))
             mapping))
         backward (into {} (map (fn [[original token]] [token original])) forward)]
@@ -82,6 +89,7 @@
                (walk/postwalk
                 (fn [x]
                   (cond
+                    (nil? x) (get forward nil)
                     (string? x) (or (get forward x)
                                     (fail! :unadmitted-string
                                            "A model transition produced an unadmitted string."))
