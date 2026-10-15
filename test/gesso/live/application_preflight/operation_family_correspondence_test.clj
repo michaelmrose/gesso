@@ -19,6 +19,7 @@
    [gesso.live.optimistic.server :as server]
    [gesso.model.command :as command]
    [gesso.model.tx :as tx]
+   [gesso.live.consistency.xtdb :as gxt]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx-model :as tx-model]
    [gesso.model.resolved-operation :as resolved]
@@ -3883,3 +3884,206 @@
       (is (= :not-performed (:live-production-rereads-in-this-comparison report)))
       (is (= :caller-supplied-not-authenticated (:guard-snapshot-origin report)))
       (is (= :not-established (:application-certification report))))))
+
+;; v984 — Gesso-owned XTDB2 current-document acquisition regression coverage.
+;; These tests exercise the real XTDB2 path and query construction rather than
+;; trusting a domain-authored callback. They do not prove connectable provenance,
+;; multi-document snapshot isolation, commit-time atomicity or XTDB refinement.
+
+(defn- v984-config
+  ([] (v984-config (v982-context) (atom 0)))
+  ([context calls]
+   (assoc (v982-config context (v982-coverage) calls)
+          :production-document-reader :gesso-xtdb-current)))
+
+(defn- v984-pair [context calls]
+  (shared-family/build-pair (v984-config context calls)))
+
+(defn- v984-server-context [context]
+  (assoc context :biff.xtdb/node @!node))
+
+(defn- v984-put! [document]
+  (xt/execute-tx @!node [[:put-docs :eligibility document]]))
+
+(deftest v984-physical-xtdb-current-document-and-temporal-normalization-test
+  (let [context (v982-context)
+        snapshot (get-in context [:eligibility :document])
+        calls (atom 0)
+        submissions (atom 0)
+        pair (v984-pair context calls)
+        server (v984-server-context context)]
+    (v984-put! snapshot)
+    (is (= [(get-in context v982-guard-path)] (:guards (v970-prepare pair))))
+    (is (= 1 @calls))
+    (is (= :matched-declared-input-fields
+           (:status (v982-compare pair context)))
+        "Pure comparison does not perform an XTDB query")
+    (is (= 1 @calls))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair server)))))
+    (is (= 2 @calls))
+    (is (= 1 @submissions))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-gesso-owned-parameterized-xtdb-document-reread))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :authentic-authoritative-xtdb-connectable-in-server-context))
+    (is (= :not-established (:application-certification pair)))))
+
+(deftest v984-physical-xtdb-stale-extra-and-missing-documents-block-submission-test
+  (let [context (v982-context)
+        original (get-in context [:eligibility :document])
+        calls (atom 0)
+        submissions (atom 0)
+        pair (v984-pair context calls)
+        server (v984-server-context context)]
+    (v984-put! original)
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair server))))
+      (v984-put! (assoc original :fixture/revision 99))
+      (is (= :production-current-document-snapshot-mismatch
+             (kind #(v970-submit pair server))))
+      (v984-put! (assoc original :fixture/unmodeled "SECRET-EXTRA-FIELD"))
+      (let [error (v966-error #(v970-submit pair server))]
+        (is (= :production-current-document-snapshot-mismatch
+               (:error/kind (ex-data error))))
+        (is (= #{:error/type :error/kind}
+               (set (keys (ex-data error)))))
+        (is (not (.contains (pr-str (ex-data error)) "SECRET-EXTRA-FIELD"))))
+      (xt/execute-tx @!node [[:delete-docs :eligibility (:xt/id original)]])
+      (is (= :production-current-document-snapshot-mismatch
+             (kind #(v970-submit pair server))))
+      (v984-put! original)
+      (is (= :incorporated (:status (v970-submit pair server)))))
+    (is (= 2 @submissions) "Only current documents reach transaction submission")
+    (is (= 2 @calls) "Only current documents reach domain construction")))
+
+(deftest v984-query-uses-literal-table-and-bound-opaque-id-test
+  (let [opaque-id "id' OR 1=1 --"
+        document (assoc (get-in (v982-context) [:eligibility :document])
+                        :xt/id opaque-id)
+        context (-> (v982-context)
+                    (assoc-in [:eligibility :document] document)
+                    (assoc-in [:eligibility :guard]
+                              (command/guard :fixture/eligibility document
+                                             (assoc v970-version
+                                                    :compare-keys
+                                                    [:fixture/revision
+                                                     :fixture/updated-at
+                                                     :fixture/created-at
+                                                     :fixture/decision]))))
+        calls (atom 0)
+        submissions (atom 0)
+        queries (atom [])
+        pair (v984-pair context calls)]
+    (with-redefs [gxt/q-from
+                  (fn [server query]
+                    (swap! queries conj [server query])
+                    [document])
+                  tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= [[context ["SELECT * FROM eligibility WHERE _id = ? LIMIT 2"
+                      opaque-id]]] @queries)
+        "Untrusted document ID must NEVER be interpolated into SQL")
+    (is (= 1 @calls))
+    (is (= 1 @submissions))))
+
+(deftest v984-invalid-xtdb-results-and-query-exceptions-fail-closed-test
+  (let [context (v982-context)
+        document (get-in context [:eligibility :document])]
+    (doseq [[label result] [["duplicate row" [document document]]
+                            ["unsupported map result" {:not :rows}]
+                            ["non-document row" [:not-a-document]]
+                            ["wrong identity" [(assoc document :xt/id "wrong")]]
+                            ["empty rows" []]
+                            ["query throws"
+                             (fn [] (throw (ex-info "PRIVATE QUERY ERROR"
+                                                    {:private "PRIVATE"})))]]]
+      (testing label
+        (let [calls (atom 0)
+              submissions (atom 0)
+              queries (atom 0)
+              pair (v984-pair context calls)]
+          (with-redefs [gxt/q-from
+                        (fn [& _]
+                          (swap! queries inc)
+                          (if (fn? result) (result) result))
+                        tx/transact! (fn [& _]
+                                       (swap! submissions inc)
+                                       {:commit/status :committed})]
+            (let [error (v966-error #(v970-submit pair context))]
+              (is (= (if (#{"wrong identity" "empty rows"} label)
+                       :production-current-document-snapshot-mismatch
+                       :production-current-document-read-failed)
+                     (:error/kind (ex-data error))))
+              (is (= #{:error/type :error/kind}
+                     (set (keys (ex-data error)))))
+              (is (not (.contains (pr-str (ex-data error)) "PRIVATE")))))
+          (is (= 1 @queries))
+          (is (zero? @calls))
+          (is (zero? @submissions)))))))
+
+(deftest v984-xtdb-mode-configuration-is-exclusive-and-fail-closed-test
+  (let [context (v982-context)
+        calls (atom 0)
+        valid (v984-config context calls)
+        reader (fn [& _] (get-in context [:eligibility :document]))]
+    (is (map? (shared-family/build-pair valid)))
+    (doseq [[label broken]
+            [["unknown reader mode"
+              (assoc valid :production-document-reader :other)]
+             ["missing reader mode"
+              (dissoc valid :production-document-reader)]
+             ["reader mode nil"
+              (assoc valid :production-document-reader nil)]
+             ["callback and built-in reader together"
+              (assoc valid :read-current-document! reader)]
+             ["read mode without declared reread"
+              (update-in valid [:context-coverage]
+                         dissoc :required-production-snapshot-reads)]]]
+      (testing label
+        (is (= :invalid-configuration
+               (kind #(shared-family/build-pair broken))))))
+    (is (zero? @calls))))
+
+(deftest v984-missing-connectable-and-malformed-query-target-block-production-test
+  (let [context (v982-context)
+        calls (atom 0)
+        submissions (atom 0)
+        pair (v984-pair context calls)]
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (let [error (v966-error #(v970-submit pair context))]
+        (is (= :production-current-document-read-failed
+               (:error/kind (ex-data error))))
+        (is (= #{:error/type :error/kind}
+               (set (keys (ex-data error)))))))
+    (is (zero? @calls))
+    (is (zero? @submissions))
+    (let [bad-type :fixture/unsafe-table
+          doc (get-in context [:eligibility :document])
+          modeled (-> context
+                      (assoc-in [:eligibility :guard]
+                                (command/guard bad-type doc
+                                               (assoc v970-version
+                                                      :compare-keys
+                                                      [:fixture/revision
+                                                       :fixture/updated-at
+                                                       :fixture/created-at
+                                                       :fixture/decision]))))
+          bad-coverage (assoc-in (v982-coverage)
+                                 [:required-guard-snapshots v982-guard-path :entity-type]
+                                 bad-type)
+          bad-pair (shared-family/build-pair
+                    (assoc (v982-config modeled bad-coverage (atom 0))
+                           :production-document-reader :gesso-xtdb-current))]
+      (with-redefs [gxt/q-from
+                    (fn [& _] (throw (AssertionError. "Unsafe SQL was executed")))]
+        (is (= :production-current-document-read-failed
+               (kind #(v970-submit bad-pair modeled))))))))
