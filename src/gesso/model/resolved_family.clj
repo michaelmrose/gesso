@@ -40,7 +40,12 @@
    document identity and every version comparison field. Optional
    :required-model-state-snapshots checks a selected finite prestate's actual
    current document against that declared snapshot before model construction.
-   This compares two finite-model objects; it does NOT authenticate production
+   Optional :required-create-absences checks a declared document target is
+   absent in the selected finite prestate and that the resulting finite AND
+   production transaction plans contain a matching canonical create. This is
+   a guarded absence of ONE document identity, not a proof of query absence,
+   uniqueness across arbitrary fields, or actual production read provenance.
+   These compare finite-model objects; they do NOT authenticate production
    acquisition. Only explicitly declared dependencies are checked; it does
    not infer missing policy, prove acquisition truth, or authenticate XTDB.
    This is a strict field comparison, not observation authentication: omitted
@@ -72,6 +77,7 @@
   #{:modeled :excluded :modeled-values :required-paths :required-guard-paths})
 (def guard-snapshot-coverage-key :required-guard-snapshots)
 (def model-state-snapshots-coverage-key :required-model-state-snapshots)
+(def create-absences-coverage-key :required-create-absences)
 (def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
@@ -102,7 +108,9 @@
               :optional-declared-nested-semantic-path-presence
               :optional-construction-guard-to-plan-correspondence
               :optional-guard-to-modeled-snapshot-correspondence
-              :optional-snapshot-to-selected-finite-prestate-correspondence}
+              :optional-snapshot-to-selected-finite-prestate-correspondence
+              :optional-declared-create-absence-in-selected-finite-prestate
+              :optional-declared-create-absence-to-transaction-correspondence}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -113,7 +121,8 @@
               :truthful-complete-authored-required-semantic-paths
               :truthful-complete-authored-guard-dependency-paths
               :truthful-guard-snapshot-acquisition-and-identity
-              :truthful-selection-of-the-finite-prestate}
+              :truthful-selection-of-the-finite-prestate
+              :complete-and-truthful-declaration-of-create-absence-dependencies}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -129,6 +138,9 @@
                       :truth-of-acquired-document-snapshots
                       :independent-authentication-of-selected-finite-prestate
                       :correspondence-of-finite-prestate-to-production-xtdb
+                      :physical-truth-of-declared-create-absences
+                      :query-wide-absence-or-uniqueness
+                      :completeness-of-declared-create-absence-dependencies
                       :completeness-of-declared-guard-snapshot-bindings
                       :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
@@ -324,8 +336,38 @@
         (when-not (= snapshot (get state target))
           (fail! :required-snapshot-finite-prestate-mismatch))))))
 
+;; A negative observation is not representable as an acquired document
+;; snapshot. For the narrow case of "document [type id] does not exist",
+;; canonical create already has an atomic absent-document precondition in the
+;; Gesso reference model. Check that the modeled input declares the intended
+;; target ID and the returned plan actually creates THAT target. Query-wide
+;; absence, alternate unique keys and actual XTDB semantics remain unproved.
+(defn- require-create-absence-targets! [coverage context]
+  (mapv (fn [[id-path entity-type]]
+          (when-not (required-path-present? context id-path)
+            (fail! :missing-required-create-absence-target))
+          (let [id (get-in context id-path)]
+            (when-not (semantic-document-id? id)
+              (fail! :invalid-required-create-absence-target))
+            [entity-type id]))
+        (:required-create-absences coverage)))
+
+(defn- require-model-create-absences! [coverage state context]
+  (when (seq (:required-create-absences coverage))
+    ;; The selected prestate is the independent finite reference; do not
+    ;; ask the application-owned model-input! callback whether it is absent.
+    (when-not (and (closed-data? state)
+                   (try (reference/require-state state)
+                        true
+                        (catch Exception _ false)))
+      (fail! :invalid-finite-semantic-prestate))
+    (doseq [target (require-create-absence-targets! coverage context)]
+      (when (contains? state target)
+        (fail! :required-create-target-not-absent-in-finite-prestate)))))
+
 (defn- guarded-plan! [coverage context plan]
-  (when (seq (:required-guard-paths coverage))
+  (when (or (seq (:required-guard-paths coverage))
+            (seq (:required-create-absences coverage)))
     ;; Admit the same supported transaction subset as the finite reference.
     ;; Raw SQL and opaque entry hooks must not stand in for a declared guard.
     (let [plan (try
@@ -349,13 +391,21 @@
                                               (:model/expected guard))))
                                     updates)))
                         guards)
-        (fail! :missing-required-commit-guard)))))
+        (fail! :missing-required-commit-guard))
+      (when-not (every? (fn [target]
+                          (some (fn [model-command]
+                                  (and (command/create? model-command)
+                                       (= target (command/target model-command))))
+                                (:commands plan)))
+                        (require-create-absence-targets! coverage context))
+        (fail! :missing-required-absence-protecting-create)))))
 
 (defn- checked-domain-constructor [coverage construct!]
   ;; This SAME wrapper is installed in production and finite family paths.
   ;; It does not infer dependencies, authenticate reads, or make the
   ;; application-owned callback pure. Opted-out applications stay unchanged.
-  (if-not (seq (:required-guard-paths coverage))
+  (if-not (or (seq (:required-guard-paths coverage))
+              (seq (:required-create-absences coverage)))
     construct!
     (fn [context binding]
       (when-not (map? context)
@@ -370,6 +420,7 @@
                                :missing-required-production-semantic-input)
       (require-guard-paths! coverage context)
       (require-guard-snapshots! coverage context)
+      (require-create-absence-targets! coverage context)
       (let [built (construct! context binding)]
         (when (and (map? built) (contains? built :plan))
           (guarded-plan! coverage context (:plan built)))
@@ -387,7 +438,8 @@
   (when-not (and (map? coverage)
                  (let [declared-keys (apply disj (set (keys coverage))
                                             [guard-snapshot-coverage-key
-                                             model-state-snapshots-coverage-key])]
+                                             model-state-snapshots-coverage-key
+                                             create-absences-coverage-key])]
                    (or (= context-coverage-keys declared-keys)
                        (= closed-context-coverage-keys declared-keys)
                        (= required-path-coverage-keys declared-keys)
@@ -454,7 +506,20 @@
                           (<= (count (:required-model-state-snapshots coverage))
                               maximum-required-paths)
                           (every? #(contains? (:required-guard-snapshots coverage) %)
-                                  (:required-model-state-snapshots coverage)))))
+                                  (:required-model-state-snapshots coverage))))
+                 (or (not (contains? coverage create-absences-coverage-key))
+                     (and (= closed-model-value-mode (:modeled-values coverage))
+                          (map? (:required-create-absences coverage))
+                          (seq (:required-create-absences coverage))
+                          (<= (count (:required-create-absences coverage))
+                              maximum-required-paths)
+                          (every? (fn [[path entity-type]]
+                                    (and (vector? path)
+                                         (<= 1 (count path) maximum-closed-depth)
+                                         (every? semantic-path-key? path)
+                                         (contains? (:modeled coverage) (first path))
+                                         (qualified-keyword? entity-type)))
+                                  (:required-create-absences coverage)))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -484,6 +549,7 @@
     (require-guard-paths! coverage (:context input))
     (require-guard-snapshots! coverage (:context input))
     (require-model-state-snapshots! coverage state (:context input))
+    (require-model-create-absences! coverage state (:context input))
     (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
@@ -526,6 +592,7 @@
                              :missing-required-production-semantic-input)
     (require-guard-paths! coverage production-context)
     (require-guard-snapshots! coverage production-context)
+    (require-create-absence-targets! coverage production-context)
     (when-not (every? (fn [[key value]]
                         (and (contains? production-context key)
                              (= value (get production-context key))))
@@ -563,6 +630,9 @@
        :not-declared)
      :declared-finite-prestate-snapshots-checked
      (count (:required-model-state-snapshots coverage))
+     :declared-create-absences-checked
+     (count (:required-create-absences coverage))
+     :create-absence-physical-origin :not-authenticated
      :finite-prestate-origin
      (if (seq (:required-model-state-snapshots coverage))
        :caller-supplied-not-authenticated
@@ -665,6 +735,13 @@
    checked when comparing supplied production input to the finite model.
    It does not compare the production constructor to XTDB and cannot prove
    that the finite prestate corresponds to any actual production snapshot.
+   Add :required-create-absences {[:allocation :target-id] :fixture/lease}
+   to require that the target ID is absent in each selected finite prestate
+   AND a canonical create for precisely [:fixture/lease target-id] appears in
+   both the finite and production construction plans. This checks a narrow
+   document-identity absence, not a database query's zero-result assertion,
+   an arbitrary uniqueness constraint, or actual XTDB enforcement. Production
+   context origin and any omitted application dependencies remain trusted.
    Add :required-guard-paths #{[:eligibility :guard]} to :closed-data coverage
    when that nested modeled value is a canonical gesso.model.command/guard.
    Every declared guard must be represented in the returned transaction plan,
