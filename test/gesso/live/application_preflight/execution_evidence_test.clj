@@ -904,3 +904,173 @@
           (is (= before @(:calls f))
               "Checker failures cannot cause a domain callback replay."))))))
 
+;; v961: provenance is intentionally only a finite, recognized statement of
+;; checker scope. These tests exercise the *public application boundary* with
+;; genuine registered executor-observation handles and fault-injected checker
+;; exceptions. A correctly spelled provenance keyword is not authenticated
+;; external evidence or an application proof.
+(deftest formal-failure-provenance-is-bounded-and-not-a-certificate-test
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        secret (str "private-provenance-" (:request-id f))
+        handle (java.util.UUID/randomUUID)
+        standard {:error/type :gesso.model.formal-check/invalid-formal-check
+                  :error/kind :model-check-failed
+                  :failure/class :invariant-counterexample
+                  :diagnostic/handle handle
+                  :diagnostic/summary
+                  {:failure/class :invariant-counterexample
+                   :failed-obligation :outcome-check-consistency
+                   :distinct-states 7
+                   :source-boundary :prepared-transaction-finite-model
+                   :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+                   :checker :recife-0.22.0/tlc
+                   :selected-plan-count 2
+                   :private-document secret
+                   :transition-prefix
+                   [{:state-index 0
+                     :private-document secret
+                     :observations [{:plan-index 0 :status :committed
+                                     :private-command secret}]}]}}
+        expected {:failure/class :invariant-counterexample
+                  :failed-obligation :outcome-check-consistency
+                  :distinct-states 7
+                  :source-boundary :prepared-transaction-finite-model
+                  :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+                  :checker :recife-0.22.0/tlc
+                  :selected-plan-count 2
+                  :transition-prefix
+                  [{:state-index 0
+                    :observations [{:plan-index 0 :status :committed}]}]}]
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [before @(:calls f)
+              backend (ex-info (str "sensitive-" secret)
+                               (assoc standard :private-data secret))
+              error (with-redefs [formal-check/check-prepared!
+                                  (fn [_] (throw backend))]
+                      (caught-formal-failure
+                       #(application/explain-with-formal-execution-evidence
+                         assembly {operation-id [evidence]})))
+              data (some-> error ex-data)]
+          (is (some? error))
+          (is (identical? backend (.getCause error)))
+          (is (= :finite-model-check-failed (:error/kind data)))
+          (is (= operation-id (:operation data)))
+          (is (= 0 (:observation-index data)))
+          (is (= expected (:formal/failure data))
+              "All admitted provenance is named and bounded.")
+          (doseq [private [secret "sensitive-" "diagnostic/handle"
+                           "private-document" "private-command"
+                           (str handle) "private-data"]]
+            (is (not (str/includes? (pr-str data) private))
+                (str "Provenance metadata must not reveal " private)))
+          (is (= before @(:calls f))
+              "Failure attribution must not re-execute business callbacks."))))))
+
+(deftest formal-failure-provenance-spoofing-and-class-conflicts-fail-closed-test
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        secret "secret-provenance-field"
+        valid-type :gesso.model.formal-check/invalid-formal-check
+        base-summary {:failure/class :model-counterexample
+                      :failed-obligation :action-accounting
+                      :source-boundary :recife-tlc-execution
+                      :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+                      :checker :recife-0.22.0/tlc
+                      :selected-plan-count 6}
+        base {:error/type valid-type
+              :failure/class :model-counterexample
+              :diagnostic/summary base-summary}
+        cases
+        [[:valid-upper-bound base
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :source-boundary :recife-tlc-execution
+           :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+           :checker :recife-0.22.0/tlc
+           :selected-plan-count 6}]
+         [:unrecognized-boundary
+          (assoc-in base [:diagnostic/summary :source-boundary] :fake/application-certified)
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+           :checker :recife-0.22.0/tlc
+           :selected-plan-count 6}]
+         [:unrecognized-subject
+          (assoc-in base [:diagnostic/summary :subject-kind] :fake/certified)
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :source-boundary :recife-tlc-execution
+           :checker :recife-0.22.0/tlc
+           :selected-plan-count 6}]
+         [:unrecognized-checker
+          (assoc-in base [:diagnostic/summary :checker] :fake/formal-prover)
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :source-boundary :recife-tlc-execution
+           :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+           :selected-plan-count 6}]
+         [:missing-plan-count
+          (update base :diagnostic/summary dissoc :selected-plan-count)
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :source-boundary :recife-tlc-execution
+           :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+           :checker :recife-0.22.0/tlc}]
+         [:zero-plan-count
+          (assoc-in base [:diagnostic/summary :selected-plan-count] 0)
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :source-boundary :recife-tlc-execution
+           :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+           :checker :recife-0.22.0/tlc}]
+         [:excessive-plan-count
+          (assoc-in base [:diagnostic/summary :selected-plan-count] 7)
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :source-boundary :recife-tlc-execution
+           :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+           :checker :recife-0.22.0/tlc}]
+         [:noninteger-plan-count
+          (assoc-in base [:diagnostic/summary :selected-plan-count] 2.0)
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting
+           :source-boundary :recife-tlc-execution
+           :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+           :checker :recife-0.22.0/tlc}]
+         [:conflicting-class
+          (assoc-in base [:diagnostic/summary :failure/class] :backend-error)
+          {:failure/class :unclassified-checker-failure}]
+         [:unrecognized-error-type
+          (assoc base :error/type :fake/formal-check)
+          {:failure/class :unclassified-checker-failure}]
+         [:unknown-failure-class
+          (assoc base :failure/class :certified-application)
+          {:failure/class :unclassified-checker-failure}]
+         [:legacy-no-summary-provenance
+          (assoc base :diagnostic/summary
+                 {:failed-obligation :action-accounting})
+          {:failure/class :model-counterexample
+           :failed-obligation :action-accounting}]]]
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [before @(:calls f)
+              explain #(application/explain-with-formal-execution-evidence
+                        assembly {operation-id [evidence]})]
+          (doseq [[label supplied expected] cases]
+            (testing (name label)
+              (let [backend (ex-info secret (assoc supplied :hidden secret))
+                    error (with-redefs [formal-check/check-prepared!
+                                        (fn [_] (throw backend))]
+                            (caught-formal-failure explain))
+                    data (some-> error ex-data)]
+                (is (some? error))
+                (is (identical? backend (.getCause error)))
+                (is (= :finite-model-check-failed (:error/kind data)))
+                (is (= expected (:formal/failure data)))
+                (is (not (str/includes? (pr-str data) secret))))))
+          (is (= before @(:calls f))
+              "Provenance classification never re-runs the domain operation."))))))
