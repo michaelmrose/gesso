@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.operation-family-correspondence-test
-  "Permanent v829–v884 regressions for registered operation-family correspondence.
+  "Regressions for registered operation families and semantic-input closure.
 
    A finite operation family must match the exact executor from a freshly
    checked application assembly. An observed XTDB transaction can demonstrate
@@ -18,6 +18,7 @@
    [gesso.live.optimistic.resolution-assurance :as assurance]
    [gesso.live.optimistic.server :as server]
    [gesso.model.command :as command]
+   [gesso.model.tx :as tx]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx-model :as tx-model]
    [gesso.model.resolved-operation :as resolved]
@@ -2409,3 +2410,259 @@
            (:required-semantic-path-presence
             (v968-compare (v966-pair example inputs (atom 0) modeled)
                           inputs production))))))
+
+
+;; v970 — Permanent generic guard-to-transaction correspondence controls.
+;; The required guard paths are authored by the application, and are checked
+;; against BOTH the finite family and the production construction.  These
+;; tests deliberately do not claim completeness of authored policy, proven
+;; acquisition provenance, or an XTDB transaction-refinement theorem.
+
+(def ^:private v970-time
+  (java.time.Instant/parse "2026-10-15T00:00:00Z"))
+
+(def ^:private v970-version
+  {:revision-key :fixture/revision
+   :created-at-key :fixture/created-at
+   :updated-at-key :fixture/updated-at})
+
+(defn- v970-eligibility [revision]
+  {:xt/id "v970-eligibility"
+   :fixture/revision revision
+   :fixture/created-at v970-time
+   :fixture/updated-at v970-time})
+
+(defn- v970-guard
+  ([] (v970-guard 4))
+  ([revision]
+   (command/guard :fixture/eligibility
+                  (v970-eligibility revision) v970-version)))
+
+(defn- v970-binding []
+  {:command-id (identity/command-id "v970-finite-command")
+   :principal (identity/principal "v970-actor")
+   :operation :fixture/allocate
+   :arguments {:resource "v970-resource"}})
+
+(defn- v970-context
+  ([] (v970-context (v970-guard)))
+  ([guard]
+   {:eligibility {:guard guard}
+    :other {:nested {:present? true}}}))
+
+(defn- v970-coverage []
+  {:modeled #{:eligibility :other}
+   :excluded #{}
+   :modeled-values :closed-data
+   :required-guard-paths #{[:eligibility :guard]}})
+
+(defn- v970-plan [guards]
+  {:commands
+   [(command/create
+     :fixture/resource
+     {:xt/id "v970-resource"
+      :fixture/revision 0
+      :fixture/created-at v970-time
+      :fixture/updated-at v970-time}
+     v970-version)]
+   :guards guards
+   :emit false})
+
+(defn- v970-config
+  [builder model-context production-guard-coverage calls]
+  {:operation :fixture/allocate
+   :read-record! (fn [_ _] nil)
+   :may-disclose? (fn [_ _ _] true)
+   :construct! (fn [context binding]
+                 (swap! calls inc)
+                 {:now v970-time
+                  :outcome {:status :allocated}
+                  :plan (builder context binding)})
+   :principals ["v970-actor"]
+   :arguments [{:resource "v970-resource"}]
+   :enabled? (constantly true)
+   :model-input! (fn [_ _ _]
+                   {:context model-context
+                    :binding (v970-binding)})
+   :context-coverage production-guard-coverage})
+
+(defn- v970-pair [builder modeled calls]
+  (shared-family/build-pair
+   (v970-config builder modeled (v970-coverage) calls)))
+
+(defn- v970-prepare [pair]
+  ((get-in pair [:family :prepare])
+   {[:fixture/eligibility "v970-eligibility"] (v970-eligibility 4)}
+   "v970-actor" {:resource "v970-resource"}))
+
+(defn- v970-submit [pair context]
+  ((:resolved-operation pair)
+   context {:binding (v970-binding) :mode :submit}))
+
+(deftest v970-required-guards-are-enforced-in-both-constructions-test
+  (let [context (v970-context)
+        calls (atom 0)
+        guard (v970-guard)
+        pair (v970-pair (fn [ctx _]
+                          (v970-plan [(get-in ctx [:eligibility :guard])]))
+                        context calls)
+        submitted (atom 0)]
+    (is (= [guard] (:guards (v970-prepare pair))))
+    (is (= 1 @calls))
+    (with-redefs [tx/transact!
+                  (fn [& _]
+                    (swap! submitted inc)
+                    {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context))))
+      (is (= 1 @submitted)))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-construction-guard-to-plan-correspondence))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :truthful-complete-authored-guard-dependency-paths))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :completeness-of-authored-policy-and-guards))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :real-xtdb-enforcement-of-declared-guards))
+    (is (= :not-established (:application-certification pair)))))
+
+(deftest v970-omitted-guard-fails-in-finite-and-production-paths-test
+  (let [context (v970-context)
+        calls (atom 0)
+        pair (v970-pair (fn [_ _] (v970-plan [])) context calls)
+        submitted (atom 0)]
+    (is (= :domain-construction-exception (kind #(v970-prepare pair))))
+    (is (= 1 @calls))
+    (with-redefs [tx/transact!
+                  (fn [& _]
+                    (swap! submitted inc)
+                    {:commit/status :committed})]
+      (let [error (v966-error #(v970-submit pair context))]
+        (is (= :missing-required-commit-guard
+               (:error/kind (ex-data error))))
+        (is (= #{:error/type :error/kind}
+               (set (keys (ex-data error)))))))
+    (is (zero? @submitted) "A missing dependency guard cannot submit")
+    (is (= 2 @calls) "One shared constructor is used by both paths")))
+
+(deftest v970-forged-guard-target-and-version-cannot-stand-in-test
+  (let [context (v970-context)
+        wrong-version (v970-guard 5)
+        wrong-target (command/guard
+                      :fixture/other
+                      (assoc (v970-eligibility 4)
+                             :xt/id "different-dependency")
+                      v970-version)]
+    (doseq [[label replacement]
+            [["wrong version" wrong-version]
+             ["wrong target" wrong-target]]]
+      (testing label
+        (let [calls (atom 0)
+              submitted (atom 0)
+              pair (v970-pair (fn [_ _] (v970-plan [replacement]))
+                              context calls)]
+          (is (= :domain-construction-exception
+                 (kind #(v970-prepare pair))))
+          (with-redefs [tx/transact!
+                        (fn [& _]
+                          (swap! submitted inc)
+                          {:commit/status :committed})]
+            (is (= :missing-required-commit-guard
+                   (kind #(v970-submit pair context)))))
+          (is (zero? @submitted))
+          (is (= 2 @calls)))))))
+
+(deftest v970-equivalent-update-precondition-can-protect-dependency-test
+  (let [before (v970-eligibility 4)
+        after (assoc before
+                     :fixture/revision 5
+                     :fixture/updated-at (.plusSeconds v970-time 1))
+        guarded-update (command/update-command
+                        :fixture/eligibility :renew before after v970-version)
+        calls (atom 0)
+        pair (v970-pair (fn [_ _]
+                          {:commands [guarded-update]
+                           :guards []
+                           :emit false})
+                        (v970-context) calls)
+        submitted (atom 0)]
+    (is (= [guarded-update] (:commands (v970-prepare pair))))
+    (with-redefs [tx/transact!
+                  (fn [& _]
+                    (swap! submitted inc)
+                    {:commit/status :committed})]
+      (is (= :incorporated
+             (:status (v970-submit pair (v970-context))))))
+    (is (= 1 @submitted))
+    (is (= 2 @calls))))
+
+(deftest v970-invalid-declared-guard-is-rejected-before-construction-test
+  (let [baseline (v970-context)
+        invalid [["missing path" (update baseline :eligibility dissoc :guard)
+                  :missing-required-semantic-guard]
+                 ["noncanonical guard" (assoc-in baseline [:eligibility :guard]
+                                                  {:arbitrary true})
+                  :invalid-required-semantic-guard]
+                 ["present nil guard" (assoc-in baseline [:eligibility :guard] nil)
+                  :invalid-required-semantic-guard]]]
+    (doseq [[label modeled expected] invalid]
+      (testing label
+        (let [calls (atom 0)
+              pair (v970-pair (fn [ctx _]
+                                (v970-plan [(get-in ctx [:eligibility :guard])]))
+                              modeled calls)]
+          (is (= expected
+                 (kind #(v970-prepare pair)))
+              "The invalid guard must be found before domain construction")
+          (is (zero? @calls)))))
+    (let [calls (atom 0)
+          pair (v970-pair (fn [ctx _]
+                            (v970-plan [(get-in ctx [:eligibility :guard])]))
+                          baseline calls)]
+      (doseq [[label production expected] invalid]
+        (testing label
+          (let [error (v966-error #(v970-submit pair production))]
+            (is (= expected (:error/kind (ex-data error))))
+            (is (= #{:error/type :error/kind}
+                   (set (keys (ex-data error))))))))
+      (is (zero? @calls) "Invalid production dependencies block construction"))))
+
+(deftest v970-guard-path-declarations-and-input-comparison-remain-scoped-test
+  (let [context (v970-context)
+        calls (atom 0)
+        covered (v970-coverage)
+        config (v970-config (fn [ctx _]
+                              (v970-plan [(get-in ctx [:eligibility :guard])]))
+                            context covered calls)
+        pair (shared-family/build-pair config)
+        compare! (:compare-production-input! pair)
+        binding (v970-binding)]
+    (is (= :invalid-context-coverage
+           (kind #(shared-family/build-pair
+                   (assoc config :context-coverage
+                          (assoc covered :required-guard-paths
+                                 #{[:not-declared :guard]}))))))
+    ;; A one-segment path is structurally legal, but it resolves to the
+    ;; enclosing map rather than to a canonical guard and must fail on use.
+    (let [single-path (shared-family/build-pair
+                       (assoc config :context-coverage
+                              (assoc covered :required-guard-paths
+                                     #{[:eligibility]})))]
+      (is (= :invalid-required-semantic-guard
+             (kind #(v970-prepare single-path)))))
+    (let [report (compare!
+                  {} "v970-actor" {:resource "v970-resource"}
+                  context binding)]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= 1 (:declared-semantic-guards-checked report)))
+      (is (= :not-checked
+             (:semantic-guard-commit-enforcement-in-this-comparison report)))
+      (is (= :not-established
+             (:semantic-guard-dependency-completeness report)))
+      (is (= :not-established (:application-certification report)))
+      (is (zero? @calls)
+          "Pure context comparison may not construct or transact"))
+    (is (= :production-context-differs-from-model-input
+           (kind #(compare! {} "v970-actor" {:resource "v970-resource"}
+                           (assoc-in context [:other :nested :present?] false)
+                           binding))))
+    (is (zero? @calls))))
