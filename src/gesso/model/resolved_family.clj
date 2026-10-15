@@ -24,7 +24,12 @@
    production context is authoritative, that the callback is pure or total,
    that enablement expresses complete authorization, or that the resulting
    resolved operation is currently registered as the actual Live executor.
-   Neither construction nor a later TLC verdict certifies an application.
+   compare-production-input! optionally checks a caller-supplied production
+   context and actual server binding against the SAME model-input! function.
+   This is a strict field comparison, not observation authentication: omitted
+   production context fields and the source of the supplied values remain
+   explicit assumptions. Neither construction nor a later TLC verdict
+   certifies an application.
    The returned functions and data may be sensitive; keep them server-local."
   (:require
    [gesso.choreo.identity :as identity]
@@ -46,16 +51,22 @@
               :canonical-finite-command-binding
               :finite-binding-operation-principal-argument-correspondence
               :complete-durable-incorporation-construction-validation
-              :source-derived-finite-domain-plan-admission}
+              :source-derived-finite-domain-plan-admission
+              :optional-modeled-context-field-correspondence
+              :optional-canonical-production-binding-comparison}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
               :truthful-state-dependent-enablement-and-authorization
-              :correct-registered-production-executor}
+              :correct-registered-production-executor
+              :trusted-provenance-of-supplied-production-context-and-binding}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
                       :purity-of-clojure-callbacks
+                      :completeness-of-modeled-production-context-fields
+                      :independent-authentication-of-production-input-values
+                      :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
                       :all-reachable-states-and-repreparation
                       :actual-xtdb-execution-refinement
@@ -81,14 +92,14 @@
        (or (= declared bound)
            (= declared (identity/raw-value bound)))))
 
-(defn- finite-plan! [operation model-input! construct! state principal arguments]
+(defn- finite-input! [operation model-input! state principal arguments]
   (let [input (call-model! :model-input-exception
                            model-input! state principal arguments)]
     (when-not (and (map? input)
                    (= model-input-keys (set (keys input)))
                    (map? (:context input)))
       (fail! :invalid-model-input))
-    (let [{:keys [context binding]} input]
+    (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
         (catch Exception _
@@ -96,27 +107,66 @@
       (when-not (and (= operation (:operation binding))
                      (= arguments (:arguments binding))
                      (matching-principal? principal (:principal binding)))
-        (fail! :model-binding-choice-mismatch))
-      (let [built (call-model! :domain-construction-exception
-                               construct! context binding)]
-        (when-not (and (map? built)
-                       (= resolved/construction-keys (set (keys built))))
-          (fail! :invalid-domain-construction))
-        ;; Production attaches the durable command result record to this
-        ;; EXACT domain construction. Enforce its existing structural limits
-        ;; and reserved-table prohibition without invoking any transaction.
-        (try
-          (resolution/incorporation-plan
-           {:binding binding :now (:now built) :outcome (:outcome built)
-            :plan (:plan built)})
-          (catch Exception _
-            (fail! :invalid-durable-incorporation)))
-        ;; Admit the ORIGINAL application domain plan. Do not silently project
-        ;; away guards, commands or unsupported transaction entries.
-        (try
-          (reference/admitted-plan (:plan built))
-          (catch Exception _
-            (fail! :unsupported-formal-domain-plan)))))))
+        (fail! :model-binding-choice-mismatch)))
+    input))
+
+(defn- compare-production-input!
+  [operation model-input! state principal arguments production-context production-binding]
+  ;; This is an explicitly supplied trusted-context witness, NOT an
+  ;; authenticated observation. Actual executor provenance must be separately
+  ;; established before using any result in application assurance.
+  (when-not (map? production-context)
+    (fail! :invalid-production-context))
+  (try
+    (resolution/require-binding production-binding)
+    (catch Exception _
+      (fail! :invalid-production-binding)))
+  (let [{modeled-context :context modeled-binding :binding}
+        (finite-input! operation model-input! state principal arguments)]
+    (when-not (= (dissoc modeled-binding :command-id)
+                 (dissoc production-binding :command-id))
+      (fail! :production-binding-differs-from-model-input))
+    ;; Comparing an empty context would certify nothing about the context.
+    ;; Compare every modeled key, including present-nil versus absent keys;
+    ;; never silently select only the keys that happen to agree.
+    (when-not (seq modeled-context)
+      (fail! :empty-modeled-context-comparison))
+    (when-not (every? (fn [[key value]]
+                        (and (contains? production-context key)
+                             (= value (get production-context key))))
+                      modeled-context)
+      (fail! :production-context-differs-from-model-input))
+    {:status :matched-declared-input-fields
+     :context-fields-compared (count modeled-context)
+     :unmodeled-production-context-fields
+     (count (remove #(contains? modeled-context %) (keys production-context)))
+     :command-id-comparison :excluded-independent-execution-identity
+     :input-origin :caller-supplied-not-authenticated
+     :application-certification :not-established}))
+
+(defn- finite-plan! [operation model-input! construct! state principal arguments]
+  (let [{:keys [context binding]}
+        (finite-input! operation model-input! state principal arguments)
+        built (call-model! :domain-construction-exception
+                           construct! context binding)]
+    (when-not (and (map? built)
+                   (= resolved/construction-keys (set (keys built))))
+      (fail! :invalid-domain-construction))
+    ;; Production attaches the durable command result record to this
+    ;; EXACT domain construction. Enforce its existing structural limits
+    ;; and reserved-table prohibition without invoking any transaction.
+    (try
+      (resolution/incorporation-plan
+       {:binding binding :now (:now built) :outcome (:outcome built)
+        :plan (:plan built)})
+      (catch Exception _
+        (fail! :invalid-durable-incorporation)))
+    ;; Admit the ORIGINAL application domain plan. Do not silently project
+    ;; away guards, commands or unsupported transaction entries.
+    (try
+      (reference/admitted-plan (:plan built))
+      (catch Exception _
+        (fail! :unsupported-formal-domain-plan)))))
 
 (defn build-pair
   "Build {:resolved-operation ..., :family ..., :scope ...} from one :construct!.
@@ -132,7 +182,15 @@
    {:context trusted-model-context :binding canonical-command-binding}.
    It is trusted application code and may NOT be assumed to reproduce the
    actual production context. In the finite family, the callback and its
-   output are local diagnostics; Gesso invokes no XTDB transaction here."
+   output are local diagnostics; Gesso invokes no XTDB transaction here.
+
+   :compare-production-input! receives [state principal arguments
+   production-context production-binding] and checks that EVERY modeled
+   context field is present with the same value in the supplied production
+   context, plus semantic binding equality excluding only the command ID.
+   Empty modeled contexts fail closed. Unmodeled extra production fields
+   are counted, not declared equivalent. It never invokes :construct! or
+   authenticates the supplied context; use only at a trusted server boundary."
   [configuration]
   (when-not (and (map? configuration)
                  (= configuration-keys (set (keys configuration)))
@@ -165,5 +223,10 @@
      :operation operation
      :resolved-operation production
      :family operation-family
+     :compare-production-input!
+     (fn [state principal args production-context production-binding]
+       (compare-production-input! operation model-input!
+                                  state principal args
+                                  production-context production-binding))
      :scope assurance-scope
      :application-certification :not-established}))
