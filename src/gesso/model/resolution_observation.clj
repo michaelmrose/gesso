@@ -5,8 +5,10 @@
    Unlike a caller-built witness input, observe-and-check! obtains its initial
    and final document maps directly from XTDB, submits the exact admitted
    prepared plans via gesso.model.tx/prepare, and captures physical outcomes
-   from xtdb.api/execute-tx. The finite checker independently determines
-   whether the result agrees with some serial ordering of those plans.
+   from xtdb.api/execute-tx. After each definitive physical submission, it
+   separately reads every tracked document to retain an ordered execution
+   prefix trace. The finite checker independently determines whether the
+   terminal result agrees with some serial ordering of those plans.
 
    This is a CONTROLLED-DATABASE facility: all target reads are separate XTDB
    queries, not one explicitly pinned XTDB snapshot. No other writer may alter
@@ -35,6 +37,8 @@
                 :transaction-submission-through-model-tx-prepare
                 :physical-xtdb-commit-and-assertion-rejection-outcomes
                 :final-documents-read-from-xtdb
+                :documents-read-after-each-definitive-submission
+                :ordered-physical-submission-prefixes-captured
                 :checked-against-finite-serial-reference}
    :assumed #{:exclusive-control-of-relevant-documents-during-collection
               :consistent-series-of-xtdb-reads
@@ -176,21 +180,48 @@
    target state, submit via the real Gesso transaction lowering and XTDB API,
    then read all targets again and run resolution-evidence/check-execution.
 
-   Returns {:collection ... :initial-state ... :observations ... :evidence ...}
-   without certifying the identity of the database or the absence of external
-   writes. If any status cannot be determined, it throws immediately; it must
-   never be treated as a rejection or permission to re-submit a command.
+   Returns {:collection ... :initial-state ... :submission-trace ...
+            :observations ... :evidence ...}.
+
+   :submission-trace is a vector in actual submission order; each entry has
+   :plan-index, :status, :before and :after. :after is a fresh XTDB inspection
+   performed immediately after a definitive execute-tx result; :before is
+   the previous inspection (or the initial inspection on the first step).
+   This makes every observed prefix available to later correspondence checks
+   without changing the existing terminal :observations/evidence contract.
+   The collector does not yet formally verify the prefix trace. Both snapshots
+   and submissions remain subject to the exclusive-control and unpinned-read
+   assumptions; the trace does not certify the identity of the database or
+   the absence of external writes. If any status cannot be determined, it
+   throws immediately; it must never be treated as a rejection or permission
+   to re-submit a command.
 
    This serial-submission collector is a FIRST STEP toward independently
    collected evidence, not a substitute for v788/v802's concurrent tests."
   [input]
   (let [{:keys [node incorporations plans tracked order]} (require-input input)
         initial-state (inspect-state node tracked)
-        statuses (reduce (fn [statuses idx]
-                           (assoc statuses idx
-                                  (execute-physical! node (nth plans idx))))
-                         (vec (repeat (count plans) nil))
-                         order)
+        {:keys [statuses submission-trace]}
+        (reduce (fn [{:keys [statuses submission-trace prior-state]} idx]
+                  ;; Execution itself is physical; no reference model runs in
+                  ;; this loop. Read the new state only after a definitive
+                  ;; commit or assertion-rejection result. An unknown result
+                  ;; throws without being turned into a spurious trace step.
+                  (let [status (execute-physical! node (nth plans idx))
+                        after (inspect-state node tracked)]
+                    {:statuses (assoc statuses idx status)
+                     :submission-trace (conj submission-trace
+                                             {:plan-index idx
+                                              :status status
+                                              :before prior-state
+                                              :after after})
+                     :prior-state after}))
+                {:statuses (vec (repeat (count plans) nil))
+                 :submission-trace []
+                 :prior-state initial-state}
+                order)
+        ;; Preserve the independent final read and existing terminal evidence
+        ;; contract; a separate reader may still detect inconsistent evidence.
         observations {:statuses statuses
                       :state (inspect-state node tracked)
                       :inspected-targets tracked}
@@ -201,5 +232,6 @@
     {:collection observation-scope
      :submission-order order
      :initial-state initial-state
+     :submission-trace submission-trace
      :observations observations
      :evidence witness}))
