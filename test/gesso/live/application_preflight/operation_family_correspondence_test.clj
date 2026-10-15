@@ -1762,3 +1762,156 @@
     (is (zero? @calls))
     (is (contains? (get-in pair [:scope :not-established])
                    :purity-of-clojure-callbacks))))
+
+;; v946 — Authenticated production construction-input correspondence.
+;; Every comparison uses the original finite admission, frozen plans, a checked
+;; application assembly and the exact registered executor's opaque evidence.
+;; This is selected-execution evidence, NOT proof of model-input completeness.
+
+(defn- v946-pair [example context!]
+  (v939-pair example (atom 0)
+             {:model-input!
+              (fn [state who args]
+                {:context (context! state who args)
+                 :binding {:command-id (identity/command-id "v946-finite-command")
+                           :principal (identity/principal who)
+                           :operation operation-id
+                           :arguments args}})}))
+
+(defn- v946-with-bound [pair-fn f]
+  (let [example (test-operation)
+        pair (pair-fn example)
+        executor (v939-executor example pair)]
+    (with-application executor
+      (fn [{:keys [assembly]}]
+        (let [bound (formal-family/bound-prepared-competition
+                     assembly (model-state example) (v939-families example pair)
+                     (model-rules example) {:max-depth 1 :max-transitions 18})]
+          (f example pair executor bound))))))
+
+(defn- v946-handle [example executor]
+  (:evidence (invoke! (assoc example :server (server-with executor)))))
+
+(deftest v946-executor-inputs-match-frozen-family-with-real-tlc-test
+  (v946-with-bound
+   (fn [example]
+     (v946-pair example (fn [& _] {:authenticated-principal principal})))
+   (fn [example pair executor bound]
+     (let [checked (formal-check/check-prepared! (:subject bound))
+           handle (v946-handle example executor)
+           execution ((:compare-execution! bound) handle)
+           comparison ((:compare-construction-input! bound) pair handle)
+           printed (pr-str comparison)]
+       (is (= 3 (:choice-count bound)))
+       (is (= 3 (count (get-in bound [:subject :plans]))))
+       (is (= :checked-finite-model (:status checked)))
+       (is (pos? (:distinct-states checked)))
+       (is (= :matched-selected-root-execution (:status execution)))
+       (is (= :matched-executor-bound-declared-input-fields
+              (:status comparison)))
+       (is (= :exact-registered-executor-call-site (:input-origin comparison)))
+       (is (= 1 (:context-fields-compared comparison)))
+       (is (pos? (:unmodeled-production-context-fields comparison)))
+       (is (= :not-established (:model-input-coverage comparison)))
+       (is (= :not-run (:tla-check comparison)))
+       (is (= :not-established (:application-certification comparison)))
+       (is (not (contains? comparison :context)))
+       (is (not (contains? comparison :binding)))
+       (is (not (contains? comparison :plan)))
+       (is (not (.contains printed (:request-id example))))
+       (is (not (.contains printed "v829-principal-private")))
+       (doseq [detached [nil (Object.) {} (assurance/inspect-evidence handle)]]
+         (is (= :unrecognized-executor-bound-evidence
+                (kind #((:compare-construction-input! bound) pair detached)))))
+       (is (= :unrecognized-frozen-shared-family
+              (kind #((:compare-construction-input! bound)
+                      (assoc pair :family (assoc (:family pair) :arguments []))
+                      handle))))
+       (is (= :not-established (:application-certification bound)))))))
+
+(deftest v946-wrong-modeled-context-rejected-after-real-plan-match-test
+  (v946-with-bound
+   (fn [example]
+     (v946-pair example (fn [& _] {:authenticated-principal
+                                    (identity/principal "v946-wrong-principal")})))
+   (fn [example pair executor bound]
+     (let [handle (v946-handle example executor)
+           execution ((:compare-execution! bound) handle)
+           comparison ((:compare-construction-input! bound) pair handle)]
+       (is (= :matched-selected-root-execution (:status execution)))
+       (is (= :counterexample (:status comparison)))
+       (is (= :modeled-input-differs-from-executor-bound-construction-input
+              (:reason comparison)))
+       (is (= :exact-registered-executor-call-site (:input-origin comparison)))
+       (is (= :not-run (:tla-check comparison)))
+       (is (= :not-established (:application-certification comparison)))
+       (is (not (contains? comparison :context)))
+       (is (not (.contains (pr-str comparison) "v946-wrong-principal")))))))
+
+(deftest v946-changed-construction-blocks-otherwise-matching-input-test
+  (let [changed? (atom false)]
+    (v946-with-bound
+     (fn [example]
+       (let [original (:prepare (first (modeled-families example)))
+             initial (model-state example)]
+         (v939-pair
+          example (atom 0)
+          {:construct!
+           (fn [ctx binding]
+             (let [plan (original (or (:model-state ctx) initial)
+                                  (identity/raw-value (:principal binding))
+                                  (:arguments binding))]
+               {:now now :outcome {:status :claimed}
+                :plan (if @changed?
+                        plan
+                        (assoc plan :commands
+                               [(command/update-command
+                                 :requests :claim (:before example)
+                                 (assoc (:claimed example)
+                                        :updated-at "v946-frozen-different")
+                                 version)]))}))
+           :model-input!
+           (fn [_ who args]
+             {:context {:authenticated-principal principal}
+              :binding {:command-id (identity/command-id "v946-frozen-id")
+                        :principal (identity/principal who)
+                        :operation operation-id :arguments args}})})))
+     (fn [example pair executor bound]
+       (reset! changed? true)
+       (let [handle (v946-handle example executor)
+             execution ((:compare-execution! bound) handle)
+             comparison ((:compare-construction-input! bound) pair handle)]
+         (is (= :counterexample (:status execution)))
+         (is (= :observed-plan-differs-from-frozen-formal-subject
+                (:reason execution)))
+         (is (= :counterexample (:status comparison)))
+         (is (= :frozen-execution-correspondence-not-established
+                (:reason comparison)))
+         (is (= :not-inspected (:input-origin comparison)))
+         (is (= :not-established (:application-certification comparison)))
+         (is (not (contains? comparison :context)))
+         (is (not (.contains (pr-str comparison) (:request-id example)))))))))
+
+(deftest v946-changed-model-input-mapping-rejected-after-admission-test
+  (let [changed? (atom false)]
+    (v946-with-bound
+     (fn [example]
+       (v946-pair example
+                  (fn [& _]
+                    {:authenticated-principal
+                     (if @changed?
+                       (identity/principal "v946-unfaithful-model-input")
+                       principal)})))
+     (fn [example pair executor bound]
+       (reset! changed? true)
+       (let [handle (v946-handle example executor)
+             execution ((:compare-execution! bound) handle)
+             comparison ((:compare-construction-input! bound) pair handle)]
+         (is (= :matched-selected-root-execution (:status execution)))
+         (is (= :counterexample (:status comparison)))
+         (is (= :modeled-input-differs-from-executor-bound-construction-input
+                (:reason comparison)))
+         (is (= :not-established (:model-input-coverage comparison)))
+         (is (= :not-established (:application-certification comparison)))
+         (is (not (.contains (pr-str comparison)
+                             "v946-unfaithful-model-input"))))))))
