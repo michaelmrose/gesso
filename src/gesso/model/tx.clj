@@ -254,6 +254,45 @@
          [:= key value]))
       checks))))
 
+
+(def ^:private maximum-asserted-document-fields 8192)
+
+(defn assert-document-field-count
+  "Returns an XTDB2 HoneySQL ASSERT that the current document at
+   [entity-type id] has exactly expected-field-count non-absent TOP-LEVEL
+   fields, including :xt/id. This counts fields in the ACTUAL transaction
+   prestate, not in the caller's earlier observation.
+
+   XTDB's LENGTH(struct) counts non-absent members. NEST_ONE(SELECT * ...)
+   materializes the identified row as a struct, so a field introduced after
+   acquisition changes the count and rejects the transaction. The id stays
+   parameterized and qualified entity types use the identical SQL schema as
+   their canonical :put-docs target.
+
+   IMPORTANT: field count alone is NOT document equality. Pair this assertion
+   with a canonical version guard comparing EVERY field in the acquired
+   snapshot (other than :xt/id, checked by target identity). Together they
+   detect additions, removals and changes of top-level fields, subject to
+   XTDB's field and equality semantics. This does not recursively enumerate
+   nested map keys or establish authenticated acquisition."
+  [entity-type id expected-field-count]
+  (require-entity-type! entity-type)
+  (require-document-id! id)
+  (when-not (and (integer? expected-field-count)
+                 (<= 1 expected-field-count maximum-asserted-document-fields))
+    (fail! ::invalid-document-field-count
+           "Expected document field count must be a bounded positive integer."
+           {:expected-field-count expected-field-count
+            :maximum maximum-asserted-document-fields}))
+  {:assert
+   [:= expected-field-count
+    {:select
+     [[[:length
+        [:nest_one
+         {:select [:*]
+          :from (table-symbol entity-type)
+          :where [:= :xt/id id]}]]]]}]})
+
 ;; =============================================================================
 ;; Canonical fragments
 ;; =============================================================================
