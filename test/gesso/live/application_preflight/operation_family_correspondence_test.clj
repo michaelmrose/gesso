@@ -2893,3 +2893,181 @@
       (is (contains? (get-in not-all-document-fields-protected
                               [:scope :not-established])
                      :commit-time-enforcement-of-undeclared-semantic-facts)))))
+
+;; v974 — The selected finite prestate independently constrains snapshots
+;; returned by application-owned model-input!. This is an opt-in assertion
+;; about the *finite model*, not evidence that physical XTDB acquired the
+;; asserted records or that the application's guard inventory is complete.
+
+(def ^:private v974-document-key
+  [:fixture/eligibility "v970-eligibility"])
+
+(defn- v974-state []
+  {v974-document-key (v970-eligibility 4)})
+
+(defn- v974-coverage []
+  (assoc (v972-coverage)
+         :required-model-state-snapshots #{[:eligibility :guard]}))
+
+(defn- v974-pair
+  ([modeled calls]
+   (v974-pair modeled (v974-coverage) calls))
+  ([modeled coverage calls]
+   (v972-pair modeled coverage calls)))
+
+(defn- v974-prepare [pair state]
+  ((get-in pair [:family :prepare])
+   state "v970-actor" {:resource "v970-resource"}))
+
+(defn- v974-compare [pair state production]
+  ((:compare-production-input! pair)
+   state "v970-actor" {:resource "v970-resource"}
+   production (v970-binding)))
+
+(deftest v974-selected-finite-prestate-matches-declared-snapshot-test
+  (let [context (v972-context)
+        calls (atom 0)
+        pair (v974-pair context calls)
+        state (v974-state)
+        prepared (v974-prepare pair state)]
+    (is (= [(get-in context [:eligibility :guard])] (:guards prepared)))
+    (is (= 1 @calls) "One finite construction follows successful validation")
+    (let [report (v974-compare pair state context)]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= 1 (:declared-semantic-guards-checked report)))
+      (is (= 1 (:declared-guard-snapshots-checked report)))
+      (is (= 1 (:declared-finite-prestate-snapshots-checked report)))
+      (is (= :caller-supplied-not-authenticated (:finite-prestate-origin report)))
+      (is (= :caller-supplied-not-authenticated (:input-origin report)))
+      (is (= :not-established (:application-certification report)))
+      (is (= 1 @calls) "Comparison cannot execute domain construction")
+      (is (not (contains? report :context)))
+      (is (not (contains? report :binding))))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-snapshot-to-selected-finite-prestate-correspondence))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :truthful-selection-of-the-finite-prestate))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :correspondence-of-finite-prestate-to-production-xtdb))))
+
+(deftest v974-fabricated-observation-is-rejected-before-domain-construction-test
+  (let [actual (v974-state)
+        context (v972-context 5)
+        calls (atom 0)
+        pair (v974-pair context calls)]
+    ;; The guard and acquired snapshot agree with each other; only the
+    ;; selected finite PRESTATE exposes their fabrication.
+    (is (= :required-snapshot-finite-prestate-mismatch
+           (kind #(v974-prepare pair actual))))
+    (is (zero? @calls))
+    (is (= :required-snapshot-finite-prestate-mismatch
+           (kind #(v974-compare pair actual context))))
+    (is (zero? @calls) "Even the comparison path cannot construct")))
+
+(deftest v974-missing-or-malformed-finite-prestate-fails-closed-test
+  (let [context (v972-context)
+        calls (atom 0)
+        pair (v974-pair context calls)
+        missing [[:empty {}]
+                 [:wrong-identity {[:fixture/eligibility "unrelated"]
+                                   (assoc (v970-eligibility 4) :xt/id "unrelated")}]]
+        malformed [[:atom {v974-document-key (atom {:secret "private-prestate"})}]
+                   [:lazy-state {v974-document-key (map identity [:invalid])}]
+                   [:nonmap [1 2 3]]]]
+    (doseq [[label state] missing]
+      (testing (name label)
+        (is (= :required-snapshot-missing-from-finite-prestate
+               (kind #(v974-prepare pair state))))
+        (is (= :required-snapshot-missing-from-finite-prestate
+               (kind #(v974-compare pair state context))))))
+    (doseq [[label state] malformed]
+      (testing (name label)
+        (let [e (v966-error #(v974-prepare pair state))]
+          (is (= :invalid-finite-semantic-prestate
+                 (:error/kind (ex-data e))))
+          (is (= #{:error/kind :error/type}
+                 (set (keys (ex-data e)))))
+          (is (not (.contains (pr-str (ex-data e)) "private-prestate"))))))
+    (is (zero? @calls) "No invalid prestate reaches :construct!")))
+
+(deftest v974-full-document-equality-catches-unguarded-fields-test
+  (let [context (v972-context)
+        state (assoc-in (v974-state)
+                        [v974-document-key :fixture/unguarded-field]
+                        :changed-after-observation)
+        calls (atom 0)
+        pair (v974-pair context calls)]
+    ;; The version guard is unchanged; validating only :model/checks would
+    ;; miss the difference in the selected finite document.
+    (is (= (get-in context [:eligibility :guard :model/expected :model/checks])
+           (get-in (v972-context) [:eligibility :guard :model/expected :model/checks])))
+    (is (= :required-snapshot-finite-prestate-mismatch
+           (kind #(v974-prepare pair state))))
+    (is (= :required-snapshot-finite-prestate-mismatch
+           (kind #(v974-compare pair state context))))
+    (is (zero? @calls))
+    ;; No finite prestate is supplied on the physical path. Gesso must not
+    ;; mistake this checked finite relation for physical XTDB authentication.
+    (let [submitted (atom 0)]
+      (with-redefs [tx/transact! (fn [& _]
+                                   (swap! submitted inc)
+                                   {:commit/status :committed})]
+        (is (= :incorporated (:status (v970-submit pair context)))))
+      (is (= 1 @submitted))
+      (is (= 1 @calls)))))
+
+(deftest v974-prestate-declarations-are-closed-and-opt-in-test
+  (let [context (v972-context)
+        coverage (v974-coverage)
+        calls (atom 0)
+        invalid [["empty set" #{}]
+                 ["vector rather than set" [[:eligibility :guard]]]
+                 ["nil" nil]
+                 ["not in snapshot inventory" #{[:other :guard]}]]]
+    (doseq [[label paths] invalid]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(v974-pair context
+                                 (assoc coverage :required-model-state-snapshots paths)
+                                 calls))))))
+    (is (= :invalid-context-coverage
+           (kind #(v974-pair context
+                             (dissoc coverage :required-guard-snapshots)
+                             calls))))
+    (is (= :invalid-context-coverage
+           (kind #(v974-pair context
+                             (dissoc coverage :modeled-values)
+                             calls))))
+    ;; Previous contracts do not independently check the finite prestate.
+    (let [without-prestate-contract (v974-pair (v972-context 5)
+                                                   (v972-coverage) calls)]
+      (is (map? (v974-prepare without-prestate-contract (v974-state))))
+      (is (= :not-declared
+             (:finite-prestate-origin
+              (v974-compare without-prestate-contract
+                            (v974-state) (v972-context 5))))))
+    (is (= 1 @calls))))
+
+(deftest v974-state-dependent-model-input-is-rechecked-every-time-test
+  (let [current (atom (v972-context))
+        calls (atom 0)
+        ;; The model-input callback may change its observation between
+        ;; its observation between separate invocations, as application-owned
+        ;; acquisition functions may do.
+        dynamic-pair (shared-family/build-pair
+                      (assoc (v970-config
+                              (fn [ctx _]
+                                (v970-plan [(get-in ctx [:eligibility :guard])]))
+                              @current (v974-coverage) calls)
+                             :model-input!
+                             (fn [_ _ _]
+                               {:context @current :binding (v970-binding)})))
+        state (v974-state)]
+    (is (map? (v974-prepare dynamic-pair state)))
+    (is (= 1 @calls))
+    (reset! current (v972-context 5))
+    (is (= :required-snapshot-finite-prestate-mismatch
+           (kind #(v974-prepare dynamic-pair state))))
+    (is (= :required-snapshot-finite-prestate-mismatch
+           (kind #(v974-compare dynamic-pair state @current))))
+    (is (= 1 @calls) "Changed observation cannot reach the constructor")))
