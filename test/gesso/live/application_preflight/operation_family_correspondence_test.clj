@@ -2216,3 +2216,196 @@
       ;; Legacy key-inventory validation did not impose value-closure.
       (is (map? ((get-in pair [:family :prepare]) state who args)))
       (is (= 1 @calls)))))
+
+
+;; v968 — Permanent tests for v967's declared nested semantic paths. The
+;; path contract verifies authored *presence* in admitted model inputs and
+;; caller-supplied production inputs; it does not infer authorization facts,
+;; authenticate acquisition, prove constructor purity, or enforce commit guards.
+
+(defn- v968-coverage [modeled production paths]
+  {:modeled (set (keys modeled))
+   :excluded (set (remove (set (keys modeled)) (keys production)))
+   :modeled-values :closed-data
+   :required-paths paths})
+
+(defn- v968-pair
+  [example inputs calls modeled production paths]
+  (v939-pair
+   example calls
+   {:context-coverage (v968-coverage modeled production paths)
+    :model-input! (fn [_ _ _]
+                    {:context modeled :binding (:modeled-binding inputs)})}))
+
+(defn- v968-compare [pair inputs production]
+  ((:compare-production-input! pair)
+   (:state inputs) (:who inputs) (:args inputs) production
+   (:physical-binding inputs)))
+
+(deftest v968-declared-paths-accept-nested-facts-and-present-nil-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        policy {:decision {:active? true :owner nil}
+                :evidence {:revision 7 :status :evaluated}}
+        modeled (assoc (:modeled-context inputs) :policy policy)
+        production (assoc (:supplied-context inputs) :policy policy)
+        paths #{[:policy :decision :active?]
+                [:policy :decision :owner]
+                [:policy :evidence :revision]
+                [:request/current-owner]}
+        calls (atom 0)
+        pair (v968-pair example inputs calls modeled production paths)
+        actual (v968-compare pair inputs production)]
+    (is (= :matched-declared-input-fields (:status actual)))
+    (is (= :checked-declared-paths (:required-semantic-path-presence actual)))
+    (is (= 4 (:required-semantic-paths-checked actual)))
+    (is (= :not-established (:required-paths-completeness actual)))
+    (is (= :checked-closed-data (:modeled-value-closure actual)))
+    (is (= :caller-supplied-not-authenticated (:input-origin actual)))
+    (is (= :not-established (:constructor-purity actual)))
+    (is (= :not-established (:application-certification actual)))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-declared-nested-semantic-path-presence))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :truthful-complete-authored-required-semantic-paths))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :commit-time-enforcement-of-declared-semantic-facts))
+    (is (zero? @calls) "A production comparison cannot call the constructor")
+    (is (not (contains? actual :context)))
+    (is (not (contains? actual :binding)))
+    (is (not (.contains (pr-str actual) (:request-id example))))
+    (is (map? ((get-in pair [:family :prepare])
+               (:state inputs) (:who inputs) (:args inputs))))
+    (is (= 1 @calls))))
+
+(deftest v968-required-modeled-paths-fail-before-construction-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        original (assoc (:modeled-context inputs)
+                        :policy {:decision {:active? false :owner nil}})
+        production (assoc (:supplied-context inputs)
+                          :policy (:policy original))
+        paths #{[:policy :decision :active?] [:policy :decision :owner]}
+        invalid
+        [["missing nested leaf" (update-in original [:policy :decision] dissoc :active?)]
+         ["missing nil leaf" (update-in original [:policy :decision] dissoc :owner)]
+         ["missing intermediate" (assoc original :policy {:else :unchanged})]
+         ["nonmap intermediate" (assoc original :policy {:decision :not-a-map})]
+         ["missing modeled top-level key" (dissoc original :policy)]]]
+    (doseq [[label modeled] invalid]
+      (testing label
+        (let [calls (atom 0)
+              pair (v939-pair example calls
+                              {:context-coverage
+                               (v968-coverage original production paths)
+                               :model-input! (fn [_ _ _]
+                                               {:context modeled
+                                                :binding (:modeled-binding inputs)})})
+              error (v966-error #((get-in pair [:family :prepare])
+                                   (:state inputs) (:who inputs) (:args inputs)))]
+          (is (= (if (= label "missing modeled top-level key")
+                   :modeled-context-key-inventory-drift
+                   :missing-required-modeled-semantic-input)
+                 (:error/kind (ex-data error))))
+          (is (= #{:error/type :error/kind}
+                 (set (keys (ex-data error)))))
+          (is (zero? @calls) "Missing modeled fact must block construction"))))))
+
+(deftest v968-required-production-paths-fail-before-context-comparison-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        modeled (assoc (:modeled-context inputs)
+                       :policy {:decision {:active? false :owner nil}})
+        production (assoc (:supplied-context inputs) :policy (:policy modeled))
+        paths #{[:policy :decision :active?] [:policy :decision :owner]}
+        calls (atom 0)
+        pair (v968-pair example inputs calls modeled production paths)
+        invalid
+        [["missing active" (update-in production [:policy :decision] dissoc :active?)]
+         ["missing nil owner" (update-in production [:policy :decision] dissoc :owner)]
+         ["missing decision" (assoc production :policy {:other :still-present})]
+         ["nonmap decision" (assoc production :policy {:decision 42})]
+         ["missing policy" (dissoc production :policy)]]]
+    (doseq [[label physical] invalid]
+      (testing label
+        (let [error (v966-error #(v968-compare pair inputs physical))]
+          (is (= :missing-required-production-semantic-input
+                 (:error/kind (ex-data error))))
+          (is (= #{:error/type :error/kind}
+                 (set (keys (ex-data error)))))
+          (is (zero? @calls)))))
+    (is (= :matched-declared-input-fields
+           (:status (v968-compare pair inputs production))))
+    ;; Values can be changed without disappearing. Existing complete-value
+    ;; comparison must still detect such changes, separately from presence.
+    (is (= :production-context-differs-from-model-input
+           (kind #(v968-compare pair inputs
+                                (assoc-in production [:policy :decision :active?] true)))))
+    (is (zero? @calls))))
+
+(deftest v968-required-paths-support-composite-document-keys-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        document-key [:resources (:request-id example)]
+        nested {:documents {document-key {:revision 9 :owner nil}}}
+        modeled (assoc (:modeled-context inputs) :finite nested)
+        production (assoc (:supplied-context inputs) :finite nested)
+        paths #{[:finite :documents document-key :revision]
+                [:finite :documents document-key :owner]}
+        calls (atom 0)
+        pair (v968-pair example inputs calls modeled production paths)]
+    (is (= :matched-declared-input-fields
+           (:status (v968-compare pair inputs production))))
+    (is (= 2 (:required-semantic-paths-checked
+              (v968-compare pair inputs production))))
+    (is (= :missing-required-modeled-semantic-input
+           (kind #((get-in (v968-pair example inputs calls
+                                      (assoc-in modeled [:finite :documents document-key]
+                                                {:owner nil})
+                                      production paths)
+                           [:family :prepare])
+                   (:state inputs) (:who inputs) (:args inputs)))))
+    (is (= :missing-required-production-semantic-input
+           (kind #(v968-compare pair inputs
+                                (assoc-in production [:finite :documents document-key]
+                                          {:revision 9})))))
+    (is (zero? @calls))))
+
+(deftest v968-required-path-configuration-is-bounded-and-fail-closed-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        modeled (:modeled-context inputs)
+        production (:supplied-context inputs)
+        baseline (v968-coverage modeled production #{[:model-state]})
+        too-many (set (for [n (range 257)] [:model-state n]))
+        too-deep (vec (cons :model-state (repeat 32 :deeper)))
+        invalid
+        [["empty path inventory" #{}]
+         ["non-set paths" [[:model-state]]]
+         ["nil paths" nil]
+         ["nonvector path" #{'(:model-state)}]
+         ["empty path" #{[]}]
+         ["undeclared root" #{[:not-modeled]}]
+         ["unsafe segment" #{[:model-state (Object.)]}]
+         ["too-long path" #{too-deep}]
+         ["too many declared paths" too-many]
+         ["wrong composite key arity" #{[:model-state [:resources 1 2]]}]
+         ["nonkeyword composite type" #{[:model-state ["resources" 1]]}]
+         ["composite key with opaque id" #{[:model-state [:resources (Object.)]]}]]]
+    (doseq [[label paths] invalid]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(v948-pair example inputs
+                                 (assoc baseline :required-paths paths)))))))
+    (is (= :invalid-context-coverage
+           (kind #(v948-pair example inputs (dissoc baseline :modeled-values)))))
+    (is (= :invalid-context-coverage
+           (kind #(v948-pair example inputs
+                             (assoc baseline :unknown-configuration true)))))
+    (is (= :invalid-context-coverage
+           (kind #(v948-pair example inputs
+                             (assoc baseline :required-paths #{[:biff.fx/now]})))))
+    (is (= :not-declared
+           (:required-semantic-path-presence
+            (v968-compare (v966-pair example inputs (atom 0) modeled)
+                          inputs production))))))
