@@ -3285,3 +3285,180 @@
                                    (get-in (v970-plan [(get-in context [:eligibility :guard])])
                                            [:commands 0 :model/after])))))
     (is (= 2 @calls))))
+
+;; v978 — Authored snapshot observations must be represented in the canonical
+;; guard comparison. The test fixture deliberately has NO domain-specific
+;; authorization semantics; it tests only the declared correspondence. Neither
+;; XTDB acquisition provenance nor completeness of authored fields is proved.
+
+(defn- v978-coverage
+  ([] (v978-coverage #{:fixture/created-at}))
+  ([fields]
+   (assoc (v972-coverage)
+          :required-protected-snapshot-fields
+          {[:eligibility :guard] fields})))
+
+(defn- v978-covered-context
+  ([] (v978-covered-context (v972-context)))
+  ([context]
+   (let [version (assoc v970-version
+                        :compare-keys [:fixture/revision
+                                       :fixture/updated-at
+                                       :fixture/created-at])]
+     (assoc-in context [:eligibility :guard]
+               (command/guard :fixture/eligibility
+                              (get-in context [:eligibility :document]) version)))))
+
+(defn- v978-compare [pair production]
+  ((:compare-production-input! pair)
+   {} "v970-actor" {:resource "v970-resource"}
+   production (v970-binding)))
+
+(deftest v978-protected-declared-fields-work-on-finite-production-and-compare-test
+  (let [context (v978-covered-context)
+        calls (atom 0)
+        submitted (atom 0)
+        pair (v972-pair context (v978-coverage) calls)
+        planned (v970-prepare pair)]
+    (is (= [(get-in context [:eligibility :guard])] (:guards planned)))
+    (is (= 1 @calls))
+    (let [report (v978-compare pair context)]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= 1 (:declared-protected-snapshot-fields-checked report)))
+      (is (= :not-established (:protected-snapshot-fields-completeness report)))
+      (is (= :caller-supplied-not-authenticated (:guard-snapshot-origin report)))
+      (is (= :not-established (:application-certification report)))
+      (is (= 1 @calls) "Pure comparison does not run application construction"))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submitted inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= 1 @submitted))
+    (is (= 2 @calls))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-declared-snapshot-field-to-commit-guard-correspondence))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :truthful-declaration-of-policy-relevant-snapshot-fields))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :completeness-of-authored-snapshot-compare-fields))))
+
+(deftest v978-omitted-version-field-rejected-before-both-constructions-test
+  (let [context (v972-context)
+        calls (atom 0)
+        submissions (atom 0)
+        pair (v972-pair context (v978-coverage) calls)]
+    ;; The guard agrees with the supplied snapshot but does not compare the
+    ;; declared created-at field. Identity and other version fields still pass.
+    (is (= :required-snapshot-field-not-commit-guarded
+           (kind #(v970-prepare pair))))
+    (is (zero? @calls) "Finite input is checked before :construct!")
+    (is (= :required-snapshot-field-not-commit-guarded
+           (kind #(v978-compare pair context))))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (let [error (v966-error #(v970-submit pair context))]
+        (is (= :required-snapshot-field-not-commit-guarded
+               (:error/kind (ex-data error))))
+        (is (= #{:error/kind :error/type}
+               (set (keys (ex-data error)))))))
+    (is (zero? @submissions) "Invalid plan cannot reach transaction submission")
+    (is (zero? @calls))))
+
+(deftest v978-present-observation-but-unguarded-field-is-rejected-test
+  (let [context (assoc-in (v972-context)
+                          [:eligibility :document :fixture/decision]
+                          :allowed)
+        coverage (v978-coverage #{:fixture/decision})
+        calls (atom 0)
+        pair (v972-pair context coverage calls)
+        submitted (atom 0)]
+    (is (= :required-snapshot-field-not-commit-guarded
+           (kind #(v970-prepare pair))))
+    (is (= :required-snapshot-field-not-commit-guarded
+           (kind #(v978-compare pair context))))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submitted inc)
+                                 {:commit/status :committed})]
+      (is (= :required-snapshot-field-not-commit-guarded
+             (kind #(v970-submit pair context)))))
+    (is (zero? @submitted))
+    (is (zero? @calls))))
+
+(deftest v978-missing-declared-field-does-not-count-as-nil-test
+  (let [coverage (v978-coverage #{:fixture/not-on-snapshot})
+        context (v978-covered-context)
+        calls (atom 0)
+        pair (v972-pair context coverage calls)
+        submitted (atom 0)]
+    (is (= :required-snapshot-field-not-commit-guarded
+           (kind #(v970-prepare pair))))
+    (is (= :required-snapshot-field-not-commit-guarded
+           (kind #(v978-compare pair context))))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submitted inc)
+                                 {:commit/status :committed})]
+      (is (= :required-snapshot-field-not-commit-guarded
+             (kind #(v970-submit pair context)))))
+    (is (zero? @submitted))
+    (is (zero? @calls))))
+
+(deftest v978-protected-field-declarations-are-closed-and-bounded-test
+  (let [context (v972-context)
+        base (v972-coverage)
+        calls (atom 0)
+        invalid [["empty declaration map" {}]
+                 ["nil declaration" nil]
+                 ["not a map" [[:eligibility :guard]]]
+                 ["undeclared guard" {[:eligibility :unknown] #{:fixture/revision}}]
+                 ["empty field set" {[:eligibility :guard] #{}}]
+                 ["nil field set" {[:eligibility :guard] nil}]
+                 ["list field collection" {[:eligibility :guard] '(:fixture/revision)}]
+                 ["nonkeyword field" {[:eligibility :guard] #{"private"}}]
+                 ["oversized field set"
+                  {[:eligibility :guard]
+                   (set (map #(keyword (str "field-" %)) (range 257)))}]]]
+    (doseq [[label declaration] invalid]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(v972-pair context
+                                 (assoc base :required-protected-snapshot-fields declaration)
+                                 calls))))))
+    (is (= :invalid-context-coverage
+           (kind #(v972-pair context
+                             (dissoc (v978-coverage) :required-guard-snapshots)
+                             calls))))
+    (is (= :invalid-context-coverage
+           (kind #(v972-pair context
+                             (dissoc (v978-coverage) :modeled-values)
+                             calls))))
+    (is (zero? @calls))))
+
+(deftest v978-protection-is-opt-in-and-production-inputs-are-rechecked-test
+  (let [baseline (v972-context)
+        covered (v978-covered-context)
+        calls (atom 0)
+        legacy (v972-pair baseline calls)
+        active (v972-pair covered (v978-coverage) calls)
+        submitted (atom 0)
+        missing-production (assoc-in covered [:eligibility :document]
+                                     (dissoc (get-in covered [:eligibility :document])
+                                             :fixture/created-at))]
+    (is (map? (v970-prepare legacy)))
+    (is (= :matched-declared-input-fields
+           (:status (v978-compare legacy baseline))))
+    (is (= 0 (:declared-protected-snapshot-fields-checked
+              (v978-compare legacy baseline))))
+    (is (= :required-guard-snapshot-mismatch
+           (kind #(v978-compare active missing-production)))
+        "Declared version fields must be present before protection checks")
+    (is (= :production-context-differs-from-model-input
+           (kind #(v978-compare active
+                                (assoc-in covered [:other :nested :present?] false)))))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submitted inc)
+                                 {:commit/status :committed})]
+      (is (= :required-guard-snapshot-mismatch
+             (kind #(v970-submit active missing-production)))))
+    (is (zero? @submitted))
+    (is (= 1 @calls) "Only the compatible legacy finite construction executes")))
