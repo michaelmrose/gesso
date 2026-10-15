@@ -5,6 +5,8 @@
    formal-check/check-prepared!. They check real finite TLC exploration,
    including repeated sessions and source-value codec compatibility, then
    exercise fail-closed input/result handling with controlled checker stubs.
+   Nullable-value cases cover real TLC transport and a private codec
+   round-trip; they are tests of the selected finite model, not XTDB.
 
    The verified scope is the selected finite serial tx-model machine, not a
    theorem about XTDB, arbitrary application code, concurrency, or CLJS.
@@ -12,6 +14,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.model.command :as command]
             [gesso.model.formal-check :as check]
+            [gesso.model.formal-family :as family]
             [gesso.model.formal-obligation :as obligation]
             [gesso.model.formal-transition :as formal]
             [recife.core :as recife]))
@@ -217,3 +220,115 @@
                     (fn [& _] (delay (dissoc complete :trace-info)))]
         (is (= :model-check-failed (reject-kind subject)))
         (is (empty? (sessions)))))))
+
+
+;; Nullable values must remain ordinary domain data. In particular, an
+;; unclaimed owner is nil, NOT a keyword chosen to appease TLC's value parser.
+;; This family test models both helpers competing for the same document.
+(defn- nullable-owner-family []
+  (let [before (assoc (document :claimable) :owner nil)
+        initial {[:items :claimable] before}
+        calls (atom [])
+        families [{:id :example/claim
+                   :principals [:helper/a :helper/b]
+                   :arguments [{:request-id :claimable}]
+                   :enabled? (fn [state principal args]
+                               (swap! calls conj [:enabled principal args])
+                               (and (= initial state)
+                                    (= :claimable (:request-id args))
+                                    (nil? (:owner (get state [:items :claimable])))))
+                   :prepare (fn [state principal args]
+                              (swap! calls conj [:prepare principal args])
+                              (let [previous (get state [:items :claimable])]
+                                {:commands [(command/update-command
+                                             :items :claim previous
+                                             (-> previous
+                                                 (assoc :owner principal :updated-at :t1)
+                                                 (update :revision inc))
+                                             version)]
+                                 :guards [] :emit false}))}]]
+    {:built (family/prepared-competition initial families)
+     :calls calls}))
+
+(deftest nullable-owner-in-application-family-survives-real-tlc-test
+  (let [{:keys [built calls]} (nullable-owner-family)
+        subject (:subject built)
+        initial (formal/initial-state subject)
+        before (::formal/documents initial)
+        first-step (formal/transition subject initial (first (:actions subject)))
+        result (check/check-prepared! subject)]
+    (is (= 2 (:choice-count built)))
+    (is (= 2 (count (:plans subject))))
+    (is (= 4 (count @calls)) "Every family choice is enabled and prepared once")
+    (is (nil? (get-in before [[:items :claimable] :owner])))
+    (is (= :helper/a
+           (get-in first-step [::formal/documents [:items :claimable] :owner])))
+    (is (= :checked-finite-model (:status result)))
+    (is (= 5 (:distinct-states result)))
+    (is (= (set obligation/obligation-ids) (:obligations result)))
+    (is (contains? (:not-established result)
+                   :complete-application-operation-enumeration))
+    (is (empty? (sessions)))))
+
+(deftest nil-in-planned-creation-and-literal-codec-collision-survives-tlc-test
+  ;; Nil and the codec's otherwise-first candidate token both occur in the
+  ;; admitted plans. Neither may be conflated with the other by TLC transport.
+  (let [subject (formal/prepared-subject
+                 {}
+                 [(create-plan :items :created nil)
+                  (create-plan :items :created :gessoformalcodec/v0)])
+        result (check/check-prepared! subject)]
+    (is (= :checked-finite-model (:status result)))
+    (is (= 5 (:distinct-states result)))
+    (is (= (set obligation/obligation-ids) (:obligations result)))
+    (is (empty? (sessions)))))
+
+(deftest nil-created-only-by-reference-transition-is-reserved-by-codec-test
+  ;; In this input neither the initial documents nor the admitted plans hold
+  ;; nil. A successful reference transition *does* produce a nil-valued
+  ;; :failed-precondition observation. The codec must already represent it.
+  (let [subject (competing-updates)
+        state (formal/transition subject (formal/initial-state subject)
+                                 (first (:actions subject)))
+        observation (first (::formal/observations state))
+        codec ((var-get (ns-resolve 'gesso.model.formal-check 'codec-for))
+               subject)
+        encoded ((:encode codec) observation)]
+    (is (nil? (:failed-precondition observation)))
+    (is (contains? observation :failed-precondition))
+    (is (some? (:failed-precondition encoded))
+        "TLC must never receive a raw nil inside a nested observation")
+    (is (= observation ((:decode codec) encoded)))
+    (is (= nil ((:decode codec) ((:encode codec) nil))))))
+
+(deftest nested-nullable-token-codec-is-reversible-and-fails-closed-test
+  ;; These assertions exercise a private codec boundary, not a mocked TLC
+  ;; proof. Actual model checking is exercised by the two tests above.
+  (let [nested {:owner nil
+                :value "payload_with_underscores"
+                :literal-keyword :gessoformalcodec/v0
+                :under_score :some_namespace/key_with_underscores
+                :nested [{nil {:child nil}} nil]}
+        subject (formal/prepared-subject
+                 {} [(create-plan :items :nested nested)])
+        codec ((var-get (ns-resolve 'gesso.model.formal-check 'codec-for))
+               subject)
+        encode (:encode codec)
+        decode (:decode codec)
+        encoded (encode nested)
+        nil-token (encode nil)]
+    (is (keyword? nil-token))
+    (is (not= nil-token :gessoformalcodec/v0))
+    (is (not= nil-token (encode :gessoformalcodec/v0)))
+    (is (not= nested encoded))
+    (is (= nested (decode encoded)))
+    (is (= [nil nil] (decode (encode [nil nil]))))
+    (is (not (contains? (get-in encoded [:nested 0]) nil))
+        "A nil map key must not survive encoding as raw nil")
+    (is (contains? (get-in encoded [:nested 0]) nil-token))
+    (is (= :unadmitted-string
+           (try (encode "string_not_admitted_by_subject")
+                ::not-rejected
+                (catch clojure.lang.ExceptionInfo ex
+                  (:error/kind (ex-data ex))))))
+    (is (empty? (sessions)))))
