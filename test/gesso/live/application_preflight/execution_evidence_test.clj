@@ -19,6 +19,7 @@
    v929 remain diagnostic. Neither promotes an observed executor attempt to
    universal operation refinement or application certification."
   (:require
+   [clojure.set :as set]
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.choreo.identity :as identity]
@@ -432,6 +433,24 @@
   #{:action-accounting :observation-chain :rejected-is-atomic
     :committed-write-set :outcome-check-consistency})
 
+;; Application assurance must independently require these minimum disclosures;
+;; neither a checked model nor a diagnostic report grants whole-app certification.
+;; Deliberately keep literals separate from formal-check/assurance-scope so
+;; removing a premise in the checker cannot silently weaken this regression.
+(def ^:private required-formal-assumptions
+  #{:complete-selected-finite-prestate-and-plans
+    :serial-atomic-reference-semantics
+    :faithful-reversible-tlc-token-encoding
+    :correct-recife-tlc-execution})
+
+(def ^:private required-formal-nonclaims
+  #{:complete-application-operation-enumeration
+    :generic-inductive-theorem
+    :actual-xtdb-implementation-refinement
+    :authorization-or-application-policy
+    :server-browser-composition
+    :independent-application-certificate})
+
 (defn- formal-card [explanation]
   (get-in (observed-card explanation)
           [:observations 0 :finite-model-safety-check]))
@@ -470,6 +489,12 @@
           (is (= :recife-0.22.0/tlc (:checker checked)))
           (is (pos-int? (:distinct-states checked)))
           (is (= expected-formal-obligations (:obligations checked)))
+          (is (set/subset? required-formal-assumptions
+                                   (:assumed checked))
+              "Real TLC results must disclose every admitted premise.")
+          (is (set/subset? required-formal-nonclaims
+                                   (:not-established checked))
+              "Real TLC results must disclose every boundary not proved.")
           (is (contains? (:not-established checked)
                          :actual-xtdb-implementation-refinement))
           (is (contains? (:not-established checked)
@@ -661,3 +686,73 @@
                              assembly {operation-id [evidence]}))))))))
       (is (zero? @checker-invocations)
           "Even a second legitimate executor may not replay the first handle."))))
+
+(deftest missing-finite-check-scope-disclosures-fail-closed-test
+  ;; Run the consumer against a genuine executor-bound observation. The mock
+  ;; checker results below are boundary fault injections, never proof evidence.
+  ;; Removing any single required premise/nonclaim must refuse the entire
+  ;; enhanced explanation, instead of returning a weaker or certified card.
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        shape {:status :checked-finite-model
+               :evidence-class :bounded-reference-model-check-not-certificate
+               :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+               :checker :recife-0.22.0/tlc
+               :distinct-states 2
+               :obligations expected-formal-obligations
+               :assumed required-formal-assumptions
+               :not-established required-formal-nonclaims}]
+    (is (= required-formal-assumptions
+           (:assumed formal-check/assurance-scope))
+        "The independent contract must track the checker's declared premises.")
+    (is (= required-formal-nonclaims
+           (:not-established formal-check/assurance-scope))
+        "The independent contract must track the checker's declared limits.")
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [explain #(application/explain-with-formal-execution-evidence
+                       assembly {operation-id [evidence]})
+              before @(:calls f)]
+          (doseq [assumption (sort (:assumed shape))]
+            (testing (str "omitted required premise " assumption)
+              (with-redefs [formal-check/check-prepared!
+                            (fn [_] (update shape :assumed disj assumption))]
+                (is (= :finite-model-check-failed (kind explain))))))
+          (doseq [nonclaim (sort (:not-established shape))]
+            (testing (str "omitted required limitation " nonclaim)
+              (with-redefs [formal-check/check-prepared!
+                            (fn [_] (update shape :not-established disj nonclaim))]
+                (is (= :finite-model-check-failed (kind explain))))))
+          (doseq [k [:assumed :not-established]]
+            (testing (str "empty disclosures " k)
+              (with-redefs [formal-check/check-prepared!
+                            (fn [_] (assoc shape k #{}))]
+                (is (= :finite-model-check-failed (kind explain))))))
+          (testing "swapping premises and nonclaims cannot satisfy either"
+            (with-redefs [formal-check/check-prepared!
+                          (fn [_] (assoc shape
+                                    :assumed required-formal-nonclaims
+                                    :not-established required-formal-assumptions))]
+              (is (= :finite-model-check-failed (kind explain)))))
+          (testing "additional conservative disclosures survive reporting"
+            (with-redefs [formal-check/check-prepared!
+                          (fn [_] (-> shape
+                                      (update :assumed conj :extra-assumption)
+                                      (update :not-established conj
+                                              :extra-unproved-boundary)))]
+              (let [report (explain)
+                    checked (formal-card report)]
+                (is (= :checked-finite-model (:status checked)))
+                (is (set/subset? required-formal-assumptions
+                                 (:assumed checked)))
+                (is (set/subset? required-formal-nonclaims
+                                 (:not-established checked)))
+                (is (contains? (:assumed checked) :extra-assumption))
+                (is (contains? (:not-established checked)
+                               :extra-unproved-boundary))
+                (is (= :bounded-observation-not-proof
+                       (:assurance-class (observed-card report))))
+                (assert-unproved-policy report))))
+          (is (= before @(:calls f))
+              "A failed or successful diagnostic must not call business code."))))))
