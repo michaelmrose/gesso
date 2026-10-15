@@ -47,13 +47,17 @@
   {:mvn/version "0.9.12"}
 
   com.zaxxer/HikariCP
-  {:mvn/version "7.0.2"}
-
-  pfeodrippe/recife
-  {:mvn/version "0.22.0"}}
+  {:mvn/version "7.0.2"}}
 
  :aliases
- {:dev
+ {;; Loaded by the JVM test harness, including the ordinary `bb test` gate.
+  ;; Recife's transitive p5 externs must not reach cljs.main/Closure builds.
+  :formal
+  {:extra-deps
+   {pfeodrippe/recife
+    {:mvn/version "0.22.0"}}}
+
+  :dev
   {:extra-deps
    {org.clojure/clojurescript
     {:mvn/version "1.12.145"}}}
