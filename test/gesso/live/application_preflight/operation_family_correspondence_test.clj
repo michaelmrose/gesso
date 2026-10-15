@@ -1598,3 +1598,167 @@
                    :identity-of-model-context-and-production-context))
     (is (contains? (get-in shared-family/assurance-scope [:not-established])
                    :current-live-executor-registration))))
+
+
+;; v941 — Permanent, conditional input-fidelity regressions for v940.
+;; This comparison uses supplied production inputs.  It does not acquire
+;; authenticated execution context, prove model-input! purity, certify an
+;; operation, or establish completeness of application authorization fields.
+
+(defn- v941-inputs [example]
+  (let [state (model-state example)
+        who (identity/raw-value principal)
+        args {:request-id (:request-id example)}
+        modeled-binding {:command-id (identity/command-id "v941-finite-private")
+                         :principal principal
+                         :operation operation-id
+                         :arguments args}
+        physical-binding (assoc modeled-binding
+                                :command-id (identity/command-id "v941-live-private"))
+        modeled-context {:model-state state
+                         :request/current-owner nil
+                         :request/eligible? true}
+        supplied-context (assoc modeled-context
+                                :authenticated-principal principal
+                                :biff.fx/now now)]
+    {:state state :who who :args args
+     :modeled-binding modeled-binding :physical-binding physical-binding
+     :modeled-context modeled-context :supplied-context supplied-context}))
+
+(defn- v941-pair [example calls {:keys [modeled-context modeled-binding] :as inputs}]
+  (v939-pair example calls
+             {:model-input! (fn [_ _ _]
+                              {:context modeled-context
+                               :binding modeled-binding})}))
+
+(deftest v941-field-comparison-is-conditional-and-redacted-test
+  (let [example (test-operation)
+        calls (atom 0)
+        inputs (v941-inputs example)
+        pair (v941-pair example calls inputs)
+        compare! (:compare-production-input! pair)
+        {:keys [state who args supplied-context physical-binding]} inputs
+        result (compare! state who args supplied-context physical-binding)]
+    (is (fn? compare!))
+    (is (= :matched-declared-input-fields (:status result)))
+    (is (= 3 (:context-fields-compared result)))
+    (is (= 2 (:unmodeled-production-context-fields result)))
+    (is (= :excluded-independent-execution-identity
+           (:command-id-comparison result)))
+    (is (= :caller-supplied-not-authenticated (:input-origin result)))
+    (is (= :not-established (:application-certification result)))
+    (is (zero? @calls) "The comparison must not construct or transact anything")
+    (is (not (contains? result :context)))
+    (is (not (contains? result :binding)))
+    (is (not (.contains (pr-str result) (:request-id example))))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :trusted-provenance-of-supplied-production-context-and-binding))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :completeness-of-modeled-production-context-fields))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :identity-of-model-context-and-production-context))))
+
+(deftest v941-context-field-mismatch-nil-and-absence-are-rejected-test
+  (let [example (test-operation)
+        calls (atom 0)
+        inputs (v941-inputs example)
+        compare! (:compare-production-input! (v941-pair example calls inputs))
+        {:keys [state who args supplied-context physical-binding]} inputs]
+    (doseq [[label context]
+            [["changed modeled state" (assoc supplied-context :model-state {:false :state})]
+             ["missing modeled state" (dissoc supplied-context :model-state)]
+             ["false permission" (assoc supplied-context :request/eligible? false)]
+             ["missing nil-valued field" (dissoc supplied-context :request/current-owner)]
+             ["non-nil instead of nil" (assoc supplied-context :request/current-owner :claimed)]]]
+      (testing label
+        (is (= :production-context-differs-from-model-input
+               (kind #(compare! state who args context physical-binding))))))
+    (is (= :invalid-production-context
+           (kind #(compare! state who args [] physical-binding))))
+    (is (= :invalid-production-context
+           (kind #(compare! state who args nil physical-binding))))
+    (is (= :matched-declared-input-fields
+           (:status (compare! state who args
+                              (assoc supplied-context :another-private-field :value)
+                              physical-binding))))
+    (is (= 3 (:unmodeled-production-context-fields
+              (compare! state who args
+                        (assoc supplied-context :another-private-field :value)
+                        physical-binding))))
+    (is (zero? @calls))))
+
+(deftest v941-production-binding-must-match-except-command-id-test
+  (let [example (test-operation)
+        calls (atom 0)
+        inputs (v941-inputs example)
+        compare! (:compare-production-input! (v941-pair example calls inputs))
+        {:keys [state who args supplied-context physical-binding]} inputs]
+    (doseq [[label altered]
+            [["wrong principal" (assoc physical-binding :principal
+                                        (identity/principal "v941-wrong-private"))]
+             ["wrong operation" (assoc physical-binding :operation :request/cancel)]
+             ["wrong arguments" (assoc physical-binding :arguments {:request-id "different"})]]]
+      (testing label
+        (is (= :production-binding-differs-from-model-input
+               (kind #(compare! state who args supplied-context altered))))))
+    (is (= :invalid-production-binding
+           (kind #(compare! state who args supplied-context {}))))
+    (is (= :invalid-production-binding
+           (kind #(compare! state who args supplied-context nil))))
+    (is (= :matched-declared-input-fields
+           (:status (compare! state who args supplied-context
+                              (assoc physical-binding :command-id
+                                     (identity/command-id "another-live-id"))))))
+    (is (zero? @calls))))
+
+(deftest v941-empty-and-invalid-modeled-input-fail-without-construction-test
+  (let [example (test-operation)
+        calls (atom 0)
+        {:keys [state who args supplied-context physical-binding] :as inputs}
+        (v941-inputs example)
+        empty-pair (v941-pair example calls (assoc inputs :modeled-context {}))
+        faulty-pair (v939-pair example calls
+                    {:model-input! (fn [& _]
+                                     (throw (ex-info "v941-secret-error"
+                                                     {:password "v941-secret-value"})))})
+        malformed-pair (v939-pair example calls
+                        {:model-input! (fn [& _] {:context []
+                                                  :binding (:modeled-binding inputs)})})
+        error (try ((:compare-production-input! faulty-pair)
+                    state who args supplied-context physical-binding)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+    (is (= :empty-modeled-context-comparison
+           (kind #((:compare-production-input! empty-pair)
+                   state who args supplied-context physical-binding))))
+    (is (= :invalid-model-input
+           (kind #((:compare-production-input! malformed-pair)
+                   state who args supplied-context physical-binding))))
+    (is (= :model-input-exception (:error/kind (ex-data error))))
+    (is (nil? (.getCause error)))
+    (is (not (.contains (.getMessage error) "v941-secret-error")))
+    (is (not (.contains (pr-str (ex-data error)) "v941-secret-value")))
+    (is (zero? @calls))))
+
+(deftest v941-model-input-is-reevaluated-and-not-proven-stable-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        {:keys [state who args supplied-context physical-binding]} inputs
+        calls (atom 0)
+        mutated? (atom false)
+        pair (v939-pair example calls
+              {:model-input! (fn [_ _ _]
+                               {:context (if @mutated?
+                                           (assoc (:modeled-context inputs)
+                                                  :request/eligible? false)
+                                           (:modeled-context inputs))
+                                :binding (:modeled-binding inputs)})})
+        compare! (:compare-production-input! pair)]
+    (is (= :matched-declared-input-fields
+           (:status (compare! state who args supplied-context physical-binding))))
+    (reset! mutated? true)
+    (is (= :production-context-differs-from-model-input
+           (kind #(compare! state who args supplied-context physical-binding))))
+    (is (zero? @calls))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :purity-of-clojure-callbacks))))
