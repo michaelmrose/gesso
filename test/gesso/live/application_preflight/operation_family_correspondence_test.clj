@@ -3071,3 +3071,217 @@
     (is (= :required-snapshot-finite-prestate-mismatch
            (kind #(v974-compare dynamic-pair state @current))))
     (is (= 1 @calls) "Changed observation cannot reach the constructor")))
+
+;; v976 — Permanent document-identity absence controls. These tests exercise
+;; only the opt-in finite-prestate absence / canonical-create correspondence;
+;; they do not assert query-wide uniqueness or authenticate physical XTDB reads.
+
+(def ^:private v976-resource-key [:fixture/resource "v970-resource"])
+
+(defn- v976-context []
+  (assoc (v970-context) :allocation {:target-id "v970-resource"}))
+
+(defn- v976-coverage []
+  (assoc (v970-coverage)
+         :modeled #{:eligibility :other :allocation}
+         :required-create-absences {[:allocation :target-id] :fixture/resource}))
+
+(defn- v976-state []
+  {[:fixture/eligibility "v970-eligibility"] (v970-eligibility 4)})
+
+(defn- v976-builder [context _]
+  (v970-plan [(get-in context [:eligibility :guard])]))
+
+(defn- v976-pair
+  ([context calls]
+   (v976-pair context (v976-coverage) calls v976-builder))
+  ([context coverage calls builder]
+   (shared-family/build-pair (v970-config builder context coverage calls))))
+
+(defn- v976-prepare [pair state]
+  ((get-in pair [:family :prepare])
+   state "v970-actor" {:resource "v970-resource"}))
+
+(defn- v976-compare [pair state production]
+  ((:compare-production-input! pair)
+   state "v970-actor" {:resource "v970-resource"}
+   production (v970-binding)))
+
+(deftest v976-declared-document-absence-is-protected-in-both-plans-test
+  (let [context (v976-context)
+        calls (atom 0)
+        pair (v976-pair context calls)
+        prepared (v976-prepare pair (v976-state))
+        submitted (atom 0)]
+    (is (= v976-resource-key (command/target (first (:commands prepared)))))
+    (is (= 1 @calls))
+    (let [report (v976-compare pair (v976-state) context)]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= 1 (:declared-create-absences-checked report)))
+      (is (= :not-authenticated (:create-absence-physical-origin report)))
+      (is (= :not-established (:application-certification report)))
+      (is (not (contains? report :context)))
+      (is (not (contains? report :binding)))
+      (is (= 1 @calls) "Input comparison never runs the constructor"))
+    (with-redefs [tx/transact! (fn [& _]
+                                (swap! submitted inc)
+                                {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= 1 @submitted))
+    (is (= 2 @calls) "One constructor call on each construction path")
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-declared-create-absence-in-selected-finite-prestate))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-declared-create-absence-to-transaction-correspondence))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :physical-truth-of-declared-create-absences))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :completeness-of-declared-create-absence-dependencies))))
+
+(deftest v976-existing-target-is-rejected-before-domain-construction-test
+  (let [context (v976-context)
+        calls (atom 0)
+        pair (v976-pair context calls)
+        existing (get-in (v970-plan [(get-in context [:eligibility :guard])])
+                         [:commands 0 :model/after])
+        occupied (assoc (v976-state) v976-resource-key existing)]
+    (is (= :required-create-target-not-absent-in-finite-prestate
+           (kind #(v976-prepare pair occupied))))
+    (is (= :required-create-target-not-absent-in-finite-prestate
+           (kind #(v976-compare pair occupied context))))
+    (is (zero? @calls) "An occupied target must not reach :construct!")
+    ;; Same document ID in a different entity type is NOT the declared target.
+    (is (map? (v976-prepare pair
+                            (assoc (v976-state)
+                                   [:fixture/unrelated "v970-resource"]
+                                   (assoc existing :xt/id "v970-resource")))))
+    (is (= 1 @calls))))
+
+(deftest v976-required-create-targets-are-rechecked-and-redacted-test
+  (let [context (v976-context)
+        calls (atom 0)
+        pair (v976-pair context calls)
+        missing (assoc context :allocation {})
+        nil-id (assoc-in context [:allocation :target-id] nil)
+        opaque-id (assoc-in context [:allocation :target-id]
+                            (atom "private-create-target"))]
+    (doseq [[label invalid wanted]
+            [["missing path" missing :missing-required-create-absence-target]
+             ["nil ID" nil-id :invalid-required-create-absence-target]
+             ["opaque ID" opaque-id :non-data-modeled-context]]]
+      (testing label
+        (let [bad (v976-pair invalid (atom 0))
+              error (v966-error #(v976-prepare bad (v976-state)))]
+          (is (= wanted (:error/kind (ex-data error))))
+          (is (= #{:error/kind :error/type} (set (keys (ex-data error)))))
+          (is (not (.contains (pr-str (ex-data error)) "private-create-target"))))))
+    (is (= :missing-required-create-absence-target
+           (kind #(v976-compare pair (v976-state) missing))))
+    (is (= :invalid-required-create-absence-target
+           (kind #(v976-compare pair (v976-state) nil-id))))
+    (is (zero? @calls) "Rejected modeled/production facts cannot construct")))
+
+(deftest v976-incorrect-or-conflicting-create-cannot-protect-absence-test
+  (let [context (v976-context)
+        coverage (v976-coverage)
+        base (v970-plan [(get-in context [:eligibility :guard])])
+        original (first (:commands base))
+        changed-id (assoc base :commands
+                          [(command/create :fixture/resource
+                                           (assoc (:model/after original)
+                                                  :xt/id "other-resource")
+                                           v970-version)])
+        changed-type (assoc base :commands
+                            [(command/create :fixture/unrelated
+                                             (:model/after original)
+                                             v970-version)])
+        duplicate-target (assoc base :commands
+                                [original
+                                 (command/create :fixture/resource
+                                                 (assoc (:model/after original)
+                                                        :fixture/variant :different)
+                                                 v970-version)])]
+    (doseq [[label plan expected]
+            [["wrong document identity" changed-id
+              :missing-required-absence-protecting-create]
+             ["wrong entity type" changed-type
+              :missing-required-absence-protecting-create]
+             ["duplicate conflicting creates" duplicate-target
+              :unsupported-guarded-domain-plan]]]
+      (testing label
+        (let [calls (atom 0)
+              submissions (atom 0)
+              pair (v976-pair context coverage calls (fn [_ _] plan))]
+          (is (= :domain-construction-exception
+                 (kind #(v976-prepare pair (v976-state)))))
+          (is (= 1 @calls))
+          (with-redefs [tx/transact! (fn [& _]
+                                      (swap! submissions inc)
+                                      {:commit/status :committed})]
+            (let [error (v966-error #(v970-submit pair context))]
+              (is (= expected (:error/kind (ex-data error))))
+              (is (= #{:error/type :error/kind} (set (keys (ex-data error)))))))
+          (is (zero? @submissions) "Conflicting creates never submit")
+          (is (= 2 @calls)))))))
+
+(deftest v976-create-absence-declaration-is-strict-and-bounded-test
+  (let [context (v976-context)
+        coverage (v976-coverage)
+        invalid [["empty" {}]
+                 ["nil" nil]
+                 ["not a map" [[:allocation :target-id]]]
+                 ["unqualified entity" {[:allocation :target-id] :resource}]
+                 ["string entity" {[:allocation :target-id] "fixture/resource"}]
+                 ["empty path" {[] :fixture/resource}]
+                 ["path not vector" {'(:allocation :target-id) :fixture/resource}]
+                 ["wrong root" {[:excluded :target-id] :fixture/resource}]
+                 ["object segment" {[:allocation (Object.)] :fixture/resource}]
+                 ["deep path" {(vec (cons :allocation (repeat 32 :field)))
+                                 :fixture/resource}]
+                 ["too many paths" (into {}
+                                          (for [n (range 257)]
+                                            [[:allocation n] :fixture/resource]))]]]
+    (doseq [[label declaration] invalid]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(v976-pair context
+                                 (assoc coverage :required-create-absences declaration)
+                                 (atom 0) v976-builder))))))
+    (is (= :invalid-context-coverage
+           (kind #(v976-pair context
+                             (dissoc coverage :modeled-values)
+                             (atom 0) v976-builder))))
+    (is (= :invalid-context-coverage
+           (kind #(v976-pair context
+                             (assoc coverage :unrecognized-assurance true)
+                             (atom 0) v976-builder))))))
+
+(deftest v976-prestate-absence-is-opt-in-and-state-dependent-test
+  (let [context (v976-context)
+        coverage (v976-coverage)
+        current (atom context)
+        calls (atom 0)
+        dynamic (shared-family/build-pair
+                 (assoc (v970-config v976-builder context coverage calls)
+                        :model-input!
+                        (fn [_ _ _]
+                          {:context @current :binding (v970-binding)})))
+        baseline (v976-state)
+        old (v976-pair context (dissoc coverage :required-create-absences)
+                       (atom 0) v976-builder)]
+    (is (map? (v976-prepare dynamic baseline)))
+    (is (= 1 @calls))
+    (reset! current (assoc-in context [:allocation :target-id] "other-target"))
+    (is (= :domain-construction-exception
+           (kind #(v976-prepare dynamic baseline)))
+        "A changed target cannot reuse the constructor's old create target")
+    (is (= 2 @calls))
+    ;; Production input comparison is a value correspondence check, not a
+    ;; proof that the physical database has no such document.
+    (is (= :production-context-differs-from-model-input
+           (kind #(v976-compare dynamic baseline context))))
+    (is (map? (v976-prepare old
+                            (assoc baseline v976-resource-key
+                                   (get-in (v970-plan [(get-in context [:eligibility :guard])])
+                                           [:commands 0 :model/after])))))
+    (is (= 2 @calls))))
