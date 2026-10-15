@@ -2666,3 +2666,230 @@
                            (assoc-in context [:other :nested :present?] false)
                            binding))))
     (is (zero? @calls))))
+
+
+;; v972 — A declared guard is checked against its acquired document snapshot
+;; on both the finite and production paths. This checks the authored relationship
+;; only; snapshot origin and the completeness of domain authorization remain
+;; independently assumed. All fixture entities are synthetic Gesso test data.
+
+(defn- v972-context
+  ([] (v972-context 4))
+  ([revision]
+   (assoc-in (v970-context (v970-guard revision))
+             [:eligibility :document]
+             (v970-eligibility revision))))
+
+(defn- v972-coverage []
+  (assoc (v970-coverage)
+         :required-guard-snapshots
+         {[:eligibility :guard]
+          {:document-path [:eligibility :document]
+           :entity-type :fixture/eligibility}}))
+
+(defn- v972-pair
+  ([modeled calls]
+   (v972-pair modeled (v972-coverage) calls))
+  ([modeled coverage calls]
+   (shared-family/build-pair
+    (v970-config (fn [ctx _]
+                   (v970-plan [(get-in ctx [:eligibility :guard])]))
+                 modeled coverage calls))))
+
+(deftest v972-guard-snapshot-binding-accepts-correct-finite-and-production-inputs-test
+  (let [context (v972-context)
+        calls (atom 0)
+        submissions (atom 0)
+        pair (v972-pair context calls)
+        planned (v970-prepare pair)]
+    (is (= [(get-in context [:eligibility :guard])]
+           (:guards planned)))
+    (is (= 1 @calls))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= 1 @submissions))
+    (is (= 2 @calls))
+    (let [report ((:compare-production-input! pair)
+                  {} "v970-actor" {:resource "v970-resource"}
+                  context (v970-binding))]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= 1 (:declared-semantic-guards-checked report)))
+      (is (= 1 (:declared-guard-snapshots-checked report)))
+      (is (= :caller-supplied-not-authenticated
+             (:guard-snapshot-origin report)))
+      (is (= :not-established (:application-certification report)))
+      (is (= 2 @calls) "Context comparison must not invoke the constructor"))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-guard-to-modeled-snapshot-correspondence))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :truthful-guard-snapshot-acquisition-and-identity))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :truth-of-acquired-document-snapshots))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :completeness-of-declared-guard-snapshot-bindings))))
+
+(deftest v972-missing-snapshots-fail-before-finite-and-production-construction-test
+  (let [good (v972-context)
+        missing (update good :eligibility dissoc :document)
+        calls (atom 0)
+        submissions (atom 0)
+        pair (v972-pair good calls)
+        missing-model-pair (v972-pair missing calls)]
+    (is (= :missing-required-guard-snapshot
+           (kind #(v970-prepare missing-model-pair))))
+    (is (zero? @calls) "A missing model observation cannot reach :construct!")
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :missing-required-guard-snapshot
+             (kind #(v970-submit pair missing)))))
+    (is (zero? @calls) "A missing production observation cannot construct")
+    (is (zero? @submissions) "No transaction may be submitted")
+    (is (= :missing-required-guard-snapshot
+           (kind #((:compare-production-input! pair)
+                   {} "v970-actor" {:resource "v970-resource"}
+                   missing (v970-binding)))))
+    (is (zero? @calls) "Pure comparison may not execute domain construction")))
+
+(deftest v972-mismatched-snapshots-fail-on-both-paths-test
+  (let [good (v972-context)
+        variants
+        [["wrong document identity"
+          (assoc-in good [:eligibility :document :xt/id] "other-document")]
+         ["wrong document revision"
+          (assoc-in good [:eligibility :document :fixture/revision] 999)]
+         ["wrong update timestamp"
+          (assoc-in good [:eligibility :document :fixture/updated-at]
+                    (.plusSeconds v970-time 10))]
+         ["missing compared field"
+          (update-in good [:eligibility :document]
+                     dissoc :fixture/revision)]
+         ["wrong guard entity type"
+          (assoc-in good [:eligibility :guard :model/entity-type]
+                    :fixture/unrelated)]
+         ["wrong guard expected identity"
+          (assoc-in good [:eligibility :guard :model/expected :model/id]
+                    "other-document")]
+         ["wrong guard expected revision"
+          (update-in good [:eligibility :guard :model/expected
+                           :model/checks]
+                     (fn [checks]
+                       (mapv (fn [[field value]]
+                               [field (if (= field :fixture/revision)
+                                        999 value)])
+                             checks)))]]
+        calls (atom 0)
+        submissions (atom 0)
+        production (v972-pair good calls)]
+    (doseq [[label bad] variants]
+      (testing label
+        (let [finite (v972-pair bad calls)
+              before @calls]
+          (is (= :required-guard-snapshot-mismatch
+                 (kind #(v970-prepare finite))))
+          (is (= before @calls)
+              "Finite validation must fail before :construct!"))
+        (let [before @calls]
+          (with-redefs [tx/transact! (fn [& _]
+                                       (swap! submissions inc)
+                                       {:commit/status :committed})]
+            (is (= :required-guard-snapshot-mismatch
+                   (kind #(v970-submit production bad)))))
+          (is (= before @calls)
+              "Production validation must fail before :construct!"))))
+    (is (zero? @submissions))))
+
+(deftest v972-snapshot-declarations-are-closed-and-bounded-test
+  (let [good (v972-context)
+        calls (atom 0)
+        coverage (v972-coverage)
+        config (v970-config (fn [ctx _]
+                              (v970-plan [(get-in ctx [:eligibility :guard])]))
+                            good coverage calls)
+        excessive (into {}
+                        (for [n (range 257)]
+                          [[:eligibility :guard n]
+                           {:document-path [:eligibility :document]
+                            :entity-type :fixture/eligibility}]))
+        invalid
+        [["empty descriptor map" {}]
+         ["nil descriptors" nil]
+         ["sequential descriptors" [[:eligibility :guard]]]
+         ["extra descriptor field"
+          {[:eligibility :guard]
+           {:document-path [:eligibility :document]
+            :entity-type :fixture/eligibility
+            :source :untrusted}}]
+         ["missing entity type"
+          {[:eligibility :guard]
+           {:document-path [:eligibility :document]}}]
+         ["non-keyword entity type"
+          {[:eligibility :guard]
+           {:document-path [:eligibility :document] :entity-type "eligibility"}}]
+         ["undeclared guard path"
+          {[:other :unknown]
+           {:document-path [:eligibility :document]
+            :entity-type :fixture/eligibility}}]
+         ["undeclared document root"
+          {[:eligibility :guard]
+           {:document-path [:unmodeled :document]
+            :entity-type :fixture/eligibility}}]
+         ["non-vector document path"
+          {[:eligibility :guard]
+           {:document-path '(:eligibility :document)
+            :entity-type :fixture/eligibility}}]
+         ["too deep document path"
+          {[:eligibility :guard]
+           {:document-path (vec (cons :eligibility (repeat 32 :nested)))
+            :entity-type :fixture/eligibility}}]
+         ["too many entries" excessive]]]
+    (doseq [[label descriptors] invalid]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(shared-family/build-pair
+                       (assoc config :context-coverage
+                              (assoc coverage :required-guard-snapshots
+                                     descriptors))))))))
+    (is (zero? @calls) "Invalid declarations may not construct operations")))
+
+(deftest v972-guard-snapshot-coverage-is-opt-in-and-not-a-truth-proof-test
+  (let [good (v972-context)
+        calls (atom 0)
+        without-snapshot-contract (v972-pair good (v970-coverage) calls)
+        differing (assoc-in good [:eligibility :document :fixture/revision] 9)
+        fully-checked (v972-pair good calls)]
+    ;; Legacy guards still protect the plan, but there is no binding to the
+    ;; supplied acquisition document unless explicitly declared.
+    (is (map? (v970-prepare without-snapshot-contract)))
+    (is (= 1 @calls))
+    (is (= :required-guard-snapshot-mismatch
+           (kind #(v970-prepare
+                   (v972-pair differing calls)))))
+    (is (= 1 @calls))
+    ;; Two internally consistent, caller-supplied values are not evidence that
+    ;; they came from an actual database observation.
+    (let [fabricated (v972-context 9)
+          candidate (v972-pair fabricated calls)]
+      (is (map? (v970-prepare candidate)))
+      (is (= 2 @calls))
+      (let [report ((:compare-production-input! candidate)
+                    {} "v970-actor" {:resource "v970-resource"}
+                    fabricated (v970-binding))]
+        (is (= :caller-supplied-not-authenticated
+               (:guard-snapshot-origin report)))
+        (is (= :not-established (:application-certification report)))))
+    (is (= :required-guard-snapshot-mismatch
+           (kind #(v970-submit fully-checked differing))))
+    ;; A version guard compares its declared CAS fields, not every document
+    ;; attribute. In this fixture :fixture/created-at is not a compare field.
+    ;; The unchanged guard therefore still matches that supplied document.
+    (let [uncompared (assoc-in good
+                               [:eligibility :document :fixture/created-at]
+                               (.plusSeconds v970-time 10))
+          not-all-document-fields-protected (v972-pair uncompared calls)]
+      (is (map? (v970-prepare not-all-document-fields-protected)))
+      (is (contains? (get-in not-all-document-fields-protected
+                              [:scope :not-established])
+                     :commit-time-enforcement-of-undeclared-semantic-facts)))))
