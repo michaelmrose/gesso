@@ -55,6 +55,12 @@
    snapshot field or an unobserved field introduced after acquisition. This is
    a guarded absence of ONE document identity, not a proof of query absence,
    uniqueness across arbitrary fields, or actual production read provenance.
+   Optional :required-production-snapshot-reads uses a separate trusted
+   :read-current-document! callback at the production construction boundary
+   to re-read selected guarded documents and compare their COMPLETE values
+   with the supplied snapshots before :construct! executes. It does not
+   independently validate the callback's DB origin or consistency, and the
+   pure model-input comparison never performs that live read.
    These compare finite-model objects; they do NOT authenticate production
    acquisition. Only explicitly declared dependencies are checked; it does
    not infer missing policy, prove acquisition truth, or authenticate XTDB.
@@ -90,6 +96,8 @@
 (def create-absences-coverage-key :required-create-absences)
 (def protected-snapshot-fields-coverage-key :required-protected-snapshot-fields)
 (def whole-snapshot-guards-coverage-key :required-whole-snapshot-guards)
+(def production-snapshot-reads-coverage-key :required-production-snapshot-reads)
+(def production-document-reader-key :read-current-document!)
 (def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
@@ -124,7 +132,8 @@
               :optional-declared-create-absence-in-selected-finite-prestate
               :optional-declared-create-absence-to-transaction-correspondence
               :optional-declared-snapshot-field-to-commit-guard-correspondence
-              :optional-observed-whole-snapshot-to-commit-guard-correspondence}
+              :optional-observed-whole-snapshot-to-commit-guard-correspondence
+              :optional-trusted-production-document-reread-correspondence}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -138,7 +147,9 @@
               :truthful-selection-of-the-finite-prestate
               :complete-and-truthful-declaration-of-create-absence-dependencies
               :truthful-declaration-of-policy-relevant-snapshot-fields
-              :truthful-completeness-of-each-acquired-document-snapshot}
+              :truthful-completeness-of-each-acquired-document-snapshot
+              :truthful-trusted-current-document-reader
+              :correct-database-snapshot-isolation-for-rereads}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -150,6 +161,8 @@
                       :commit-time-enforcement-of-declared-semantic-facts
                       :commit-time-enforcement-of-undeclared-semantic-facts
                       :real-xtdb-enforcement-of-declared-guards
+                      :authentication-of-trusted-production-document-reader
+                      :transactionally-consistent-production-rereads
                       :independent-authentication-of-production-input-values
                       :truth-of-acquired-document-snapshots
                       :independent-authentication-of-selected-finite-prestate
@@ -370,6 +383,54 @@
                                   compared))
         (fail! :whole-snapshot-field-not-commit-guarded)))))
 
+;; Unlike model input comparison, this optional production-only path invokes
+;; a separately supplied trusted database reader immediately before domain
+;; construction. The reader receives the ORIGINAL server context and exact
+;; [entity-type id], not the supplied snapshot or guard. Comparing both maps
+;; prevents a self-consistent but stale/fabricated captured snapshot from
+;; reaching :construct! when the reader returns a different current document.
+;; The reader itself is trusted application integration, NOT a verified XTDB
+;; primitive or an atomic read/commit snapshot guarantee. The version guards
+;; remain essential at commit time, whose physical semantics are unproved.
+(defn- require-production-snapshot-reads!
+  [coverage read-current-document! context]
+  (doseq [guard-path (:required-production-snapshot-reads coverage)]
+    (let [{:keys [document-path entity-type]}
+          (get (:required-guard-snapshots coverage) guard-path)
+          snapshot (get-in context document-path)
+          id (:xt/id snapshot)
+          current (try
+                    (read-current-document! context entity-type id)
+                    (catch Exception _
+                      (fail! :production-current-document-read-failed)))]
+      ;; Do not execute an arbitrary external equals method on the returned
+      ;; value. Closed data and exact identity/equality are required first.
+      (when-not (and (closed-data? current)
+                     (map? current)
+                     (= id (:xt/id current))
+                     (= snapshot current))
+        (fail! :production-current-document-snapshot-mismatch)))))
+
+(defn- checked-production-constructor [coverage read-current-document! construct!]
+  (if-not (seq (:required-production-snapshot-reads coverage))
+    construct!
+    (fn [context binding]
+      (when-not (map? context)
+        (fail! :invalid-production-context))
+      (let [modeled (select-keys context (:modeled coverage))]
+        (require-modeled-coverage! coverage modeled)
+        (require-closed-modeled-values! coverage modeled))
+      ;; Admit structure and guard coverage before invoking an effectful
+      ;; reader, so malformed input cannot trigger an avoidable DB call.
+      (require-semantic-paths! coverage context
+                               :missing-required-production-semantic-input)
+      (require-guard-paths! coverage context)
+      (require-guard-snapshots! coverage context)
+      (require-whole-snapshot-guards! coverage context)
+      (require-production-snapshot-reads!
+       coverage read-current-document! context)
+      (construct! context binding))))
+
 (defn- require-model-state-snapshots! [coverage state context]
   ;; The model-input! callback is application-owned. Without this optional
   ;; independent check it could fabricate the acquired snapshot while the
@@ -503,7 +564,8 @@
                                              model-state-snapshots-coverage-key
                                              create-absences-coverage-key
                                              protected-snapshot-fields-coverage-key
-                                             whole-snapshot-guards-coverage-key])]
+                                             whole-snapshot-guards-coverage-key
+                                             production-snapshot-reads-coverage-key])]
                    (or (= context-coverage-keys declared-keys)
                        (= closed-context-coverage-keys declared-keys)
                        (= required-path-coverage-keys declared-keys)
@@ -608,7 +670,15 @@
                           (<= (count (:required-whole-snapshot-guards coverage))
                               maximum-required-paths)
                           (every? #(contains? (:required-guard-snapshots coverage) %)
-                                  (:required-whole-snapshot-guards coverage)))))
+                                  (:required-whole-snapshot-guards coverage))))
+                 (or (not (contains? coverage production-snapshot-reads-coverage-key))
+                     (and (= closed-model-value-mode (:modeled-values coverage))
+                          (set? (:required-production-snapshot-reads coverage))
+                          (seq (:required-production-snapshot-reads coverage))
+                          (<= (count (:required-production-snapshot-reads coverage))
+                              maximum-required-paths)
+                          (every? #(contains? (:required-whole-snapshot-guards coverage) %)
+                                  (:required-production-snapshot-reads coverage)))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -721,6 +791,9 @@
      (reduce + 0 (map count (vals (:required-protected-snapshot-fields coverage))))
      :declared-whole-snapshot-guards-checked
      (count (:required-whole-snapshot-guards coverage))
+     :declared-production-snapshot-rereads-configured
+     (count (:required-production-snapshot-reads coverage))
+     :live-production-rereads-in-this-comparison :not-performed
      :whole-snapshot-field-inventory
      (if (seq (:required-whole-snapshot-guards coverage))
        :checked-observed-fields-only
@@ -854,6 +927,18 @@
    manually enumerating observed fields, but not missing acquisition fields,
    unseen concurrent field additions, unmodeled dependencies, or physical
    XTDB provenance. The declaration is opt-in and capped at 256 guards.
+   Add :required-production-snapshot-reads #{[:eligibility :guard]} only for
+   paths already in :required-whole-snapshot-guards, and supply a trusted
+   :read-current-document! callback as an ADDITIONAL top-level configuration
+   key. The callback receives [production-context entity-type document-id]
+   and must independently fetch the actual current complete document from
+   the intended DB. The production wrapper calls it before domain
+   construction, compares the complete reread result with the context's
+   declared snapshot, and rejects omissions, drift, invalid values or reader
+   exceptions without leaking documents. The finite constructor never calls
+   the reader; pure :compare-production-input! also never calls it. That
+   function is a trusted integration callback, NOT an authenticated XTDB
+   primitive or proof of isolation between reading and committing.
    Add :required-create-absences {[:allocation :target-id] :fixture/lease}
    to require that the target ID is absent in each selected finite prestate
    AND a canonical create for precisely [:fixture/lease target-id] appears in
@@ -872,21 +957,33 @@
   (when-not (and (map? configuration)
                  (or (= configuration-keys (set (keys configuration)))
                      (= (conj configuration-keys :context-coverage)
+                        (set (keys configuration)))
+                     (= (into configuration-keys
+                              [:context-coverage production-document-reader-key])
                         (set (keys configuration))))
                  (qualified-keyword? (:operation configuration))
                  (fn? (:enabled? configuration))
                  (fn? (:model-input! configuration))
                  (fn? (:construct! configuration)))
     (fail! :invalid-configuration))
+  (when-not (and (= (contains? configuration production-document-reader-key)
+                    (contains? (:context-coverage configuration)
+                               production-snapshot-reads-coverage-key))
+                 (or (not (contains? configuration production-document-reader-key))
+                     (fn? (:read-current-document! configuration))))
+    (fail! :invalid-configuration))
   (let [coverage (when (contains? configuration :context-coverage)
                    (require-context-coverage! (:context-coverage configuration)))
         {:keys [operation principals arguments enabled? model-input! construct!]}
         configuration
         guarded-construct! (checked-domain-constructor coverage construct!)
+        production-construct!
+        (checked-production-constructor
+         coverage (:read-current-document! configuration) guarded-construct!)
         production (try
                      (resolved/build-operation
                       (assoc (select-keys configuration resolved/configuration-keys)
-                             :construct! guarded-construct!))
+                             :construct! production-construct!))
                      (catch Exception _ (fail! :invalid-production-operation)))
         operation-family {:id operation
                           :principals principals
