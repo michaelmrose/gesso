@@ -1,15 +1,14 @@
 (ns gesso.live.optimistic.resolution-assurance-test
-  "Permanent v814 diagnostic regressions for the v813 Live execution-assurance
-   runner. They exercise genuine registered adapter identity, actual Gesso
-   Live settlement, real embedded XTDB incorporation and independently checked
-   persisted state, replay, conflict, and post-commit diagnostic failures.
+  "Permanent executor-assurance regressions, including v943 construction-input
+   capture at the actual production call site. Exercises registered adapter
+   identity, genuine Gesso Live settlement, embedded XTDB incorporation, replay,
+   conflict, post-commit diagnostics, private-context redaction and fail-closed
+   missing, duplicated and inconsistent construction-input observations.
 
-   The runner issues only bounded, process-local evidence for the executions
-   observed here. Neither this suite nor the handle registry certifies the
-   domain's authorization rules, snapshot consistency, universal refinement,
-   or arbitrary downstream application code."
+   These bounded process-local witnesses do not certify authorization policy,
+   snapshot consistency, implementation refinement, or downstream applications."
   (:require
-   [clojure.test :refer [deftest is use-fixtures]]
+   [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.choreo.identity :as identity]
    [gesso.live.core :as live]
    [gesso.live.optimistic.protocol :as protocol]
@@ -406,3 +405,152 @@
                    :trusted-domain-construct-and-project-callbacks))
     (is (contains? (get-in report [:scope :not-established])
                    :domain-authorization-or-invariant-correctness))))
+
+;; v944: permanent v943 executor-bound construction-input regressions.
+(deftest actual-sensitive-construction-input-is-executor-bound-test
+  (let [f (fixture!)
+        secret "v943-secret-input-witness"
+        context (assoc (:ctx (invocation f))
+                       :private-policy secret :nullable-restriction nil)
+        invocation (assoc (invocation f) :ctx context)
+        {:keys [evidence]} (assurance/run-and-check! invocation)
+        report (assurance/inspect-evidence evidence)
+        witness (assurance/inspect-construction-input-for-executor
+                 evidence (:executor f))
+        other (fixture!)]
+    (is (= :bounded-execution-correspondence (:status report)))
+    (is (= :captured-and-correlated
+           (get-in report [:construction-input :status])))
+    (is (= :withheld-from-report
+           (get-in report [:construction-input :context-values])))
+    (is (not (.contains (pr-str report) secret)))
+    (is (= :executor-bound-construction-input (:status witness)))
+    (is (= report
+           (assurance/inspect-evidence-for-executor evidence (:executor f))))
+    (is (= :not-established
+           (get-in report [:construction-input :model-input-coverage])))
+    (is (contains? (get-in report [:scope :not-established])
+                   :complete-model-input-or-policy-dependencies))
+    (is (not (contains? report :context)))
+    (is (not (contains? report :construction-input-witness)))
+    (is (not (.contains (pr-str report) ":private-policy")))
+    (is (= context (:context witness)))
+    (is (contains? (:context witness) :nullable-restriction))
+    (is (nil? (:nullable-restriction (:context witness))))
+    (is (= (:binding report) (:binding witness)))
+    (is (= :trusted-local-call-site-capture (:input-origin witness)))
+    (is (= :not-established (:application-certification witness)))
+    (is (nil? (assurance/inspect-evidence-for-executor
+               evidence (:executor other))))
+    (is (nil? (assurance/inspect-construction-input-for-executor
+               evidence (:executor other))))
+    (is (nil? (assurance/inspect-construction-input-for-executor
+               nil (:executor f))))
+    (is (nil? (assurance/inspect-construction-input-for-executor
+               (Object.) (:executor f))))
+    (is (nil? (assurance/inspect-construction-input-for-executor
+               report (:executor f))))
+    (is (nil? (assurance/inspect-construction-input-for-executor
+               (assoc report :status :bounded-execution-correspondence)
+               (:executor f))))
+    (is (nil? (assurance/inspect-construction-input-for-executor
+               evidence (with-meta (fn [_] nil) (meta (:executor f))))))))
+
+(deftest preexisting-construction-input-observer-is-rejected-test
+  (let [f (fixture!)
+        request (assoc-in (invocation f)
+                          [:ctx model-resolved/construction-input-context-key]
+                          (fn [_] nil))]
+    (is (= :invalid-observation-context
+           (kind #(assurance/run-and-check! request))))
+    (is (zero? (:construct @(:counts f))))
+    (is (nil? (stored-record f)))
+    (is (= (:before f) (row :requests (get-in f [:before :xt/id]))))))
+
+(deftest construction-input-events-fail-closed-test
+  (let [probe (var-get (ns-resolve 'gesso.live.optimistic.resolution-assurance
+                                    'construction-input-witness!))
+        ctx {:context-private "do-not-disclose" :nullable nil}
+        binding (resolution/require-binding
+                 {:command-id (identity/command-id "v943-test-command")
+                  :operation operation-id
+                  :principal trusted-principal
+                  :arguments {:request-id "v943-target"}})
+        instrumented (assoc ctx
+                            model-resolved/construction-input-context-key (fn [_] nil)
+                            model-resolved/observation-context-key (fn [_] nil))
+        event {:scope model-resolved/construction-input-observation-scope
+               :phase :construction-input :operation operation-id
+               :context instrumented :binding binding}
+        invalids [["no event" [] :construction-input-incomplete]
+                  ["duplicated event" [event event] :construction-input-incomplete]
+                  ["wrong command" [(assoc event :binding
+                                             (assoc binding :command-id
+                                                    (identity/command-id "v943-other")))]
+                   :construction-input-mismatch]
+                  ["wrong operation" [(assoc event :operation :request/cancel)]
+                   :construction-input-mismatch]
+                  ["wrong principal" [(assoc event :binding
+                                                (assoc binding :principal
+                                                       (identity/principal "impostor")))]
+                   :construction-input-mismatch]
+                  ["wrong arguments" [(assoc event :binding
+                                                (assoc binding :arguments
+                                                       {:request-id "other"}))]
+                   :construction-input-mismatch]
+                  ["copied context" [(assoc event :context (into {} instrumented))]
+                   :construction-input-mismatch]
+                  ["extra field" [(assoc event :secret "should-not-leak")]
+                   :construction-input-mismatch]]]
+    (is (= {:context ctx :binding binding}
+           (probe (atom [event]) instrumented ctx binding)))
+    (is (not (identical? instrumented (into {} instrumented))))
+    (doseq [[label observations expected-kind] invalids]
+      (testing label
+        (let [err (thrown #(probe (atom observations) instrumented ctx binding))]
+          (is (= expected-kind (get-in (ex-data err) [:error/kind])))
+          (is (not (.contains (pr-str (ex-data err)) "do-not-disclose"))))))))
+
+(deftest committed-transaction-with-incomplete-construction-input-has-no-handle-test
+  (doseq [mode [:missing :duplicate]]
+    (testing (name mode)
+      (let [f (fixture!)
+            original-model (:model f)
+            wrapped-model
+            (with-meta
+              (fn [ctx input]
+                (case mode
+                  :missing
+                  (original-model
+                   (dissoc ctx model-resolved/construction-input-context-key)
+                   input)
+                  :duplicate
+                  (do
+                    ((get ctx model-resolved/construction-input-context-key)
+                     {:scope model-resolved/construction-input-observation-scope
+                      :phase :construction-input
+                      :operation operation-id
+                      :context ctx
+                      :binding (:binding input)})
+                    (original-model ctx input))))
+              (meta original-model))
+            executor (adapter/build-executor
+                      {:operation operation-id
+                       :resolved-operation wrapped-model
+                       :submission-mode! (constantly :submit)
+                       :project! (fn [_ _]
+                                   {:resolution :confirmed
+                                    :authoritative
+                                    (protocol/authoritative
+                                     {:presence :present
+                                      :basis {:tx-id 2 :system-time now}
+                                      :projection {:request/owner
+                                                   (:owner (row :requests
+                                                                (get-in f [:before :xt/id])))}})
+                                    :outcome :request/claimed})})
+            request (assoc (invocation f) :server (server-with executor))]
+        (is (= :construction-input-incomplete
+               (kind #(assurance/run-and-check! request))))
+        (is (= (:claimed f) (row :requests (get-in f [:before :xt/id]))))
+        (is (map? (stored-record f)))
+        (is (= 1 (:construct @(:counts f))))))))
