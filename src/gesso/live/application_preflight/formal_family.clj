@@ -22,6 +22,13 @@
    the bridge cannot prove that arbitrary Clojure functions are identical.
    It does not establish finite-domain completeness, XTDB refinement, a
    complete reachable state graph, an actual TLC verdict, or certification.
+   :compare-construction-input! additionally checks the model-input slice
+   against the input values captured at the SAME executor's actual construct!
+   call site. It refuses unmatched frozen plans and an independently substituted
+   paired family. This is conditional field equality, not proof that all
+   authorization dependencies were modeled or that the paired functions came
+   from a trusted construction registry.
+
    The unredacted :subject is LOCAL ONLY; the comparator's return value is
    redacted and must not grant authorization or be sent to the browser."
   (:require
@@ -31,6 +38,7 @@
    [gesso.model.command :as command]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.formal-family :as formal-family]
+   [gesso.model.resolved-family :as paired]
    [gesso.model.tx-model :as tx-model]))
 
 (def assurance-scope
@@ -43,12 +51,16 @@
               :exact-opaque-executor-evidence-handle
               :observed-choice-matches-finite-declaration
               :observed-domain-plan-matches-frozen-formal-plan
-              :selected-root-and-captured-pre-poststate-value-comparison}
+              :selected-root-and-captured-pre-poststate-value-comparison
+              :executor-bound-construction-input-provenance
+              :modeled-field-equality-against-real-construction-input
+              :frozen-shared-family-identity-before-input-comparison}
    :assumed #{:correct-current-application-assembly
               :pure-deterministic-truthful-authored-family-callbacks
               :truthful-complete-selected-prestate-and-finite-choice-domains
               :trusted-live-xtdb-observation-and-executor-registries
-              :serialized-atomic-reference-semantics}
+              :serialized-atomic-reference-semantics
+              :truthful-shared-construction-pair-and-model-input-callback}
    :not-established #{:identity-of-authored-callbacks-and-production-executor-logic
                       :completeness-of-domain-state-principal-or-argument-universe
                       :unbounded-invariant-preservation
@@ -57,6 +69,8 @@
                       :universal-server-refinement
                       :authorization-or-business-policy-correctness
                       :browser-server-correspondence
+                      :completeness-of-modeled-construction-input-fields
+                      :source-identity-of-shared-construction-pair
                       :recife-tlc-verdict
                       :application-certification}})
 
@@ -99,8 +113,9 @@
         executor (get-in registered [operation :execute!])]
     (when-not (and (application/valid? report) (fn? executor))
       (fail! :registered-executor-unavailable))
-    (or (execution/inspect-evidence-for-executor handle executor)
-        (fail! :unrecognized-executor-bound-evidence))))
+    (if-let [result (execution/inspect-evidence-for-executor handle executor)]
+      (assoc result :executor executor)
+      (fail! :unrecognized-executor-bound-evidence))))
 
 (defn bound-prepared-competition
   "Build a selected-prestate finite TLC subject tied to the current registered
@@ -120,6 +135,15 @@
    a :counterexample, not a successful proof. False or stale evidence fails
    with a typed exception through the preexisting exact-executor boundary.
 
+   :compare-construction-input! accepts [paired-family opaque-handle].
+   The pair must be the same family map object frozen at admission and must
+   expose the shared-construction comparison. The opaque handle must pass
+   the frozen plan, selected-root and exact-current-executor checks first.
+   Only then is the original, sensitive call-site witness obtained from the
+   process-local executor registry and compared against modeled context fields
+   and semantic command binding. The result contains NO private values.
+   Omitted production context fields are counted, NOT proved irrelevant.
+
    The caller must keep the returned subject private. Neither a checked
    finite model nor a matched real execution alone certifies an application."
   [assembly initial-state families rules options]
@@ -127,6 +151,7 @@
                   assembly initial-state families rules options)
         {:keys [subject choices choice-count]}
         (formal-family/prepared-competition initial-state families)
+        family-by-id (into {} (map (juxt :id identity)) families)
         by-instance (into {}
                           (map-indexed (fn [idx choice]
                                          [(:instance-id choice)
@@ -135,48 +160,118 @@
                                        choices))]
     (when-not (= (count by-instance) choice-count (count (:plans subject)))
       (fail! :incomplete-prepared-instance-index))
-    {:kind :gesso.live.application-preflight.formal-family/bound-prepared-competition-v1
-     :scope assurance-scope
-     :choice-count choice-count
-     :subject subject
-     :formal-check :not-run
-     :application-certification :not-established
-     :compare-execution!
-     (fn [handle]
-       (let [comparison (compare! handle)
-             instance (:family-instance-id comparison)
-             admitted (get by-instance instance)
-             base {:scope assurance-scope
-                   :choice-instance-id instance
-                   :operation (:operation comparison)
-                   :selected-prestate-only? true
-                   :tla-check :not-run
-                   :application-certification :not-established}]
-         (when-not admitted
-           (fail! :execution-outside-frozen-formal-choices))
-         (if-not (= :matched (:status comparison))
-           (assoc base :status :counterexample
-                  :reason :declared-family-does-not-match-observed-execution)
-           (let [record (current-execution! assembly (:operation comparison) handle)
-                 observed (observed-domain-plan (:observation record))
-                 frozen (:plan admitted)
-                 root? (= :matches-captured-pretransaction-state
-                          (get-in comparison [:declared-root-state-comparison :status]))
-                 after? (= :matches-captured-posttransaction-dependencies
-                           (get-in comparison [:declared-root-poststate-comparison :status]))]
-             (cond
-               (not= observed frozen)
-               (assoc base :status :counterexample
-                      :reason :observed-plan-differs-from-frozen-formal-subject)
+    (letfn [(compare-execution! [handle]
+              (let [comparison (compare! handle)
+                    instance (:family-instance-id comparison)
+                    admitted (get by-instance instance)
+                    base {:scope assurance-scope
+                          :choice-instance-id instance
+                          :operation (:operation comparison)
+                          :selected-prestate-only? true
+                          :tla-check :not-run
+                          :application-certification :not-established}]
+                (when-not admitted
+                  (fail! :execution-outside-frozen-formal-choices))
+                (if-not (= :matched (:status comparison))
+                  (assoc base :status :counterexample
+                         :reason :declared-family-does-not-match-observed-execution)
+                  (let [record (current-execution! assembly (:operation comparison) handle)
+                        observed (observed-domain-plan (:observation record))
+                        frozen (:plan admitted)
+                        root? (= :matches-captured-pretransaction-state
+                                 (get-in comparison [:declared-root-state-comparison :status]))
+                        after? (= :matches-captured-posttransaction-dependencies
+                                  (get-in comparison [:declared-root-poststate-comparison :status]))]
+                    (cond
+                      (not= observed frozen)
+                      (assoc base :status :counterexample
+                             :reason :observed-plan-differs-from-frozen-formal-subject)
 
-               (not root?)
-               (assoc base :status :counterexample
-                      :reason :selected-root-differs-from-observed-prestate)
+                      (not root?)
+                      (assoc base :status :counterexample
+                             :reason :selected-root-differs-from-observed-prestate)
 
-               (not after?)
-               (assoc base :status :counterexample
-                      :reason :selected-root-step-differs-from-observed-poststate)
+                      (not after?)
+                      (assoc base :status :counterexample
+                             :reason :selected-root-step-differs-from-observed-poststate)
 
-               :else
-               (assoc base :status :matched-selected-root-execution
-                      :reason :registered-executor-and-frozen-plan-correspondence))))))}))
+                      :else
+                      (assoc base :status :matched-selected-root-execution
+                             :reason :registered-executor-and-frozen-plan-correspondence))))))
+            (compare-construction-input! [pair handle]
+              (let [comparison (compare-execution! handle)
+                    operation (:operation comparison)
+                    admitted (get by-instance (:choice-instance-id comparison))
+                    choice (:choice admitted)
+                    original-family (get family-by-id (:family-id choice))]
+                (when-not (and (map? pair)
+                               (= :gesso.model.resolved-family/shared-construction-v1
+                                  (:kind pair))
+                               (= paired/assurance-scope (:scope pair))
+                               (= operation (:operation pair))
+                               (identical? original-family (:family pair))
+                               (fn? (:compare-production-input! pair)))
+                  (fail! :unrecognized-frozen-shared-family))
+                (if-not (= :matched-selected-root-execution (:status comparison))
+                  {:status :counterexample
+                   :reason :frozen-execution-correspondence-not-established
+                   :operation operation
+                   :scope assurance-scope
+                   :input-origin :not-inspected
+                   :application-certification :not-established}
+                  (let [record (current-execution! assembly operation handle)
+                        ;; The identity check is made against the current
+                        ;; registered executor, never a caller-supplied adapter.
+                        executor (:executor record)
+                        _ (when-not (fn? executor)
+                            (fail! :registered-executor-unavailable))
+                        witness (execution/inspect-construction-input-for-executor
+                                 handle executor)]
+                    (when-not (and (= :executor-bound-construction-input
+                                      (:status witness))
+                                   (= :trusted-local-call-site-capture
+                                      (:input-origin witness))
+                                   (map? (:context witness))
+                                   (map? (:binding witness)))
+                      (fail! :unavailable-executor-bound-construction-input))
+                    (let [result (try
+                                   ((:compare-production-input! pair)
+                                    initial-state (:principal choice)
+                                    (:arguments choice)
+                                    (:context witness) (:binding witness))
+                                   (catch Exception e
+                                     ;; Do not leak callback exception details,
+                                     ;; private command bindings or context.
+                                     (if (= :gesso.model.resolved-family/invalid-resolved-family
+                                            (:error/type (ex-data e)))
+                                       nil
+                                       (fail! :construction-input-comparison-failed))))]
+                      (if (= :matched-declared-input-fields (:status result))
+                        {:status :matched-executor-bound-declared-input-fields
+                         :operation operation
+                         :choice-instance-id (:instance-id choice)
+                         :scope assurance-scope
+                         :input-origin :exact-registered-executor-call-site
+                         :context-fields-compared (:context-fields-compared result)
+                         :unmodeled-production-context-fields
+                         (:unmodeled-production-context-fields result)
+                         :command-id-comparison (:command-id-comparison result)
+                         :model-input-coverage :not-established
+                         :tla-check :not-run
+                         :application-certification :not-established}
+                        {:status :counterexample
+                         :reason :modeled-input-differs-from-executor-bound-construction-input
+                         :operation operation
+                         :scope assurance-scope
+                         :input-origin :exact-registered-executor-call-site
+                         :model-input-coverage :not-established
+                         :tla-check :not-run
+                         :application-certification :not-established}))))))]
+      {:kind :gesso.live.application-preflight.formal-family/bound-prepared-competition-v1
+       :scope assurance-scope
+       :choice-count choice-count
+       :subject subject
+       :formal-check :not-run
+       :application-certification :not-established
+       :compare-execution! compare-execution!
+       :compare-construction-input! compare-construction-input!})))
