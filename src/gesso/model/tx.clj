@@ -148,11 +148,18 @@
 ;; =============================================================================
 
 (defn- table-symbol
+  "Convert a model entity type to the same XTDB table identity used by
+   :put-docs. A qualified keyword addresses its namespace's SQL schema;
+   discarding that namespace would make ASSERT check a different table from
+   the canonical write. Unqualified keywords retain the default public-schema
+   behavior for existing application plans."
   [entity-type]
-  (symbol
-   (name
-    (require-entity-type!
-     entity-type))))
+  (let [entity-type
+        (require-entity-type!
+         entity-type)]
+    (if-let [schema (namespace entity-type)]
+      (symbol schema (name entity-type))
+      (symbol (name entity-type)))))
 
 (defn- count-subquery
   [entity-type where]
