@@ -10,11 +10,18 @@
    observed physical transaction against the bounded serial reference model
    using independent XTDB reads.
 
+   The same session also captures the actual context and canonical binding at
+   the resolved-operation construction call site. Only a complete, exact-match
+   construction event paired with the definitive physical attempt can yield
+   an evidence handle. Sensitive inputs stay private to the handle registry;
+   the ordinary explanatory report never contains them.
+
    Only a successful, definitive single-attempt diagnostic run yields an opaque
    process-local evidence handle. inspect-evidence accepts only that exact
    handle, not an application-supplied report or copied function metadata.
    inspect-evidence-for-executor additionally requires the SAME executor object
-   that actually ran. Application reporting can use that check against the
+   that actually ran. inspect-construction-input-for-executor requires that same
+   identity and exposes sensitive original inputs only to a trusted local caller. Application reporting can use that check against the
    executor recovered from a freshly checked application assembly; reports
    must never infer this identity link from a matching operation keyword.
    These functions return explanatory maps, not transferable certificates.
@@ -52,15 +59,21 @@
               :independent-bounded-xtdb-state-correspondence
               :no-evidence-on-unknown-outcome-or-replay
               :opaque-process-local-evidence-handle
-              :exact-executed-adapter-identity-bound-to-evidence-handle}
+              :exact-executed-adapter-identity-bound-to-evidence-handle
+              :construction-input-captured-at-real-call-site
+              :construction-input-correlated-with-definitive-attempt
+              :sensitive-input-excluded-from-detached-report}
    :assumed #{:trusted-server-and-request-context
               :trusted-v798-runtime-construction-registry
+              :actual-v942-construction-input-hook
               :actual-v809-transaction-event-hook
               :truthful-xtdb-node-and-queries
               :no-unrelated-writes-during-observation
               :consistent-unpinned-xtdb-reads
               :trusted-domain-construct-and-project-callbacks}
-   :not-established #{:authenticated-xtdb-transaction-history
+   :not-established #{:independently-authenticated-construction-input-values
+                      :complete-model-input-or-policy-dependencies
+                      :authenticated-xtdb-transaction-history
                       :durable-or-portable-certificate
                       :domain-authorization-or-invariant-correctness
                       :complete-business-guard-dependencies
@@ -76,7 +89,7 @@
                    :error/kind kind
                    :error/details details})))
 
-(defn- record-evidence! [executor operation result]
+(defn- record-evidence! [executor operation result construction-input]
   ;; Weak references to both the handle and executor avoid retaining hot-reload
   ;; generations. The executor is NOT recovered from function metadata: it is
   ;; the exact object invoked through the real Live boundary.
@@ -86,7 +99,10 @@
             {:identity (WeakReference. handle)
              :executor-reference (WeakReference. executor)
              :operation operation
-             :result result}))
+             :result result
+             ;; SENSITIVE: never include this witness inside :result, because
+             ;; inspect-evidence deliberately returns a detachable report.
+             :construction-input construction-input}))
     handle))
 
 (defn- evidence-entry [handle]
@@ -130,14 +146,70 @@
                    (= current-construction (:adapter-construction result)))
           result)))))
 
+(defn inspect-construction-input-for-executor
+  "Return the SENSITIVE construction-input witness only for a current live
+   registry handle and its EXACT executed adapter object. The caller must
+   separately establish that the executor is still registered in the current
+   checked application assembly. No detached report, copied metadata or other
+   executor can retrieve the inputs.
+
+   Returns {:status :executor-bound-construction-input
+            :context original-trusted-server-context
+            :binding canonical-command-binding
+            :input-origin :trusted-local-call-site-capture} or nil.
+   The context includes original application-private fields and the XTDB node,
+   but excludes both temporary diagnostic hooks. Do not serialize, log,
+   expose to the browser, or treat these values as an independently
+   authenticated statement about all production authorization dependencies.
+   This is a process-local witness for optional model-input comparison, not a
+   formal proof or transferable certificate."
+  [handle executor]
+  (when (inspect-evidence-for-executor handle executor)
+    (when-let [{:keys [context binding]} (:construction-input (evidence-entry handle))]
+      {:status :executor-bound-construction-input
+       :context context
+       :binding binding
+       :input-origin :trusted-local-call-site-capture
+       :application-certification :not-established})))
+
+(defn- construction-input-witness!
+  [captured instrumented-context original-context binding]
+  (let [observations @captured]
+    ;; A real initial construction emits exactly one event. No event means
+    ;; replay/reconciliation or a failed observer, not evidence of equality.
+    (when-not (= 1 (count observations))
+      (fail! :construction-input-incomplete
+             "Construction input evidence is absent or ambiguous." {}))
+    (let [event (first observations)]
+      (when-not (and (map? event)
+                     (= #{:scope :phase :operation :context :binding}
+                        (set (keys event)))
+                     (= resolved/construction-input-observation-scope
+                        (:scope event))
+                     (= :construction-input (:phase event))
+                     (= (:operation binding) (:operation event))
+                     (= binding (:binding event))
+                     ;; A matching *copy* of a context cannot silently claim
+                     ;; to be the actual map passed into construct!.
+                     (identical? instrumented-context (:context event))
+                     (= original-context
+                        (dissoc (:context event)
+                                resolved/observation-context-key
+                                resolved/construction-input-context-key)))
+        (fail! :construction-input-mismatch
+               "Construction input evidence does not match the trusted Live invocation."
+               {}))
+      {:context original-context :binding binding})))
+
 (defn run-and-check!
   "Run one fresh trusted Live command and check its definitive physical attempt.
 
    Request: {:server prepared-optimistic-server :ctx trusted-ring-context
              :command already-decoded-protocol-v3-command}.
-   :ctx MUST carry the actual :biff.xtdb/node and must not have an existing
-   transaction observation hook. Registration must contain the exact v798
-   adapter executor, not copied metadata or a wrapper. The principal and
+   :ctx MUST carry the actual :biff.xtdb/node and must not have either
+   diagnostic observation hook. The captured context is accessible only via
+   inspect-construction-input-for-executor with the exact executor identity.
+   Registration must contain the exact v798 adapter executor, not copied metadata or a wrapper. The principal and
    operation binding are derived from server/begin-command rather than from
    caller-provided assurance claims.
 
@@ -159,7 +231,8 @@
       (fail! :invalid-server-context
              "A checked Live server and trusted context are required." {}))
     (when (or (nil? (:biff.xtdb/node ctx))
-              (contains? ctx resolved/observation-context-key))
+              (contains? ctx resolved/observation-context-key)
+              (contains? ctx resolved/construction-input-context-key))
       (fail! :invalid-observation-context
              "Require an authoritative node and exclusive diagnostic hook ownership."
              {}))
@@ -183,9 +256,20 @@
                       :arguments (:arguments execution-context)})
             observation (events/start-session!
                          {:node (:biff.xtdb/node ctx) :binding binding})
-            instrumented (assoc execution-context :ctx
-                                (assoc ctx resolved/observation-context-key
-                                       (:observe! observation)))
+            captured-inputs (atom [])
+            instrumented-context
+            (assoc ctx
+                   resolved/observation-context-key (:observe! observation)
+                   resolved/construction-input-context-key
+                   (fn [event]
+                     ;; Bound memory for incorrect or hostile duplicate event
+                     ;; delivery; duplicate evidence must fail closed.
+                     (swap! captured-inputs
+                            (fn [events]
+                              (if (< (count events) 2)
+                                (conj events event)
+                                events)))))
+            instrumented (assoc execution-context :ctx instrumented-context)
             ;; Same trusted execution and settlement functions as server/run-command.
             ;; A thrown exception is never translated to a settled rejection.
             result (executor instrumented)
@@ -195,11 +279,19 @@
           (fail! :execution-counterexample
                  "Real observed execution does not correspond to the finite reference machine."
                  {:reason (get-in checked [:evidence :reason])}))
-        {:prepared-send prepared-send
-         :evidence (record-evidence!
-                    executor operation
-                    {:status :bounded-execution-correspondence
-                     :scope assurance-scope
-                     :adapter-construction provenance
-                     :binding binding
-                     :observation checked})}))))
+        (let [input-witness (construction-input-witness!
+                             captured-inputs instrumented-context ctx binding)]
+          {:prepared-send prepared-send
+           :evidence (record-evidence!
+                      executor operation
+                      {:status :bounded-execution-correspondence
+                       :scope assurance-scope
+                       :adapter-construction provenance
+                       :binding binding
+                       :construction-input
+                       {:status :captured-and-correlated
+                        :context-values :withheld-from-report
+                        :binding :matched-canonical-live-command
+                        :model-input-coverage :not-established}
+                       :observation checked}
+                      input-witness)})))))
