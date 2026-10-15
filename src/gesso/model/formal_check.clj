@@ -174,7 +174,14 @@
           (let [raw (recife/run-model initial components
                                       {:no-deadlock true :workers 1})
                 result (if (instance? clojure.lang.IDeref raw) @raw raw)]
-            (when-not (and (= :ok (:trace result))
+            ;; A missing :trace-info is not the same as an explicit nil.
+            ;; Recife uses nil here for a completed invariant-safe check;
+            ;; accepting absent metadata could silently upgrade an incomplete
+            ;; checker response into a successful bounded result.
+            (when-not (and (map? result)
+                           (every? #(contains? result %)
+                                   [:trace :trace-info :distinct-states])
+                           (= :ok (:trace result))
                            (nil? (:trace-info result))
                            (pos-int? (:distinct-states result)))
               (fail! :model-check-failed
