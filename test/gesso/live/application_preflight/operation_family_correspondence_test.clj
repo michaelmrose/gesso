@@ -4260,3 +4260,165 @@
     (is (= :not-established
            (:application-certification (:pair test-case)))
         "Observed-field protection must never be advertised as full-document isolation")))
+
+
+;; v987 — Physical regression for v986 namespaced transaction assertions.
+;; Every test submits the canonical tx/prepare output to a real XTDB2 node.
+;; These are bounded observations of the lowering, not a general refinement
+;; proof or proof of application dependency completeness.
+
+(def ^:private v987-version
+  {:revision-key :revision
+   :created-at-key :created-at
+   :updated-at-key :updated-at})
+
+(defn- v987-document [id revision]
+  {:xt/id id
+   :revision revision
+   :created-at "t0"
+   :updated-at (str "t" revision)
+   :value (str "value-" revision)})
+
+(defn- v987-row [entity-type document-id]
+  (let [table (case entity-type
+                :fixture/resource "fixture.resource"
+                :other/resource "other.resource"
+                :fixture/outcome "fixture.outcome"
+                :other/audit "other.audit"
+                :resource "public.resource")]
+    (first (xt/q @!node [(str "SELECT * FROM " table " WHERE _id = ?")
+                         document-id]))))
+
+(defn- v987-ops [commands guards]
+  (:tx-ops
+   (tx/prepare {}
+               {:commands commands
+                :guards guards
+                :emit false})))
+
+(defn- v987-commit-result [tx-ops]
+  (try
+    (xt/execute-tx @!node tx-ops)
+    :committed
+    (catch Throwable error
+      (if (= :xtdb/assert-failed
+             (:xtdb.error/code (ex-data error)))
+        :assert-failed
+        (throw error)))))
+
+(deftest v987-namespaced-guard-commits-against-correct-physical-schema-test
+  (let [id (str "v987-shared-" (random-uuid))
+        output-id (str "v987-out-" (random-uuid))
+        actual (v987-document id 0)
+        decoy (v987-document id 17)
+        created (v987-document output-id 0)
+        ops (v987-ops
+             [(command/create :fixture/outcome created v987-version)]
+             [(command/guard :fixture/resource actual v987-version)])
+        sql (->> ops (filter vector?) (map first) (filter string?))]
+    (xt/execute-tx @!node
+                   [[:put-docs :fixture/resource actual]
+                    [:put-docs :other/resource decoy]])
+    (is (some #(re-find #"FROM fixture\.resource" %) sql)
+        "The guarded table must retain its namespace")
+    (is (some #(re-find #"FROM fixture\.outcome" %) sql)
+        "The create-absence assertion must retain its namespace")
+    (is (not-any? #(re-find #"FROM public\.resource" %) sql)
+        "A qualified guard must never silently check public.resource")
+    (is (= :committed (v987-commit-result ops)))
+    (is (= output-id (:xt/id (v987-row :fixture/outcome output-id))))
+    (is (= 0 (:revision (v987-row :fixture/resource id))))
+    (is (= 17 (:revision (v987-row :other/resource id))))))
+
+(deftest v987-stale-namespaced-guard-aborts-every-canonical-write-test
+  (let [id (str "v987-shared-" (random-uuid))
+        output-id (str "v987-out-" (random-uuid))
+        audit-id (str "v987-audit-" (random-uuid))
+        observed (v987-document id 0)
+        actual (v987-document id 1)
+        decoy (v987-document id 0)
+        ops (v987-ops
+             [(command/create :fixture/outcome
+                              (v987-document output-id 0) v987-version)
+              (command/create :other/audit
+                              (v987-document audit-id 0) v987-version)]
+             [(command/guard :fixture/resource observed v987-version)])]
+    (xt/execute-tx @!node
+                   [[:put-docs :fixture/resource observed]
+                    [:put-docs :other/resource decoy]])
+    ;; The change occurs AFTER the transaction was prepared. The wrong
+    ;; public/other schema still has the stale version expected by the guard.
+    (xt/execute-tx @!node [[:put-docs :fixture/resource actual]])
+    (is (= :assert-failed (v987-commit-result ops)))
+    (is (= 1 (:revision (v987-row :fixture/resource id))))
+    (is (= 0 (:revision (v987-row :other/resource id))))
+    (is (nil? (v987-row :fixture/outcome output-id))
+        "An assertion conflict must prevent the application write")
+    (is (nil? (v987-row :other/audit audit-id))
+        "An assertion conflict must prevent every other write too")))
+
+(deftest v987-competing-write-in-unrelated-schema-does-not-falsify-guard-test
+  (let [id (str "v987-shared-" (random-uuid))
+        output-id (str "v987-out-" (random-uuid))
+        observed (v987-document id 0)
+        decoy (v987-document id 0)
+        ops (v987-ops
+             [(command/create :fixture/outcome
+                              (v987-document output-id 0) v987-version)]
+             [(command/guard :fixture/resource observed v987-version)])]
+    (xt/execute-tx @!node
+                   [[:put-docs :fixture/resource observed]
+                    [:put-docs :other/resource decoy]])
+    (xt/execute-tx @!node
+                   [[:put-docs :other/resource (v987-document id 3)]])
+    (is (= :committed (v987-commit-result ops))
+        "An unrelated same-ID document must not falsify a qualified guard")
+    (is (= output-id (:xt/id (v987-row :fixture/outcome output-id))))
+    (is (= 0 (:revision (v987-row :fixture/resource id))))
+    (is (= 3 (:revision (v987-row :other/resource id))))))
+
+(deftest v987-qualified-create-checks-absence-in-its-own-schema-test
+  (let [id (str "v987-shared-" (random-uuid))
+        decoy (v987-document id 9)
+        created (v987-document id 0)
+        ops (v987-ops [(command/create :fixture/resource
+                                      created v987-version)] [])]
+    (xt/execute-tx @!node [[:put-docs :other/resource decoy]])
+    (is (= :committed (v987-commit-result ops))
+        "Presence in other.resource must not preclude fixture.resource")
+    (is (= 0 (:revision (v987-row :fixture/resource id))))
+    (is (= 9 (:revision (v987-row :other/resource id))))
+    (is (= :assert-failed (v987-commit-result ops))
+        "A repeated create of the same qualified identity must conflict")
+    (is (= 0 (:revision (v987-row :fixture/resource id))))))
+
+(deftest v987-qualified-update-version-guard-protects-own-schema-test
+  (let [id (str "v987-shared-" (random-uuid))
+        original (v987-document id 0)
+        changed (v987-document id 1)
+        decoy (v987-document id 23)
+        ops (v987-ops
+             [(command/update-command
+               :fixture/resource :update original changed v987-version)] [])]
+    (xt/execute-tx @!node
+                   [[:put-docs :fixture/resource original]
+                    [:put-docs :other/resource decoy]])
+    (is (= :committed (v987-commit-result ops)))
+    (is (= 1 (:revision (v987-row :fixture/resource id))))
+    (is (= 23 (:revision (v987-row :other/resource id))))
+    (is (= :assert-failed (v987-commit-result ops))
+        "The consumed original version must not permit a second update")
+    (is (= 1 (:revision (v987-row :fixture/resource id))))))
+
+(deftest v987-unqualified-entity-keeps-public-schema-semantics-test
+  (let [id (str "v987-shared-" (random-uuid))
+        decoy (v987-document id 7)
+        public (v987-document id 0)
+        ops (v987-ops [(command/create :resource public v987-version)] [])]
+    (xt/execute-tx @!node [[:put-docs :fixture/resource decoy]])
+    (is (= :committed (v987-commit-result ops))
+        "Unqualified :resource is a public-schema table, not fixture.resource")
+    (is (= 0 (:revision (v987-row :resource id))))
+    (is (= 7 (:revision (v987-row :fixture/resource id))))
+    (is (= :assert-failed (v987-commit-result ops)))
+    (is (= 0 (:revision (v987-row :resource id))))))
