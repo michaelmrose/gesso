@@ -1,21 +1,20 @@
 (ns gesso.model.command-resolution-observation-formal-test
-  "Finite Recife/TLC comparison of a real, controlled XTDB command-incorporation
-   observation with Gesso's existing serial reference transition semantics.
+  "Finite Recife/TLC correspondence checks for Gesso's controlled XTDB
+   command-incorporation collector and source-derived serial transitions.
 
-   The physical observations come from resolution-observation/observe-and-check!,
-   which submits canonical prepared plans through gesso.model.tx/prepare and
-   xtdb.api/execute-tx and reads actual persisted documents. Recife explores
-   both serial orders of the SAME prepared plans using formal-transition,
-   which delegates to tx-model/step. On the terminal path matching the actual
-   submission order, TLC requires matching indexed commit/reject results and
-   exact persisted documents, not merely a plausible outcome label.
+   The collector physically submits canonical plans and independently reads
+   tracked XTDB documents after EVERY definitive submission. Recife explores
+   both orders of the same prepared plans via formal-transition, delegating
+   every modeled operation to tx-model/step. On each reached prefix whose
+   order agrees with the physical submission, TLC checks the exact indexed
+   status, prestate and poststate. The terminal check remains independent.
+   Altered intermediate snapshots, missing trace steps and terminal status
+   corruption must produce genuine TLC counterexamples.
 
-   The controlled collector assumes exclusive access to relevant database
-   documents and consistent unpinned XTDB reads; this test is NOT evidence of
-   production execution provenance, general concurrency linearizability,
-   application policy correctness or universal implementation refinement.
-   The corrupted-observation variant must fail model checking. No physical
-   transaction runs inside a TLC transition or invariant."
+   This is bounded correspondence evidence for selected serial executions in
+   an exclusively controlled database, not universal XTDB refinement, proof
+   of collector provenance, or proof of concurrent production operations.
+   All physical I/O happens before model checking, never in an invariant."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [clojure.walk :as walk]
@@ -121,7 +120,8 @@
                  (mapv :plan (:incorporations physical)))
         codec (make-codec [(:initial-state physical)
                            (:incorporations physical)
-                           (:observations physical)])]
+                           (:observations physical)
+                           (:submission-trace physical)])]
     {:subject subject
      :physical physical
      :codec codec}))
@@ -149,6 +149,42 @@
             (or (not= status :rejected) (= before after)))
           (::formal/observations state)))
 
+(helpers/definvariant xtdb-submission-trace-has-declared-order [state]
+  ;; Unconditional evidence-completeness check. Without it, a missing or
+  ;; mislabeled physical step could avoid every matching-prefix branch.
+  (let [{:keys [physical]} @!case
+        trace (:submission-trace physical)]
+    (and (vector? trace)
+         (= (count (:submission-order physical)) (count trace))
+         (= (:submission-order physical) (mapv :plan-index trace))
+         (= (:initial-state physical) (:before (first trace)))
+         (= (get-in physical [:observations :state]) (:after (last trace))))))
+
+(helpers/definvariant xtdb-prefix-matches-modeled-transition [state]
+  (let [{:keys [physical codec]} @!case
+        modeled-order (::order state)
+        modeled-steps (::formal/observations state)
+        physical-steps (vec (take (count modeled-order)
+                                  (:submission-trace physical)))]
+    ;; Every prefix of the observed order is reachable by the corresponding
+    ;; Recife action choices. Alternate paths are checked for generic safety,
+    ;; but must not be compared with a different physical submission order.
+    (if (= modeled-order (mapv :plan-index physical-steps))
+      (and (= (count modeled-order) (count modeled-steps))
+           (every? true?
+                   (map (fn [modeled observed]
+                          (and (= (:plan-index modeled) (:plan-index observed))
+                               (= (:status modeled) (:status observed))
+                               (= (:before modeled) ((:encode codec) (:before observed)))
+                               (= (:after modeled) ((:encode codec) (:after observed)))))
+                        modeled-steps physical-steps))
+           (= (::formal/documents state)
+              ((:encode codec)
+               (if (seq physical-steps)
+                 (:after (peek physical-steps))
+                 (:initial-state physical)))))
+      true)))
+
 (helpers/definvariant xtdb-observation-matches-modeled-order [state]
   (let [{:keys [subject physical codec]} @!case
         actual-order (:submission-order physical)]
@@ -168,6 +204,8 @@
 (def ^:private components
   #{attempt-first attempt-second
     reference-rejection-is-atomic
+    xtdb-submission-trace-has-declared-order
+    xtdb-prefix-matches-modeled-transition
     xtdb-observation-matches-modeled-order})
 
 (defn- check! [case]
@@ -188,6 +226,13 @@
         (is (= [order] (get-in physical [:evidence :matching-orders])))
         (is (= (:initial-state physical)
                ((:decode codec) ((:encode codec) (:initial-state physical)))))
+        (is (= order (mapv :plan-index (:submission-trace physical))))
+        (is (= (:initial-state physical)
+               (get-in physical [:submission-trace 0 :before])))
+        (is (= (get-in physical [:submission-trace 0 :after])
+               (get-in physical [:submission-trace 1 :before])))
+        (is (= (get-in physical [:observations :state])
+               (get-in physical [:submission-trace 1 :after])))
         (is (= (get-in physical [:observations :state])
                ((:decode codec)
                 ((:encode codec) (get-in physical [:observations :state])))))
@@ -208,3 +253,33 @@
     (is (some? (:trace-info result)))
     (is (re-find #"xtdb-observation-matches-modeled-order"
                  (pr-str (:trace-info result))))))
+
+(deftest tampered-intermediate-physical-prefix-must-fail-tlc-test
+  (let [physical (collect [0 1])
+        ;; The independent terminal :observations and real XTDB data are
+        ;; untouched. These mutations must be found by prefix checking,
+        ;; even though v912's terminal-only comparison would accept them.
+        cases [[:false-first-poststate
+                (assoc-in physical [:submission-trace 0 :after]
+                          (:initial-state physical))]
+               [:false-second-prestate
+                (assoc-in physical [:submission-trace 1 :before]
+                          (:initial-state physical))]
+               [:false-first-status
+                (assoc-in physical [:submission-trace 0 :status] :rejected)]
+               [:wrong-plan-index
+                (assoc-in physical [:submission-trace 1 :plan-index] 0)]
+               [:missing-last-submission
+                (update physical :submission-trace pop)]]]
+    (is (= :consistent (get-in physical [:evidence :status])))
+    (doseq [[mutant altered] cases]
+      (testing (name mutant)
+        (is (= (:observations physical) (:observations altered)))
+        (let [result (check! (case-data altered))
+              error (pr-str (:trace-info result))]
+          (is (not= :ok (:trace result)))
+          (is (some? (:trace-info result)))
+          (is (re-find (if (#{:missing-last-submission :wrong-plan-index} mutant)
+                        #"xtdb-submission-trace-has-declared-order"
+                        #"xtdb-prefix-matches-modeled-transition") error)
+              error))))))
