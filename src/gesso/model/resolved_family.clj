@@ -52,8 +52,13 @@
    present in each named acquired snapshot, apart from :xt/id, to appear in
    its canonical version comparisons. This removes separately enumerated
    field-list omissions for that snapshot, but does not detect a missing
-   snapshot field or an unobserved field introduced after acquisition. This is
-   a guarded absence of ONE document identity, not a proof of query absence,
+   snapshot field. For whole-snapshot mode, Gesso additionally inserts an
+   exact canonical commit-time document field-count ASSERT into BOTH plans.
+   Together with all observed-field comparisons, this protects against new
+   top-level fields introduced between acquisition and commit, under XTDB's
+   tested field-count and equality semantics. It is not recursively complete
+   for nested values. This is a guarded absence of ONE document identity,
+   not a proof of query absence,
    uniqueness across arbitrary fields, or actual production read provenance.
    Optional :required-production-snapshot-reads uses a separate trusted
    :read-current-document! callback at the production construction boundary
@@ -142,6 +147,7 @@
               :optional-declared-create-absence-to-transaction-correspondence
               :optional-declared-snapshot-field-to-commit-guard-correspondence
               :optional-observed-whole-snapshot-to-commit-guard-correspondence
+              :optional-whole-snapshot-commit-time-field-count-insertion
               :optional-trusted-production-document-reread-correspondence
               :optional-gesso-owned-parameterized-xtdb-document-reread}
    :assumed #{:truthful-and-complete-finite-choice-domains
@@ -564,6 +570,40 @@
                         (require-create-absence-targets! coverage context))
         (fail! :missing-required-absence-protecting-create)))))
 
+(defn- with-whole-snapshot-field-counts! [coverage context plan]
+  ;; All observed fields (except :xt/id) already have to occur in a canonical
+  ;; expected-version guard. That alone cannot detect a field added between
+  ;; acquisition and commit. Insert the Gesso-owned, commit-time field-count
+  ;; check for each declared snapshot so BOTH production and the finite model
+  ;; see the same additional precondition. The finite reference admits this
+  ;; exact canonical SQL form, never arbitrary application-authored SQL.
+  ;;
+  ;; Every guard/snapshot identity and observed field is validated before the
+  ;; application's :construct! call. The domain plan is admitted again after
+  ;; augmentation; we do not discard or silently sanitize existing assertions.
+  ;; Sorting declaration paths gives stable plan ordering across executions.
+  (if-not (seq (:required-whole-snapshot-guards coverage))
+    plan
+    (let [assertions (mapv
+                      (fn [guard-path]
+                        (let [{:keys [document-path entity-type]}
+                              (get (:required-guard-snapshots coverage) guard-path)
+                              snapshot (get-in context document-path)]
+                          (try
+                            (tx/assert-document-field-count
+                             entity-type (:xt/id snapshot) (count snapshot))
+                            (catch Exception _
+                              (fail! :invalid-whole-snapshot-field-count)))))
+                      (sort-by pr-str (:required-whole-snapshot-guards coverage)))]
+      ;; Validate before adding to avoid coercing a malformed domain plan's
+      ;; assertions into a seemingly acceptable vector.
+      (let [normalized (try
+                         (tx/normalize-plan plan)
+                         (catch Exception _
+                           (fail! :invalid-guarded-domain-plan)))]
+        (assoc normalized :assertions
+               (into (:assertions normalized) assertions))))))
+
 (defn- checked-domain-constructor [coverage construct!]
   ;; This SAME wrapper is installed in production and finite family paths.
   ;; It does not infer dependencies, authenticate reads, or make the
@@ -588,11 +628,16 @@
       (require-whole-snapshot-guards! coverage context)
       (require-create-absence-targets! coverage context)
       (let [built (construct! context binding)]
-        (when (and (map? built) (contains? built :plan))
-          (guarded-plan! coverage context (:plan built)))
-        ;; A malformed construction remains subject to the ordinary
-        ;; resolved-operation validation, never silently authorized here.
-        built))))
+        (if (and (map? built) (contains? built :plan))
+          (let [plan (with-whole-snapshot-field-counts!
+                      coverage context (:plan built))]
+            (guarded-plan! coverage context plan)
+            ;; Return the augmented construction to BOTH consumers. The finite
+            ;; path evaluates the canonical assertion against its prestate;
+            ;; production lowers it into the actual atomic XTDB transaction.
+            (assoc built :plan plan))
+          ;; Malformed constructions still go to existing strict validation.
+          built)))))
 
 (defn- call-model! [kind f & arguments]
   (try
@@ -967,9 +1012,13 @@
    (which is protected by the guard target). The guard's canonical expected
    comparisons must include these fields; the ordinary declared guard-to-plan
    checks must also pass in finite and production construction. This avoids
-   manually enumerating observed fields, but not missing acquisition fields,
-   unseen concurrent field additions, unmodeled dependencies, or physical
-   XTDB provenance. The declaration is opt-in and capped at 256 guards.
+   manually enumerating observed fields. Gesso additionally adds the canonical
+   document-field-count assertion to both finite and production plans, so a
+   NEW top-level field added after acquisition also conflicts at commit time.
+   The finite model understands only this exact SQL assertion shape. This does
+   not detect missing acquisition fields, recursively protect nested maps,
+   authenticate XTDB reads, prove general refinement or infer undeclared
+   dependencies. The declaration is opt-in and capped at 256 guards.
    To use a Gesso-owned parameterized XTDB2 query instead of the trusted
    custom callback, configure :production-document-reader :gesso-xtdb-current
    (never together with :read-current-document!). This still depends on a
