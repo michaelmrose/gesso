@@ -293,7 +293,7 @@
       symbol))
 
 ;; Formal-backend tests are still ordinary JVM tests, and so are always
-;; included in the full `clojure -M:test` discovery. This narrower selector
+;; included in the full `clojure -M:test:formal` discovery. This narrower selector
 ;; exists for rapid proof work without introducing a second, optional suite.
 ;; Keep the convention engine-neutral: test names containing a separate
 ;; `recife` or `formal` segment are eligible, not just one pilot namespace.
@@ -757,13 +757,13 @@
 
   (run-command-streaming-with-timeout!
    ["clojure"
-    "-M:test"]
+    "-M:test:formal"]
    jvm-wall-clock-timeout-ms))
 
 (defn run-formal-tests!
   []
   (let [namespaces (formal-test-namespaces)
-        command (into ["clojure" "-M:test"]
+        command (into ["clojure" "-M:test:formal"]
                       (mapcat (fn [namespace]
                                 ["-n" (str namespace)])
                               namespaces))]
