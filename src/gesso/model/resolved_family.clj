@@ -26,12 +26,18 @@
    resolved operation is currently registered as the actual Live executor.
    compare-production-input! optionally checks a caller-supplied production
    context and actual server binding against the SAME model-input! function.
+   An optional, CLOSED :context-coverage inventory requires every captured
+   production context key to be either modeled or explicitly excluded; new
+   fields and drift in the modeled key set fail closed, rather than passing
+   with only an extra-field count. Exclusions are declarations, NOT evidence
+   that construct! cannot read those fields or that authorization ignores them.
    This is a strict field comparison, not observation authentication: omitted
-   production context fields and the source of the supplied values remain
+   production context semantics and the source of the supplied values remain
    explicit assumptions. Neither construction nor a later TLC verdict
    certifies an application.
    The returned functions and data may be sensitive; keep them server-local."
   (:require
+   [clojure.set :as set]
    [gesso.choreo.identity :as identity]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.operation-family :as family]
@@ -41,6 +47,8 @@
 (def configuration-keys
   #{:operation :read-record! :may-disclose? :construct!
     :principals :arguments :enabled? :model-input!})
+
+(def context-coverage-keys #{:modeled :excluded})
 
 (def model-input-keys #{:context :binding})
 
@@ -53,18 +61,23 @@
               :complete-durable-incorporation-construction-validation
               :source-derived-finite-domain-plan-admission
               :optional-modeled-context-field-correspondence
-              :optional-canonical-production-binding-comparison}
+              :optional-canonical-production-binding-comparison
+              :optional-closed-production-context-key-inventory
+              :declared-modeled-context-key-stability}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
               :truthful-state-dependent-enablement-and-authorization
               :correct-registered-production-executor
-              :trusted-provenance-of-supplied-production-context-and-binding}
+              :trusted-provenance-of-supplied-production-context-and-binding
+              :truthful-declaration-of-excluded-context-field-irrelevance}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
                       :purity-of-clojure-callbacks
                       :completeness-of-modeled-production-context-fields
+                      :irrelevance-of-declared-excluded-production-fields
+                      :completeness-of-application-policy-dependency-declaration
                       :independent-authentication-of-production-input-values
                       :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
@@ -87,18 +100,39 @@
     (catch Exception _
       (fail! kind))))
 
+(defn- require-context-coverage! [coverage]
+  (when-not (and (map? coverage)
+                 (= context-coverage-keys (set (keys coverage)))
+                 (set? (:modeled coverage))
+                 (seq (:modeled coverage))
+                 (every? keyword? (:modeled coverage))
+                 (set? (:excluded coverage))
+                 (every? keyword? (:excluded coverage))
+                 (empty? (set/intersection (:modeled coverage)
+                                           (:excluded coverage))))
+    (fail! :invalid-context-coverage))
+  coverage)
+
+(defn- require-modeled-coverage! [coverage modeled-context]
+  ;; Validate at EVERY model-input! invocation, not only at build time.
+  ;; The callback may be mutable or state-dependent.
+  (when (and coverage
+             (not= (:modeled coverage) (set (keys modeled-context))))
+    (fail! :modeled-context-key-inventory-drift)))
+
 (defn- matching-principal? [declared bound]
   (and (identity/principal? bound)
        (or (= declared bound)
            (= declared (identity/raw-value bound)))))
 
-(defn- finite-input! [operation model-input! state principal arguments]
+(defn- finite-input! [operation model-input! coverage state principal arguments]
   (let [input (call-model! :model-input-exception
                            model-input! state principal arguments)]
     (when-not (and (map? input)
                    (= model-input-keys (set (keys input)))
                    (map? (:context input)))
       (fail! :invalid-model-input))
+    (require-modeled-coverage! coverage (:context input))
     (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
@@ -111,7 +145,7 @@
     input))
 
 (defn- compare-production-input!
-  [operation model-input! state principal arguments production-context production-binding]
+  [operation model-input! coverage state principal arguments production-context production-binding]
   ;; This is an explicitly supplied trusted-context witness, NOT an
   ;; authenticated observation. Actual executor provenance must be separately
   ;; established before using any result in application assurance.
@@ -122,7 +156,7 @@
     (catch Exception _
       (fail! :invalid-production-binding)))
   (let [{modeled-context :context modeled-binding :binding}
-        (finite-input! operation model-input! state principal arguments)]
+        (finite-input! operation model-input! coverage state principal arguments)]
     (when-not (= (dissoc modeled-binding :command-id)
                  (dissoc production-binding :command-id))
       (fail! :production-binding-differs-from-model-input))
@@ -136,17 +170,29 @@
                              (= value (get production-context key))))
                       modeled-context)
       (fail! :production-context-differs-from-model-input))
+    (when (and coverage
+               (not= (set (keys production-context))
+                     (set/union (:modeled coverage) (:excluded coverage))))
+      ;; Refuse both undeclared new fields and absent excluded fields. Merely
+      ;; counting unknown keys is NOT enough for a closed inventory claim.
+      (fail! :production-context-key-inventory-differs))
     {:status :matched-declared-input-fields
      :context-fields-compared (count modeled-context)
+     :context-key-inventory (if coverage
+                              :closed-against-authored-exclusions
+                              :not-declared)
+     :explicitly-excluded-context-fields (if coverage
+                                           (count (:excluded coverage)) 0)
+     :exclusion-relevance :not-established
      :unmodeled-production-context-fields
      (count (remove #(contains? modeled-context %) (keys production-context)))
      :command-id-comparison :excluded-independent-execution-identity
      :input-origin :caller-supplied-not-authenticated
      :application-certification :not-established}))
 
-(defn- finite-plan! [operation model-input! construct! state principal arguments]
+(defn- finite-plan! [operation model-input! coverage construct! state principal arguments]
   (let [{:keys [context binding]}
-        (finite-input! operation model-input! state principal arguments)
+        (finite-input! operation model-input! coverage state principal arguments)
         built (call-model! :domain-construction-exception
                            construct! context binding)]
     (when-not (and (map? built)
@@ -190,16 +236,29 @@
    context, plus semantic binding equality excluding only the command ID.
    Empty modeled contexts fail closed. Unmodeled extra production fields
    are counted, not declared equivalent. It never invokes :construct! or
-   authenticates the supplied context; use only at a trusted server boundary."
+   authenticates the supplied context; use only at a trusted server boundary.
+
+   Optional :context-coverage {:modeled #{...} :excluded #{...}} enables a
+   strict inventory. The :modeled set must be nonempty, and must equal the
+   model-input! context keys on EVERY invocation, including formal admission.
+   On comparison, the captured production context must contain exactly those
+   modeled keys and the explicitly declared excluded keys. An undeclared new
+   field or missing declared field fails closed. Excluded values are NOT
+   compared; their irrelevance to construct! or authorization is NOT proven.
+   Without this opt-in declaration, legacy conditional comparison is retained."
   [configuration]
   (when-not (and (map? configuration)
-                 (= configuration-keys (set (keys configuration)))
+                 (or (= configuration-keys (set (keys configuration)))
+                     (= (conj configuration-keys :context-coverage)
+                        (set (keys configuration))))
                  (qualified-keyword? (:operation configuration))
                  (fn? (:enabled? configuration))
                  (fn? (:model-input! configuration))
                  (fn? (:construct! configuration)))
     (fail! :invalid-configuration))
-  (let [{:keys [operation principals arguments enabled? model-input! construct!]}
+  (let [coverage (when (contains? configuration :context-coverage)
+                   (require-context-coverage! (:context-coverage configuration)))
+        {:keys [operation principals arguments enabled? model-input! construct!]}
         configuration
         production (try
                      (resolved/build-operation
@@ -210,7 +269,7 @@
                           :arguments arguments
                           :enabled? enabled?
                           :prepare (fn [state principal args]
-                                     (finite-plan! operation model-input!
+                                     (finite-plan! operation model-input! coverage
                                                    construct! state principal args))}]
     ;; Validate the entire finite family NOW, before returning either surface.
     ;; In particular, do not return a production function paired with a
@@ -225,7 +284,7 @@
      :family operation-family
      :compare-production-input!
      (fn [state principal args production-context production-binding]
-       (compare-production-input! operation model-input!
+       (compare-production-input! operation model-input! coverage
                                   state principal args
                                   production-context production-binding))
      :scope assurance-scope
