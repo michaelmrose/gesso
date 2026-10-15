@@ -6,7 +6,7 @@
    bounded preparation/execution correspondence, but not domain-policy
    completeness, truthful projections, or universal refinement."
   (:require
-   [clojure.test :refer [deftest is use-fixtures]]
+   [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.choreo.identity :as identity]
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.operation-family-correspondence :as correspondence]
@@ -21,6 +21,7 @@
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx-model :as tx-model]
    [gesso.model.resolved-operation :as resolved]
+   [gesso.model.resolved-family :as shared-family]
    [xtdb.api :as xt]
    [xtdb.node :as xtn]))
 
@@ -1387,3 +1388,213 @@
                  (kind #(v937-bound! assembly example missing))))
           (is (= "unclaimed" (:owner (row :requests (:request-id example)))))
           (is (= 0 (:construct @(:calls example)))))))))
+
+
+;; v939 — Permanent shared-construction bridge tests.  The actual production
+;; resolved operation and the finite operation family use one identical
+;; application-owned :construct! function.  This eliminates a duplicate
+;; business-plan implementation, not the trusted model-context mapping or
+;; proof of the callback's purity, authorization, or universal correctness.
+
+(defn- v939-pair
+  ([example calls] (v939-pair example calls {}))
+  ([example calls overrides]
+   (let [original (first (modeled-families example))
+         initial (model-state example)
+         args {:request-id (:request-id example)}
+         source (fn [context binding]
+                  (swap! calls inc)
+                  {:now now
+                   :outcome {:status :claimed}
+                   :plan ((:prepare original)
+                          (or (:model-state context) initial)
+                          (identity/raw-value (:principal binding))
+                          (:arguments binding))})
+         config {:operation operation-id
+                 :read-record! (fn [_ id] (row :gesso_commands id))
+                 :may-disclose? (fn [_ _ _] true)
+                 :construct! source
+                 :principals [(identity/raw-value principal)]
+                 :arguments [args]
+                 :enabled? (:enabled? original)
+                 :model-input! (fn [state who arguments]
+                                 {:context {:model-state state}
+                                  :binding {:command-id (identity/command-id
+                                                          "v939-finite-command")
+                                            :principal (identity/principal who)
+                                            :operation operation-id
+                                            :arguments arguments}})}]
+     (shared-family/build-pair (merge config overrides)))))
+
+(defn- v939-executor [example paired]
+  (adapter/build-executor
+   {:operation operation-id
+    :resolved-operation (:resolved-operation paired)
+    :submission-mode! (constantly :submit)
+    :project! (fn [_ result]
+                {:resolution (if (= :replay (:status result))
+                               :already-incorporated :confirmed)
+                 :authoritative
+                 (protocol/authoritative
+                  {:presence :present
+                   :basis {:tx-id 2 :system-time now}
+                   :projection {:request/owner
+                                (:owner (row :requests (:request-id example)))}})
+                 :outcome :request/claimed})}))
+
+(defn- v939-families [example pair]
+  (let [families (modeled-families example)]
+    (-> families
+        (assoc 0 (:family pair))
+        (assoc-in [1 :enabled?] (fn [& _] true))
+        (assoc-in [1 :prepare] (get-in pair [:family :prepare]))
+        (assoc-in [2 :enabled?] (fn [& _] true))
+        (assoc-in [2 :prepare] (get-in pair [:family :prepare])))))
+
+(deftest v939-shared-construction-real-executor-and-tlc-test
+  (let [example (test-operation)
+        calls (atom 0)
+        pair (v939-pair example calls)
+        executor (v939-executor example pair)]
+    (is (= 0 @calls) "Pairing must not execute application construction")
+    (is (fn? (:resolved-operation pair)))
+    (is (= operation-id (get-in pair [:family :id])))
+    (is (= :not-established (:application-certification pair)))
+    (with-application executor
+      (fn [{:keys [assembly]}]
+        (let [bound (formal-family/bound-prepared-competition
+                     assembly (model-state example) (v939-families example pair)
+                     (model-rules example) {:max-depth 1 :max-transitions 18})
+              subject (:subject bound)
+              checked (formal-check/check-prepared! subject)]
+          (is (= 3 (:choice-count bound)))
+          (is (= 3 (count (:plans subject))))
+          (is (= :checked-finite-model (:status checked)))
+          (is (pos? (:distinct-states checked)))
+          (let [handle (:evidence (invoke! (assoc example :server (server-with executor))))
+                result ((:compare-execution! bound) handle)]
+            (is (= :matched-selected-root-execution (:status result)))
+            (is (= :registered-executor-and-frozen-plan-correspondence
+                   (:reason result)))
+            (is (= :not-established (:application-certification result)))
+            (is (= :not-run (:tla-check result)))
+            (is (> @calls 0))
+            (is (not (contains? result :plan)))
+            (is (not (contains? result :binding)))
+            (is (not (.contains (pr-str result) (:request-id example))))))))))
+
+(deftest v939-model-input-mismatch-and-shape-rejected-test
+  (let [example (test-operation)
+        initial (model-state example)
+        who (identity/raw-value principal)
+        args {:request-id (:request-id example)}
+        binding {:command-id (identity/command-id "v939-model-input")
+                 :principal principal
+                 :operation operation-id
+                 :arguments args}]
+    (doseq [[label input expected]
+            [["wrong principal" {:context {} :binding (assoc binding
+                                                     :principal (identity/principal "other"))}
+              :model-binding-choice-mismatch]
+             ["wrong operation" {:context {} :binding (assoc binding
+                                                     :operation :request/cancel)}
+              :model-binding-choice-mismatch]
+             ["wrong arguments" {:context {} :binding (assoc binding
+                                                     :arguments {:request-id "different"})}
+              :model-binding-choice-mismatch]
+             ["missing binding" {:context {} :binding {}}
+              :invalid-model-binding]
+             ["missing context" {:binding binding}
+              :invalid-model-input]
+             ["additional unadmitted model field" {:context {} :binding binding
+                                                    :untrusted true}
+              :invalid-model-input]
+             ["nonmap context" {:context [] :binding binding}
+              :invalid-model-input]]]
+      (testing label
+        (let [calls (atom 0)
+              pair (v939-pair example calls
+                              {:model-input! (fn [& _] input)})]
+          (is (= 0 @calls) "Malformed model input is only evaluated on demand")
+          (is (= expected
+                 (kind #((get-in pair [:family :prepare]) initial who args))))
+          (is (zero? @calls)
+              "A rejected model binding must not invoke business construction"))))))
+
+(deftest v939-same-mutable-construction-still-cannot-rewrite-frozen-plan-test
+  (let [example (test-operation)
+        initial (model-state example)
+        source-plan (:prepare (first (modeled-families example)))
+        changed? (atom false)
+        source (fn [ctx binding]
+                 (let [state (or (:model-state ctx) initial)
+                       plan (source-plan state (identity/raw-value (:principal binding))
+                                         (:arguments binding))]
+                   {:now now
+                    :outcome {:status :claimed}
+                    :plan (if @changed?
+                            (assoc plan :commands
+                                   [(command/update-command
+                                     :requests :claim (:before example)
+                                     (assoc (:claimed example)
+                                            :updated-at "v939-unfaithful-mutable-construction")
+                                     version)])
+                            plan)}))
+        pair (v939-pair example (atom 0) {:construct! source})
+        executor (v939-executor example pair)]
+    (with-application executor
+      (fn [{:keys [assembly]}]
+        (let [bound (formal-family/bound-prepared-competition
+                     assembly initial (v939-families example pair)
+                     (model-rules example) {:max-depth 1 :max-transitions 18})
+              frozen (first (get-in bound [:subject :plans]))]
+          (reset! changed? true)
+          (is (not= frozen
+                    (tx-model/admitted-plan
+                     (:plan (source {:model-state initial}
+                                    {:principal principal
+                                     :operation operation-id
+                                     :arguments {:request-id (:request-id example)}})))))
+          (let [handle (:evidence (invoke! (assoc example :server (server-with executor))))
+                verdict ((:compare-execution! bound) handle)]
+            (is (= :counterexample (:status verdict)))
+            (is (= :observed-plan-differs-from-frozen-formal-subject
+                   (:reason verdict)))
+            (is (= :not-established (:application-certification verdict)))
+            (is (not (contains? verdict :plan)))))))))
+
+(deftest v939-construction-and-config-fail-closed-test
+  (let [example (test-operation)
+        who (identity/raw-value principal)
+        args {:request-id (:request-id example)}
+        initial (model-state example)
+        calls (atom 0)
+        invalid (v939-pair example calls
+                           {:construct! (fn [& _]
+                                          (swap! calls inc)
+                                          {:now now :outcome {:status :claimed}
+                                           :plan {:commands [] :guards []
+                                                  :emit false}})})]
+    (is (= 0 @calls))
+    (is (= :invalid-durable-incorporation
+           (kind #((get-in invalid [:family :prepare]) initial who args))))
+    (is (= 1 @calls))
+    (let [secret "v939-private-construction-failure"
+          pair (v939-pair example (atom 0)
+                          {:construct! (fn [& _]
+                                         (throw (ex-info secret {:secret secret})))})
+          error (try ((get-in pair [:family :prepare]) initial who args)
+                     nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+      (is (= :domain-construction-exception (:error/kind (ex-data error))))
+      (is (not (.contains (.getMessage error) secret)))
+      (is (nil? (.getCause error)))
+      (is (not (.contains (pr-str (ex-data error)) secret))))
+    (is (= :invalid-finite-domain
+           (kind #(v939-pair example (atom 0) {:principals []}))))
+    (is (= :invalid-configuration
+           (kind #(v939-pair example (atom 0) {:unexpected-field true}))))
+    (is (contains? (get-in shared-family/assurance-scope [:not-established])
+                   :identity-of-model-context-and-production-context))
+    (is (contains? (get-in shared-family/assurance-scope [:not-established])
+                   :current-live-executor-registration))))
