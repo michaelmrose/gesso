@@ -4087,3 +4087,176 @@
                     (fn [& _] (throw (AssertionError. "Unsafe SQL was executed")))]
         (is (= :production-current-document-read-failed
                (kind #(v970-submit bad-pair modeled))))))))
+
+;; v985 — Real physical submission through the v983 Gesso-owned acquisition
+;; path and the actual gesso.model.tx/prepare XTDB lowering. Only Gesso Live's
+;; publication orchestration is substituted: the probe executes its supplied
+;; tx-ops on the SAME real XTDB node and observes durable documents afterward.
+;; This is bounded observed correspondence, not isolation or refinement proof.
+;; In particular, this fixture deliberately uses the unqualified :eligibility
+;; table so its canonical guard and physical SQL address the same public table.
+
+(defn- v985-context []
+  (let [context (v980-covered-context
+                 (assoc-in (v972-context)
+                           [:eligibility :document :fixture/decision]
+                           "permitted"))
+        snapshot (get-in context [:eligibility :document])
+        compare-fields (->> (keys snapshot) (remove #{:xt/id}) sort vec)]
+    (assoc-in context v982-guard-path
+              (command/guard :eligibility snapshot
+                             (assoc v970-version :compare-keys compare-fields)))))
+
+(defn- v985-coverage []
+  (assoc-in (v982-coverage)
+            [:required-guard-snapshots v982-guard-path :entity-type]
+            :eligibility))
+
+(defn- v985-case
+  ([resource-id] (v985-case resource-id (str "v985-command-" (random-uuid))))
+  ([resource-id command-id]
+   (let [context (v985-context)
+         calls (atom 0)
+         binding {:command-id (identity/command-id command-id)
+                  :principal (identity/principal "v970-actor")
+                  :operation :fixture/allocate
+                  :arguments {:resource resource-id}}
+         config (v970-config
+                 (fn [ctx _binding]
+                   {:commands
+                    [(command/create
+                      :fixture/resource
+                      {:xt/id resource-id
+                       :fixture/revision 0
+                       :fixture/created-at v970-time
+                       :fixture/updated-at v970-time}
+                      v970-version)]
+                    :guards [(get-in ctx v982-guard-path)]
+                    :emit false})
+                 context (v985-coverage) calls)
+         pair (shared-family/build-pair
+               (assoc config
+                      :arguments [{:resource resource-id}]
+                      :model-input! (fn [_state _principal _arguments]
+                                      {:context context :binding binding})
+                      :production-document-reader :gesso-xtdb-current))]
+     {:context context
+      :binding binding
+      :pair pair
+      :calls calls
+      :resource-id resource-id
+      :command-id command-id})))
+
+(defn- v985-submit [test-case]
+  ((:resolved-operation (:pair test-case))
+   (v984-server-context (:context test-case))
+   {:binding (:binding test-case) :mode :submit}))
+
+(defn- v985-read [table id]
+  (let [sql (case table
+              :eligibility "SELECT * FROM public.eligibility WHERE _id = ?"
+              :resource "SELECT * FROM fixture.resource WHERE _id = ?"
+              :commands "SELECT * FROM public.gesso_commands WHERE _id = ?")]
+    (first (xt/q @!node [sql id]))))
+
+(defn- v985-real-commit! [hook submissions]
+  (fn [_live-system _server-context {:keys [tx-ops] :as _options}]
+    (swap! submissions inc)
+    (hook)
+    ;; No test-produced SQL! The transaction ops were normalized/lowered by
+    ;; the actual gesso.model.tx/transact! production path.
+    (let [key (xt/execute-tx @!node tx-ops)]
+      {:tx-id (:tx-id key)
+       :system-time (:system-time key)})))
+
+(deftest v985-real-xtdb-commit-persists-domain-and-command-in-one-transaction-test
+  (let [test-case (v985-case (str "v985-resource-" (random-uuid)))
+        snapshot (get-in test-case [:context :eligibility :document])
+        submissions (atom 0)]
+    (v984-put! snapshot)
+    (with-redefs [gesso.live.core/transact-and-notify!
+                  (v985-real-commit! (fn [] nil) submissions)]
+      (let [result (v985-submit test-case)]
+        (is (= :incorporated (:status result)))
+        (is (= :committed (get-in result [:transaction :commit/status])))))
+    (is (= 1 @submissions))
+    (is (= 1 @(:calls test-case)))
+    (is (= (:resource-id test-case)
+           (:xt/id (v985-read :resource (:resource-id test-case)))))
+    (is (= :incorporated
+           (:gesso.command/status
+            (v985-read :commands (:command-id test-case)))))
+    (is (= snapshot
+           (update-vals
+            (select-keys (v985-read :eligibility (:xt/id snapshot))
+                         (keys snapshot))
+            (fn [v]
+              (if (instance? java.time.ZonedDateTime v)
+                (.toInstant ^java.time.ZonedDateTime v)
+                v)))))))
+
+(deftest v985-interposed-xtdb-write-rejects-stale-snapshot-and-all-writes-test
+  (let [test-case (v985-case (str "v985-resource-" (random-uuid)))
+        snapshot (get-in test-case [:context :eligibility :document])
+        submissions (atom 0)
+        conflicts (atom [])
+        newer (update snapshot :fixture/revision inc)]
+    (v984-put! snapshot)
+    ;; The injected write occurs AFTER Gesso's physical reread succeeds but
+    ;; BEFORE the prepared guarded transaction is physically submitted.
+    (with-redefs [gesso.live.core/transact-and-notify!
+                  (fn [system ctx {:keys [tx-ops]}]
+                    (swap! submissions inc)
+                    (xt/execute-tx @!node [[:put-docs :eligibility newer]])
+                    (let [tx-key (try
+                                   (xt/execute-tx @!node tx-ops)
+                                   (catch Throwable error
+                                     ;; XTDB2 uses xtdb.error.Conflict, a
+                                     ;; Throwable that is not ExceptionInfo.
+                                     ;; Recognize ONLY its typed assert code.
+                                     (when (= :xtdb/assert-failed
+                                              (:xtdb.error/code (ex-data error)))
+                                       (swap! conflicts conj :xtdb/assert-failed))
+                                     (throw error)))]
+                      (throw (ex-info
+                              "Stale guarded transaction unexpectedly committed."
+                              {:tx-key tx-key}))))]
+      (is (= :unresolved (:status (v985-submit test-case)))
+          "An ambiguous/rejected commit must not be reported as incorporated"))
+    (is (= [:xtdb/assert-failed] @conflicts))
+    (is (= 1 @submissions))
+    (is (= 1 @(:calls test-case))
+        "A correct reread was followed by a stale commit guard")
+    (is (= (:fixture/revision newer)
+           (:fixture/revision
+            (v985-read :eligibility (:xt/id snapshot)))))
+    (is (nil? (v985-read :resource (:resource-id test-case)))
+        "A failed guard must prevent the application write")
+    (is (nil? (v985-read :commands (:command-id test-case)))
+        "A failed guard must prevent the durable command record")))
+
+(deftest v985-matching-revision-but-newly-added-field-exposes-observation-limit-test
+  (let [test-case (v985-case (str "v985-resource-" (random-uuid)))
+        snapshot (get-in test-case [:context :eligibility :document])
+        submissions (atom 0)]
+    (v984-put! snapshot)
+    ;; This is a deliberately documented LIMITATION of the current guard:
+    ;; adding a previously unobserved field without changing a guarded value
+    ;; is not prevented by the SQL equality predicates for observed fields.
+    (with-redefs [gesso.live.core/transact-and-notify!
+                  (v985-real-commit!
+                   (fn []
+                     (xt/execute-tx @!node
+                                    [[:put-docs :eligibility
+                                      (assoc snapshot :fixture/late-policy true)]]))
+                   submissions)]
+      (is (= :incorporated (:status (v985-submit test-case)))))
+    (is (= 1 @submissions))
+    (is (= true
+           (:fixture/late-policy
+            (v985-read :eligibility (:xt/id snapshot)))))
+    (is (some? (v985-read :resource (:resource-id test-case))))
+    (is (some? (v985-read :commands (:command-id test-case))))
+    (is (= :not-established
+           (:application-certification (:pair test-case)))
+        "Observed-field protection must never be advertised as full-document isolation")))
