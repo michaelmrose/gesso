@@ -1052,6 +1052,18 @@
     :committed-write-set
     :outcome-check-consistency})
 
+;; These values are framework-owned diagnostic provenance, not names or
+;; evidence supplied by the application. Admit only known constants from the
+;; current finite checker. Unknown/future backends must remain unclassified
+;; until an explicit contract update, never acquire a plausible source label
+;; by echoing arbitrary backend metadata.
+(def ^:private finite-checker-source-boundaries
+  #{:prepared-transaction-finite-model :recife-tlc-execution})
+(def ^:private finite-checker-subject-kind
+  :gesso.model.formal-transition/prepared-serial-v1)
+(def ^:private finite-checker-backend
+  :recife-0.22.0/tlc)
+
 (defn- safe-finite-transition-prefix [prefix]
   ;; The TLC backend exposes only bounded state/plan indices and enum statuses
   ;; in its safe summary. Never forward arbitrary backend-provided maps, even
@@ -1087,20 +1099,41 @@
         summary (when (and recognized? (map? (:diagnostic/summary data)))
                   (:diagnostic/summary data))
         class (:failure/class data)
+        ;; When a checker reports two conflicting classifications, never
+        ;; attach a credible-sounding invariant label to the application
+        ;; error. An absent summary class is allowed for older emitters.
+        consistent-class?
+        (or (not (contains? summary :failure/class))
+            (= class (:failure/class summary)))
+        recognized-class?
+        (and recognized? consistent-class?
+             (contains? finite-checker-failure-classes class))
         obligation (:failed-obligation summary)
         states (:distinct-states summary)
-        prefix (safe-finite-transition-prefix (:transition-prefix summary))]
+        prefix (safe-finite-transition-prefix (:transition-prefix summary))
+        boundary (:source-boundary summary)
+        subject-kind (:subject-kind summary)
+        checker (:checker summary)
+        plan-count (:selected-plan-count summary)]
     (cond-> {:failure/class
-             (if (and recognized? (contains? finite-checker-failure-classes class))
-               class
-               :unclassified-checker-failure)}
-      (and recognized? (contains? finite-checker-obligation-ids obligation))
+             (if recognized-class? class :unclassified-checker-failure)}
+      (and recognized-class? (contains? finite-checker-obligation-ids obligation))
       (assoc :failed-obligation obligation)
-      (and recognized? (integer? states) (<= 1 states 1000000000))
+      (and recognized-class? (integer? states) (<= 1 states 1000000000))
       (assoc :distinct-states states)
-      (and recognized? (seq prefix))
-      (assoc :transition-prefix prefix))))
-
+      (and recognized-class? (seq prefix))
+      (assoc :transition-prefix prefix)
+      ;; Additional source attribution is safe only for exact framework
+      ;; vocabulary. These fields describe the diagnostic's stated scope;
+      ;; neither they nor the outer exception establish an application proof.
+      (and recognized-class? (contains? finite-checker-source-boundaries boundary))
+      (assoc :source-boundary boundary)
+      (and recognized-class? (= finite-checker-subject-kind subject-kind))
+      (assoc :subject-kind subject-kind)
+      (and recognized-class? (= finite-checker-backend checker))
+      (assoc :checker checker)
+      (and recognized-class? (integer? plan-count) (<= 1 plan-count 6))
+      (assoc :selected-plan-count plan-count))))
 (defn- reject-finite-model-check!
   [operation index exception]
   (let [details
@@ -1333,7 +1366,8 @@
    Invalid evidence, malformed model-checker outputs, checker failures or
    missing Recife support fail closed. Formal-check failures carry an
    application-safe :formal/failure summary (a recognized failure class,
-   named obligation, and bounded state/plan/status prefix when available).
+   named obligation, bounded state/plan/status prefix and strictly enumerated
+   checker/subject/source attribution when available).
    The underlying exception cause is LOCAL, may contain confidential TLC
    data or an inspection handle, and must not be serialized to clients.
    Neither success nor failure issues application certification. An empty
