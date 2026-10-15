@@ -332,3 +332,216 @@
                 (catch clojure.lang.ExceptionInfo ex
                   (:error/kind (ex-data ex))))))
     (is (empty? (sessions)))))
+
+
+;; ---------------------------------------------------------------------------
+;; v956: diagnostics are NOT certificates. These controls substitute results at
+;; the Recife boundary to test classification, redaction and local inspection.
+;; They do not claim any additional TLC exploration or XTDB correspondence.
+;; ---------------------------------------------------------------------------
+
+(defn- captured-formal-failure [subject raw]
+  (with-redefs [recife/run-model (fn [& _] raw)]
+    (try
+      (check/check-prepared! subject)
+      ::unexpected-success
+      (catch clojure.lang.ExceptionInfo e
+        e))))
+
+(defn- failure-records []
+  @(var-get (get (ns-interns 'gesso.model.formal-check) 'failure-records)))
+
+(def ^:private sensitive-marker "DO_NOT_EXPOSE_PRIVATE_MODEL_DATA_v956")
+
+(defn- controlled-trace [state-count]
+  ;; Model-state and business-value fields are intentionally confidential.
+  ;; Only a bounded prefix of numeric state/plan positions and enumerated
+  ;; observation statuses is allowed to leave the local diagnostic registry.
+  (mapv (fn [i]
+          [i {::formal/documents
+              {[:private-table :private-id]
+               {:xt/id :private-id :secret sensitive-marker}}
+              ::formal/observations
+              (vec (concat [{:plan-index 0
+                             :status :committed
+                             :secret sensitive-marker
+                             :target [:private-table :private-id]}
+                            {:plan-index 999 :status :sensitive-state
+                             :secret sensitive-marker}]
+                           (repeat 6 {:plan-index -1
+                                      :status sensitive-marker})))}])
+        (range state-count)))
+
+(deftest structured-invariant-counterexample-preserves-private-trace-test
+  (let [subject (competing-updates)
+        raw {:trace (controlled-trace 35)
+             :trace-info {:violation
+                          {:type :invariant
+                           :name :gesso.model.formal-check/outcome-check-consistency
+                           :private-info sensitive-marker}}
+             :distinct-states 35}
+        error (captured-formal-failure subject raw)]
+    (is (instance? clojure.lang.ExceptionInfo error))
+    (when (instance? clojure.lang.ExceptionInfo error)
+      (let [data (ex-data error)
+            summary (:diagnostic/summary data)
+            handle (:diagnostic/handle data)
+            stored (check/inspect-failure handle)
+            prefix (:transition-prefix summary)]
+        (is (= :model-check-failed (:error/kind data)))
+        (is (= :invariant-counterexample (:failure/class data)))
+        (is (= :invariant-counterexample (:failure/class summary)))
+        (is (= :invariant (:violation/type summary)))
+        (is (= :outcome-check-consistency (:failed-obligation summary)))
+        (is (= (:kind subject) (:subject-kind summary)))
+        (is (= 2 (:selected-plan-count summary)))
+        (is (= :prepared-transaction-finite-model (:source-boundary summary)))
+        (is (= :recife-0.22.0/tlc (:checker summary)))
+        (is (= 35 (:distinct-states summary)))
+        (is (contains? (:not-established summary)
+                       :actual-xtdb-implementation-refinement))
+        (is (instance? java.util.UUID handle))
+        (is (= 32 (count prefix)) "Only the first 32 states are summarized")
+        (is (= (range 32) (mapv :state-index prefix)))
+        (is (every? #(= 6 (count (:observations %))) prefix)
+            "Only the first six observations of each state are summarized")
+        (is (= {:plan-index 0 :status :committed}
+               (first (:observations (second prefix)))))
+        (is (= {} (second (:observations (second prefix))))
+            "Out-of-range or unrecognized status is not trusted")
+        (is (not (.contains (pr-str data) sensitive-marker))
+            "Neither nested exception data nor redacted prefix expose domain values")
+        (is (not (.contains (pr-str data) "private-table")))
+        (is (not (contains? data :trace)))
+        (is (not (contains? data :raw-result)))
+        (is (not (contains? data :subject)))
+        (is (= raw (:raw-result stored)))
+        (is (= subject (:subject stored)))
+        (is (= summary (:summary stored)))
+        (is (= (mapv identity (:trace raw)) (:decoded-trace stored)))
+        (is (= nil (check/inspect-failure (str handle))))
+        (is (= nil (check/inspect-failure :not-a-handle)))
+        (is (empty? (sessions)))))))
+
+(deftest unknown-or-untrusted-obligation-names-are-never-attributed-test
+  (let [subject (competing-updates)]
+    (doseq [name [:unrelated-framework-obligation
+                  :gesso.model.formal-check/unknown-obligation
+                  "gesso.model.formal-check/outcome-check-consistency"
+                  nil]]
+      (testing (str "unrecognized invariant name " (pr-str name))
+        (let [raw {:trace [[0 {::formal/observations []}]]
+                   :trace-info {:violation {:type :invariant :name name}}
+                   :distinct-states 1}
+              error (captured-formal-failure subject raw)
+              summary (:diagnostic/summary (ex-data error))]
+          (is (= :invariant-counterexample (:failure/class (ex-data error))))
+          (is (not (contains? summary :failed-obligation)))
+          (is (= raw (:raw-result
+                      (check/inspect-failure
+                       (:diagnostic/handle (ex-data error)))))))))
+    (is (empty? (sessions)))))
+
+(deftest checker-result-failure-classes-remain-distinct-test
+  (let [subject (competing-updates)
+        cases [[:model-counterexample
+                {:trace [[0 {::formal/observations []}]]
+                 :trace-info {:violation {:type :liveness}}
+                 :distinct-states 1}]
+               [:invariant-counterexample
+                {:trace :violation-detected
+                 :trace-info {:violation {:type :invariant
+                                          :name :gesso.model.formal-check/observation-chain}}
+                 :distinct-states 2}]
+               [:backend-error
+                {:trace :error :trace-info {:message sensitive-marker}
+                 :distinct-states 0}]
+               [:inconclusive-checker-result
+                {:trace :ok :trace-info nil :distinct-states 0}]
+               [:inconclusive-checker-result
+                {:trace :ok :trace-info {:warning :incomplete}
+                 :distinct-states 5}]
+               [:unrecognized-checker-result
+                {:trace :unrecognized :trace-info nil :distinct-states 5}]
+               [:malformed-checker-result nil]
+               [:malformed-checker-result {:trace :ok :trace-info nil}]
+               [:malformed-checker-result [:not-a-checker-result]]]]
+    (doseq [[expected raw] cases]
+      (testing (str expected " " (pr-str (:trace raw)))
+        (let [error (captured-formal-failure subject raw)
+              data (ex-data error)
+              handle (:diagnostic/handle data)]
+          (is (= :model-check-failed (:error/kind data)))
+          (is (= expected (:failure/class data)))
+          (is (= expected (get-in data [:diagnostic/summary :failure/class])))
+          (is (= raw (:raw-result (check/inspect-failure handle))))
+          (is (not (.contains (pr-str data) sensitive-marker))))))
+    (is (empty? (sessions)))))
+
+(deftest backend-exceptions-keep-causes-private-and-classified-test
+  (let [subject (competing-updates)
+        cases [[:backend-exception
+                (ex-info "Internal TLC failure" {:private sensitive-marker})]
+               [:checker-timeout
+                (java.util.concurrent.TimeoutException. "TLC timed out")]]]
+    (doseq [[expected cause] cases]
+      (testing (name expected)
+        (with-redefs [recife/run-model (fn [& _] (throw cause))]
+          (let [error (try (check/check-prepared! subject)
+                           ::unexpected-success
+                           (catch clojure.lang.ExceptionInfo e e))
+                data (ex-data error)
+                handle (:diagnostic/handle data)
+                local (check/inspect-failure handle)]
+            (is (= :model-check-failed (:error/kind data)))
+            (is (= expected (:failure/class data)))
+            (is (= expected (get-in data [:diagnostic/summary :failure/class])))
+            (is (= :recife-tlc-execution
+                   (get-in data [:diagnostic/summary :source-boundary])))
+            (is (= cause (.getCause error)))
+            (is (= cause (:backend-exception local)))
+            (is (nil? (:raw-result local)))
+            (is (not (.contains (pr-str data) sensitive-marker)))
+            (is (empty? (sessions)))))))
+    (testing "a dereferenced asynchronous failure is classified identically"
+      (with-redefs [recife/run-model
+                    (fn [& _]
+                      (delay (throw (java.util.concurrent.TimeoutException.
+                                     "Deferred TLC timeout"))))]
+        (let [error (try (check/check-prepared! subject)
+                         ::unexpected-success
+                         (catch clojure.lang.ExceptionInfo e e))]
+          (is (= :checker-timeout (:failure/class (ex-data error))))
+          (is (empty? (sessions))))))))
+
+(deftest diagnostic-registry-is-bounded-and-evicts-expired-handles-test
+  (let [subject (competing-updates)
+        raw {:trace :error :trace-info nil :distinct-states 0}
+        handles (mapv (fn [_]
+                        (let [error (captured-formal-failure subject raw)]
+                          (:diagnostic/handle (ex-data error))))
+                      (range 19))
+        {:keys [order entries]} (failure-records)]
+    (is (= (count handles) (count (distinct handles))))
+    (is (= 16 (count order)) "The bounded process-local registry keeps 16 records")
+    (is (= (set order) (set (keys entries))))
+    (is (= (subvec handles 3) order))
+    (is (every? nil? (map check/inspect-failure (take 3 handles)))
+        "Old diagnostic handles expire rather than exposing stale cases")
+    (is (every? some? (map check/inspect-failure (drop 3 handles))))
+    (is (empty? (sessions)))))
+
+(deftest valid-check-does-not-create-failure-handle-test
+  (let [subject (competing-updates)
+        successful {:trace :ok :trace-info nil :distinct-states 5}
+        before (failure-records)]
+    (with-redefs [recife/run-model (fn [& _] successful)]
+      ;; This only checks result-shape validation, not actual TLC soundness.
+      (let [result (check/check-prepared! subject)]
+        (is (= :checked-finite-model (:status result)))
+        (is (= :bounded-reference-model-check-not-certificate
+               (:evidence-class result)))
+        (is (= (set obligation/obligation-ids) (:obligations result)))
+        (is (not (contains? result :diagnostic/handle)))
+        (is (= before (failure-records)))
+        (is (empty? (sessions)))))))
