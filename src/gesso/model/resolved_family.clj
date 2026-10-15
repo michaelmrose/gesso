@@ -35,7 +35,9 @@
    production facts for structural presence, without inferring omitted policy.
    Optional :required-guard-paths connects declared context-held canonical
    version guards to the transaction plan in both formal and actual production
-   construction. Only explicitly declared dependencies are checked; it does
+   construction. Optional :required-guard-snapshots independently checks each
+   declared guard against a named, modeled acquisition snapshot, including
+   document identity and every version comparison field. Only explicitly declared dependencies are checked; it does
    not infer missing policy, prove acquisition truth, or authenticate XTDB.
    This is a strict field comparison, not observation authentication: omitted
    production context semantics and the source of the supplied values remain
@@ -64,6 +66,7 @@
   #{:modeled :excluded :modeled-values :required-guard-paths})
 (def guarded-path-coverage-keys
   #{:modeled :excluded :modeled-values :required-paths :required-guard-paths})
+(def guard-snapshot-coverage-key :required-guard-snapshots)
 (def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
@@ -92,7 +95,8 @@
               :declared-modeled-context-key-stability
               :optional-recursive-modeled-value-closure
               :optional-declared-nested-semantic-path-presence
-              :optional-construction-guard-to-plan-correspondence}
+              :optional-construction-guard-to-plan-correspondence
+              :optional-guard-to-modeled-snapshot-correspondence}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -101,7 +105,8 @@
               :trusted-provenance-of-supplied-production-context-and-binding
               :truthful-declaration-of-excluded-context-field-irrelevance
               :truthful-complete-authored-required-semantic-paths
-              :truthful-complete-authored-guard-dependency-paths}
+              :truthful-complete-authored-guard-dependency-paths
+              :truthful-guard-snapshot-acquisition-and-identity}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -114,6 +119,8 @@
                       :commit-time-enforcement-of-undeclared-semantic-facts
                       :real-xtdb-enforcement-of-declared-guards
                       :independent-authentication-of-production-input-values
+                      :truth-of-acquired-document-snapshots
+                      :completeness-of-declared-guard-snapshot-bindings
                       :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
                       :all-reachable-states-and-repreparation
@@ -253,6 +260,35 @@
             guard))
         (:required-guard-paths coverage)))
 
+(defn- require-guard-snapshots! [coverage context]
+  ;; Compare each declared guard with the snapshot that the author says was
+  ;; acquired. This is a second relationship beyond guard presence in the
+  ;; transaction plan. It prevents a forged/stale version, unrelated document
+  ;; or wrong entity type from being substituted for a declared observation.
+  ;; No XTDB access happens here: the origin and freshness of the supplied
+  ;; snapshot are NOT authenticated by comparing two context values.
+  (doseq [[guard-path {:keys [document-path entity-type]}]
+          (:required-guard-snapshots coverage)]
+    (when-not (required-path-present? context document-path)
+      (fail! :missing-required-guard-snapshot))
+    (let [guard (get-in context guard-path)
+          snapshot (get-in context document-path)
+          expected (:model/expected guard)
+          checks (:model/checks expected)]
+      (when-not (and (command/guard? guard)
+                     (= entity-type (:model/entity-type guard))
+                     (map? snapshot)
+                     (contains? snapshot :xt/id)
+                     (= (:xt/id snapshot) (:model/id expected))
+                     ;; Check every field, including presence; a missing key
+                     ;; cannot agree with an expected nil or a fabricated
+                     ;; comparison value.
+                     (every? (fn [[field value]]
+                               (and (contains? snapshot field)
+                                    (= value (get snapshot field))))
+                             checks))
+        (fail! :required-guard-snapshot-mismatch)))))
+
 (defn- guarded-plan! [coverage context plan]
   (when (seq (:required-guard-paths coverage))
     ;; Admit the same supported transaction subset as the finite reference.
@@ -298,6 +334,7 @@
       (require-semantic-paths! coverage context
                                :missing-required-production-semantic-input)
       (require-guard-paths! coverage context)
+      (require-guard-snapshots! coverage context)
       (let [built (construct! context binding)]
         (when (and (map? built) (contains? built :plan))
           (guarded-plan! coverage context (:plan built)))
@@ -313,11 +350,13 @@
 
 (defn- require-context-coverage! [coverage]
   (when-not (and (map? coverage)
-                 (or (= context-coverage-keys (set (keys coverage)))
-                     (= closed-context-coverage-keys (set (keys coverage)))
-                     (= required-path-coverage-keys (set (keys coverage)))
-                     (= guarded-coverage-keys (set (keys coverage)))
-                     (= guarded-path-coverage-keys (set (keys coverage))))
+                 (let [declared-keys (disj (set (keys coverage))
+                                           guard-snapshot-coverage-key)]
+                   (or (= context-coverage-keys declared-keys)
+                       (= closed-context-coverage-keys declared-keys)
+                       (= required-path-coverage-keys declared-keys)
+                       (= guarded-coverage-keys declared-keys)
+                       (= guarded-path-coverage-keys declared-keys)))
                  (set? (:modeled coverage))
                  (seq (:modeled coverage))
                  (every? keyword? (:modeled coverage))
@@ -350,7 +389,28 @@
                                          (every? semantic-path-key? path)
                                          (contains? (:modeled coverage)
                                                     (first path))))
-                                  (:required-guard-paths coverage)))))
+                                  (:required-guard-paths coverage))))
+                 (or (not (contains? coverage guard-snapshot-coverage-key))
+                     (and (= closed-model-value-mode (:modeled-values coverage))
+                          (map? (:required-guard-snapshots coverage))
+                          (seq (:required-guard-snapshots coverage))
+                          (<= (count (:required-guard-snapshots coverage))
+                              maximum-required-paths)
+                          (every?
+                           (fn [[guard-path descriptor]]
+                             (and (contains? (:required-guard-paths coverage)
+                                             guard-path)
+                                  (map? descriptor)
+                                  (= #{:document-path :entity-type}
+                                     (set (keys descriptor)))
+                                  (keyword? (:entity-type descriptor))
+                                  (let [path (:document-path descriptor)]
+                                    (and (vector? path)
+                                         (<= 1 (count path) maximum-closed-depth)
+                                         (every? semantic-path-key? path)
+                                         (contains? (:modeled coverage)
+                                                    (first path))))))
+                           (:required-guard-snapshots coverage)))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -378,6 +438,7 @@
     (require-semantic-paths! coverage (:context input)
                              :missing-required-modeled-semantic-input)
     (require-guard-paths! coverage (:context input))
+    (require-guard-snapshots! coverage (:context input))
     (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
@@ -419,6 +480,7 @@
     (require-semantic-paths! coverage production-context
                              :missing-required-production-semantic-input)
     (require-guard-paths! coverage production-context)
+    (require-guard-snapshots! coverage production-context)
     (when-not (every? (fn [[key value]]
                         (and (contains? production-context key)
                              (= value (get production-context key))))
@@ -449,6 +511,11 @@
      (count (:required-paths coverage))
      :required-paths-completeness :not-established
      :declared-semantic-guards-checked (count (:required-guard-paths coverage))
+     :declared-guard-snapshots-checked (count (:required-guard-snapshots coverage))
+     :guard-snapshot-origin
+     (if (seq (:required-guard-snapshots coverage))
+       :caller-supplied-not-authenticated
+       :not-declared)
      :semantic-guard-commit-enforcement-in-this-comparison :not-checked
      :semantic-guard-dependency-completeness :not-established
      :unmodeled-production-context-fields
@@ -530,6 +597,14 @@
    guards enforce those dependencies. It does not prove callback purity,
    dependency completeness, or excluded context-field irrelevance. Without
    the coverage declaration, legacy conditional comparison is retained.
+   Add :required-guard-snapshots
+   {[:eligibility :guard] {:document-path [:eligibility :document]
+                          :entity-type :fixture/eligibility}}
+   to bind an explicitly authored guard to a modeled document. Every expected
+   version check must agree with the corresponding acquired document field and
+   the guard's entity type must match. The snapshot must be present on both
+   construction sides. This never authenticates the snapshot's production
+   origin, establishes policy completeness, or proves XTDB behavior.
    Add :required-guard-paths #{[:eligibility :guard]} to :closed-data coverage
    when that nested modeled value is a canonical gesso.model.command/guard.
    Every declared guard must be represented in the returned transaction plan,
