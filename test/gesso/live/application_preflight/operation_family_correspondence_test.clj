@@ -2045,3 +2045,174 @@
     (is (= :not-established (:exclusion-relevance actual)))
     (is (= :not-established (:application-certification actual)))
     (is (not (.contains (pr-str actual) "private")))))
+
+
+;; v966 — Permanent tests for v965's opt-in recursive closed-data input gate.
+;; This gate enforces a bounded representation discipline, not application
+;; callback purity, complete authorization dependencies, or authenticated
+;; production acquisition. Keep fixtures synthetic and source independent.
+
+(defn- v966-coverage [inputs]
+  (assoc (v948-coverage inputs) :modeled-values :closed-data))
+
+(defn- v966-pair
+  [example inputs calls modeled-context]
+  (v939-pair example calls
+             {:context-coverage (v966-coverage inputs)
+              :model-input!
+              (fn [_ _ _]
+                {:context modeled-context
+                 :binding (:modeled-binding inputs)})}))
+
+(defn- v966-error [f]
+  (try
+    (f)
+    nil
+    (catch clojure.lang.ExceptionInfo e e)))
+
+(deftest v966-closed-data-valid-nested-values-and-scope-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        value {:numbers [nil true false 0 12N 3/7 1.5M 4.25]
+               :identity [(random-uuid) (java.time.Instant/parse "2026-10-15T00:00:00Z")]
+               :collections {:map (array-map :a 1 :b #{:ok :good})
+                             :vector (subvec [:a :b :c] 1)
+                             :list (list :yes :no)
+                             :empty '()}}
+        modeled (assoc (:modeled-context inputs) :request/eligible? value)
+        physical (assoc (:supplied-context inputs) :request/eligible? value)
+        calls (atom 0)
+        pair (v966-pair example inputs calls modeled)
+        {:keys [state who args physical-binding]} inputs
+        match ((:compare-production-input! pair)
+               state who args physical physical-binding)
+        printed (pr-str match)]
+    (is (= :matched-declared-input-fields (:status match)))
+    (is (= :checked-closed-data (:modeled-value-closure match)))
+    (is (= :not-established (:constructor-purity match)))
+    (is (= :closed-against-authored-exclusions (:context-key-inventory match)))
+    (is (= :caller-supplied-not-authenticated (:input-origin match)))
+    (is (= :not-established (:application-certification match)))
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-recursive-modeled-value-closure))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :absence-of-ambient-constructor-dependencies))
+    (is (zero? @calls) "Comparison does not call the business constructor")
+    (is (not (contains? match :context)))
+    (is (not (contains? match :binding)))
+    (is (not (.contains printed (:request-id example))))
+    (is (map? ((get-in pair [:family :prepare]) state who args)))
+    (is (= 1 @calls) "Admitted finite construction still executes normally")))
+
+(deftest v966-closed-data-rejects-nested-capabilities-before-construction-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        {:keys [state who args]} inputs
+        bad-values
+        [["atom in map" {:outer {:inner (atom true)}}]
+         ["atom in key" {(atom :secret) :value}]
+         ["function in vector" [:ok (fn [] :hidden)]]
+         ["volatile" [1 (volatile! 2)]]
+         ["lazy sequence" (map identity [:a :b])]
+         ["delay" (delay :secret)]
+         ["java map" (doto (java.util.HashMap.) (.put "key" "value"))]
+         ["java list" (java.util.ArrayList. [:a :b])]
+         ["java array" (into-array Object [:a :b])]
+         ["java date" (java.util.Date.)]
+         ["sorted map comparator" (sorted-map :a 1)]
+         ["sorted set comparator" (sorted-set :a :b)]
+         ["nonfinite double" Double/NaN]
+         ["nonfinite float" Float/POSITIVE_INFINITY]
+         ["nested metadata" {:path (with-meta [:safe] {:hidden (atom 2)})}]
+         ["metadata on context value" (with-meta {:a 1} {:source :untrusted})]]]
+    (doseq [[label value] bad-values]
+      (testing label
+        (let [calls (atom 0)
+              modeled (assoc (:modeled-context inputs) :request/eligible? value)
+              pair (v966-pair example inputs calls modeled)
+              exception (v966-error #((get-in pair [:family :prepare])
+                                      state who args))]
+          (is (= :non-data-modeled-context (:error/kind (ex-data exception))))
+          (is (= :gesso.model.resolved-family/invalid-resolved-family
+                 (:error/type (ex-data exception))))
+          (is (= #{:error/type :error/kind} (set (keys (ex-data exception)))))
+          (is (not (contains? (ex-data exception) :context)))
+          (is (zero? @calls) "Construction cannot observe the rejected context"))))))
+
+(deftest v966-closed-data-traversal-bounds-fail-closed-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        {:keys [state who args]} inputs
+        depth-excess (nth (iterate vector :leaf) 40)
+        node-excess (vec (repeat 8250 :leaf))]
+    (doseq [[label value] [["depth" depth-excess]
+                           ["node budget" node-excess]]]
+      (testing label
+        (let [calls (atom 0)
+              modeled (assoc (:modeled-context inputs) :request/eligible? value)
+              pair (v966-pair example inputs calls modeled)
+              exception (v966-error #((get-in pair [:family :prepare])
+                                      state who args))]
+          (is (= :non-data-modeled-context (:error/kind (ex-data exception))))
+          (is (zero? @calls))
+          (is (not (.contains (pr-str (ex-data exception)) "leaf"))))))))
+
+(deftest v966-closed-production-values-checked-before-equality-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        calls (atom 0)
+        pair (v966-pair example inputs calls (:modeled-context inputs))
+        {:keys [state who args supplied-context physical-binding]} inputs
+        compare! (:compare-production-input! pair)]
+    (doseq [[label value] [["production atom" {:nested (atom true)}]
+                           ["production function" (fn [] :hidden)]
+                           ["production metadata" (with-meta [:value] {:hidden :yes})]
+                           ["production lazy" (map identity [:x])]]]
+      (testing label
+        (let [exception (v966-error
+                         #(compare! state who args
+                                    (assoc supplied-context :request/eligible? value)
+                                    physical-binding))]
+          (is (= :non-data-modeled-context (:error/kind (ex-data exception))))
+          (is (zero? @calls))
+          (is (not (contains? (ex-data exception) :context))))))
+    ;; Excluded inputs intentionally have no content-level closure guarantee.
+    (let [physical (assoc supplied-context :biff.fx/now (Object.))
+          report (compare! state who args physical physical-binding)]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= :not-established (:exclusion-relevance report)))
+      (is (= :checked-closed-data (:modeled-value-closure report)))
+      (is (zero? @calls)))))
+
+(deftest v966-closed-data-configuration-and-legacy-mode-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        coverage (v966-coverage inputs)
+        invalid [nil :unexpected false :partially-closed]
+        {:keys [state who args supplied-context physical-binding]} inputs]
+    (doseq [value invalid]
+      (testing (str "invalid mode " value)
+        (is (= :invalid-context-coverage
+               (kind #(v948-pair example inputs
+                                 (assoc coverage :modeled-values value)))))))
+    (is (= :invalid-context-coverage
+           (kind #(v948-pair example inputs
+                             (assoc coverage :unsupported true)))))
+    (let [calls (atom 0)
+          modeled (assoc (:modeled-context inputs) :request/eligible? (atom true))
+          old-coverage (v948-coverage inputs)
+          pair (v939-pair example calls
+                          {:context-coverage old-coverage
+                           :model-input!
+                           (fn [_ _ _] {:context modeled
+                                        :binding (:modeled-binding inputs)})})]
+      (is (= :not-checked
+             (:modeled-value-closure
+              ((:compare-production-input! pair)
+               state who args
+               (assoc supplied-context :request/eligible? (:request/eligible? modeled))
+               physical-binding))))
+      (is (zero? @calls))
+      ;; Legacy key-inventory validation did not impose value-closure.
+      (is (map? ((get-in pair [:family :prepare]) state who args)))
+      (is (= 1 @calls)))))
