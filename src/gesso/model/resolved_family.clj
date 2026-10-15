@@ -37,7 +37,11 @@
    version guards to the transaction plan in both formal and actual production
    construction. Optional :required-guard-snapshots independently checks each
    declared guard against a named, modeled acquisition snapshot, including
-   document identity and every version comparison field. Only explicitly declared dependencies are checked; it does
+   document identity and every version comparison field. Optional
+   :required-model-state-snapshots checks a selected finite prestate's actual
+   current document against that declared snapshot before model construction.
+   This compares two finite-model objects; it does NOT authenticate production
+   acquisition. Only explicitly declared dependencies are checked; it does
    not infer missing policy, prove acquisition truth, or authenticate XTDB.
    This is a strict field comparison, not observation authentication: omitted
    production context semantics and the source of the supplied values remain
@@ -67,6 +71,7 @@
 (def guarded-path-coverage-keys
   #{:modeled :excluded :modeled-values :required-paths :required-guard-paths})
 (def guard-snapshot-coverage-key :required-guard-snapshots)
+(def model-state-snapshots-coverage-key :required-model-state-snapshots)
 (def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
@@ -96,7 +101,8 @@
               :optional-recursive-modeled-value-closure
               :optional-declared-nested-semantic-path-presence
               :optional-construction-guard-to-plan-correspondence
-              :optional-guard-to-modeled-snapshot-correspondence}
+              :optional-guard-to-modeled-snapshot-correspondence
+              :optional-snapshot-to-selected-finite-prestate-correspondence}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -106,7 +112,8 @@
               :truthful-declaration-of-excluded-context-field-irrelevance
               :truthful-complete-authored-required-semantic-paths
               :truthful-complete-authored-guard-dependency-paths
-              :truthful-guard-snapshot-acquisition-and-identity}
+              :truthful-guard-snapshot-acquisition-and-identity
+              :truthful-selection-of-the-finite-prestate}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -120,6 +127,8 @@
                       :real-xtdb-enforcement-of-declared-guards
                       :independent-authentication-of-production-input-values
                       :truth-of-acquired-document-snapshots
+                      :independent-authentication-of-selected-finite-prestate
+                      :correspondence-of-finite-prestate-to-production-xtdb
                       :completeness-of-declared-guard-snapshot-bindings
                       :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
@@ -289,6 +298,32 @@
                              checks))
         (fail! :required-guard-snapshot-mismatch)))))
 
+(defn- require-model-state-snapshots! [coverage state context]
+  ;; The model-input! callback is application-owned. Without this optional
+  ;; independent check it could fabricate the acquired snapshot while the
+  ;; guard and transaction plan faithfully agree with the fabrication.
+  ;; The selected PRESTATE, not the callback output, supplies the document
+  ;; checked here. Still no claim of XTDB authenticity or complete policy.
+  (when (seq (:required-model-state-snapshots coverage))
+    ;; Prevent opaque state objects, effectful equality and malformed finite
+    ;; state from influencing this check. Do not relay private documents in
+    ;; diagnostics from reference/require-state.
+    (when-not (and (closed-data? state)
+                   (try
+                     (reference/require-state state)
+                     true
+                     (catch Exception _ false)))
+      (fail! :invalid-finite-semantic-prestate))
+    (doseq [guard-path (:required-model-state-snapshots coverage)]
+      (let [{:keys [document-path entity-type]}
+            (get (:required-guard-snapshots coverage) guard-path)
+            snapshot (get-in context document-path)
+            target [entity-type (:xt/id snapshot)]]
+        (when-not (contains? state target)
+          (fail! :required-snapshot-missing-from-finite-prestate))
+        (when-not (= snapshot (get state target))
+          (fail! :required-snapshot-finite-prestate-mismatch))))))
+
 (defn- guarded-plan! [coverage context plan]
   (when (seq (:required-guard-paths coverage))
     ;; Admit the same supported transaction subset as the finite reference.
@@ -350,8 +385,9 @@
 
 (defn- require-context-coverage! [coverage]
   (when-not (and (map? coverage)
-                 (let [declared-keys (disj (set (keys coverage))
-                                           guard-snapshot-coverage-key)]
+                 (let [declared-keys (apply disj (set (keys coverage))
+                                            [guard-snapshot-coverage-key
+                                             model-state-snapshots-coverage-key])]
                    (or (= context-coverage-keys declared-keys)
                        (= closed-context-coverage-keys declared-keys)
                        (= required-path-coverage-keys declared-keys)
@@ -410,7 +446,15 @@
                                          (every? semantic-path-key? path)
                                          (contains? (:modeled coverage)
                                                     (first path))))))
-                           (:required-guard-snapshots coverage)))))
+                           (:required-guard-snapshots coverage))))
+                 (or (not (contains? coverage model-state-snapshots-coverage-key))
+                     (and (= closed-model-value-mode (:modeled-values coverage))
+                          (set? (:required-model-state-snapshots coverage))
+                          (seq (:required-model-state-snapshots coverage))
+                          (<= (count (:required-model-state-snapshots coverage))
+                              maximum-required-paths)
+                          (every? #(contains? (:required-guard-snapshots coverage) %)
+                                  (:required-model-state-snapshots coverage)))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -439,6 +483,7 @@
                              :missing-required-modeled-semantic-input)
     (require-guard-paths! coverage (:context input))
     (require-guard-snapshots! coverage (:context input))
+    (require-model-state-snapshots! coverage state (:context input))
     (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
@@ -514,6 +559,12 @@
      :declared-guard-snapshots-checked (count (:required-guard-snapshots coverage))
      :guard-snapshot-origin
      (if (seq (:required-guard-snapshots coverage))
+       :caller-supplied-not-authenticated
+       :not-declared)
+     :declared-finite-prestate-snapshots-checked
+     (count (:required-model-state-snapshots coverage))
+     :finite-prestate-origin
+     (if (seq (:required-model-state-snapshots coverage))
        :caller-supplied-not-authenticated
        :not-declared)
      :semantic-guard-commit-enforcement-in-this-comparison :not-checked
@@ -605,6 +656,15 @@
    the guard's entity type must match. The snapshot must be present on both
    construction sides. This never authenticates the snapshot's production
    origin, establishes policy completeness, or proves XTDB behavior.
+   Add :required-model-state-snapshots #{[:eligibility :guard]} when that
+   guard is already listed in :required-guard-snapshots. On every finite
+   model-input! invocation, Gesso compares the authored snapshot to the
+   actual current document at [entity-type document-id] in the SELECTED
+   finite prestate, using complete document equality (not merely version
+   fields). This rejects fabricated model-input snapshots and is also
+   checked when comparing supplied production input to the finite model.
+   It does not compare the production constructor to XTDB and cannot prove
+   that the finite prestate corresponds to any actual production snapshot.
    Add :required-guard-paths #{[:eligibility :guard]} to :closed-data coverage
    when that nested modeled value is a canonical gesso.model.command/guard.
    Every declared guard must be represented in the returned transaction plan,
