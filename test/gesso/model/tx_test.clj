@@ -184,8 +184,8 @@
          :where
          [:and
           [:= :xt/id :widget-1]
-          [:= :widget/revision 3]
-          [:= :widget/updated-at :t1]]}]}
+          [:= :widget/revision [:lift 3]]
+          [:= :widget/updated-at [:lift :t1]]]}]}
       (tx/assert-document-current
        :widget
        (:model/expected
@@ -1773,3 +1773,98 @@
                   :emit false}))]
       (is (= :assert-failed (v989-commit-result node plan)))
       (is (nil? (v989-row node :fixture/outcome out-id))))))
+
+
+;; v994 — The expected-version values are data. The finite reference model
+;; compares their values directly; the physical XTDB adapter must transmit
+;; those same values as SQL parameters rather than interpreting maps, vectors,
+;; or qualified keywords as HoneySQL query syntax or SQL identifiers.
+
+(defn- v994-guarded-stored-value [original outcome-id]
+  (let [guard (v989-full-guard original)]
+    (:tx-ops
+     (tx/prepare
+      {}
+      {:commands [(command/create
+                   :fixture/outcome
+                   (v989-outcome outcome-id)
+                   v989-version)]
+       :guards [guard]
+       :emit false}))))
+
+(deftest v994-expected-version-comparison-values-are-lifted-test
+  (let [id "v994-data-shape"
+        nested {:eligibility {:group :fixture/helpers
+                              :rules [{:resource/id :fixture/target}]}}
+        tags [:fixture/first {:policy/allowed? true}]
+        original (assoc (v989-document id)
+                        :fixture/details nested
+                        :fixture/tags tags
+                        :fixture/classification :fixture/active)
+        guard (v989-full-guard original)
+        assertion (tx/assert-document-current
+                   :fixture/subject
+                   (:model/expected guard))
+        conditions (rest (get-in assertion [:assert 2 :where]))]
+    (is (some #{[:= :xt/id id]} conditions))
+    (is (some #{[:= :fixture/details [:lift nested]]} conditions))
+    (is (some #{[:= :fixture/tags [:lift tags]]} conditions))
+    (is (some #{[:= :fixture/classification [:lift :fixture/active]]}
+              conditions))
+    (is (some #{[:= :fixture/revision [:lift 0]]} conditions))
+    (is (every? (fn [[op field expected]]
+                  (or (= field :xt/id)
+                      (and (= := op)
+                           (= :lift (first expected))
+                           (= 2 (count expected)))))
+                conditions)
+        "All version values, but not the document target, are lifted data")))
+
+(defn- v994-physical-value-case! [label before after]
+  (with-open [node (xtn/start-node {})]
+    (let [id (str "v994-subject-" (random-uuid))
+          accepted-id (str "v994-stable-" (random-uuid))
+          rejected-id (str "v994-stale-" (random-uuid))
+          original (assoc (v989-document id) :fixture/payload before)
+          committed-ops (v994-guarded-stored-value original accepted-id)
+          rejected-ops (v994-guarded-stored-value original rejected-id)]
+      (xt/execute-tx node [[:put-docs :fixture/subject original]])
+      (is (= :committed (v989-commit-result node committed-ops))
+          (str label ": original nested value must match the physical guard"))
+      (is (= accepted-id (:xt/id (v989-row node :fixture/outcome accepted-id)))
+          (str label ": matching guard must persist its application write"))
+      (xt/execute-tx node
+                     [[:put-docs :fixture/subject
+                       (assoc original :fixture/payload after)]])
+      (is (= :assert-failed (v989-commit-result node rejected-ops))
+          (str label ": changed nested value must conflict"))
+      (is (nil? (v989-row node :fixture/outcome rejected-id))
+          (str label ": failed guard must leave no application write")))))
+
+(deftest v994-physical-nested-map-version-comparison-test
+  (v994-physical-value-case!
+   "nested map"
+   {:eligibility {:active? true
+                  :policy {:priority 1
+                           :class :fixture/approved}}}
+   {:eligibility {:active? false
+                  :policy {:priority 1
+                           :class :fixture/approved}}}))
+
+(deftest v994-physical-vector-version-comparison-test
+  (v994-physical-value-case!
+   "nested vector"
+   [:fixture/reader {:permissions [:fixture/read :fixture/write]}]
+   [:fixture/reader {:permissions [:fixture/read]}]))
+
+(deftest v994-physical-qualified-keyword-version-comparison-test
+  (v994-physical-value-case!
+   "qualified keyword"
+   :fixture/allowed
+   :fixture/denied))
+
+(deftest v994-physical-string-version-comparison-test
+  (v994-physical-value-case!
+   "string"
+   "literal unchanged"
+   "literal changed"))
