@@ -4,7 +4,9 @@
    [com.biffweb.core :as biff.core]
    [gesso.live.core :as live]
    [gesso.model.command :as command]
-   [gesso.model.tx :as tx]))
+   [gesso.model.tx :as tx]
+   [xtdb.api :as xt]
+   [xtdb.node :as xtn]))
 
 (def version
   {:revision-key :widget/revision
@@ -1563,3 +1565,211 @@
        {tx/transact-effect
         tx/transact!}}
       (tx/module)))))
+
+;; v989 — Physical XTDB2 correspondence for a complete-observation field-count
+;; ASSERT. The assertion is a generic Gesso transaction primitive; applications
+;; opt in explicitly until a later resolved-family integration revision.
+;; Real XTDB executions test a bounded subset of the operational semantics,
+;; not a general refinement proof or an authenticated acquisition guarantee.
+
+(def ^:private v989-version
+  {:revision-key :fixture/revision
+   :created-at-key :fixture/created-at
+   :updated-at-key :fixture/updated-at})
+
+(defn- v989-document [id]
+  {:xt/id id
+   :fixture/revision 0
+   :fixture/created-at "t0"
+   :fixture/updated-at "t0"
+   :fixture/active? true})
+
+(defn- v989-outcome [id]
+  {:xt/id id
+   :fixture/revision 0
+   :fixture/created-at "t0"
+   :fixture/updated-at "t0"
+   :fixture/accepted? true})
+
+(defn- v989-full-guard [observed]
+  (command/guard
+   :fixture/subject observed
+   (assoc v989-version
+          :compare-keys (->> (keys observed)
+                             (remove #{:xt/id})
+                             sort
+                             vec))))
+
+(defn- v989-ops
+  ([observed outcome-id]
+   (v989-ops observed outcome-id true))
+  ([observed outcome-id field-count?]
+   (:tx-ops
+    (tx/prepare
+     {}
+     {:commands [(command/create :fixture/outcome
+                                 (v989-outcome outcome-id)
+                                 v989-version)]
+      :guards [(v989-full-guard observed)]
+      :assertions (if field-count?
+                    [(tx/assert-document-field-count
+                      :fixture/subject (:xt/id observed) (count observed))]
+                    [])
+      :emit false}))))
+
+(defn- v989-commit-result [node ops]
+  (try
+    (xt/execute-tx node ops)
+    :committed
+    (catch Throwable error
+      (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data error)))
+        :assert-failed
+        (throw error)))))
+
+(defn- v989-row [node entity-type id]
+  (let [table (case entity-type
+                :fixture/subject "fixture.subject"
+                :other/subject "other.subject"
+                :fixture/outcome "fixture.outcome")]
+    (first (xt/q node [(str "SELECT * FROM " table " WHERE _id = ?") id]))))
+
+(deftest v989-field-count-assertion-sql-and-validation-test
+  (let [id "literal-' OR 1=1 --"
+        a (tx/assert-document-field-count :fixture/subject id 5)
+        prepared (:tx-ops (tx/prepare {}
+                                      {:commands [(command/create
+                                                   :fixture/outcome
+                                                   (v989-outcome "v989-sql-out")
+                                                   v989-version)]
+                                       :assertions [a]
+                                       :emit false}))
+        sql (->> prepared
+                 (filter #(and (vector? %) (string? (first %))))
+                 (map (fn [[statement & params]]
+                        [statement params]))
+                 (filter (fn [[statement _]]
+                           (re-find #"LENGTH\(NEST_ONE\s*\(" statement)))
+                 first)]
+    (is (some? sql) "A field-count ASSERT must reach the prepared transaction")
+    (is (re-find #"FROM fixture\.subject" (first sql)))
+    (is (re-find #"WHERE _id = \?" (first sql)))
+    (is (not (.contains (first sql) id))
+        "The document ID must never be interpolated into assertion SQL")
+    (is (some #{id} (second sql))
+        "The document ID must travel as a bound argument")
+    (is (= ::tx/invalid-document-field-count
+           (error-type #(tx/assert-document-field-count :fixture/subject id 0))))
+    (is (= ::tx/invalid-document-field-count
+           (error-type #(tx/assert-document-field-count :fixture/subject id -1))))
+    (is (= ::tx/invalid-document-field-count
+           (error-type #(tx/assert-document-field-count :fixture/subject id 8193))))
+    (is (= ::tx/invalid-document-field-count
+           (error-type #(tx/assert-document-field-count :fixture/subject id 2.5))))
+    (is (= ::tx/invalid-entity-type
+           (error-type #(tx/assert-document-field-count "fixture/subject" id 5))))
+    (is (= ::tx/invalid-document-id
+           (error-type #(tx/assert-document-field-count :fixture/subject nil 5))))))
+
+(deftest v989-physical-matching-complete-document-commits-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (str "v989-subject-" (random-uuid))
+          out-id (str "v989-out-" (random-uuid))
+          original (v989-document id)
+          ops (v989-ops original out-id)]
+      (xt/execute-tx node [[:put-docs :fixture/subject original]])
+      (is (= :committed (v989-commit-result node ops)))
+      (is (= out-id (:xt/id (v989-row node :fixture/outcome out-id))))
+      (is (= 0 (:fixture/revision (v989-row node :fixture/subject id)))))))
+
+(deftest v989-physical-late-field-is-conflict-and-atomic-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (str "v989-subject-" (random-uuid))
+          original (v989-document id)
+          unprotected-id (str "v989-oldguard-" (random-uuid))
+          protected-id (str "v989-newguard-" (random-uuid))
+          without-count (v989-ops original unprotected-id false)
+          with-count (v989-ops original protected-id)]
+      (xt/execute-tx node [[:put-docs :fixture/subject original]])
+      ;; Prepared plans have captured the old snapshot when another writer
+      ;; adds a policy field. All original field values remain unchanged.
+      (xt/execute-tx node [[:put-docs :fixture/subject
+                            (assoc original :fixture/new-policy "added")]])
+      (is (= :committed (v989-commit-result node without-count))
+          "An all-observed-fields guard ALONE does not detect an added field")
+      (is (= unprotected-id (:xt/id (v989-row node :fixture/outcome unprotected-id))))
+      (is (= :assert-failed (v989-commit-result node with-count))
+          "The field-count assertion must reject the SAME late addition")
+      (is (nil? (v989-row node :fixture/outcome protected-id))
+          "Failed ASSERT must abort the canonical application create")
+      (is (= "added" (:fixture/new-policy (v989-row node :fixture/subject id)))))))
+
+(deftest v989-physical-observed-field-change-is-conflict-and-atomic-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (str "v989-subject-" (random-uuid))
+          original (v989-document id)
+          protected-id (str "v989-guarded-" (random-uuid))
+          count-only-id (str "v989-countonly-" (random-uuid))
+          guarded (v989-ops original protected-id)
+          count-only (:tx-ops
+                      (tx/prepare
+                       {}
+                       {:commands [(command/create
+                                    :fixture/outcome
+                                    (v989-outcome count-only-id)
+                                    v989-version)]
+                        :assertions [(tx/assert-document-field-count
+                                      :fixture/subject id (count original))]
+                        :emit false}))]
+      (xt/execute-tx node [[:put-docs :fixture/subject original]])
+      (xt/execute-tx node [[:put-docs :fixture/subject
+                            (assoc original :fixture/active? false)]])
+      (is (= :committed (v989-commit-result node count-only))
+          "A field count ALONE does not detect a changed observed value")
+      (is (= count-only-id (:xt/id (v989-row node :fixture/outcome count-only-id))))
+      (is (= :assert-failed (v989-commit-result node guarded))
+          "The combination of full guard and field count catches the change")
+      (is (nil? (v989-row node :fixture/outcome protected-id)))
+      (is (false? (:fixture/active? (v989-row node :fixture/subject id)))))))
+
+(deftest v989-physical-assertion-uses-correct-schema-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (str "v989-cross-schema-" (random-uuid))
+          original (v989-document id)
+          other (assoc original :fixture/extra-field true)
+          first-id (str "v989-physical-first-" (random-uuid))
+          second-id (str "v989-physical-second-" (random-uuid))]
+      (xt/execute-tx node
+                     [[:put-docs :fixture/subject original]
+                      [:put-docs :other/subject other]])
+      (is (= :committed (v989-commit-result node (v989-ops original first-id)))
+          "Count the document from fixture.subject, not same-ID other.subject")
+      (is (= first-id (:xt/id (v989-row node :fixture/outcome first-id))))
+      (let [wrong-schema-ops
+            (:tx-ops
+             (tx/prepare
+              {}
+              {:commands [(command/create :fixture/outcome
+                                          (v989-outcome second-id)
+                                          v989-version)]
+               :assertions [(tx/assert-document-field-count
+                             :other/subject id (count original))]
+               :emit false}))]
+        (is (= :assert-failed (v989-commit-result node wrong-schema-ops))
+            "The same expected count must fail against the other schema")
+        (is (nil? (v989-row node :fixture/outcome second-id)))))))
+
+(deftest v989-physical-missing-document-fails-closed-test
+  (with-open [node (xtn/start-node {})]
+    (let [id (str "v989-missing-" (random-uuid))
+          out-id (str "v989-absent-out-" (random-uuid))
+          plan (:tx-ops
+                (tx/prepare
+                 {}
+                 {:commands [(command/create :fixture/outcome
+                                             (v989-outcome out-id)
+                                             v989-version)]
+                  :assertions [(tx/assert-document-field-count
+                                :fixture/subject id 5)]
+                  :emit false}))]
+      (is (= :assert-failed (v989-commit-result node plan)))
+      (is (nil? (v989-row node :fixture/outcome out-id))))))
