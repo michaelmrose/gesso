@@ -1028,6 +1028,98 @@
                                (set (keys observations)))}))
     observations))
 
+;; TLC failures are local diagnostics, not public assurance evidence. Preserve
+;; only the closed, framework-owned explanation vocabulary in the *outer*
+;; application error. Raw traces and process-local inspection handles stay in
+;; the underlying JVM exception, which callers must never serialize or log as
+;; an HTTP error response. Application errors deliberately do not depend on
+;; the Recife namespace or load a checker during ordinary preflight.
+(def ^:private finite-checker-failure-classes
+  #{:invariant-counterexample
+    :model-counterexample
+    :backend-error
+    :backend-exception
+    :checker-interrupted
+    :checker-timeout
+    :malformed-checker-result
+    :inconclusive-checker-result
+    :unrecognized-checker-result})
+
+(def ^:private finite-checker-obligation-ids
+  #{:action-accounting
+    :observation-chain
+    :rejected-is-atomic
+    :committed-write-set
+    :outcome-check-consistency})
+
+(defn- safe-finite-transition-prefix [prefix]
+  ;; The TLC backend exposes only bounded state/plan indices and enum statuses
+  ;; in its safe summary. Never forward arbitrary backend-provided maps, even
+  ;; if a checker exception claims to contain a :diagnostic/summary.
+  (when (vector? prefix)
+    (mapv
+     (fn [state]
+       (let [index (when (map? state) (:state-index state))
+             observations (when (map? state) (:observations state))]
+         (cond-> {}
+           (and (integer? index) (<= 0 index 1000000))
+           (assoc :state-index index)
+           (vector? observations)
+           (assoc :observations
+                  (mapv (fn [observation]
+                          (let [plan (when (map? observation)
+                                       (:plan-index observation))
+                                status (when (map? observation)
+                                         (:status observation))]
+                            (cond-> {}
+                              (and (integer? plan) (<= 0 plan 5))
+                              (assoc :plan-index plan)
+                              (contains? #{:committed :rejected} status)
+                              (assoc :status status))))
+                        (take 6 observations))))))
+     (take 32 prefix))))
+
+(defn- safe-finite-checker-failure [exception]
+  (let [data (when (instance? clojure.lang.ExceptionInfo exception)
+               (ex-data exception))
+        recognized? (= :gesso.model.formal-check/invalid-formal-check
+                       (:error/type data))
+        summary (when (and recognized? (map? (:diagnostic/summary data)))
+                  (:diagnostic/summary data))
+        class (:failure/class data)
+        obligation (:failed-obligation summary)
+        states (:distinct-states summary)
+        prefix (safe-finite-transition-prefix (:transition-prefix summary))]
+    (cond-> {:failure/class
+             (if (and recognized? (contains? finite-checker-failure-classes class))
+               class
+               :unclassified-checker-failure)}
+      (and recognized? (contains? finite-checker-obligation-ids obligation))
+      (assoc :failed-obligation obligation)
+      (and recognized? (integer? states) (<= 1 states 1000000000))
+      (assoc :distinct-states states)
+      (and recognized? (seq prefix))
+      (assoc :transition-prefix prefix))))
+
+(defn- reject-finite-model-check!
+  [operation index exception]
+  (let [details
+        {:operation operation
+         :observation-index index
+         :formal/failure (if exception
+                           (safe-finite-checker-failure exception)
+                           {:failure/class :invalid-checker-result})}
+        error (preflight-error
+               :finite-model-check-failed
+               "Selected finite-model checking did not establish required obligations."
+               details)]
+    ;; Only the outer ex-data is safe application-facing metadata. The cause
+    ;; preserves the backend's local inspection handle for explicit, trusted
+    ;; JVM debugging, and may contain confidential exception-chain material.
+    (throw (if exception
+             (ex-info (ex-message error) (ex-data error) exception)
+             error))))
+
 (defn- checked-operation-observations
   [report operation handles model-check?]
   (let [executor (get-in report
@@ -1083,10 +1175,9 @@
                                ((requiring-resolve
                                  'gesso.model.formal-check/check-prepared!)
                                 (:subject case))
-                               (catch Exception _
-                                 (invalid-execution-observation!
-                                  :finite-model-check-failed
-                                  {:operation operation :observation-index index})))]
+                               (catch Exception error
+                                 (reject-finite-model-check!
+                                  operation index error)))]
                          (when-not
                           (and (map? result)
                                (= :checked-finite-model (:status result))
@@ -1107,9 +1198,8 @@
                                (set? (:not-established result))
                                (set/subset? required-finite-model-nonclaims
                                             (:not-established result)))
-                           (invalid-execution-observation!
-                            :finite-model-check-failed
-                            {:operation operation :observation-index index}))
+                           (reject-finite-model-check!
+                            operation index nil))
                          ;; Only checker-supplied finite scope and invariant IDs;
                          ;; no actual documents, commands or model states.
                          (select-keys result
@@ -1241,8 +1331,12 @@
    and must run under an enclosing timeout; they do not run at normal startup.
 
    Invalid evidence, malformed model-checker outputs, checker failures or
-   missing Recife support fail closed. The report is redacted and neither
-   issues nor accepts application certification. An empty observation map
-   reports zero checks and proves nothing."
+   missing Recife support fail closed. Formal-check failures carry an
+   application-safe :formal/failure summary (a recognized failure class,
+   named obligation, and bounded state/plan/status prefix when available).
+   The underlying exception cause is LOCAL, may contain confidential TLC
+   data or an inspection handle, and must not be serialized to clients.
+   Neither success nor failure issues application certification. An empty
+   observation map reports zero checks and proves nothing."
   [assembly observations]
   (explain-with-execution-evidence* assembly observations true))
