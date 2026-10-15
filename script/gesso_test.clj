@@ -24,6 +24,13 @@
 (def real-browser-integration-wall-clock-timeout-ms
   300000)
 
+;; The JVM gate includes embedded XTDB and Recife/TLC model checking. Both may
+;; leave threads alive after the test runner prints its result. Limit the whole
+;; child JVM rather than accepting a printed summary as a completed gate.
+;; This bound must comfortably accommodate the full JVM corpus on slower hosts.
+(def jvm-wall-clock-timeout-ms
+  1800000)
+
 (def real-browser-integration-namespace
   "gesso.live.browser.chromium-integration")
 
@@ -156,6 +163,45 @@
    java-process)
 
   nil)
+
+(defn run-command-streaming-with-timeout!
+  [command timeout-ms]
+  ;; Keep test output live: the full JVM suite can be large and long-running.
+  ;; A captured result would hide progress and buffer its entire output.
+  ;; Inherit streams, but wait on the child Process with a wall-clock bound.
+  (let [process-result
+        (process/process
+         command
+         {:in :inherit
+          :out :inherit
+          :err :inherit})
+        java-process
+        (:proc process-result)
+        completed?
+        (.waitFor
+         java-process
+         timeout-ms
+         java.util.concurrent.TimeUnit/MILLISECONDS)]
+    (if completed?
+      (let [result @process-result]
+        (when-not
+         (zero? (:exit result))
+          (gate-failure!
+           "External test command failed."
+           {:command command
+            :exit (:exit result)}))
+        result)
+      (do
+        ;; Cleanup is the same process-tree teardown used for Chromium tests.
+        ;; A checker that hangs, or one that leaves a non-daemon worker alive,
+        ;; must not indefinitely stall the normal Gesso test gate.
+        (terminate-process-tree! java-process)
+        (let [result @process-result]
+          (gate-failure!
+           "External test command exceeded its wall-clock timeout."
+           {:command command
+            :exit (:exit result)
+            :timeout-ms timeout-ms}))))))
 
 (defn print-captured-output!
   [result]
@@ -676,10 +722,15 @@
   (println)
   (println
    "== JVM tests ==")
+  (println
+   "JVM suite wall-clock limit:"
+   (/ jvm-wall-clock-timeout-ms 60000)
+   "minutes")
 
-  (run-command!
+  (run-command-streaming-with-timeout!
    ["clojure"
-    "-M:test"]))
+    "-M:test"]
+   jvm-wall-clock-timeout-ms))
 
 (defn node-test-plan
   []
