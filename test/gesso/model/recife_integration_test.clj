@@ -1,17 +1,19 @@
 (ns gesso.model.recife-integration-test
-  "Recife/TLC integration against Gesso's *existing* pure serial transaction
-  semantics. This is a bounded model-checking regression, not a claim of
-  database linearizability, arbitrary application-policy correctness, or
-  universal implementation refinement.
+  "Finite Recife/TLC regression against Gesso's admitted prepared-transaction
+  machine, gesso.model.formal-transition. Plans are normalized by tx-model;
+  the formal transition function delegates every enabled action to
+  tx-model/step. This test does not hand-implement commit/rejection semantics.
 
-  Two independently prepared updates race for one generic document. The
-  model invokes gesso.model.tx-model/step, not an independently handwritten
-  transaction decision function. A deliberately corrupted rejection branch
-  is expected to yield a TLC invariant counterexample."
+  The intentionally defective variant corrupts the result *after* the real
+  transition, to prove that independent TLC invariants detect an invalid
+  rejection. Checked bounds: one document, two prepared competing updates,
+  one attempt per plan, all serial orderings. No XTDB, replay, network,
+  authorization, or unbounded refinement claim follows from this test."
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.model.command :as command]
-   [gesso.model.tx-model :as tx-model]
+   [gesso.model.formal-transition :as formal]
+   [gesso.model.tx-model :as reference]
    [recife.core :as recife]
    [recife.helpers :as helpers]))
 
@@ -43,92 +45,128 @@
    :emit false})
 
 (def ^:private plans
-  {:first (prepared-plan :first)
-   :second (prepared-plan :second)})
+  [(prepared-plan :first)
+   (prepared-plan :second)])
+
+;; The formal state and action vocabulary are constructed from the Gesso
+;; reference, rather than independently maintained in this Recife test.
+(def ^:private subject
+  (formal/prepared-subject initial-documents plans))
 
 (defn- initial-state [mode]
-  {::documents initial-documents
-   ::attempted #{}
-   ::observations []
-   ::mode mode})
+  (assoc (formal/initial-state subject) ::mode mode))
 
-(defn- attempt [state actor]
-  (if (contains? (::attempted state) actor)
-    state
-    (let [before (::documents state)
-          result (tx-model/step before (get plans actor))
-          rejected? (= :rejected (:status result))
-          ;; Deliberately WRONG interpreter: a rejected plan writes a value.
-          ;; The correct branch preserves tx-model/step's authoritative result.
-          after (if (and rejected? (= :mutated-rejection (::mode state)))
-                  (assoc-in (:after result) [target :value] :corrupted)
-                  (:after result))]
-      (-> state
-          (assoc ::documents after)
-          (update ::attempted conj actor)
-          (update ::observations conj
-                  {:actor actor
-                   :status (:status result)
-                   :before before
-                   :after after})))))
+(defn- attempt [state index]
+  (let [action (nth (:actions subject) index)]
+    (if-not (some #(= action %) (formal/enabled-actions subject state))
+      state
+      (let [next-state (formal/transition subject state action)
+            last-observation (peek (::formal/observations next-state))]
+        (if (and (= ::corrupt-rejection (::mode state))
+                 (= :rejected (:status last-observation)))
+          ;; Deliberate *post-transition* defect. Do not replace Gesso's
+          ;; interpreter or its admitted plan. Corrupt both document state
+          ;; and its observation to model an illegal rejected write.
+          (-> next-state
+              (assoc-in [::formal/documents target :value] :corrupted)
+              (update ::formal/observations
+                      (fn [observations]
+                        (update observations (dec (count observations))
+                                update :after assoc-in [target :value] :corrupted))))
+          next-state)))))
 
-(recife/defproc attempt-first (fn [state] (attempt state :first)))
-(recife/defproc attempt-second (fn [state] (attempt state :second)))
+(recife/defproc attempt-first (fn [state] (attempt state 0)))
+(recife/defproc attempt-second (fn [state] (attempt state 1)))
 
-(defn- rejection-preserves-state? [state]
+;; These are independently stated properties of the *observed* machine,
+;; not a replay of the transition function or an assertion that :scope
+;; carries proof evidence.
+(helpers/definvariant rejected-preserves-documents [state]
   (every? (fn [{:keys [status before after]}]
             (or (not= :rejected status)
                 (= before after)))
-          (::observations state)))
+          (::formal/observations state)))
 
-(defn- single-committer? [state]
+(helpers/definvariant only-one-competing-update-commits [state]
   (<= (count (filter #(= :committed (:status %))
-                     (::observations state)))
+                     (::formal/observations state)))
       1))
 
-(defn- admitted-values-only? [state]
+(helpers/definvariant documents-have-admitted-values [state]
   (contains? #{:initial :first :second}
-             (get-in state [::documents target :value])))
+             (get-in state [::formal/documents target :value])))
 
-(helpers/definvariant rejected-is-unchanged [state]
-  (rejection-preserves-state? state))
-
-(helpers/definvariant one-committer [state]
-  (single-committer? state))
-
-(helpers/definvariant values-come-from-commits [state]
-  (admitted-values-only? state))
+(helpers/definvariant observations-form-one-state-chain [state]
+  (let [observations (::formal/observations state)]
+    (and
+     (or (empty? observations)
+         (= initial-documents (:before (first observations))))
+     (every? (fn [[earlier later]]
+               (= (:after earlier) (:before later)))
+             (partition 2 1 observations))
+     (= (::formal/documents state)
+        (if (seq observations)
+          (:after (peek observations))
+          initial-documents)))))
 
 (def ^:private components
   #{attempt-first attempt-second
-    rejected-is-unchanged one-committer values-come-from-commits})
+    rejected-preserves-documents
+    only-one-competing-update-commits
+    documents-have-admitted-values
+    observations-form-one-state-chain})
 
 (defn- check! [mode]
-  ;; Terminal states with both prepared plans attempted are intentional. This
-  ;; pilot checks safety, not progress or fairness; disable TLC deadlock checks.
-  (let [run (recife/run-model (initial-state mode) components
-                              {:no-deadlock true :workers 1})]
-    (if (instance? clojure.lang.IDeref run) @run run)))
+  ;; The two-attempt terminal states are intentional. This checks safety,
+  ;; not progress, fairness, or application liveness.
+  (let [result (recife/run-model (initial-state mode) components
+                                 {:no-deadlock true :workers 1})]
+    (if (instance? clojure.lang.IDeref result) @result result)))
 
-(deftest existing-gesso-serial-commit-semantics-are-model-checked-test
-  (testing "TLC checks both serial interleavings of actual tx-model/step"
-    (let [{:keys [trace distinct-states generated-states trace-info] :as result}
-          (check! :correct)]
-      (is (= :ok trace) (pr-str (select-keys result
-                                             [:trace :trace-info :distinct-states])))
+(defn- apply-order [actions]
+  (reduce (fn [state action]
+            (formal/transition subject state action))
+          (formal/initial-state subject)
+          actions))
+
+(deftest prepared-transition-is-the-model-checked-subject-test
+  (testing "both executions use exactly the admitted Gesso action vocabulary"
+    (is (= :gesso.model.formal-transition/prepared-serial-v1 (:kind subject)))
+    (is (= 2 (count (:actions subject))))
+    (is (= (:actions subject)
+           (formal/enabled-actions subject (formal/initial-state subject))))
+    (let [explored (reference/explore-orders initial-documents plans)]
+      (is (= 2 (count (:paths explored))))
+      (doseq [{:keys [order trace final-state]} (:paths explored)]
+        (let [machine (apply-order (mapv (:actions subject) order))
+              observations (::formal/observations machine)]
+          (is (= final-state (::formal/documents machine)))
+          (is (= (mapv :status trace) (mapv :status observations)))
+          (is (= (mapv :failed-precondition trace)
+                 (mapv :failed-precondition observations)))
+          (is (= [:committed :rejected] (mapv :status observations)))
+          (is (empty? (formal/enabled-actions subject machine))))))))
+
+(deftest derived-gesso-machine-passes-recife-invariants-test
+  (testing "TLC explores both serial interleavings of formal/transition"
+    (let [{:keys [trace trace-info distinct-states generated-states] :as result}
+          (check! ::correct)]
+      (is (= :ok trace)
+          (pr-str (select-keys result [:trace :trace-info :distinct-states])))
       (is (nil? trace-info))
       (is (= 5 distinct-states)
-          "Both prepared-plan execution orders must be reachable")
+          "One root, two one-attempt states, and two completed orderings")
       (is (pos? (or generated-states 0))))))
 
-(deftest corrupted-rejection-yields-real-tlc-counterexample-test
-  (testing "mutating a rejected transaction must violate named invariants"
-    (let [{:keys [trace trace-info] :as result} (check! :mutated-rejection)]
+(deftest broken-rejection-produces-tlc-counterexample-test
+  (testing "a post-transition illegal write fails independent invariants"
+    (let [{:keys [trace trace-info] :as result} (check! ::corrupt-rejection)
+          violation (:violation trace-info)]
       (is (and (vector? trace) (seq trace))
           (pr-str (select-keys result [:trace :trace-info])))
-      (is (= :invariant (get-in trace-info [:violation :type])))
+      (is (= :invariant (:type violation)) (pr-str trace-info))
       (is (contains?
-           #{:gesso.model.recife-integration-test/rejected-is-unchanged
-             :gesso.model.recife-integration-test/values-come-from-commits}
-           (get-in trace-info [:violation :name]))
+           #{:gesso.model.recife-integration-test/rejected-preserves-documents
+             :gesso.model.recife-integration-test/documents-have-admitted-values}
+           (:name violation))
           (pr-str trace-info)))))
