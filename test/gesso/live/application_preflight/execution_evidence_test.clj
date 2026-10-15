@@ -756,3 +756,151 @@
                 (assert-unproved-policy report))))
           (is (= before @(:calls f))
               "A failed or successful diagnostic must not call business code."))))))
+
+;; v959: external evidence is authentic, but the checker itself is deliberately
+;; fault-injected. Its ex-data may contain private documents, an opaque local
+;; diagnostic handle and hostile fields. The public application boundary may
+;; forward ONLY the small checked vocabulary. None of these stubbed checker
+;; outcomes constitutes actual TLC evidence or a production certificate.
+(defn- caught-formal-failure [thunk]
+  (try (thunk)
+       nil
+       (catch clojure.lang.ExceptionInfo e e)))
+
+(deftest formal-counterexample-propagates-safe-attribution-not-private-state-test
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        secret (str "private-row-" (:request-id f))
+        inspection-handle (java.util.UUID/randomUUID)
+        backend (ex-info
+                 (str "private-backend-message-" secret)
+                 {:error/type :gesso.model.formal-check/invalid-formal-check
+                  :error/kind :model-check-failed
+                  :failure/class :invariant-counterexample
+                  :diagnostic/handle inspection-handle
+                  :private-documents [{:xt/id secret :owner secret}]
+                  :diagnostic/summary
+                  {:failed-obligation :outcome-check-consistency
+                   :distinct-states 4
+                   :private-plan {:secret secret}
+                   :transition-prefix
+                   [{:state-index 1
+                     :private-document secret
+                     :observations [{:plan-index 0 :status :committed
+                                     :private-command secret}]}
+                    {:state-index 2
+                     :observations [{:plan-index 1 :status :rejected
+                                     :private-reason secret}]}]}})]
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [before @(:calls f)
+              error (with-redefs [formal-check/check-prepared!
+                                  (fn [_] (throw backend))]
+                      (caught-formal-failure
+                       #(application/explain-with-formal-execution-evidence
+                         assembly {operation-id [evidence]})))
+              data (some-> error ex-data)
+              exposed (pr-str data)]
+          (is (some? error))
+          (is (identical? backend (.getCause error))
+              "Only a trusted JVM caller may follow the local cause.")
+          (is (= :finite-model-check-failed (:error/kind data)))
+          (is (= operation-id (:operation data)))
+          (is (= 0 (:observation-index data)))
+          (is (= {:failure/class :invariant-counterexample
+                  :failed-obligation :outcome-check-consistency
+                  :distinct-states 4
+                  :transition-prefix
+                  [{:state-index 1
+                    :observations [{:plan-index 0 :status :committed}]}
+                   {:state-index 2
+                    :observations [{:plan-index 1 :status :rejected}]}]}
+                 (:formal/failure data)))
+          (doseq [forbidden [secret "private-backend-message"
+                             "private-documents" "private-plan"
+                             "private-command" "private-reason"
+                             "diagnostic/handle" (str inspection-handle)]]
+            (is (not (str/includes? exposed forbidden))
+                (str "The outer failure must not reveal " forbidden)))
+          (is (= before @(:calls f))
+              "Reporting checker failures must not re-invoke domain code."))))))
+
+(deftest formal-failure-classification-spoofing-and-bounds-stay-closed-test
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        secret "not-for-application-errors"
+        valid-type :gesso.model.formal-check/invalid-formal-check
+        cases
+        [[:unrecognized-error-type
+          {:error/type :untrusted/forged
+           :failure/class :invariant-counterexample
+           :diagnostic/summary {:failed-obligation :action-accounting
+                                :distinct-states 9}}
+          {:failure/class :unclassified-checker-failure}]
+         [:unknown-class-and-obligation
+          {:error/type valid-type
+           :failure/class :certified-application
+           :diagnostic/summary {:failed-obligation :application/certified}}
+          {:failure/class :unclassified-checker-failure}]
+         [:recognized-backend-failure
+          {:error/type valid-type
+           :failure/class :backend-error
+           :diagnostic/summary {:failed-obligation :unrecognized-rule
+                                :distinct-states -1}}
+          {:failure/class :backend-error}]
+         [:oversized-finite-prefix
+          {:error/type valid-type
+           :failure/class :model-counterexample
+           :diagnostic/summary
+           {:failed-obligation :observation-chain
+            :distinct-states 1000000001
+            :transition-prefix
+            (vec
+             (repeat 40
+                     {:state-index 2000000
+                      :document secret
+                      :observations
+                      (vec (repeat 12 {:plan-index 1000
+                                       :status :private-success
+                                       :secret secret}))}))}}
+          {:failure/class :model-counterexample
+           :failed-obligation :observation-chain}]]]
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [explain #(application/explain-with-formal-execution-evidence
+                       assembly {operation-id [evidence]})
+              before @(:calls f)]
+          (doseq [[label backend-data expected] cases]
+            (testing (name label)
+              (let [backend (ex-info secret (assoc backend-data :secret secret))
+                    error (with-redefs [formal-check/check-prepared!
+                                        (fn [_] (throw backend))]
+                            (caught-formal-failure explain))
+                    data (some-> error ex-data)
+                    failure (:formal/failure data)]
+                (is (some? error))
+                (is (identical? backend (.getCause error)))
+                (is (= :finite-model-check-failed (:error/kind data)))
+                (is (= expected (select-keys failure (keys expected))))
+                (is (not (str/includes? (pr-str data) secret)))
+                (when (= label :oversized-finite-prefix)
+                  (is (not (contains? failure :distinct-states)))
+                  (is (= 32 (count (:transition-prefix failure))))
+                  (is (every? #(= {:observations (vec (repeat 6 {}))} %)
+                              (:transition-prefix failure)))))))
+          (let [error (with-redefs [formal-check/check-prepared!
+                                    (fn [_] nil)]
+                        (caught-formal-failure explain))]
+            (is (some? error))
+            (is (nil? (.getCause error))
+                "Malformed checker results have no fabricated backend cause.")
+            (is (= :invalid-checker-result
+                   (get-in (ex-data error)
+                           [:formal/failure :failure/class])))
+            (is (= :finite-model-check-failed
+                   (:error/kind (ex-data error)))))
+          (is (= before @(:calls f))
+              "Checker failures cannot cause a domain callback replay."))))))
+
