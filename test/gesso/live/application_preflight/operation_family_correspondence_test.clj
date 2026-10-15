@@ -3462,3 +3462,184 @@
              (kind #(v970-submit active missing-production)))))
     (is (zero? @submitted))
     (is (= 1 @calls) "Only the compatible legacy finite construction executes")))
+
+;; v980 — The opt-in whole-snapshot guard protects every observed field in a
+;; declared acquired snapshot, instead of relying on a manually enumerated
+;; subset. It does not establish the completeness or XTDB provenance of that
+;; snapshot. The fixture remains generic and synthetic.
+
+(defn- v980-coverage []
+  (assoc (v972-coverage)
+         :required-whole-snapshot-guards #{[:eligibility :guard]}))
+
+(defn- v980-covered-context
+  ([] (v980-covered-context (v972-context)))
+  ([context]
+   (let [snapshot (get-in context [:eligibility :document])
+         fields (->> (keys snapshot) (remove #{:xt/id}) sort vec)
+         version (assoc v970-version :compare-keys fields)]
+     (assoc-in context [:eligibility :guard]
+               (command/guard :fixture/eligibility snapshot version)))))
+
+(deftest v980-whole-snapshot-guards-accept-complete-finite-and-production-plans-test
+  (let [context (-> (v972-context)
+                    (assoc-in [:eligibility :document :fixture/decision] :allowed)
+                    (assoc-in [:eligibility :document :fixture/optional] false)
+                    v980-covered-context)
+        calls (atom 0)
+        submissions (atom 0)
+        pair (v972-pair context (v980-coverage) calls)
+        guard (get-in context [:eligibility :guard])]
+    (is (= [guard] (:guards (v970-prepare pair))))
+    (is (= 1 @calls))
+    (is (some #{[:fixture/optional false]}
+              (get-in guard [:model/expected :model/checks]))
+        "A newly observed field must be compared, including false values")
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= 1 @submissions))
+    (is (= 2 @calls))
+    (let [report (v978-compare pair context)]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= 1 (:declared-whole-snapshot-guards-checked report)))
+      (is (= :checked-observed-fields-only (:whole-snapshot-field-inventory report)))
+      (is (= :not-established (:protected-snapshot-fields-completeness report)))
+      (is (= :caller-supplied-not-authenticated (:guard-snapshot-origin report)))
+      (is (= :not-established (:semantic-guard-dependency-completeness report)))
+      (is (= :not-established (:application-certification report))))
+    (is (= 2 @calls) "Pure comparison must not execute the constructor")
+    (is (contains? (get-in pair [:scope :checked])
+                   :optional-observed-whole-snapshot-to-commit-guard-correspondence))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :completeness-of-authored-snapshot-compare-fields))))
+
+(deftest v980-incomplete-version-rejected-before-finite-and-production-construction-test
+  (let [context (v972-context)
+        calls (atom 0)
+        submitted (atom 0)
+        pair (v972-pair context (v980-coverage) calls)]
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v970-prepare pair))))
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v978-compare pair context))))
+    (is (zero? @calls) "Neither failed path invokes the domain constructor")
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submitted inc)
+                                 {:commit/status :committed})]
+      (let [error (v966-error #(v970-submit pair context))]
+        (is (= :whole-snapshot-field-not-commit-guarded
+               (:error/kind (ex-data error))))
+        (is (= #{:error/type :error/kind}
+               (set (keys (ex-data error)))))))
+    (is (zero? @submitted))
+    (is (zero? @calls))))
+
+(deftest v980-extra-observed-field-invalidates-previously-complete-guard-test
+  (let [baseline (v980-covered-context)
+        enriched (assoc-in baseline [:eligibility :document :fixture/decision]
+                           :allowed)
+        calls (atom 0)
+        submitted (atom 0)
+        pair (v972-pair enriched (v980-coverage) calls)
+        prior (v972-pair baseline (v980-coverage) (atom 0))]
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v970-prepare pair))))
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v978-compare pair enriched))))
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v978-compare prior enriched)))
+        "Production context is checked before model-input equality")
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submitted inc)
+                                 {:commit/status :committed})]
+      (is (= :whole-snapshot-field-not-commit-guarded
+             (kind #(v970-submit pair enriched)))))
+    (is (zero? @calls))
+    (is (zero? @submitted))
+    (let [repaired (v980-covered-context enriched)
+          accepted (v972-pair repaired (v980-coverage) (atom 0))]
+      (is (map? (v970-prepare accepted)))
+      (is (= :matched-declared-input-fields
+             (:status (v978-compare accepted repaired)))))))
+
+(deftest v980-whole-snapshot-protection-is-stronger-than-authored-field-list-test
+  (let [context (assoc-in (v978-covered-context)
+                          [:eligibility :document :fixture/decision] :allowed)
+        calls (atom 0)
+        covered (v978-coverage)
+        authored (v972-pair context covered calls)
+        both (v972-pair context
+                       (assoc covered
+                              :required-whole-snapshot-guards
+                              #{[:eligibility :guard]}) calls)]
+    (is (map? (v970-prepare authored))
+        "The authored set protects created-at but permits other omissions")
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v970-prepare both)))
+        "Whole-snapshot mode additionally requires every observed field")
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v978-compare both context))))
+    (is (= 1 @calls))))
+
+(deftest v980-whole-snapshot-declarations-are-strict-and-bounded-test
+  (let [context (v980-covered-context)
+        base (v980-coverage)
+        calls (atom 0)
+        invalid [["empty path set" #{}]
+                 ["nil" nil]
+                 ["list" '([:eligibility :guard])]
+                 ["vector" [[:eligibility :guard]]]
+                 ["unknown guard" #{[:eligibility :missing]}]
+                 ["opaque path" #{[:eligibility (Object.)]}]
+                 ["oversized inventory"
+                  (set (for [n (range 257)] [:eligibility n]))]]]
+    (doseq [[label value] invalid]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(v972-pair context
+                                 (assoc base :required-whole-snapshot-guards value)
+                                 calls))))))
+    (doseq [[label coverage]
+            [["snapshot descriptor required" (dissoc base :required-guard-snapshots)]
+             ["closed data required" (dissoc base :modeled-values)]
+             ["unknown contract key" (assoc base :unrecognized true)]]]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(v972-pair context coverage calls))))))
+    (is (zero? @calls))))
+
+(deftest v980-rechecks-changing-modeled-observations-and-preserves-opt-out-test
+  (let [initial (v980-covered-context)
+        changed (assoc-in initial [:eligibility :document :fixture/newly-observed]
+                          false)
+        current (atom initial)
+        calls (atom 0)
+        pair (shared-family/build-pair
+              (assoc (v970-config
+                      (fn [ctx _]
+                        (v970-plan [(get-in ctx [:eligibility :guard])]))
+                      initial (v980-coverage) calls)
+                     :model-input! (fn [_ _ _]
+                                     {:context @current
+                                      :binding (v970-binding)})))
+        legacy (v972-pair (v972-context) (v972-coverage) (atom 0))]
+    (is (map? (v970-prepare pair)))
+    (is (= 1 @calls))
+    (reset! current changed)
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v970-prepare pair)))
+        "A subsequent call cannot reuse prior successful coverage")
+    (is (= :whole-snapshot-field-not-commit-guarded
+           (kind #(v978-compare pair changed))))
+    (is (= 1 @calls))
+    (reset! current initial)
+    (is (map? (v970-prepare pair)))
+    (is (= 2 @calls))
+    (is (map? (v970-prepare legacy))
+        "Existing contracts without whole-snapshot mode remain valid")
+    (is (= 0 (:declared-whole-snapshot-guards-checked
+              (v978-compare legacy (v972-context)))))
+    (is (= :not-declared (:whole-snapshot-field-inventory
+                          (v978-compare legacy (v972-context)))))))
