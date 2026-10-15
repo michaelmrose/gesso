@@ -1009,7 +1009,7 @@
     observations))
 
 (defn- checked-operation-observations
-  [report operation handles]
+  [report operation handles model-check?]
   (let [executor (get-in report
                          (conj execution-observation-executor-root
                                operation :execute!))
@@ -1053,13 +1053,59 @@
                  (invalid-execution-observation!
                   :noncorresponding-execution-reference
                   {:operation operation :observation-index index}))
-               ;; Do not leak opaque handles, principal, arguments, raw database
-               ;; snapshots or transaction receipts through application reports.
-               {:index index
-                :status :bounded-correspondence-observed
-                :physical-status (get-in result [:observation :physical :status])
-                :finite-reference-status
-                (get-in result [:observation :evidence :status])})))
+               ;; Recife and its classpath are loaded ONLY for the explicit
+               ;; formal diagnostic API. Ordinary application admission and
+               ;; explanations do not load TLC or run a model checker.
+               (let [finite-check
+                     (when model-check?
+                       (let [result
+                             (try
+                               ((requiring-resolve
+                                 'gesso.model.formal-check/check-prepared!)
+                                (:subject case))
+                               (catch Exception _
+                                 (invalid-execution-observation!
+                                  :finite-model-check-failed
+                                  {:operation operation :observation-index index})))]
+                         (when-not
+                          (and (map? result)
+                               (= :checked-finite-model (:status result))
+                               (= :bounded-reference-model-check-not-certificate
+                                  (:evidence-class result))
+                               (= (:kind (:subject case)) (:subject-kind result))
+                               (= :recife-0.22.0/tlc (:checker result))
+                               (pos-int? (:distinct-states result))
+                               (= #{:action-accounting
+                                    :observation-chain
+                                    :rejected-is-atomic
+                                    :committed-write-set
+                                    :outcome-check-consistency}
+                                  (:obligations result))
+                               (set? (:assumed result))
+                               (set? (:not-established result))
+                               (every? (:not-established result)
+                                       #{:actual-xtdb-implementation-refinement
+                                         :authorization-or-application-policy
+                                         :server-browser-composition
+                                         :independent-application-certificate}))
+                           (invalid-execution-observation!
+                            :finite-model-check-failed
+                            {:operation operation :observation-index index}))
+                         ;; Only checker-supplied finite scope and invariant IDs;
+                         ;; no actual documents, commands or model states.
+                         (select-keys result
+                                      [:status :evidence-class :subject-kind
+                                       :checker :distinct-states :obligations
+                                       :assumed :not-established])))]
+                 ;; Do not leak opaque handles, principal, arguments, raw
+                 ;; snapshots or receipts through the application explanation.
+                 (cond->
+                  {:index index
+                   :status :bounded-correspondence-observed
+                   :physical-status (get-in result [:observation :physical :status])
+                   :finite-reference-status
+                   (get-in result [:observation :evidence :status])}
+                   model-check? (assoc :finite-model-safety-check finite-check))))))
          (range (count handles))
          handles)]
     {:status :bounded-process-local-execution-observations
@@ -1076,7 +1122,7 @@
      :assurance-class :bounded-observation-not-proof
      :universal-guarantees :not-established}))
 
-(defn explain-with-execution-evidence
+(defn- explain-with-execution-evidence*
   "Explain a CURRENT ApplicationAssembly together with separately collected
    bounded diagnostic execution observations.
 
@@ -1092,15 +1138,16 @@
    diagnostic facts about FINITE executions, never whole-application proof,
    authorization proof, projection correctness or universal command replay.
    Each supplied handle is also checked against the actual source-derived
-   finite transaction step. This deterministic comparison does not invoke
-   Recife/TLC and must not be presented as a mechanically checked theorem.
-   This function executes no business callback and never submits transactions.
+   finite transaction step. The ordinary public entry point performs only
+   deterministic reference replay; the separate formal opt-in entry point
+   additionally runs Recife/TLC on selected finite subjects. Neither proves
+   universal correspondence. No business callbacks or transactions execute.
 
    The original explain function remains unchanged and does not acquire a
    process-local diagnostic dependency. Returned explanations contain only
    redacted observational summaries, not handles, command bindings, receipts,
    transaction plans, principals, or actual database document contents."
-  [assembly observations]
+  [assembly observations model-check?]
   (if-let [report (current-application-report assembly)]
     (let [observations (require-execution-observation-input!
                         report observations)
@@ -1111,21 +1158,32 @@
           checked (into {}
                         (map (fn [[operation handles]]
                                [operation (checked-operation-observations
-                                           report operation handles)]))
+                                           report operation handles model-check?)]))
                         observations)
           audit' (-> audit
                      (assoc :execution-observation-summary
-                            {:status :diagnostic-execution-observations-only
-                             :observed-operation-count (count checked)
-                             :observation-count
-                             (reduce + 0 (map :observation-count (vals checked)))
-                             :source :current-assembly-exact-executor-registry
-                             :not-established
-                             #{:all-executions-observed
-                               :complete-business-policy-guards
-                               :authorization-correctness
-                               :truthful-application-projections
-                               :universal-refinement-or-certification}})
+                            (cond->
+                             {:status :diagnostic-execution-observations-only
+                              :observed-operation-count (count checked)
+                              :observation-count
+                              (reduce + 0 (map :observation-count (vals checked)))
+                              :source :current-assembly-exact-executor-registry
+                              :not-established
+                              #{:all-executions-observed
+                                :complete-business-policy-guards
+                                :authorization-correctness
+                                :truthful-application-projections
+                                :universal-refinement-or-certification}}
+                              model-check?
+                              (assoc :finite-model-safety-check
+                                     {:status :selected-finite-subjects-checked
+                                      :checked-subject-count
+                                      (reduce + 0 (map :observation-count (vals checked)))
+                                      :assurance-class
+                                      :bounded-reference-model-check-not-certificate
+                                      :subject-origin
+                                      :exact-executor-observed-attempt
+                                      :universal-guarantees :not-established})))
                      (update :operation-cards
                              (fn [cards]
                                (reduce-kv
@@ -1139,3 +1197,33 @@
     (invalid-execution-observation!
      :invalid-or-stale-observation-assembly
      {:reason :requires-current-application-assembly})))
+
+
+(defn explain-with-execution-evidence
+  "Explain source-derived correspondence for exact-executor diagnostic handles.
+
+   This established API is intentionally NOT a model-checking entry point.
+   It does not load Recife and preserves the non-certifying original report."
+  [assembly observations]
+  (explain-with-execution-evidence* assembly observations false))
+
+(defn explain-with-formal-execution-evidence
+  "Opt in to Recife/TLC checks for each authenticated executor observation.
+
+   Accepts the same CURRENT ApplicationAssembly and opaque, exact-executor
+   diagnostic handles as explain-with-execution-evidence. Each checked finite
+   subject is derived from the actual admitted plan and observed prestate,
+   AFTER executor identity, physical completeness and reference correspondence
+   have been verified. TLC explores all enabled orders of each supplied
+   subject and discharges the five generic prepared-transaction safety
+   obligations. The result cannot verify other prestates, other operation
+   inputs, absent traces, policy coverage, truthful projections, or actual
+   XTDB/browser refinement. These checks are optional, expensive, JVM-only,
+   and must run under an enclosing timeout; they do not run at normal startup.
+
+   Invalid evidence, malformed model-checker outputs, checker failures or
+   missing Recife support fail closed. The report is redacted and neither
+   issues nor accepts application certification. An empty observation map
+   reports zero checks and proves nothing."
+  [assembly observations]
+  (explain-with-execution-evidence* assembly observations true))
