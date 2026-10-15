@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.execution-evidence-test
-  "Permanent v817 regressions for application/explain-with-execution-evidence.
+  "Permanent execution-evidence regressions for application/explain-with-execution-evidence.
 
    The canonical explanation must bind a process-local diagnostic handle to
    the EXACT executor recovered from a freshly checked ApplicationAssembly.
@@ -9,7 +9,9 @@
 
    Tests use their own authoritative fixtures. No fake certificate, mutated
    metadata, detached report, or alternate adapter may substitute for a handle
-   produced by the actual registered Live executor."
+   produced by the actual registered Live executor. The source-derived
+   comparison introduced in v921 remains diagnostic and must fail closed
+   without promoting selected executions into universal certification."
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
@@ -21,6 +23,7 @@
    [gesso.live.optimistic.resolution-assurance :as assurance]
    [gesso.live.optimistic.server :as server]
    [gesso.model.command :as command]
+   [gesso.model.formal-observation :as formal-observation]
    [gesso.model.resolved-operation :as resolved]
    [xtdb.api :as xt]
    [xtdb.node :as xtn]))
@@ -191,7 +194,8 @@
           (is (= 0 (:observed-operation-count summary)))
           (is (= :current-assembly-exact-executor-registry (:source summary)))
           (is (contains? (:not-established summary) :all-executions-observed))
-          (is (nil? (observed-card enhanced)))
+          (is (nil? (observed-card enhanced))
+              "Empty evidence cannot imply even one source-derived check.")
           (is (nil? (observed-summary ordinary)))
           (is (= ordinary (without-diagnostics enhanced)))
           (is (= before @(:calls f))
@@ -219,6 +223,12 @@
           (is (= :exact-registered-executor-diagnostic-handle
                  (:evidence-class card)))
           (is (= :not-established (:universal-guarantees card)))
+          (is (= {:status :selected-attempts-correspond
+                  :checked-attempt-count 1
+                  :subject :gesso.model.formal-observation/single-executor-attempt-v1
+                  :assurance-class :finite-reference-replay-not-formal-proof
+                  :model-checked? false}
+                 (:source-derived-reference-check card)))
           (is (= 1 (:observation-count card)))
           (is (= [{:index 0
                    :status :bounded-correspondence-observed
@@ -226,6 +236,9 @@
                    :finite-reference-status :consistent}]
                  (:observations card)))
           (is (= assurance/assurance-scope (:scope card)))
+          (is (false? (get-in card [:source-derived-reference-check
+                                    :model-checked?])))
+          (is (= :not-established (:universal-guarantees card)))
           (is (= 1 (:observation-count summary)))
           (is (= 1 (:observed-operation-count summary)))
           (is (contains? (:not-established summary)
@@ -328,6 +341,77 @@
                  (get-in (observed-card result) [:observations 0 :physical-status])))
           (is (= :bounded-observation-not-proof
                  (:assurance-class (observed-card result))))
+          (is (= :finite-reference-replay-not-formal-proof
+                 (get-in (observed-card result)
+                         [:source-derived-reference-check :assurance-class])))
+          (is (false? (get-in (observed-card result)
+                             [:source-derived-reference-check :model-checked?])))
+          (is (= :not-established
+                 (:universal-guarantees (observed-card result))))
           (is (contains? (:not-established (observed-summary result))
                          :truthful-application-projections))
           (assert-unproved-policy result))))))
+
+(deftest source-derived-correspondence-fails-closed-test
+  ;; These are boundary fault injections, not forged executor handles. Each
+  ;; invocation uses a genuine process-local handle and the exact executor.
+  ;; We replace ONLY the pure formal-observation result to test the assembly
+  ;; consumer's refusal to treat invalid reference evidence as certification.
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        prepare-case formal-observation/prepared-event-case
+        replay-path formal-observation/observed-path-report]
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [explain #(application/explain-with-execution-evidence
+                       assembly {operation-id [evidence]})
+              before @(:calls f)]
+          (testing "an inadmissible formal case is refused, not downgraded"
+            (with-redefs [formal-observation/prepared-event-case
+                          (fn [_]
+                            (throw (ex-info "Malformed admitted observation"
+                                            {:error/kind
+                                             :invalid-executor-event-observation
+                                             :untrusted-secret (:request-id f)})))]
+              (is (= :invalid-execution-reference-observation
+                     (kind explain)))
+              (let [error (try (explain) nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+                (is (some? error))
+                (is (= :invalid-executor-event-observation
+                       (get-in (ex-data error) [:cause-kind])))
+                (is (not (str/includes? (pr-str (ex-data error))
+                                          (:request-id f)))
+                    "Original error details must not leak in the public diagnostic."))))
+          (testing "an incomplete physical prefix cannot produce a card"
+            (with-redefs [formal-observation/prepared-event-case
+                          (fn [observation]
+                            (assoc-in (prepare-case observation)
+                                      [:physical :submission-trace 0 :plan-index]
+                                      999))]
+              (is (= :noncorresponding-execution-reference
+                     (kind explain)))))
+          (testing "an altered origin is not an authenticated executor attempt"
+            (with-redefs [formal-observation/prepared-event-case
+                          (fn [observation]
+                            (assoc (prepare-case observation)
+                                   :observation-origin :untrusted-detached))]
+              (is (= :noncorresponding-execution-reference
+                     (kind explain)))))
+          (testing "a spurious replay order is not correspondence"
+            (with-redefs [formal-observation/observed-path-report
+                          (fn [case]
+                            (assoc (replay-path case) :checked-order []))]
+              (is (= :noncorresponding-execution-reference
+                     (kind explain)))))
+          (is (= before @(:calls f))
+              "Even rejected evidence must not invoke application callbacks.")
+          (testing "genuine evidence still provides only bounded diagnosis"
+            (let [card (observed-card (explain))]
+              (is (= :selected-attempts-correspond
+                     (get-in card [:source-derived-reference-check :status])))
+              (is (false? (get-in card
+                                  [:source-derived-reference-check :model-checked?])))
+              (is (= :not-established (:universal-guarantees card))))
+            (assert-unproved-policy (explain))))))))
