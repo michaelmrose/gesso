@@ -47,7 +47,12 @@
    declared snapshots to be represented in their canonical version checks,
    on BOTH finite and production construction paths. This links declared
    policy observations to commit-time compare-and-set protection, without
-   discovering omitted dependencies or authenticating acquired values. This is
+   discovering omitted dependencies or authenticating acquired values.
+   Optional :required-whole-snapshot-guards requires every field ALREADY
+   present in each named acquired snapshot, apart from :xt/id, to appear in
+   its canonical version comparisons. This removes separately enumerated
+   field-list omissions for that snapshot, but does not detect a missing
+   snapshot field or an unobserved field introduced after acquisition. This is
    a guarded absence of ONE document identity, not a proof of query absence,
    uniqueness across arbitrary fields, or actual production read provenance.
    These compare finite-model objects; they do NOT authenticate production
@@ -84,6 +89,7 @@
 (def model-state-snapshots-coverage-key :required-model-state-snapshots)
 (def create-absences-coverage-key :required-create-absences)
 (def protected-snapshot-fields-coverage-key :required-protected-snapshot-fields)
+(def whole-snapshot-guards-coverage-key :required-whole-snapshot-guards)
 (def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
@@ -117,7 +123,8 @@
               :optional-snapshot-to-selected-finite-prestate-correspondence
               :optional-declared-create-absence-in-selected-finite-prestate
               :optional-declared-create-absence-to-transaction-correspondence
-              :optional-declared-snapshot-field-to-commit-guard-correspondence}
+              :optional-declared-snapshot-field-to-commit-guard-correspondence
+              :optional-observed-whole-snapshot-to-commit-guard-correspondence}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -130,7 +137,8 @@
               :truthful-guard-snapshot-acquisition-and-identity
               :truthful-selection-of-the-finite-prestate
               :complete-and-truthful-declaration-of-create-absence-dependencies
-              :truthful-declaration-of-policy-relevant-snapshot-fields}
+              :truthful-declaration-of-policy-relevant-snapshot-fields
+              :truthful-completeness-of-each-acquired-document-snapshot}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -150,6 +158,8 @@
                       :query-wide-absence-or-uniqueness
                       :completeness-of-declared-create-absence-dependencies
                       :completeness-of-authored-snapshot-compare-fields
+                      :completeness-of-acquired-snapshot-fields
+                      :protection-of-fields-added-after-observation
                       :completeness-of-declared-guard-snapshot-bindings
                       :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
@@ -340,6 +350,26 @@
                      (set/subset? fields compared))
         (fail! :required-snapshot-field-not-commit-guarded)))))
 
+(defn- require-whole-snapshot-guards! [coverage context]
+  ;; The author can opt to protect every field PRESENT in an acquired
+  ;; snapshot instead of enumerating individually important fields. This
+  ;; checks field presence in a canonical expected-version comparison;
+  ;; guard/snapshot value correspondence and transaction-plan enforcement
+  ;; are separate checks. A missing field cannot protect itself, and this
+  ;; is not a guarantee that the acquisition was complete or authentic.
+  (doseq [guard-path (:required-whole-snapshot-guards coverage)]
+    (let [{:keys [document-path]}
+          (get (:required-guard-snapshots coverage) guard-path)
+          snapshot (get-in context document-path)
+          guard (get-in context guard-path)
+          compared (set (map first (get-in guard [:model/expected :model/checks])))]
+      ;; :xt/id is protected by the canonical guard's target identity,
+      ;; independently validated in require-guard-snapshots!.
+      (when-not (and (map? snapshot)
+                     (set/subset? (disj (set (keys snapshot)) :xt/id)
+                                  compared))
+        (fail! :whole-snapshot-field-not-commit-guarded)))))
+
 (defn- require-model-state-snapshots! [coverage state context]
   ;; The model-input! callback is application-owned. Without this optional
   ;; independent check it could fabricate the acquired snapshot while the
@@ -451,6 +481,7 @@
       (require-guard-paths! coverage context)
       (require-guard-snapshots! coverage context)
       (require-protected-snapshot-fields! coverage context)
+      (require-whole-snapshot-guards! coverage context)
       (require-create-absence-targets! coverage context)
       (let [built (construct! context binding)]
         (when (and (map? built) (contains? built :plan))
@@ -471,7 +502,8 @@
                                             [guard-snapshot-coverage-key
                                              model-state-snapshots-coverage-key
                                              create-absences-coverage-key
-                                             protected-snapshot-fields-coverage-key])]
+                                             protected-snapshot-fields-coverage-key
+                                             whole-snapshot-guards-coverage-key])]
                    (or (= context-coverage-keys declared-keys)
                        (= closed-context-coverage-keys declared-keys)
                        (= required-path-coverage-keys declared-keys)
@@ -568,7 +600,15 @@
                                   (:required-protected-snapshot-fields coverage))
                           (<= (reduce + 0 (map count
                                                (vals (:required-protected-snapshot-fields coverage))))
-                              maximum-required-paths))))
+                              maximum-required-paths)))
+                 (or (not (contains? coverage whole-snapshot-guards-coverage-key))
+                     (and (= closed-model-value-mode (:modeled-values coverage))
+                          (set? (:required-whole-snapshot-guards coverage))
+                          (seq (:required-whole-snapshot-guards coverage))
+                          (<= (count (:required-whole-snapshot-guards coverage))
+                              maximum-required-paths)
+                          (every? #(contains? (:required-guard-snapshots coverage) %)
+                                  (:required-whole-snapshot-guards coverage)))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -598,6 +638,7 @@
     (require-guard-paths! coverage (:context input))
     (require-guard-snapshots! coverage (:context input))
     (require-protected-snapshot-fields! coverage (:context input))
+    (require-whole-snapshot-guards! coverage (:context input))
     (require-model-state-snapshots! coverage state (:context input))
     (require-model-create-absences! coverage state (:context input))
     (let [binding (:binding input)]
@@ -643,6 +684,7 @@
     (require-guard-paths! coverage production-context)
     (require-guard-snapshots! coverage production-context)
     (require-protected-snapshot-fields! coverage production-context)
+    (require-whole-snapshot-guards! coverage production-context)
     (require-create-absence-targets! coverage production-context)
     (when-not (every? (fn [[key value]]
                         (and (contains? production-context key)
@@ -677,6 +719,12 @@
      :declared-guard-snapshots-checked (count (:required-guard-snapshots coverage))
      :declared-protected-snapshot-fields-checked
      (reduce + 0 (map count (vals (:required-protected-snapshot-fields coverage))))
+     :declared-whole-snapshot-guards-checked
+     (count (:required-whole-snapshot-guards coverage))
+     :whole-snapshot-field-inventory
+     (if (seq (:required-whole-snapshot-guards coverage))
+       :checked-observed-fields-only
+       :not-declared)
      :protected-snapshot-fields-completeness :not-established
      :guard-snapshot-origin
      (if (seq (:required-guard-snapshots coverage))
@@ -798,6 +846,14 @@
    on both finite and production paths. Field completeness and the physical
    provenance of snapshots remain unproved. The declaration is bounded to
    256 field entries overall, and missing or empty declarations fail closed.
+   Add :required-whole-snapshot-guards #{[:eligibility :guard]} to protect
+   EVERY key already present in that guard's acquired snapshot, except :xt/id
+   (which is protected by the guard target). The guard's canonical expected
+   comparisons must include these fields; the ordinary declared guard-to-plan
+   checks must also pass in finite and production construction. This avoids
+   manually enumerating observed fields, but not missing acquisition fields,
+   unseen concurrent field additions, unmodeled dependencies, or physical
+   XTDB provenance. The declaration is opt-in and capped at 256 guards.
    Add :required-create-absences {[:allocation :target-id] :fixture/lease}
    to require that the target ID is absent in each selected finite prestate
    AND a canonical create for precisely [:fixture/lease target-id] appears in
