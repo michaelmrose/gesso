@@ -251,7 +251,10 @@
        [:= :xt/id id]]
       (map
        (fn [[key value]]
-         [:= key value]))
+         ;; Expected-version values are document data, not HoneySQL syntax.
+         ;; Lift even collection and keyword values so maps are not parsed as
+         ;; subqueries, arrays as expression forms, or keywords as columns.
+         [:= key [:lift value]]))
       checks))))
 
 
@@ -950,21 +953,31 @@
     (biff.core/validate-with-ex documents))
   tx-ops)
 
-(defn- format-query
-  "Format a HoneySQL query/transaction form exactly as Biff 2 does before
-   passing it to XTDB.
+(defn- normalize-sql-identifiers
+  "Normalize qualified HoneySQL identifiers, never the DATA carried by :lift.
 
-   Vector XTDB operations already have the representation XTDB expects and are
-   returned unchanged."
+   Treating a lifted qualified keyword as a SQL identifier would change the
+   expected value (:namespace/name to :namespace$name) and make a valid
+   version guard conflict against the document that supplied it. Keeping
+   lifted maps and arrays opaque also preserves their nested values."
+  [form]
+  (if (and (vector? form)
+           (= :lift (first form))
+           (= 2 (count form)))
+    form
+    (walk/walk normalize-sql-identifiers
+               (fn [value]
+                 (if (qualified-keyword? value)
+                   (xt.util/kw->normal-form-kw value)
+                   value))
+               form)))
+
+(defn- format-query
+  "Format a HoneySQL query/transaction form with identifier normalization,
+   preserving bound data as data. Vector XTDB operations are unchanged."
   [query]
   (if (map? query)
-    (hsql/format
-     (walk/postwalk
-      (fn [value]
-        (cond-> value
-          (qualified-keyword? value)
-          xt.util/kw->normal-form-kw))
-      query))
+    (hsql/format (normalize-sql-identifiers query))
     query))
 
 (defn prepare
