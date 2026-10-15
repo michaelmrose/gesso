@@ -10,9 +10,12 @@
    unbounded refinement or correctness of the physical executor.
 
    These obligations are intentionally about the Gesso-owned serial atomic
-   transaction subset, not authorization, application rules, or HumanHelp.
+   transaction subset, not application-specific authorization or business rules.
    The subject determines the selected finite states/plans; omitted writers
-   and policy dependencies are not inferred by these predicates."
+   and application-policy dependencies are not inferred by these predicates.
+   The strengthened outcome obligation independently reconstructs the generic
+   canonical guards declared by each admitted plan and checks their truth
+   against the observed pre-write state."
   (:require [gesso.model.command :as command]
             [gesso.model.formal-transition :as formal]))
 
@@ -31,6 +34,7 @@
                       :soundness-of-model-checker-exploration
                       :actual-xtdb-implementation-refinement
                       :application-policy-or-authorization
+                      :completeness-of-application-decision-dependencies
                       :network-or-browser-correspondence
                       :unbounded-correctness}})
 
@@ -113,21 +117,82 @@
        true))
    (::formal/observations state)))
 
-(defn- outcome-check-consistency? [state]
+(defn- satisfies-expected-version?
+  "Independent truth relation for a canonical expected version. The required
+   id and every expected comparison key must exist in the *pre-write* document.
+   This deliberately does not delegate to tx-model/step or its check results."
+  [documents target expected]
+  (let [document (get documents target)]
+    (and (contains? documents target)
+         (map? document)
+         (= (:xt/id document) (:model/id expected))
+         (every? (fn [[key value]]
+                   (and (contains? document key)
+                        (= (get document key) value)))
+                 (:model/checks expected)))))
+
+(defn- required-checks
+  "Independently reconstruct the canonical precondition inventory and its
+   truth values from the *admitted* plan and this observation's before-state.
+
+   A dependency guard on a document already updated by the plan is redundant:
+   normalize-plan admits it only when it agrees with that command's version.
+   All other dependency guards precede the commands' own preconditions.
+   No application-specific decision dependencies are inferred here."
+  [{:keys [commands guards]} before]
+  (let [written-targets (set (map command/target commands))
+        independent-guards
+        (remove (fn [guard]
+                  (contains? written-targets (command/guard-target guard)))
+                guards)]
+    (into
+     (mapv (fn [guard]
+             (let [target (command/guard-target guard)
+                   expected (:model/expected guard)]
+               {:kind :dependency-version
+                :target target
+                :expected expected
+                :satisfied? (satisfies-expected-version?
+                             before target expected)}))
+           independent-guards)
+     (map (fn [model-command]
+            (let [target (command/target model-command)]
+              (if (command/create? model-command)
+                {:kind :document-absent
+                 :target target
+                 :satisfied? (not (contains? before target))}
+                (let [expected (:model/expected model-command)]
+                  {:kind :command-version
+                   :target target
+                   :expected expected
+                   :satisfied? (satisfies-expected-version?
+                                before target expected)}))))
+          commands))))
+
+(defn- outcome-check-consistency? [subject state]
+  ;; Keep the established obligation ID so the existing Recife/TLC backends
+  ;; execute the stronger relation immediately, without a temporary unchecked
+  ;; sixth invariant while the formal runner and permanent tests are updated.
+  ;; Exact vector equality also rejects duplicate, omitted, reordered, and
+  ;; fabricated checks. Status follows the independently reconstructed FIRST
+  ;; failed precondition; an empty reported checks vector cannot vacuously pass.
   (every?
-   (fn [{:keys [status checks failed-precondition]}]
-     (let [failed (first (remove :satisfied? checks))]
-       (and (vector? checks)
-            (every? (fn [check] (and (map? check)
-                                     (contains? check :satisfied?)
-                                     (boolean? (:satisfied? check))))
-                    checks)
-            (case status
-              :committed (and (nil? failed)
-                              (nil? failed-precondition))
-              :rejected (and (some? failed)
-                             (= failed failed-precondition))
-              false))))
+   (fn [{:keys [plan-index status before checks failed-precondition]}]
+     (and (integer? plan-index)
+          (<= 0 plan-index)
+          (< plan-index (count (:plans subject)))
+          (map? before)
+          (vector? checks)
+          (let [required (required-checks
+                          (nth (:plans subject) plan-index) before)
+                failed (first (remove :satisfied? required))]
+            (and (= required checks)
+                 (case status
+                   :committed (and (nil? failed)
+                                   (nil? failed-precondition))
+                   :rejected (and (some? failed)
+                                  (= failed failed-precondition))
+                   false)))))
    (::formal/observations state)))
 
 (defn holds?
@@ -155,7 +220,11 @@
       :rejected-is-atomic (rejected-is-atomic? state)
       :committed-write-set (and (action-accounting? subject state)
                                 (committed-write-set? subject state))
-      :outcome-check-consistency (outcome-check-consistency? state))))
+      ;; The separate chain obligation owns malformed observation histories.
+      ;; Only assess guard truth once the recorded before-states have a valid
+      ;; authoritative chain; otherwise report the primary chain defect.
+      :outcome-check-consistency (or (not (observation-chain? subject state))
+                                     (outcome-check-consistency? subject state)))))
 
 (defn violated-obligations
   "Diagnostic list ONLY. A zero-length list for one state is not a proof.
