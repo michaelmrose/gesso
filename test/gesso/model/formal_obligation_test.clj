@@ -7,10 +7,16 @@
    under test are stated independently in formal-obligation; the deliberately
    broken transitions below corrupt outputs AFTER the genuine Gesso step.
 
-   Bounded scope: two selected, already-prepared plans, one attempt per plan,
-   both serial orders, no actual XTDB, application policy, retry, network,
-   browser effects, or general refinement theorem. The model checker must
-   return real TLC results; a direct predicate check is never called a proof."
+   The strengthened outcome-check invariant independently reconstructs every
+   canonical command/dependency precondition from the admitted plan and the
+   recorded prestate. Mutation tests must catch omitted/fabricated checks, not
+   merely a false boolean in an otherwise honest reported check vector.
+
+   Bounded scope: up to two selected, already-prepared plans, one attempt per
+   plan, both serial orders where applicable, no actual XTDB, application
+   policy, retry, network, browser effects, or general refinement theorem.
+   TLC results are finite checks of the admitted subject, not proofs of the
+   physical executor or completeness of application decision dependencies."
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.model.command :as command]
@@ -53,6 +59,13 @@
 (def ^:private right (document :right))
 (def ^:private left-target [:items :left])
 (def ^:private right-target [:items :right])
+(def ^:private dependency-target [:conditions :right])
+
+(defn- guarded-update-plan []
+  {:commands [(command/update-command
+               :items :replace left (updated left :guarded) version)]
+   :guards [(command/guard :conditions right version)]
+   :emit false})
 
 (def ^:private cases
   {:competing-updates
@@ -71,7 +84,22 @@
    {:subject (formal/prepared-subject
               {}
               [(create-plan :new :first) (create-plan :new :second)])
-    :statuses [:committed :rejected]}})
+    :statuses [:committed :rejected]}
+
+   ;; External dependency guards are not the command's own version guard.
+   ;; This case deliberately shares no domain-specific authorization policy.
+   :valid-dependency
+   {:subject (formal/prepared-subject
+              {left-target left dependency-target right}
+              [(guarded-update-plan)])
+    :statuses [:committed]}
+
+   :stale-dependency
+   {:subject (formal/prepared-subject
+              {left-target left
+               dependency-target (update right :revision inc)}
+              [(guarded-update-plan)])
+    :statuses [:rejected]}})
 
 (def ^:private mutation-obligation
   {:bad-accounting :action-accounting
@@ -84,6 +112,30 @@
   (assoc (formal/initial-state (get-in cases [case-id :subject]))
          ::case case-id
          ::mutation mutation))
+
+(defn- change-observation [state index f]
+  (update-in state [::formal/observations index] f))
+
+(defn- forged-commit [state observation-index reported-checks]
+  ;; This deliberately bypasses tx-model/step after the authentic transition.
+  ;; The forged before/after chain and write set remain internally consistent;
+  ;; only independent guard reconstruction can expose the unauthorized commit.
+  (let [observation (nth (::formal/observations state) observation-index)
+        subject (get-in cases [(::case state) :subject])
+        plan (nth (:plans subject) (:plan-index observation))
+        after (reduce (fn [documents model-command]
+                        (assoc documents
+                               (command/target model-command)
+                               (command/after model-command)))
+                      (:before observation)
+                      (:commands plan))]
+    (-> state
+        (assoc ::formal/documents after)
+        (assoc-in [::formal/observations observation-index :after] after)
+        (assoc-in [::formal/observations observation-index :status] :committed)
+        (assoc-in [::formal/observations observation-index :checks] reported-checks)
+        (assoc-in [::formal/observations observation-index :failed-precondition]
+                  nil))))
 
 (defn- corrupt [state index]
   (let [observation (peek (::formal/observations state))
@@ -132,20 +184,60 @@
                   false)
         state)
 
+      :omit-dependency-check
+      (change-observation state last-index
+                          #(update % :checks (fn [checks]
+                                                (subvec checks 1))))
+
+      :report-no-checks
+      (change-observation state last-index #(assoc % :checks []))
+
+      :duplicate-dependency-check
+      (change-observation state last-index
+                          #(update % :checks conj (first (:checks %))))
+
+      :misdirect-dependency-check
+      (change-observation state last-index
+                          #(assoc-in % [:checks 0 :target]
+                                     [:conditions :fabricated]))
+
+      :reorder-dependency-checks
+      (change-observation state last-index
+                          #(update % :checks (comp vec reverse)))
+
+      :fabricate-expected-version
+      (change-observation state last-index
+                          #(assoc-in % [:checks 0 :expected :model/checks]
+                                     [[:revision 99]]))
+
+      :forge-stale-commit-with-checks
+      (if (= :rejected status)
+        (forged-commit state last-index
+                       (mapv #(assoc % :satisfied? true)
+                             (:checks observation)))
+        state)
+
+      :forge-stale-commit-without-checks
+      (if (= :rejected status)
+        (forged-commit state last-index [])
+        state)
+
       ;; The good machine is always the unchanged Gesso transition.
       :correct state)))
 
 (defn- attempt [state index]
   (let [subject (get-in cases [(::case state) :subject])
-        action (nth (:actions subject) index)]
-    (if (some #{action} (formal/enabled-actions subject state))
+        action (get (:actions subject) index)]
+    (if (and action
+             (some #{action} (formal/enabled-actions subject state)))
       (corrupt (formal/transition subject state action) index)
       state)))
 
 (recife/defproc attempt-first (fn [state] (attempt state 0)))
 (recife/defproc attempt-second (fn [state] (attempt state 1)))
 
-;; TLC evaluates ALL five independent predicates at every reachable state.
+;; TLC evaluates all five obligations at every reachable state, including
+;; the independently strengthened :outcome-check-consistency obligation.
 ;; Each invariant selects the admitted subject encoded by this model's case ID.
 (helpers/definvariant action-accounting [state]
   (obligation/holds? (get-in cases [(::case state) :subject])
@@ -186,7 +278,9 @@
 (deftest admitted-gesso-subjects-expose-different-outcomes-test
   (testing "three real generic plan constructions explore both serial orders"
     (is (= 5 (count obligation/obligation-ids)))
-    (doseq [[case-id {:keys [subject statuses]}] cases]
+    (doseq [case-id [:competing-updates :independent-updates
+                    :competing-creates]
+            :let [{:keys [subject statuses]} (get cases case-id)]]
       (let [paths (reference/explore-orders
                    (::formal/documents (formal/initial-state subject))
                    (:plans subject))]
@@ -235,6 +329,84 @@
                  #{expected-obligation})
                (some-> (:name violation) name keyword))
               (pr-str trace-info)))))))
+
+(def ^:private guard-mutations
+  ;; Each must defeat the invariant without depending on another invariant's
+  ;; failure. These remain separate from the historical five-obligation tests.
+  [[:valid-dependency :omit-dependency-check]
+   [:valid-dependency :report-no-checks]
+   [:valid-dependency :duplicate-dependency-check]
+   [:valid-dependency :misdirect-dependency-check]
+   [:valid-dependency :reorder-dependency-checks]
+   [:valid-dependency :fabricate-expected-version]
+   [:stale-dependency :forge-stale-commit-with-checks]
+   [:stale-dependency :forge-stale-commit-without-checks]])
+
+(deftest guarded-precondition-reconstruction-positive-controls-test
+  (testing "real committed dependency/command checks are accepted"
+    (let [subject (get-in cases [:valid-dependency :subject])
+          initial (formal/initial-state subject)
+          committed (attempt (initial-state :valid-dependency :correct) 0)
+          result (peek (::formal/observations committed))]
+      (is (= :committed (:status result)))
+      (is (= [:dependency-version :command-version]
+             (mapv :kind (:checks result))))
+      (is (every? :satisfied? (:checks result)))
+      (is (= [] (obligation/violated-obligations subject initial)))
+      (is (= [] (obligation/violated-obligations subject committed)))))
+  (testing "a legitimately stale external dependency rejects atomically"
+    (let [subject (get-in cases [:stale-dependency :subject])
+          rejected (attempt (initial-state :stale-dependency :correct) 0)
+          result (peek (::formal/observations rejected))]
+      (is (= :rejected (:status result)))
+      (is (= [:dependency-version :command-version]
+             (mapv :kind (:checks result))))
+      (is (= [false true] (mapv :satisfied? (:checks result))))
+      (is (= (first (:checks result)) (:failed-precondition result)))
+      (is (= (:before result) (:after result)))
+      (is (= [] (obligation/violated-obligations subject rejected)))))
+  (testing "ordinary create/update preconditions still pass"
+    (doseq [case-id [:competing-updates :independent-updates :competing-creates]]
+      (let [subject (get-in cases [case-id :subject])
+            states (execution subject [0 1])]
+        (is (every? #(obligation/holds?
+                      subject :outcome-check-consistency %)
+                    states)
+            (name case-id))))))
+
+(deftest guard-inventory-and-truth-mutations-fail-independently-test
+  (doseq [[case-id mutation] guard-mutations]
+    (testing (str (name case-id) ": " (name mutation))
+      (let [subject (get-in cases [case-id :subject])
+            witness (attempt (initial-state case-id mutation) 0)]
+        (is (false? (obligation/holds?
+                     subject :outcome-check-consistency witness)))
+        (is (= [:outcome-check-consistency]
+               (obligation/violated-obligations subject witness))
+            (pr-str witness))))))
+
+(deftest tlc-exposes-guard-inventory-and-fabricated-commit-counterexamples-test
+  (doseq [[case-id mutation] guard-mutations]
+    (testing (str (name case-id) ": " (name mutation))
+      ;; TLC, not a direct predicate call, must actually find the mutant.
+      ;; It explores the one-step generic transaction machine for the
+      ;; selected plan while checking all five registered invariants.
+      (let [{:keys [trace trace-info] :as result} (check! case-id mutation)
+            violation (:violation trace-info)]
+        (is (and (vector? trace) (seq trace)) (pr-str result))
+        (is (= :invariant (:type violation)) (pr-str trace-info))
+        (is (= :outcome-check-consistency
+               (some-> (:name violation) name keyword))
+            (pr-str trace-info))))))
+
+(deftest tlc-accepts-valid-and-stale-dependency-controls-test
+  (doseq [case-id [:valid-dependency :stale-dependency]]
+    (testing (name case-id)
+      (let [{:keys [trace trace-info distinct-states] :as result}
+            (check! case-id :correct)]
+        (is (= :ok trace) (pr-str result))
+        (is (nil? trace-info) (pr-str result))
+        (is (= 2 distinct-states) (pr-str result))))))
 
 (deftest malformed-obligation-input-fails-closed-test
   (let [subject (get-in cases [:competing-updates :subject])
