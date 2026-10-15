@@ -19,6 +19,9 @@
   (:require [clojure.set :as set]
             [clojure.walk :as walk]
             [gesso.model.command :as command]
+            [gesso.model.command-resolution :as resolution]
+            [gesso.model.resolution-event-observation :as event-observation]
+            [gesso.model.resolution-passive-observation :as passive-observation]
             [gesso.model.formal-transition :as formal]
             [gesso.model.tx :as tx]))
 
@@ -285,3 +288,87 @@
                  :corresponds :mismatch)
        :checked-order (get-in case [:physical :submission-order])
        :scope assurance-scope})))
+
+(def event-observation-bridge-scope
+  {:subject :gesso.model.formal-observation/single-executor-attempt-v1
+   :derived-from #{:gesso.model.resolution-event-observation/single-attempt-v1
+                   :gesso.model.formal-transition/prepared-serial-v1}
+   :checked #{:event-binding-equals-command-record-binding
+              :single-definitive-status-equals-physical-status
+              :canonical-incorporation-plan-admitted
+              :complete-guard-and-write-target-coverage
+              :actual-executor-attempt-matches-reference-transition}
+   :assumed #{:the-completed-event-session-came-from-the-actual-executor
+              :trusted-event-source-and-physical-classification
+              :exclusive-control-of-observed-documents
+              :consistent-unpinned-xtdb-reads}
+   :not-established #{:authentication-of-detached-observation-data
+                      :exact-executor-identity-bound-to-current-application
+                      :application-policy-correctness
+                      :independently-model-checked-formal-invariants
+                      :formal-refinement-or-application-certification}})
+
+(defn prepared-event-case
+  "Adapt one completed, DEFINITIVE physical executor-attempt observation to
+   the SAME finite source-derived transition subject as controlled XTDB tests.
+
+   Accept only the successful shape returned by
+   resolution-event-observation/start-session!'s complete! function. This
+   bridge does NOT execute a command, read XTDB, start Recife, or issue proof
+   evidence. A detached map can be forged: the caller must separately prove
+   that the event session came from the exact currently registered executor
+   (for example through Gesso's process-local resolution-assurance registry).
+   Do not pass this result into ordinary application startup certification.
+
+   The single attempt has no intermediate physical read between submissions:
+   its first and only prefix is the independently collected before/after pair.
+   Incompatible statuses, command records, target sets and model transitions
+   fail closed rather than becoming an asserted application guarantee."
+  [completed]
+  (let [incorporation (:submitted-incorporation completed)
+        record (:record incorporation)
+        binding (:binding completed)
+        physical-status (get-in completed [:physical :status])
+        observations (:observations completed)]
+    (when-not (and (map? completed)
+                   (= event-observation/observation-scope
+                      (:bridge-scope completed))
+                   (= passive-observation/observation-scope
+                      (:collection completed))
+                   (uuid? (:attempt-id completed))
+                   (map? incorporation)
+                   (= resolution/assurance-scope (:scope incorporation))
+                   (map? (:plan incorporation))
+                   (= binding (resolution/require-binding binding))
+                   (= binding (:gesso.command/binding
+                               (resolution/require-record record)))
+                   (#{:committed :rejected} physical-status)
+                   (= [physical-status] (:statuses observations))
+                   (= :consistent (get-in completed [:evidence :status]))
+                   (map? (:initial-state completed))
+                   (map? (:state observations))
+                   (set? (:inspected-targets observations)))
+      (fail! :invalid-executor-event-observation
+             "Expected one completed and consistent canonical executor-attempt observation."
+             {:bridge-scope (:bridge-scope completed)
+              :status physical-status
+              :observed-statuses (:statuses observations)}))
+    (let [before (:initial-state completed)
+          after (:state observations)
+          physical {:initial-state before
+                    :submission-order [0]
+                    :submission-trace [{:plan-index 0
+                                        :status physical-status
+                                        :before before
+                                        :after after}]
+                    :observations observations}
+          case (prepared-case physical [(:plan incorporation)])
+          result (observed-path-report case)]
+      (when-not (= :corresponds (:status result))
+        (fail! :executor-attempt-reference-mismatch
+               "The completed physical executor attempt disagrees with Gesso's admitted transaction semantics."
+               {:status (:status result)
+                :checked-order (:checked-order result)}))
+      (assoc case
+             :observation-origin :single-executor-attempt-diagnostic
+             :origin-scope event-observation-bridge-scope))))
