@@ -164,18 +164,33 @@
         (with-redefs [recife/run-model (fn [& _] raw)]
           (is (= :model-check-failed (reject-kind subject)))
           (is (empty? (sessions))))))
-    (testing "a throwing checker still releases its session"
-      (with-redefs [recife/run-model (fn [& _]
-                                      (throw (ex-info "TLC crashed" {:tester true})))]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"TLC crashed"
-                              (check/check-prepared! subject)))
-        (is (empty? (sessions)))))
-    (testing "an IDeref whose evaluation fails also releases its session"
-      (with-redefs [recife/run-model
-                    (fn [& _] (delay (throw (ex-info "TLC future failed" {}))))]
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"TLC future failed"
-                              (check/check-prepared! subject)))
-        (is (empty? (sessions)))))))
+    ;; Do not require the public exception message to repeat a backend error.
+    ;; The backend may contain private application data. Future implementations
+    ;; must be able to redact the outer message without breaking this test.
+    (testing "a throwing checker preserves its cause and releases the session"
+      (let [cause (ex-info "TLC crashed" {:tester true})]
+        (with-redefs [recife/run-model (fn [& _] (throw cause))]
+          (let [error (try (check/check-prepared! subject)
+                           ::unexpected-success
+                           (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo error))
+            (when (instance? clojure.lang.ExceptionInfo error)
+              (is (identical? cause (.getCause error)))
+              (is (= :model-check-failed (:error/kind (ex-data error))))
+              (is (= :backend-exception (:failure/class (ex-data error))))))
+          (is (empty? (sessions))))))
+    (testing "an IDeref failure preserves its cause and releases the session"
+      (let [cause (ex-info "TLC future failed" {:tester true})]
+        (with-redefs [recife/run-model (fn [& _] (delay (throw cause)))]
+          (let [error (try (check/check-prepared! subject)
+                           ::unexpected-success
+                           (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo error))
+            (when (instance? clojure.lang.ExceptionInfo error)
+              (is (identical? cause (.getCause error)))
+              (is (= :model-check-failed (:error/kind (ex-data error))))
+              (is (= :backend-exception (:failure/class (ex-data error))))))
+          (is (empty? (sessions))))))))
 
 (deftest structurally-incomplete-checker-responses-fail-closed-test
   ;; These responses are deliberately substituted at the Recife boundary.
@@ -545,3 +560,33 @@
         (is (not (contains? result :diagnostic/handle)))
         (is (= before (failure-records)))
         (is (empty? (sessions)))))))
+
+(deftest backend-exception-safe-data-and-local-cause-survive-public-message-migration-test
+  ;; Compatibility gate for the following source revision: tests must not
+  ;; demand backend-controlled text in the outer exception message. The
+  ;; source revision must separately assert its newly redacted public message.
+  (let [subject (competing-updates)
+        secret "v962-private-backend-message-7fbc"
+        cases [[:backend-exception (ex-info secret {:private secret})]
+               [:checker-timeout
+                (java.util.concurrent.TimeoutException. secret)]]]
+    (doseq [[kind cause] cases]
+      (testing (name kind)
+        (with-redefs [recife/run-model (fn [& _] (throw cause))]
+          (let [error (try (check/check-prepared! subject)
+                           ::unexpected-success
+                           (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo error))
+            (when (instance? clojure.lang.ExceptionInfo error)
+              (let [data (ex-data error)
+                    handle (:diagnostic/handle data)
+                    private (check/inspect-failure handle)]
+                (is (= :model-check-failed (:error/kind data)))
+                (is (= kind (:failure/class data)))
+                (is (= :recife-tlc-execution
+                       (get-in data [:diagnostic/summary :source-boundary])))
+                (is (not (.contains (pr-str data) secret)))
+                (is (identical? cause (.getCause error)))
+                (is (identical? cause (:backend-exception private)))
+                (is (nil? (:raw-result private)))
+                (is (empty? (sessions)))))))))))
