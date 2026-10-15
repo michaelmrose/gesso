@@ -590,3 +590,69 @@
                 (is (identical? cause (:backend-exception private)))
                 (is (nil? (:raw-result private)))
                 (is (empty? (sessions)))))))))))
+
+;; v964: the source now uses a fixed outer message for exceptions arising in
+;; the Recife backend. Assertions on the *public* ExceptionInfo are distinct
+;; from local cause/registry assertions: an error message may be serialized
+;; or logged even when ex-data has been carefully redacted. These are
+;; controlled boundary tests, not evidence of finite-model correctness.
+(deftest backend-controlled-text-never-enters-public-error-message-test
+  (let [subject (competing-updates)
+        secret "PRIVATE_MODEL_PAYLOAD_v964_DO_NOT_LOG"
+        public-message "Recife/TLC backend failed to establish finite obligations."
+        cases [[:backend-exception
+                (ex-info (str "Backend echoed: " secret)
+                         {:private-domain-document secret})]
+               [:checker-timeout
+                (java.util.concurrent.TimeoutException.
+                 (str "Timeout contained: " secret))]
+               [:checker-interrupted
+                (InterruptedException.
+                 (str "Interrupt contained: " secret))]]]
+    (doseq [[expected-class cause] cases]
+      (testing (name expected-class)
+        (try
+          (with-redefs [recife/run-model (fn [& _] (throw cause))]
+            (let [error (try (check/check-prepared! subject)
+                             ::unexpected-success
+                             (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo error))
+              (when (instance? clojure.lang.ExceptionInfo error)
+                (let [data (ex-data error)
+                      handle (:diagnostic/handle data)
+                      local (check/inspect-failure handle)]
+                  (is (= public-message (.getMessage error)))
+                  (is (not (.contains (.toString error) secret)))
+                  (is (not (.contains (pr-str data) secret)))
+                  (is (= :model-check-failed (:error/kind data)))
+                  (is (= expected-class (:failure/class data)))
+                  (is (= expected-class
+                         (get-in data [:diagnostic/summary :failure/class])))
+                  (is (identical? cause (.getCause error)))
+                  (is (identical? cause (:backend-exception local)))
+                  (is (.contains (.getMessage cause) secret)
+                      "Local trusted inspection must retain the original cause")
+                  (is (empty? (sessions)))))))
+          (finally
+            ;; Production correctly preserves interrupt status. Clearing it
+            ;; here is test cleanup so other test namespaces are unaffected.
+            (when (= :checker-interrupted expected-class)
+              (Thread/interrupted))))))
+    (testing "deferred failure cannot leak a backend-controlled message"
+      (with-redefs [recife/run-model
+                    (fn [& _]
+                      (delay (throw (ex-info (str "Deferred: " secret)
+                                             {:private secret}))))]
+        (let [error (try (check/check-prepared! subject)
+                         ::unexpected-success
+                         (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo error))
+          (when (instance? clojure.lang.ExceptionInfo error)
+            (let [data (ex-data error)
+                  local (check/inspect-failure (:diagnostic/handle data))]
+              (is (= public-message (.getMessage error)))
+              (is (not (.contains (pr-str data) secret)))
+              (is (= :backend-exception (:failure/class data)))
+              (is (identical? (.getCause error) (:backend-exception local)))
+              (is (.contains (.getMessage (.getCause error)) secret))
+              (is (empty? (sessions))))))))))
