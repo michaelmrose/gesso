@@ -61,6 +61,12 @@
    with the supplied snapshots before :construct! executes. It does not
    independently validate the callback's DB origin or consistency, and the
    pure model-input comparison never performs that live read.
+   A separate optional :production-document-reader :gesso-xtdb-current
+   selects Gesso's own parameterized XTDB2 current-document query instead of
+   an application-supplied reader. It removes the independent callback's query
+   implementation from this path, but still assumes the supplied server
+   context points at the authoritative XTDB connectable and does not close
+   the read/commit isolation gap.
    These compare finite-model objects; they do NOT authenticate production
    acquisition. Only explicitly declared dependencies are checked; it does
    not infer missing policy, prove acquisition truth, or authenticate XTDB.
@@ -72,6 +78,7 @@
   (:require
    [clojure.set :as set]
    [gesso.choreo.identity :as identity]
+   [gesso.live.consistency.xtdb :as xtdb]
    [gesso.model.command :as command]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.operation-family :as family]
@@ -98,6 +105,8 @@
 (def whole-snapshot-guards-coverage-key :required-whole-snapshot-guards)
 (def production-snapshot-reads-coverage-key :required-production-snapshot-reads)
 (def production-document-reader-key :read-current-document!)
+(def xtdb-document-reader-mode-key :production-document-reader)
+(def gesso-xtdb-current-reader-mode :gesso-xtdb-current)
 (def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
@@ -133,7 +142,8 @@
               :optional-declared-create-absence-to-transaction-correspondence
               :optional-declared-snapshot-field-to-commit-guard-correspondence
               :optional-observed-whole-snapshot-to-commit-guard-correspondence
-              :optional-trusted-production-document-reread-correspondence}
+              :optional-trusted-production-document-reread-correspondence
+              :optional-gesso-owned-parameterized-xtdb-document-reread}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -149,7 +159,8 @@
               :truthful-declaration-of-policy-relevant-snapshot-fields
               :truthful-completeness-of-each-acquired-document-snapshot
               :truthful-trusted-current-document-reader
-              :correct-database-snapshot-isolation-for-rereads}
+              :correct-database-snapshot-isolation-for-rereads
+              :authentic-authoritative-xtdb-connectable-in-server-context}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -392,6 +403,38 @@
 ;; The reader itself is trusted application integration, NOT a verified XTDB
 ;; primitive or an atomic read/commit snapshot guarantee. The version guards
 ;; remain essential at commit time, whose physical semantics are unproved.
+;; When explicitly selected, this is a GESSO-owned physical XTDB2 read,
+;; not an application-supplied query callback. The table name is derived only
+;; from a declared entity type and admitted against a strict SQL identifier
+;; grammar; document IDs are always bound as parameters. A LIMIT 2 bounds the
+;; cardinality check, rather than silently choosing a duplicate row.
+;;
+;; Crucially, the context's XTDB connectable is still an assumed trusted
+;; server capability. No query here pins a cross-document transaction snapshot
+;; or proves that the ensuing commit is isolated from a concurrent writer.
+(defn- gesso-xtdb-current-document! [context entity-type document-id]
+  (let [table (name entity-type)]
+    (when-not (re-matches #"[A-Za-z_][A-Za-z0-9_]*" table)
+      (fail! :unsupported-production-document-table))
+    (let [rows (xtdb/q-from
+                context
+                [(str "SELECT * FROM " table " WHERE _id = ? LIMIT 2")
+                 document-id])]
+      (when-not (and (sequential? rows) (<= (count rows) 1))
+        (fail! :invalid-production-current-document-query-result))
+      (when-let [document (first rows)]
+        ;; XTDB2 currently materializes stored Instants as ZonedDateTime
+        ;; values. Only normalize known top-level temporal values, preserving
+        ;; the authoritative instant without comparing representation classes.
+        ;; This limited normalization is owned by the Gesso query path only;
+        ;; the application callback's return value is never rewritten.
+        (into {}
+              (map (fn [[field value]]
+                     [field (if (instance? java.time.ZonedDateTime value)
+                              (.toInstant ^java.time.ZonedDateTime value)
+                              value)]))
+              document)))))
+
 (defn- require-production-snapshot-reads!
   [coverage read-current-document! context]
   (doseq [guard-path (:required-production-snapshot-reads coverage)]
@@ -927,6 +970,11 @@
    manually enumerating observed fields, but not missing acquisition fields,
    unseen concurrent field additions, unmodeled dependencies, or physical
    XTDB provenance. The declaration is opt-in and capped at 256 guards.
+   To use a Gesso-owned parameterized XTDB2 query instead of the trusted
+   custom callback, configure :production-document-reader :gesso-xtdb-current
+   (never together with :read-current-document!). This still depends on a
+   trusted, authoritative XTDB2 connectable in the production server context;
+   Gesso does not pin a consistent multi-document read snapshot here.
    Add :required-production-snapshot-reads #{[:eligibility :guard]} only for
    paths already in :required-whole-snapshot-guards, and supply a trusted
    :read-current-document! callback as an ADDITIONAL top-level configuration
@@ -960,18 +1008,26 @@
                         (set (keys configuration)))
                      (= (into configuration-keys
                               [:context-coverage production-document-reader-key])
+                        (set (keys configuration)))
+                     (= (into configuration-keys
+                              [:context-coverage xtdb-document-reader-mode-key])
                         (set (keys configuration))))
                  (qualified-keyword? (:operation configuration))
                  (fn? (:enabled? configuration))
                  (fn? (:model-input! configuration))
                  (fn? (:construct! configuration)))
     (fail! :invalid-configuration))
-  (when-not (and (= (contains? configuration production-document-reader-key)
-                    (contains? (:context-coverage configuration)
-                               production-snapshot-reads-coverage-key))
-                 (or (not (contains? configuration production-document-reader-key))
-                     (fn? (:read-current-document! configuration))))
-    (fail! :invalid-configuration))
+  (let [custom? (contains? configuration production-document-reader-key)
+        xtdb? (contains? configuration xtdb-document-reader-mode-key)
+        reads? (contains? (:context-coverage configuration)
+                          production-snapshot-reads-coverage-key)]
+    (when-not (and (= reads? (or custom? xtdb?))
+                   (not (and custom? xtdb?))
+                   (or (not custom?) (fn? (:read-current-document! configuration)))
+                   (or (not xtdb?)
+                       (= gesso-xtdb-current-reader-mode
+                          (:production-document-reader configuration))))
+      (fail! :invalid-configuration)))
   (let [coverage (when (contains? configuration :context-coverage)
                    (require-context-coverage! (:context-coverage configuration)))
         {:keys [operation principals arguments enabled? model-input! construct!]}
@@ -979,7 +1035,11 @@
         guarded-construct! (checked-domain-constructor coverage construct!)
         production-construct!
         (checked-production-constructor
-         coverage (:read-current-document! configuration) guarded-construct!)
+         coverage
+         (if (contains? configuration xtdb-document-reader-mode-key)
+           gesso-xtdb-current-document!
+           (:read-current-document! configuration))
+         guarded-construct!)
         production (try
                      (resolved/build-operation
                       (assoc (select-keys configuration resolved/configuration-keys)
