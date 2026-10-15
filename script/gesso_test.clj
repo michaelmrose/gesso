@@ -292,6 +292,34 @@
        "-")
       symbol))
 
+;; Formal-backend tests are still ordinary JVM tests, and so are always
+;; included in the full `clojure -M:test` discovery. This narrower selector
+;; exists for rapid proof work without introducing a second, optional suite.
+;; Keep the convention engine-neutral: test names containing a separate
+;; `recife` or `formal` segment are eligible, not just one pilot namespace.
+(def formal-test-file-pattern
+  #"(?:^|[_-])(?:recife|formal)(?:[_-]|\.)")
+
+(defn formal-test-namespaces
+  []
+  (let [namespaces
+        (->> (concat
+              (fs/glob "test" "**/*_test.clj")
+              (fs/glob "test" "**/*_test.cljc"))
+             (filter
+              (fn [path]
+                (re-find formal-test-file-pattern
+                         (str (fs/file-name path)))))
+             (map test-namespace)
+             distinct
+             sort
+             vec)]
+    (when (empty? namespaces)
+      (gate-failure!
+       "No formal-verification test namespaces were discovered."
+       {:expected "test/**/*recife*_test.clj or test/**/*formal*_test.clj (also .cljc)"}))
+    namespaces))
+
 (defn cljs-test-namespaces
   []
   (->> (concat
@@ -731,6 +759,22 @@
    ["clojure"
     "-M:test"]
    jvm-wall-clock-timeout-ms))
+
+(defn run-formal-tests!
+  []
+  (let [namespaces (formal-test-namespaces)
+        command (into ["clojure" "-M:test"]
+                      (mapcat (fn [namespace]
+                                ["-n" (str namespace)])
+                              namespaces))]
+    (println)
+    (println "== Formal JVM tests (Recife/TLC) ==")
+    (println "Selected namespaces:" (pr-str namespaces))
+    (println "Wall-clock limit:" (/ jvm-wall-clock-timeout-ms 60000)
+             "minutes")
+    (run-command-streaming-with-timeout!
+     command
+     jvm-wall-clock-timeout-ms)))
 
 (defn node-test-plan
   []
@@ -1384,6 +1428,10 @@
    {:label "JVM"
     :run run-jvm-tests!}
 
+   :formal
+   {:label "Formal JVM"
+    :run run-formal-tests!}
+
    :node:choreo
    {:label "Node Choreo"
     :run run-node-choreo-tests!}
@@ -1495,7 +1543,7 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|integrity|jvm|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes]")
+   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes]")
   (System/exit
    2))
 
@@ -1517,6 +1565,9 @@
 
           "jvm"
           [:jvm]
+
+          "formal"
+          [:formal]
 
           "cljs"
           [:advanced
