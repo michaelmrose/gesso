@@ -10,6 +10,8 @@
    [gesso.choreo.identity :as identity]
    [gesso.live.application-preflight :as application]
    [gesso.live.application-preflight.operation-family-correspondence :as correspondence]
+   [gesso.live.application-preflight.formal-family :as formal-family]
+   [gesso.model.formal-check :as formal-check]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.optimistic.protocol :as protocol]
    [gesso.live.optimistic.resolved-operation :as adapter]
@@ -1255,3 +1257,133 @@
                    :unbounded-execution-refinement
                    :whole-application-certification]]
       (is (contains? (:not-established scope) limit)))))
+
+
+;; v937 — Permanent regressions for the v936 executor-bound, frozen prepared
+;; competition. These exercise the real registered Live executor and XTDB
+;; collector, not detached sample reports. The application-owned domain
+;; fixture remains deliberately test-only; these checks do not certify policy.
+
+(def ^:private v937-options {:max-depth 1 :max-transitions 16})
+
+(defn- v937-enabled-competition [example]
+  (let [families (modeled-families example)
+        original-prepare (:prepare (first families))]
+    (-> families
+        (assoc-in [1 :enabled?] (fn [& _] true))
+        (assoc-in [1 :prepare] original-prepare)
+        (assoc-in [2 :enabled?] (fn [& _] true))
+        (assoc-in [2 :prepare] original-prepare))))
+
+(defn- v937-bound! [assembly example families]
+  (formal-family/bound-prepared-competition
+   assembly (model-state example) families (model-rules example)
+   v937-options))
+
+(deftest v937-real-registered-claim-has-frozen-finite-tlc-subject-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [before @(:calls example)
+              bound (v937-bound! assembly example (v937-enabled-competition example))
+              subject (:subject bound)]
+          (is (= 3 (:choice-count bound)))
+          (is (= 3 (count (:plans subject))))
+          ;; Subject construction must not execute the application operation.
+          (is (= before @(:calls example)))
+          (is (= :not-run (:formal-check bound)))
+          (is (= :not-established (:application-certification bound)))
+          (let [checked (formal-check/check-prepared! subject)]
+            (is (= :checked-finite-model (:status checked)))
+            (is (pos? (:distinct-states checked)))
+            (is (contains? (:not-established checked)
+                           :independent-application-certificate)))
+          (let [handle (:evidence (invoke! example))
+                verdict ((:compare-execution! bound) handle)
+                printed (pr-str verdict)]
+            (is (= :matched-selected-root-execution (:status verdict)))
+            (is (= :registered-executor-and-frozen-plan-correspondence
+                   (:reason verdict)))
+            (is (= operation-id (:operation verdict)))
+            (is (= :not-run (:tla-check verdict)))
+            (is (= :not-established (:application-certification verdict)))
+            (is (contains? (get-in verdict [:scope :not-established])
+                           :identity-of-authored-callbacks-and-production-executor-logic))
+            (is (contains? (get-in verdict [:scope :not-established])
+                           :recife-tlc-verdict))
+            (doseq [private-field [:subject :plan :commands :observation :binding]]
+              (is (not (contains? verdict private-field))))
+            (is (not (.contains printed (:request-id example))))))))))
+
+(deftest v937-changed-preparation-cannot-rewrite-frozen-proof-subject-test
+  (let [example (test-operation)
+        original-prep (:prepare (first (modeled-families example)))
+        current-preparation? (atom false)
+        unstable-prep
+        (fn [state who args]
+          (if @current-preparation?
+            (original-prep state who args)
+            ;; This was admitted as the frozen plan. Its update differs from
+            ;; the *actual* executor's update, although the same mutable
+            ;; callback will agree with the executor when re-evaluated later.
+            (let [plan (original-prep state who args)
+                  prior (get state [:requests (:request-id args)])
+                  changed (assoc (:claimed example)
+                                 :updated-at "v937-frozen-different-update")]
+              (assoc plan :commands
+                     [(command/update-command :requests :claim
+                                              prior changed version)]))))
+        families (assoc-in (v937-enabled-competition example)
+                           [0 :prepare] unstable-prep)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [bound (v937-bound! assembly example families)
+              frozen-first-plan (first (get-in bound [:subject :plans]))
+              _ (reset! current-preparation? true)
+              handle (:evidence (invoke! example))
+              verdict ((:compare-execution! bound) handle)]
+          (is (not= frozen-first-plan
+                    (gesso.model.tx-model/admitted-plan
+                     (original-prep (model-state example)
+                                    "v829-principal-private"
+                                    {:request-id (:request-id example)}))))
+          (is (= :counterexample (:status verdict)))
+          (is (= :observed-plan-differs-from-frozen-formal-subject
+                 (:reason verdict)))
+          (is (= :not-established (:application-certification verdict)))
+          (is (= :not-run (:tla-check verdict)))
+          (is (not (contains? verdict :plan)))
+          (is (not (contains? verdict :observation))))))))
+
+(deftest v937-exact-registered-executor-rejects-detached-evidence-test
+  (let [example (test-operation)
+        other (test-operation)
+        other-handle (:evidence (invoke! other))]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [bound (v937-bound! assembly example
+                                 (v937-enabled-competition example))
+              compare! (:compare-execution! bound)
+              valid (:evidence (invoke! example))]
+          (is (= :matched-selected-root-execution
+                 (:status (compare! valid))))
+          (doseq [forged [nil (Object.) {} {:status :matched-selected-root-execution}
+                          (assurance/inspect-evidence valid) other-handle]]
+            (is (= :unrecognized-executor-bound-evidence
+                   (kind #(compare! forged)))))
+          (is (= :matched-selected-root-execution
+                 (:status (compare! valid)))))))))
+
+(deftest v937-prepared-competition-refuses-incomplete-choice-coverage-test
+  (let [example (test-operation)]
+    (with-application (:executor example)
+      (fn [{:keys [assembly]}]
+        (let [complete (v937-enabled-competition example)
+              disabled (assoc-in complete [1 :enabled?] (constantly false))
+              missing (subvec complete 0 2)]
+          (is (= :disabled-declared-choice
+                 (kind #(v937-bound! assembly example disabled))))
+          (is (= :operation-identity-coverage-mismatch
+                 (kind #(v937-bound! assembly example missing))))
+          (is (= "unclaimed" (:owner (row :requests (:request-id example)))))
+          (is (= 0 (:construct @(:calls example)))))))))
