@@ -4235,14 +4235,15 @@
     (is (nil? (v985-read :commands (:command-id test-case)))
         "A failed guard must prevent the durable command record")))
 
-(deftest v985-matching-revision-but-newly-added-field-exposes-observation-limit-test
+(deftest v985-matching-revision-but-newly-added-field-is-rejected-atomically-test
   (let [test-case (v985-case (str "v985-resource-" (random-uuid)))
         snapshot (get-in test-case [:context :eligibility :document])
         submissions (atom 0)]
     (v984-put! snapshot)
-    ;; This is a deliberately documented LIMITATION of the current guard:
-    ;; adding a previously unobserved field without changing a guarded value
-    ;; is not prevented by the SQL equality predicates for observed fields.
+    ;; v991 closes the limitation demonstrated by the original v985 test:
+    ;; a newly added top-level field leaves every observed-field comparison
+    ;; unchanged, but the automatically inserted field-count assertion sees
+    ;; the actual transaction prestate and rejects the whole transaction.
     (with-redefs [gesso.live.core/transact-and-notify!
                   (v985-real-commit!
                    (fn []
@@ -4250,17 +4251,20 @@
                                     [[:put-docs :eligibility
                                       (assoc snapshot :fixture/late-policy true)]]))
                    submissions)]
-      (is (= :incorporated (:status (v985-submit test-case)))))
+      (is (= :unresolved (:status (v985-submit test-case)))
+          "The conflicting transaction cannot be treated as incorporated"))
     (is (= 1 @submissions))
-    (is (= true
-           (:fixture/late-policy
-            (v985-read :eligibility (:xt/id snapshot)))))
-    (is (some? (v985-read :resource (:resource-id test-case))))
-    (is (some? (v985-read :commands (:command-id test-case))))
+    (is (= 1 @(:calls test-case)))
+    (is (true? (:fixture/late-policy
+                (v985-read :eligibility (:xt/id snapshot))))
+        "The interposed database write is committed")
+    (is (nil? (v985-read :resource (:resource-id test-case)))
+        "The rejected transaction cannot persist the application write")
+    (is (nil? (v985-read :commands (:command-id test-case)))
+        "The rejected transaction cannot persist the durable command record")
     (is (= :not-established
            (:application-certification (:pair test-case)))
-        "Observed-field protection must never be advertised as full-document isolation")))
-
+        "A passing physical regression is not an application proof")))
 
 ;; v987 — Physical regression for v986 namespaced transaction assertions.
 ;; Every test submits the canonical tx/prepare output to a real XTDB2 node.
@@ -4422,3 +4426,129 @@
     (is (= 7 (:revision (v987-row :fixture/resource id))))
     (is (= :assert-failed (v987-commit-result ops)))
     (is (= 0 (:revision (v987-row :resource id))))))
+
+;; v992 — v991 automatically inserts the exact canonical field-count ASSERT
+;; into opted-in whole-snapshot plans. These tests exercise BOTH shared
+;; construction paths and the finite reference interpretation of that SQL.
+;; They do not infer authorization dependency completeness, authenticate the
+;; production read connection, or claim general XTDB refinement.
+
+(defn- v992-count-assertion [context]
+  (let [snapshot (get-in context [:eligibility :document])]
+    (tx/assert-document-field-count :eligibility (:xt/id snapshot)
+                                    (count snapshot))))
+
+(defn- v992-state [context]
+  (let [snapshot (get-in context [:eligibility :document])]
+    {[:eligibility (:xt/id snapshot)] snapshot}))
+
+(deftest v992-shared-finite-construction-adds-one-canonical-assertion-test
+  (let [resource-id (str "v992-resource-" (random-uuid))
+        {:keys [pair context calls]} (v985-case resource-id)
+        snapshot (get-in context [:eligibility :document])
+        state (v992-state context)
+        prepare (get-in pair [:family :prepare])
+        plan (prepare state "v970-actor" {:resource resource-id})
+        expected (v992-count-assertion context)]
+    (is (= 1 @calls))
+    (is (= [expected] (:assertions plan))
+        "Gesso inserts exactly one canonical assertion, not opaque SQL")
+    (is (= [(get-in context [:eligibility :guard])] (:guards plan)))
+    (is (= :committed (:status (tx-model/step state plan))))
+    (is (contains? (:after (tx-model/step state plan))
+                   [:fixture/resource resource-id]))
+    (is (= :rejected
+           (:status (tx-model/step
+                     (assoc state [:eligibility (:xt/id snapshot)]
+                            (assoc snapshot :fixture/newly-added true))
+                     plan)))
+        "An unobserved top-level field invalidates an otherwise matching version")
+    (is (= :rejected
+           (:status (tx-model/step
+                     (assoc state [:eligibility (:xt/id snapshot)]
+                            (update snapshot :fixture/revision inc))
+                     plan)))
+        "Canonical observed-field guards still reject changed revisions")
+    (is (= 1 @calls)
+        "Finite reference evaluation never invokes application construction")))
+
+(deftest v992-production-construction-adds-one-identical-assertion-test
+  (let [resource-id (str "v992-resource-" (random-uuid))
+        {:keys [pair context calls] :as test-case} (v985-case resource-id)
+        expected (v992-count-assertion context)
+        captured (atom [])]
+    (v984-put! (get-in context [:eligibility :document]))
+    (with-redefs [tx/transact!
+                  (fn [_ctx plan]
+                    (swap! captured conj plan)
+                    {:commit/status :committed})]
+      (is (= :incorporated (:status (v985-submit test-case)))))
+    (is (= 1 (count @captured)) "Exactly one submit plan is delivered")
+    (is (= [expected] (:assertions (first @captured)))
+        "The production plan uses the same canonical assertion as the finite plan")
+    (is (= [(get-in context [:eligibility :guard])]
+           (:guards (first @captured))))
+    (is (= 1 @calls))
+    (is (= :not-established
+           (:application-certification pair)))))
+
+(deftest v992-whole-snapshot-assertion-is-opt-in-test
+  (let [context (v972-context)
+        calls (atom 0)
+        legacy (v972-pair context (v972-coverage) calls)
+        guarded (v972-pair (v980-covered-context context)
+                           (v980-coverage) calls)
+        submitted (atom [])]
+    (is (empty? (:assertions (v970-prepare legacy)))
+        "Previous non-whole-snapshot contracts do not acquire new assertions")
+    (is (= [(tx/assert-document-field-count
+             :fixture/eligibility "v970-eligibility"
+             (count (get-in context [:eligibility :document])))]
+           (:assertions (v970-prepare guarded))))
+    (with-redefs [tx/transact!
+                  (fn [_ctx plan]
+                    (swap! submitted conj plan)
+                    {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit legacy context)))))
+    (is (= 1 (count @submitted)))
+    (is (empty? (:assertions (first @submitted))))
+    (is (= 3 @calls))))
+
+(deftest v992-pure-comparison-does-not-inject-or-submit-assertions-test
+  (let [resource-id (str "v992-resource-" (random-uuid))
+        {:keys [pair context binding calls]} (v985-case resource-id)
+        submissions (atom 0)]
+    (with-redefs [tx/transact!
+                  (fn [& _]
+                    (swap! submissions inc)
+                    (throw (ex-info "Comparison must not submit" {})))]
+      (let [report ((:compare-production-input! pair)
+                    (v992-state context) "v970-actor"
+                    {:resource resource-id} context binding)]
+        (is (= :matched-declared-input-fields (:status report)))
+        (is (= :not-established (:application-certification report)))
+        (is (= :caller-supplied-not-authenticated
+               (:guard-snapshot-origin report)))))
+    (is (zero? @calls) "The pure comparison must not call :construct!")
+    (is (zero? @submissions))))
+
+(deftest v992-unmodified-document-with-automatic-assertion-commits-physically-test
+  (let [resource-id (str "v992-resource-" (random-uuid))
+        {:keys [context calls] :as test-case} (v985-case resource-id)
+        snapshot (get-in context [:eligibility :document])
+        submissions (atom 0)]
+    (v984-put! snapshot)
+    (with-redefs [gesso.live.core/transact-and-notify!
+                  (v985-real-commit! (fn [] nil) submissions)]
+      (let [result (v985-submit test-case)]
+        (is (= :incorporated (:status result)))
+        (is (= :committed (get-in result [:transaction :commit/status])))))
+    (is (= 1 @submissions))
+    (is (= 1 @calls))
+    (is (= resource-id (:xt/id (v985-read :resource resource-id))))
+    (is (= :incorporated
+           (:gesso.command/status
+            (v985-read :commands (:command-id test-case)))))
+    (is (= (:fixture/revision snapshot)
+           (:fixture/revision
+            (v985-read :eligibility (:xt/id snapshot)))))))
