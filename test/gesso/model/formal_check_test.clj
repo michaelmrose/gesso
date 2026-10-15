@@ -173,3 +173,47 @@
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"TLC future failed"
                               (check/check-prepared! subject)))
         (is (empty? (sessions)))))))
+
+(deftest structurally-incomplete-checker-responses-fail-closed-test
+  ;; These responses are deliberately substituted at the Recife boundary.
+  ;; This is a validator/cleanup regression, NOT a model-checking proof.
+  ;; The separate real-TLC tests above establish the valid execution path.
+  (let [subject (competing-updates)
+        complete {:trace :ok :trace-info nil :distinct-states 5}
+        malformed
+        [[:missing-trace (dissoc complete :trace)]
+         [:missing-trace-info (dissoc complete :trace-info)]
+         [:missing-distinct-states (dissoc complete :distinct-states)]
+         [:missing-all-required-fields {:elapsed-ms 1}]
+         [:nil-response nil]
+         [:non-map-response []]
+         [:nil-trace (assoc complete :trace nil)]
+         [:inconclusive-trace (assoc complete :trace :unknown)]
+         [:empty-trace (assoc complete :trace [])]
+         [:non-nil-trace-info (assoc complete :trace-info {})]
+         [:false-trace-info (assoc complete :trace-info false)]
+         [:nil-distinct-states (assoc complete :distinct-states nil)]
+         [:zero-distinct-states (assoc complete :distinct-states 0)]
+         [:negative-distinct-states (assoc complete :distinct-states -2)]
+         [:fractional-distinct-states (assoc complete :distinct-states 5.5)]
+         [:string-distinct-states (assoc complete :distinct-states "5")]
+         [:boolean-distinct-states (assoc complete :distinct-states true)]]]
+    (testing "the complete, explicit response shape is recognized by the wrapper"
+      ;; Do not interpret this stub as proving the underlying model safe:
+      ;; it only confirms the response-shape validator's positive control.
+      (with-redefs [recife/run-model (fn [& _] complete)]
+        (let [result (check/check-prepared! subject)]
+          (is (= :checked-finite-model (:status result)))
+          (is (= :bounded-reference-model-check-not-certificate
+                 (:evidence-class result)))
+          (is (empty? (sessions))))))
+    (doseq [[variant response] malformed]
+      (testing (name variant)
+        (with-redefs [recife/run-model (fn [& _] response)]
+          (is (= :model-check-failed (reject-kind subject)))
+          (is (empty? (sessions)) "Failure must release the checker session"))))
+    (testing "an incomplete dereferenced checker result is rejected as well"
+      (with-redefs [recife/run-model
+                    (fn [& _] (delay (dissoc complete :trace-info)))]
+        (is (= :model-check-failed (reject-kind subject)))
+        (is (empty? (sessions)))))))
