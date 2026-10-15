@@ -11,6 +11,7 @@
    refinement, concurrent execution, observation provenance, or application
    authorization. Physical I/O takes place before model checking."
   (:require
+   [clojure.set :as set]
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.choreo.identity :as identity]
    [gesso.model.command :as command]
@@ -198,3 +199,58 @@
                (keyword "gesso.model.command-resolution-observation-formal-test"
                         (name invariant)))
               (pr-str (:trace-info result))))))))
+
+
+(deftest target-inspection-coverage-must-fail-closed-test
+  (let [physical (collect [0 1])
+        baseline (prepared-case physical)
+        inspected (get-in physical [:observations :inspected-targets])
+        trace (:submission-trace physical)
+        ;; A rejected incorporation has no command record to read from the
+        ;; snapshots. The collector still has to inspect its absent target.
+        visible-targets (apply set/union
+                               (map (comp set keys)
+                                    (concat [(:initial-state physical)
+                                             (get-in physical [:observations :state])]
+                                            (mapcat (juxt :before :after) trace))))
+        never-materialized-targets (set/difference inspected visible-targets)
+        missing (first (sort-by pr-str never-materialized-targets))
+        foreign-target [:unobserved :phantom]
+        foreign-document {:xt/id :phantom}
+        forged
+        [[:unreported-absent-target
+          (update-in physical [:observations :inspected-targets] disj missing)]
+         [:invented-inspected-target
+          (update-in physical [:observations :inspected-targets]
+                     conj foreign-target)]
+         [:unexpected-initial-document
+          (assoc-in physical [:initial-state foreign-target] foreign-document)]
+         [:unexpected-intermediate-document
+          (assoc-in physical
+                    [:submission-trace 0 :after foreign-target]
+                    foreign-document)]
+         [:unexpected-terminal-document
+          (assoc-in physical
+                    [:observations :state foreign-target]
+                    foreign-document)]]]
+    (is (= :consistent (get-in physical [:evidence :status])))
+    (is (= :corresponds
+           (:status (formal-observation/observed-path-report baseline))))
+    (is (true? (formal-observation/evidence-complete? baseline)))
+    (is (set? inspected))
+    (is (seq never-materialized-targets)
+        "The losing command must have an absent ledger target to inspect.")
+    (is (some? missing))
+    (is (not (contains? visible-targets missing)))
+    (is (not (contains? inspected foreign-target)))
+    (doseq [[label tampered] forged]
+      (testing (name label)
+        (let [case (prepared-case tampered)
+              report (formal-observation/observed-path-report case)
+              result (check! case)]
+          (is (false? (formal-observation/evidence-complete? case)))
+          (is (= :evidence-incomplete (:status report)))
+          (is (invariant-counterexample?
+               result
+               :gesso.model.command-resolution-observation-formal-test/xtdb-submission-trace-is-complete)
+              (pr-str (select-keys result [:trace :trace-info]))))))))
