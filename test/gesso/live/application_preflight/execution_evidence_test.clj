@@ -1,5 +1,10 @@
 (ns gesso.live.application-preflight.execution-evidence-test
-  "Permanent execution-evidence regressions for application/explain-with-execution-evidence.
+  "Permanent execution-evidence regressions for both application assurance APIs.
+
+   Ordinary explain-with-execution-evidence is deterministic and does not run
+   Recife. Opt-in explain-with-formal-execution-evidence checks an authenticated
+   executor observation through the admitted finite transaction subject and
+   the generic TLC-backed five-obligation checker.
 
    The canonical explanation must bind a process-local diagnostic handle to
    the EXACT executor recovered from a freshly checked ApplicationAssembly.
@@ -10,8 +15,9 @@
    Tests use their own authoritative fixtures. No fake certificate, mutated
    metadata, detached report, or alternate adapter may substitute for a handle
    produced by the actual registered Live executor. The source-derived
-   comparison introduced in v921 remains diagnostic and must fail closed
-   without promoting selected executions into universal certification."
+   comparison introduced in v921 and the bounded Recife check introduced in
+   v929 remain diagnostic. Neither promotes an observed executor attempt to
+   universal operation refinement or application certification."
   (:require
    [clojure.string :as str]
    [clojure.test :refer [deftest is testing use-fixtures]]
@@ -23,6 +29,7 @@
    [gesso.live.optimistic.resolution-assurance :as assurance]
    [gesso.live.optimistic.server :as server]
    [gesso.model.command :as command]
+   [gesso.model.formal-check :as formal-check]
    [gesso.model.formal-observation :as formal-observation]
    [gesso.model.resolved-operation :as resolved]
    [xtdb.api :as xt]
@@ -415,3 +422,242 @@
                                   [:source-derived-reference-check :model-checked?])))
               (is (= :not-established (:universal-guarantees card))))
             (assert-unproved-policy (explain))))))))
+
+
+;; These tests exercise the *public application-assurance consumer* of the
+;; generic checker. Positive checking uses actual embedded XTDB and Recife/TLC.
+;; The deliberately malformed checker maps below are boundary fault injections,
+;; not evidence or model-checking results accepted as proof.
+(def ^:private expected-formal-obligations
+  #{:action-accounting :observation-chain :rejected-is-atomic
+    :committed-write-set :outcome-check-consistency})
+
+(defn- formal-card [explanation]
+  (get-in (observed-card explanation)
+          [:observations 0 :finite-model-safety-check]))
+
+(deftest actual-executor-observation-is-bounded-tlc-diagnostic-test
+  (let [f (test-operation)
+        {:keys [evidence prepared-send]} (invoke! f)]
+    (is (server/prepared-send? prepared-send))
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [calls-before @(:calls f)
+              ordinary (application/explain-with-execution-evidence
+                        assembly {operation-id [evidence]})
+              formal (application/explain-with-formal-execution-evidence
+                      assembly {operation-id [evidence]})
+              ordinary-card (observed-card ordinary)
+              checked (formal-card formal)
+              card (observed-card formal)
+              summary (observed-summary formal)
+              finite-summary (:finite-model-safety-check summary)
+              printed (pr-str {:card card :summary summary})]
+          (is (nil? (get-in ordinary-card
+                            [:observations 0 :finite-model-safety-check]))
+              "Ordinary explanation must not acquire TLC conclusions.")
+          (is (= (dissoc (first (:observations card))
+                         :finite-model-safety-check)
+                 (first (:observations ordinary-card))))
+          (is (= (:source-derived-reference-check card)
+                 (:source-derived-reference-check ordinary-card)))
+          (is (= :checked-finite-model (:status checked)))
+          (is (= :bounded-reference-model-check-not-certificate
+                 (:evidence-class checked)))
+          (is (= :gesso.model.formal-transition/prepared-serial-v1
+                 (:subject-kind checked)))
+          (is (= :recife-0.22.0/tlc (:checker checked)))
+          (is (pos-int? (:distinct-states checked)))
+          (is (= expected-formal-obligations (:obligations checked)))
+          (is (contains? (:not-established checked)
+                         :actual-xtdb-implementation-refinement))
+          (is (contains? (:not-established checked)
+                         :authorization-or-application-policy))
+          (is (contains? (:not-established checked)
+                         :server-browser-composition))
+          (is (contains? (:not-established checked)
+                         :independent-application-certificate))
+          (is (= :selected-finite-subjects-checked
+                 (:status finite-summary)))
+          (is (= 1 (:checked-subject-count finite-summary)))
+          (is (= :exact-executor-observed-attempt
+                 (:subject-origin finite-summary)))
+          (is (= :not-established (:universal-guarantees finite-summary)))
+          (is (= 1 (:observation-count summary)))
+          (is (= :bounded-observation-not-proof (:assurance-class card)))
+          (is (= :finite-reference-replay-not-formal-proof
+                 (get-in card [:source-derived-reference-check :assurance-class])))
+          (is (false? (get-in card [:source-derived-reference-check
+                                    :model-checked?])))
+          (is (= :not-established (:universal-guarantees card)))
+          (is (not (str/includes? printed (:request-id f))))
+          (is (not (str/includes? printed "v817-principal-private")))
+          (is (not (str/includes? printed
+                                  (str (:command-id (:command f))))))
+          (doseq [secret [:receipt :binding :plan :submission-trace
+                          :initial-state :documents]]
+            (is (not (str/includes? printed (str secret)))))
+          (is (= calls-before @(:calls f))
+              "Reporting must not execute application callbacks.")
+          (assert-unproved-policy formal))))))
+
+(deftest formal-path-rejects-impostors-before-checker-test
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        actual-checks (atom 0)]
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly report]}]
+        (with-redefs [formal-check/check-prepared!
+                      (fn [_]
+                        (swap! actual-checks inc)
+                        (throw (ex-info "Checker was not supposed to run" {})))]
+          (doseq [forgery [(Object.)
+                          (assurance/inspect-evidence evidence)
+                          (assoc (assurance/inspect-evidence evidence)
+                                 :status :bounded-execution-correspondence)]]
+            (is (= :unrecognized-execution-observation
+                   (kind #(application/explain-with-formal-execution-evidence
+                           assembly {operation-id [forgery]})))))
+          (doseq [invalid [nil [] {operation-id []} {operation-id [nil]}
+                           {:operation/unknown [evidence]}]]
+            (is (= :invalid-execution-observation-request
+                   (kind #(application/explain-with-formal-execution-evidence
+                           assembly invalid)))))
+          (is (= :invalid-or-stale-observation-assembly
+                 (kind #(application/explain-with-formal-execution-evidence
+                         report {operation-id [evidence]}))))
+          (is (zero? @actual-checks)
+              "An untrusted handle must never reach the model checker.")
+          (let [ordinary (application/explain-with-execution-evidence
+                          assembly {operation-id [evidence]})
+                empty-result (application/explain-with-formal-execution-evidence
+                              assembly {})]
+            (is (= :selected-attempts-correspond
+                   (get-in (observed-card ordinary)
+                           [:source-derived-reference-check :status])))
+            (is (= 0 (get-in (observed-summary empty-result)
+                             [:finite-model-safety-check :checked-subject-count])))
+            (is (= :not-established
+                   (get-in (observed-summary empty-result)
+                           [:finite-model-safety-check :universal-guarantees])))
+            (is (zero? @actual-checks))))))))
+
+(deftest formal-checker-failures-and-incomplete-reports-fail-closed-test
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        ;; A structurally plausible result supplies a starting point only for
+        ;; negative boundary mutation. It must never be offered as positive
+        ;; evidence that TLC actually executed.
+        shape {:status :checked-finite-model
+               :evidence-class :bounded-reference-model-check-not-certificate
+               :subject-kind :gesso.model.formal-transition/prepared-serial-v1
+               :checker :recife-0.22.0/tlc
+               :distinct-states 2
+               :obligations expected-formal-obligations
+               :assumed #{:serial-atomic-reference-semantics}
+               :not-established #{:actual-xtdb-implementation-refinement}}
+        invalid [[:nil-result (constantly nil)]
+                 [:missing-status #(dissoc % :status)]
+                 [:false-status #(assoc % :status :failed)]
+                 [:missing-evidence-class #(dissoc % :evidence-class)]
+                 [:certificate-forgery #(assoc % :evidence-class
+                                               :application-certified)]
+                 [:wrong-subject-kind #(assoc % :subject-kind :arbitrary)]
+                 [:wrong-checker #(assoc % :checker :assertions-only)]
+                 [:missing-state-count #(dissoc % :distinct-states)]
+                 [:zero-states #(assoc % :distinct-states 0)]
+                 [:noninteger-states #(assoc % :distinct-states 1.5)]
+                 [:missing-obligations #(dissoc % :obligations)]
+                 [:partial-obligations #(update % :obligations disj
+                                                :observation-chain)]
+                 [:invented-obligation #(update % :obligations conj
+                                                 :unverified-application-rule)]
+                 [:missing-assumptions #(dissoc % :assumed)]
+                 [:assumptions-not-a-set #(assoc % :assumed [])]
+                 [:missing-limits #(dissoc % :not-established)]
+                 [:limits-not-a-set #(assoc % :not-established [])]
+                 [:unsupported-limit #(update % :not-established conj
+                                             :arbitrary-assurance)]]]
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [explain #(application/explain-with-formal-execution-evidence
+                       assembly {operation-id [evidence]})
+              before @(:calls f)]
+          (doseq [[label alter] invalid]
+            (testing (name label)
+              (with-redefs [formal-check/check-prepared!
+                            (fn [_] (alter shape))]
+                (is (= :finite-model-check-failed (kind explain))))))
+          (with-redefs [formal-check/check-prepared!
+                        (fn [_]
+                          (throw (ex-info "private XTDB document content"
+                                          {:document (:request-id f)
+                                           :principal "v817-principal-private"})))]
+            (let [error (try (explain) nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+              (is (some? error))
+              (is (= :finite-model-check-failed
+                     (:error/kind (ex-data error))))
+              (is (not (str/includes? (pr-str (ex-data error))
+                                      (:request-id f))))
+              (is (not (str/includes? (pr-str (ex-data error))
+                                      "v817-principal-private")))))
+          (is (= before @(:calls f))
+              "Checker faults must not execute domain code."))))))
+
+(deftest model-checked-physical-witness-does-not-certify-false-projection-test
+  (let [f (test-operation {:false-projection? true})
+        {:keys [prepared-send evidence]} (invoke! f)]
+    (is (= {:request/owner "deliberately-false-projection"}
+           (get-in prepared-send [:settlement :authoritative :projection])))
+    (is (= "v817-principal-private"
+           (:owner (row :requests (:request-id f)))))
+    (with-application
+      (:executor f)
+      (fn [{:keys [assembly]}]
+        (let [result (application/explain-with-formal-execution-evidence
+                      assembly {operation-id [evidence]})
+              checked (formal-card result)]
+          (is (= :checked-finite-model (:status checked)))
+          (is (= expected-formal-obligations (:obligations checked)))
+          (is (= :not-established
+                 (:universal-guarantees (observed-card result))))
+          (is (contains? (:not-established (observed-summary result))
+                         :truthful-application-projections))
+          (assert-unproved-policy result))))))
+
+(deftest formal-evidence-is-bound-to-one-registered-executor-test
+  (let [f (test-operation)
+        {:keys [evidence]} (invoke! f)
+        original (:executor f)
+        cloned (with-meta original (assoc (meta original) :copied true))
+        impersonator (with-meta (fn [ctx] (original ctx)) (meta original))
+        alternate (adapter/build-executor
+                   {:operation operation-id
+                    :resolved-operation (:model f)
+                    :submission-mode! (fn [_] :submit)
+                    :project! (fn [_ _]
+                                (throw (ex-info "Must not invoke projection" {})))})
+        checker-invocations (atom 0)]
+    (is (nil? (adapter/construction-evidence cloned)))
+    (is (nil? (adapter/construction-evidence impersonator)))
+    (is (some? (adapter/construction-evidence alternate)))
+    (with-redefs [formal-check/check-prepared!
+                  (fn [_]
+                    (swap! checker-invocations inc)
+                    (throw (ex-info "Must not verify wrong executor" {})))]
+      (doseq [[label wrong] [[:cloned-fn cloned]
+                             [:copied-metadata impersonator]
+                             [:separately-registered-adapter alternate]]]
+        (testing (name label)
+          (with-application
+            wrong
+            (fn [{:keys [assembly]}]
+              (is (= :unrecognized-execution-observation
+                     (kind #(application/explain-with-formal-execution-evidence
+                             assembly {operation-id [evidence]}))))))))
+      (is (zero? @checker-invocations)
+          "Even a second legitimate executor may not replay the first handle."))))
