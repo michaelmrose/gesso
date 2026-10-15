@@ -33,6 +33,10 @@
    that construct! cannot read those fields or that authorization ignores them.
    Optional :required-paths checks declared nested modeled and supplied
    production facts for structural presence, without inferring omitted policy.
+   Optional :required-guard-paths connects declared context-held canonical
+   version guards to the transaction plan in both formal and actual production
+   construction. Only explicitly declared dependencies are checked; it does
+   not infer missing policy, prove acquisition truth, or authenticate XTDB.
    This is a strict field comparison, not observation authentication: omitted
    production context semantics and the source of the supplied values remain
    explicit assumptions. Neither construction nor a later TLC verdict
@@ -41,10 +45,12 @@
   (:require
    [clojure.set :as set]
    [gesso.choreo.identity :as identity]
+   [gesso.model.command :as command]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.operation-family :as family]
    [gesso.model.resolved-operation :as resolved]
-   [gesso.model.tx-model :as reference]))
+   [gesso.model.tx-model :as reference]
+   [gesso.model.tx :as tx]))
 
 (def configuration-keys
   #{:operation :read-record! :may-disclose? :construct!
@@ -54,6 +60,10 @@
 (def closed-context-coverage-keys #{:modeled :excluded :modeled-values})
 (def required-path-coverage-keys
   #{:modeled :excluded :modeled-values :required-paths})
+(def guarded-coverage-keys
+  #{:modeled :excluded :modeled-values :required-guard-paths})
+(def guarded-path-coverage-keys
+  #{:modeled :excluded :modeled-values :required-paths :required-guard-paths})
 (def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
@@ -81,7 +91,8 @@
               :optional-closed-production-context-key-inventory
               :declared-modeled-context-key-stability
               :optional-recursive-modeled-value-closure
-              :optional-declared-nested-semantic-path-presence}
+              :optional-declared-nested-semantic-path-presence
+              :optional-construction-guard-to-plan-correspondence}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -89,7 +100,8 @@
               :correct-registered-production-executor
               :trusted-provenance-of-supplied-production-context-and-binding
               :truthful-declaration-of-excluded-context-field-irrelevance
-              :truthful-complete-authored-required-semantic-paths}
+              :truthful-complete-authored-required-semantic-paths
+              :truthful-complete-authored-guard-dependency-paths}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -99,6 +111,8 @@
                       :irrelevance-of-declared-excluded-production-fields
                       :completeness-of-application-policy-dependency-declaration
                       :commit-time-enforcement-of-declared-semantic-facts
+                      :commit-time-enforcement-of-undeclared-semantic-facts
+                      :real-xtdb-enforcement-of-declared-guards
                       :independent-authentication-of-production-input-values
                       :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
@@ -225,6 +239,72 @@
     (when-not (every? #(required-path-present? modeled-context %) paths)
       (fail! kind))))
 
+(declare require-modeled-coverage!)
+
+(defn- require-guard-paths! [coverage context]
+  ;; The author supplies canonical guard values in modeled context fields.
+  ;; This is a deliberate semantic contract, not a discovery of policy facts.
+  (mapv (fn [path]
+          (when-not (required-path-present? context path)
+            (fail! :missing-required-semantic-guard))
+          (let [guard (get-in context path)]
+            (when-not (command/guard? guard)
+              (fail! :invalid-required-semantic-guard))
+            guard))
+        (:required-guard-paths coverage)))
+
+(defn- guarded-plan! [coverage context plan]
+  (when (seq (:required-guard-paths coverage))
+    ;; Admit the same supported transaction subset as the finite reference.
+    ;; Raw SQL and opaque entry hooks must not stand in for a declared guard.
+    (let [plan (try
+                 (reference/admitted-plan plan)
+                 (catch Exception _
+                   (fail! :unsupported-guarded-domain-plan)))
+          guards (require-guard-paths! coverage context)
+          effective (try
+                      (tx/effective-guards (:commands plan) (:guards plan))
+                      (catch Exception _
+                        (fail! :invalid-guarded-domain-plan)))
+          updates (filter command/update? (:commands plan))]
+      (when-not (every? (fn [guard]
+                          (or (some #(= guard %) effective)
+                              ;; Effective guards omit redundant protection
+                              ;; supplied by the corresponding update command.
+                              (some (fn [update]
+                                      (and (= (command/target update)
+                                              (command/guard-target guard))
+                                           (= (:model/expected update)
+                                              (:model/expected guard))))
+                                    updates)))
+                        guards)
+        (fail! :missing-required-commit-guard)))))
+
+(defn- checked-domain-constructor [coverage construct!]
+  ;; This SAME wrapper is installed in production and finite family paths.
+  ;; It does not infer dependencies, authenticate reads, or make the
+  ;; application-owned callback pure. Opted-out applications stay unchanged.
+  (if-not (seq (:required-guard-paths coverage))
+    construct!
+    (fn [context binding]
+      (when-not (map? context)
+        (fail! :invalid-production-context))
+      ;; Production ctx may contain excluded capabilities. Only the modeled
+      ;; portion has the closed-data requirement.
+      (require-modeled-coverage! coverage
+                                 (select-keys context (:modeled coverage)))
+      (require-closed-modeled-values!
+       coverage (select-keys context (:modeled coverage)))
+      (require-semantic-paths! coverage context
+                               :missing-required-production-semantic-input)
+      (require-guard-paths! coverage context)
+      (let [built (construct! context binding)]
+        (when (and (map? built) (contains? built :plan))
+          (guarded-plan! coverage context (:plan built)))
+        ;; A malformed construction remains subject to the ordinary
+        ;; resolved-operation validation, never silently authorized here.
+        built))))
+
 (defn- call-model! [kind f & arguments]
   (try
     (apply f arguments)
@@ -235,7 +315,9 @@
   (when-not (and (map? coverage)
                  (or (= context-coverage-keys (set (keys coverage)))
                      (= closed-context-coverage-keys (set (keys coverage)))
-                     (= required-path-coverage-keys (set (keys coverage))))
+                     (= required-path-coverage-keys (set (keys coverage)))
+                     (= guarded-coverage-keys (set (keys coverage)))
+                     (= guarded-path-coverage-keys (set (keys coverage))))
                  (set? (:modeled coverage))
                  (seq (:modeled coverage))
                  (every? keyword? (:modeled coverage))
@@ -255,7 +337,20 @@
                                          (<= 1 (count path) maximum-closed-depth)
                                          (every? semantic-path-key? path)
                                          (contains? (:modeled coverage) (first path))))
-                                  (:required-paths coverage)))))
+                                  (:required-paths coverage))))
+                 (or (not (contains? coverage :required-guard-paths))
+                     (and (= closed-model-value-mode (:modeled-values coverage))
+                          (set? (:required-guard-paths coverage))
+                          (seq (:required-guard-paths coverage))
+                          (<= (count (:required-guard-paths coverage))
+                              maximum-required-paths)
+                          (every? (fn [path]
+                                    (and (vector? path)
+                                         (<= 1 (count path) maximum-closed-depth)
+                                         (every? semantic-path-key? path)
+                                         (contains? (:modeled coverage)
+                                                    (first path))))
+                                  (:required-guard-paths coverage)))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -282,6 +377,7 @@
     (require-closed-modeled-values! coverage (:context input))
     (require-semantic-paths! coverage (:context input)
                              :missing-required-modeled-semantic-input)
+    (require-guard-paths! coverage (:context input))
     (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
@@ -322,6 +418,7 @@
        coverage (select-keys production-context (:modeled coverage))))
     (require-semantic-paths! coverage production-context
                              :missing-required-production-semantic-input)
+    (require-guard-paths! coverage production-context)
     (when-not (every? (fn [[key value]]
                         (and (contains? production-context key)
                              (= value (get production-context key))))
@@ -351,6 +448,9 @@
      :required-semantic-paths-checked
      (count (:required-paths coverage))
      :required-paths-completeness :not-established
+     :declared-semantic-guards-checked (count (:required-guard-paths coverage))
+     :semantic-guard-commit-enforcement-in-this-comparison :not-checked
+     :semantic-guard-dependency-completeness :not-established
      :unmodeled-production-context-fields
      (count (remove #(contains? modeled-context %) (keys production-context)))
      :command-id-comparison :excluded-independent-execution-identity
@@ -376,6 +476,7 @@
         (fail! :invalid-durable-incorporation)))
     ;; Admit the ORIGINAL application domain plan. Do not silently project
     ;; away guards, commands or unsupported transaction entries.
+    (guarded-plan! coverage context (:plan built))
     (try
       (reference/admitted-plan (:plan built))
       (catch Exception _
@@ -428,7 +529,14 @@
    presence; it cannot infer omitted policy dependencies or ensure commit-time
    guards enforce those dependencies. It does not prove callback purity,
    dependency completeness, or excluded context-field irrelevance. Without
-   the coverage declaration, legacy conditional comparison is retained."
+   the coverage declaration, legacy conditional comparison is retained.
+   Add :required-guard-paths #{[:eligibility :guard]} to :closed-data coverage
+   when that nested modeled value is a canonical gesso.model.command/guard.
+   Every declared guard must be represented in the returned transaction plan,
+   either as a dependency guard or as an equivalent update-command precondition.
+   This check runs in BOTH production and finite construction using the SAME
+   wrapped callback. It cannot infer omitted dependencies, prove the acquired
+   guard matches physical database truth, or show XTDB refinement."
   [configuration]
   (when-not (and (map? configuration)
                  (or (= configuration-keys (set (keys configuration)))
@@ -443,9 +551,11 @@
                    (require-context-coverage! (:context-coverage configuration)))
         {:keys [operation principals arguments enabled? model-input! construct!]}
         configuration
+        guarded-construct! (checked-domain-constructor coverage construct!)
         production (try
                      (resolved/build-operation
-                      (select-keys configuration resolved/configuration-keys))
+                      (assoc (select-keys configuration resolved/configuration-keys)
+                             :construct! guarded-construct!))
                      (catch Exception _ (fail! :invalid-production-operation)))
         operation-family {:id operation
                           :principals principals
@@ -453,7 +563,7 @@
                           :enabled? enabled?
                           :prepare (fn [state principal args]
                                      (finite-plan! operation model-input! coverage
-                                                   construct! state principal args))}]
+                                                   guarded-construct! state principal args))}]
     ;; Validate the entire finite family NOW, before returning either surface.
     ;; In particular, do not return a production function paired with a
     ;; truncated or duplicate choice declaration.
