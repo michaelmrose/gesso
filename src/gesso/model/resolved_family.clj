@@ -31,6 +31,8 @@
    fields and drift in the modeled key set fail closed, rather than passing
    with only an extra-field count. Exclusions are declarations, NOT evidence
    that construct! cannot read those fields or that authorization ignores them.
+   Optional :required-paths checks declared nested modeled and supplied
+   production facts for structural presence, without inferring omitted policy.
    This is a strict field comparison, not observation authentication: omitted
    production context semantics and the source of the supplied values remain
    explicit assumptions. Neither construction nor a later TLC verdict
@@ -50,6 +52,9 @@
 
 (def context-coverage-keys #{:modeled :excluded})
 (def closed-context-coverage-keys #{:modeled :excluded :modeled-values})
+(def required-path-coverage-keys
+  #{:modeled :excluded :modeled-values :required-paths})
+(def ^:private maximum-required-paths 256)
 (def closed-model-value-mode :closed-data)
 
 ;; A deliberately narrow, opt-in semantic-value language. These are immutable
@@ -75,14 +80,16 @@
               :optional-canonical-production-binding-comparison
               :optional-closed-production-context-key-inventory
               :declared-modeled-context-key-stability
-              :optional-recursive-modeled-value-closure}
+              :optional-recursive-modeled-value-closure
+              :optional-declared-nested-semantic-path-presence}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
               :truthful-state-dependent-enablement-and-authorization
               :correct-registered-production-executor
               :trusted-provenance-of-supplied-production-context-and-binding
-              :truthful-declaration-of-excluded-context-field-irrelevance}
+              :truthful-declaration-of-excluded-context-field-irrelevance
+              :truthful-complete-authored-required-semantic-paths}
    :not-established #{:identity-of-model-context-and-production-context
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
@@ -91,6 +98,7 @@
                       :completeness-of-modeled-production-context-fields
                       :irrelevance-of-declared-excluded-production-fields
                       :completeness-of-application-policy-dependency-declaration
+                      :commit-time-enforcement-of-declared-semantic-facts
                       :independent-authentication-of-production-input-values
                       :equivalence-of-model-command-id-and-live-command-id
                       :current-live-executor-registration
@@ -185,6 +193,38 @@
     ;; contexts may include private application documents and credentials.
     (fail! :non-data-modeled-context)))
 
+;; A path describes an explicitly declared observation, not a proof that the
+;; developer declared every fact affecting authorization. Present nil is a
+;; meaningful observation (for example an explicitly absent owner), while a
+;; missing key is NOT the same observation. Restrict paths to keys whose
+;; identity is independently inspectable. Finite document maps use the usual
+;; [entity-type document-id] map keys. Both sides are already :closed-data,
+;; so traversal calls no arbitrary Java/Clojure container behavior. Do not
+;; include paths/values in errors.
+(defn- semantic-document-id? [value]
+  (or (keyword? value) (string? value) (integer? value)
+      (instance? java.util.UUID value)))
+
+(defn- semantic-path-key? [value]
+  (or (semantic-document-id? value)
+      (and (vector? value)
+           (= 2 (count value))
+           (keyword? (first value))
+           (semantic-document-id? (second value)))))
+
+(defn- required-path-present? [context path]
+  (loop [current context keys-left path]
+    (if-let [key (first keys-left)]
+      (and (map? current)
+           (contains? current key)
+           (recur (get current key) (next keys-left)))
+      true)))
+
+(defn- require-semantic-paths! [coverage modeled-context kind]
+  (when-let [paths (:required-paths coverage)]
+    (when-not (every? #(required-path-present? modeled-context %) paths)
+      (fail! kind))))
+
 (defn- call-model! [kind f & arguments]
   (try
     (apply f arguments)
@@ -194,7 +234,8 @@
 (defn- require-context-coverage! [coverage]
   (when-not (and (map? coverage)
                  (or (= context-coverage-keys (set (keys coverage)))
-                     (= closed-context-coverage-keys (set (keys coverage))))
+                     (= closed-context-coverage-keys (set (keys coverage)))
+                     (= required-path-coverage-keys (set (keys coverage))))
                  (set? (:modeled coverage))
                  (seq (:modeled coverage))
                  (every? keyword? (:modeled coverage))
@@ -203,7 +244,18 @@
                  (empty? (set/intersection (:modeled coverage)
                                            (:excluded coverage)))
                  (or (not (contains? coverage :modeled-values))
-                     (= closed-model-value-mode (:modeled-values coverage))))
+                     (= closed-model-value-mode (:modeled-values coverage)))
+                 (or (not (contains? coverage :required-paths))
+                     (and (= closed-model-value-mode (:modeled-values coverage))
+                          (set? (:required-paths coverage))
+                          (seq (:required-paths coverage))
+                          (<= (count (:required-paths coverage)) maximum-required-paths)
+                          (every? (fn [path]
+                                    (and (vector? path)
+                                         (<= 1 (count path) maximum-closed-depth)
+                                         (every? semantic-path-key? path)
+                                         (contains? (:modeled coverage) (first path))))
+                                  (:required-paths coverage)))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -228,6 +280,8 @@
       (fail! :invalid-model-input))
     (require-modeled-coverage! coverage (:context input))
     (require-closed-modeled-values! coverage (:context input))
+    (require-semantic-paths! coverage (:context input)
+                             :missing-required-modeled-semantic-input)
     (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
@@ -266,6 +320,8 @@
     (when (= closed-model-value-mode (:modeled-values coverage))
       (require-closed-modeled-values!
        coverage (select-keys production-context (:modeled coverage))))
+    (require-semantic-paths! coverage production-context
+                             :missing-required-production-semantic-input)
     (when-not (every? (fn [[key value]]
                         (and (contains? production-context key)
                              (= value (get production-context key))))
@@ -290,6 +346,11 @@
                               :checked-closed-data
                               :not-checked)
      :constructor-purity :not-established
+     :required-semantic-path-presence
+     (if (contains? coverage :required-paths) :checked-declared-paths :not-declared)
+     :required-semantic-paths-checked
+     (count (:required-paths coverage))
+     :required-paths-completeness :not-established
      :unmodeled-production-context-fields
      (count (remove #(contains? modeled-context %) (keys production-context)))
      :command-id-comparison :excluded-independent-execution-identity
@@ -357,9 +418,17 @@
    called. Modeled fields in the supplied production context are also checked
    before equality comparison. Only immutable EDN-like
    scalars, UUIDs, Instants and bounded persistent collections are admitted.
-   It does not prove callback purity, dependency completeness, or excluded
-   context-field irrelevance. Without the coverage declaration, legacy
-   conditional comparison is retained."
+   Add :required-paths #{[:record :version] [:eligibility :active?]} to
+   :closed-data coverage to require declared nested facts. Segments may be
+   keywords, immutable document IDs, or [entity-type document-id] keys for
+   finite state maps. Paths must begin with modeled top-level keys and be present in both model
+   and supplied production contexts; a present nil is allowed, but a missing
+   key is rejected before construction. Paths are bounded; no application
+   paths or data are included in errors. This only checks AUTHORED path
+   presence; it cannot infer omitted policy dependencies or ensure commit-time
+   guards enforce those dependencies. It does not prove callback purity,
+   dependency completeness, or excluded context-field irrelevance. Without
+   the coverage declaration, legacy conditional comparison is retained."
   [configuration]
   (when-not (and (map? configuration)
                  (or (= configuration-keys (set (keys configuration)))
