@@ -1915,3 +1915,133 @@
          (is (= :not-established (:application-certification comparison)))
          (is (not (.contains (pr-str comparison)
                              "v946-unfaithful-model-input"))))))))
+
+
+;; v948 — Permanent closed modeled-context inventory regressions (v947).
+;; A closed inventory makes omitted/added production keys visible, but authored
+;; :excluded fields remain UNPROVED irrelevant to construction or authorization.
+;; These checks are caller-supplied comparisons, not executor authentication.
+
+(defn- v948-coverage [inputs]
+  {:modeled (set (keys (:modeled-context inputs)))
+   :excluded (set (remove (set (keys (:modeled-context inputs)))
+                          (keys (:supplied-context inputs))))})
+
+(defn- v948-pair
+  ([example inputs] (v948-pair example inputs (v948-coverage inputs)))
+  ([example inputs coverage]
+   (v939-pair example (atom 0)
+              {:model-input! (fn [_ _ _]
+                               {:context (:modeled-context inputs)
+                                :binding (:modeled-binding inputs)})
+               :context-coverage coverage})))
+
+(deftest v948-closed-context-inventory-reports-limits-and-redacts-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        pair (v948-pair example inputs)
+        {:keys [state who args supplied-context physical-binding]} inputs
+        actual ((:compare-production-input! pair)
+                state who args supplied-context physical-binding)
+        printable (pr-str actual)]
+    (is (= :matched-declared-input-fields (:status actual)))
+    (is (= :closed-against-authored-exclusions (:context-key-inventory actual)))
+    (is (= 3 (:context-fields-compared actual)))
+    (is (= 2 (:explicitly-excluded-context-fields actual)))
+    (is (= 2 (:unmodeled-production-context-fields actual)))
+    (is (= :not-established (:exclusion-relevance actual)))
+    (is (= :caller-supplied-not-authenticated (:input-origin actual)))
+    (is (= :not-established (:application-certification actual)))
+    (is (contains? (get-in pair [:scope :assumed])
+                   :truthful-declaration-of-excluded-context-field-irrelevance))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :irrelevance-of-declared-excluded-production-fields))
+    (is (contains? (get-in pair [:scope :not-established])
+                   :completeness-of-application-policy-dependency-declaration))
+    (is (not (contains? actual :context)))
+    (is (not (contains? actual :binding)))
+    (is (not (.contains printable (:request-id example))))))
+
+(deftest v948-production-context-must-have-exactly-declared-fields-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        compare! (:compare-production-input! (v948-pair example inputs))
+        {:keys [state who args supplied-context physical-binding]} inputs]
+    (doseq [[label mutated]
+            [["added field" (assoc supplied-context :authorization/revoked? true)]
+             ["removed excluded field" (dissoc supplied-context :biff.fx/now)]
+             ["removed another excluded field" (dissoc supplied-context :authenticated-principal)]]]
+      (testing label
+        (is (= :production-context-key-inventory-differs
+               (kind #(compare! state who args mutated physical-binding))))))
+    (doseq [[label mutated]
+            [["changed modeled state" (assoc supplied-context :model-state {:corrupted true})]
+             ["removed nullable modeled field" (dissoc supplied-context :request/current-owner)]
+             ["replaced nullable modeled field" (assoc supplied-context :request/current-owner :claimed)]]]
+      (testing label
+        (is (= :production-context-differs-from-model-input
+               (kind #(compare! state who args mutated physical-binding))))))
+    (is (= :matched-declared-input-fields
+           (:status (compare! state who args supplied-context physical-binding))))))
+
+(deftest v948-closed-inventory-configuration-must-be-total-and-disjoint-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        coverage (v948-coverage inputs)]
+    (doseq [[label invalid]
+            [["nil" nil]
+             ["empty" {}]
+             ["no modeled fields" {:modeled #{} :excluded #{:another}}]
+             ["modeled field is not keyword" {:modeled #{1} :excluded #{}}]
+             ["excluded field is not keyword" {:modeled #{:a} :excluded #{1}}]
+             ["overlap" {:modeled #{:a} :excluded #{:a}}]
+             ["excluded not a set" {:modeled #{:a} :excluded [:b]}]
+             ["unknown configuration key" (assoc coverage :unexpected true)]]]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(v948-pair example inputs invalid))))))
+    (is (= :invalid-configuration
+           (kind #(v939-pair example (atom 0)
+                              {:context-coverage coverage
+                               :unknown :configuration}))))))
+
+(deftest v948-model-key-drift-rejected-before-business-construction-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        initial (:modeled-context inputs)
+        changed? (atom false)
+        constructed (atom 0)
+        pair (v939-pair example constructed
+                        {:context-coverage (v948-coverage inputs)
+                         :model-input!
+                         (fn [_ _ _]
+                           {:context (if @changed?
+                                       (dissoc initial :request/current-owner)
+                                       initial)
+                            :binding (:modeled-binding inputs)})})
+        {:keys [state who args supplied-context physical-binding]} inputs
+        compare! (:compare-production-input! pair)]
+    (is (= :matched-declared-input-fields
+           (:status (compare! state who args supplied-context physical-binding))))
+    (reset! changed? true)
+    (is (= :modeled-context-key-inventory-drift
+           (kind #(compare! state who args supplied-context physical-binding))))
+    (is (= :modeled-context-key-inventory-drift
+           (kind #((get-in pair [:family :prepare]) state who args))))
+    (is (zero? @constructed))))
+
+(deftest v948-inventory-is-opt-in-and-does-not-certify-extra-fields-test
+  (let [example (test-operation)
+        inputs (v941-inputs example)
+        pair (v941-pair example (atom 0) inputs)
+        {:keys [state who args supplied-context physical-binding]} inputs
+        actual ((:compare-production-input! pair)
+                state who args
+                (assoc supplied-context :undeclared/new-authorization-key :private)
+                physical-binding)]
+    (is (= :matched-declared-input-fields (:status actual)))
+    (is (= :not-declared (:context-key-inventory actual)))
+    (is (= 3 (:unmodeled-production-context-fields actual)))
+    (is (= :not-established (:exclusion-relevance actual)))
+    (is (= :not-established (:application-certification actual)))
+    (is (not (.contains (pr-str actual) "private")))))
