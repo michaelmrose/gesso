@@ -1,35 +1,46 @@
 #+title: Gesso
-#+subtitle: Server-rendered live UI for Clojure
-#+options: toc:nil
+#+subtitle: Server-rendered live UI and checked application construction for Clojure
+#+options: toc:2
 
-A small Clojure library for building server-rendered applications with Hiccup, HTMX, SSE, and Biff.
+Gesso is a Clojure framework for server-rendered applications using Hiccup,
+HTMX 2.x, SSE, Biff, and XTDB. Its basic interaction model remains ordinary
+HTTP: handlers receive requests, views return HTML, and HTMX swaps fragments
+into the page. For live updates, the server normally sends an invalidation
+notification and the browser reacquires authoritative HTML.
 
-The basic model is ordinary HTTP: handlers receive requests, views return HTML, and HTMX swaps fragments into the page. For live updates, the server sends an SSE invalidation event and the browser asks for the affected fragment again.
-
-Gesso adds helpers for reusable components, live fragments, client-side continuity across swaps, and theme CSS generation.
+Gesso also develops explicitly constructed operations, choreography, continuity,
+optimistic presentation, application preflight, and finite verification. These
+assurance facilities are under active development; their existence must not be
+mistaken for proof of arbitrary applications or physical database/browser code.
 
 * Install
 
-Use the released Git coordinate in ~deps.edn~:
+An existing release can be referenced using its exact Git coordinate in
+~deps.edn~ (the following is the historical v0.2.0 coordinate, not an assurance
+certification for current development HEAD):
 
 #+begin_src clojure
 {:deps
-{michaelmrose/gesso
-{:git/url "https://github.com/michaelmrose/gesso.git"
-:git/tag "v0.2.0"
-:git/sha "3f22e0c3e3cd34fca9cbb5a03625e203d5b3ad37"}}}
+ {michaelmrose/gesso
+  {:git/url "https://github.com/michaelmrose/gesso.git"
+   :git/tag "v0.2.0"
+   :git/sha "3f22e0c3e3cd34fca9cbb5a03625e203d5b3ad37"}}}
 #+end_src
 
-For local development against a sibling checkout:
+For development against a sibling checkout:
 
 #+begin_src clojure
 {:deps
-{michaelmrose/gesso {:local/root "../gesso"}}}
+ {michaelmrose/gesso {:local/root "../gesso"}}}
 #+end_src
+
+Use the application's own dependency configuration as the authority for which
+Gesso revision it runs. A local edit has no effect on an application that is
+still loading a published Git dependency.
 
 * Try it
 
-The easiest starting point is Gessokit, which contains a deps-new template and an example app.
+Gessokit provides a deps-new template and example application:
 
 #+begin_src sh
 git clone https://github.com/michaelmrose/gessokit
@@ -40,81 +51,254 @@ cd ../myapp
 clojure -M:dev dev
 #+end_src
 
-The generated app includes the basic Gesso project shape, theme build setup, routing, HTMX forms, SSE invalidation, live fragments, toasts, and continuity across fragment replacement.
+The generated app includes routing, theme setup, HTMX forms, SSE invalidation,
+live fragments, toasts, and continuity across fragment replacement. For local
+framework development, clone Gesso and Gessokit side by side and explicitly
+point the application at the local Gesso checkout.
 
-For local framework development, clone Gesso and Gessokit side by side and temporarily point Gessokit at the local checkout. For normal generated projects, use the released Git dependency.
-
+For views, prefer the =gesso.core= facade and the existing components. Keep
+views pure; acquire data and perform authoritative mutations outside rendering.
 
 * Live fragments
 
-A live fragment is a server-rendered piece of HTML that can be refreshed when its backing state changes.
+A live fragment is server-rendered HTML refreshed from authoritative state.
 
 #+begin_src text
-data changes
--> server invalidates a live scope
--> browser receives an SSE event
--> HTMX requests the fragment again
--> server returns fresh HTML
--> browser swaps it into place
+committed state change
+  -> invalidate an affected scope
+  -> client receives an SSE notification
+  -> HTMX GET requests the current fragment
+  -> server returns authoritative HTML
+  -> browser swaps the fragment and restores interaction continuity
 #+end_src
 
-This keeps the application model server-side without giving up live UI.
+SSE is an advisory transport, not authoritative application state. A lost
+notification may require reconnect acquisition, polling, or explicit refresh;
+which progress guarantee applies depends on the admitted application policy.
+Do not replace the DOM element that owns the live connection and event handling
+without preserving or explicitly recreating that behavior.
 
 * Continuity
 
-Replacing a fragment can accidentally lose browser-local state: focus, caret position, scroll anchoring, open cards, or local input state.
-
-Gesso Live can preserve that state across swaps.
+Replacing a fragment can lose browser-local state such as focus, caret position,
+scroll anchoring, and expanded cards. Gesso Live can preserve appropriate
+interaction state across swaps without treating it as authoritative truth.
 
 #+begin_src clojure
 (require '[gesso.live.continuity :as continuity])
 
-(def request-list-continuity
-(continuity/preserve
-{:scroll {:selector "[data-request-card]"}
-:focus true
-:boxes [(continuity/details-open
-{:selector "details[data-request-card][data-accordion-value]"
-:key-attr "data-accordion-value"
-:single? true})]}))
+(def list-continuity
+  (continuity/preserve
+   {:scroll {:selector "[data-item-card]"}
+    :focus true
+    :boxes [(continuity/details-open
+             {:selector "details[data-item-card][data-accordion-value]"
+              :key-attr "data-accordion-value"
+              :single? true})]}))
 #+end_src
-
-That example preserves scroll position, focus/caret state, and the currently open native ~<details>~ card.
 
 * Themes
 
-Gesso can build theme CSS from framework and application component roots.
+Gesso can build theme CSS from framework and application component roots:
 
 #+begin_src clojure
 ((requiring-resolve 'gesso.build.themes/build!)
-{:input-dir "resources/themes"
-:output-file "resources/public/gesso/app-themes.css"
-:component-css-dirs ["path/to/gesso/components"
-"src/myapp/components"
-"src/myapp/site/components"]})
+ {:input-dir "resources/themes"
+  :output-file "resources/public/gesso/app-themes.css"
+  :component-css-dirs ["path/to/gesso/components"
+                       "src/myapp/components"]})
 #+end_src
 
-* Development
+* Checked construction and assurance scope
 
-Run tests:
+Gesso's intent is to let application authors express domain rules and assemble
+ordinary Clojure/Gesso constructions. Authors are not expected to write Recife,
+TLA+, or Quint. Gesso's verification engines are backend implementation tools.
 
-#+begin_src sh
-clojure -M:test
+** Current construction boundaries
+
+- =gesso.core= and existing UI components are the normal application-facing view
+  facade. HTMX 2.x and server-rendered HTML remain the supported UI approach.
+- =gesso.model.command= and =gesso.model.tx= describe canonical model commands
+  and guarded transaction plans. Business authorization and all required guard
+  dependencies are still the application's responsibility.
+- =gesso.model.resolved-operation/build-operation= constructs a durable-command
+  operation. =gesso.model.resolved-family/build-pair= reuses one application-owned
+  =:construct!= callback for production and finite-family planning. Both are
+  advanced, evolving construction interfaces, not a complete proof of context
+  fidelity, callback purity, policy coverage, or production registration.
+- =gesso.model.formal-transition=, =formal-obligation=, and =formal-check= are
+  internal/JVM verification interfaces. Direct calls to these are useful for
+  framework diagnostics, not a required application language or a public
+  application certificate format.
+
+** Minimal checked transaction example (JVM, framework diagnostic)
+
+The following uses a *generic* versioned resource and two ordinary Gesso
+constructions. The first is accepted for finite reference-model checking. The
+second has an invalid revision progression and is rejected at construction.
+
+#+begin_src clojure
+(require '[gesso.model.command :as command]
+         '[gesso.model.formal-transition :as formal]
+         '[gesso.model.formal-check :as formal-check])
+
+(def version
+  {:revision-key :revision
+   :created-at-key :created-at
+   :updated-at-key :updated-at})
+
+(def before
+  {:xt/id :resource-1
+   :revision 0 :created-at :t0 :updated-at :t0
+   :status :available})
+
+(def after
+  (-> before
+      (assoc :status :reserved :updated-at :t1)
+      (update :revision inc)))
+
+(def plan
+  {:commands [(command/update-command
+               :resources :reserve before after version)]
+   :guards []
+   :emit false})
+
+(def subject
+  (formal/prepared-subject {[:resources :resource-1] before} [plan]))
+
+;; Returns :status :checked-finite-model for this finite subject, provided
+;; the configured Recife/TLC backend runs and all modeled obligations hold.
+(formal-check/check-prepared! subject)
+
+;; Deliberately defective construction: no incremented revision.
+;; Throws ExceptionInfo with :error/type
+;; :gesso.model.command/invalid-update-command.
+(command/update-command
+ :resources :reserve before (assoc before :status :reserved) version)
 #+end_src
 
-Create a release tag:
+This is an *internal demonstration*, not a suggested application route handler.
+Normal applications supply domain construction to the appropriate Gesso
+operation boundary; the checked-subject and checker calls are framework-side.
+
+The positive TLC result covers only the selected finite serial transaction
+model and its named obligations. The invalid command is rejected by command
+admission; it is not a TLC counterexample. Critically, if a programmer omits a
+necessary application-specific policy guard *entirely*, this generic finite
+transaction checker cannot infer the omitted business rule. Complete semantic
+inputs and incorporation-time authorization remain separate assurance work.
+
+** Assurance claims must remain specific
+
+| Result or mechanism | What it establishes | What it does not establish |
+|-------------------------------+----------------------------------------------+----------------------------------------------|
+| Canonical construction admission | Supported plan/command shapes and generic version mechanics | Business-rule completeness or authorization truth |
+| Finite Recife/TLC result | Named safety obligations across reachable states of the selected finite model, under stated assumptions | General application certification or real XTDB refinement |
+| Choreo finite structural checks | Their named structural/projection-origin properties | Universal dynamic projection and browser refinement |
+| Reference/concrete execution comparison | Agreement of the executions and observations actually compared | Universal correctness for unobserved executions |
+| Chromium integration tests | Behavior of the tested browser/HTMX/SSE scenarios | Exhaustive or formal browser correctness |
+
+The current formal obligation layer checks generic transaction accounting,
+observation-chain consistency, atomic rejection, committed write sets, and
+reported/required precondition consistency. Guard inventory and truth are
+reconstructed from the *declared* plan and prestate. These checks do not prove
+that all application-specific guards were declared, that every other writer
+was modeled, or that XTDB and browser code refine the formal transitions.
+
+A failed TLC check can provide a redacted error summary and a process-local,
+opaque diagnostic handle via =gesso.model.formal-check/inspect-failure=. That
+handle is for controlled local diagnosis, not a portable certificate, and raw
+traces may contain sensitive application values. Do not expose inspected raw
+trace data to untrusted application clients.
+
+* Framework development and tests
+
+** Prerequisites
+
+For a full repository gate, install a compatible JDK (development verification
+has used OpenJDK 25), the Clojure CLI, Babashka (=bb=), Fish (required by
+=script/repo_integrity.fish=), Node.js, and Chromium/Chrome on =PATH=. JVM
+and browser dependencies are declared in =deps.edn=; real-browser gates use
+Playwright and the system Chromium/Chrome executable. Run commands from the
+Gesso repository root. Some gates compile or write generated files in
+=target/= and =resources/public/js/=. Ensure toolchain and project dependencies
+are installed before invoking the full gate.
+
+** Authoritative test commands
 
 #+begin_src sh
-git tag -a v0.2.0 -m "Gesso 0.2.0"
-git push origin v0.2.0
+bb test                         # Entire gate, including formal JVM tests
+bb test:jvm                     # All JVM tests, including Recife/TLC
+bb test:formal                  # Focused formal JVM test namespaces
+clojure -M:test:formal          # Direct full JVM test runner with Recife
+bb test:node                    # Portable Choreo and browser reducer tests
+bb test:browser                 # CLJS tests in headless Chromium
+bb test:browser:integration     # Production runtime + real HTTP/HTMX/SSE
+bb test:advanced               # Production browser runtime compilation
+bb test:themes                 # Theme build verification
 #+end_src
 
-Get the SHA for downstream deps:
+=bb test= is the single complete project gate: repository integrity, advanced
+runtime build, JVM tests, Node Choreo and browser tests, Chromium tests, real
+browser integration, and themes. Ordinary =bb test:jvm= includes formal tests;
+=:test:formal= is not an optional second correctness gate. Some tests use
+embedded XTDB and TLC and can require substantial runtime and memory.
+
+The =:formal= dependency alias loads Recife only into JVM test processes.
+The current =deps.edn= and =script/gesso_test.clj= use =-M:test:formal= for JVM
+runs. The CLJS/Closure builds must *not* inherit Recife's dependencies: doing
+so can introduce duplicate Closure extern inputs (including p5 externs).
+The old command =clojure -M:test= is not the documented full Gesso gate and
+must not be substituted for =bb test=.
+
+A completed test summary alone does not establish that a timed-out JVM exited
+cleanly. The harness enforces process timeouts and reports per-gate failures;
+only a successful full gate means the full selected suite ran successfully.
+
+** Current assurance work and evidence locations
+
+The canonical twelve-part R4 design states intended guarantees, not their
+completion status. The following repository paths are useful evidence and
+implementation anchors; existence of a test file is not a claim that its
+latest execution passed:
+
+- =src/gesso/model/formal_obligation.clj= and
+  =test/gesso/model/formal_obligation_test.clj=: generic finite transaction
+  safety obligations and positive/adversarial checking.
+- =src/gesso/model/formal_check.clj= and
+  =test/gesso/model/formal_check_test.clj=: Recife/TLC execution, bounded
+  diagnostics, and testable failure classes.
+- =src/gesso/model/resolved_family.clj= and its corresponding tests: reuse
+  of production construction for finite operation-family planning.
+- =src/gesso/choreo/proof.cljc=: finite structural Choreo properties and
+  explicit limitations.
+- =src/gesso/live/application_preflight.clj=: application assembly checks;
+  these are not, by themselves, a general proof certificate.
+- =doc/claim-proof-obligation-ledger.org=: historical obligation tracking;
+  do not treat its older checklist as an authoritative current pass report.
+
+Active, unestablished proof boundaries include complete application semantic
+inputs and authorization dependencies, transaction/ledger composition,
+uncertain command recovery, actual XTDB refinement, required evidence at
+admission, publication recovery, and dynamic Choreo/browser correspondence.
+The repository must not present those as proved merely because a finite model
+passes its checks. Record exact subjects, bounds, assumptions, artifacts, and
+executed gates when reporting assurance progress.
+
+* Releases
+
+A release is a separate decision from a passing test or finite model check.
+Use a *new* approved version/tag and the actual commit SHA when publishing;
+do not recreate or move the historical =v0.2.0= coordinate shown above.
 
 #+begin_src sh
-git rev-parse 'v0.2.0^{commit}'
+git rev-parse HEAD
+# After an approved release/tag operation:
+# git rev-parse '<approved-tag>^{commit}'
 #+end_src
 
 * License
 
-FIXME
+FIXME: establish and document the project's license before making a definitive
+licensing claim.
