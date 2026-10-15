@@ -32,6 +32,11 @@
    :task
    (shell "bb" "script/gesso_test.clj" "jvm")}
 
+  test:formal
+  {:doc "Run focused Recife/TLC verification tests. Also included by `bb test:jvm` and `bb test`."
+   :task
+   (shell "bb" "script/gesso_test.clj" "formal")}
+
   test:cljs
   {:doc "Run all CLJS/browser gates: Node groups + Chromium + real HTTP/HTMX/SSE integration. Included by `bb test`."
    :task
