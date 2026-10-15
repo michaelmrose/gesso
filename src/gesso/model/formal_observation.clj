@@ -16,14 +16,18 @@
    Passing comparisons establish agreement only for supplied serial traces.
    They do not establish provenance, concurrent XTDB refinement, application
    authorization, fairness, or general implementation correctness."
-  (:require [clojure.walk :as walk]
-            [gesso.model.formal-transition :as formal]))
+  (:require [clojure.set :as set]
+            [clojure.walk :as walk]
+            [gesso.model.command :as command]
+            [gesso.model.formal-transition :as formal]
+            [gesso.model.tx :as tx]))
 
 (def assurance-scope
   {:subject :gesso.model.formal-observation/controlled-prefix-v1
    :derived-from #{:gesso.model.formal-transition/prepared-serial-v1
                    :gesso.model.resolution-observation/direct-xtdb-v1}
    :checked #{:physical-trace-completeness
+              :physical-target-coverage
               :physical-prestate-and-poststate-chain
               :reference-transition-for-observed-order
               :per-prefix-status-and-document-correspondence
@@ -158,16 +162,51 @@
             (or (not= status :rejected) (= before after)))
           (::formal/observations state)))
 
+(defn- required-inspection-targets
+  "Independently derive the required target universe from admitted plans.
+
+   Includes command writes, effective guard dependencies, and already-present
+   initial documents. A currently absent command record or guard target must
+   still appear in :inspected-targets; absence from document snapshots alone
+   is not evidence that it was read. Do not trust a caller-supplied target list
+   as the definition of what needed inspection."
+  [{:keys [subject physical]}]
+  (reduce (fn [targets {:keys [commands guards]}]
+            (set/union targets
+                       (into #{} (map command/target) commands)
+                       (into #{} (map command/guard-target)
+                             (tx/effective-guards commands guards))))
+          (set (keys (:initial-state physical)))
+          (:plans subject)))
+
+(defn- covered-documents?
+  "A snapshot may omit absent documents but cannot contain untracked ones."
+  [inspected documents]
+  (and (map? documents)
+       (set/subset? (set (keys documents)) inspected)))
+
 (defn evidence-complete?
   "Check physical index permutation, trace length, contiguous physical
    states, definitive statuses, indexed terminal statuses and final state.
+   Also independently derive the mandatory inspected-target set from the
+   admitted plans, including targets whose documents are currently absent.
    Never accepts an empty trace as evidence for an admitted nonempty subject."
   [{:keys [subject physical]}]
   (let [order (:submission-order physical)
         trace (:submission-trace physical)
         observations (:observations physical)
+        inspected (:inspected-targets observations)
+        required (required-inspection-targets {:subject subject :physical physical})
         n (count (:actions subject))]
-    (and (vector? order)
+    (and (set? inspected)
+         (= required inspected)
+         (covered-documents? inspected (:initial-state physical))
+         (every? (fn [entry]
+                   (and (covered-documents? inspected (:before entry))
+                        (covered-documents? inspected (:after entry))))
+                 (:submission-trace physical))
+         (covered-documents? inspected (:state observations))
+         (vector? order)
          (= n (count order))
          (= (set (range n)) (set order))
          (vector? trace)
