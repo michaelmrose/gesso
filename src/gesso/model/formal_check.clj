@@ -296,9 +296,13 @@
                                    :backend-exception error})]
     (when (= class :checker-interrupted)
       (.interrupt (Thread/currentThread)))
-    ;; Preserve the original message for compatibility with existing JVM
-    ;; diagnostic consumers. It is not included in structured safe ex-data.
-    (throw (ex-info (or (.getMessage error) "Recife/TLC backend failed.")
+    ;; Backend error messages are untrusted: they can include private model
+    ;; state, command arguments, or documents. Never copy them into the outer
+    ;; exception, which callers may log or serialize. The structured failure
+    ;; class identifies the condition without disclosing backend-controlled
+    ;; text. Preserve the original exception only as a trusted local cause and
+    ;; in the bounded, process-local diagnostic registry.
+    (throw (ex-info "Recife/TLC backend failed to establish finite obligations."
                     {:error/type ::invalid-formal-check
                      :error/kind :model-check-failed
                      :failure/class class
