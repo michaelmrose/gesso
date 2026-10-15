@@ -982,6 +982,26 @@
   [:analysis :operation-acquisition-assembly
    :execution-assembly :server :operations])
 
+;; This is the MINIMUM assurance contract for the opt-in finite-model checker,
+;; independently enforced by the application-facing consumer. A returned set's
+;; type alone is not evidence that essential premises or limitations survived
+;; transport. Keep this vocabulary in correspondence with the formally admitted
+;; checker scope; additions by that checker may make claims WEAKER, not stronger.
+;; Do not require Recife to be on the ordinary application-preflight classpath.
+(def ^:private required-finite-model-assumptions
+  #{:complete-selected-finite-prestate-and-plans
+    :serial-atomic-reference-semantics
+    :faithful-reversible-tlc-token-encoding
+    :correct-recife-tlc-execution})
+
+(def ^:private required-finite-model-nonclaims
+  #{:complete-application-operation-enumeration
+    :generic-inductive-theorem
+    :actual-xtdb-implementation-refinement
+    :authorization-or-application-policy
+    :server-browser-composition
+    :independent-application-certificate})
+
 (defn- invalid-execution-observation!
   [kind details]
   (throw
@@ -1082,12 +1102,11 @@
                                     :outcome-check-consistency}
                                   (:obligations result))
                                (set? (:assumed result))
+                               (set/subset? required-finite-model-assumptions
+                                            (:assumed result))
                                (set? (:not-established result))
-                               (every? (:not-established result)
-                                       #{:actual-xtdb-implementation-refinement
-                                         :authorization-or-application-policy
-                                         :server-browser-composition
-                                         :independent-application-certificate}))
+                               (set/subset? required-finite-model-nonclaims
+                                            (:not-established result)))
                            (invalid-execution-observation!
                             :finite-model-check-failed
                             {:operation operation :observation-index index}))
