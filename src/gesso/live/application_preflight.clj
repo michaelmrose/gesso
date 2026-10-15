@@ -40,6 +40,7 @@
    [gesso.live.application-preflight.assurance :as assurance]
    [gesso.live.application-preflight.semantic-audit :as semantic-audit]
    [gesso.live.optimistic.resolution-assurance :as resolution-assurance]
+   [gesso.model.formal-observation :as formal-observation]
    [gesso.live.application-preflight.affordance :as affordance]
    [gesso.live.application-preflight.biff :as biff-lifecycle]
    [gesso.live.application-preflight.rendered-surface :as rendered-surface]))
@@ -1030,19 +1031,47 @@
                (invalid-execution-observation!
                 :unrecognized-execution-observation
                 {:operation operation :observation-index index}))
-             ;; Do not leak opaque handles, principal, arguments, raw database
-             ;; snapshots or transaction receipts through application reports.
-             {:index index
-              :status :bounded-correspondence-observed
-              :physical-status (get-in result [:observation :physical :status])
-              :finite-reference-status
-              (get-in result [:observation :evidence :status])}))
+             ;; The exact-executor registry authenticates THIS evidence handle,
+             ;; not an arbitrary caller-supplied map. Derive a finite formal
+             ;; subject only from the completed observation inside that handle.
+             ;; The bridge checks the admitted plan, every inspected target and
+             ;; the source-derived transition for the observed physical step.
+             ;; No Recife run, theorem or application-wide proof is implied.
+             (let [case (try
+                          (formal-observation/prepared-event-case
+                           (:observation result))
+                          (catch clojure.lang.ExceptionInfo e
+                            (invalid-execution-observation!
+                             :invalid-execution-reference-observation
+                             {:operation operation :observation-index index
+                              :cause-kind (:error/kind (ex-data e))})))
+                   replay (formal-observation/observed-path-report case)]
+               (when-not (and (= :single-executor-attempt-diagnostic
+                                 (:observation-origin case))
+                              (= :corresponds (:status replay))
+                              (= [0] (:checked-order replay)))
+                 (invalid-execution-observation!
+                  :noncorresponding-execution-reference
+                  {:operation operation :observation-index index}))
+               ;; Do not leak opaque handles, principal, arguments, raw database
+               ;; snapshots or transaction receipts through application reports.
+               {:index index
+                :status :bounded-correspondence-observed
+                :physical-status (get-in result [:observation :physical :status])
+                :finite-reference-status
+                (get-in result [:observation :evidence :status])})))
          (range (count handles))
          handles)]
     {:status :bounded-process-local-execution-observations
      :evidence-class :exact-registered-executor-diagnostic-handle
      :observation-count (count observations)
      :observations observations
+     :source-derived-reference-check
+     {:status :selected-attempts-correspond
+      :checked-attempt-count (count observations)
+      :subject (:subject formal-observation/event-observation-bridge-scope)
+      :assurance-class :finite-reference-replay-not-formal-proof
+      :model-checked? false}
      :scope resolution-assurance/assurance-scope
      :assurance-class :bounded-observation-not-proof
      :universal-guarantees :not-established}))
@@ -1062,6 +1091,9 @@
    No observation is implied for other operations. These observations are
    diagnostic facts about FINITE executions, never whole-application proof,
    authorization proof, projection correctness or universal command replay.
+   Each supplied handle is also checked against the actual source-derived
+   finite transaction step. This deterministic comparison does not invoke
+   Recife/TLC and must not be presented as a mechanically checked theorem.
    This function executes no business callback and never submits transactions.
 
    The original explain function remains unchanged and does not acquire a
