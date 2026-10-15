@@ -49,6 +49,17 @@
     :principals :arguments :enabled? :model-input!})
 
 (def context-coverage-keys #{:modeled :excluded})
+(def closed-context-coverage-keys #{:modeled :excluded :modeled-values})
+(def closed-model-value-mode :closed-data)
+
+;; A deliberately narrow, opt-in semantic-value language. These are immutable
+;; scalar values or fully realized persistent collections, not arbitrary
+;; Clojure objects that can hide atoms, functions, lazy computations or DB
+;; handles. Inspection is bounded so a malicious/deep input fails closed.
+;; This is NOT a sandbox for :construct!, nor a proof that excluded production
+;; fields or captured variables cannot affect its behavior.
+(def ^:private maximum-closed-nodes 8192)
+(def ^:private maximum-closed-depth 32)
 
 (def model-input-keys #{:context :binding})
 
@@ -63,7 +74,8 @@
               :optional-modeled-context-field-correspondence
               :optional-canonical-production-binding-comparison
               :optional-closed-production-context-key-inventory
-              :declared-modeled-context-key-stability}
+              :declared-modeled-context-key-stability
+              :optional-recursive-modeled-value-closure}
    :assumed #{:truthful-and-complete-finite-choice-domains
               :trusted-state-to-production-context-mapping
               :pure-deterministic-total-domain-construction
@@ -75,6 +87,7 @@
                       :complete-production-principals-and-arguments
                       :completeness-of-authored-policy-and-guards
                       :purity-of-clojure-callbacks
+                      :absence-of-ambient-constructor-dependencies
                       :completeness-of-modeled-production-context-fields
                       :irrelevance-of-declared-excluded-production-fields
                       :completeness-of-application-policy-dependency-declaration
@@ -94,6 +107,84 @@
           "The shared durable-operation family cannot be admitted."
           {:error/type ::invalid-resolved-family :error/kind kind})))
 
+(defn- immutable-number? [value]
+  (let [type (class value)]
+    (or (#{java.lang.Byte java.lang.Short java.lang.Integer java.lang.Long
+           java.math.BigInteger java.math.BigDecimal clojure.lang.BigInt
+           clojure.lang.Ratio} type)
+        (and (= java.lang.Double type)
+             (Double/isFinite ^double value))
+        (and (= java.lang.Float type)
+             (Float/isFinite ^float value)))))
+
+(defn- immutable-scalar? [value]
+  (or (nil? value)
+      (string? value)
+      (keyword? value)
+      (symbol? value)
+      (instance? Boolean value)
+      (instance? Character value)
+      (instance? java.util.UUID value)
+      (instance? java.time.Instant value)
+      (and (number? value) (immutable-number? value))))
+
+(defn- known-persistent-container? [value]
+  ;; Restrict to known Clojure collection implementations: a custom
+  ;; IPersistentMap/Set/Vector may execute application code during seq/lookup.
+  (or (instance? clojure.lang.PersistentArrayMap value)
+      (instance? clojure.lang.PersistentHashMap value)
+      (instance? clojure.lang.PersistentVector value)
+      (instance? clojure.lang.APersistentVector$SubVector value)
+      (instance? clojure.lang.PersistentHashSet value)
+      (instance? clojure.lang.PersistentList value)
+      (= "clojure.lang.PersistentList$EmptyList" (.getName (class value)))))
+
+(defn- closed-data? [value]
+  (loop [pending (list [value 0]) remaining maximum-closed-nodes]
+    (cond
+      (empty? pending) true
+      (zero? remaining) false
+      :else
+      (let [[item depth] (first pending)
+            pending (rest pending)]
+        (cond
+          ;; Metadata is observable to ordinary Clojure and can itself
+          ;; contain capabilities even when collection entries are plain.
+          (and (instance? clojure.lang.IObj item) (some? (meta item)))
+          false
+
+          (immutable-scalar? item)
+          (recur pending (dec remaining))
+
+          (>= depth maximum-closed-depth)
+          false
+
+          (or (record? item)
+              ;; Sorted collections can retain an arbitrary user comparator.
+              (instance? clojure.lang.Sorted item))
+          false
+
+          (known-persistent-container? item)
+          (let [child-count (* (if (map? item) 2 1) (count item))]
+            (if (>= child-count remaining)
+              false
+              (let [children (if (map? item)
+                               (mapcat (fn [[key val]] [key val]) item)
+                               item)]
+                (recur (reduce (fn [acc child]
+                                 (conj acc [child (inc depth)]))
+                               pending children)
+                       (dec remaining)))))
+
+          :else false)))))
+
+(defn- require-closed-modeled-values! [coverage modeled-context]
+  (when (and (= closed-model-value-mode (:modeled-values coverage))
+             (not (closed-data? modeled-context)))
+    ;; Deliberately omit the offending value/path from failure metadata: model
+    ;; contexts may include private application documents and credentials.
+    (fail! :non-data-modeled-context)))
+
 (defn- call-model! [kind f & arguments]
   (try
     (apply f arguments)
@@ -102,14 +193,17 @@
 
 (defn- require-context-coverage! [coverage]
   (when-not (and (map? coverage)
-                 (= context-coverage-keys (set (keys coverage)))
+                 (or (= context-coverage-keys (set (keys coverage)))
+                     (= closed-context-coverage-keys (set (keys coverage))))
                  (set? (:modeled coverage))
                  (seq (:modeled coverage))
                  (every? keyword? (:modeled coverage))
                  (set? (:excluded coverage))
                  (every? keyword? (:excluded coverage))
                  (empty? (set/intersection (:modeled coverage)
-                                           (:excluded coverage))))
+                                           (:excluded coverage)))
+                 (or (not (contains? coverage :modeled-values))
+                     (= closed-model-value-mode (:modeled-values coverage))))
     (fail! :invalid-context-coverage))
   coverage)
 
@@ -133,6 +227,7 @@
                    (map? (:context input)))
       (fail! :invalid-model-input))
     (require-modeled-coverage! coverage (:context input))
+    (require-closed-modeled-values! coverage (:context input))
     (let [binding (:binding input)]
       (try
         (resolution/require-binding binding)
@@ -165,6 +260,12 @@
     ;; never silently select only the keys that happen to agree.
     (when-not (seq modeled-context)
       (fail! :empty-modeled-context-comparison))
+    ;; Never compare an admitted closed value against an opaque producer-owned
+    ;; value whose equals/hash implementation could itself be effectful.
+    ;; Excluded context fields remain outside this opt-in guarantee.
+    (when (= closed-model-value-mode (:modeled-values coverage))
+      (require-closed-modeled-values!
+       coverage (select-keys production-context (:modeled coverage))))
     (when-not (every? (fn [[key value]]
                         (and (contains? production-context key)
                              (= value (get production-context key))))
@@ -184,6 +285,11 @@
      :explicitly-excluded-context-fields (if coverage
                                            (count (:excluded coverage)) 0)
      :exclusion-relevance :not-established
+     :modeled-value-closure (if (= closed-model-value-mode
+                                   (:modeled-values coverage))
+                              :checked-closed-data
+                              :not-checked)
+     :constructor-purity :not-established
      :unmodeled-production-context-fields
      (count (remove #(contains? modeled-context %) (keys production-context)))
      :command-id-comparison :excluded-independent-execution-identity
@@ -245,7 +351,15 @@
    modeled keys and the explicitly declared excluded keys. An undeclared new
    field or missing declared field fails closed. Excluded values are NOT
    compared; their irrelevance to construct! or authorization is NOT proven.
-   Without this opt-in declaration, legacy conditional comparison is retained."
+   Add :modeled-values :closed-data to the context-coverage map to reject
+   nested functions, atoms, mutable Java objects, lazy sequences, metadata,
+   user comparators, and other opaque context values before :construct! is
+   called. Modeled fields in the supplied production context are also checked
+   before equality comparison. Only immutable EDN-like
+   scalars, UUIDs, Instants and bounded persistent collections are admitted.
+   It does not prove callback purity, dependency completeness, or excluded
+   context-field irrelevance. Without the coverage declaration, legacy
+   conditional comparison is retained."
   [configuration]
   (when-not (and (map? configuration)
                  (or (= configuration-keys (set (keys configuration)))
