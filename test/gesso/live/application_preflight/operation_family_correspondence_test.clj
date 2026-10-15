@@ -3643,3 +3643,243 @@
               (v978-compare legacy (v972-context)))))
     (is (= :not-declared (:whole-snapshot-field-inventory
                           (v978-compare legacy (v972-context)))))))
+
+;; v982 — Permanent regression coverage for v981's opt-in production-only
+;; document reread. The callback is a TRUSTED integration boundary, not proof
+;; that it actually queries XTDB or provides transactional snapshot isolation.
+;; All documents and operations below are generic synthetic fixtures.
+
+(def ^:private v982-guard-path [:eligibility :guard])
+
+(defn- v982-coverage []
+  (assoc (v980-coverage)
+         :required-production-snapshot-reads #{v982-guard-path}))
+
+(defn- v982-context []
+  (v980-covered-context
+   (assoc-in (v972-context)
+             [:eligibility :document :fixture/decision]
+             :permitted)))
+
+(defn- v982-config [context coverage calls]
+  (v970-config (fn [ctx _]
+                 (v970-plan [(get-in ctx v982-guard-path)]))
+               context coverage calls))
+
+(defn- v982-pair [context calls reads read-current!]
+  (shared-family/build-pair
+   (assoc (v982-config context (v982-coverage) calls)
+          :read-current-document!
+          (fn [server-context entity-type document-id]
+            (swap! reads conj [server-context entity-type document-id])
+            (read-current! server-context entity-type document-id)))))
+
+(defn- v982-compare [pair production-context]
+  ((:compare-production-input! pair)
+   {} "v970-actor" {:resource "v970-resource"}
+   production-context (v970-binding)))
+
+(deftest v982-fresh-read-is-production-only-and-preserves-pure-comparison-test
+  (let [context (v982-context)
+        snapshot (get-in context [:eligibility :document])
+        guard (get-in context v982-guard-path)
+        calls (atom 0)
+        reads (atom [])
+        submissions (atom 0)
+        pair (v982-pair context calls reads (fn [_ _ _] snapshot))]
+    (is (= [guard] (:guards (v970-prepare pair))))
+    (is (= 1 @calls))
+    (is (empty? @reads) "Finite construction must not access the production reader")
+    (let [report (v982-compare pair context)]
+      (is (= :matched-declared-input-fields (:status report)))
+      (is (= 1 (:declared-production-snapshot-rereads-configured report)))
+      (is (= :not-performed (:live-production-rereads-in-this-comparison report)))
+      (is (= :caller-supplied-not-authenticated (:input-origin report)))
+      (is (= :not-established (:semantic-guard-dependency-completeness report)))
+      (is (= :not-established (:application-certification report))))
+    (is (= 1 @calls) "Comparison never invokes domain construction")
+    (is (empty? @reads) "Comparison never consults the production reader")
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= 1 @submissions))
+    (is (= 2 @calls))
+    (is (= [[context :fixture/eligibility (:xt/id snapshot)]] @reads)
+        "Reader must receive ORIGINAL server context and exact document target")
+    (is (contains? (get-in pair [:scope :not-established])
+                   :correspondence-of-finite-prestate-to-production-xtdb))
+    (is (= :not-established (:application-certification pair)))))
+
+(deftest v982-stale-missing-and-nondata-rereads-block-submission-test
+  (let [context (v982-context)
+        snapshot (get-in context [:eligibility :document])
+        altered [["stale compared revision"
+                  (assoc snapshot :fixture/revision 99)]
+                 ["changed unguarded field"
+                  (assoc snapshot :fixture/unexpected "private-current-value")]
+                 ["wrong identity"
+                  (assoc snapshot :xt/id "wrong-target")]
+                 ["no document" nil]
+                 ["nonmap value" [:not-a-document]]
+                 ["opaque nested value"
+                  (assoc snapshot :fixture/opaque (atom {:private "opaque-secret"}))]
+                 ["metadata-bearing value"
+                  (with-meta snapshot {:private (atom "metadata-secret")})]]]
+    (doseq [[label current] altered]
+      (testing label
+        (let [calls (atom 0)
+              reads (atom [])
+              submissions (atom 0)
+              pair (v982-pair context calls reads (fn [_ _ _] current))]
+          (with-redefs [tx/transact! (fn [& _]
+                                       (swap! submissions inc)
+                                       {:commit/status :committed})]
+            (let [error (v966-error #(v970-submit pair context))]
+              (is (= :production-current-document-snapshot-mismatch
+                     (:error/kind (ex-data error))))
+              (is (= #{:error/type :error/kind} (set (keys (ex-data error)))))
+              (is (not (.contains (pr-str (ex-data error)) "private-")))))
+          (is (= 1 (count @reads)))
+          (is (zero? @calls) "Invalid rereads must block :construct!")
+          (is (zero? @submissions) "Invalid rereads must block transaction submission"))))))
+
+(deftest v982-reader-exceptions-are-fail-closed-and-redacted-test
+  (let [context (v982-context)]
+    (doseq [failure [(fn [& _]
+                       (throw (ex-info "PRIVATE-READER-EXCEPTION"
+                                       {:document {:secret "PRIVATE-DATA"}})))
+                     (fn [& _]
+                       (throw (IllegalStateException. "PRIVATE-EXCEPTION-MESSAGE")))]]
+      (let [calls (atom 0)
+            reads (atom [])
+            submissions (atom 0)
+            pair (v982-pair context calls reads failure)]
+        (with-redefs [tx/transact! (fn [& _]
+                                     (swap! submissions inc)
+                                     {:commit/status :committed})]
+          (let [error (v966-error #(v970-submit pair context))]
+            (is (= :production-current-document-read-failed
+                   (:error/kind (ex-data error))))
+            (is (= #{:error/type :error/kind} (set (keys (ex-data error)))))
+            (is (not (.contains (pr-str (ex-data error)) "PRIVATE")))))
+        (is (= 1 (count @reads)))
+        (is (zero? @calls))
+        (is (zero? @submissions))))))
+
+(deftest v982-reader-and-coverage-admission-is-closed-and-bounded-test
+  (let [context (v982-context)
+        calls (atom 0)
+        baseline (v982-config context (v982-coverage) calls)
+        reader (fn [& _] (get-in context [:eligibility :document]))
+        configured (assoc baseline :read-current-document! reader)]
+    (doseq [[label invalid]
+            [["reader omitted" baseline]
+             ["reader not callable" (assoc baseline :read-current-document! :reader)]
+             ["reader nil" (assoc baseline :read-current-document! nil)]
+             ["reader without opt-in"
+              (assoc (v982-config context (v980-coverage) calls)
+                     :read-current-document! reader)]
+             ["reader without context coverage"
+              (assoc (dissoc baseline :context-coverage)
+                     :read-current-document! reader)]]]
+      (testing label
+        (is (= :invalid-configuration
+               (kind #(shared-family/build-pair invalid))))))
+    (doseq [[label replacement]
+            [["empty" #{}]
+             ["nil" nil]
+             ["vector instead of set" [v982-guard-path]]
+             ["undeclared guard" #{[:eligibility :not-a-guard]}]
+             ["extra undeclared guard" #{v982-guard-path [:eligibility :other]}]
+             ["more than maximum" (set (map (fn [n] [:eligibility n])
+                                              (range 257)))]]]
+      (testing label
+        (is (= :invalid-context-coverage
+               (kind #(shared-family/build-pair
+                       (assoc-in configured
+                                 [:context-coverage :required-production-snapshot-reads]
+                                 replacement)))))))
+    (doseq [dropped [:required-whole-snapshot-guards
+                     :required-guard-snapshots
+                     :modeled-values]]
+      (testing (str "missing prerequisite " dropped)
+        (is (= :invalid-context-coverage
+               (kind #(shared-family/build-pair
+                       (update configured :context-coverage dissoc dropped)))))))
+    (is (zero? @calls) "Invalid configurations cannot construct application plans")))
+
+(deftest v982-invalid-production-semantic-input-is-rejected-before-any-reread-test
+  (let [context (v982-context)
+        deviations [["missing declared guard"
+                     (update context :eligibility dissoc :guard)
+                     :missing-required-semantic-guard]
+                    ["non-data supplied snapshot"
+                     (assoc-in context [:eligibility :document]
+                               (atom {:private "not-a-snapshot"}))
+                     :non-data-modeled-context]
+                    ["guard and snapshot disagree"
+                     (assoc-in context [:eligibility :document :fixture/revision] 9)
+                     :required-guard-snapshot-mismatch]
+                    ["added unprotected snapshot field"
+                     (assoc-in context [:eligibility :document :fixture/extra] true)
+                     :whole-snapshot-field-not-commit-guarded]]]
+    (doseq [[label production-context expected] deviations]
+      (testing label
+        (let [calls (atom 0)
+              reads (atom [])
+              submissions (atom 0)
+              pair (v982-pair context calls reads
+                              (fn [& _]
+                                (throw (ex-info "reader must not run" {}))))]
+          (with-redefs [tx/transact! (fn [& _]
+                                       (swap! submissions inc)
+                                       {:commit/status :committed})]
+            (is (= expected
+                   (kind #(v970-submit pair production-context)))))
+          (is (empty? @reads))
+          (is (zero? @calls))
+          (is (zero? @submissions)))))))
+
+(deftest v982-live-reread-repeats-for-each-production-attempt-test
+  (let [context (v982-context)
+        captured (get-in context [:eligibility :document])
+        current (atom captured)
+        calls (atom 0)
+        reads (atom [])
+        submissions (atom 0)
+        pair (v982-pair context calls reads (fn [& _] @current))]
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context))))
+      (swap! current assoc :fixture/revision 100)
+      (is (= :production-current-document-snapshot-mismatch
+             (kind #(v970-submit pair context))))
+      (is (= 1 @submissions) "Earlier approval cannot authorize a stale retry")
+      (reset! current captured)
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= 3 (count @reads)) "Read must be repeated on every attempt")
+    (is (= 2 @calls) "Only current snapshots reach :construct!")
+    (is (= 2 @submissions))))
+
+(deftest v982-unconfigured-read-remains-optional-and-does-not-certify-acquisition-test
+  (let [context (v982-context)
+        calls (atom 0)
+        pair (shared-family/build-pair
+              (v982-config context (v980-coverage) calls))
+        submissions (atom 0)]
+    (is (= [ (get-in context v982-guard-path) ]
+           (:guards (v970-prepare pair))))
+    (is (= 1 @calls))
+    (with-redefs [tx/transact! (fn [& _]
+                                 (swap! submissions inc)
+                                 {:commit/status :committed})]
+      (is (= :incorporated (:status (v970-submit pair context)))))
+    (is (= 2 @calls))
+    (is (= 1 @submissions))
+    (let [report (v982-compare pair context)]
+      (is (= 0 (:declared-production-snapshot-rereads-configured report)))
+      (is (= :not-performed (:live-production-rereads-in-this-comparison report)))
+      (is (= :caller-supplied-not-authenticated (:guard-snapshot-origin report)))
+      (is (= :not-established (:application-certification report))))))
