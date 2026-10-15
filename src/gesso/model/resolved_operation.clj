@@ -106,6 +106,53 @@
                       :policy-guard-completeness
                       :universal-linearizability}})
 
+;; Optional diagnostic input capture at the ORIGINAL application construction
+;; call site. Never piggyback on ::observe-transaction!: its prepared/outcome
+;; event protocol is strict and cannot accept a third event or extra fields.
+;; The supplied sink receives SENSITIVE application context: only install it
+;; in trusted, short-lived, server-local verification sessions. Its possession
+;; does not establish current executor identity, physical execution, or a
+;; portable proof. A missing event is never positive evidence of construction.
+(def construction-input-context-key ::observe-construction-input!)
+
+(def construction-input-observation-scope
+  {:capture :gesso.model.resolved-operation/construction-input-v1
+   :observed #{:context-at-actual-construction-call-site
+               :canonical-command-binding-at-construction-call-site
+               :only-after-unresolved-initial-submit}
+   :assumed #{:trusted-server-injection-of-input-observer
+              :observer-receives-and-preserves-sensitive-input-event
+              :no-domain-effects-in-observation-hook}
+   :not-established #{:independent-authentication-of-captured-context
+                      :exact-current-live-executor-identity
+                      :complete-model-input-coverage
+                      :successful-domain-construction
+                      :physical-submission-or-commit
+                      :application-authorization-or-certification}})
+
+(defn- construction-input-observer-for! [ctx]
+  (when (and (map? ctx) (contains? ctx construction-input-context-key))
+    (let [observer (get ctx construction-input-context-key)]
+      (when-not (fn? observer)
+        (fail! :invalid-construction-input-observer
+               "Construction input capture requires a trusted function."
+               {:context-key construction-input-context-key}))
+      observer)))
+
+(defn- publish-construction-input! [observer ctx binding]
+  (when observer
+    ;; Capturing may fail, but the diagnostic sink may NEVER suppress an
+    ;; authoritative construction/transaction or change its reported outcome.
+    ;; A future correlated session must reject missing/failed observations.
+    (try
+      (observer {:scope construction-input-observation-scope
+                 :phase :construction-input
+                 :operation (:operation binding)
+                 :context ctx
+                 :binding binding})
+      (catch Throwable _
+        nil))))
+
 (defn- observer-for! [ctx]
   (when (and (map? ctx) (contains? ctx observation-context-key))
     (let [observer (get ctx observation-context-key)]
@@ -267,6 +314,8 @@
 
             :else
             (let [observer (observer-for! ctx)
+                  input-observer (construction-input-observer-for! ctx)
+                  _ (publish-construction-input! input-observer ctx binding)
                   {:keys [now plan outcome]} (construction! construct! ctx binding)
                   incorporated (resolution/incorporation-plan
                                 {:binding binding
