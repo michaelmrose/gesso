@@ -20,7 +20,10 @@
    transition and predicates always receive decoded Clojure values. Model
    checks are serialized because Recife controls process-wide model-checking
    machinery. Session data is removed on
-   completion, failure, or interruption. No application callbacks execute."
+   completion, failure, or interruption. Failed runs preserve a bounded,
+   process-local diagnostic record reachable only through an opaque handle.
+   Exception data exposes only a redacted summary, not model documents or
+   raw TLC states. No application callbacks execute."
   (:require [clojure.walk :as walk]
             [gesso.model.formal-obligation :as obligation]
             [gesso.model.formal-transition :as formal]
@@ -49,6 +52,37 @@
 ;; def would erase live sessions during model initialization.
 (defonce ^:private sessions (atom {}))
 (defonce ^:private checker-lock (Object.))
+
+;; A finite local registry, not a release artifact, authentication credential,
+;; or certificate. Handle possession grants access to potentially sensitive
+;; raw subject/trace data; never expose inspect-failure over HTTP or in logs.
+;; Older records are discarded so repeated failed checks cannot grow without
+;; bound. A process restart discards all diagnostics.
+(def ^:private max-failure-records 16)
+(defonce ^:private failure-records (atom {:order [] :entries {}}))
+
+(defn inspect-failure
+  "Inspect the raw diagnostic for one opaque handle IN THIS JVM PROCESS.
+
+   Returned data can contain the complete selected prestate, prepared plans,
+   TLC traces, and backend messages. Treat it as confidential local diagnostic
+   material: never serialize it to browser responses or ordinary logs.
+   Unknown/expired handles return nil. A handle is not a certification token."
+  [handle]
+  (when (instance? UUID handle)
+    (get-in @failure-records [:entries handle])))
+
+(defn- remember-failure! [entry]
+  (let [handle (UUID/randomUUID)]
+    (swap! failure-records
+           (fn [{:keys [order entries]}]
+             (let [order (conj (vec order) handle)
+                   excess (max 0 (- (count order) max-failure-records))
+                   dropped (take excess order)]
+               {:order (vec (drop excess order))
+                :entries (-> (apply dissoc entries dropped)
+                             (assoc handle entry))})))
+    handle))
 
 (defn- fail! [kind message]
   (throw (ex-info message {:error/type ::invalid-formal-check
@@ -151,6 +185,127 @@
     action-accounting observation-chain rejected-is-atomic
     committed-write-set outcome-check-consistency})
 
+(defn- recognized-obligation [reported-name]
+  ;; Recife/TLC invariant names may be namespaced; only known obligation IDs
+  ;; are safe to attribute. An unknown name is not guessed from its spelling.
+  (when (keyword? reported-name)
+    (some (fn [id]
+            (when (= (name id) (name reported-name)) id))
+          obligation/obligation-ids)))
+
+(defn- trace-states [result]
+  (let [trace (:trace result)]
+    (when (and (vector? trace)
+               (every? (fn [item]
+                         (and (vector? item) (= 2 (count item))
+                              (integer? (first item)) (map? (second item))))
+                       trace))
+      trace)))
+
+(defn- safe-trace-prefix [codec result]
+  ;; Index and status are framework control data. Never put the domain
+  ;; documents, command arguments, target IDs or unredacted states into an
+  ;; exception, since an application can accidentally serialize ex-data.
+  (when-let [states (trace-states result)]
+    (mapv
+     (fn [[index encoded]]
+       (let [state ((:decode codec) encoded)
+             observations (::formal/observations state)]
+         {:state-index index
+          :observations (when (vector? observations)
+                          (mapv (fn [o]
+                                  ;; Do not trust arbitrary return values in a
+                                  ;; purported TLC result to be safe metadata.
+                                  (cond-> {}
+                                    (and (integer? (:plan-index o))
+                                         (<= 0 (:plan-index o) 5))
+                                    (assoc :plan-index (:plan-index o))
+                                    (contains? #{:committed :rejected} (:status o))
+                                    (assoc :status (:status o))))
+                                (take 6 observations)))}))
+     (take 32 states))))
+
+(defn- failure-class [result]
+  (cond
+    (not (map? result)) :malformed-checker-result
+    (not (every? #(contains? result %)
+                 [:trace :trace-info :distinct-states]))
+    :malformed-checker-result
+    (and (or (vector? (:trace result))
+             (= :violation-detected (:trace result)))
+         (= :invariant (get-in result [:trace-info :violation :type])))
+    :invariant-counterexample
+    (= :error (:trace result)) :backend-error
+    (or (vector? (:trace result))
+        (= :violation-detected (:trace result)))
+    :model-counterexample
+    (= :ok (:trace result)) :inconclusive-checker-result
+    :else :unrecognized-checker-result))
+
+(defn- failure-summary [subject codec result class]
+  (let [reported (get-in result [:trace-info :violation])
+        trace-prefix (safe-trace-prefix codec result)]
+    (cond-> {:failure/class class
+             :subject-kind (:kind subject)
+             :checker :recife-0.22.0/tlc
+             :selected-plan-count (count (:plans subject))
+             :obligations (set obligation/obligation-ids)
+             :assumed (:assumed assurance-scope)
+             :not-established (:not-established assurance-scope)
+             :source-boundary :prepared-transaction-finite-model}
+      (and (map? reported) (keyword? (:type reported)))
+      (assoc :violation/type (:type reported))
+      (recognized-obligation (:name reported))
+      (assoc :failed-obligation (recognized-obligation (:name reported)))
+      (seq trace-prefix)
+      (assoc :transition-prefix trace-prefix)
+      (and (map? result) (pos-int? (:distinct-states result)))
+      (assoc :distinct-states (:distinct-states result)))))
+
+(defn- reject-result! [subject codec result]
+  (let [class (failure-class result)
+        summary (failure-summary subject codec result class)
+        handle (remember-failure! {:summary summary
+                                   :subject subject
+                                   :raw-result result
+                                   :decoded-trace
+                                   (when-let [states (trace-states result)]
+                                     (mapv (fn [[index state]]
+                                             [index ((:decode codec) state)])
+                                           states))})]
+    ;; Keep the historic :error/kind so existing application callers continue
+    ;; to fail closed. :failure/class tells them WHY checking failed.
+    (throw (ex-info "Recife/TLC did not establish the selected finite obligations."
+                    {:error/type ::invalid-formal-check
+                     :error/kind :model-check-failed
+                     :failure/class class
+                     :diagnostic/summary summary
+                     :diagnostic/handle handle}))))
+
+(defn- reject-backend-exception! [subject error]
+  (let [class (cond
+                (instance? InterruptedException error) :checker-interrupted
+                (instance? java.util.concurrent.TimeoutException error) :checker-timeout
+                :else :backend-exception)
+        summary {:failure/class class
+                 :subject-kind (:kind subject)
+                 :checker :recife-0.22.0/tlc
+                 :source-boundary :recife-tlc-execution
+                 :selected-plan-count (count (:plans subject))}
+        handle (remember-failure! {:summary summary :subject subject
+                                   :backend-exception error})]
+    (when (= class :checker-interrupted)
+      (.interrupt (Thread/currentThread)))
+    ;; Preserve the original message for compatibility with existing JVM
+    ;; diagnostic consumers. It is not included in structured safe ex-data.
+    (throw (ex-info (or (.getMessage error) "Recife/TLC backend failed.")
+                    {:error/type ::invalid-formal-check
+                     :error/kind :model-check-failed
+                     :failure/class class
+                     :diagnostic/summary summary
+                     :diagnostic/handle handle}
+                    error))))
+
 (defn check-prepared!
   "Run Recife/TLC over ALL enabled orders of one admitted finite subject.
 
@@ -179,21 +334,22 @@
                         (assoc ::session session-id))]
         (swap! sessions assoc session-id {:subject subject :codec codec})
         (try
-          (let [raw (recife/run-model initial components
-                                      {:no-deadlock true :workers 1})
-                result (if (instance? clojure.lang.IDeref raw) @raw raw)]
-            ;; A missing :trace-info is not the same as an explicit nil.
-            ;; Recife uses nil here for a completed invariant-safe check;
-            ;; accepting absent metadata could silently upgrade an incomplete
-            ;; checker response into a successful bounded result.
+          (let [result (try
+                         (let [raw (recife/run-model initial components
+                                                     {:no-deadlock true :workers 1})]
+                           (if (instance? clojure.lang.IDeref raw) @raw raw))
+                         (catch Exception error
+                           (reject-backend-exception! subject error)))]
+            ;; TLC success requires an explicit and complete terminal result.
+            ;; Every other shape is a failure, with a redacted explanation and
+            ;; an optional locally inspectable raw diagnostic.
             (when-not (and (map? result)
                            (every? #(contains? result %)
                                    [:trace :trace-info :distinct-states])
                            (= :ok (:trace result))
                            (nil? (:trace-info result))
                            (pos-int? (:distinct-states result)))
-              (fail! :model-check-failed
-                     "Recife/TLC did not establish the selected finite obligations."))
+              (reject-result! subject codec result))
             {:status :checked-finite-model
              :evidence-class :bounded-reference-model-check-not-certificate
              :subject-kind (:kind subject)
