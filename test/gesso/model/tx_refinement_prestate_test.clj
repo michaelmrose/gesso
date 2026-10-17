@@ -793,3 +793,196 @@
     (is (not (re-find #"(?i)ASSERT\\s+|SELECT\\s+" rendered)))
     (is (every? #(= :undischarged (:physical-predicate-equivalence %))
                 (:predicate-obligations result)))))
+
+
+;; -----------------------------------------------------------------------------
+;; v1026: fail-closed applicability of conditional refinement conclusions.
+;; A rejected ABSTRACT operation can still have a valid conditional argument.
+;; A contradictory LOCAL argument must not carry a physical-refinement claim.
+;; -----------------------------------------------------------------------------
+
+(defn- assert-invalid-conditional-report
+  "Common public-report obligations for contradictory LOCAL evidence. This
+   deliberately checks the public shape, not a private implementation helper."
+  [result expected-failures]
+  (let [refinement (:physical-refinement result)
+        failures (:failed-local-checks result)]
+    (is (false? (:local-argument-valid? result)))
+    (is (false? (:conditional-argument-admissible? result)))
+    (is (= :invalid-local-argument (:status refinement)))
+    (is (= #{:status :assumptions} (set (keys refinement)))
+        "Invalid evidence must have neither antecedent nor consequent")
+    (is (not (contains? refinement :antecedent)))
+    (is (not (contains? refinement :consequent)))
+    (is (= (:undischarged-premises prestate/conditional-step-scope)
+           (:assumptions refinement)))
+    (is (= (:undischarged-premises prestate/conditional-step-scope)
+           (:undischarged-premises result)))
+    (is (= (vec (sort-by name failures)) failures)
+        "Diagnostic check names must have stable order")
+    (is (= (set failures)
+           (set (for [[name passed?] (:checks result)
+                      :when (not (true? passed?))]
+                  name)))
+        "Failure names must describe all and only failed local checks")
+    (is (every? (set failures) expected-failures))
+    (is (false? (:input-prestate-attested? result)))
+    (is (false? (:physical-predicates-proved? result)))
+    (is (false? (:certifies-physical-execution? result)))
+    (is (false? (:proves-general-refinement? result)))))
+
+(deftest conditional-valid-success-retains-only-conditional-conclusion-test
+  (let [result (argument-for {} create-plan)
+        refinement (:physical-refinement result)]
+    (is (true? (:local-argument-valid? result)))
+    (is (true? (:conditional-argument-admissible? result)))
+    (is (= [] (:failed-local-checks result)))
+    (is (= :conditional-only (:status refinement)))
+    (is (= :all-undischarged-premises-hold (:antecedent refinement)))
+    (is (= :physical-transaction-refines-this-abstract-serial-step
+           (:consequent refinement)))
+    (is (false? (:certifies-physical-execution? result)))))
+
+(deftest conditional-valid-rejection-is-not-an-invalid-argument-test
+  (let [created (command/after (first (:commands create-plan)))
+        result (argument-for (state-with [:requests created]) create-plan)]
+    (is (= :rejected (:abstract-status result)))
+    (is (= 0 (:first-failed-assertion-index result)))
+    (is (true? (:local-argument-valid? result)))
+    (is (true? (:conditional-argument-admissible? result)))
+    (is (= [] (:failed-local-checks result)))
+    (is (= :conditional-only (get-in result [:physical-refinement :status])))))
+
+(deftest conditional-falsified-success-predicate-suppresses-conclusion-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (update-in (original state plan) [:checks 0 :satisfied?] not))]
+      (let [result (argument-for {} create-plan)]
+        (assert-invalid-conditional-report
+         result #{:reference-predicate-truth-recheck})
+        (is (= :committed (:abstract-status result)))
+        (is (= [true] (mapv :finite-predicate-holds?
+                            (:predicate-obligations result))))))))
+
+(deftest conditional-falsified-rejection-predicate-suppresses-conclusion-test
+  (let [created (command/after (first (:commands create-plan)))
+        original model/step]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (assoc-in (original state plan) [:checks 0 :satisfied?] true))]
+      (let [result (argument-for (state-with [:requests created]) create-plan)]
+        (assert-invalid-conditional-report
+         result #{:reference-predicate-truth-recheck
+                  :first-failed-precondition-order})
+        (is (= :rejected (:abstract-status result)))
+        (is (= 0 (:first-failed-assertion-index result)))))))
+
+(deftest conditional-falsified-commit-decision-suppresses-conclusion-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (assoc (original state plan) :status :rejected))]
+      (let [result (argument-for {} create-plan)]
+        (assert-invalid-conditional-report
+         result #{:all-preconditions-or-atomic-rejection})
+        (is (= :rejected (:abstract-status result)))))))
+
+(deftest conditional-falsified-atomic-poststate-suppresses-conclusion-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (assoc (original state plan) :after state))]
+      (let [result (argument-for {} create-plan)]
+        (assert-invalid-conditional-report
+         result #{:complete-reference-write-or-no-write})
+        (is (= :committed (:abstract-status result)))))))
+
+(deftest conditional-falsified-rejected-poststate-suppresses-conclusion-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (let [predicted (original state plan)]
+                      (assoc predicted :after
+                             (assoc state [:requests "secret-injected-poststate"]
+                                    {:xt/id "secret-injected-poststate"}))))]
+      (let [created (command/after (first (:commands create-plan)))
+            result (argument-for (state-with [:requests created]) create-plan)]
+        (assert-invalid-conditional-report
+         result #{:complete-reference-write-or-no-write})
+        (is (= :rejected (:abstract-status result)))
+        (is (not (re-find #"secret-injected-poststate" (pr-str result))))))))
+
+(deftest conditional-falsified-assertion-sql-suppresses-conclusion-test
+  (let [original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx plan]
+                    (update-in (original ctx plan) [:tx-ops 0 0]
+                               (constantly "ASSERT secret-falsified-predicate")))]
+      (let [result (argument-for {} create-plan)]
+        (assert-invalid-conditional-report
+         result #{:local-prewrite-lowering-correspondence})
+        (is (true? (get-in result [:checks :reference-predicate-truth-recheck])))
+        (is (not (re-find #"secret-falsified-predicate" (pr-str result))))))))
+
+(deftest conditional-falsified-assertion-binding-suppresses-conclusion-test
+  (let [original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx plan]
+                    (update-in (original ctx plan) [:tx-ops 0 1]
+                               (constantly "secret-falsified-binding")))]
+      (let [result (argument-for {} create-plan)]
+        (assert-invalid-conditional-report
+         result #{:local-prewrite-lowering-correspondence})
+        (is (= :committed (:abstract-status result)))
+        (is (not (re-find #"secret-falsified-binding" (pr-str result))))))))
+
+(deftest conditional-multiple-falsified-sources-report-every-failure-test
+  (let [original-step model/step
+        original-prepare tx/prepare]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (-> (original-step state plan)
+                        (assoc :status :rejected)
+                        (assoc :after state)))
+                  tx/prepare
+                  (fn [ctx plan]
+                    (update-in (original-prepare ctx plan) [:tx-ops 0 1]
+                               (constantly "secret-double-falsification")))]
+      (let [result (argument-for {} create-plan)]
+        (assert-invalid-conditional-report
+         result #{:local-prewrite-lowering-correspondence
+                  :all-preconditions-or-atomic-rejection
+                  :complete-reference-write-or-no-write})
+        (is (= [:all-preconditions-or-atomic-rejection
+                :complete-reference-write-or-no-write
+                :local-prewrite-lowering-correspondence]
+               (:failed-local-checks result)))
+        (is (not (re-find #"secret-double-falsification" (pr-str result))))))))
+
+(deftest conditional-invalid-check-value-never-counts-as-success-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (assoc (original state plan) :status nil))]
+      (let [result (argument-for {} create-plan)]
+        (assert-invalid-conditional-report
+         result #{:all-preconditions-or-atomic-rejection})
+        (is (nil? (:abstract-status result)))))))
+
+(deftest conditional-invalid-reports-preserve-premises-without-certification-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state plan]
+                    (assoc (original state plan) :status :rejected))]
+      (let [result (argument-for good-guarded-state guarded-plan)
+            rendered (pr-str result)]
+        (assert-invalid-conditional-report
+         result #{:all-preconditions-or-atomic-rejection})
+        (is (= prestate/conditional-step-scope (:scope result)))
+        (is (every? #(= :undischarged (:physical-predicate-equivalence %))
+                    (:predicate-obligations result)))
+        (is (not (re-find #"secret-request|secret-membership|secret-organization"
+                          rendered)))
+        (is (not (re-find #"helper-1|unclaimed|allow" rendered)))
+        (is (not (re-find #"(?i)ASSERT\\s+|SELECT\\s+" rendered)))))))
