@@ -9,7 +9,13 @@
        :read-record! (fn [ctx command-row-id] ...) ; AUTHORITATIVE read
        :may-disclose? (fn [ctx binding record] ...) ; trusted permission
        :construct! (fn [ctx binding]                  ; trusted, PURE plan
-                     {:now now :plan plan :outcome outcome})})
+                     {:now now :plan plan :outcome outcome})
+       ;; Optional closed table-coverage contract (see below):
+       :construction-contract
+       {:required-guard-tables #{:memberships}
+        :allowed-guard-tables #{:memberships}
+        :required-write-tables #{:requests :gesso_commands}
+        :allowed-write-tables #{:requests :gesso_commands}}})
 
    The result is a callable `(fn [ctx {:binding ... :mode ...}])`. Its modes
    are server-owned decisions, NEVER browser-provided authorization:
@@ -29,18 +35,32 @@
    principal, reads every relevant dependency, expresses sufficient atomic
    guards, avoids effects before commit, or records a truthful outcome.
 
+   A trusted operation registration may opt into a CLOSED TABLE-COVERAGE
+   contract. The wrapper checks the final incorporated plan, including the
+   automatically added durable command record, BEFORE calling transact!.
+   This detects omitted/extra declared guard and write TABLES only. It does
+   not establish correct document IDs, business-rule completeness, predicate
+   correctness, or that an arbitrary :construct! callback is pure.
+
    After a successful transaction commit, Gesso Live publication and any
    read-your-writes context remain owned by gesso.model.tx. This wrapper does
    not turn its returned outcome into an authoritative browser projection or
    promise durable notification delivery. It is NOT a proof certificate and
    does not register an application operation with Choreo/Live preflight."
   (:require
+   [clojure.set :as set]
    [gesso.live.core :as live]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx :as tx]))
 
 (def configuration-keys
   #{:operation :read-record! :may-disclose? :construct!})
+
+(def construction-contract-key :construction-contract)
+
+(def construction-contract-keys
+  #{:required-guard-tables :allowed-guard-tables
+    :required-write-tables :allowed-write-tables})
 
 (def invocation-keys
   #{:binding :mode})
@@ -71,7 +91,27 @@
                       :commit-uncertainty-liveness
                       :durable-notification-debt
                       :whole-application-choreo-preflight
-                      :universal-linearizability}})
+                      :universal-linearizability
+                      :independent-authorization-dependency-discovery
+                      :custom-assertion-table-dependency-extraction
+                      :proof-that-domain-constructor-is-pure}})
+
+(def construction-contract-scope
+  {:construction :gesso.model.resolved-operation/closed-table-coverage-v1
+   :checked #{:exact-registered-table-declaration-shape
+              :incorporation-ledger-included-in-write-coverage
+              :required-guard-and-write-table-presence
+              :unexpected-guard-and-write-table-rejection
+              :opaque-custom-assertions-rejected-before-transaction-send}
+   :assumed #{:trusted-registration-of-business-table-requirements
+              :constructor-uses-trusted-inputs-and-is-pure
+              :sufficient-document-and-predicate-guards}
+   :not-established #{:independent-business-rule-discovery
+                      :authorization-or-policy-correctness
+                      :correct-row-identities-within-declared-tables
+                      :all-executor-branches-and-prestates
+                      :xtdb-physical-refinement
+                      :application-certification}})
 
 (defn- fail! [kind message details]
   (throw (ex-info message
@@ -221,8 +261,63 @@
            {:expected expected-keys :received value}))
   value)
 
+(defn- require-construction-contract [contract]
+  ;; Only an operation registration made by trusted server code can opt in.
+  ;; The sets describe tables, not document IDs or authorization policies.
+  ;; An omitted set is never interpreted as an unconstrained wildcard.
+  (when-not (and (map? contract)
+                 (= construction-contract-keys (set (keys contract)))
+                 (every? (fn [k]
+                           (let [tables (get contract k)]
+                             (and (set? tables)
+                                  (every? keyword? tables))))
+                         construction-contract-keys)
+                 (set/subset? (:required-guard-tables contract)
+                              (:allowed-guard-tables contract))
+                 (set/subset? (:required-write-tables contract)
+                              (:allowed-write-tables contract))
+                 (contains? (:required-write-tables contract)
+                            resolution/command-entity-type))
+    (fail! :invalid-construction-contract
+           "A closed construction contract must declare consistent guard and write table sets and require the durable command table."
+           {:contract-keys construction-contract-keys}))
+  contract)
+
+(defn- require-plan-table-coverage! [contract incorporated]
+  (when contract
+    (let [plan (:plan incorporated)
+          guards (set (map (comp first tx/guard-target) (:guards plan)))
+          writes (set (map (comp first tx/command-target) (:commands plan)))
+          missing-guards (set/difference (:required-guard-tables contract) guards)
+          extra-guards (set/difference guards (:allowed-guard-tables contract))
+          missing-writes (set/difference (:required-write-tables contract) writes)
+          extra-writes (set/difference writes (:allowed-write-tables contract))]
+      ;; Arbitrary HoneySQL assertions can depend on other tables which this
+      ;; table-coverage check does not parse. Fail closed rather than claim a
+      ;; closed footprint for plans containing opaque predicates.
+      (when (or (seq (:assertions plan))
+                (seq missing-guards) (seq extra-guards)
+                (seq missing-writes) (seq extra-writes))
+        (fail! :construction-contract-mismatch
+               "The submitted transaction does not satisfy its registered closed table-coverage contract."
+               {:opaque-assertions? (boolean (seq (:assertions plan)))
+                :missing-guard-tables missing-guards
+                :unexpected-guard-tables extra-guards
+                :missing-write-tables missing-writes
+                :unexpected-write-tables extra-writes}))))
+  incorporated)
+
 (defn- require-configuration [configuration]
-  (exact-map! configuration configuration-keys :invalid-configuration)
+  (when-not (and (map? configuration)
+                 (or (= configuration-keys (set (keys configuration)))
+                     (= (conj configuration-keys construction-contract-key)
+                        (set (keys configuration)))))
+    (fail! :invalid-configuration
+           "Resolved operation configuration must use the exact admitted key set."
+           {:expected configuration-keys
+            :optional construction-contract-key}))
+  (when (contains? configuration construction-contract-key)
+    (require-construction-contract (:construction-contract configuration)))
   (let [{:keys [operation read-record! may-disclose? construct!]} configuration]
     (when-not (qualified-keyword? operation)
       (fail! :invalid-operation-id
@@ -294,9 +389,17 @@
    dependency guards and truthful effects, and must never execute a domain
    mutation or external effect while constructing the plan. The application
    must register the command-result schema/table and use an authoritative,
-   read-after-commit-correct :read-record! implementation."
+   read-after-commit-correct :read-record! implementation.
+
+   Optional :construction-contract checks the incorporated plan's explicit
+   guard and write table sets before submission. Contract sets are closed;
+   :required-* must be present, :allowed-* bounds the actual targets, and
+   :gesso_commands must be required as a write. Custom HoneySQL assertions
+   fail closed because they may hide undeclared table reads. The contract
+   is NOT an independent authorization-dependency discovery mechanism."
   [configuration]
-  (let [{:keys [operation read-record! may-disclose? construct!]}
+  (let [{:keys [operation read-record! may-disclose? construct!
+                construction-contract]}
         (require-configuration configuration)]
     (with-meta
       (fn resolved-operation [ctx input]
@@ -322,6 +425,11 @@
                                  :now now
                                  :plan plan
                                  :outcome outcome})
+                  ;; Evaluate the actual incorporated plan, not just the
+                  ;; application's pre-ledger fragment. On rejection, do not
+                  ;; send any transaction and do not publish :prepared.
+                  _ (require-plan-table-coverage! construction-contract
+                                                  incorporated)
                   {:keys [transaction error]}
                   (transact-observed! ctx incorporated binding observer)]
               (if (and (nil? error)
@@ -336,6 +444,10 @@
                 ;; application-level resolution. They are NOT interchangeable
                 ;; physical results. An authoritative read error propagates.
                 (after-commit-error read-record! may-disclose? ctx binding))))))
-      {:gesso.model/operation-id operation
-       :gesso.model/resolution :durable-command-v1
-       :gesso.model/assurance-scope assurance-scope})))
+      (cond-> {:gesso.model/operation-id operation
+               :gesso.model/resolution :durable-command-v1
+               :gesso.model/assurance-scope assurance-scope}
+        construction-contract
+        (assoc :gesso.model/construction-contract construction-contract
+               :gesso.model/construction-contract-scope
+               construction-contract-scope)))))
