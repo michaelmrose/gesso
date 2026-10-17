@@ -16,24 +16,32 @@
         :allowed-guard-tables #{:memberships}
         :required-write-tables #{:requests :gesso_commands}
         :allowed-write-tables #{:requests :gesso_commands}}
-       ;; Optional, separate CLOSED document-identity contract. Called before
-       ;; :construct! with trusted context and canonical command binding:
+       ;; Optional closed document-target declaration (from trusted inputs):
        :target-contract! (fn [ctx binding]
                            {:required-guard-targets #{[:memberships (:membership-id ctx)]}
                             :allowed-guard-targets #{[:memberships (:membership-id ctx)]}
                             :required-write-targets #{[:requests (get-in binding [:arguments :request-id])]}
                             :allowed-write-targets #{[:requests (get-in binding [:arguments :request-id])]}})
-       ;; Optional, separate CLOSED equality-check contract. The trusted
-       ;; callback runs before :construct! and declares exact expected values:
+       ;; Optional exact command-operation declaration, independent of the
+       ;; constructed plan; requires the closed table and target contracts.
+       ;; Its triples distinguish :create from update operations such as :claim.
+       :command-operation-contract! (fn [ctx binding]
+                                      (let [r (get-in binding [:arguments :request-id])]
+                                        {:required-command-operations #{[:requests r :claim]}
+                                         :allowed-command-operations #{[:requests r :claim]}}))
+       ;; Optional exact predicate declaration; requires both prior contracts.
+       ;; Allowed includes every version/field check that can legitimately
+       ;; appear in the final plan for these document identities.
        :predicate-contract! (fn [ctx binding]
-                              {:required-guard-checks #{[[:memberships (:membership-id ctx)]
-                                                         :active true]}
-                               :allowed-guard-checks #{[[:memberships (:membership-id ctx)]
-                                                        :active true]
-                                                       [[:memberships (:membership-id ctx)]
-                                                        :revision (:membership-revision ctx)]}
-                               :required-update-checks #{}
-                               :allowed-update-checks #{}})})
+                              (let [m (:membership-id ctx)
+                                    r (get-in binding [:arguments :request-id])]
+                                {:required-guard-checks #{[:memberships m :active true]}
+                                 :allowed-guard-checks #{[:memberships m :active true]
+                                                         [:memberships m :revision (:membership-revision ctx)]
+                                                         [:memberships m :updated-at (:membership-updated-at ctx)]}
+                                 :required-update-checks #{[:requests r :revision (:request-revision ctx)]}
+                                 :allowed-update-checks #{[:requests r :revision (:request-revision ctx)]
+                                                          [:requests r :updated-at (:request-updated-at ctx)]}}))})
 
    The result is a callable `(fn [ctx {:binding ... :mode ...}])`. Its modes
    are server-owned decisions, NEVER browser-provided authorization:
@@ -60,11 +68,19 @@
    When a registration ALSO supplies trusted :target-contract!, Gesso checks
    the final plan against closed required/allowed document targets derived
    from the context and command binding before domain construction begins.
-   An additional optional :predicate-contract! checks exact declared equality
-   values in the final version guards and update-command preconditions for
-   those document targets. It cannot independently infer business rules or
-   certify that the declarations are authentic, complete, or correct.
-   None of these contracts establishes constructor purity or authorization.
+   Optional :command-operation-contract! declares the expected operation
+   keyword (including :create versus a named update operation) per required
+   domain write target before plan construction. Gesso supplies its own
+   command-ledger :create requirement and checks the final plan before send.
+   This is another opt-in consistency check, not semantic operation proof.
+
+   A further optional :predicate-contract! independently declares exact
+   required and permitted [table document-id field value] checks for both
+   version guards and update-command optimistic conditions. It requires
+   both other contracts and checks actual canonical :model/checks, not
+   arbitrary SQL or the claimed contents of a record. Even this three-layer
+   check does not discover missing business rules or prove authorization,
+   complete dependencies, constructor purity, or XTDB semantics.
 
    After a successful transaction commit, Gesso Live publication and any
    read-your-writes context remain owned by gesso.model.tx. This wrapper does
@@ -84,6 +100,10 @@
 (def construction-contract-key :construction-contract)
 (def target-contract-key :target-contract!)
 (def predicate-contract-key :predicate-contract!)
+(def command-operation-contract-key :command-operation-contract!)
+
+(def command-operation-contract-keys
+  #{:required-command-operations :allowed-command-operations})
 
 (def predicate-contract-keys
   #{:required-guard-checks :allowed-guard-checks
@@ -168,21 +188,42 @@
                       :application-certification}})
 
 (def predicate-contract-scope
-  {:construction :gesso.model.resolved-operation/closed-expected-checks-v1
+  {:construction :gesso.model.resolved-operation/closed-exact-checks-v1
    :checked #{:predicate-requirements-computed-before-construction
-              :exact-guard-and-update-expected-check-coverage
-              :predicate-checks-bound-to-registered-document-targets
-              :no-transaction-submission-on-predicate-mismatch}
+              :actual-guard-and-update-check-values-match-declaration
+              :required-checks-present-and-undeclared-checks-rejected
+              :checks-restricted-to-independently-declared-document-targets
+              :required-guard-targets-have-required-checks
+              :no-transaction-submission-on-check-mismatch}
    :assumed #{:trusted-predicate-requirements-callback
-              :requirements-independent-of-constructed-plan
-              :correct-expected-values-from-trusted-application-context
-              :application-guards-enforce-declared-equality-semantics}
-   :not-established #{:independent-authorization-policy-discovery
-                      :complete-authorization-or-business-predicates
-                      :authenticity-of-declared-inputs
-                      :complete-semantic-dependency-closure
-                      :arbitrary-sql-predicate-correspondence
+              :requirements-derived-independently-of-constructed-plan
+              :trusted-command-binding-and-application-context
+              :expected-values-are-stable-until-construction-check
+              :business-rules-adequately-represented-by-expected-checks}
+   :not-established #{:independent-discovery-of-business-rule-predicates
+                      :authorization-or-policy-correctness
+                      :independent-trustworthiness-of-declared-expected-values
+                      :arbitrary-honeysql-assertion-equivalence
                       :constructor-purity
+                      :all-executor-branches-and-prestates
+                      :xtdb-physical-refinement
+                      :application-certification}})
+
+(def command-operation-contract-scope
+  {:construction :gesso.model.resolved-operation/closed-command-operations-v1
+   :checked #{:command-operation-requirements-computed-before-construction
+              :required-and-allowed-command-operations-match-final-plan
+              :independent-binding-derived-command-ledger-create
+              :all-required-domain-write-targets-have-required-operation
+              :no-submission-on-command-operation-mismatch}
+   :assumed #{:trusted-command-operation-requirements-callback
+              :requirements-independent-of-constructed-plan
+              :trusted-invocation-context-and-binding
+              :complete-declaration-of-domain-write-semantics}
+   :not-established #{:correct-post-state-values
+                      :authorization-or-policy-correctness
+                      :independent-business-rule-discovery
+                      :all-executor-branches-and-prestates
                       :xtdb-physical-refinement
                       :application-certification}})
 
@@ -444,76 +485,147 @@
                 :unexpected-write-target-count (count unexpected-writes)}))))
   incorporated)
 
-(defn- exact-check-set? [checks]
+(defn- check-set? [checks]
   (and (set? checks)
        (every? (fn [check]
                  (and (vector? check)
-                      (= 3 (count check))
-                      (target-set? #{(first check)})
-                      (keyword? (second check))
-                      ;; gesso.model.command/expected-version disallows nil.
-                      (some? (nth check 2))))
+                      (= 4 (count check))
+                      (keyword? (nth check 0))
+                      (some? (nth check 1))
+                      (keyword? (nth check 2))
+                      (some? (nth check 3))))
                checks)))
 
+(defn- check-targets [checks]
+  (set (map (fn [[table id _ _]] [table id]) checks)))
+
 (defn- require-predicate-contract! [declared targets]
-  ;; The declarations must originate independently of the constructed plan.
-  ;; Only checks on already declared guard/write targets can be admitted.
-  ;; Do not include sensitive expected values or document IDs in diagnostics.
-  (let [required-guard (:required-guard-checks declared)
-        allowed-guard (:allowed-guard-checks declared)
-        required-update (:required-update-checks declared)
-        allowed-update (:allowed-update-checks declared)]
+  ;; This trusted callback is evaluated BEFORE :construct! and has no access
+  ;; to the constructed plan. The ledger is a create, not an update version
+  ;; check: domain code must never declare ledger predicates.
+  (let [required-guards (:required-guard-checks declared)
+        allowed-guards (:allowed-guard-checks declared)
+        required-updates (:required-update-checks declared)
+        allowed-updates (:allowed-update-checks declared)
+        required-guard-targets (:required-guard-targets targets)
+        allowed-guard-targets (:allowed-guard-targets targets)
+        allowed-domain-writes (set (remove (fn [[table _]]
+                                             (= table resolution/command-entity-type))
+                                           (:allowed-write-targets targets)))]
     (when-not (and (map? declared)
                    (= predicate-contract-keys (set (keys declared)))
-                   (every? exact-check-set? (vals declared))
-                   (set/subset? required-guard allowed-guard)
-                   (set/subset? required-update allowed-update)
-                   (set/subset? (set (map first allowed-guard))
-                                (:allowed-guard-targets targets))
-                   (set/subset? (set (map first allowed-update))
-                                (:allowed-write-targets targets))
-                   ;; Update predicates refer to existing domain documents,
-                   ;; not the Gesso-created command-result document.
-                   (not-any? (fn [[target _ _]]
-                               (= (first target) resolution/command-entity-type))
-                             (concat required-guard allowed-guard
-                                     required-update allowed-update)))
+                   (every? check-set? (vals declared))
+                   (set/subset? required-guards allowed-guards)
+                   (set/subset? required-updates allowed-updates)
+                   (set/subset? (check-targets required-guards)
+                                required-guard-targets)
+                   (set/subset? (check-targets allowed-guards)
+                                allowed-guard-targets)
+                   (set/subset? (check-targets required-updates)
+                                allowed-domain-writes)
+                   (set/subset? (check-targets allowed-updates)
+                                allowed-domain-writes)
+                   ;; Every required guarded document must carry at least one
+                   ;; independently required value condition. Otherwise the
+                   ;; caller could satisfy targets with a useless version check.
+                   (set/subset? required-guard-targets
+                                (check-targets required-guards)))
       (fail! :invalid-predicate-contract
-             "Trusted equality-check declaration is malformed or inconsistent with its document-target contract."
-             {:declared-shape-valid? false})))
-  declared)
+             "Trusted exact-check requirements are incomplete or inconsistent with declared document targets."
+             {:declared-shape-valid? false}))
+    declared))
 
-(defn- expected-check-triples [items target-f]
+(defn- actual-checks [entries target-fn]
   (into #{}
-        (mapcat (fn [item]
-                  (let [target (target-f item)]
-                    (map (fn [[attribute value]] [target attribute value])
-                         (get-in item [:model/expected :model/checks])))))
-        items))
+        (mapcat (fn [entry]
+                  (let [[table id] (target-fn entry)]
+                    (map (fn [[field value]] [table id field value])
+                         (get-in entry [:model/expected :model/checks])))))
+        entries))
 
 (defn- require-plan-predicate-coverage! [declared incorporated]
   (when declared
     (let [plan (:plan incorporated)
-          guard-checks (expected-check-triples (:guards plan) tx/guard-target)
-          update-checks (expected-check-triples
-                         (remove command/create? (:commands plan))
-                         tx/command-target)
-          missing-guards (set/difference (:required-guard-checks declared)
-                                         guard-checks)
-          extra-guards (set/difference guard-checks
-                                       (:allowed-guard-checks declared))
-          missing-updates (set/difference (:required-update-checks declared)
-                                          update-checks)
-          extra-updates (set/difference update-checks
-                                        (:allowed-update-checks declared))]
+          guards (actual-checks (:guards plan) tx/guard-target)
+          updates (actual-checks (filter command/update? (:commands plan))
+                                 tx/command-target)
+          missing-guards (set/difference (:required-guard-checks declared) guards)
+          extra-guards (set/difference guards (:allowed-guard-checks declared))
+          missing-updates (set/difference (:required-update-checks declared) updates)
+          extra-updates (set/difference updates (:allowed-update-checks declared))]
+      ;; Values, field names, and document identities may all be sensitive.
+      ;; Report counts only; never echo registered or observed check tuples.
       (when (or (seq missing-guards) (seq extra-guards)
                 (seq missing-updates) (seq extra-updates))
         (fail! :construction-predicate-mismatch
-               "The final incorporated transaction does not match registered equality-check requirements."
+               "The final incorporated transaction does not match declared exact guard and update predicates."
                {:missing-guard-check-count (count missing-guards)
                 :unexpected-guard-check-count (count extra-guards)
                 :missing-update-check-count (count missing-updates)
                 :unexpected-update-check-count (count extra-updates)}))))
+  incorporated)
+
+(defn- command-operation-set? [operations]
+  (and (set? operations)
+       (every? (fn [entry]
+                 (and (vector? entry)
+                      (= 3 (count entry))
+                      (keyword? (nth entry 0))
+                      (some? (nth entry 1))
+                      (keyword? (nth entry 2))))
+               operations)))
+
+(defn- command-operation-targets [operations]
+  (set (map (fn [[table id _]] [table id]) operations)))
+
+(defn- require-command-operation-contract! [declared targets binding]
+  ;; The trusted callback must not declare its own command-ledger operation.
+  ;; Only Gesso computes the ledger target and its mandatory :create.
+  (let [required (:required-command-operations declared)
+        allowed (:allowed-command-operations declared)
+        domain-required (disj (:required-write-targets targets)
+                              [resolution/command-entity-type
+                               (resolution/record-id binding)])
+        domain-allowed (disj (:allowed-write-targets targets)
+                             [resolution/command-entity-type
+                              (resolution/record-id binding)])
+        ledger-operation [resolution/command-entity-type
+                          (resolution/record-id binding) :create]]
+    (when-not (and (map? declared)
+                   (= command-operation-contract-keys (set (keys declared)))
+                   (every? command-operation-set? (vals declared))
+                   (set/subset? required allowed)
+                   (not-any? (fn [[table _ _]]
+                               (= resolution/command-entity-type table))
+                             allowed)
+                   (= domain-required (command-operation-targets required))
+                   (set/subset? (command-operation-targets allowed)
+                                domain-allowed)
+                   (= (count required)
+                      (count (command-operation-targets required))))
+      (fail! :invalid-command-operation-contract
+             "Trusted write-operation declaration must cover exactly the independently required domain targets."
+             {:declared-shape-valid? false}))
+    {:required-command-operations (conj required ledger-operation)
+     :allowed-command-operations (conj allowed ledger-operation)}))
+
+(defn- require-plan-command-operation-coverage! [declared incorporated]
+  (when declared
+    (let [operations (set (map (fn [entry]
+                                 (let [[table id] (tx/command-target entry)]
+                                   [table id (command/operation entry)]))
+                               (get-in incorporated [:plan :commands])))
+          missing (set/difference (:required-command-operations declared)
+                                  operations)
+          unexpected (set/difference operations
+                                     (:allowed-command-operations declared))]
+      ;; Do not put command IDs, application document IDs, or operation names
+      ;; into caller-visible rejection diagnostics.
+      (when (or (seq missing) (seq unexpected))
+        (fail! :construction-command-operation-mismatch
+               "The final transaction uses a different command operation than the registered requirement."
+               {:missing-command-operation-count (count missing)
+                :unexpected-command-operation-count (count unexpected)}))))
   incorporated)
 
 (defn- require-configuration [configuration]
@@ -523,13 +635,18 @@
                               (conj configuration-keys construction-contract-key
                                     target-contract-key)
                               (conj configuration-keys construction-contract-key
-                                    target-contract-key predicate-contract-key)}
+                                    target-contract-key predicate-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key command-operation-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key predicate-contract-key
+                                    command-operation-contract-key)}
                             (set (keys configuration))))
     (fail! :invalid-configuration
            "Resolved operation configuration must use the exact admitted key set."
            {:expected configuration-keys
-            :optional #{construction-contract-key target-contract-key
-                        predicate-contract-key}}))
+            :optional #{construction-contract-key target-contract-key predicate-contract-key
+                        command-operation-contract-key}}))
   (when (contains? configuration construction-contract-key)
     (require-construction-contract (:construction-contract configuration)))
   (when (and (contains? configuration target-contract-key)
@@ -537,11 +654,16 @@
     (fail! :invalid-target-contract
            "An enabled document-target contract requires a trusted function."
            {:callback target-contract-key}))
-  (when (contains? configuration predicate-contract-key)
-    (when-not (fn? (:predicate-contract! configuration))
-      (fail! :invalid-predicate-contract
-             "An enabled equality-check contract requires a trusted function and a document-target contract."
-             {:callback predicate-contract-key})))
+  (when (and (contains? configuration predicate-contract-key)
+             (not (fn? (:predicate-contract! configuration))))
+    (fail! :invalid-predicate-contract
+           "An enabled predicate contract requires a trusted function."
+           {:callback predicate-contract-key}))
+  (when (and (contains? configuration command-operation-contract-key)
+             (not (fn? (:command-operation-contract! configuration))))
+    (fail! :invalid-command-operation-contract
+           "An enabled command-operation contract requires a trusted function."
+           {:callback command-operation-contract-key}))
   (let [{:keys [operation read-record! may-disclose? construct!]} configuration]
     (when-not (qualified-keyword? operation)
       (fail! :invalid-operation-id
@@ -626,18 +748,20 @@
    of required/allowed [table document-id] pairs for DOMAIN targets. Each
    required TABLE must have at least one required document target. The wrapper
    adds the exact command-ledger target derived from binding, never from the
-   constructor. Neither layer independently discovers business requirements.
-
-   Optional :predicate-contract! requires :target-contract! and declares four
-   required/allowed sets of [target attribute expected-value] triples. It is
-   evaluated from trusted [ctx binding] BEFORE :construct!, and compares
-   the final version guards and update command preconditions. All predicates
-   remain plain, canonical expected-version equalities; arbitrary HoneySQL
-   expressions are not admitted. Correct predicates still cannot establish
-   that all application authorization requirements were declared."
+   constructor. Optional :predicate-contract! requires both prior contracts;
+   it independently declares required and permitted exact guards and update
+   expected-version checks [table id field value]. One required check must
+   appear for every required guard target. Optional
+   :command-operation-contract! requires the table and target contracts and
+   independently declares required and allowed [table id operation] triples
+   for every required domain write target (e.g. :claim rather than :create).
+   Gesso adds the binding-owned command-ledger :create requirement. These
+   checks reject wrong command operations before tx/transact!, but do not
+   prove semantic adequacy, domain postconditions, or authentic acquisition."
   [configuration]
   (let [{:keys [operation read-record! may-disclose? construct!
-                construction-contract target-contract! predicate-contract!]}
+                construction-contract target-contract! predicate-contract!
+                command-operation-contract!]}
         (require-configuration configuration)]
     (with-meta
       (fn resolved-operation [ctx input]
@@ -662,10 +786,17 @@
                                     (require-target-contract!
                                      (target-contract! ctx binding)
                                      construction-contract binding))
+                  ;; The target requirements include Gesso's binding-derived
+                  ;; ledger target, but only DOMAIN update predicates qualify.
                   predicate-contract (when predicate-contract!
                                        (require-predicate-contract!
                                         (predicate-contract! ctx binding)
                                         target-contract))
+                  command-operation-contract
+                  (when command-operation-contract!
+                    (require-command-operation-contract!
+                     (command-operation-contract! ctx binding)
+                     target-contract binding))
                   _ (publish-construction-input! input-observer ctx binding)
                   {:keys [now plan outcome]} (construction! construct! ctx binding)
                   incorporated (resolution/incorporation-plan
@@ -680,6 +811,8 @@
                                                   incorporated)
                   _ (require-plan-target-coverage! target-contract incorporated)
                   _ (require-plan-predicate-coverage! predicate-contract incorporated)
+                  _ (require-plan-command-operation-coverage!
+                     command-operation-contract incorporated)
                   {:keys [transaction error]}
                   (transact-observed! ctx incorporated binding observer)]
               (if (and (nil? error)
@@ -704,4 +837,7 @@
         target-contract!
         (assoc :gesso.model/target-contract-scope target-contract-scope)
         predicate-contract!
-        (assoc :gesso.model/predicate-contract-scope predicate-contract-scope)))))
+        (assoc :gesso.model/predicate-contract-scope predicate-contract-scope)
+        command-operation-contract!
+        (assoc :gesso.model/command-operation-contract-scope
+               command-operation-contract-scope)))))
