@@ -1,5 +1,6 @@
 (ns gesso.model.tx-refinement-prestate-test
-  "Permanent adversarial regressions for the LOCAL XTDB prewrite obligation.
+  "Permanent adversarial regressions for the LOCAL XTDB prewrite obligation,
+   including v1020 SQL-predicate and bound-value correspondence.
 
    These tests establish the order and structural correspondence of Gesso's
    admitted transaction lowering with its bounded reference-model checks.
@@ -345,3 +346,199 @@
         (is (false? (:local-structure-valid? obligation)))
         (is (contains? (false-checks obligation) :precondition-count))
         (is (contains? (false-checks obligation) :precondition-kinds-and-order))))))
+
+
+;; ---------------------------------------------------------------------------
+;; v1021: the finite-model check vocabulary is the independent reference for
+;; BOTH raw HoneySQL predicates and the prepared XTDB SQL/binding vectors.
+;; These are local construction checks, not a proof of backend SQL semantics.
+;; ---------------------------------------------------------------------------
+
+(defn- reference-checks-valid?
+  [obligation]
+  (and (true? (get-in obligation
+                       [:checks :reference-preconditions-match-unformatted-assertions]))
+       (true? (get-in obligation
+                       [:checks :formatted-assertion-sql-and-bindings-match-reference]))))
+
+(deftest reference-sql-contract-scope-remains-explicitly-local-test
+  (let [scope prestate/contract-scope
+        obligation (prestate/derive-obligation rich-plan)]
+    (is (contains? (:checked scope)
+                   :reference-precondition-to-honeysql-expression-correspondence))
+    (is (contains? (:checked scope)
+                   :formatted-assertion-sql-and-bound-values-match-reference))
+    (is (contains? (:external-premises scope)
+                   :xtdb-sql-predicates-refine-finite-guard-semantics))
+    (is (contains? (:not-established scope)
+                   :backend-premises-proved-from-xtdb-source))
+    (is (reference-checks-valid? obligation))
+    (is (false? (:certifies-physical-execution? obligation)))
+    (is (false? (:proves-general-refinement? obligation)))))
+
+(deftest reference-sql-accepts-the-entire-admitted-check-vocabulary-test
+  (doseq [[label a-plan expected-kinds]
+          [[:create create-plan [:document-absent]]
+           [:guard guarded-plan
+            [:dependency-version :dependency-version :command-version]]
+           [:field-count rich-plan
+            [:document-field-count :dependency-version :dependency-version
+             :command-version :document-absent]]]]
+    (testing (name label)
+      (let [obligation (prestate/derive-obligation a-plan)]
+        (is (:local-structure-valid? obligation))
+        (is (reference-checks-valid? obligation))
+        (is (= expected-kinds (mapv :kind (:preconditions obligation))))))))
+
+(deftest altered-formatted-assertion-parameter-fails-even-with-valid-assert-prefix-test
+  (let [original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx a-plan]
+                    (update-in (original ctx a-plan) [:tx-ops 0 1]
+                               (constantly "secret-forged-bound-id")))]
+      (let [result (prestate/derive-obligation create-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))
+        (is (true? (get-in result [:checks :formatted-assertion-prefix])))
+        (is (true? (get-in result
+                           [:checks :reference-preconditions-match-unformatted-assertions])))
+        (is (not (re-find #"secret-forged" (pr-str result))))))))
+
+(deftest altered-formatted-assertion-sql-fails-despite-unchanged-bindings-test
+  (let [original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx a-plan]
+                    (update-in (original ctx a-plan) [:tx-ops 0 0]
+                               #(str % " /* changed-assert-predicate */")))]
+      (let [result (prestate/derive-obligation create-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))
+        (is (true? (get-in result [:checks :formatted-assertion-prefix])))
+        (is (true? (get-in result
+                           [:checks :reference-preconditions-match-unformatted-assertions])))
+        (is (not (re-find #"changed-assert" (pr-str result))))))))
+
+(deftest reordered-formatted-guard-sql-fails-independent-reference-test
+  (let [original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx a-plan]
+                    (update (original ctx a-plan) :tx-ops
+                            #(assoc % 0 (nth % 1) 1 (first %))))]
+      (let [result (prestate/derive-obligation guarded-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))
+        (is (true? (get-in result [:checks :formatted-assertion-prefix])))
+        (is (true? (get-in result [:checks :canonical-operation-sequence])))))))
+
+(deftest dropped-formatted-assertion-binding-is-rejected-test
+  (let [original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx a-plan]
+                    (update-in (original ctx a-plan) [:tx-ops 0] pop))]
+      (let [result (prestate/derive-obligation create-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))
+        (is (true? (get-in result [:checks :formatted-assertion-prefix])))))))
+
+(deftest changed-unformatted-document-absence-predicate-fails-reference-test
+  (let [original tx/command-precondition]
+    (with-redefs [tx/command-precondition
+                  (fn [c]
+                    (update-in (original c) [:assert 2 :where]
+                               (constantly [:= :xt/id "secret-wrong-document"])))]
+      (let [result (prestate/derive-obligation create-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :reference-preconditions-match-unformatted-assertions])))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))
+        (is (not (re-find #"secret-wrong" (pr-str result))))))))
+
+(deftest changed-unformatted-version-predicate-fails-reference-test
+  (let [original tx/guard-assertion]
+    (with-redefs [tx/guard-assertion
+                  (fn [g]
+                    (update-in (original g) [:assert 2 :where]
+                               (constantly [:= :xt/id "secret-other-guard"])))]
+      (let [result (prestate/derive-obligation guarded-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :reference-preconditions-match-unformatted-assertions])))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))
+        (is (not (re-find #"secret-other" (pr-str result))))))))
+
+(deftest changed-finite-reference-field-count-fails-both-checks-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state a-plan]
+                    (update-in (original state a-plan) [:checks 0 :expected-count]
+                               (constantly 4)))]
+      (let [result (prestate/derive-obligation rich-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :reference-preconditions-match-unformatted-assertions])))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))))))
+
+(deftest malformed-finite-reference-field-count-fails-closed-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state a-plan]
+                    (update-in (original state a-plan) [:checks 0 :expected-count]
+                               (constantly -1)))]
+      (let [result (prestate/derive-obligation rich-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :reference-preconditions-match-unformatted-assertions])))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))))))
+
+(deftest qualified-tables-and-nested-values-are-bound-as-data-test
+  (let [version-with-payload (assoc version :compare-keys
+                                    [:revision :updated-at :payload])
+        before {:xt/id "secret-qualified-id"
+                :revision 3 :created-at "t0" :updated-at "t0"
+                :payload {:nested [:domain/role {:value "secret-nested-value"}]}}
+        after (advance before {:status :claimed})
+        a-plan (plan [(command/update-command
+                       :domain/request :claim before after version-with-payload)])
+        prepared (first (:tx-ops (tx/prepare {} a-plan)))
+        result (prestate/derive-obligation a-plan)]
+    (is (:local-structure-valid? result))
+    (is (reference-checks-valid? result))
+    (is (= [:domain/request] (mapv :table (:preconditions result))))
+    (is (some #(= (:payload before) %) (rest prepared)))
+    (is (not (re-find #"secret-qualified-id|secret-nested-value"
+                       (pr-str result))))))
+
+(deftest qualified-nested-bound-parameter-mutation-fails-reference-test
+  (let [version-with-payload (assoc version :compare-keys
+                                    [:revision :updated-at :payload])
+        before {:xt/id "secret-qualified-parameter"
+                :revision 3 :created-at "t0" :updated-at "t0"
+                :payload {:nested [:domain/role {:value "secret-unchanged"}]}}
+        after (advance before {:status :claimed})
+        a-plan (plan [(command/update-command
+                       :domain/request :claim before after version-with-payload)])
+        original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx p]
+                    (update-in (original ctx p) [:tx-ops 0]
+                               (fn [sql-vec]
+                                 (mapv (fn [param]
+                                         (if (= param (:payload before))
+                                           {:nested [:domain/role {:value "secret-mutated"}]}
+                                           param))
+                                       sql-vec))))]
+      (let [result (prestate/derive-obligation a-plan)]
+        (is (false? (:local-structure-valid? result)))
+        (is (false? (get-in result
+                            [:checks :formatted-assertion-sql-and-bindings-match-reference])))
+        (is (true? (get-in result
+                           [:checks :reference-preconditions-match-unformatted-assertions])))
+        (is (not (re-find #"secret-unchanged|secret-mutated" (pr-str result))))))))
