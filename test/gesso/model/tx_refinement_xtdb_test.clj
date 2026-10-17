@@ -19,11 +19,14 @@
    transaction-ID adjacency, detected intervening writes, and explicitly
    unverifiable isolation assumptions. The v1017 opt-in repeatable-window
    regressions replay the exact snapshot-token and clock for both phases,
-   and test false replay evidence without resubmitting the transaction."
+   and test false replay evidence without resubmitting the transaction.
+   v1028 exercises the v1027 composed conditional-step boundary, separating
+   local validity from observed physical agreement, without certification."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
    [gesso.model.tx :as tx]
+   [gesso.model.tx-refinement-prestate :as prestate]
    [gesso.model.tx-refinement-xtdb :as collector]
    [xtdb.api :as xt]
    [xtdb.node :as xtn]))
@@ -1578,3 +1581,225 @@
                (error-type #(collector/observe-and-compare-repeatable-window!
                              (assoc base extra :forged)))))
         (is (empty? @calls))))))
+
+
+;; v1028: conditional argument and controlled physical observation are obtained
+;; within the SAME collector execution. These are assertions about one bounded
+;; diagnostic, not a backend refinement theorem or a production receipt.
+
+(defn- collect-composed! [a-plan targets]
+  (collector/observe-and-derive-conditional!
+   {:node (node) :plan a-plan :targets targets}))
+
+(defn- check-composed-report! [report status]
+  (is (= status (get-in report [:execution :status])))
+  (is (true? (:conditional-argument-admissible? (:conditional-step report))))
+  (is (= status (get-in report [:conditional-step :abstract-status])))
+  (is (= :conditional-only
+         (get-in report [:conditional-step :physical-refinement :status])))
+  (is (true? (get-in report [:comparison :corresponds?])))
+  (is (= :locally-valid-and-observationally-consistent
+         (get-in report [:composed-assurance :status])))
+  (is (true? (get-in report [:composed-assurance :local-argument-valid?])))
+  (is (true? (get-in report [:composed-assurance :physical-observations-correspond?])))
+  (is (true? (get-in report [:composed-assurance :joint-evidence-consistent?])))
+  (is (= 0 (get-in report [:comparison :prestate-mismatch-count])))
+  (is (= 0 (get-in report [:comparison :poststate-mismatch-count])))
+  (is (not (contains? (:comparison report) :prestate-mismatches)))
+  (is (not (contains? (:comparison report) :poststate-mismatches)))
+  (is (false? (:certifies-physical-execution? report)))
+  (doseq [flag [:certifies-physical-execution?
+                :proves-internal-prestate?
+                :proves-general-refinement?]]
+    (is (false? (get-in report [:composed-assurance flag]))))
+  report)
+
+(deftest composed-conditional-scope-retains-all-backend-premises-test
+  (let [{:keys [composition checked undischarged-premises not-established]}
+        collector/composed-step-scope]
+    (is (= :gesso.model.tx/collected-conditional-step-v1 composition))
+    (is (contains? checked
+                   :finite-prestate-derived-from-same-physical-before-observation))
+    (is (contains? checked
+                   :local-lowering-and-predicate-argument-valid-before-submission))
+    (is (contains? checked
+                   :separate-local-and-observed-correspondence-outcomes))
+    (is (contains? undischarged-premises
+                   :concrete-transaction-internal-prestate-relates-to-abstract-prestate))
+    (doseq [unproved [:transaction-internal-prestate-attested
+                     :universal-physical-to-abstract-refinement
+                     :backend-premises-discharged-by-observational-agreement]]
+      (is (contains? not-established unproved))
+      (is (not (contains? checked unproved))))))
+
+(deftest composed-create-and-rejected-duplicate-share-collector-state-test
+  (let [req (request "composed-private-create")
+        id (:xt/id req)
+        action (plan [(command/create :requests req version)])
+        rt [:requests id]
+        committed (check-composed-report! (collect-composed! action [rt]) :committed)
+        rejected (check-composed-report! (collect-composed! action [rt]) :rejected)]
+    (is (= :document-absent
+           (get-in rejected [:comparison :failed-precondition-kind])))
+    (is (= 1 (get-in committed [:conditional-step :abstract-write-count])))
+    (is (nil? (get-in committed [:conditional-step :first-failed-assertion-index])))
+    (is (= 0 (get-in rejected [:conditional-step :first-failed-assertion-index])))
+    (is (= :xtdb/assert-failed (get-in rejected [:execution :error/code])))
+    (is (= req (physical-document :requests id)))
+    (doseq [report [committed rejected]]
+      (is (not (re-find #"composed-private-create" (pr-str report))))
+      (is (contains? (get-in report [:composed-assurance :undischarged-premises])
+                     :concrete-transaction-internal-prestate-relates-to-abstract-prestate)))))
+
+(deftest composed-authoritative-version-and-dependency-rejections-test
+  (let [req (seed! :requests (request "composed-claim"))
+        member (seed! :memberships (membership "composed-membership"))
+        rt [:requests (:xt/id req)]
+        mt [:memberships (:xt/id member)]
+        action (plan [(claim req "owner-composed")]
+                     (command/guard :memberships member version))
+        committed (check-composed-report! (collect-composed! action [rt mt]) :committed)
+        stale (check-composed-report! (collect-composed! action [rt mt]) :rejected)]
+    (is (= :command-version
+           (get-in stale [:comparison :failed-precondition-kind])))
+    (is (= "owner-composed" (:owner (physical-document :requests (:xt/id req)))))
+    (is (= 2 (:collected-target-count committed)))
+    (is (= 2 (:collected-target-count stale)))))
+
+(deftest composed-invalid-local-argument-stops-before-submission-test
+  (let [req (request "composed-local-blocked")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        actual prestate/derive-conditional-step
+        submitted (atom 0)
+        thrown (try
+                 (with-redefs
+                   [prestate/derive-conditional-step
+                    (fn [state p]
+                      (assoc (actual state p)
+                             :conditional-argument-admissible? false
+                             :failed-local-checks [:deliberately-falsified-local-check]))
+                    xt/execute-tx (fn [& _]
+                                    (swap! submitted inc)
+                                    (throw (ex-info "Unexpected submission" {})))]
+                   (collect-composed! action [rt]))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+    (is (= ::collector/invalid-local-argument
+           (:error/type (ex-data thrown))))
+    (is (= [:deliberately-falsified-local-check]
+           (get-in (ex-data thrown) [:error/details :failed-checks])))
+    (is (= 0 @submitted))
+    (is (nil? (physical-document :requests (:xt/id req))))))
+
+(deftest composed-rejects-caller-fabricated-evidence-before-io-test
+  (let [req (request "composed-injected-evidence")
+        input {:node (node)
+               :plan (plan [(command/create :requests req version)])
+               :targets [[:requests (:xt/id req)]]}
+        io (atom [])]
+    (with-redefs
+      [xt/q (fn [& _] (swap! io conj :query) nil)
+       xt/execute-tx (fn [& _] (swap! io conj :execute) nil)]
+      (doseq [extra [:reference-before :observed-before :observed-after
+                     :conditional-step :execution :recorded-tx-ops
+                     :snapshot-token :before-ledger-watermark]]
+        (is (= ::collector/invalid-input
+               (error-type #(collector/observe-and-derive-conditional!
+                             (assoc input extra :forged)))))
+        (is (empty? @io))))))
+
+(deftest composed-falsified-replayed-document-suppresses-joint-evidence-test
+  (doseq [[phase injection-read] [[:before 3] [:after 4]]]
+    (testing (name phase)
+      (let [req (request (str "composed-private-replay-" (name phase)))
+            rt [:requests (:xt/id req)]
+            actual-query xt/q
+            actual-execute xt/execute-tx
+            reads (atom 0)
+            submits (atom 0)
+            report (with-redefs
+                     [xt/q (fn [& args]
+                             (let [q (second args)
+                                   sql (if (vector? q) (first q) q)]
+                               (if (and (= 3 (count args))
+                                        (string? sql)
+                                        (.startsWith ^String sql "SELECT * FROM requests"))
+                                 (if (= injection-read (swap! reads inc))
+                                   [{:xt/id (:xt/id req) :revision 999
+                                     :created-at "secret-fabricated-observation"}]
+                                   (apply actual-query args))
+                                 (apply actual-query args))))
+                      xt/execute-tx (fn [& args]
+                                      (when (= 2 (count args))
+                                        (swap! submits inc))
+                                      (apply actual-execute args))]
+                     (collect-composed!
+                      (plan [(command/create :requests req version)]) [rt]))
+            joint (:composed-assurance report)]
+        (is (= 4 @reads))
+        (is (= 1 @submits))
+        (is (= :committed (get-in report [:execution :status])))
+        (is (true? (:conditional-argument-admissible? (:conditional-step report))))
+        (is (true? (:local-argument-valid? joint)))
+        (is (false? (get-in report [:comparison :corresponds?])))
+        (is (false? (:physical-observations-correspond? joint)))
+        (is (false? (:joint-evidence-consistent? joint)))
+        (is (= :observation-mismatch (:status joint)))
+        (is (not (contains? (:comparison report) :prestate-mismatches)))
+        (is (not (contains? (:comparison report) :poststate-mismatches)))
+        (is (not (re-find #"composed-private-replay|secret-fabricated-observation"
+                          (pr-str report))))
+        (is (= req (physical-document :requests (:xt/id req))))))))
+
+(deftest composed-falsified-ledger-replay-suppresses-joint-evidence-test
+  (let [req (request "composed-private-watermark")
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        real-execute xt/execute-tx
+        watermark-reads (atom 0)
+        submissions (atom 0)
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (let [rows (apply real-query args)]
+                           (if (= before-watermark-sql (second args))
+                             (if (= 4 (swap! watermark-reads inc))
+                               [{:xt/id (+ 2 (:xt/id (first rows)))}]
+                               rows)
+                             rows)))
+                  xt/execute-tx (fn [& args]
+                                  (when (= 2 (count args))
+                                    (swap! submissions inc))
+                                  (apply real-execute args))]
+                 (collect-composed! (plan [(command/create :requests req version)]) [rt]))]
+    (is (= 4 @watermark-reads))
+    (is (= 1 @submissions))
+    (is (true? (:conditional-argument-admissible? (:conditional-step report))))
+    (is (= :committed (get-in report [:execution :status])))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (false? (get-in report [:composed-assurance :joint-evidence-consistent?])))
+    (is (= :observation-mismatch (get-in report [:composed-assurance :status])))
+    (is (false? (get-in report [:comparison :checks
+                                :after-ledger-watermark-repeats-at-pinned-basis])))
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest composed-unknown-outcome-is-never-reclassified-or-retried-test
+  (let [req (request "composed-unknown")
+        actual-execute xt/execute-tx
+        submits (atom 0)
+        thrown (try
+                 (with-redefs
+                   [xt/execute-tx (fn [& args]
+                                    (if (= 2 (count args))
+                                      (do (swap! submits inc)
+                                          (throw (ex-info "Simulated indeterminate transport" 
+                                                          {:error/type :indeterminate})))
+                                      (apply actual-execute args)))]
+                   (collect-composed!
+                    (plan [(command/create :requests req version)])
+                    [[:requests (:xt/id req)]]))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+    (is (= 1 @submits))
+    (is (= :indeterminate (:error/type (ex-data thrown))))
+    (is (nil? (physical-document :requests (:xt/id req))))))
