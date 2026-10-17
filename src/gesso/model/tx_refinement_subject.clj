@@ -21,7 +21,7 @@
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest]
            [java.time Instant LocalDate LocalDateTime OffsetDateTime ZonedDateTime]
-           [java.util Date UUID]))
+           [java.util UUID]))
 
 (def subject-scope
   {:identity :gesso.model.tx/serial-refinement-instance-subject-v1
@@ -103,7 +103,17 @@
 ;; Canonical serialization is deliberately type tagged. Never hash `pr-str`
 ;; directly over maps/sets (iteration order is unstable); never stringify an
 ;; unknown Java object or function (often includes process-local identity).
-;; We reject such objects rather than silently mint a non-reproducible ID.
+;; Accept only known immutable scalar types. java.lang.Number is an open class:
+;; mutable implementations such as AtomicLong must not be encoded by converting
+;; them to double/string. java.util.Date and java.sql.Timestamp are mutable too,
+;; so application declarations must use immutable java.time values instead.
+;; Reject other objects rather than silently minting non-reproducible identities.
+(def ^:private integer-scalar-classes
+  #{Byte Short Integer Long java.math.BigInteger clojure.lang.BigInt})
+
+(def ^:private floating-scalar-classes
+  #{Float Double})
+
 (defn- canonical [value]
   (let [visited (volatile! 0)]
     (letfn [(encode [x depth]
@@ -124,12 +134,13 @@
                 (instance? LocalDateTime x) [:local-date-time (str x)]
                 (instance? OffsetDateTime x) [:offset-date-time (str x)]
                 (instance? ZonedDateTime x) [:zoned-date-time (str x)]
-                (instance? java.sql.Timestamp x) [:sql-timestamp (str (.toInstant ^java.sql.Timestamp x))]
-                (instance? Date x) [:legacy-date (.getTime ^Date x)]
-                (integer? x) [:integer (.getName (class x)) (str x)]
-                (ratio? x) [:ratio (str x)]
-                (instance? java.math.BigDecimal x) [:decimal (.toPlainString ^java.math.BigDecimal x)]
-                (and (number? x) (Double/isFinite (double x)))
+                (contains? integer-scalar-classes (class x))
+                [:integer (.getName (class x)) (str x)]
+                (identical? clojure.lang.Ratio (class x)) [:ratio (str x)]
+                (identical? java.math.BigDecimal (class x))
+                [:decimal (.toPlainString ^java.math.BigDecimal x)]
+                (and (contains? floating-scalar-classes (class x))
+                     (Double/isFinite (double x)))
                 [:floating (.getName (class x)) (str x)]
                 (map? x)
                 (let [entries (mapv (fn [[k v]] [(encode k (inc depth))
