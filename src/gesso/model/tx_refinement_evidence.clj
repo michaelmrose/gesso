@@ -86,7 +86,8 @@
               :independent-evidence-route-classification
               :proposal-shape-and-subject-binding
               :duplicate-and-unknown-proposal-rejection
-              :no-caller-supplied-discharge}
+              :no-caller-supplied-discharge
+              :aggregate-candidate-package-gate}
    :not-established #{:artifact-existence
                       :artifact-content-authenticity
                       :application-plan-specific-subject-binding
@@ -97,7 +98,8 @@
                       :transaction-internal-read-state-refinement
                       :any-external-premise-discharged
                       :general-xtdb-refinement
-                      :application-certification}})
+                      :application-certification
+                      :downstream-admission-consumer-enforcement}})
 
 (def instance-evidence-scope
   {:obligation :gesso.model.tx/instance-refinement-evidence-review-v1
@@ -108,7 +110,8 @@
               :declared-backend-source-and-footprint-binding
               :cross-instance-proposal-rejection
               :generic-premise-route-and-completeness-checks
-              :no-caller-supplied-discharge}
+              :no-caller-supplied-discharge
+              :aggregate-candidate-package-gate}
    :not-established #{:source-or-binary-authentication
                       :application-dependency-or-writer-completeness
                       :selected-physical-prestate-authenticity
@@ -121,7 +124,8 @@
                       :any-external-premise-discharged
                       :general-xtdb-refinement
                       :application-certification
-                      :confidentiality-of-low-entropy-digest-input}})
+                      :confidentiality-of-low-entropy-digest-input
+                      :downstream-admission-consumer-enforcement}})
 
 (defn- contract-error! [reason]
   (throw (ex-info "XTDB refinement evidence source contract changed."
@@ -211,6 +215,37 @@
      :proof-checked? false
      :discharges-premise? false}))
 
+(defn- aggregate-candidate-package
+  "Aggregate, fail-closed *candidate* readiness for independent review.
+
+   Per-premise :review-package-complete? remains a local diagnostic: it may be
+   true even if ANOTHER proposal was rejected. A downstream consumer must
+   use the aggregate decision, never a conjunction of individual completeness
+   flags. Even :complete-unverified-candidate-package is NOT verification,
+   premise discharge, application admission, or proof."
+  [requirements reviews local-valid? instance-sha]
+  (let [all-reviewable? (boolean (and (seq reviews)
+                                      (every? #(= :review-required (:status %))
+                                              reviews)))
+        all-covered? (boolean (every? :review-package-complete? requirements))
+        ready? (boolean (and local-valid? all-reviewable? all-covered?))
+        status (cond
+                 (not local-valid?) :invalid-local-argument
+                 (some #(= :rejected (:status %)) reviews) :rejected-proposals
+                 (empty? reviews) :awaiting-proposals
+                 (not all-covered?) :incomplete-candidate-package
+                 :else :complete-unverified-candidate-package)]
+    {:status status
+     :binding-scope (if instance-sha :declared-application-instance
+                         :generic-premise-catalog)
+     :all-proposals-reviewable? all-reviewable?
+     :all-premise-candidate-packages-complete? all-covered?
+     :ready-for-independent-review? ready?
+     :verified? false
+     :premises-discharged? false
+     :application-admitted? false
+     :certifies-physical-execution? false}))
+
 (defn- review*
   "Shared fail-closed review engine. instance-sha is independently recomputed
    by the entrypoint when instance binding is required."
@@ -268,6 +303,11 @@
      (boolean (and instance-sha (seq proposals) (not rejected?)
                    (= (count reviewable) (count proposals))))
      :local-argument-status (get-in ledger [:local-argument :status])
+     ;; Never infer batch admissibility from :requirements alone. A locally
+     ;; complete candidate for one premise survives unrelated rejections only
+     ;; as diagnostic information. Aggregate review must fail closed.
+     :aggregate-candidate-package
+     (aggregate-candidate-package required reviews local-valid? instance-sha)
      :requirements required
      :proposals reviews
      :reviewable-proposals (count reviewable)
