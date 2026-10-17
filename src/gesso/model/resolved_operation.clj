@@ -98,6 +98,11 @@
    ledger is excluded from application declarations and checked elsewhere.
    A matching post-state contract still cannot prove that the declared
    values represent the intended business rule.
+   These optional declarations also reject mutable Java document IDs and
+   predicate/post-state values, including legacy Date and arbitrary Number
+   subclasses. Immutable java.time values and portable persistent data are
+   admitted within bounded traversal; this is not deep runtime immutability
+   verification of application code.
 
    Optional :outcome-contract! declares one deterministic, nonempty portable
    command-result outcome from trusted invocation data before :construct!.
@@ -207,6 +212,7 @@
 (def target-contract-scope
   {:construction :gesso.model.resolved-operation/closed-document-targets-v1
    :checked #{:target-requirements-computed-before-construction
+              :immutable-recursive-declared-value-shape
               :required-and-allowed-document-target-coverage
               :independent-command-ledger-target-derived-from-binding
               :target-declarations-consistent-with-closed-table-contract
@@ -226,6 +232,7 @@
 (def predicate-contract-scope
   {:construction :gesso.model.resolved-operation/closed-exact-checks-v1
    :checked #{:predicate-requirements-computed-before-construction
+              :immutable-recursive-declared-value-shape
               :actual-guard-and-update-check-values-match-declaration
               :required-checks-present-and-undeclared-checks-rejected
               :checks-restricted-to-independently-declared-document-targets
@@ -248,6 +255,7 @@
 (def command-operation-contract-scope
   {:construction :gesso.model.resolved-operation/closed-command-operations-v1
    :checked #{:command-operation-requirements-computed-before-construction
+              :immutable-recursive-declared-value-shape
               :required-and-allowed-command-operations-match-final-plan
               :independent-binding-derived-command-ledger-create
               :all-required-domain-write-targets-have-required-operation
@@ -266,6 +274,7 @@
 (def post-state-contract-scope
   {:construction :gesso.model.resolved-operation/closed-post-state-values-v1
    :checked #{:post-state-requirements-computed-before-construction
+              :immutable-recursive-declared-value-shape
               :required-and-allowed-domain-post-state-values-match-final-plan
               :independent-binding-derived-command-ledger-excluded
               :post-state-declarations-restricted-to-registered-write-targets
@@ -494,13 +503,53 @@
                 :unexpected-write-tables extra-writes}))))
   incorporated)
 
+;; A closed construction contract must not retain caller-owned mutable objects
+;; whose value can change between the independent declaration and checking the
+;; incorporated plan. Use an intentionally narrow, recursively checked subset
+;; of immutable scalar values and persistent Clojure collections. This is a
+;; deterministic *data-shape check*, not a proof of callback purity or
+;; authenticity of the declarer's business rules.
+(def ^:private stable-contract-number-classes
+  #{Byte Short Integer Long java.math.BigInteger clojure.lang.BigInt
+    clojure.lang.Ratio java.math.BigDecimal Float Double})
+
+(defn- stable-contract-value? [value]
+  (let [visited (volatile! 0)]
+    (letfn [(stable? [x depth]
+              (vswap! visited inc)
+              (and (<= depth 64)
+                   (<= @visited 50000)
+                   (cond
+                     (or (nil? x) (boolean? x) (string? x) (keyword? x)
+                         (symbol? x) (char? x) (uuid? x)) true
+                     (contains? stable-contract-number-classes (class x))
+                     (or (not (#{Float Double} (class x)))
+                         (Double/isFinite (double x)))
+                     (or (instance? java.time.Instant x)
+                         (instance? java.time.LocalDate x)
+                         (instance? java.time.LocalTime x)
+                         (instance? java.time.LocalDateTime x)
+                         (instance? java.time.OffsetDateTime x)
+                         (instance? java.time.ZonedDateTime x)
+                         (instance? java.time.OffsetTime x)
+                         (instance? java.time.Duration x)
+                         (instance? java.time.Period x)) true
+                     (vector? x) (every? #(stable? % (inc depth)) x)
+                     (list? x) (every? #(stable? % (inc depth)) x)
+                     (set? x) (every? #(stable? % (inc depth)) x)
+                     (map? x) (and (every? #(stable? % (inc depth)) (keys x))
+                                   (every? #(stable? % (inc depth)) (vals x)))
+                     :else false)))]
+      (stable? value 0))))
+
 (defn- target-set? [targets]
   (and (set? targets)
        (every? (fn [target]
                  (and (vector? target)
                       (= 2 (count target))
                       (keyword? (first target))
-                      (some? (second target))))
+                      (some? (second target))
+                      (stable-contract-value? (second target))))
                targets)))
 
 (defn- require-target-contract! [declared table-contract binding]
@@ -566,7 +615,9 @@
                       (keyword? (nth check 0))
                       (some? (nth check 1))
                       (keyword? (nth check 2))
-                      (some? (nth check 3))))
+                      (some? (nth check 3))
+                      (stable-contract-value? (nth check 1))
+                      (stable-contract-value? (nth check 3))))
                checks)))
 
 (defn- check-targets [checks]
@@ -645,6 +696,7 @@
                       (= 3 (count entry))
                       (keyword? (nth entry 0))
                       (some? (nth entry 1))
+                      (stable-contract-value? (nth entry 1))
                       (keyword? (nth entry 2))))
                operations)))
 
@@ -708,7 +760,9 @@
                       (= 4 (count tuple))
                       (keyword? (nth tuple 0))
                       (some? (nth tuple 1))
-                      (keyword? (nth tuple 2))))
+                      (stable-contract-value? (nth tuple 1))
+                      (keyword? (nth tuple 2))
+                      (stable-contract-value? (nth tuple 3))))
                values)))
 
 (defn- unique-post-state-fields? [tuples]
