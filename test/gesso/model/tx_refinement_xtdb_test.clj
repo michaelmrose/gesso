@@ -17,7 +17,9 @@
    diagnostics attest a production submission or certify physical refinement.
    Ledger-window regressions additionally check phase-local ledger ceilings,
    transaction-ID adjacency, detected intervening writes, and explicitly
-   unverifiable isolation assumptions."
+   unverifiable isolation assumptions. The v1017 opt-in repeatable-window
+   regressions replay the exact snapshot-token and clock for both phases,
+   and test false replay evidence without resubmitting the transaction."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
@@ -1333,4 +1335,246 @@
         (is (= ::collector/invalid-input
                (error-type #(collector/observe-and-compare-ledger-window!
                              (assoc base field :untrusted)))))
+        (is (empty? @calls))))))
+
+;; v1017: Repeated physical observations are checked only at the EXACT
+;; originally acquired {:snapshot-token ... :current-time ...} pair. No
+;; production receipt or transaction-internal read basis is inferred from a
+;; passing replay, and none of these tests supplies production evidence.
+
+(def ^:private repeat-check-keys
+  #{:before-documents-repeat-at-pinned-basis
+    :after-documents-repeat-at-pinned-basis
+    :before-ledger-watermark-repeats-at-pinned-basis
+    :after-ledger-watermark-repeats-at-pinned-basis})
+
+(defn- collect-repeatable! [a-plan targets]
+  (collector/observe-and-compare-repeatable-window!
+   {:node (node) :plan a-plan :targets targets}))
+
+(defn- check-repeatable-report! [report status]
+  (is (= status (get-in report [:execution :status])))
+  (is (true? (get-in report [:comparison :corresponds?]))
+      (pr-str (get-in report [:comparison :checks])))
+  (is (every? true? (vals (select-keys (get-in report [:comparison :checks])
+                                      (into window-check-keys repeat-check-keys)))))
+  (is (= :direct-controlled-xtdb-repeatable-ledger-window-observation
+         (:evidence-kind report)))
+  (is (= :gesso.model.tx/direct-xtdb-repeatable-ledger-window-v1
+         (get-in report [:collection-scope :collector])))
+  (is (true? (:transaction-ledger-matches? report)))
+  (is (integer? (:physical-tx-id report)))
+  (is (false? (:certifies-physical-execution? report)))
+  (is (false? (get-in report [:comparison :certifies-physical-execution?])))
+  (is (not-any? #(contains? report %)
+                [:node :plan :tx-key :snapshot-token :system-time
+                 :recorded-tx-ops :observed-before :observed-after
+                 :reference-before :before-ledger-watermark
+                 :after-ledger-watermark]))
+  report)
+
+(deftest repeatable-window-scope-explicitly-excludes-general-refinement-test
+  (let [{:keys [collector collected assumed not-established]}
+        collector/repeatable-ledger-window-collection-scope]
+    (is (= :gesso.model.tx/direct-xtdb-repeatable-ledger-window-v1 collector))
+    (doseq [fact [:before-document-replay-at-identical-basis
+                 :after-document-replay-at-identical-basis
+                 :before-ledger-watermark-replay-at-identical-basis
+                 :after-ledger-watermark-replay-at-identical-basis]]
+      (is (contains? collected fact)))
+    (is (contains? assumed :exclusive-control-of-tracked-documents-during-collection))
+    (doseq [not-proven [:transaction-internal-read-basis-attested
+                       :all-possible-replays-are-repeatable
+                       :concurrent-writers-are-excluded
+                       :retroactive-basis-clock-rebinding-safe
+                       :general-xtdb-step-refinement
+                       :authenticated-physical-submission-receipt]]
+      (is (contains? not-established not-proven))
+      (is (not (contains? collected not-proven))))))
+
+(deftest repeatable-window-commit-and-stale-retry-correspond-test
+  (let [req (seed! :requests (request "repeatable-claim"))
+        rt [:requests (:xt/id req)]
+        action (plan [(claim req "repeatable-helper")])
+        accepted (check-repeatable-report! (collect-repeatable! action [rt]) :committed)
+        rejected (check-repeatable-report! (collect-repeatable! action [rt]) :rejected)]
+    (is (< (:physical-tx-id accepted) (:physical-tx-id rejected)))
+    (is (= :xtdb/assert-failed (get-in rejected [:execution :error/code])))
+    (is (= :command-version
+           (get-in rejected [:comparison :failed-precondition-kind])))
+    (is (= "repeatable-helper" (:owner (physical-document :requests (:xt/id req)))))))
+
+(deftest repeatable-window-create-and-duplicate-rejection-correspond-test
+  (let [req (request "repeatable-create")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        accepted (check-repeatable-report! (collect-repeatable! action [rt]) :committed)
+        rejected (check-repeatable-report! (collect-repeatable! action [rt]) :rejected)]
+    (is (< (:physical-tx-id accepted) (:physical-tx-id rejected)))
+    (is (= :document-absent
+           (get-in rejected [:comparison :failed-precondition-kind])))
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest repeatable-window-reuses-both-complete-phase-bases-test
+  (let [req (request "repeatable-bases")
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        real-execute xt/execute-tx
+        basis-calls (atom [])
+        document-calls (atom [])
+        watermark-calls (atom [])
+        submit-count (atom 0)
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (when (= 2 (count args))
+                           (when (= "SHOW SNAPSHOT_TOKEN" (second args))
+                             (swap! basis-calls conj :captured)))
+                         (when (= 3 (count args))
+                           (let [q (second args)
+                                 basis (nth args 2)]
+                             (when (and (vector? q)
+                                        (string? (first q))
+                                        (.startsWith ^String (first q) "SELECT * FROM requests"))
+                               (swap! document-calls conj basis))
+                             (when (= before-watermark-sql q)
+                               (swap! watermark-calls conj basis))))
+                         (apply real-query args))
+                  xt/execute-tx (fn [& args]
+                                  (when (= 2 (count args))
+                                    (swap! submit-count inc))
+                                  (apply real-execute args))]
+                 (collect-repeatable! (plan [(command/create :requests req version)]) [rt]))
+        [before-doc after-doc before-repeat after-repeat] @document-calls
+        [before-mark after-mark before-mark-repeat after-mark-repeat] @watermark-calls]
+    (check-repeatable-report! report :committed)
+    (is (= 2 (count @basis-calls)) "Replays must not acquire newer phase bases.")
+    (is (= 1 @submit-count))
+    (is (= 4 (count @document-calls)))
+    (is (= 4 (count @watermark-calls)))
+    (is (= before-doc before-repeat before-mark before-mark-repeat))
+    (is (= after-doc after-repeat after-mark after-mark-repeat))
+    (is (not= before-doc after-doc))
+    (is (= #{:snapshot-token :current-time} (set (keys before-doc))))
+    (is (= #{:snapshot-token :current-time} (set (keys after-doc))))
+    (is (string? (:snapshot-token before-doc)))
+    (is (string? (:snapshot-token after-doc)))
+    (is (:current-time before-doc))
+    (is (:current-time after-doc))))
+
+(deftest repeatable-window-detects-falsified-document-replays-without-retry-test
+  (doseq [[phase falsified-n] [[:before 3] [:after 4]]]
+    (testing (name phase)
+      (let [req (request (str "repeatable-forged-" (name phase)))
+            rt [:requests (:xt/id req)]
+            real-query xt/q
+            real-execute xt/execute-tx
+            reads (atom 0)
+            submissions (atom 0)
+            report (with-redefs
+                     [xt/q (fn [& args]
+                             (let [query (second args)
+                                   sql (if (vector? query) (first query) query)]
+                               (if (and (= 3 (count args))
+                                        (string? sql)
+                                        (.startsWith ^String sql "SELECT * FROM requests"))
+                                 (if (= falsified-n (swap! reads inc))
+                                   [{:xt/id (:xt/id req) :revision 999 :created-at "fabricated"}]
+                                   (apply real-query args))
+                                 (apply real-query args))))
+                      xt/execute-tx (fn [& args]
+                                      (when (= 2 (count args))
+                                        (swap! submissions inc))
+                                      (apply real-execute args))]
+                     (collect-repeatable! (plan [(command/create :requests req version)]) [rt]))
+            checks (get-in report [:comparison :checks])]
+        (is (= 4 @reads))
+        (is (= 1 @submissions))
+        (is (= :committed (get-in report [:execution :status])))
+        (is (= (not= phase :before)
+               (:before-documents-repeat-at-pinned-basis checks)))
+        (is (= (not= phase :after)
+               (:after-documents-repeat-at-pinned-basis checks)))
+        (is (every? true? (vals (select-keys checks window-check-keys))))
+        (is (false? (get-in report [:comparison :corresponds?])))
+        (is (false? (:certifies-physical-execution? report)))
+        (is (= req (physical-document :requests (:xt/id req))))))))
+
+(deftest repeatable-window-detects-falsified-ledger-replay-without-retry-test
+  (doseq [[phase falsified-n check-key]
+          [[:before 3 :before-ledger-watermark-repeats-at-pinned-basis]
+           [:after 4 :after-ledger-watermark-repeats-at-pinned-basis]]]
+    (testing (name phase)
+      (let [req (request (str "repeatable-watermark-" (name phase)))
+            rt [:requests (:xt/id req)]
+            real-query xt/q
+            real-execute xt/execute-tx
+            calls (atom 0)
+            submissions (atom 0)
+            report (with-redefs
+                     [xt/q (fn [& args]
+                             (let [rows (apply real-query args)]
+                               (if (= before-watermark-sql (second args))
+                                 (if (= falsified-n (swap! calls inc))
+                                   [{:xt/id (+ 2 (:xt/id (first rows)))}]
+                                   rows)
+                                 rows)))
+                      xt/execute-tx (fn [& args]
+                                      (when (= 2 (count args))
+                                        (swap! submissions inc))
+                                      (apply real-execute args))]
+                     (collect-repeatable! (plan [(command/create :requests req version)]) [rt]))
+            checks (get-in report [:comparison :checks])]
+        (is (= 4 @calls))
+        (is (= 1 @submissions))
+        (is (true? (:before-documents-repeat-at-pinned-basis checks)))
+        (is (true? (:after-documents-repeat-at-pinned-basis checks)))
+        (is (false? (get checks check-key)))
+        (is (true? (get checks (if (= phase :before)
+                                 :after-ledger-watermark-repeats-at-pinned-basis
+                                 :before-ledger-watermark-repeats-at-pinned-basis))))
+        (is (false? (get-in report [:comparison :corresponds?])))
+        (is (= req (physical-document :requests (:xt/id req))))))))
+
+(deftest repeatable-window-malformed-before-ledger-replay-never-resubmits-test
+  (let [req (request "repeatable-malformed-replay")
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        real-execute xt/execute-tx
+        watermark-reads (atom 0)
+        submissions (atom 0)
+        thrown (try
+                 (with-redefs
+                   [xt/q (fn [& args]
+                           (if (and (= before-watermark-sql (second args))
+                                    (= 3 (swap! watermark-reads inc)))
+                             [{:xt/id "not-an-id"}]
+                             (apply real-query args)))
+                    xt/execute-tx (fn [& args]
+                                    (when (= 2 (count args))
+                                      (swap! submissions inc))
+                                    (apply real-execute args))]
+                   (collect-repeatable! (plan [(command/create :requests req version)]) [rt]))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+    (is (= ::collector/invalid-before-ledger-watermark
+           (:error/type (ex-data thrown))))
+    (is (= 3 @watermark-reads))
+    (is (= 1 @submissions))
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest repeatable-window-rejects-caller-evidence-before-any-physical-io-test
+  (let [req (request "repeatable-reject-evidence")
+        base {:node (node)
+              :plan (plan [(command/create :requests req version)])
+              :targets [[:requests (:xt/id req)]]}
+        calls (atom [])]
+    (with-redefs [xt/q (fn [& _] (swap! calls conj :query) nil)
+                  xt/execute-tx (fn [& _] (swap! calls conj :submit) nil)]
+      (doseq [extra [:observed-before :observed-after :reference-before
+                     :before-ledger-watermark :after-ledger-watermark
+                     :tx-key :recorded-tx-ops :execution :snapshot-token
+                     :current-time]]
+        (is (= ::collector/invalid-input
+               (error-type #(collector/observe-and-compare-repeatable-window!
+                             (assoc base extra :forged)))))
         (is (empty? @calls))))))
