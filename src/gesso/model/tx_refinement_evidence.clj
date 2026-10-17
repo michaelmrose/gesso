@@ -16,7 +16,8 @@
    status could change."
   (:require [clojure.set :as set]
             [clojure.string :as str]
-            [gesso.model.tx-refinement-premises :as premises]))
+            [gesso.model.tx-refinement-premises :as premises]
+            [gesso.model.tx-refinement-subject :as instance-subject]))
 
 ;; A route specifies ALTERNATIVE sets of *required* evidence kinds. A route
 ;; containing a two-element set requires BOTH pieces; having either alone is
@@ -75,6 +76,9 @@
   #{:premise-id :evidence-kind :subject :artifact-sha256
     :claimed-issuer :artifact-version})
 
+(def ^:private instance-proposal-keys
+  (conj proposal-keys :instance-subject-sha256))
+
 (def evidence-scope
   {:obligation :gesso.model.tx/refinement-evidence-review-v1
    :premise-source :gesso.model.tx/serial-refinement-premise-ledger-v1
@@ -94,6 +98,30 @@
                       :any-external-premise-discharged
                       :general-xtdb-refinement
                       :application-certification}})
+
+(def instance-evidence-scope
+  {:obligation :gesso.model.tx/instance-refinement-evidence-review-v1
+   :premise-source (:premise-source evidence-scope)
+   :subject-source (:identity instance-subject/subject-scope)
+   :checked #{:exact-instance-proposal-shape
+              :freshly-derived-plan-and-prestate-subject
+              :declared-backend-source-and-footprint-binding
+              :cross-instance-proposal-rejection
+              :generic-premise-route-and-completeness-checks
+              :no-caller-supplied-discharge}
+   :not-established #{:source-or-binary-authentication
+                      :application-dependency-or-writer-completeness
+                      :selected-physical-prestate-authenticity
+                      :artifact-existence-or-authenticity
+                      :issuer-authentication
+                      :independent-proof-validation
+                      :backend-contract-admission
+                      :physical-execution-attestation
+                      :transaction-internal-read-state-refinement
+                      :any-external-premise-discharged
+                      :general-xtdb-refinement
+                      :application-certification
+                      :confidentiality-of-low-entropy-digest-input}})
 
 (defn- contract-error! [reason]
   (throw (ex-info "XTDB refinement evidence source contract changed."
@@ -136,9 +164,14 @@
 (defn- nonblank-string? [x]
   (and (string? x) (<= 1 (count x) 256) (not (str/blank? x))))
 
-(defn- well-formed-proposal? [proposal]
+(defn- well-formed-proposal? [proposal instance-sha]
   (and (map? proposal)
-       (= proposal-keys (set (keys proposal)))
+       (= (if instance-sha instance-proposal-keys proposal-keys)
+          (set (keys proposal)))
+       (or (nil? instance-sha)
+           (and (string? (:instance-subject-sha256 proposal))
+                (boolean (re-matches #"[0-9a-f]{64}"
+                                     (:instance-subject-sha256 proposal)))))
        (keyword? (:premise-id proposal))
        (keyword? (:evidence-kind proposal))
        (keyword? (:subject proposal))
@@ -148,16 +181,19 @@
        (nonblank-string? (:artifact-version proposal))))
 
 (defn- review-one
-  [by-id subject seen index proposal]
+  [by-id subject instance-sha seen index proposal]
   (let [id (:premise-id proposal)
         premise (get by-id id)
         kind (:evidence-kind proposal)
-        valid? (well-formed-proposal? proposal)
+        valid? (well-formed-proposal? proposal instance-sha)
         token (when valid? [id kind (:artifact-sha256 proposal)])
         reason (cond
                  (not valid?) :malformed-proposal
                  (nil? premise) :unknown-premise
                  (not= subject (:subject proposal)) :wrong-formal-subject
+                 (and instance-sha
+                      (not= instance-sha (:instance-subject-sha256 proposal)))
+                 :wrong-instance-subject
                  (not (some #(contains? % kind)
                             (get routes (:discharge-route premise))))
                  :incompatible-evidence-kind
@@ -175,26 +211,10 @@
      :proof-checked? false
      :discharges-premise? false}))
 
-(defn review-evidence
-  "Review untrusted evidence *proposals* against a freshly derived premise ledger.
-
-   `proposals` must be a vector of at most 64 maps with exactly these keys:
-     :premise-id       an existing open premise id
-     :evidence-kind    a route-compatible candidate type
-     :subject          the generic premise-ledger subject id (NOT plan-specific)
-     :artifact-sha256  64 lowercase hexadecimal characters (claimed only)
-     :claimed-issuer   nonblank string (unverified identity)
-     :artifact-version nonblank string (unverified version)
-
-   A digest is a caller-supplied label, NOT an authenticated content hash;
-   this function does not retrieve artifacts or verify issuers or proofs.
-   Every external premise stays :undischarged. The result reports whether
-   proposals merit independent review, not whether they constitute proof.
-   The subject identifier is intentionally ONLY the generic premise-catalog
-   identity. It does not bind an artifact to a particular transaction, plan,
-   application, dependency closure, or backend build; that work remains open.
-   No XTDB I/O occurs. Sensitive proposal fields are never returned."
-  [abstract-state plan proposals]
+(defn- review*
+  "Shared fail-closed review engine. instance-sha is independently recomputed
+   by the entrypoint when instance binding is required."
+  [abstract-state plan proposals instance-sha]
   (when-not (and (vector? proposals) (<= (count proposals) 64))
     (throw (ex-info "Expected a bounded vector of XTDB evidence proposals."
                     {:error/type ::invalid-proposals})))
@@ -207,8 +227,8 @@
                   (if (= index (count proposals))
                     result
                     (let [proposal (nth proposals index)
-                          review (review-one by-id subject seen index proposal)
-                          token (when (well-formed-proposal? proposal)
+                          review (review-one by-id subject instance-sha seen index proposal)
+                          token (when (well-formed-proposal? proposal instance-sha)
                                   [(:premise-id proposal)
                                    (:evidence-kind proposal)
                                    (:artifact-sha256 proposal)])]
@@ -237,14 +257,16 @@
                             (boolean (some #(set/subset? % proposed) alternatives))
                             :status :undischarged}))
                        ps)]
-    {:obligation (:obligation evidence-scope)
+    {:obligation (:obligation (if instance-sha instance-evidence-scope evidence-scope))
      :status (cond
                (not local-valid?) :invalid-local-argument
                rejected? :invalid-evidence-proposals
                (empty? proposals) :awaiting-independent-evidence
                :else :independent-review-required)
      :subject subject
-     :plan-specific-subject-bound? false
+     :plan-specific-subject-bound?
+     (boolean (and instance-sha (seq proposals) (not rejected?)
+                   (= (count reviewable) (count proposals))))
      :local-argument-status (get-in ledger [:local-argument :status])
      :requirements required
      :proposals reviews
@@ -255,4 +277,55 @@
      :backend-contract-admitted? false
      :general-refinement-proved? false
      :certifies-physical-execution? false
-     :scope evidence-scope}))
+     :scope (if instance-sha instance-evidence-scope evidence-scope)}))
+
+(defn review-evidence
+  "Review untrusted evidence *proposals* against a freshly derived premise ledger.
+
+   `proposals` must be a vector of at most 64 maps with exactly these keys:
+     :premise-id       an existing open premise id
+     :evidence-kind    a route-compatible candidate type
+     :subject          the generic premise-ledger subject id (NOT plan-specific)
+     :artifact-sha256  64 lowercase hexadecimal characters (claimed only)
+     :claimed-issuer   nonblank string (unverified identity)
+     :artifact-version nonblank string (unverified version)
+
+   A digest is a caller-supplied label, NOT an authenticated content hash;
+   this function does not retrieve artifacts or verify issuers or proofs.
+   Every external premise stays :undischarged. The result reports whether
+   proposals merit independent review, not whether they constitute proof.
+   The subject identifier is intentionally ONLY the generic premise-catalog
+   identity. It does not bind an artifact to a particular transaction, plan,
+   application, dependency closure, or backend build; that work remains open.
+   No XTDB I/O occurs. Sensitive proposal fields are never returned."
+  [abstract-state plan proposals]
+  (review* abstract-state plan proposals nil))
+
+(defn review-instance-evidence
+  "Review proposals bound to ONE selected transaction, abstract prestate and
+   supplied environment. The additional required proposal key is
+   :instance-subject-sha256, computed independently using
+   tx-refinement-subject/derive-subject on the same three arguments. The
+   ordinary :subject must still identify the generic premise catalog.
+
+   Mismatched, omitted, malformed or extra instance binding is rejected and
+   contributes no candidate evidence toward package completeness. The
+   instance digest is NOT included in this report to avoid unnecessarily
+   exposing a potentially guessable identifier derived from private state.
+   The digest and declared source/backend/writer descriptors are *unattested*
+   caller declarations. No issuer, artifact, premise or backend assertion
+   is authenticated, independently verified, discharged or certified."
+  [abstract-state plan environment proposals]
+  (when-not (and (vector? proposals) (<= (count proposals) 64))
+    (throw (ex-info "Expected a bounded vector of XTDB evidence proposals."
+                    {:error/type ::invalid-proposals})))
+  (let [computed (instance-subject/derive-subject abstract-state plan environment)
+        instance-sha (:subject-sha256 computed)
+        report (review* abstract-state plan proposals instance-sha)]
+    (assoc report
+           :binding-granularity (:binding-granularity computed)
+           :instance-identity (:identity computed)
+           :instance-subject-derived? true
+           :instance-declarations-authenticated? false
+           :application-dependencies-proved-complete? false
+           :instance-evidence-verified? false)))
