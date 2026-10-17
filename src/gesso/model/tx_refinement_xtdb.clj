@@ -44,6 +44,7 @@
    [gesso.model.tx :as tx]
    [gesso.model.tx-model :as model]
    [gesso.model.tx-refinement :as refinement]
+   [gesso.model.tx-refinement-prestate :as prestate]
    [xtdb.api :as xt])
   (:import [java.time Instant]))
 
@@ -318,6 +319,60 @@
              {:phase phase
               :row-count (when (sequential? rows) (count rows))}))))
 
+(def composed-step-scope
+  "Local step derivation and physical collection are performed in ONE controlled
+   execution.  Only the captured physical before-read is used as the finite
+   prestate.  Agreement of both diagnostics is still conditional on all named
+   backend and collection premises; it is never a certification or an internal
+   snapshot witness.  No application author supplies a second specification."
+  {:composition :gesso.model.tx/collected-conditional-step-v1
+   :checked #{:finite-prestate-derived-from-same-physical-before-observation
+              :local-lowering-and-predicate-argument-valid-before-submission
+              :direct-physical-submission-and-repeatable-window-observation
+              :separate-local-and-observed-correspondence-outcomes}
+   :undischarged-premises
+   (set/union (:undischarged-premises prestate/conditional-step-scope)
+              (:assumed repeatable-ledger-window-collection-scope))
+   :not-established
+   (set/union (:not-established prestate/conditional-step-scope)
+              (:not-established repeatable-ledger-window-collection-scope)
+              #{:backend-premises-discharged-by-observational-agreement
+                :transaction-internal-prestate-attested
+                :universal-physical-to-abstract-refinement})})
+
+(defn- combine-conditional-observations
+  "Do NOT infer physical correctness from a well-formed local conditional.
+   Inconsistent physical observations suppress joint agreement."
+  [report conditional]
+  (let [observed? (true? (get-in report [:comparison :corresponds?]))
+        local? (true? (:conditional-argument-admissible? conditional))
+        joint? (and local? observed?)]
+    (-> report
+        ;; The original observation comparison identifies targets by their
+        ;; private IDs.  The composed report exposes only mismatch counts.
+        (update :comparison
+                (fn [comparison]
+                  (-> comparison
+                      (assoc :prestate-mismatch-count
+                             (count (:prestate-mismatches comparison))
+                             :poststate-mismatch-count
+                             (count (:poststate-mismatches comparison)))
+                      (dissoc :prestate-mismatches :poststate-mismatches))))
+        (assoc :conditional-step conditional
+               :composed-assurance
+               {:status (if joint?
+                          :locally-valid-and-observationally-consistent
+                          :observation-mismatch)
+                :local-argument-valid? local?
+                :physical-observations-correspond? observed?
+                :joint-evidence-consistent? joint?
+                :undischarged-premises (:undischarged-premises composed-step-scope)
+                :not-established (:not-established composed-step-scope)
+                :scope composed-step-scope
+                :certifies-physical-execution? false
+                :proves-internal-prestate? false
+                :proves-general-refinement? false}))))
+
 (defn- collect-step!
   "Execute one admitted finite transaction on a CONTROLLED XTDB node.
 
@@ -345,10 +400,11 @@
    collection scope. For unknown outcomes the exception propagates instead
    of returning a misleading comparison or attempting reconciliation."
   [input ledger-mode]
-  (let [ledger? (not= :none ledger-mode)
-        replay? (= :repeatable-window ledger-mode)
-        window? (contains? #{:window :repeatable-window} ledger-mode)
-        bracketed? (contains? #{:bracketed :window :repeatable-window} ledger-mode)
+  (let [composed? (= :composed-repeatable-window ledger-mode)
+        ledger? (not= :none ledger-mode)
+        replay? (contains? #{:repeatable-window :composed-repeatable-window} ledger-mode)
+        window? (contains? #{:window :repeatable-window :composed-repeatable-window} ledger-mode)
+        bracketed? (contains? #{:bracketed :window :repeatable-window :composed-repeatable-window} ledger-mode)
         {:keys [node plan targets]} (require-input! input)
         plan (model/admitted-plan plan)
         targets (refinement/require-targets targets)
@@ -369,6 +425,16 @@
                                     (ledger-watermark! node (:basis before) :before))
           reference-before (refinement/observation-state
                             targets (:documents before))
+          ;; The conditional argument is derived from EXACTLY these physical
+          ;; before-reads, not a second caller-supplied state or later query.
+          ;; If its local proof checks fail, do not submit a transaction.
+          conditional (when composed?
+                        (prestate/derive-conditional-step reference-before plan))
+          _ (when (and composed?
+                       (not (:conditional-argument-admissible? conditional)))
+              (fail! ::invalid-local-argument
+                     "Local conditional checks failed before physical submission."
+                     {:failed-checks (:failed-local-checks conditional)}))
           {:keys [execution tx-key]} (execute-definitively! node operations)
           ;; A ledger-linked request must have a definite physical identity.
           ;; If absent after the submission, fail rather than fabricate a
@@ -428,7 +494,7 @@
                             bracket-checks
                             window-checks
                             replay-checks)]
-          (-> base-report
+          (cond-> (-> base-report
               (assoc :comparison
                      (assoc comparison
                             :checks checks
@@ -444,7 +510,8 @@
                                       replay? :direct-controlled-xtdb-repeatable-ledger-window-observation
                                       window? :direct-controlled-xtdb-ledger-window-observation
                                       bracketed? :direct-controlled-xtdb-ledger-bracketed-observation
-                                      :else :direct-controlled-xtdb-ledger-linked-observation))))))))
+                                      :else :direct-controlled-xtdb-ledger-linked-observation)))
+            composed? (combine-conditional-observations conditional)))))))
 
 (defn observe-and-compare!
   "Original v1006 diagnostic API. Pin the two observation phases, submit once,
@@ -519,3 +586,21 @@
    The input remains exactly {:node ... :plan ... :targets ...}."
   [input]
   (collect-step! input :repeatable-window))
+
+(defn observe-and-derive-conditional!
+  "Opt-in ONE-execution composition of the v1025 conditional step argument
+   with the v1016 repeatable-window XTDB comparison. Takes exactly
+   {:node ... :plan ... :targets ...}; the finite prestate is derived from the
+   collector's OWN pinned physical before-read. Local checks are performed
+   BEFORE submitting the canonical XTDB transaction and fail closed if invalid.
+   Execute-tx is called at most once; unknown outcomes propagate unchanged.
+
+   The returned :conditional-step and :comparison remain separate and are
+   joined only as :composed-assurance/:joint-evidence-consistent?.  This flag
+   asserts observed agreement of two bounded checks, NOT backend truth,
+   independent SQL equivalence, an internal transaction snapshot, or proof.
+   All still-needed backend and controlled-database premises remain named.
+   Mismatched private target identities are redacted in this opt-in report.
+   This is an active diagnostic; never use as production claim processing."
+  [input]
+  (collect-step! input :composed-repeatable-window))
