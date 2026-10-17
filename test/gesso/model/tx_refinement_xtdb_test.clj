@@ -327,3 +327,205 @@
              error))))
     (is (= 1 @submission-count))
     (is (= original (physical-document :requests (:xt/id req))))))
+
+;; v1008's snapshot-pinned collection is deliberately narrower than a
+;; transaction-internal snapshot guarantee. These checks exercise actual XTDB
+;; query options and adversarial cross-phase changes, not merely the collector's
+;; declared scope map.
+
+(deftest pinned-basis-is-reused-within-each-physical-phase-test
+  (let [req (seed! :requests (request "pin-basis-request"))
+        member (seed! :memberships (membership "pin-basis-member"))
+        rt [:requests (:xt/id req)]
+        mt [:memberships (:xt/id member)]
+        original-query xt/q
+        calls (atom [])
+        action (plan [(claim req "pin-helper")]
+                     (command/guard :memberships member version))
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (let [query (second args)]
+                           ;; xt/q's 2-arity delegates to its 3-arity.
+                           ;; Count the physical query only at that boundary.
+                           (when (= 3 (count args))
+                             (swap! calls conj
+                                    (if (= "SHOW SNAPSHOT_TOKEN" query)
+                                      {:kind :basis}
+                                      {:kind :read
+                                       :query query
+                                       :options (nth args 2)})))
+                           (apply original-query args)))]
+                 (collect! action [rt mt]))
+        [basis-1 before-1 before-2 basis-2 after-1 after-2] @calls
+        before-basis (:options before-1)
+        after-basis (:options after-1)]
+    (check-report! report :committed)
+    (is (= [:basis :read :read :basis :read :read]
+           (mapv :kind @calls)))
+    (is (= :basis (:kind basis-1)))
+    (is (= :basis (:kind basis-2)))
+    (is (= before-basis (:options before-2)))
+    (is (= after-basis (:options after-2)))
+    (is (= #{:snapshot-token :current-time} (set (keys before-basis))))
+    (is (= #{:snapshot-token :current-time} (set (keys after-basis))))
+    (is (string? (:snapshot-token before-basis)))
+    (is (seq (:snapshot-token before-basis)))
+    (is (instance? java.time.Instant (:current-time before-basis)))
+    (is (instance? java.time.Instant (:current-time after-basis)))
+    (is (not= (:snapshot-token before-basis)
+              (:snapshot-token after-basis)))
+    (is (= :separate-pinned-before-and-after-phases
+           (:observation-basis report)))
+    (is (contains? (get-in report [:collection-scope :collected])
+                   :phase-local-pinned-snapshot-token-and-clock))
+    (is (contains? (get-in report [:collection-scope :not-established])
+                   :transaction-internal-snapshot-equals-observed-prestate))
+    (is (contains? (get-in report [:collection-scope :not-established])
+                   :same-snapshot-for-before-and-after-phases))))
+
+(deftest missing-or-malformed-before-snapshot-token-fails-before-submission-test
+  (let [req (request "pin-invalid-before")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        invalid-rows [nil [] {} [{}] [{:snapshot-token nil}]
+                      [{:snapshot-token ""}] [{:snapshot-token 17}]
+                      [{:snapshot-token "one"} {:snapshot-token "two"}]]]
+    (doseq [rows invalid-rows]
+      (let [calls (atom [])]
+        (with-redefs [xt/q (fn [& args]
+                             ;; This stub returns immediately at the public
+                             ;; 2-arity, so no inner 3-arity query is issued.
+                             (swap! calls conj [:query (second args)])
+                             rows)
+                      xt/execute-tx (fn [& _]
+                                      (swap! calls conj [:submit])
+                                      (throw (ex-info "unexpected submission" {})))]
+          (is (= ::collector/missing-snapshot-token
+                 (error-type #(collect! action [rt])))
+              (str "Invalid basis shape should fail closed: " (pr-str rows)))
+          (is (= [[:query "SHOW SNAPSHOT_TOKEN"]] @calls)
+              "No target read or transaction may follow a malformed basis."))))
+    (is (nil? (physical-document :requests (:xt/id req))))))
+
+(deftest unavailable-after-snapshot-does-not-turn-commit-into-rejection-test
+  (let [req (request "pin-invalid-after")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        original-query xt/q
+        original-execute xt/execute-tx
+        basis-count (atom 0)
+        submissions (atom 0)
+        failure
+        (try
+          (with-redefs [xt/q (fn [& args]
+                               (if (and (= 3 (count args))
+                                        (= "SHOW SNAPSHOT_TOKEN" (second args))
+                                        (= 2 (swap! basis-count inc)))
+                                 [{:snapshot-token nil}]
+                                 (apply original-query args)))
+                        xt/execute-tx (fn [& args]
+                                        (when (= 3 (count args))
+                                          (swap! submissions inc))
+                                        (apply original-execute args))]
+            (collect! action [rt]))
+          nil
+          (catch clojure.lang.ExceptionInfo error error))]
+    (is (= ::collector/missing-snapshot-token
+           (:error/type (ex-data failure))))
+    (is (= 2 @basis-count))
+    (is (= 1 @submissions) "A committed command must never be resubmitted.")
+    (is (= req (physical-document :requests (:xt/id req)))
+        "The physical commit happened despite the failed post-observation.")))
+
+(deftest pinned-before-phase-does-not-conceal-cross-phase-interference-test
+  (let [req (seed! :requests (request "pin-mid-read-request"))
+        spectator (seed! :memberships (membership "pin-mid-read-member"))
+        rt [:requests (:xt/id req)]
+        st [:memberships (:xt/id spectator)]
+        original-query xt/q
+        original-execute xt/execute-tx
+        injected? (atom false)
+        member-reads (atom [])
+        changed-member (advance spectator {:active false})
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (let [query (second args)
+                               rows (apply original-query args)]
+                           ;; Mutate after the first target was read, but before
+                           ;; the second target is read from the pinned basis.
+                           (when (and (vector? query)
+                                      (= (:xt/id req) (second query))
+                                      (compare-and-set! injected? false true))
+                             (original-execute (node)
+                                               [[:put-docs :memberships changed-member]]))
+                           (when (and (vector? query)
+                                      (= (:xt/id spectator) (second query)))
+                             (swap! member-reads conj (first rows)))
+                           rows))]
+                 (collect! (plan [(claim req "mid-read-helper")]) [rt st]))]
+    (is @injected?)
+    (is (= [spectator changed-member] @member-reads)
+        "The pinned before-phase sees the old member; the later phase sees the write.")
+    (is (= :committed (get-in report [:execution :status])))
+    (is (true? (get-in report [:comparison :checks :prestate])))
+    (is (false? (get-in report [:comparison :checks :poststate])))
+    (is (= [st] (get-in report [:comparison :poststate-mismatches])))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (false? (:certifies-physical-execution? report)))))
+
+(deftest writer-between-before-phase-and-submit-breaks-correspondence-test
+  (let [req (seed! :requests (request "pin-pre-submit"))
+        rt [:requests (:xt/id req)]
+        original-execute xt/execute-tx
+        submissions (atom 0)
+        external (advance req {:owner "outside-writer"})
+        report (with-redefs
+                 [xt/execute-tx (fn [& args]
+                                  (if (= 2 (count args))
+                                    (apply original-execute args)
+                                    (let [[db operations] args]
+                                      (swap! submissions inc)
+                                      ;; Call original 3-arity to avoid a second
+                                      ;; interception through its 2-arity.
+                                      (original-execute db
+                                                        [[:put-docs :requests external]] {})
+                                      (apply original-execute args))))]
+                 (collect! (plan [(claim req "expected-helper")]) [rt]))]
+    (is (= 1 @submissions) "The collector itself submits once.")
+    (is (= :rejected (get-in report [:execution :status])))
+    (is (= :xtdb/assert-failed (get-in report [:execution :error/code])))
+    (is (false? (get-in report [:comparison :checks :outcome-status])))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (= external (physical-document :requests (:xt/id req))))
+    (is (contains? (get-in report [:collection-scope :assumed])
+                   :exclusive-control-of-tracked-documents-during-collection))))
+
+(deftest writer-after-submit-before-after-phase-is-detected-test
+  (let [req (seed! :requests (request "pin-post-submit"))
+        rt [:requests (:xt/id req)]
+        original-execute xt/execute-tx
+        submissions (atom 0)
+        externally-replaced (advance (advance req {:owner "expected-helper"})
+                                     {:owner "late-external-writer"})
+        ;; This writer runs after execute-tx has definitively committed but
+        ;; before the collector acquires the after-phase snapshot.
+        report (with-redefs
+                 [xt/execute-tx (fn [& args]
+                                  (if (= 2 (count args))
+                                    (apply original-execute args)
+                                    (let [[db _operations] args]
+                                      (swap! submissions inc)
+                                      (let [result (apply original-execute args)]
+                                        (original-execute db
+                                                          [[:put-docs :requests externally-replaced]] {})
+                                        result))))]
+                 (collect! (plan [(claim req "expected-helper")]) [rt]))]
+    (is (= 1 @submissions))
+    (is (= :committed (get-in report [:execution :status])))
+    (is (true? (get-in report [:comparison :checks :outcome-status])))
+    (is (false? (get-in report [:comparison :checks :poststate])))
+    (is (= [rt] (get-in report [:comparison :poststate-mismatches])))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (false? (:certifies-physical-execution? report)))
+    (is (= externally-replaced
+           (physical-document :requests (:xt/id req))))))
