@@ -10,12 +10,16 @@
 
    These tests cover a deliberately small admitted subset: version-guarded
    :put-docs on :requests and :memberships, including document absence for
-   creates. Their serialization is deliberate. They do not establish XTDB's
+   creates, canonical field-count ASSERTs, and explicit representation
+   boundaries. Their serialization is deliberate. They do not establish XTDB's
    isolation under truly concurrent submissions, business authorization,
    durable application-command replay, general SQL correspondence, or
    correctness of domain-specific guards. In particular, the missing-guard
    test demonstrates a policy dependency that this generic layer cannot
-   infer. This namespace is NOT a certification or formal proof artifact."
+   infer. An explicit-nil test is a RED correspondence regression against
+   the current finite model: XTDB removes nil-valued document fields rather
+   than counting them as persisted fields. This namespace is NOT a
+   certification or formal proof artifact."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
@@ -95,13 +99,12 @@
      :state state}))
 
 (defn- select-document [table id]
-  ;; Fixed SQL projections for the admitted test document shapes. Query rows
-  ;; normalize _id to :xt/id in the XTDB 2 public Clojure API.
+  ;; SELECT * preserves the observable top-level field set, including newly
+  ;; added fields. A fixed projection would hide the very drift that the
+  ;; field-count assertion is intended to detect. XTDB returns :xt/id for _id.
   (let [sql (case table
-              :requests
-              "SELECT _id, revision, created_at, updated_at, owner FROM requests WHERE _id = ?"
-              :memberships
-              "SELECT _id, revision, created_at, updated_at, active FROM memberships WHERE _id = ?")
+              :requests "SELECT * FROM requests WHERE _id = ?"
+              :memberships "SELECT * FROM memberships WHERE _id = ?")
         rows (xt/q (node) [sql id])]
     (when-not (<= (count rows) 1)
       (throw (ex-info "More than one document for the requested ID."
@@ -251,3 +254,141 @@
            (get-in unguarded-result [:actual [:requests (:xt/id request)] :owner])))
     (testing "This is a counterexample to an *undeclared policy*, not a pass for authorization."
       (is (= :committed (:status (model/step after-revoke unguarded)))))))
+
+
+;; v999 — Cross-representation witness cases for the canonical field-count
+;; assertion. All comparisons below use production tx/prepare and the actual
+;; embedded XTDB transaction executor. They are not universal refinement
+;; proofs. The explicit nil case is intentionally a failing correspondence
+;; regression until the admitted finite state representation is corrected.
+
+(defn- fresh-request [label]
+  (request-document (str "v999-" label "-" (random-uuid))))
+
+(defn- seed-request! [document]
+  (xt/execute-tx (node) [[:put-docs :requests document]])
+  document)
+
+(defn- complete-guard [observed]
+  (command/guard
+   :requests observed
+   (assoc version
+          :compare-keys (->> (keys observed)
+                             (remove #{:xt/id})
+                             sort
+                             vec))))
+
+(defn- field-count-plan
+  ([observed output]
+   (field-count-plan observed output true))
+  ([observed output compare-all-fields?]
+   {:commands [(command/create :requests output version)]
+    :guards [(if compare-all-fields?
+               (complete-guard observed)
+               (command/guard :requests observed version))]
+    :assertions [(tx/assert-document-field-count
+                  :requests (:xt/id observed) (count observed))]
+    :emit false}))
+
+(deftest v999-complete-count-matches-real-nested-document-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "complete")
+                         :policy {:groups ["helpers" "staff"]
+                                  :priority 3}))
+        output (fresh-request "complete-out")
+        target [:requests (:xt/id observed)]
+        outcome (compare-step! {target observed}
+                               (field-count-plan observed output)
+                               [target [:requests (:xt/id output)]])]
+    (is (= :committed (get-in outcome [:execution :status])))
+    (is (= observed (select-document :requests (:xt/id observed))))
+    (is (= output (select-document :requests (:xt/id output))))))
+
+(deftest v999-late-top-level-field-rejects-and-preserves-write-set-test
+  (let [observed (seed-request! (fresh-request "new-field"))
+        output (fresh-request "new-field-out")
+        action (field-count-plan observed output)
+        changed (assoc observed :late-policy "introduced")
+        target [:requests (:xt/id observed)]
+        _ (seed-request! changed)
+        result (compare-step! {target changed} action
+                              [target [:requests (:xt/id output)]])]
+    (is (= :rejected (get-in result [:execution :status])))
+    (is (= :document-field-count
+           (get-in result [:prediction :failed-precondition :kind])))
+    (is (nil? (select-document :requests (:xt/id output))))
+    (is (= changed (select-document :requests (:xt/id observed))))))
+
+(deftest v999-removed-top-level-field-rejects-and-preserves-write-set-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "removed-field")
+                         :policy "must-remain"))
+        output (fresh-request "removed-field-out")
+        action (field-count-plan observed output)
+        changed (dissoc observed :policy)
+        target [:requests (:xt/id observed)]
+        _ (seed-request! changed)
+        result (compare-step! {target changed} action
+                              [target [:requests (:xt/id output)]])]
+    (is (= :rejected (get-in result [:execution :status])))
+    (is (= :document-field-count
+           (get-in result [:prediction :failed-precondition :kind])))
+    (is (nil? (select-document :requests (:xt/id output))))))
+
+(deftest v999-same-field-count-but-changed-nested-value-rejects-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "nested-drift")
+                         :policy {:groups ["helpers"] :priority 3}))
+        output (fresh-request "nested-drift-out")
+        action (field-count-plan observed output)
+        changed (assoc-in observed [:policy :priority] 4)
+        target [:requests (:xt/id observed)]
+        _ (seed-request! changed)
+        result (compare-step! {target changed} action
+                              [target [:requests (:xt/id output)]])]
+    (is (= (count observed) (count changed)))
+    (is (= :rejected (get-in result [:execution :status])))
+    (is (= :dependency-version
+           (get-in result [:prediction :failed-precondition :kind])))
+    (is (nil? (select-document :requests (:xt/id output))))))
+
+(deftest v999-explicit-nil-is-not-a-persisted-field-count-regression-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "nil-field")
+                         :optional-policy nil))
+        output (fresh-request "nil-field-out")
+        target [:requests (:xt/id observed)]
+        physical (select-document :requests (:xt/id observed))
+        action (field-count-plan observed output false)
+        prediction (model/step {target observed} action)
+        execution (execute-and-classify (prepared-ops action))]
+    (testing "XTDB drops top-level nil when persisting document data"
+      (is (contains? observed :optional-policy))
+      (is (not (contains? physical :optional-policy)))
+      (is (= (dec (count observed)) (count physical))))
+    (testing "The same field-count ASSERT must agree with the finite model"
+      (is (= :rejected (:status execution)))
+      ;; Expected RED against v994: tx-model presently counts every map key.
+      ;; A later fix must either reject non-representable nil-valued documents
+      ;; with a typed diagnostic or give them a sound physical abstraction.
+      (is (= (:status execution) (:status prediction))
+          (str "Explicit nil/absence is not represented faithfully: "
+               (pr-str {:physical-field-count (count physical)
+                        :reference-field-count (count observed)
+                        :physical-status (:status execution)
+                        :reference-status (:status prediction)})))
+      (is (nil? (select-document :requests (:xt/id output)))))))
+
+(deftest v999-removed-document-fails-field-count-and-guard-atomically-test
+  (let [observed (seed-request! (fresh-request "removed-document"))
+        output (fresh-request "removed-document-out")
+        action (field-count-plan observed output)
+        target [:requests (:xt/id observed)]
+        _ (xt/execute-tx (node) [[:delete-docs :requests (:xt/id observed)]])
+        result (compare-step! {} action
+                              [target [:requests (:xt/id output)]])]
+    (is (= :rejected (get-in result [:execution :status])))
+    (is (= :document-field-count
+           (get-in result [:prediction :failed-precondition :kind])))
+    (is (nil? (select-document :requests (:xt/id output))))
+    (is (nil? (select-document :requests (:xt/id observed))))))
