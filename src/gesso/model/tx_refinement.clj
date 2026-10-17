@@ -18,6 +18,7 @@
   (:require
    [clojure.set :as set]
    [gesso.model.command :as command]
+   [gesso.model.tx :as tx]
    [gesso.model.tx-model :as model]))
 
 (def comparison-scope
@@ -34,7 +35,10 @@
               :serialized-atomic-commit
               :production-plan-lowering
               :honest-execution-classification}
-   :not-established #{:general-xtdb-step-refinement
+   :not-established #{:proof-certificate-from-matching-observations
+                      :authenticated-observation-and-execution-origin
+                      :production-transaction-submission-binding
+                      :general-xtdb-step-refinement
                       :database-isolation-and-temporal-history
                       :physical-read-completeness-outside-declared-targets
                       :writer-and-dependency-closure
@@ -42,6 +46,16 @@
                       :authorization-and-business-invariants
                       :durable-command-incorporation-and-replay
                       :browser-or-choreography-correspondence}})
+
+(def submission-comparison-scope
+  "The opt-in recorded-submission comparison adds structural equality with
+   production tx/prepare output. The recorded operations themselves remain
+   caller-provided data, not an authenticated database submission receipt."
+  (-> comparison-scope
+      (assoc :relation :gesso.model.tx/recorded-submission-observation-v1)
+      (update :checked conj :recorded-submission-equals-production-lowering)
+      (update :assumed conj :honest-submitted-operation-record)
+      (update :not-established conj :authenticated-physical-submission-receipt)))
 
 (defn- fail!
   [kind message details]
@@ -179,9 +193,13 @@
              "Observation targets omit a model read dependency or write target."
              {:untracked untracked}))
     (when-not (and (map? execution)
-                   (#{:committed :rejected} (:status execution)))
+                   (case (:status execution)
+                     :committed (set/subset? (set (keys execution))
+                                              #{:status :error/code})
+                     :rejected (= #{:status :error/code} (set (keys execution)))
+                     false))
       (fail! ::invalid-execution
-             "Execution must declare either :committed or :rejected."
+             "Execution must have a recognized status and only supported outcome fields."
              {:execution execution}))
     (let [before (state-relation targets (:before prediction) observed-before)
           after (state-relation targets (:after prediction) observed-after)
@@ -201,4 +219,64 @@
        :observed-status (:status execution)
        :failed-precondition-kind (get-in prediction [:failed-precondition :kind])
        :tracked-target-count (count targets)
+       :evidence-kind :caller-supplied-observation-comparison
+       :certifies-physical-execution? false
        :scope comparison-scope})))
+
+(defn compare-recorded-step
+  "Opt-in stronger diagnostic comparison of a *reported* physical step.
+
+   Accepts exactly the six compare-step inputs plus :recorded-tx-ops, which
+   must be the vector of formatted operations reportedly submitted to XTDB.
+   Re-derive the canonical operations through production tx/prepare from the
+   admitted plan and compare the vectors structurally, in order. A missing,
+   malformed, shortened, altered, or reordered record cannot pass this check.
+
+   This DOES NOT prove that XTDB received or executed those operations: the
+   record, physical reads, execution status, and plan still come from the
+   caller. A positive result remains diagnostic-only and is never a proof
+   certificate. A real execution boundary must capture and bind the submitted
+   operations and actual transaction result independently in later work.
+
+   A correctly shaped but different record produces :corresponds? false and
+   :recorded-submission false. Invalid shapes fail closed. Operation contents
+   (which may contain private application data) are not copied to diagnostics."
+  [input]
+  (let [expected-keys #{:reference-before :plan :targets :observed-before
+                        :execution :observed-after :recorded-tx-ops}]
+    (when-not (and (map? input)
+                   (= expected-keys (set (keys input))))
+      (fail! ::invalid-input
+             "A recorded-step comparison requires all seven explicit inputs."
+             {:missing (set/difference expected-keys
+                                       (if (map? input) (set (keys input)) #{}))
+              :unexpected (set/difference
+                           (if (map? input) (set (keys input)) #{})
+                           expected-keys)})))
+  (let [recorded (:recorded-tx-ops input)]
+    (when-not (and (vector? recorded) (seq recorded))
+      (fail! ::invalid-recorded-ops
+             "Recorded XTDB transaction operations must be a nonempty vector."
+             {:recorded-type (if (nil? recorded) :nil (type recorded))})))
+  (let [plan (model/admitted-plan (:plan input))
+        canonical (:tx-ops (tx/prepare {} plan))
+        recorded (:recorded-tx-ops input)
+        ;; Never use a nil sentinel: nil may be a legitimate bound value.
+        absent (Object.)
+        mismatch-indices (->> (range (max (count canonical) (count recorded)))
+                              (filter (fn [index]
+                                        (not= (get canonical index absent)
+                                              (get recorded index absent))))
+                              vec)
+        comparison (compare-step (dissoc input :recorded-tx-ops))
+        checks (assoc (:checks comparison)
+                      :recorded-submission (empty? mismatch-indices))]
+    (assoc comparison
+           :checks checks
+           :corresponds? (every? true? (vals checks))
+           :recorded-op-count (count recorded)
+           :canonical-op-count (count canonical)
+           :mismatched-op-indices mismatch-indices
+           :evidence-kind :caller-supplied-recorded-step-comparison
+           :certifies-physical-execution? false
+           :scope submission-comparison-scope)))
