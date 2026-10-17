@@ -1135,6 +1135,121 @@
   [:analysis :operation-acquisition-assembly
    :execution-assembly :server :operations])
 
+(def ^:private executor-bound-refinement-nonclaims
+  ;; An observed, exactly registered executor attempt provides a stronger
+  ;; provenance link than caller-selected transaction plans. It still says
+  ;; nothing universal about other branches, states or the truth of supplied
+  ;; application/backend source and policy descriptors.
+  (-> tx-refinement-consumer-nonclaims
+      (disj :actual-executor-to-transaction-plan-binding)
+      (conj :unobserved-executor-branches-and-prestates
+            :complete-executor-model-preparation-correspondence
+            :process-independent-observation-provenance)))
+
+(defn require-executor-bound-refinement-candidates!
+  "Review candidate evidence for ONE OBSERVED physical attempt per selected
+   operation, binding its plan and prestate to the exact CURRENT registered
+   executor rather than trusting a caller-selected plan.
+
+   `cases` is {registered-operation
+               {:evidence-handle opaque-process-local-handle
+                :environment declared-backend-gesso-and-application
+                :proposals candidate-proposals}}. The handle must originate in
+   resolution-assurance/run-and-check!, which captures the same executor's
+   submitted transaction and physical initial state. This function performs
+   the exact-executor process-local registry check and the source-derived
+   prepared-event correspondence check BEFORE deriving a transaction instance
+   subject and requiring the nine-premise aggregate candidate-package review.
+
+   The caller cannot supply :plan or :abstract-state on this path. The selected
+   environment and candidate artifacts remain unauthenticated declarations.
+   No arbitrary function invocation occurs here; this consumes an ALREADY
+   COMPLETED, definitive controlled diagnostic. Missing, forged, stale,
+   mismatched, replay-only and indeterminate handles fail closed.
+
+   This is an opt-in ONE-ATTEMPT diagnostic path, not production admission,
+   universal executor verification, complete domain-guard coverage, evidence
+   authentication, or discharge of any XTDB premise. Returned data is redacted
+   and contains no plan, prestate, handle, source digest or command binding."
+  [application-assembly cases]
+  (if-let [report (current-application-report application-assembly)]
+    (let [registered (set (keys (get-in report [:analysis :operations])))]
+      (when-not (and (map? cases)
+                     (seq cases)
+                     (<= (count cases) (count registered))
+                     (every? #(and (keyword? %) (contains? registered %))
+                             (keys cases)))
+        (reject-refinement-candidates! :invalid-selected-operations nil))
+      (let [derived
+            (into (sorted-map)
+                  (for [[operation selection] cases]
+                    (do
+                      (when-not (and (map? selection)
+                                     (= #{:evidence-handle :environment :proposals}
+                                        (set (keys selection)))
+                                     (some? (:evidence-handle selection))
+                                     (map? (:environment selection))
+                                     (= operation
+                                        (get-in selection
+                                                [:environment :application
+                                                 :operation])))
+                        (reject-refinement-candidates!
+                         :invalid-or-mismatched-executor-selection operation))
+                      (let [executor (get-in report
+                                             (conj execution-observation-executor-root
+                                                   operation :execute!))
+                            result (resolution-assurance/inspect-evidence-for-executor
+                                    (:evidence-handle selection) executor)
+                            observation (:observation result)]
+                        (when-not (and (= :bounded-execution-correspondence
+                                          (:status result))
+                                       (= operation (get-in result [:binding :operation]))
+                                       (map? observation)
+                                       (= :consistent
+                                          (get-in observation [:evidence :status]))
+                                       (= operation
+                                          (get-in observation [:binding :operation])))
+                          (reject-refinement-candidates!
+                           :unrecognized-executor-observation operation))
+                        ;; A successful process-local identity lookup by itself
+                        ;; is not enough: require that the captured physical
+                        ;; attempt refines its source-derived reference step.
+                        (let [checked
+                              (try
+                                (formal-observation/prepared-event-case observation)
+                                (catch Exception _
+                                  (reject-refinement-candidates!
+                                   :noncorresponding-executor-observation operation)))]
+                          (when-not (= :single-executor-attempt-diagnostic
+                                       (:observation-origin checked))
+                            (reject-refinement-candidates!
+                             :noncorresponding-executor-observation operation)))
+                        (let [plan (get-in observation
+                                           [:submitted-incorporation :plan])
+                              prestate (:initial-state observation)]
+                          (when-not (and (map? plan) (map? prestate))
+                            (reject-refinement-candidates!
+                             :incomplete-executor-observation operation))
+                          [operation
+                           {:abstract-state prestate
+                            :plan plan
+                            :environment (:environment selection)
+                            :proposals (:proposals selection)}])))))]
+        ;; This established consumer independently rechecks assembly
+        ;; currentness and the entire v1039 aggregate decision. A restart,
+        ;; hot-reload or replaced physical artifact between the two reviews
+        ;; therefore fails closed rather than minting stale review readiness.
+        (let [review (require-refinement-candidate-packages!
+                      application-assembly derived)]
+          (assoc review
+                 :status :observed-executor-candidates-ready-for-independent-review
+                 :scope :exact-registered-executor-controlled-attempt
+                 :observation-count (count derived)
+                 :evidence-origin :process-local-executor-bound-observation
+                 :not-established executor-bound-refinement-nonclaims))))
+    (reject-refinement-candidates! :invalid-or-stale-application-assembly nil)))
+
+
 ;; This is the MINIMUM assurance contract for the opt-in finite-model checker,
 ;; independently enforced by the application-facing consumer. A returned set's
 ;; type alone is not evidence that essential premises or limitations survived
