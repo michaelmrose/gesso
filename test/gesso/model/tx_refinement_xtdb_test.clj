@@ -1,5 +1,5 @@
 (ns gesso.model.tx-refinement-xtdb-test
-  "Permanent controlled-XTDB regressions for observe-and-compare!.
+  "Permanent controlled-XTDB regressions for direct and ledger-linked observation.
 
    Exercises the actual collector: it independently reads the declared target
    domain, constructs and submits canonical tx/prepare operations, classifies
@@ -9,7 +9,10 @@
 
    A successful report is diagnostic evidence for this controlled execution,
    not an authenticated XTDB receipt or a general refinement theorem. The
-   fixture assumes exclusive control of its embedded node and target IDs."
+   fixture assumes exclusive control of its embedded node and target IDs.
+   Ledger-linked tests inspect XTDB tx keys against the pinned xt.txs row,
+   including missing, contradictory, and unavailable evidence. This still
+   does not attest a production submission or certify physical refinement."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
@@ -529,3 +532,264 @@
     (is (false? (:certifies-physical-execution? report)))
     (is (= externally-replaced
            (physical-document :requests (:xt/id req))))))
+
+
+;; v1010 ledger-linkage: only transaction ID, definitive disposition and
+;; physical system time are checked. Do not confuse a matching xt.txs row
+;; with independent attestation of the submitted transaction payload.
+
+(defn- collect-ledger! [a-plan targets]
+  (collector/observe-and-compare-ledger! {:node (node)
+                                         :plan a-plan
+                                         :targets targets}))
+
+(def ^:private ledger-checks
+  #{:tx-ledger-record-present
+    :tx-ledger-id
+    :tx-ledger-commit-status
+    :tx-ledger-system-time})
+
+(def ^:private ledger-sql
+  "SELECT _id, committed, system_time FROM xt.txs WHERE _id = ?")
+
+(defn- check-ledger-report! [report status]
+  (is (= status (get-in report [:execution :status])))
+  (is (true? (get-in report [:comparison :corresponds?]))
+      (pr-str (get-in report [:comparison :checks])))
+  (is (true? (:transaction-ledger-matches? report)))
+  (is (every? true? (vals (select-keys (get-in report [:comparison :checks])
+                                       ledger-checks))))
+  (is (= ledger-checks
+         (set (filter ledger-checks
+                      (keys (get-in report [:comparison :checks]))))))
+  (is (= :direct-controlled-xtdb-ledger-linked-observation
+         (:evidence-kind report)))
+  (is (= :gesso.model.tx/direct-xtdb-ledger-linked-step-v1
+         (get-in report [:collection-scope :collector])))
+  (is (integer? (:physical-tx-id report)))
+  (is (<= 0 (:physical-tx-id report)))
+  (is (false? (:certifies-physical-execution? report)))
+  (is (false? (get-in report [:comparison :certifies-physical-execution?])))
+  (is (not-any? #(contains? report %)
+                [:node :plan :tx-key :recorded-tx-ops
+                 :observed-before :observed-after :reference-before
+                 :snapshot-token :system-time]))
+  report)
+
+(deftest ledger-scope-preserves-open-assumptions-test
+  (let [{:keys [collector collected assumed not-established]}
+        collector/ledger-collection-scope]
+    (is (= :gesso.model.tx/direct-xtdb-ledger-linked-step-v1 collector))
+    (doseq [fact [:tx-key-from-physical-execute-tx
+                 :xt-txs-record-from-pinned-post-observation
+                 :ledger-id-system-time-and-commit-status-comparison]]
+      (is (contains? collected fact)))
+    (is (contains? assumed :trustworthy-xtdb-tx-key-and-system-ledger))
+    (doseq [open [:authenticated-physical-submission-receipt
+                 :production-live-execution-correspondence
+                 :transaction-internal-snapshot-equals-observed-prestate
+                 :absence-of-external-writers
+                 :general-xtdb-step-refinement
+                 :authorization-and-business-invariants]]
+      (is (contains? not-established open))
+      (is (not (contains? collected open))))))
+
+(deftest ledger-commit-and-stale-rejection-have-distinct-physical-ids-test
+  (let [req (seed! :requests (request "ledger-claim"))
+        member (seed! :memberships (membership "ledger-member"))
+        rt [:requests (:xt/id req)]
+        mt [:memberships (:xt/id member)]
+        action (plan [(claim req "ledger-helper")]
+                     (command/guard :memberships member version))
+        commit (check-ledger-report! (collect-ledger! action [rt mt]) :committed)
+        retry (check-ledger-report! (collect-ledger! action [rt mt]) :rejected)]
+    (is (< (:physical-tx-id commit) (:physical-tx-id retry)))
+    (is (= :xtdb/assert-failed (get-in retry [:execution :error/code])))
+    (is (= :command-version
+           (get-in retry [:comparison :failed-precondition-kind])))
+    (is (= 1 (:revision (physical-document :requests (:xt/id req)))))
+    (is (= "ledger-helper" (:owner (physical-document :requests (:xt/id req)))))
+    (is (true? (get-in commit [:comparison :checks :recorded-submission])))
+    (is (true? (get-in retry [:comparison :checks :recorded-submission])))))
+
+(deftest ledger-duplicate-create-and-guard-rejection-correspond-test
+  (let [new-req (request "ledger-create")
+        rt [:requests (:xt/id new-req)]
+        create (plan [(command/create :requests new-req version)])
+        first-result (check-ledger-report! (collect-ledger! create [rt]) :committed)
+        duplicate (check-ledger-report! (collect-ledger! create [rt]) :rejected)
+        membership-doc (seed! :memberships (membership "ledger-guard"))
+        mt [:memberships (:xt/id membership-doc)]
+        claim-action (plan [(claim new-req "ledger-wrong-guard")]
+                           (command/guard :memberships membership-doc version))]
+    (xt/execute-tx (node)
+                   [[:put-docs :memberships
+                     (advance membership-doc {:active false})]])
+    (let [guard (check-ledger-report! (collect-ledger! claim-action [rt mt]) :rejected)]
+      (is (< (:physical-tx-id first-result) (:physical-tx-id duplicate)))
+      (is (= :dependency-version
+             (get-in guard [:comparison :failed-precondition-kind])))
+      (is (= new-req (physical-document :requests (:xt/id new-req)))))))
+
+(deftest ledger-query-uses-the-exact-post-observation-basis-test
+  (let [req (seed! :requests (request "ledger-basis"))
+        rt [:requests (:xt/id req)]
+        calls (atom [])
+        original-query xt/q
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (when (= 3 (count args))
+                           (let [query (second args)]
+                             (swap! calls conj
+                                    {:kind (cond
+                                             (= query "SHOW SNAPSHOT_TOKEN") :basis
+                                             (and (vector? query) (= ledger-sql (first query))) :ledger
+                                             :else :document)
+                                     :query query
+                                     :options (nth args 2)})))
+                         (apply original-query args))]
+                 (collect-ledger! (plan [(claim req "basis-helper")]) [rt]))
+        [before-basis before-read after-basis after-read ledger] @calls]
+    (check-ledger-report! report :committed)
+    (is (= [:basis :document :basis :document :ledger]
+           (mapv :kind @calls)))
+    (is (= (:options after-read) (:options ledger)))
+    (is (not= (:options before-read) (:options ledger)))
+    (is (= #{:snapshot-token :current-time}
+           (set (keys (:options ledger)))))
+    (is (= ledger-sql (first (:query ledger))))
+    (is (= [(:physical-tx-id report)] (subvec (:query ledger) 1)))
+    (is (= :basis (:kind before-basis)))
+    (is (= :basis (:kind after-basis)))
+    (is (not= (:snapshot-token (:options before-read))
+              (:snapshot-token (:options after-read))))))
+
+(defn- poison-ledger
+  "Intercept ONLY the physical ledger query. All document reads, snapshots,
+   and the single submitted transaction remain real."
+  [transform thunk]
+  (let [real-query xt/q]
+    (with-redefs [xt/q (fn [& args]
+                         (let [query (second args)
+                               rows (apply real-query args)]
+                           (if (and (vector? query)
+                                    (= ledger-sql (first query)))
+                             (transform rows)
+                             rows)))]
+      (thunk))))
+
+(deftest missing-duplicate-and-malformed-ledger-rows-fail-comparison-test
+  (doseq [[label alter expected]
+          [["missing" (constantly []) :tx-ledger-record-present]
+           ["duplicate" (fn [rows] [(first rows) (first rows)]) :tx-ledger-record-present]
+           ["map-not-sequence" (constantly {}) :tx-ledger-record-present]
+           ["nil-row" (constantly [nil]) :tx-ledger-record-present]
+           ["wrong-id" (fn [rows] [(update (first rows) :xt/id inc)]) :tx-ledger-id]
+           ["wrong-status" (fn [rows] [(update (first rows) :committed not)]) :tx-ledger-commit-status]
+           ["absent-status" (fn [rows] [(dissoc (first rows) :committed)]) :tx-ledger-commit-status]
+           ["string-status" (fn [rows] [(assoc (first rows) :committed "true")]) :tx-ledger-commit-status]
+           ["wrong-time" (fn [rows] [(update (first rows) :system-time
+                                              #(.plusSeconds ^java.time.ZonedDateTime % 10))]) :tx-ledger-system-time]
+           ["missing-time" (fn [rows] [(dissoc (first rows) :system-time)]) :tx-ledger-system-time]
+           ["string-time" (fn [rows] [(assoc (first rows) :system-time "not-time")]) :tx-ledger-system-time]]]
+    (testing label
+      (let [req (seed! :requests (request (str "ledger-poison-" label)))
+            rt [:requests (:xt/id req)]
+            report (poison-ledger alter
+                                  #(collect-ledger! (plan [(claim req "poison-helper")]) [rt]))
+            checks (get-in report [:comparison :checks])]
+        (is (= :committed (get-in report [:execution :status])))
+        (is (false? (:transaction-ledger-matches? report)))
+        (is (false? (get-in report [:comparison :corresponds?])))
+        (is (false? (get checks expected)))
+        (is (true? (:recorded-submission checks)))
+        (is (true? (:poststate checks)))
+        (is (= "poison-helper" (:owner (physical-document :requests (:xt/id req)))))
+        (is (false? (:certifies-physical-execution? report)))))))
+
+(deftest contradicted-rejection-ledger-cannot-be-reported-corresponding-test
+  (let [req (seed! :requests (request "ledger-reject-contradiction"))
+        rt [:requests (:xt/id req)]
+        action (plan [(claim req "reject-first")])
+        _ (check-ledger-report! (collect-ledger! action [rt]) :committed)
+        rejected (poison-ledger
+                   (fn [rows] [(assoc (first rows) :committed true)])
+                   #(collect-ledger! action [rt]))]
+    (is (= :rejected (get-in rejected [:execution :status])))
+    (is (= :xtdb/assert-failed (get-in rejected [:execution :error/code])))
+    (is (false? (get-in rejected [:comparison :checks :tx-ledger-commit-status])))
+    (is (true? (get-in rejected [:comparison :checks :recorded-submission])))
+    (is (false? (:transaction-ledger-matches? rejected)))
+    (is (false? (get-in rejected [:comparison :corresponds?])))))
+
+(deftest absent-or-invalid-physical-tx-key-fails-after-one-submit-test
+  (doseq [[label break-key] [["missing" (constantly nil)]
+                              ["malformed" (constantly {:tx-id "not-an-id"})]
+                              ["negative" (fn [key] (assoc key :tx-id -1))]
+                              ["missing-time" (fn [key] (dissoc key :system-time))]]]
+    (testing label
+      (let [req (request (str "ledger-key-" label))
+            rt [:requests (:xt/id req)]
+            submissions (atom 0)
+            real-execute xt/execute-tx
+            result (try
+                     (with-redefs [xt/execute-tx
+                                   (fn [& args]
+                                     (let [key (apply real-execute args)]
+                                       (when (= 3 (count args))
+                                         (swap! submissions inc))
+                                       (if (= 3 (count args))
+                                         (break-key key)
+                                         key)))]
+                       (collect-ledger! (plan [(command/create :requests req version)]) [rt]))
+                     nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+        (is (= ::collector/missing-tx-key (:error/type (ex-data result))))
+        (is (= 1 @submissions) "A committed operation is not retried after missing evidence.")
+        (is (= req (physical-document :requests (:xt/id req))))))))
+
+(deftest ledger-query-throws-after-commit-without-retry-test
+  (let [req (request "ledger-query-error")
+        rt [:requests (:xt/id req)]
+        submissions (atom 0)
+        ledger-calls (atom 0)
+        failure (ex-info "unavailable ledger" {:error/type ::ledger-query-unavailable})
+        real-query xt/q
+        real-execute xt/execute-tx
+        caught (try
+                 (with-redefs
+                   [xt/q (fn [& args]
+                           (if (and (vector? (second args))
+                                    (= ledger-sql (first (second args))))
+                             (do (swap! ledger-calls inc) (throw failure))
+                             (apply real-query args)))
+                    xt/execute-tx (fn [& args]
+                                    (when (= 3 (count args))
+                                      (swap! submissions inc))
+                                    (apply real-execute args))]
+                   (collect-ledger! (plan [(command/create :requests req version)]) [rt]))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+    (is (identical? failure caught))
+    (is (= 1 @submissions))
+    (is (= 1 @ledger-calls))
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest ledger-input-shape-is-identical-to-original-collector-test
+  (let [req (request "ledger-input")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        base {:node (node) :plan action :targets [rt]}
+        calls (atom [])]
+    (with-redefs [xt/q (fn [& _] (swap! calls conj :query) nil)
+                  xt/execute-tx (fn [& _] (swap! calls conj :submit) nil)]
+      (is (= ::collector/invalid-input
+             (error-type #(collector/observe-and-compare-ledger!
+                           (assoc base :claimed-tx-key {:tx-id 0})))))
+      (is (= ::collector/invalid-input
+             (error-type #(collector/observe-and-compare-ledger!
+                           (assoc base :execution {:status :committed})))))
+      (is (= ::collector/untracked-dependencies
+             (error-type #(collector/observe-and-compare-ledger!
+                           (assoc base :targets [[:memberships "missing"]])))))
+      (is (= [] @calls)))))
