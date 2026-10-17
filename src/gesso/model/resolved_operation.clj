@@ -15,7 +15,14 @@
        {:required-guard-tables #{:memberships}
         :allowed-guard-tables #{:memberships}
         :required-write-tables #{:requests :gesso_commands}
-        :allowed-write-tables #{:requests :gesso_commands}}})
+        :allowed-write-tables #{:requests :gesso_commands}}
+       ;; Optional, separate CLOSED document-identity contract. Called before
+       ;; :construct! with trusted context and canonical command binding:
+       :target-contract! (fn [ctx binding]
+                           {:required-guard-targets #{[:memberships (:membership-id ctx)]}
+                            :allowed-guard-targets #{[:memberships (:membership-id ctx)]}
+                            :required-write-targets #{[:requests (get-in binding [:arguments :request-id])]}
+                            :allowed-write-targets #{[:requests (get-in binding [:arguments :request-id])]}})})
 
    The result is a callable `(fn [ctx {:binding ... :mode ...}])`. Its modes
    are server-owned decisions, NEVER browser-provided authorization:
@@ -38,9 +45,12 @@
    A trusted operation registration may opt into a CLOSED TABLE-COVERAGE
    contract. The wrapper checks the final incorporated plan, including the
    automatically added durable command record, BEFORE calling transact!.
-   This detects omitted/extra declared guard and write TABLES only. It does
-   not establish correct document IDs, business-rule completeness, predicate
-   correctness, or that an arbitrary :construct! callback is pure.
+   By itself this detects omitted/extra declared guard and write TABLES only.
+   When a registration ALSO supplies trusted :target-contract!, Gesso checks
+   the final plan against closed required/allowed document targets derived
+   from the context and command binding before domain construction begins.
+   Neither optional contract establishes business-rule completeness, policy
+   correctness, complete authorization dependencies, or constructor purity.
 
    After a successful transaction commit, Gesso Live publication and any
    read-your-writes context remain owned by gesso.model.tx. This wrapper does
@@ -57,6 +67,11 @@
   #{:operation :read-record! :may-disclose? :construct!})
 
 (def construction-contract-key :construction-contract)
+(def target-contract-key :target-contract!)
+
+(def target-contract-keys
+  #{:required-guard-targets :allowed-guard-targets
+    :required-write-targets :allowed-write-targets})
 
 (def construction-contract-keys
   #{:required-guard-tables :allowed-guard-tables
@@ -109,6 +124,25 @@
    :not-established #{:independent-business-rule-discovery
                       :authorization-or-policy-correctness
                       :correct-row-identities-within-declared-tables
+                      :all-executor-branches-and-prestates
+                      :xtdb-physical-refinement
+                      :application-certification}})
+
+(def target-contract-scope
+  {:construction :gesso.model.resolved-operation/closed-document-targets-v1
+   :checked #{:target-requirements-computed-before-construction
+              :required-and-allowed-document-target-coverage
+              :independent-command-ledger-target-derived-from-binding
+              :target-declarations-consistent-with-closed-table-contract
+              :no-transaction-submission-on-target-mismatch}
+   :assumed #{:trusted-target-requirements-callback
+              :requirements-derived-independently-of-constructed-plan
+              :trusted-binding-and-application-context
+              :complete-declaration-of-relevant-document-dependencies}
+   :not-established #{:independent-discovery-of-authorization-subjects
+                      :authorization-policy-correctness
+                      :correct-predicate-values-or-document-versions
+                      :constructor-purity
                       :all-executor-branches-and-prestates
                       :xtdb-physical-refinement
                       :application-certification}})
@@ -307,17 +341,88 @@
                 :unexpected-write-tables extra-writes}))))
   incorporated)
 
+(defn- target-set? [targets]
+  (and (set? targets)
+       (every? (fn [target]
+                 (and (vector? target)
+                      (= 2 (count target))
+                      (keyword? (first target))
+                      (some? (second target))))
+               targets)))
+
+(defn- require-target-contract! [declared table-contract binding]
+  ;; The application callback declares DOMAIN targets only. The durable
+  ;; command-record identity is Gesso-owned and never caller-selectable.
+  (let [ledger-target [resolution/command-entity-type
+                       (resolution/record-id binding)]
+        required-guard (:required-guard-targets declared)
+        allowed-guard (:allowed-guard-targets declared)
+        required-write (:required-write-targets declared)
+        allowed-write (:allowed-write-targets declared)
+        domain-write-tables (disj (:required-write-tables table-contract)
+                                 resolution/command-entity-type)]
+    (when-not (and (map? declared)
+                   (= target-contract-keys (set (keys declared)))
+                   (every? target-set? (vals declared))
+                   (set/subset? required-guard allowed-guard)
+                   (set/subset? required-write allowed-write)
+                   (not-any? (fn [[table _]]
+                               (= table resolution/command-entity-type))
+                             (concat required-guard allowed-guard
+                                     required-write allowed-write))
+                   (set/subset? (set (map first allowed-guard))
+                                (:allowed-guard-tables table-contract))
+                   (set/subset? (set (map first allowed-write))
+                                (:allowed-write-tables table-contract))
+                   (set/subset? (:required-guard-tables table-contract)
+                                (set (map first required-guard)))
+                   (set/subset? domain-write-tables
+                                (set (map first required-write))))
+      (fail! :invalid-target-contract
+             "Trusted document-target declaration is incomplete or inconsistent with the registered table contract."
+             {:declared-shape-valid? false}))
+    (-> declared
+        (update :required-write-targets conj ledger-target)
+        (update :allowed-write-targets conj ledger-target))))
+
+(defn- require-plan-target-coverage! [declared incorporated]
+  (when declared
+    (let [plan (:plan incorporated)
+          guards (set (map tx/guard-target (:guards plan)))
+          writes (set (map tx/command-target (:commands plan)))
+          missing-guards (set/difference (:required-guard-targets declared) guards)
+          unexpected-guards (set/difference guards (:allowed-guard-targets declared))
+          missing-writes (set/difference (:required-write-targets declared) writes)
+          unexpected-writes (set/difference writes (:allowed-write-targets declared))]
+      ;; IDs and target tuples may be sensitive. Do not include them in errors.
+      (when (or (seq missing-guards) (seq unexpected-guards)
+                (seq missing-writes) (seq unexpected-writes))
+        (fail! :construction-target-mismatch
+               "The final incorporated transaction does not match registered document-target requirements."
+               {:missing-guard-target-count (count missing-guards)
+                :unexpected-guard-target-count (count unexpected-guards)
+                :missing-write-target-count (count missing-writes)
+                :unexpected-write-target-count (count unexpected-writes)}))))
+  incorporated)
+
 (defn- require-configuration [configuration]
   (when-not (and (map? configuration)
-                 (or (= configuration-keys (set (keys configuration)))
-                     (= (conj configuration-keys construction-contract-key)
-                        (set (keys configuration)))))
+                 (contains? #{configuration-keys
+                              (conj configuration-keys construction-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key)}
+                            (set (keys configuration))))
     (fail! :invalid-configuration
            "Resolved operation configuration must use the exact admitted key set."
            {:expected configuration-keys
-            :optional construction-contract-key}))
+            :optional #{construction-contract-key target-contract-key}}))
   (when (contains? configuration construction-contract-key)
     (require-construction-contract (:construction-contract configuration)))
+  (when (and (contains? configuration target-contract-key)
+             (not (fn? (:target-contract! configuration))))
+    (fail! :invalid-target-contract
+           "An enabled document-target contract requires a trusted function."
+           {:callback target-contract-key}))
   (let [{:keys [operation read-record! may-disclose? construct!]} configuration]
     (when-not (qualified-keyword? operation)
       (fail! :invalid-operation-id
@@ -395,11 +500,17 @@
    guard and write table sets before submission. Contract sets are closed;
    :required-* must be present, :allowed-* bounds the actual targets, and
    :gesso_commands must be required as a write. Custom HoneySQL assertions
-   fail closed because they may hide undeclared table reads. The contract
-   is NOT an independent authorization-dependency discovery mechanism."
+   fail closed because they may hide undeclared table reads.
+
+   Optional :target-contract! requires :construction-contract, takes trusted
+   [ctx binding] before domain construction, and returns exactly four sets
+   of required/allowed [table document-id] pairs for DOMAIN targets. Each
+   required TABLE must have at least one required document target. The wrapper
+   adds the exact command-ledger target derived from binding, never from the
+   constructor. Neither layer independently discovers business requirements."
   [configuration]
   (let [{:keys [operation read-record! may-disclose? construct!
-                construction-contract]}
+                construction-contract target-contract!]}
         (require-configuration configuration)]
     (with-meta
       (fn resolved-operation [ctx input]
@@ -418,6 +529,12 @@
             :else
             (let [observer (observer-for! ctx)
                   input-observer (construction-input-observer-for! ctx)
+                  ;; Establish independent declared identities before domain
+                  ;; code builds its plan. Never source expectations from plan.
+                  target-contract (when target-contract!
+                                    (require-target-contract!
+                                     (target-contract! ctx binding)
+                                     construction-contract binding))
                   _ (publish-construction-input! input-observer ctx binding)
                   {:keys [now plan outcome]} (construction! construct! ctx binding)
                   incorporated (resolution/incorporation-plan
@@ -430,6 +547,7 @@
                   ;; send any transaction and do not publish :prepared.
                   _ (require-plan-table-coverage! construction-contract
                                                   incorporated)
+                  _ (require-plan-target-coverage! target-contract incorporated)
                   {:keys [transaction error]}
                   (transact-observed! ctx incorporated binding observer)]
               (if (and (nil? error)
@@ -450,4 +568,6 @@
         construction-contract
         (assoc :gesso.model/construction-contract construction-contract
                :gesso.model/construction-contract-scope
-               construction-contract-scope)))))
+               construction-contract-scope)
+        target-contract!
+        (assoc :gesso.model/target-contract-scope target-contract-scope)))))
