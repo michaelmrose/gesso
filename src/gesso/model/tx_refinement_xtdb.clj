@@ -129,27 +129,86 @@
              {:table table}))
     (first rows)))
 
-(defn- observe!
+(defn- observe-phase!
   [node targets]
-  ;; Capture the basis ONCE and pass it unchanged to every target query.
-  ;; Explicit nil still means 'queried and absent', never 'not queried'.
+  ;; The basis belongs to this entire phase, including any optional ledger
+  ;; query. A later query must not silently move to the newest XTDB snapshot.
   (let [basis (phase-basis! node)]
-    (into {} (map (fn [target] [target (read-target! node basis target)]))
-          targets)))
+    {:basis basis
+     :documents (into {}
+                      (map (fn [target]
+                             [target (read-target! node basis target)]))
+                      targets)}))
 
 (defn- execute-definitively!
   [node operations]
   (try
-    (xt/execute-tx node operations)
-    {:status :committed}
+    ;; Both this successful return and a recognized assertion conflict carry
+    ;; an XTDB tx-key in 2.2.0-beta1. Retain it *internally* for the optional
+    ;; independent xt.txs check, without passing it to the finite comparison.
+    {:execution {:status :committed}
+     :tx-key (xt/execute-tx node operations)}
     (catch Throwable error
       (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data error)))
-        {:status :rejected :error/code :xtdb/assert-failed}
+        {:execution {:status :rejected :error/code :xtdb/assert-failed}
+         :tx-key (:tx-key (ex-data error))}
         ;; A timeout or unknown exception is NOT evidence of rejection.
         ;; Never automatically retry a potentially incorporated command.
         (throw error)))))
 
-(defn observe-and-compare!
+(def ledger-collection-scope
+  "The opt-in ledger-linked diagnostic adds a read of XTDB's own transaction
+   record at precisely the same pinned post-observation basis. It checks the
+   returned/exception-carried tx-key against the ledger ID, system time, and
+   committed flag. This improves evidence about *which* physical transaction
+   was observed; it does not certify its submitted payload, internal snapshot,
+   authorization, or application-wide write isolation."
+  (-> collection-scope
+      (assoc :collector :gesso.model.tx/direct-xtdb-ledger-linked-step-v1)
+      (update :collected into
+              #{:tx-key-from-physical-execute-tx
+                :xt-txs-record-from-pinned-post-observation
+                :ledger-id-system-time-and-commit-status-comparison})
+      (update :assumed conj :trustworthy-xtdb-tx-key-and-system-ledger)))
+
+(defn- tx-key!
+  [tx-key]
+  (when-not (and (map? tx-key)
+                 (= #{:tx-id :system-time} (set (keys tx-key)))
+                 (integer? (:tx-id tx-key))
+                 (<= 0 (:tx-id tx-key))
+                 (instance? Instant (:system-time tx-key)))
+    (fail! ::missing-tx-key
+           "XTDB did not supply an identifiable transaction key for the definitive outcome."
+           {}))
+  tx-key)
+
+(defn- ledger-evidence!
+  [node basis {:keys [tx-id system-time]} execution]
+  ;; Select only non-sensitive transaction metadata. Query at the SAME basis
+  ;; as poststate rather than letting a new query select a different history.
+  (let [rows (xt/q node
+                   ["SELECT _id, committed, system_time FROM xt.txs WHERE _id = ?"
+                    tx-id]
+                   basis)
+        row (when (and (sequential? rows) (= 1 (count rows)))
+              (first rows))
+        present? (map? row)
+        id? (and present? (= tx-id (:xt/id row)))
+        status? (and present? (boolean? (:committed row))
+                     (= (= :committed (:status execution)) (:committed row)))
+        time? (and present?
+                   (instance? java.time.ZonedDateTime (:system-time row))
+                   (= system-time (.toInstant ^java.time.ZonedDateTime
+                                              (:system-time row))))
+        checks {:tx-ledger-record-present present?
+                :tx-ledger-id id?
+                :tx-ledger-commit-status status?
+                :tx-ledger-system-time time?}]
+    {:checks checks
+     :matches? (every? true? (vals checks))}))
+
+(defn- collect-step!
   "Execute one admitted finite transaction on a CONTROLLED XTDB node.
 
    The input is exactly {:node node :plan admitted-plan :targets [[table id] ...]}.
@@ -175,7 +234,7 @@
    payloads. It carries a bounded comparison, known physical outcome, and
    collection scope. For unknown outcomes the exception propagates instead
    of returning a misleading comparison or attempting reconciliation."
-  [input]
+  [input ledger?]
   (let [{:keys [node plan targets]} (require-input! input)
         plan (model/admitted-plan plan)
         targets (refinement/require-targets targets)
@@ -189,23 +248,66 @@
     (doseq [[table _] targets]
       (safe-sql-table! table))
     (let [operations (:tx-ops (tx/prepare {} plan))
-          before (observe! node targets)
-          reference-before (refinement/observation-state targets before)
-          execution (execute-definitively! node operations)
-          after (observe! node targets)
+          before (observe-phase! node targets)
+          reference-before (refinement/observation-state
+                            targets (:documents before))
+          {:keys [execution tx-key]} (execute-definitively! node operations)
+          ;; A ledger-linked request must have a definite physical identity.
+          ;; If absent after the submission, fail rather than fabricate a
+          ;; rejected/committed comparison or try the operation again.
+          tx-key (when ledger? (tx-key! tx-key))
+          after (observe-phase! node targets)
           comparison (refinement/compare-recorded-step
                       {:reference-before reference-before
                        :plan plan
                        :targets targets
-                       :observed-before before
+                       :observed-before (:documents before)
                        :recorded-tx-ops operations
                        :execution execution
-                       :observed-after after})]
-      {:comparison comparison
-       :execution execution
-       :collected-target-count (count targets)
-       :submitted-operation-count (count operations)
-       :collection-scope collection-scope
-       :evidence-kind :direct-controlled-xtdb-observation
-       :observation-basis :separate-pinned-before-and-after-phases
-       :certifies-physical-execution? false})))
+                       :observed-after (:documents after)})
+          base-report {:comparison comparison
+                       :execution execution
+                       :collected-target-count (count targets)
+                       :submitted-operation-count (count operations)
+                       :collection-scope collection-scope
+                       :evidence-kind :direct-controlled-xtdb-observation
+                       :observation-basis :separate-pinned-before-and-after-phases
+                       :certifies-physical-execution? false}]
+      (if-not ledger?
+        base-report
+        (let [ledger (ledger-evidence! node (:basis after) tx-key execution)
+              checks (merge (:checks comparison) (:checks ledger))]
+          (-> base-report
+              (assoc :comparison
+                     (assoc comparison
+                            :checks checks
+                            :corresponds? (every? true? (vals checks))))
+              (assoc :physical-tx-id (:tx-id tx-key)
+                     :transaction-ledger-matches? (:matches? ledger)
+                     :collection-scope ledger-collection-scope
+                     :evidence-kind :direct-controlled-xtdb-ledger-linked-observation)))))))
+
+(defn observe-and-compare!
+  "Original v1006 diagnostic API. Pin the two observation phases, submit once,
+   and compare physical documents, lowering, and definitive outcome. No
+   transaction-ledger query is performed by this compatibility entry point."
+  [input]
+  (collect-step! input false))
+
+(defn observe-and-compare-ledger!
+  "Stronger, opt-in controlled-XTDB diagnostic, with the SAME exact three-key
+   input as observe-and-compare!. In addition to the bounded step comparison,
+   link XTDB's success tx-key or assertion-conflict tx-key to xt.txs at the
+   pinned poststate basis. Confirm ID, timestamp, and committed status.
+
+   Missing/invalid tx-keys and XTDB query errors fail closed after submission:
+   they NEVER trigger retries. Missing or contradictory ledger rows make
+   :comparison/:corresponds? false with individual false ledger checks.
+
+   A passing result is not an authenticated receipt or a refinement proof.
+   In particular, the tx ledger does not attest the transaction's operations,
+   the internal read snapshot, external-writer exclusion, or production-node
+   identity; the controlled-DB assumptions remain explicit. The returned
+   report excludes raw tokens, document bodies, and transaction payloads."
+  [input]
+  (collect-step! input true))
