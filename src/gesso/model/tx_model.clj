@@ -32,7 +32,7 @@
               :atomic-document-write-set}
    :bounded-extension
    {:canonical-document-field-count-assertions
-    :prewrite-top-level-map-count}
+    :prewrite-non-nil-top-level-map-count}
    :assumed #{:serialized-atomic-commit}
    :not-established #{:real-xtdb-correspondence
                       :business-authorization
@@ -40,7 +40,8 @@
                       :arbitrary-sql-assertions
                       :durable-application-command-replay
                       :delivery-and-live-effects
-                      :temporal-validity-and-isolation}})
+                      :temporal-validity-and-isolation
+                      :general-nil-absence-state-correspondence}})
 
 (defn- fail!
   [type message details]
@@ -77,9 +78,11 @@
    canonical constructor output, and require structural identity. Arbitrary
    assertions must never become unconstrained 'successful' model steps.
 
-   A finite state document is a map, so its top-level key count models this
-   particular XTDB NEST_ONE/LENGTH assertion. This does not establish the
-   physical equality semantics for every XTDB value or serialization type."
+   The corresponding XTDB NEST_ONE/LENGTH assertion counts persisted
+   top-level fields. An explicit Clojure nil at the top level is absent from
+   the persisted XTDB document and must not contribute to this count.
+   This does not establish physical equality semantics, full nil/absence
+   correspondence for version guards, or general XTDB serialization."
   [assertion]
   (try
     (when (and (map? assertion)
@@ -169,6 +172,18 @@
              :expected (:model/expected model-command)}))
         commands))))
 
+(defn- persisted-top-level-field-count
+  "Count XTDB-visible top-level fields in a finite document representation.
+
+   XTDB2 omits top-level document entries whose Clojure value is nil on
+   :put-docs; NEST_ONE(SELECT *) therefore cannot count those entries.
+   Keep nested values opaque: this is only the canonical *top-level*
+   field-count assertion, not recursive serialization or equality."
+  [document]
+  (reduce-kv (fn [count _ value]
+               (if (nil? value) count (inc count)))
+             0 document))
+
 (defn- assess-precondition
   [state {:keys [kind target expected] :as check}]
   (let [actual (get state target)]
@@ -180,7 +195,8 @@
 
              :document-field-count
              (and (map? actual)
-                  (= (:expected-count check) (count actual)))
+                  (= (:expected-count check)
+                     (persisted-top-level-field-count actual)))
 
              (:command-version :dependency-version)
              (matches-expected? actual expected)))))
