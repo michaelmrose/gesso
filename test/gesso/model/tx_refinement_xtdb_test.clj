@@ -1,5 +1,5 @@
 (ns gesso.model.tx-refinement-xtdb-test
-  "Permanent controlled-XTDB regressions for direct, ledger-linked, and bracketed observations.
+  "Permanent controlled-XTDB regressions for direct, ledger-linked, bracketed, and ledger-window observations.
 
    Exercises the actual collector: it independently reads the declared target
    domain, constructs and submits canonical tx/prepare operations, classifies
@@ -14,7 +14,10 @@
    including missing, contradictory, and unavailable evidence. Bracketed
    tests independently inspect the before-ledger high watermark and its
    ordering relative to the submitted physical transaction. None of these
-   diagnostics attest a production submission or certify physical refinement."
+   diagnostics attest a production submission or certify physical refinement.
+   Ledger-window regressions additionally check phase-local ledger ceilings,
+   transaction-ID adjacency, detected intervening writes, and explicitly
+   unverifiable isolation assumptions."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
@@ -1050,3 +1053,284 @@
              (error-type #(collector/observe-and-compare-bracketed!
                            (assoc base :targets [[:memberships "other"]])))))
       (is (empty? @calls)))))
+
+
+;; v1015: Window checks are intentionally STRONGER than the ID bracket, but
+;; remain observations rather than a production execution certificate.
+(defn- collect-window! [a-plan targets]
+  (collector/observe-and-compare-ledger-window!
+   {:node (node) :plan a-plan :targets targets}))
+
+(def ^:private window-check-keys
+  #{:executed-tx-after-before-watermark
+    :executed-tx-immediate-successor
+    :executed-tx-equals-after-watermark})
+
+(defn- check-window-report! [report expected-status]
+  (is (= expected-status (get-in report [:execution :status])))
+  (is (true? (get-in report [:comparison :corresponds?]))
+      (pr-str (get-in report [:comparison :checks])))
+  (is (every? true? (vals (select-keys (get-in report [:comparison :checks])
+                                      window-check-keys))))
+  (is (= :direct-controlled-xtdb-ledger-window-observation
+         (:evidence-kind report)))
+  (is (= :gesso.model.tx/direct-xtdb-ledger-window-step-v1
+         (get-in report [:collection-scope :collector])))
+  (is (true? (:transaction-ledger-matches? report)))
+  (is (integer? (:physical-tx-id report)))
+  (is (false? (:certifies-physical-execution? report)))
+  (is (false? (get-in report [:comparison :certifies-physical-execution?])))
+  (is (not-any? #(contains? report %)
+                [:node :plan :tx-key :snapshot-token :system-time
+                 :recorded-tx-ops :observed-before :observed-after
+                 :reference-before :before-ledger-watermark
+                 :after-ledger-watermark]))
+  report)
+
+(deftest ledger-window-scope-does-not-assert-refinement-or-isolation-test
+  (let [{:keys [collector collected assumed not-established]}
+        collector/ledger-window-collection-scope]
+    (is (= :gesso.model.tx/direct-xtdb-ledger-window-step-v1 collector))
+    (doseq [fact [:pinned-before-ledger-high-watermark
+                 :pinned-after-ledger-high-watermark
+                 :executed-tx-immediate-successor-of-before-watermark
+                 :executed-tx-equals-after-ledger-watermark]]
+      (is (contains? collected fact)))
+    (doseq [premise [:monotonic-xtdb-transaction-ids
+                    :unique-monotonic-xtdb-transaction-ids
+                    :ledger-high-watermarks-include-all-visible-tx-ids
+                    :exclusive-control-of-tracked-documents-during-collection]]
+      (is (contains? assumed premise)))
+    (doseq [unproved [:transaction-internal-snapshot-equals-observed-prestate
+                     :no-writer-outside-pinned-observation-window
+                     :no-in-flight-or-future-external-commits
+                     :transaction-snapshot-attestation
+                     :authenticated-physical-submission-receipt
+                     :general-xtdb-step-refinement]]
+      (is (contains? not-established unproved))
+      (is (not (contains? collected unproved))))))
+
+(deftest ledger-window-commit-and-rejected-retry-correspond-test
+  (let [req (seed! :requests (request "window-retry"))
+        rt [:requests (:xt/id req)]
+        action (plan [(claim req "window-helper")])
+        commit (check-window-report! (collect-window! action [rt]) :committed)
+        reject (check-window-report! (collect-window! action [rt]) :rejected)]
+    (is (= :xtdb/assert-failed (get-in reject [:execution :error/code])))
+    (is (< (:physical-tx-id commit) (:physical-tx-id reject)))
+    (is (= "window-helper" (:owner (physical-document :requests (:xt/id req)))))))
+
+(deftest ledger-window-duplicate-create-rejection-still-has-ledger-entry-test
+  (let [req (request "window-duplicate")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        first-result (check-window-report! (collect-window! action [rt]) :committed)
+        second-result (check-window-report! (collect-window! action [rt]) :rejected)]
+    (is (< (:physical-tx-id first-result) (:physical-tx-id second-result)))
+    (is (= :document-absent
+           (get-in second-result [:comparison :failed-precondition-kind])))
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest ledger-window-high-watermarks-share-pinned-document-bases-test
+  (let [req (seed! :requests (request "window-bases"))
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        real-execute xt/execute-tx
+        events (atom [])
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (when (= 3 (count args))
+                           (let [query (second args)]
+                             (swap! events conj
+                                    {:kind (cond
+                                             (= query "SHOW SNAPSHOT_TOKEN") :basis
+                                             (= before-watermark-sql query) :watermark
+                                             (and (vector? query) (= ledger-sql (first query))) :ledger
+                                             :else :document)
+                                     :basis (nth args 2)})))
+                         (apply real-query args))
+                  xt/execute-tx (fn [& args]
+                                  (when (= 2 (count args))
+                                    (swap! events conj {:kind :submit}))
+                                  (apply real-execute args))]
+                 (collect-window! (plan [(claim req "window-bases-helper")]) [rt]))
+        [before-basis before-doc before-watermark submit
+         after-basis after-doc ledger after-watermark] @events]
+    (check-window-report! report :committed)
+    (is (= [:basis :document :watermark :submit
+            :basis :document :ledger :watermark]
+           (mapv :kind @events)))
+    (is (= :basis (:kind before-basis)))
+    (is (= :basis (:kind after-basis)))
+    (is (= (:basis before-doc) (:basis before-watermark)))
+    (is (= (:basis after-doc) (:basis ledger) (:basis after-watermark)))
+    (is (not= (:basis before-doc) (:basis after-doc)))
+    (is (= #{:snapshot-token :current-time} (set (keys (:basis before-doc)))))
+    (is (string? (get-in after-watermark [:basis :snapshot-token])))
+    (is (nil? (:basis submit)))))
+
+(deftest ledger-window-bad-before-watermark-fails-before-execution-test
+  (let [req (request "window-bad-before")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        real-query xt/q
+        invalid-rows [nil {} [nil] [{}] [{:xt/id -1}]
+                      [{:xt/id "1"}] [{:xt/id 1.2}]
+                      [{:xt/id 0} {:xt/id 1}]]]
+    (doseq [rows invalid-rows]
+      (testing (pr-str rows)
+        (let [submissions (atom 0)]
+          (with-redefs
+            [xt/q (fn [& args]
+                    (if (= before-watermark-sql (second args))
+                      rows
+                      (apply real-query args)))
+             xt/execute-tx (fn [& _]
+                             (swap! submissions inc)
+                             (throw (ex-info "unexpected submission" {})))]
+            (is (= ::collector/invalid-before-ledger-watermark
+                   (error-type #(collect-window! action [rt]))))
+            (is (zero? @submissions))))))
+    (is (nil? (physical-document :requests (:xt/id req))))))
+
+(deftest ledger-window-bad-after-watermark-fails-after-single-commit-test
+  (let [req (request "window-bad-after")
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        real-submit xt/execute-tx
+        watermark-count (atom 0)
+        submits (atom 0)
+        caught (try
+                 (with-redefs
+                   [xt/q (fn [& args]
+                           (if (= before-watermark-sql (second args))
+                             (if (= 2 (swap! watermark-count inc))
+                               [{:xt/id "not-a-number"}]
+                               (apply real-query args))
+                             (apply real-query args)))
+                    xt/execute-tx (fn [& args]
+                                    (when (= 2 (count args)) (swap! submits inc))
+                                    (apply real-submit args))]
+                   (collect-window! (plan [(command/create :requests req version)]) [rt]))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+    (is (= ::collector/invalid-after-ledger-watermark
+           (:error/type (ex-data caught))))
+    (is (= 2 @watermark-count))
+    (is (= 1 @submits) "Missing post-commit evidence must not resubmit.")
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest ledger-window-falsified-before-id-gap-breaks-correspondence-test
+  (let [req (seed! :requests (request "window-false-before"))
+        rt [:requests (:xt/id req)]
+        original-query xt/q
+        watermarks (atom 0)
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (let [rows (apply original-query args)]
+                           (if (= before-watermark-sql (second args))
+                             (if (= 1 (swap! watermarks inc))
+                               ;; Fabricate only the PREDECESSOR: the actual
+                               ;; after-ledger query must remain independent.
+                               [{:xt/id (- (or (:xt/id (first rows)) 0) 1)}]
+                               rows)
+                             rows)))]
+                 (collect-window! (plan [(claim req "window-false-before-helper")]) [rt]))
+        checks (get-in report [:comparison :checks])]
+    (is (= :committed (get-in report [:execution :status])))
+    (is (true? (:executed-tx-after-before-watermark checks)))
+    (is (false? (:executed-tx-immediate-successor checks)))
+    (is (true? (:executed-tx-equals-after-watermark checks)))
+    (is (true? (:transaction-ledger-matches? report)))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (= "window-false-before-helper"
+           (:owner (physical-document :requests (:xt/id req)))))))
+
+(deftest ledger-window-falsified-after-watermark-breaks-correspondence-test
+  (let [req (seed! :requests (request "window-false-after"))
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        query-count (atom 0)
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (if (= before-watermark-sql (second args))
+                           (let [i (swap! query-count inc)
+                                 rows (apply real-query args)]
+                             (if (= 2 i)
+                               [{:xt/id (inc (:xt/id (first rows)))}]
+                               rows))
+                           (apply real-query args)))]
+                 (collect-window! (plan [(claim req "window-false-after-helper")]) [rt]))
+        checks (get-in report [:comparison :checks])]
+    (is (= 2 @query-count))
+    (is (= :committed (get-in report [:execution :status])))
+    (is (true? (:executed-tx-immediate-successor checks)))
+    (is (false? (:executed-tx-equals-after-watermark checks)))
+    (is (true? (:poststate checks)))
+    (is (false? (get-in report [:comparison :corresponds?])))))
+
+(deftest ledger-window-unrelated-writer-before-submit-is-detected-test
+  (let [req (request "window-writer-before")
+        unrelated (membership "window-unrelated-before")
+        rt [:requests (:xt/id req)]
+        real-submit xt/execute-tx
+        injected (atom false)
+        report (with-redefs
+                 [xt/execute-tx
+                  (fn [& args]
+                    (when (and (= 2 (count args))
+                               (compare-and-set! injected false true))
+                      (real-submit (node) [[:put-docs :memberships unrelated]]))
+                    (apply real-submit args))]
+                 (collect-window! (plan [(command/create :requests req version)]) [rt]))
+        checks (get-in report [:comparison :checks])]
+    (is @injected)
+    (is (= :committed (get-in report [:execution :status])))
+    (is (true? (:poststate checks)))
+    (is (true? (:executed-tx-after-before-watermark checks)))
+    (is (false? (:executed-tx-immediate-successor checks)))
+    (is (true? (:executed-tx-equals-after-watermark checks)))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (= unrelated (physical-document :memberships (:xt/id unrelated))))))
+
+(deftest ledger-window-unrelated-writer-after-submit-is-detected-test
+  (let [req (request "window-writer-after")
+        unrelated (membership "window-unrelated-after")
+        rt [:requests (:xt/id req)]
+        original-query xt/q
+        real-submit xt/execute-tx
+        seen-bases (atom 0)
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         ;; Only direct two-argument snapshot-token requests
+                         ;; count. Internal XTDB queries may use a different
+                         ;; arity and must not trigger the injection.
+                         (when (and (= 2 (count args))
+                                    (= "SHOW SNAPSHOT_TOKEN" (second args))
+                                    (= 2 (swap! seen-bases inc)))
+                           (real-submit (node) [[:put-docs :memberships unrelated]]))
+                         (apply original-query args))]
+                 (collect-window! (plan [(command/create :requests req version)]) [rt]))
+        checks (get-in report [:comparison :checks])]
+    (is (= 2 @seen-bases))
+    (is (= :committed (get-in report [:execution :status])))
+    (is (true? (:poststate checks)))
+    (is (true? (:executed-tx-immediate-successor checks)))
+    (is (false? (:executed-tx-equals-after-watermark checks)))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (= unrelated (physical-document :memberships (:xt/id unrelated))))))
+
+(deftest ledger-window-input-shape-rejects-claimed-evidence-before-io-test
+  (let [req (request "window-claimed-evidence")
+        rt [:requests (:xt/id req)]
+        base {:node (node) :plan (plan [(command/create :requests req version)])
+              :targets [rt]}
+        calls (atom [])]
+    (with-redefs [xt/q (fn [& _] (swap! calls conj :read) nil)
+                  xt/execute-tx (fn [& _] (swap! calls conj :submit) nil)]
+      (doseq [field [:before-ledger-watermark :after-ledger-watermark
+                     :tx-key :recorded-tx-ops :execution :observed-before]]
+        (is (= ::collector/invalid-input
+               (error-type #(collector/observe-and-compare-ledger-window!
+                             (assoc base field :untrusted)))))
+        (is (empty? @calls))))))
