@@ -16,10 +16,12 @@
    durable application-command replay, general SQL correspondence, or
    correctness of domain-specific guards. In particular, the missing-guard
    test demonstrates a policy dependency that this generic layer cannot
-   infer. An explicit-nil test is a RED correspondence regression against
-   the current finite model: XTDB removes nil-valued document fields rather
-   than counting them as persisted fields. This namespace is NOT a
-   certification or formal proof artifact."
+   infer. The v999 nil/absence counterexample now has a repaired field-count
+   interpretation, exercised against XTDB by v1001 positive and negative
+   cases. The comparison is explicitly scoped to top-level field presence:
+   it does NOT establish equality of arbitrary nil-bearing model states and
+   persisted documents. This namespace is NOT a certification or formal proof
+   artifact."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
@@ -259,8 +261,7 @@
 ;; v999 — Cross-representation witness cases for the canonical field-count
 ;; assertion. All comparisons below use production tx/prepare and the actual
 ;; embedded XTDB transaction executor. They are not universal refinement
-;; proofs. The explicit nil case is intentionally a failing correspondence
-;; regression until the admitted finite state representation is corrected.
+;; proofs. The former RED nil/count witness now passes with v1000.
 
 (defn- fresh-request [label]
   (request-document (str "v999-" label "-" (random-uuid))))
@@ -368,11 +369,11 @@
       (is (= (dec (count observed)) (count physical))))
     (testing "The same field-count ASSERT must agree with the finite model"
       (is (= :rejected (:status execution)))
-      ;; Expected RED against v994: tx-model presently counts every map key.
-      ;; A later fix must either reject non-representable nil-valued documents
-      ;; with a typed diagnostic or give them a sound physical abstraction.
+      ;; The v999 regression was RED before v1000 corrected the count rule.
+      ;; The reference retains nil-bearing input state; state equality is not
+      ;; claimed here, only this specific ASSERT outcome.
       (is (= (:status execution) (:status prediction))
-          (str "Explicit nil/absence is not represented faithfully: "
+          (str "Nil/absence field-count outcomes disagree: "
                (pr-str {:physical-field-count (count physical)
                         :reference-field-count (count observed)
                         :physical-status (:status execution)
@@ -392,3 +393,174 @@
            (get-in result [:prediction :failed-precondition :kind])))
     (is (nil? (select-document :requests (:xt/id output))))
     (is (nil? (select-document :requests (:xt/id observed))))))
+
+
+;; v1001 — Test both admissible counts for a nil-bearing *observation*,
+;; including a successful physical commit. A nil-valued top-level field in an
+;; input map is not physically distinguishable from a missing field in XTDB2.
+;; We compare projected document states ONLY for this explicit representation
+;; boundary; ordinary tests retain strict full-state comparison.
+
+(defn- strip-top-level-nils [document]
+  (into {} (remove (comp nil? val)) document))
+
+(defn- xtdb-visible-state [state]
+  (update-vals state strip-top-level-nils))
+
+(defn- compare-nil-boundary-step!
+  [before a-plan targets]
+  (let [prediction (model/step before a-plan)
+        execution (execute-and-classify (prepared-ops a-plan))
+        actual (persisted-state targets)]
+    (is (= (:status prediction) (:status execution))
+        (str "nil-boundary status discrepancy: "
+             (pr-str {:reference (:status prediction)
+                      :physical (:status execution)})))
+    (is (= (xtdb-visible-state (:after prediction)) actual)
+        (str "Explicit top-level nil projection differs from physical state: "
+             (pr-str {:projected (xtdb-visible-state (:after prediction))
+                      :physical actual})))
+    (when (= :rejected (:status prediction))
+      (is (= :xtdb/assert-failed (:error/code execution))))
+    {:prediction prediction :execution execution :actual actual}))
+
+(defn- physical-count-plan
+  "Canonical field-count assertion with an independently supplied persisted
+   field count. A default version guard checks the revision and updated-at,
+   deliberately NOT an optional nil-bearing input field."
+  [observed output expected-count]
+  {:commands [(command/create :requests output version)]
+   :guards [(command/guard :requests observed version)]
+   :assertions [(tx/assert-document-field-count
+                 :requests (:xt/id observed) expected-count)]
+   :emit false})
+
+(deftest v1001-nil-bearing-observation-commits-at-physical-field-count-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "nil-positive")
+                         :optional-policy nil))
+        output (fresh-request "nil-positive-out")
+        target [:requests (:xt/id observed)]
+        actual-before (select-document :requests (:xt/id observed))
+        expected-fields (count actual-before)
+        action (physical-count-plan observed output expected-fields)
+        result (compare-nil-boundary-step! {target observed} action
+                                           [target [:requests (:xt/id output)]])]
+    (testing "A top-level nil is absent from XTDB's physical document"
+      (is (contains? observed :optional-policy))
+      (is (not (contains? actual-before :optional-policy)))
+      (is (= (dec (count observed)) expected-fields)))
+    (testing "The canonical field-count assertion must also ACCEPT the physical count"
+      (is (= :committed (get-in result [:prediction :status])))
+      (is (= :committed (get-in result [:execution :status])))
+      (is (= output (select-document :requests (:xt/id output)))))))
+
+(deftest v1001-nil-and-absent-prestates-agree-on-admitted-count-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "nil-vs-absent")
+                         :optional-policy nil))
+        target [:requests (:xt/id observed)]
+        physical (select-document :requests (:xt/id observed))
+        output (fresh-request "nil-vs-absent-out")
+        action (physical-count-plan observed output (count physical))
+        with-nil (model/step {target observed} action)
+        without-nil (model/step {target physical} action)
+        result (compare-step! {target physical} action
+                              [target [:requests (:xt/id output)]])]
+    (is (= :committed (:status with-nil) (:status without-nil)))
+    (is (= (:status with-nil) (get-in result [:execution :status])))
+    (is (= physical (select-document :requests (:xt/id observed))))))
+
+(deftest v1001-physical-introduction-of-formerly-nil-field-conflicts-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "nil-introduced")
+                         :optional-policy nil))
+        physical (select-document :requests (:xt/id observed))
+        output (fresh-request "nil-introduced-out")
+        action (physical-count-plan observed output (count physical))
+        changed (assoc observed :optional-policy {:allow true})
+        target [:requests (:xt/id observed)]
+        _ (seed-request! changed)
+        result (compare-step! {target changed} action
+                              [target [:requests (:xt/id output)]])]
+    (is (= :rejected (get-in result [:execution :status])))
+    (is (= :document-field-count
+           (get-in result [:prediction :failed-precondition :kind])))
+    (is (nil? (select-document :requests (:xt/id output))))))
+
+(deftest v1001-removing-compared-field-via-physical-nil-conflicts-test
+  (let [observed (seed-request!
+                  (assoc (fresh-request "nil-removed")
+                         :optional-policy {:allow true}))
+        output (fresh-request "nil-removed-out")
+        action (field-count-plan observed output)
+        target [:requests (:xt/id observed)]
+        physically-nil (assoc observed :optional-policy nil)
+        _ (seed-request! physically-nil)
+        actual-before (select-document :requests (:xt/id observed))
+        result (compare-step! {target actual-before} action
+                              [target [:requests (:xt/id output)]])]
+    (is (not (contains? actual-before :optional-policy)))
+    (is (= (dec (count observed)) (count actual-before)))
+    (is (= :rejected (get-in result [:execution :status])))
+    (is (= :document-field-count
+           (get-in result [:prediction :failed-precondition :kind])))
+    (is (nil? (select-document :requests (:xt/id output))))))
+
+(deftest v1001-stale-timestamp-with-unchanged-revision-conflicts-test
+  (let [observed (seed-request! (fresh-request "same-revision"))
+        changed (assoc observed :updated-at "t0-external")
+        output (fresh-request "same-revision-out")
+        target [:requests (:xt/id observed)]
+        action (physical-count-plan observed output (count observed))
+        _ (seed-request! changed)
+        result (compare-step! {target changed} action
+                              [target [:requests (:xt/id output)]])]
+    (is (= (:revision observed) (:revision changed)))
+    (is (= (count observed) (count changed)))
+    (is (= :rejected (get-in result [:execution :status])))
+    (is (= :dependency-version
+           (get-in result [:prediction :failed-precondition :kind])))
+    (is (nil? (select-document :requests (:xt/id output))))))
+
+(deftest v1001-version-guard-is-not-a-whole-snapshot-guard-test
+  (let [observed (seed-request! (fresh-request "version-only"))
+        changed (assoc observed :owner "externally-changed")
+        target [:requests (:xt/id observed)]
+        version-only-output (fresh-request "version-only-out")
+        full-snapshot-output (fresh-request "whole-snapshot-out")
+        version-only (physical-count-plan observed version-only-output
+                                          (count observed))
+        full-snapshot (field-count-plan observed full-snapshot-output)
+        version-output-target [:requests (:xt/id version-only-output)]
+        full-output-target [:requests (:xt/id full-snapshot-output)]
+        _ (seed-request! changed)
+        first-result (compare-step! {target changed} version-only
+                                    [target version-output-target])
+        next-state (:actual first-result)
+        second-result (compare-step! next-state full-snapshot
+                                     [target version-output-target full-output-target])]
+    (testing "Version/timestamp alone do not detect a changed non-versioned field"
+      (is (= :committed (get-in first-result [:execution :status])))
+      (is (= version-only-output (select-document :requests
+                                                 (:xt/id version-only-output)))))
+    (testing "The same changed field is detected when included in the complete guard"
+      (is (= :rejected (get-in second-result [:execution :status])))
+      (is (= :dependency-version
+             (get-in second-result [:prediction :failed-precondition :kind])))
+      (is (nil? (select-document :requests (:xt/id full-snapshot-output)))))))
+
+(deftest v1001-nil-valued-field-cannot-enter-canonical-version-check-test
+  (let [observed (assoc (fresh-request "nil-compare")
+                        :optional-policy nil)
+        failure (try
+                  (complete-guard observed)
+                  nil
+                  (catch clojure.lang.ExceptionInfo error
+                    (ex-data error)))]
+    (is (= ::command/invalid-versioned-document (:error/type failure))
+        "A nil-bearing comparison is rejected during guard construction, not silently treated as a matching absent field.")
+    (is (contains? observed :optional-policy))
+    (is (not (command/versioned-document?
+              observed (assoc version
+                              :compare-keys [:revision :updated-at :optional-policy]))))))
