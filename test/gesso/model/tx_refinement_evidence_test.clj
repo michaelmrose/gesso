@@ -1,14 +1,15 @@
 (ns gesso.model.tx-refinement-evidence-test
-  "Adversarial tests for v1031's candidate-evidence review boundary.
+  "Adversarial candidate-evidence and instance-subject binding regressions.
 
-   These tests distinguish well-formed *proposals* from authenticated proof.
-   They intentionally do not fabricate a verifier, discharge XTDB premises,
-   or bind generic catalog evidence to a particular application transaction."
+   Generic candidate review remains intentionally separate from v1037's
+   instance-bound review. Neither authenticates sources, proves closed-world
+   dependencies, verifies evidence, or discharges an XTDB backend premise."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.model.command :as command]
             [gesso.model.tx-model :as model]
             [gesso.model.tx-refinement-evidence :as evidence]
-            [gesso.model.tx-refinement-premises :as premises]))
+            [gesso.model.tx-refinement-premises :as premises]
+            [gesso.model.tx-refinement-subject :as instance-subject]))
 
 (def ^:private version
   {:revision-key :revision
@@ -378,3 +379,291 @@
                      (catch clojure.lang.ExceptionInfo e e)))]
       (is (= ::evidence/source-contract-drift (:error/type (ex-data err))))
       (is (not (.contains (pr-str (ex-data err)) "private-issuer-leak-1032"))))))
+
+
+;; v1038 — Application-specific evidence proposals carry one exact, locally
+;; reconstructed subject digest. The digest binds DECLARATIONS, not truth.
+;; These helpers deliberately use the public subject constructor; they do not
+;; fabricate a verifier or an authenticated artifact.
+(def ^:private instance-environment
+  {:backend {:product :xtdb
+             :version "2.2.0-beta1"
+             :build-sha256 sha-a
+             :settings {:clock :system :features #{:one :two}}}
+   :gesso {:source-sha256 sha-a}
+   :application {:id :humanhelp
+                 :operation :create-request
+                 :source-sha256 sha-a
+                 :dependency-targets [[:requests private-id]
+                                      [:organizations "private-organization-1038"]]
+                 :writer-ids [:humanhelp/request-writer :humanhelp/claim-writer]
+                 :policy-rule-ids [:humanhelp/active-member :humanhelp/org-policy]}})
+
+(defn- instance-digest
+  ([] (instance-digest {} create-plan instance-environment))
+  ([state plan environment]
+   (:subject-sha256
+    (instance-subject/derive-subject state plan environment))))
+
+(defn- instance-proposal
+  ([premise kind] (instance-proposal premise kind sha-a))
+  ([premise kind artifact-hash]
+   (assoc (proposal premise kind artifact-hash)
+          :instance-subject-sha256 (instance-digest))))
+
+(def ^:private bound-ordinary
+  (instance-proposal default-premise :versioned-backend-contract))
+
+(defn- instance-review
+  ([proposals]
+   (instance-review {} create-plan instance-environment proposals))
+  ([state plan environment proposals]
+   (evidence/review-instance-evidence state plan environment proposals)))
+
+(defn- proof-remains-open! [r]
+  (is (= #{} (:external-premises-discharged r)))
+  (is (false? (:evidence-authenticated? r)))
+  (is (false? (:any-proof-checked? r)))
+  (is (false? (:backend-contract-admitted? r)))
+  (is (false? (:general-refinement-proved? r)))
+  (is (false? (:certifies-physical-execution? r)))
+  (is (false? (:instance-declarations-authenticated? r)))
+  (is (false? (:application-dependencies-proved-complete? r)))
+  (is (false? (:instance-evidence-verified? r)))
+  (is (= #{:undischarged} (set (map :status (:requirements r)))))
+  (doseq [p (:proposals r)]
+    (is (false? (:authenticated? p)))
+    (is (false? (:proof-checked? p)))
+    (is (false? (:discharges-premise? p)))))
+
+(deftest instance-evidence-scope-explicitly-limits-assurance-test
+  (is (= :gesso.model.tx/instance-refinement-evidence-review-v1
+         (:obligation evidence/instance-evidence-scope)))
+  (is (= (:identity instance-subject/subject-scope)
+         (:subject-source evidence/instance-evidence-scope)))
+  (is (every? (:checked evidence/instance-evidence-scope)
+              #{:exact-instance-proposal-shape
+                :freshly-derived-plan-and-prestate-subject
+                :declared-backend-source-and-footprint-binding
+                :cross-instance-proposal-rejection
+                :generic-premise-route-and-completeness-checks
+                :no-caller-supplied-discharge}))
+  (is (every? (:not-established evidence/instance-evidence-scope)
+              #{:source-or-binary-authentication
+                :application-dependency-or-writer-completeness
+                :selected-physical-prestate-authenticity
+                :artifact-existence-or-authenticity
+                :issuer-authentication :independent-proof-validation
+                :backend-contract-admission :physical-execution-attestation
+                :transaction-internal-read-state-refinement
+                :any-external-premise-discharged :general-xtdb-refinement
+                :application-certification
+                :confidentiality-of-low-entropy-digest-input})))
+
+(deftest instance-review-with-no-proposals-does-not-assert-binding-test
+  (let [r (instance-review [])]
+    (is (= :awaiting-independent-evidence (:status r)))
+    (is (= :checked (:local-argument-status r)))
+    (is (zero? (:reviewable-proposals r)))
+    (is (false? (:plan-specific-subject-bound? r)))
+    (is (= true (:instance-subject-derived? r)))
+    (is (= :one-selected-abstract-prestate-and-plan (:binding-granularity r)))
+    (is (= 9 (count (:requirements r))))
+    (proof-remains-open! r)))
+
+(deftest correctly-bound-candidate-remains-only-a-review-proposal-test
+  (let [r (instance-review [bound-ordinary])]
+    (is (= :independent-review-required (:status r)))
+    (is (true? (:plan-specific-subject-bound? r)))
+    (is (= 1 (:reviewable-proposals r)))
+    (is (= :requires-independent-verification
+           (get-in r [:proposals 0 :reason])))
+    (is (true? (:review-package-complete? (entry r default-premise))))
+    (is (not (contains? r :instance-subject-sha256)))
+    (is (not (contains? r :subject-sha256)))
+    (proof-remains-open! r)))
+
+(deftest generic-review-retains-old-catalog-only-semantics-test
+  (let [generic (review [ordinary])
+        bound (instance-review [bound-ordinary])]
+    (is (= :gesso.model.tx/refinement-evidence-review-v1
+           (:obligation generic)))
+    (is (false? (:plan-specific-subject-bound? generic)))
+    (is (= :independent-review-required (:status generic)))
+    (is (= :malformed-proposal
+           (get-in (review [bound-ordinary]) [:proposals 0 :reason])))
+    (is (= :malformed-proposal
+           (get-in (instance-review [ordinary]) [:proposals 0 :reason])))
+    (is (= :gesso.model.tx/instance-refinement-evidence-review-v1
+           (:obligation bound)))
+    (no-proof-claims! generic)
+    (proof-remains-open! bound)))
+
+(deftest alternate-evidence-routes-are-still-not-verified-test
+  (doseq [kind [:versioned-backend-contract :independent-formal-proof]]
+    (let [r (instance-review [(instance-proposal default-premise kind)])]
+      (is (true? (:review-package-complete? (entry r default-premise))))
+      (proof-remains-open! r)))
+  (let [id :transaction-valid-time-and-value-representation-is-admitted
+        contract (instance-proposal id :versioned-backend-contract)
+        proof (instance-proposal id :representation-refinement-proof sha-b)]
+    (is (false? (:review-package-complete?
+                 (entry (instance-review [contract]) id))))
+    (is (false? (:review-package-complete?
+                 (entry (instance-review [proof]) id))))
+    (let [r (instance-review [contract proof])]
+      (is (true? (:review-package-complete? (entry r id))))
+      (proof-remains-open! r))))
+
+(deftest complete-instance-candidate-catalog-cannot-discharge-a-premise-test
+  (let [p (mapcat (fn [[id {:keys [alternatives]}]]
+                    (map #(instance-proposal id %)
+                         (first alternatives)))
+                  (sort-by (comp name key) expected-routes))
+        r (instance-review (vec p))]
+    (is (= 10 (count p)))
+    (is (= 10 (:reviewable-proposals r)))
+    (is (= :independent-review-required (:status r)))
+    (is (true? (:plan-specific-subject-bound? r)))
+    (is (every? :review-package-complete? (:requirements r)))
+    (proof-remains-open! r)))
+
+(deftest backend-descriptor-changes-invalidate-bound-evidence-test
+  (doseq [e [(assoc-in instance-environment [:backend :version] "new-version")
+             (assoc-in instance-environment [:backend :build-sha256] sha-b)
+             (assoc-in instance-environment [:backend :settings :clock] :different)
+             (assoc-in instance-environment [:backend :settings :feature] :other)]]
+    (let [r (instance-review {} create-plan e [bound-ordinary])]
+      (is (= :wrong-instance-subject (get-in r [:proposals 0 :reason])))
+      (is (= :invalid-evidence-proposals (:status r)))
+      (is (false? (:plan-specific-subject-bound? r)))
+      (is (false? (:review-package-complete? (entry r default-premise))))
+      (proof-remains-open! r))))
+
+(deftest application-and-gesso-descriptor-changes-invalidate-bound-evidence-test
+  (doseq [e [(assoc-in instance-environment [:gesso :source-sha256] sha-b)
+             (assoc-in instance-environment [:application :source-sha256] sha-b)
+             (assoc-in instance-environment [:application :id] :different/application)
+             (assoc-in instance-environment [:application :operation] :other-operation)
+             (assoc-in instance-environment [:application :writer-ids]
+                       [:humanhelp/different-writer])
+             (assoc-in instance-environment [:application :policy-rule-ids]
+                       [:humanhelp/different-rule])
+             (update-in instance-environment [:application :dependency-targets]
+                        conj [:other "unattested-added-dependency"])]]
+    (let [r (instance-review {} create-plan e [bound-ordinary])]
+      (is (= :wrong-instance-subject (get-in r [:proposals 0 :reason])))
+      (is (false? (:plan-specific-subject-bound? r)))
+      (proof-remains-open! r))))
+
+(deftest representation-order-does-not-change-instance-digest-test
+  (let [e (-> instance-environment
+              (assoc-in [:backend :settings]
+                        (array-map :features #{:two :one} :clock :system))
+              (update-in [:application :dependency-targets] (comp vec reverse))
+              (update-in [:application :writer-ids] (comp vec reverse))
+              (update-in [:application :policy-rule-ids] (comp vec reverse)))
+        r (instance-review {} create-plan e [bound-ordinary])]
+    (is (= (instance-digest) (instance-digest {} create-plan e)))
+    (is (= :independent-review-required (:status r)))
+    (is (true? (:plan-specific-subject-bound? r)))
+    (proof-remains-open! r)))
+
+(deftest plan-and-prestate-changes-invalidate-previous-instance-evidence-test
+  (let [changed-plan {:commands [(command/create :requests
+                                                 (assoc create-doc :updated-at "t2")
+                                                 version)]
+                      :guards [] :assertions [] :emit false}
+        state {[:requests private-id] create-doc}]
+    (doseq [[s p] [[{} changed-plan] [state create-plan]]]
+      (let [r (instance-review s p instance-environment [bound-ordinary])]
+        (is (= :wrong-instance-subject (get-in r [:proposals 0 :reason])))
+        (is (= :invalid-evidence-proposals (:status r)))
+        (proof-remains-open! r)))))
+
+(deftest absent-malformed-and-extra-instance-bindings-fail-closed-test
+  (doseq [bad [(dissoc bound-ordinary :instance-subject-sha256)
+               (assoc bound-ordinary :instance-subject-sha256 nil)
+               (assoc bound-ordinary :instance-subject-sha256 :symbol)
+               (assoc bound-ordinary :instance-subject-sha256 "wrong")
+               (assoc bound-ordinary :instance-subject-sha256 sha-a)
+               (assoc bound-ordinary :instance-subject-sha256 (.toUpperCase (instance-digest)))
+               (assoc bound-ordinary :instance-subject-sha256 (subs (instance-digest) 1))
+               (assoc bound-ordinary :instance-subject-sha256 (str (instance-digest) "0"))
+               (assoc bound-ordinary :forged-proof true)]]
+    (let [r (instance-review [bad])]
+      (is (= :invalid-evidence-proposals (:status r)))
+      (is (= :rejected (get-in r [:proposals 0 :status])))
+      (is (false? (:plan-specific-subject-bound? r)))
+      (is (false? (:review-package-complete? (entry r default-premise))))
+      (proof-remains-open! r))))
+
+(deftest cross-catalog-and-incompatible-instance-evidence-fail-closed-test
+  (doseq [[bad expected] [[(assoc bound-ordinary :subject :other/catalog)
+                           :wrong-formal-subject]
+                          [(assoc bound-ordinary :premise-id :secret/unknown)
+                           :unknown-premise]
+                          [(assoc bound-ordinary :evidence-kind :passing-test-log)
+                           :incompatible-evidence-kind]]]
+    (let [r (instance-review [bad])]
+      (is (= expected (get-in r [:proposals 0 :reason])))
+      (is (= :invalid-evidence-proposals (:status r)))
+      (proof-remains-open! r))))
+
+(deftest duplicates-and-rejected-batches-never-claim-instance-binding-test
+  (let [duplicate (instance-review [bound-ordinary bound-ordinary])
+        cross (assoc bound-ordinary :instance-subject-sha256 sha-b)
+        mixed (instance-review [bound-ordinary cross])]
+    (is (= :duplicate-proposal (get-in duplicate [:proposals 1 :reason])))
+    (is (= :wrong-instance-subject (get-in mixed [:proposals 1 :reason])))
+    (doseq [r [duplicate mixed]]
+      (is (= :invalid-evidence-proposals (:status r)))
+      (is (false? (:plan-specific-subject-bound? r)))
+      (is (= 1 (:reviewable-proposals r)))
+      ;; Existing generic semantics report candidate completeness per
+      ;; premise independently; an invalid BATCH is never an admission.
+      (proof-remains-open! r))))
+
+(deftest forged-trust-flags-rejected-by-instance-review-test
+  (doseq [k [:verified? :certified? :authenticated? :trusted?
+             :discharged? :backend-contract-admitted? :proof-checked?
+             :physical-execution-attested? :application-certified?]]
+    (let [r (instance-review [(assoc bound-ordinary k true)])]
+      (is (= :malformed-proposal (get-in r [:proposals 0 :reason])))
+      (is (false? (:plan-specific-subject-bound? r)))
+      (proof-remains-open! r))))
+
+(deftest instance-review-bounds-and-invalid-environment-fail-before-review-test
+  (doseq [bad [nil {} '() (list bound-ordinary) (vec (repeat 65 bound-ordinary))]]
+    (is (= ::evidence/invalid-proposals
+           (exception-type #(instance-review bad)))))
+  (doseq [env [(dissoc instance-environment :backend)
+              (assoc-in instance-environment [:backend :build-sha256] "not-a-hash")
+              (update-in instance-environment [:application :dependency-targets]
+                         #(vec (remove #{[:requests private-id]} %)))]]
+    (is (= ::instance-subject/invalid-subject
+           (exception-type #(instance-review {} create-plan env [bound-ordinary]))))))
+
+(deftest instance-review-source-ledger-drift-is-rejected-test
+  (let [base (premises/derive-obligation-ledger {} create-plan)
+        corrupted (assoc-in base [:open-premises 0 :id] :plausible-new-premise)]
+    (is (= ::instance-subject/invalid-subject
+           (with-redefs [premises/derive-obligation-ledger (fn [_ _] corrupted)]
+             (exception-type #(instance-review [bound-ordinary])))))))
+
+(deftest instance-reports-and-errors-redact-subject-digest-and-private-values-test
+  (let [correct (instance-review [(assoc bound-ordinary
+                                         :claimed-issuer "unverified-private-issuer-1038")])
+        wrong (instance-review [(assoc bound-ordinary :instance-subject-sha256 sha-b)])
+        printed (pr-str [correct wrong])
+        forbidden [private-id "private-organization-1038"
+                   "unverified-private-issuer-1038" "private-version-1032"
+                   (instance-digest) sha-a sha-b]]
+    (doseq [secret forbidden]
+      (is (not (.contains printed secret))))
+    (is (= #{:index :premise-id :status :reason
+             :authenticated? :proof-checked? :discharges-premise?}
+           (set (keys (first (:proposals correct))))))
+    (is (= :wrong-instance-subject (get-in wrong [:proposals 0 :reason])))
+    (proof-remains-open! correct)
+    (proof-remains-open! wrong)))
