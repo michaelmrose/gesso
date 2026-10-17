@@ -542,3 +542,254 @@
         (is (true? (get-in result
                            [:checks :reference-preconditions-match-unformatted-assertions])))
         (is (not (re-find #"secret-unchanged|secret-mutated" (pr-str result))))))))
+
+;; ---------------------------------------------------------------------------
+;; v1024: a conditional refinement argument is only a LOCAL account of an
+;; abstract step. These adversarial tests falsify inputs or intermediate
+;; evidence and ensure no physical guarantee is silently inferred.
+;; ---------------------------------------------------------------------------
+
+(defn- state-with
+  [& typed-documents]
+  (into {} (map (fn [[entity-type document]]
+                  [[entity-type (:xt/id document)] document])
+                typed-documents)))
+
+(def ^:private good-guarded-state
+  (state-with [:requests request]
+              [:memberships membership]
+              [:organizations organization]))
+
+(defn- conditional-check-failures [result]
+  (false-checks result))
+
+(defn- argument-for [state a-plan]
+  (prestate/derive-conditional-step state a-plan))
+
+(deftest conditional-step-scope-does-not-upgrade-assumptions-test
+  (let [result (argument-for {} create-plan)
+        scope prestate/conditional-step-scope]
+    (is (= :gesso.model.tx/conditional-serial-step-refinement-v1
+           (:obligation result)))
+    (is (= scope (:scope result)))
+    (is (= (:undischarged-premises scope) (:undischarged-premises result)))
+    (is (contains? (:undischarged-premises result)
+                   :supplied-abstract-prestate-is-complete-and-genuine))
+    (is (contains? (:undischarged-premises result)
+                   :concrete-transaction-internal-prestate-relates-to-abstract-prestate))
+    (is (contains? (:not-established scope)
+                   :universally-quantified-physical-transition-proof))
+    (is (= :conditional-only (get-in result [:physical-refinement :status])))
+    (is (= :all-undischarged-premises-hold
+           (get-in result [:physical-refinement :antecedent])))
+    (is (true? (:local-argument-valid? result)))
+    (is (false? (:input-prestate-attested? result)))
+    (is (false? (:physical-predicates-proved? result)))
+    (is (false? (:certifies-physical-execution? result)))
+    (is (false? (:proves-general-refinement? result)))))
+
+(deftest conditional-create-success-has-complete-abstract-write-test
+  (let [result (argument-for {} create-plan)]
+    (is (:local-argument-valid? result))
+    (is (every? true? (vals (:checks result))))
+    (is (= :committed (:abstract-status result)))
+    (is (nil? (:first-failed-assertion-index result)))
+    (is (= 1 (:abstract-write-count result)))
+    (is (= [{:assertion-index 0
+             :kind :document-absent
+             :table :requests
+             :finite-predicate-holds? true
+             :abstract-meaning :no-document-at-target
+             :physical-assertion-intent :assert-zero-rows-for-target
+             :physical-predicate-equivalence :undischarged}]
+           (:predicate-obligations result)))))
+
+(deftest conditional-create-collision-rejects-without-write-test
+  (let [created (command/after (first (:commands create-plan)))
+        result (argument-for (state-with [:requests created]) create-plan)]
+    (is (:local-argument-valid? result))
+    (is (= :rejected (:abstract-status result)))
+    (is (= 0 (:first-failed-assertion-index result)))
+    (is (= [false] (mapv :finite-predicate-holds?
+                         (:predicate-obligations result))))
+    (is (true? (get-in result [:checks :complete-reference-write-or-no-write])))))
+
+(deftest conditional-guarded-claim-success-requires-every-dependency-test
+  (let [result (argument-for good-guarded-state guarded-plan)]
+    (is (:local-argument-valid? result))
+    (is (= :committed (:abstract-status result)))
+    (is (= [:dependency-version :dependency-version :command-version]
+           (mapv :kind (:predicate-obligations result))))
+    (is (= [true true true]
+           (mapv :finite-predicate-holds? (:predicate-obligations result))))
+    (is (= 3 (count (:predicate-obligations result))))
+    (is (nil? (:first-failed-assertion-index result)))))
+
+(deftest conditional-first-failure-respects-ordered-guards-test
+  (doseq [[label state expected-index expected-bits]
+          [[:first-guard
+            (assoc good-guarded-state
+                   [:memberships (:xt/id membership)]
+                   (assoc membership :active false :revision 1))
+            0 [false true true]]
+           [:second-guard
+            (assoc good-guarded-state
+                   [:organizations (:xt/id organization)]
+                   (assoc organization :policy "deny" :revision 1))
+            1 [true false true]]
+           [:command-version
+            (assoc good-guarded-state
+                   [:requests (:xt/id request)]
+                   (assoc request :revision 1))
+            2 [true true false]]
+           [:all-fail
+            (-> good-guarded-state
+                (update [:memberships (:xt/id membership)] assoc :revision 1)
+                (update [:organizations (:xt/id organization)] assoc :revision 1)
+                (update [:requests (:xt/id request)] assoc :revision 1))
+            0 [false false false]]]]
+    (testing (name label)
+      (let [result (argument-for state guarded-plan)]
+        (is (:local-argument-valid? result))
+        (is (= :rejected (:abstract-status result)))
+        (is (= expected-index (:first-failed-assertion-index result)))
+        (is (= expected-bits
+               (mapv :finite-predicate-holds? (:predicate-obligations result))))
+        (is (true? (get-in result
+                           [:checks :all-preconditions-or-atomic-rejection])))))))
+
+(deftest conditional-missing-guard-is-an-explicit-rejection-test
+  (let [state (dissoc good-guarded-state [:memberships (:xt/id membership)])
+        result (argument-for state guarded-plan)]
+    (is (:local-argument-valid? result))
+    (is (= :rejected (:abstract-status result)))
+    (is (= 0 (:first-failed-assertion-index result)))
+    (is (= [false true true]
+           (mapv :finite-predicate-holds? (:predicate-obligations result))))))
+
+(deftest conditional-field-count-ignores-only-top-level-nil-test
+  (let [good-state (assoc good-guarded-state
+                          [:requests (:xt/id request)]
+                          (assoc request :optional nil))
+        bad-state (assoc good-guarded-state
+                         [:requests (:xt/id request)]
+                         (assoc request :optional "now-present"))
+        accepted (argument-for good-state rich-plan)
+        rejected (argument-for bad-state rich-plan)]
+    (is (:local-argument-valid? accepted))
+    (is (= :committed (:abstract-status accepted)))
+    (is (= 2 (:abstract-write-count accepted)))
+    (is (= [:document-field-count :dependency-version
+            :dependency-version :command-version :document-absent]
+           (mapv :kind (:predicate-obligations accepted))))
+    (is (:local-argument-valid? rejected))
+    (is (= :rejected (:abstract-status rejected)))
+    (is (= 0 (:first-failed-assertion-index rejected)))
+    (is (= [false true true true true]
+           (mapv :finite-predicate-holds? (:predicate-obligations rejected))))))
+
+(deftest conditional-multiwrite-conflict-rejects-entire-write-set-test
+  (let [audit (command/after (second (:commands rich-plan)))
+        state (assoc good-guarded-state [:audits (:xt/id audit)] audit)
+        result (argument-for state rich-plan)]
+    (is (:local-argument-valid? result))
+    (is (= :rejected (:abstract-status result)))
+    (is (= 4 (:first-failed-assertion-index result)))
+    (is (= 2 (:abstract-write-count result)))
+    (is (= [true true true true false]
+           (mapv :finite-predicate-holds? (:predicate-obligations result))))
+    (is (true? (get-in result [:checks :complete-reference-write-or-no-write])))))
+
+(deftest conditional-invalid-abstract-state-fails-admission-test
+  (is (= ::model/invalid-state
+         (error-type #(argument-for nil create-plan))))
+  (is (= ::model/invalid-state
+         (error-type #(argument-for
+                       {[:requests "another-id"] request} guarded-plan))))
+  (is (= ::model/invalid-state
+         (error-type #(argument-for
+                       {[:requests "missing-document"] nil} create-plan)))))
+
+(deftest conditional-conflicting-input-guards-fail-admission-test
+  (let [conflict (plan [claim]
+                       :guards [membership-guard
+                                (command/guard :memberships
+                                               (advance membership {:active false})
+                                               version)])]
+    (is (= ::tx/conflicting-guards
+           (error-type #(argument-for good-guarded-state conflict))))))
+
+(deftest conditional-falsified-finite-predicate-truth-fails-local-check-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state a-plan]
+                    (update-in (original state a-plan) [:checks 0 :satisfied?] not))]
+      (let [result (argument-for {} create-plan)]
+        (is (false? (:local-argument-valid? result)))
+        (is (contains? (conditional-check-failures result)
+                       :reference-predicate-truth-recheck))
+        (is (= [true]
+               (mapv :finite-predicate-holds? (:predicate-obligations result))))
+        (is (false? (:certifies-physical-execution? result)))))))
+
+(deftest conditional-falsified-first-rejection-index-fails-local-check-test
+  (let [created (command/after (first (:commands create-plan)))
+        original model/step]
+    (with-redefs [model/step
+                  (fn [state a-plan]
+                    (update-in (original state a-plan) [:checks 0 :satisfied?]
+                               (constantly true)))]
+      (let [result (argument-for (state-with [:requests created]) create-plan)]
+        (is (false? (:local-argument-valid? result)))
+        (is (contains? (conditional-check-failures result)
+                       :first-failed-precondition-order))
+        (is (= 0 (:first-failed-assertion-index result)))
+        (is (= :rejected (:abstract-status result)))))))
+
+(deftest conditional-falsified-commit-status-fails-atomic-decision-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state a-plan]
+                    (assoc (original state a-plan) :status :rejected))]
+      (let [result (argument-for {} create-plan)]
+        (is (false? (:local-argument-valid? result)))
+        (is (contains? (conditional-check-failures result)
+                       :all-preconditions-or-atomic-rejection))
+        (is (= :rejected (:abstract-status result)))))))
+
+(deftest conditional-falsified-after-state-fails-atomic-write-check-test
+  (let [original model/step]
+    (with-redefs [model/step
+                  (fn [state a-plan]
+                    (assoc (original state a-plan) :after state))]
+      (let [result (argument-for {} create-plan)]
+        (is (false? (:local-argument-valid? result)))
+        (is (contains? (conditional-check-failures result)
+                       :complete-reference-write-or-no-write))
+        (is (= :committed (:abstract-status result)))))))
+
+(deftest conditional-falsified-lowering-fails-even-when-abstract-step-is-good-test
+  (let [original tx/prepare]
+    (with-redefs [tx/prepare
+                  (fn [ctx a-plan]
+                    (update-in (original ctx a-plan) [:tx-ops 0 1]
+                               (constantly "secret-falsified-bind")))]
+      (let [result (argument-for {} create-plan)]
+        (is (false? (:local-argument-valid? result)))
+        (is (contains? (conditional-check-failures result)
+                       :local-prewrite-lowering-correspondence))
+        (is (true? (get-in result
+                           [:checks :reference-predicate-truth-recheck])))
+        (is (= :committed (:abstract-status result)))
+        (is (not (re-find #"secret-falsified-bind" (pr-str result))))))))
+
+(deftest conditional-output-excludes-sensitive-prestate-and-values-test
+  (let [result (argument-for good-guarded-state rich-plan)
+        rendered (pr-str result)]
+    (is (:local-argument-valid? result))
+    (is (not (re-find #"secret-request|secret-membership|secret-organization|secret-audit"
+                      rendered)))
+    (is (not (re-find #"helper-1|unclaimed|allow" rendered)))
+    (is (not (re-find #"(?i)ASSERT\\s+|SELECT\\s+" rendered)))
+    (is (every? #(= :undischarged (:physical-predicate-equivalence %))
+                (:predicate-obligations result)))))
