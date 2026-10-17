@@ -267,15 +267,128 @@
            (str "Unexpectedly admitted " (.getName (class bad))))))
 
 (deftest mutable-java-number-must-not-enter-subject-hash-test
-  ;; A mutable java.lang.Number is not a reproducible declared input. The
-  ;; existing v1033 canonicalizer currently admits AtomicLong via number?.
-  ;; Keep this test failing until the encoder rejects mutable Number subclasses.
+  ;; Mutable java.lang.Number implementations are not reproducible subject
+  ;; inputs. v1035 rejects them with an exact-class scalar allowlist.
   (let [mutable (java.util.concurrent.atomic.AtomicLong. 3)]
     (is (= [::subject/invalid-subject :unsupported-content-type]
            (error-reason #(subject-of {} create-plan
                                       (assoc-in environment
                                                 [:backend :settings :mutable-number]
                                                 mutable)))))))
+
+
+;; v1036: permanent allowlist coverage for the v1035 canonical encoder.
+;; All probes vary a backend *declaration*, not the production XTDB backend.
+;; Successful digests bind caller-provided data; they do not attest its origin.
+(defn- scalar-identity [value]
+  (identifier {} create-plan
+              (assoc-in environment [:backend :settings :scalar-audit] value)))
+
+(defn- scalar-rejection [value]
+  (error-reason #(scalar-identity value)))
+
+(deftest immutable-numeric-allowlist-hashes-reproducibly-test
+  (let [accepted [(byte 7) (short 7) (int 7) (long 7)
+                  (java.math.BigInteger. "700000000000000000000001")
+                  (bigint 700000000000000000000001)
+                  (/ 2 3) (java.math.BigDecimal. "7.00")
+                  (float 7.25) (double -0.0)
+                  Double/MIN_VALUE Float/MIN_VALUE
+                  Long/MAX_VALUE]]
+    (doseq [value accepted]
+      (let [first-id (scalar-identity value)]
+        (is (re-matches #"[0-9a-f]{64}" first-id)
+            (str "Accepted immutable numeric class: " (class value)))
+        (is (= first-id (scalar-identity value))
+            (str "Non-reproducible immutable numeric class: " (class value)))))))
+
+(deftest numeric-scalar-class-and-representation-remain-bound-test
+  ;; Numeric equality must not erase declared type or BigDecimal scale.
+  (doseq [[left right] [[(byte 1) (short 1)]
+                        [(short 1) (int 1)]
+                        [(int 1) (long 1)]
+                        [(long 1) (java.math.BigInteger. "1")]
+                        [(java.math.BigInteger. "1") (bigint 1)]
+                        [(long 1) (float 1.0)]
+                        [(float 1.0) (double 1.0)]
+                        [(double 1.0) (java.math.BigDecimal. "1.0")]
+                        [(java.math.BigDecimal. "1.0")
+                         (java.math.BigDecimal. "1.00")]
+                        [(double 0.0) (double -0.0)]]]
+    (is (not= (scalar-identity left) (scalar-identity right))
+        (str (class left) " versus " (class right)
+             " must retain typed or represented distinction"))))
+
+(deftest unknown-and-mutable-numeric-subclasses-are-rejected-test
+  (let [unknown-number (proxy [Number] []
+                         (intValue [] 9) (longValue [] 9)
+                         (floatValue [] (float 9))
+                         (doubleValue [] (double 9)))]
+    (doseq [value [(java.util.concurrent.atomic.AtomicLong. 3)
+                   (java.util.concurrent.atomic.AtomicInteger. 4)
+                   (java.util.concurrent.atomic.LongAdder.)
+                   (java.util.concurrent.atomic.DoubleAdder.)
+                   unknown-number]]
+      (is (= [::subject/invalid-subject :unsupported-content-type]
+             (scalar-rejection value))
+          (str "Open Number subclass must not be admitted: " (class value))))))
+
+(deftest legacy-mutable-date-types-are-rejected-test
+  (doseq [value [(java.util.Date. 1760595600000)
+                 (java.sql.Timestamp. 1760595600000)
+                 (java.sql.Date. 1760572800000)
+                 (java.sql.Time. 3600000)
+                 (java.util.GregorianCalendar.)]]
+    (is (= [::subject/invalid-subject :unsupported-content-type]
+           (scalar-rejection value))
+        (str "Mutable legacy date/calendar must not be admitted: " (class value)))))
+
+(deftest immutable-temporal-scalar-forms-remain-supported-test
+  (let [accepted [(java.time.Instant/parse "2026-10-16T08:15:00Z")
+                  (java.time.LocalDate/parse "2026-10-16")
+                  (java.time.LocalDateTime/parse "2026-10-16T08:15:00")
+                  (java.time.OffsetDateTime/parse "2026-10-16T08:15:00-07:00")
+                  (java.time.ZonedDateTime/parse "2026-10-16T08:15:00-07:00[America/Los_Angeles]")
+                  (java.util.UUID/fromString "00000000-0000-0000-0000-000000000001")]]
+    (doseq [value accepted]
+      (let [a (scalar-identity value)]
+        (is (re-matches #"[0-9a-f]{64}" a) (str (class value)))
+        (is (= a (scalar-identity value)) (str (class value)))
+        (is (not= a (scalar-identity (str value)))
+            (str "Temporal/UUID scalar must differ from a plain string: " (class value)))))))
+
+(deftest nonfinite-floating-values-fail-closed-test
+  (doseq [value [Double/NaN Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY
+                 Float/NaN Float/POSITIVE_INFINITY Float/NEGATIVE_INFINITY]]
+    (is (= [::subject/invalid-subject :unsupported-content-type]
+           (scalar-rejection value))
+        (str "Nonfinite floating scalar must not be admitted: " (class value)))))
+
+(deftest nested-mutable-scalar-is-rejected-at-all-supported-container-boundaries-test
+  (let [number (java.util.concurrent.atomic.AtomicLong. 41)
+        date (java.util.Date. 1760595600000)
+        nested [(vector :safe number)
+                (list :safe date)
+                {:settings {:secret number}}
+                #{:safe date}
+                {number :value}]]
+    (doseq [value nested]
+      (is (= [::subject/invalid-subject :unsupported-content-type]
+             (scalar-rejection value))
+          "Nested mutable values must not hide inside supported containers"))))
+
+(deftest unsupported-scalar-errors-do-not-echo-private-inputs-test
+  (let [private-object (java.util.concurrent.atomic.AtomicLong. 73829)
+        private-label "private-v1036-scalar-value"
+        exception (try (scalar-identity {:confidential private-label
+                                         :mutable private-object})
+                       nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+    (is (instance? clojure.lang.ExceptionInfo exception))
+    (is (= ::subject/invalid-subject (:error/type (ex-data exception))))
+    (is (= :unsupported-content-type (:error/reason (ex-data exception))))
+    (is (not (.contains (str (.getMessage exception) " " (pr-str (ex-data exception)))
+                        private-label)))))
 
 (deftest invalid-finite-state-or-unsupported-transaction-plan-rejected-test
   (is (some? (error-reason #(subject-of {[:requests request-id] nil}
