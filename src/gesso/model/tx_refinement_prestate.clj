@@ -260,3 +260,151 @@
      :certifies-physical-execution? false
      :proves-internal-prestate? false
      :proves-general-refinement? false}))
+
+
+;; -----------------------------------------------------------------------------
+;; Conditional, per-step refinement ARGUMENT. No backend premise is discharged.
+;; -----------------------------------------------------------------------------
+
+(def conditional-step-scope
+  "The premise ledger for one abstract prestate and one admitted plan.
+
+   The local checks are executable consistency checks, not a theorem about
+   XTDB. In particular the supplied abstract prestate is NOT a transaction-
+   internal XTDB snapshot, and the SQL-truth-table regressions are bounded
+   witnesses rather than quantified backend equivalence proofs."
+  {:obligation :gesso.model.tx/conditional-serial-step-refinement-v1
+   :checked #{:local-prewrite-lowering-correspondence
+              :reference-predicate-truth-recheck
+              :all-preconditions-or-atomic-rejection
+              :first-failed-precondition-order
+              :complete-reference-write-or-no-write}
+   :undischarged-premises
+   (conj (:external-premises contract-scope)
+         :supplied-abstract-prestate-is-complete-and-genuine)
+   :not-established
+   (into (:not-established contract-scope)
+         #{:sql-predicate-refinement-proved-by-bounded-truth-tables
+           :transaction-internal-read-basis-attested
+           :universally-quantified-physical-transition-proof})})
+
+(def ^:private predicate-meanings
+  "The exact vocabulary supported by tx-model. These are semantic names,
+   not a second developer-facing rules language or evidence of XTDB behavior."
+  {:document-absent
+   {:abstract :no-document-at-target
+    :physical :assert-zero-rows-for-target}
+   :document-field-count
+   {:abstract :non-nil-top-level-fields-equal-expected-count
+    :physical :assert-nest-one-select-star-length}
+   :dependency-version
+   {:abstract :guarded-document-has-all-expected-comparison-fields
+    :physical :assert-one-row-with-all-bound-comparisons}
+   :command-version
+   {:abstract :command-document-has-all-expected-comparison-fields
+    :physical :assert-one-row-with-all-bound-comparisons}})
+
+(defn- finite-check-holds?
+  "Second, explicit interpreter of the small admitted reference vocabulary.
+   Compare its output against tx-model's own assessments; agreeing Clojure
+   interpreters do NOT independently prove XTDB's SQL predicates."
+  [abstract-state {:keys [kind target expected expected-count]}]
+  (let [document (get abstract-state target)]
+    (case kind
+      :document-absent
+      (not (contains? abstract-state target))
+
+      :document-field-count
+      (and (map? document)
+           (= expected-count
+              (count (filter (comp some? val) document))))
+
+      (:dependency-version :command-version)
+      (and (map? document)
+           (= (:model/id expected) (:xt/id document))
+           (every? (fn [[field value]]
+                     (and (contains? document field)
+                          (= value (get document field))))
+                   (:model/checks expected)))
+
+      false)))
+
+(defn derive-conditional-step
+  "Explain a CONDITIONAL physical-to-abstract step argument for one plan.
+
+   The state is a caller-supplied finite model map, NOT a physical read and
+   NOT evidence of XTDB's internal transaction prestate. Independently
+   re-evaluates each admitted finite predicate, establishes that the finite
+   decision is the conjunction of those predicates, and checks the finite
+   command write set is entirely applied or entirely absent.
+
+   Combines that local argument with derive-obligation's exact SQL lowering
+   checks and lists every still-undischarged backend premise. The conditional
+   conclusion is valid ONLY IF those premises are established separately;
+   :local-argument-valid? must NEVER be interpreted as a physical proof.
+
+   Results expose check kinds, tables, indices, and boolean outcomes only;
+   never the supplied documents, identifiers, expected values, or SQL binds."
+  [abstract-state plan]
+  (let [state (model/require-state abstract-state)
+        plan (model/admitted-plan plan)
+        lowering (derive-obligation plan)
+        predicted (model/step state plan)
+        reference-checks (:checks predicted)
+        truth (mapv (partial finite-check-holds? state) reference-checks)
+        predicted-truth (mapv :satisfied? reference-checks)
+        first-failed-index (first (keep-indexed (fn [i satisfied?]
+                                                (when-not satisfied? i))
+                                              truth))
+        all-pass? (every? true? truth)
+        expected-after (if all-pass?
+                         (reduce (fn [current model-command]
+                                   (assoc current
+                                          (command/target model-command)
+                                          (command/after model-command)))
+                                 state (:commands plan))
+                         state)
+        checks {:local-prewrite-lowering-correspondence
+                (:local-structure-valid? lowering)
+                :reference-predicate-truth-recheck
+                (= truth predicted-truth)
+                :all-preconditions-or-atomic-rejection
+                (= (:status predicted)
+                   (if all-pass? :committed :rejected))
+                :first-failed-precondition-order
+                (= first-failed-index
+                   (first (keep-indexed (fn [i check]
+                                          (when-not (:satisfied? check) i))
+                                        reference-checks)))
+                :complete-reference-write-or-no-write
+                (= expected-after (:after predicted))}
+        kinds (mapv :kind reference-checks)]
+    {:obligation (:obligation conditional-step-scope)
+     :local-argument-valid? (every? true? (vals checks))
+     :checks checks
+     :predicate-obligations
+     (mapv (fn [index check satisfied?]
+             {:assertion-index index
+              :kind (:kind check)
+              :table (first (:target check))
+              :finite-predicate-holds? satisfied?
+              :abstract-meaning (get-in predicate-meanings
+                                        [(:kind check) :abstract])
+              :physical-assertion-intent (get-in predicate-meanings
+                                               [(:kind check) :physical])
+              :physical-predicate-equivalence :undischarged})
+           (range (count reference-checks)) reference-checks truth)
+     :abstract-status (:status predicted)
+     :first-failed-assertion-index first-failed-index
+     :abstract-write-count (count (:commands plan))
+     :physical-refinement
+     {:status :conditional-only
+      :antecedent :all-undischarged-premises-hold
+      :consequent :physical-transaction-refines-this-abstract-serial-step
+      :assumptions (:undischarged-premises conditional-step-scope)}
+     :undischarged-premises (:undischarged-premises conditional-step-scope)
+     :scope conditional-step-scope
+     :input-prestate-attested? false
+     :physical-predicates-proved? false
+     :certifies-physical-execution? false
+     :proves-general-refinement? false}))
