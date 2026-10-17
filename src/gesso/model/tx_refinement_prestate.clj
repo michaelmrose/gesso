@@ -18,7 +18,10 @@
    substitute backend model. It adds no developer-facing specification DSL."
   (:require [gesso.model.command :as command]
             [gesso.model.tx :as tx]
-            [gesso.model.tx-model :as model]))
+            [gesso.model.tx-model :as model]
+            [clojure.walk :as walk]
+            [honey.sql :as hsql]
+            [xtdb.util :as xt.util]))
 
 (def contract-scope
   {:obligation :gesso.model.tx/prewrite-serial-refinement-v1
@@ -28,7 +31,9 @@
               :precondition-order-matches-finite-reference
               :dependency-and-command-targets-match-reference
               :single-put-docs-write-per-command
-              :formatted-transaction-operation-kind-and-count}
+              :formatted-transaction-operation-kind-and-count
+              :reference-precondition-to-honeysql-expression-correspondence
+              :formatted-assertion-sql-and-bound-values-match-reference}
    :external-premises #{:xtdb-dml-is-serialized-in-transaction-log-order
                         :xtdb-asserts-evaluate-against-current-transaction-state
                         :xtdb-assert-failure-rolls-back-all-transaction-writes
@@ -62,6 +67,106 @@
        (keyword? (second operation))
        (map? (nth operation 2))))
 
+(defn- reference-table
+  "Derive the SQL table from an abstract target, preserving its schema."
+  [entity-type]
+  (when-not (keyword? entity-type)
+    (throw (ex-info "Invalid finite-model target table." {})))
+  (if-let [schema (namespace entity-type)]
+    (symbol schema (name entity-type))
+    (symbol (name entity-type))))
+
+(defn- reference-assertion
+  "Independently encode the admitted finite check vocabulary as HoneySQL.
+
+   This encoder consumes finite-model checks, NOT tx/transaction-ops or the
+   assertion helpers under test. It deliberately covers only the admitted
+   field-count, absence, and exact expected-version checks. Unsupported or
+   malformed reference checks must not be accepted as equivalence evidence."
+  [{:keys [kind target expected expected-count]}]
+  (when-not (and (vector? target)
+                 (= 2 (count target))
+                 (some? (second target)))
+    (throw (ex-info "Invalid finite-model check target." {})))
+  (let [[entity-type id] target
+        table (reference-table entity-type)
+        id-predicate [:= :xt/id id]
+        row-count (fn [predicate]
+                    {:select [[[:count '*]]]
+                     :from table
+                     :where predicate})]
+    (case kind
+      :document-absent
+      {:assert [:= 0 (row-count id-predicate)]}
+
+      :document-field-count
+      (do
+        (when-not (and (integer? expected-count) (pos? expected-count))
+          (throw (ex-info "Invalid finite-model field-count check." {})))
+        {:assert [:= expected-count
+                  {:select [[[:length [:nest_one
+                                      {:select [:*]
+                                       :from table
+                                       :where id-predicate}]]]]}]})
+
+      (:dependency-version :command-version)
+      (let [checks (:model/checks expected)]
+        (when-not (and (map? expected)
+                       (= id (:model/id expected))
+                       (vector? checks)
+                       (seq checks)
+                       (every? (fn [entry]
+                                 (and (vector? entry)
+                                      (= 2 (count entry))
+                                      (keyword? (first entry))
+                                      (some? (second entry))))
+                               checks))
+          (throw (ex-info "Invalid finite-model version check." {})))
+        {:assert [:= 1
+                  (row-count (into [:and id-predicate]
+                                   (map (fn [[field value]]
+                                          [:= field [:lift value]]))
+                                   checks))]})
+
+      (throw (ex-info "Unsupported finite-model precondition." {})))))
+
+(defn- reference-identifier-normalization
+  "Apply XTDB identifier normalization without interpreting lifted DATA.
+
+   This is deliberately local to the independent reference encoder. It does
+   not call the private formatting implementation in gesso.model.tx. Both
+   routes still depend on HoneySQL and XTDB's keyword convention, which are
+   named dependencies rather than independently proved SQL semantics."
+  [form]
+  (if (and (vector? form)
+           (= :lift (first form))
+           (= 2 (count form)))
+    form
+    (walk/walk reference-identifier-normalization
+               (fn [node]
+                 (if (qualified-keyword? node)
+                   (xt.util/kw->normal-form-kw node)
+                   node))
+               form)))
+
+(defn- reference-sql
+  [assertion]
+  (hsql/format (reference-identifier-normalization assertion)))
+
+(defn- reference-assertion-correspondence
+  "Return only booleans; do not expose SQL, parameters, or document IDs."
+  [reference-checks actual-assertions formatted-assertions]
+  (try
+    (let [reference-assertions (mapv reference-assertion reference-checks)
+          expected-formatted (mapv reference-sql reference-assertions)]
+      {:reference-preconditions-match-unformatted-assertions
+       (= reference-assertions (vec actual-assertions))
+       :formatted-assertion-sql-and-bindings-match-reference
+       (= expected-formatted (vec formatted-assertions))})
+    (catch Exception _
+      {:reference-preconditions-match-unformatted-assertions false
+       :formatted-assertion-sql-and-bindings-match-reference false})))
+
 (defn derive-obligation
   "Derive a LOCAL lowering obligation from an admitted model transaction plan.
 
@@ -73,7 +178,8 @@
 
    This does not evaluate any predicate against XTDB's actual internal read
    state. A true :local-structure-valid? establishes the emitted operation
-   ORDER and recognized operation SHAPES only. It is not an executable
+   ORDER, recognized operation SHAPES, and equality to the independently
+   encoded reference HoneySQL and formatted binding vectors. It is not an executable
    refinement theorem or a claim that external backend premises hold.
 
    Unsupported plans fail using tx-model's existing typed admission checks."
@@ -107,7 +213,10 @@
                                              :document-absent
                                              :command-version))
                                          commands)))
-        checks {:canonical-operation-sequence
+        checks (merge
+                (reference-assertion-correspondence
+                 reference-checks raw-asserts formatted-asserts)
+                {:canonical-operation-sequence
                 (= expected-unformatted actual-unformatted)
                 :precondition-count
                 (= assertion-count (count reference-checks))
@@ -131,7 +240,7 @@
                 :formatted-put-only-suffix
                 (and (= write-count (count formatted-writes))
                      (every? put-op? formatted-writes)
-                     (= expected-writes (vec formatted-writes)))}
+                     (= expected-writes (vec formatted-writes)))})
         positions (mapv (fn [i check]
                           {:assertion-index i
                            :kind (:kind check)
