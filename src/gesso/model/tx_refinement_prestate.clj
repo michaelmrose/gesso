@@ -342,9 +342,13 @@
    checks and lists every still-undischarged backend premise. The conditional
    conclusion is valid ONLY IF those premises are established separately;
    :local-argument-valid? must NEVER be interpreted as a physical proof.
+   Failed local checks suppress the conditional-refinement conclusion entirely.
 
    Results expose check kinds, tables, indices, and boolean outcomes only;
-   never the supplied documents, identifiers, expected values, or SQL binds."
+   never the supplied documents, identifiers, expected values, or SQL binds.
+   If any local check fails, the report marks the proposed argument invalid and
+   omits its conditional physical-refinement consequent, rather than leaving
+   a misleading :conditional-only status attached to contradictory evidence."
   [abstract-state plan]
   (let [state (model/require-state abstract-state)
         plan (model/admitted-plan plan)
@@ -378,9 +382,28 @@
                                         reference-checks)))
                 :complete-reference-write-or-no-write
                 (= expected-after (:after predicted))}
-        kinds (mapv :kind reference-checks)]
+        local-valid? (every? true? (vals checks))
+        failed-local-checks (->> checks
+                                 (keep (fn [[check passed?]]
+                                         (when-not (true? passed?) check)))
+                                 (sort-by name)
+                                 vec)
+        ;; A failed local check invalidates the conditional ARGUMENT itself.
+        ;; It is not merely another unproved XTDB premise. In particular,
+        ;; no physical-refinement consequent may survive an invalid local
+        ;; derivation, even when the abstract step reports :committed.
+        physical-refinement
+        (cond-> {:status (if local-valid?
+                           :conditional-only
+                           :invalid-local-argument)
+                 :assumptions (:undischarged-premises conditional-step-scope)}
+          local-valid?
+          (assoc :antecedent :all-undischarged-premises-hold
+                 :consequent :physical-transaction-refines-this-abstract-serial-step))]
     {:obligation (:obligation conditional-step-scope)
-     :local-argument-valid? (every? true? (vals checks))
+     :local-argument-valid? local-valid?
+     :conditional-argument-admissible? local-valid?
+     :failed-local-checks failed-local-checks
      :checks checks
      :predicate-obligations
      (mapv (fn [index check satisfied?]
@@ -397,11 +420,7 @@
      :abstract-status (:status predicted)
      :first-failed-assertion-index first-failed-index
      :abstract-write-count (count (:commands plan))
-     :physical-refinement
-     {:status :conditional-only
-      :antecedent :all-undischarged-premises-hold
-      :consequent :physical-transaction-refines-this-abstract-serial-step
-      :assumptions (:undischarged-premises conditional-step-scope)}
+     :physical-refinement physical-refinement
      :undischarged-premises (:undischarged-premises conditional-step-scope)
      :scope conditional-step-scope
      :input-prestate-attested? false
