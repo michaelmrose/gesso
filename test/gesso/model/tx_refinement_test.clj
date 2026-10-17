@@ -3,9 +3,11 @@
 
    The physical cases use production tx/prepare, real embedded XTDB2 writes,
    and independent SELECT * observations before and after each transaction.
-   Deliberately incomplete or falsified evidence is tested separately so it
-   cannot be confused with a witnessed physical disagreement. Passing these
-   finite cases is NOT a universal concrete-to-abstract refinement proof."
+   The opt-in recorded-step tests capture the exact vector passed to XTDB in
+   the test harness, then deliberately corrupt that separately reported record.
+   This test-harness capture is NOT an authenticated XTDB receipt; even fully
+   consistent caller-fabricated input must remain diagnostic-only. Passing
+   these finite cases is NOT a universal concrete-to-abstract refinement proof."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
@@ -383,3 +385,209 @@
     (is (false? (:corresponds? classified)))
     (is (false? (get-in classified [:checks :recognized-conflict])))
     (is (true? (get-in classified [:checks :outcome-status])))))
+
+;; V1005: recording the prepared operations where the test harness actually
+;; submits them helps catch recording mistakes, but it does not authenticate
+;; the record or prove that a remote production XTDB node executed it.
+(defn- run-recorded-physical-step! [reference-before a-plan targets]
+  (let [before (observe! targets)
+        recorded (:tx-ops (tx/prepare {} a-plan))
+        execution (try
+                    (xt/execute-tx (node) recorded)
+                    {:status :committed}
+                    (catch Throwable error
+                      (if (= :xtdb/assert-failed (:xtdb.error/code (ex-data error)))
+                        {:status :rejected :error/code :xtdb/assert-failed}
+                        (throw error))))
+        after (observe! targets)
+        arguments (assoc (input reference-before a-plan targets before execution after)
+                         :recorded-tx-ops recorded)
+        comparison (refinement/compare-recorded-step arguments)]
+    (is (:corresponds? comparison)
+        (str "The reported real XTDB step does not match the bounded model: "
+             (pr-str (select-keys comparison
+                                  [:checks :mismatched-op-indices
+                                   :expected-status :observed-status]))))
+    (is (false? (:certifies-physical-execution? comparison)))
+    {:arguments arguments
+     :comparison comparison
+     :execution execution
+     :reference-after (:after (model/step reference-before a-plan))
+     :physical-before before
+     :physical-after after}))
+
+(deftest recorded-submission-assurance-scope-remains-explicitly-bounded-test
+  (let [base refinement/comparison-scope
+        scope refinement/submission-comparison-scope]
+    (is (= :gesso.model.tx/recorded-submission-observation-v1
+           (:relation scope)))
+    (is (= (conj (:checked base)
+                 :recorded-submission-equals-production-lowering)
+           (:checked scope)))
+    (is (contains? (:assumed scope) :honest-submitted-operation-record))
+    (is (contains? (:assumed scope)
+                   :independent-before-and-after-physical-reads))
+    (is (contains? (:not-established scope)
+                   :authenticated-physical-submission-receipt))
+    (is (contains? (:not-established scope)
+                   :production-transaction-submission-binding))
+    (is (contains? (:not-established scope) :general-xtdb-step-refinement))
+    (is (contains? (:not-established scope)
+                   :authorization-and-business-invariants))
+    (is (not (contains? (:checked scope) :authenticated-physical-submission-receipt)))))
+
+(deftest physical-recorded-claim-and-stale-retry-correspond-test
+  (let [req (seed! :requests (request "recorded-claim"))
+        member (seed! :memberships (membership "recorded-claim-member"))
+        rt [:requests (:xt/id req)]
+        mt [:memberships (:xt/id member)]
+        targets [rt mt]
+        initial {rt req mt member}
+        action (plan [(claim req "helper-recorded")]
+                     (command/guard :memberships member version))
+        accepted (run-recorded-physical-step! initial action targets)
+        retry (run-recorded-physical-step! (:reference-after accepted)
+                                           action targets)]
+    (testing "A recorded commit matches canonical production lowering"
+      (is (= :committed (get-in accepted [:execution :status])))
+      (is (every? true? (vals (get-in accepted [:comparison :checks]))))
+      (is (true? (get-in accepted [:comparison :checks :recorded-submission])))
+      (is (empty? (get-in accepted [:comparison :mismatched-op-indices])))
+      (is (= (count (get-in accepted [:arguments :recorded-tx-ops]))
+             (get-in accepted [:comparison :canonical-op-count])))
+      (is (= "helper-recorded"
+             (get-in accepted [:physical-after rt :owner]))))
+    (testing "The very same recorded operations are rejected on stale retry"
+      (is (= :rejected (get-in retry [:execution :status])))
+      (is (= :xtdb/assert-failed (get-in retry [:execution :error/code])))
+      (is (= :command-version
+             (get-in retry [:comparison :failed-precondition-kind])))
+      (is (every? true? (vals (get-in retry [:comparison :checks]))))
+      (is (= (:physical-before retry) (:physical-after retry)))
+      (is (= (get-in accepted [:arguments :recorded-tx-ops])
+             (get-in retry [:arguments :recorded-tx-ops]))))))
+
+(deftest altered-omitted-duplicated-added-and-reordered-recorded-ops-fail-test
+  (let [req (seed! :requests (request "recorded-mutations"))
+        fresh (request "recorded-mutations-fresh")
+        rt [:requests (:xt/id req)]
+        ft [:requests (:xt/id fresh)]
+        action (plan [(claim req "helper-record-mutations")
+                      (command/create :requests fresh version)])
+        result (run-recorded-physical-step! {rt req} action [rt ft])
+        arguments (:arguments result)
+        ops (:recorded-tx-ops arguments)
+        n (count ops)
+        private-marker "private-recorded-operation-canary"
+        cases [[:altered-first
+                (assoc ops 0 [:put-docs :requests
+                              {:xt/id private-marker :payload private-marker}])
+                [0]]
+               [:omitted-last (pop ops) [(dec n)]]
+               [:added-last (conj ops [:delete-docs :requests "not-submitted"])
+                [n]]
+               [:duplicated-last (conj ops (last ops)) [n]]
+               [:reordered-first-two
+                (assoc ops 0 (nth ops 1) 1 (nth ops 0))
+                [0 1]]]]
+    (is (<= 2 n) "Use a transaction with multiple distinguishable operations")
+    (is (not= (first ops) (second ops)))
+    (doseq [[description bogus expected-indices] cases]
+      (testing (name description)
+        (let [comparison (refinement/compare-recorded-step
+                          (assoc arguments :recorded-tx-ops bogus))]
+          (is (false? (:corresponds? comparison)))
+          (is (false? (get-in comparison [:checks :recorded-submission])))
+          (is (every? true? (vals (dissoc (:checks comparison)
+                                          :recorded-submission))))
+          (is (= expected-indices (:mismatched-op-indices comparison)))
+          (is (= (count bogus) (:recorded-op-count comparison)))
+          (is (= n (:canonical-op-count comparison)))
+          (is (false? (:certifies-physical-execution? comparison)))
+          (is (not (.contains (pr-str comparison) private-marker)))
+          (is (not (contains? comparison :recorded-tx-ops))))))))
+
+(deftest recorded-ops-cannot-mask-a-different-plan-or-falsified-physical-evidence-test
+  (let [req (seed! :requests (request "recorded-plan-binding"))
+        rt [:requests (:xt/id req)]
+        action (plan [(claim req "helper-actual")])
+        accepted (run-recorded-physical-step! {rt req} action [rt])
+        arguments (:arguments accepted)
+        changed-plan (assoc arguments :plan (plan [(claim req "helper-other")]))
+        mismatched-plan (refinement/compare-recorded-step changed-plan)
+        wrong-after (refinement/compare-recorded-step
+                     (assoc-in arguments [:observed-after rt :owner]
+                               "physically-impossible"))
+        wrong-status (refinement/compare-recorded-step
+                      (assoc arguments :execution
+                             {:status :rejected
+                              :error/code :xtdb/assert-failed}))]
+    (is (false? (:corresponds? mismatched-plan)))
+    (is (false? (get-in mismatched-plan [:checks :recorded-submission])))
+    (is (false? (get-in mismatched-plan [:checks :poststate])))
+    (is (false? (:corresponds? wrong-after)))
+    (is (true? (get-in wrong-after [:checks :recorded-submission])))
+    (is (false? (get-in wrong-after [:checks :poststate])))
+    (is (false? (:corresponds? wrong-status)))
+    (is (true? (get-in wrong-status [:checks :recorded-submission])))
+    (is (false? (get-in wrong-status [:checks :outcome-status])))))
+
+(deftest malformed-recorded-inputs-and-unsupported-execution-metadata-fail-test
+  (let [req (seed! :requests (request "recorded-invalid"))
+        rt [:requests (:xt/id req)]
+        result (run-recorded-physical-step! {rt req}
+                                            (plan [(claim req "helper-invalid")])
+                                            [rt])
+        arguments (:arguments result)]
+    (doseq [bad [nil [] '([:not-a-vector]) {} "not-a-vector" 42]]
+      (is (= ::refinement/invalid-recorded-ops
+             (error-type #(refinement/compare-recorded-step
+                           (assoc arguments :recorded-tx-ops bad))))))
+    (is (= ::refinement/invalid-input
+           (error-type #(refinement/compare-recorded-step
+                         (dissoc arguments :recorded-tx-ops)))))
+    (is (= ::refinement/invalid-input
+           (error-type #(refinement/compare-recorded-step
+                         (assoc arguments :extra-evidence true)))))
+    (is (= ::refinement/incomplete-observation
+           (error-type #(refinement/compare-recorded-step
+                         (update arguments :observed-before dissoc rt)))))
+    (is (= ::refinement/invalid-execution
+           (error-type #(refinement/compare-recorded-step
+                         (assoc arguments :execution {:status :unknown})))))
+    (is (= ::refinement/invalid-execution
+           (error-type #(refinement/compare-recorded-step
+                         (assoc arguments :execution
+                                {:status :committed
+                                 :provider-receipt "unverified"})))))
+    (let [inconsistent (refinement/compare-recorded-step
+                        (assoc arguments :execution
+                               {:status :committed
+                                :error/code :xtdb/assert-failed}))]
+      (is (false? (:corresponds? inconsistent)))
+      (is (true? (get-in inconsistent [:checks :recorded-submission])))
+      (is (false? (get-in inconsistent [:checks :recognized-conflict]))))))
+
+(deftest synthetic-unexecuted-step-can-match-but-never-certifies-test
+  (let [created (request "recorded-never-executed")
+        target [:requests (:xt/id created)]
+        action (plan [(command/create :requests created version)])
+        predicted (model/step {} action)
+        arguments {:reference-before {}
+                   :plan action
+                   :targets [target]
+                   :observed-before {target nil}
+                   :execution {:status :committed}
+                   :observed-after {target (get (:after predicted) target)}
+                   :recorded-tx-ops (:tx-ops (tx/prepare {} action))}
+        report (refinement/compare-recorded-step arguments)]
+    ;; No xt/execute-tx was called for this operation. This intentionally
+    ;; demonstrates why an entirely consistent supplied report is NOT proof.
+    (is (nil? (get (observe! [target]) target)))
+    (is (true? (:corresponds? report)))
+    (is (every? true? (vals (:checks report))))
+    (is (= :caller-supplied-recorded-step-comparison (:evidence-kind report)))
+    (is (false? (:certifies-physical-execution? report)))
+    (is (contains? (get-in report [:scope :not-established])
+                   :authenticated-physical-submission-receipt))
+    (is (nil? (get (observe! [target]) target)))))
