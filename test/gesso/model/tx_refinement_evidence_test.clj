@@ -1,5 +1,5 @@
 (ns gesso.model.tx-refinement-evidence-test
-  "Adversarial candidate-evidence and instance-subject binding regressions.
+  "Adversarial candidate evidence, instance binding and aggregate readiness regressions.
 
    Generic candidate review remains intentionally separate from v1037's
    instance-bound review. Neither authenticates sources, proves closed-world
@@ -667,3 +667,253 @@
     (is (= :wrong-instance-subject (get-in wrong [:proposals 0 :reason])))
     (proof-remains-open! correct)
     (proof-remains-open! wrong)))
+
+
+;; v1040 — The aggregate candidate-package result is an additional, fail-closed
+;; gate on *review readiness*, not a replacement for per-premise diagnostics.
+;; A requirement may be complete while the whole batch is rejected; that is
+;; useful information for debugging, but not permission to consume evidence.
+(defn- complete-generic-proposals []
+  (vec (mapcat (fn [[premise-id {:keys [alternatives]}]]
+                 (map (fn [kind] (proposal premise-id kind))
+                      (first alternatives)))
+               (sort-by (comp name key) expected-routes))))
+
+(defn- complete-instance-proposals []
+  (mapv #(assoc % :instance-subject-sha256 (instance-digest))
+        (complete-generic-proposals)))
+
+(defn- aggregate [report]
+  (:aggregate-candidate-package report))
+
+(defn- aggregate-is-not-proof! [report]
+  (let [a (aggregate report)]
+    (is (map? a))
+    (is (false? (:verified? a)))
+    (is (false? (:premises-discharged? a)))
+    (is (false? (:application-admitted? a)))
+    (is (false? (:certifies-physical-execution? a)))
+    (is (= #{} (:external-premises-discharged report)))
+    (is (false? (:evidence-authenticated? report)))
+    (is (false? (:general-refinement-proved? report)))
+    (is (= #{:undischarged} (set (map :status (:requirements report)))))))
+
+(deftest aggregate-scope-advertises-review-only-not-downstream-admission-test
+  (is (contains? (:checked evidence/evidence-scope)
+                 :aggregate-candidate-package-gate))
+  (is (contains? (:checked evidence/instance-evidence-scope)
+                 :aggregate-candidate-package-gate))
+  (doseq [scope [evidence/evidence-scope evidence/instance-evidence-scope]]
+    (is (contains? (:not-established scope)
+                   :downstream-admission-consumer-enforcement))
+    (is (contains? (:not-established scope) :independent-proof-validation))
+    (is (contains? (:not-established scope) :any-external-premise-discharged))))
+
+(deftest empty-aggregate-has-no-readiness-in-either-binding-scope-test
+  (doseq [[mode r] [[:generic (review [])]
+                    [:instance (instance-review [])]]]
+    (let [a (aggregate r)]
+      (is (= :awaiting-proposals (:status a)) (name mode))
+      (is (= (if (= mode :generic) :generic-premise-catalog
+                 :declared-application-instance)
+             (:binding-scope a)))
+      (is (false? (:all-proposals-reviewable? a)))
+      (is (false? (:all-premise-candidate-packages-complete? a)))
+      (is (false? (:ready-for-independent-review? a)))
+      (is (= :awaiting-independent-evidence (:status r)))
+      (aggregate-is-not-proof! r))))
+
+(deftest partial-batch-is-reviewable-but-never-globally-ready-test
+  (doseq [[mode r] [[:generic (review [ordinary])]
+                    [:instance (instance-review [bound-ordinary])]]]
+    (let [a (aggregate r)]
+      (is (= :independent-review-required (:status r)) (name mode))
+      (is (= :incomplete-candidate-package (:status a)))
+      (is (true? (:all-proposals-reviewable? a)))
+      (is (false? (:all-premise-candidate-packages-complete? a)))
+      (is (false? (:ready-for-independent-review? a)))
+      (is (true? (:review-package-complete? (entry r default-premise))))
+      ;; A correct instance binding on one proposal is not batch readiness.
+      (is (= (= mode :instance) (:plan-specific-subject-bound? r)))
+      (aggregate-is-not-proof! r))))
+
+(deftest complete-ten-artifact-catalog-is-ready-only-for-independent-review-test
+  (let [generic (review (complete-generic-proposals))
+        instance (instance-review (complete-instance-proposals))]
+    (doseq [[mode r] [[:generic generic] [:instance instance]]]
+      (let [a (aggregate r)]
+        (is (= 10 (:reviewable-proposals r)) (name mode))
+        (is (= 9 (count (:requirements r))))
+        (is (every? :review-package-complete? (:requirements r)))
+        (is (= :complete-unverified-candidate-package (:status a)))
+        (is (true? (:all-proposals-reviewable? a)))
+        (is (true? (:all-premise-candidate-packages-complete? a)))
+        (is (true? (:ready-for-independent-review? a)))
+        (is (= (if (= mode :generic) :generic-premise-catalog
+                   :declared-application-instance) (:binding-scope a)))
+        (is (= :independent-review-required (:status r)))
+        (aggregate-is-not-proof! r)))))
+
+(deftest all-requirements-can-be-complete-while-one-rejected-proposal-poisons-batch-test
+  (doseq [[mode candidates reviewer] [[:generic (complete-generic-proposals) review]
+                                          [:instance (complete-instance-proposals) instance-review]]]
+    (let [bad (assoc (first candidates) :subject :wrong/catalog)
+          r (reviewer (conj candidates bad))
+          a (aggregate r)]
+      (is (every? :review-package-complete? (:requirements r)) (name mode))
+      (is (true? (:all-premise-candidate-packages-complete? a)))
+      (is (false? (:all-proposals-reviewable? a)))
+      (is (= :rejected-proposals (:status a)))
+      (is (= :invalid-evidence-proposals (:status r)))
+      (is (= 10 (:reviewable-proposals r)))
+      (is (= :wrong-formal-subject (-> r :proposals last :reason)))
+      (is (false? (:ready-for-independent-review? a)))
+      (aggregate-is-not-proof! r))))
+
+(deftest duplicating-a-valid-proposal-poisons-a-complete-catalog-test
+  (doseq [[candidates reviewer] [[(complete-generic-proposals) review]
+                                 [(complete-instance-proposals) instance-review]]]
+    (let [r (reviewer (conj candidates (first candidates)))
+          a (aggregate r)]
+      (is (every? :review-package-complete? (:requirements r)))
+      (is (= :duplicate-proposal (-> r :proposals last :reason)))
+      (is (= :rejected-proposals (:status a)))
+      (is (false? (:ready-for-independent-review? a)))
+      (aggregate-is-not-proof! r))))
+
+(deftest otherwise-complete-batches-reject-forged-certification-labels-test
+  (doseq [[candidates reviewer] [[(complete-generic-proposals) review]
+                                 [(complete-instance-proposals) instance-review]]
+          forged [:verified? :trusted? :proof-checked? :discharged? :application-admitted?]]
+    (let [bad (assoc (first candidates) forged true)
+          r (reviewer (conj candidates bad))]
+      (is (= :malformed-proposal (-> r :proposals last :reason)))
+      (is (every? :review-package-complete? (:requirements r)))
+      (is (= :rejected-proposals (-> r aggregate :status)))
+      (is (false? (-> r aggregate :ready-for-independent-review?)))
+      (aggregate-is-not-proof! r))))
+
+(deftest incomplete-multi-part-representation-route-blocks-aggregate-readiness-test
+  (let [missing-kind :representation-refinement-proof
+        p (filterv #(not= missing-kind (:evidence-kind %))
+                   (complete-generic-proposals))
+        r (review p)
+        id :transaction-valid-time-and-value-representation-is-admitted]
+    (is (= 9 (:reviewable-proposals r)))
+    (is (true? (-> r aggregate :all-proposals-reviewable?)))
+    (is (false? (:review-package-complete? (entry r id))))
+    (is (every? :review-package-complete?
+                (remove #(= id (:id %)) (:requirements r))))
+    (is (= :incomplete-candidate-package (-> r aggregate :status)))
+    (is (false? (-> r aggregate :ready-for-independent-review?)))
+    (aggregate-is-not-proof! r)))
+
+(deftest alternative-contract-or-proof-completes-one-route-not-entire-batch-test
+  (doseq [kind [:versioned-backend-contract :independent-formal-proof]]
+    (let [r (review [(proposal default-premise kind)])]
+      (is (true? (:review-package-complete? (entry r default-premise))))
+      (is (= :incomplete-candidate-package (-> r aggregate :status)))
+      (is (false? (-> r aggregate :ready-for-independent-review?)))
+      (aggregate-is-not-proof! r))))
+
+(deftest cross-instance-subject-contamination-invalidates-otherwise-complete-batch-test
+  (let [good (complete-instance-proposals)
+        wrong (assoc (first good) :instance-subject-sha256 sha-b)
+        r (instance-review (conj good wrong))
+        a (aggregate r)]
+    (is (every? :review-package-complete? (:requirements r)))
+    (is (= :wrong-instance-subject (-> r :proposals last :reason)))
+    (is (= :rejected-proposals (:status a)))
+    (is (false? (:plan-specific-subject-bound? r)))
+    (is (false? (:ready-for-independent-review? a)))
+    (aggregate-is-not-proof! r)))
+
+(deftest changed-declarations-prevent-old-complete-evidence-from-being-reviewable-test
+  (let [candidate-set (complete-instance-proposals)]
+    (doseq [env [(assoc-in instance-environment [:backend :version] "another-build")
+                 (assoc-in instance-environment [:gesso :source-sha256] sha-b)
+                 (assoc-in instance-environment [:application :operation] :other-operation)]]
+      (let [r (instance-review {} create-plan env candidate-set)
+            a (aggregate r)]
+        (is (= :rejected-proposals (:status a)))
+        (is (false? (:all-proposals-reviewable? a)))
+        (is (false? (:all-premise-candidate-packages-complete? a)))
+        (is (false? (:ready-for-independent-review? a)))
+        (is (every? #(= :wrong-instance-subject (:reason %)) (:proposals r)))
+        (aggregate-is-not-proof! r)))))
+
+(deftest invalid-local-argument-takes-priority-over-complete-evidence-candidates-test
+  (let [original model/step
+        p (complete-generic-proposals)
+        invalid (with-redefs [model/step
+                              (fn [state plan]
+                                (assoc (original state plan) :status :rejected))]
+                  (review p))
+        a (aggregate invalid)]
+    (is (= :invalid-local-argument (:status invalid)))
+    (is (= :invalid-local-argument (:status a)))
+    (is (true? (:all-proposals-reviewable? a)))
+    (is (true? (:all-premise-candidate-packages-complete? a)))
+    (is (false? (:ready-for-independent-review? a)))
+    (aggregate-is-not-proof! invalid)))
+
+(deftest invalid-local-argument-is-not-hidden-by-simultaneously-rejected-proposal-test
+  (let [original model/step
+        p (conj (complete-generic-proposals)
+                (assoc ordinary :evidence-kind :test-run))
+        r (with-redefs [model/step
+                        (fn [state plan]
+                          (assoc (original state plan) :status :rejected))]
+            (review p))
+        a (aggregate r)]
+    (is (= :invalid-local-argument (:status a)))
+    (is (false? (:all-proposals-reviewable? a)))
+    (is (true? (:all-premise-candidate-packages-complete? a)))
+    (is (false? (:ready-for-independent-review? a)))
+    (aggregate-is-not-proof! r)))
+
+(deftest aggregate-completeness-is-insensitive-to-candidate-ordering-test
+  (doseq [candidates [(complete-generic-proposals)
+                      (complete-instance-proposals)]
+          :let [reviewer (if (:instance-subject-sha256 (first candidates))
+                           instance-review review)
+                forward (reviewer candidates)
+                reversed (reviewer (vec (reverse candidates)))]]
+    (is (= (aggregate forward) (aggregate reversed)))
+    (is (= (mapv (juxt :id :review-package-complete?) (:requirements forward))
+           (mapv (juxt :id :review-package-complete?) (:requirements reversed))))
+    (aggregate-is-not-proof! forward)
+    (aggregate-is-not-proof! reversed)))
+
+(deftest malformed-and-oversized-batches-never-return-an-aggregate-decision-test
+  (doseq [reviewer [review instance-review]
+          invalid [nil '() {} (list ordinary) (vec (repeat 65 ordinary))]]
+    (is (= ::evidence/invalid-proposals
+           (exception-type #(reviewer invalid)))))
+  (let [p (complete-generic-proposals)
+        r (review (into p (repeat 54 ordinary)))]
+    (is (= 64 (count (:proposals r))))
+    (is (= :rejected-proposals (-> r aggregate :status)))
+    (is (false? (-> r aggregate :ready-for-independent-review?)))
+    (aggregate-is-not-proof! r)))
+
+(deftest aggregate-report-has-minimal-nonsensitive-and-noncertifying-shape-test
+  (let [valid (review (complete-generic-proposals))
+        instance (instance-review (complete-instance-proposals))
+        contaminated (review (conj (complete-generic-proposals)
+                                   (assoc ordinary :claimed-issuer
+                                          "confidential-issuer-1040"
+                                          :evidence-kind :unsupported
+                                          :artifact-sha256 sha-b)))
+        expected-keys #{:status :binding-scope :all-proposals-reviewable?
+                        :all-premise-candidate-packages-complete?
+                        :ready-for-independent-review? :verified?
+                        :premises-discharged? :application-admitted?
+                        :certifies-physical-execution?}
+        printed (pr-str [valid instance contaminated])]
+    (doseq [r [valid instance contaminated]]
+      (is (= expected-keys (set (keys (aggregate r)))))
+      (aggregate-is-not-proof! r))
+    (doseq [s [private-id "private-organization-1038"
+               "confidential-issuer-1040" (instance-digest) sha-a sha-b]]
+      (is (not (.contains printed s))))))
