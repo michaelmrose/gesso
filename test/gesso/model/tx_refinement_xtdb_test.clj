@@ -1,5 +1,5 @@
 (ns gesso.model.tx-refinement-xtdb-test
-  "Permanent controlled-XTDB regressions for direct and ledger-linked observation.
+  "Permanent controlled-XTDB regressions for direct, ledger-linked, and bracketed observations.
 
    Exercises the actual collector: it independently reads the declared target
    domain, constructs and submits canonical tx/prepare operations, classifies
@@ -11,8 +11,10 @@
    not an authenticated XTDB receipt or a general refinement theorem. The
    fixture assumes exclusive control of its embedded node and target IDs.
    Ledger-linked tests inspect XTDB tx keys against the pinned xt.txs row,
-   including missing, contradictory, and unavailable evidence. This still
-   does not attest a production submission or certify physical refinement."
+   including missing, contradictory, and unavailable evidence. Bracketed
+   tests independently inspect the before-ledger high watermark and its
+   ordering relative to the submitted physical transaction. None of these
+   diagnostics attest a production submission or certify physical refinement."
   (:require
    [clojure.test :refer [deftest is testing use-fixtures]]
    [gesso.model.command :as command]
@@ -793,3 +795,258 @@
              (error-type #(collector/observe-and-compare-ledger!
                            (assoc base :targets [[:memberships "missing"]])))))
       (is (= [] @calls)))))
+
+
+;; v1012 ledger bracketing: one pinned BEFORE snapshot provides the maximum
+;; already-visible transaction ID, and a distinct pinned AFTER snapshot
+;; provides the specific submitted transaction ledger entry. Neither is a
+;; transaction-internal read snapshot or a proof of intervening-writer absence.
+
+(def ^:private before-watermark-sql
+  "SELECT _id FROM xt.txs ORDER BY _id DESC LIMIT 1")
+
+(defn- collect-bracketed! [a-plan targets]
+  (collector/observe-and-compare-bracketed!
+   {:node (node) :plan a-plan :targets targets}))
+
+(defn- check-bracketed-report! [report status]
+  (is (= status (get-in report [:execution :status])))
+  (is (true? (get-in report [:comparison :corresponds?]))
+      (pr-str (get-in report [:comparison :checks])))
+  (is (true? (get-in report [:comparison :checks
+                            :executed-tx-after-before-watermark])))
+  (is (true? (:transaction-ledger-matches? report)))
+  (is (= :direct-controlled-xtdb-ledger-bracketed-observation
+         (:evidence-kind report)))
+  (is (= :gesso.model.tx/direct-xtdb-ledger-bracketed-step-v1
+         (get-in report [:collection-scope :collector])))
+  (is (integer? (:physical-tx-id report)))
+  (is (false? (:certifies-physical-execution? report)))
+  (is (false? (get-in report [:comparison :certifies-physical-execution?])))
+  (is (= #{:executed-tx-after-before-watermark}
+         (set (filter #{:executed-tx-after-before-watermark}
+                      (keys (get-in report [:comparison :checks]))))))
+  (is (not-any? #(contains? report %)
+                [:node :plan :tx-key :snapshot-token :system-time
+                 :recorded-tx-ops :observed-before :observed-after
+                 :reference-before :before-ledger-watermark]))
+  report)
+
+(deftest bracketed-scope-reports-its-assumptions-and-non-proofs-test
+  (let [{:keys [collector collected assumed not-established]}
+        collector/bracketed-ledger-collection-scope]
+    (is (= :gesso.model.tx/direct-xtdb-ledger-bracketed-step-v1 collector))
+    (doseq [fact [:pinned-before-ledger-high-watermark
+                 :executed-tx-id-greater-than-before-watermark
+                 :xt-txs-record-from-pinned-post-observation]]
+      (is (contains? collected fact)))
+    (doseq [assumption [:monotonic-xtdb-transaction-ids
+                        :trustworthy-xtdb-tx-key-and-system-ledger
+                        :exclusive-control-of-tracked-documents-during-collection]]
+      (is (contains? assumed assumption)))
+    (doseq [open [:no-intervening-external-transactions
+                 :transaction-internal-snapshot-equals-observed-prestate
+                 :absence-of-external-writers
+                 :authenticated-physical-submission-receipt
+                 :general-xtdb-step-refinement]]
+      (is (contains? not-established open))
+      (is (not (contains? collected open))))))
+
+(deftest bracketed-commit-and-stale-rejection-correspond-test
+  (let [req (seed! :requests (request "bracket-claim"))
+        member (seed! :memberships (membership "bracket-member"))
+        rt [:requests (:xt/id req)]
+        mt [:memberships (:xt/id member)]
+        action (plan [(claim req "bracket-helper")]
+                     (command/guard :memberships member version))
+        commit (check-bracketed-report!
+                (collect-bracketed! action [rt mt]) :committed)
+        reject (check-bracketed-report!
+                (collect-bracketed! action [rt mt]) :rejected)]
+    (is (< (:physical-tx-id commit) (:physical-tx-id reject)))
+    (is (= :xtdb/assert-failed (get-in reject [:execution :error/code])))
+    (is (= :command-version
+           (get-in reject [:comparison :failed-precondition-kind])))
+    (is (= "bracket-helper" (:owner (physical-document :requests (:xt/id req)))))))
+
+(deftest bracketed-create-and-duplicate-physical-ids-test
+  (let [req (request "bracket-create")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        commit (check-bracketed-report! (collect-bracketed! action [rt]) :committed)
+        reject (check-bracketed-report! (collect-bracketed! action [rt]) :rejected)]
+    (is (< (:physical-tx-id commit) (:physical-tx-id reject)))
+    (is (= :document-absent
+           (get-in reject [:comparison :failed-precondition-kind])))
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest bracketed-ledger-watermark-precedes-submission-and-shares-before-basis-test
+  (let [req (seed! :requests (request "bracket-read-basis"))
+        rt [:requests (:xt/id req)]
+        events (atom [])
+        real-query xt/q
+        real-execute xt/execute-tx
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (when (= 3 (count args))
+                           (let [query (second args)]
+                             (swap! events conj
+                                    {:kind (cond
+                                             (= query "SHOW SNAPSHOT_TOKEN") :basis
+                                             (= query before-watermark-sql) :watermark
+                                             (and (vector? query) (= (first query) ledger-sql)) :after-ledger
+                                             :else :document)
+                                     :basis (nth args 2)})))
+                         (apply real-query args))
+                  xt/execute-tx (fn [& args]
+                                  (when (= 3 (count args))
+                                    (swap! events conj {:kind :submit}))
+                                  (apply real-execute args))]
+                 (collect-bracketed! (plan [(claim req "bracket-basis")]) [rt]))
+        phases (mapv :kind @events)
+        before-read (first (filter #(= :document (:kind %)) @events))
+        watermark (first (filter #(= :watermark (:kind %)) @events))
+        document-reads (filter #(= :document (:kind %)) @events)
+        after-read (second document-reads)
+        after-ledger (first (filter #(= :after-ledger (:kind %)) @events))]
+    (check-bracketed-report! report :committed)
+    (is (= [:basis :document :watermark :submit :basis :document :after-ledger]
+           phases))
+    (is (= (:basis before-read) (:basis watermark)))
+    (is (= (:basis after-read) (:basis after-ledger)))
+    (is (not= (:basis watermark) (:basis after-ledger)))
+    (is (= #{:snapshot-token :current-time}
+           (set (keys (:basis watermark)))))
+    (is (string? (get-in watermark [:basis :snapshot-token])))))
+
+(deftest empty-before-ledger-history-uses-explicit-negative-one-watermark-test
+  (let [req (request "bracket-empty-ledger")
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        seen (atom 0)
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (if (= before-watermark-sql (second args))
+                           (do (swap! seen inc) [])
+                           (apply real-query args)))]
+                 (collect-bracketed!
+                  (plan [(command/create :requests req version)]) [rt]))]
+    (check-bracketed-report! report :committed)
+    (is (= 1 @seen))
+    (is (= req (physical-document :requests (:xt/id req))))))
+
+(deftest invalid-before-ledger-watermark-fails-before-submission-test
+  (let [req (request "bracket-malformed")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        invalid-rows [nil {} [nil] [{}] [{:xt/id -1}]
+                      [{:xt/id "8"}] [{:xt/id 1.5}]
+                      [{:xt/id 0} {:xt/id 1}]]
+        real-query xt/q]
+    (doseq [rows invalid-rows]
+      (testing (pr-str rows)
+        (let [submissions (atom 0)]
+          (with-redefs
+            [xt/q (fn [& args]
+                    (if (= before-watermark-sql (second args))
+                      rows
+                      (apply real-query args)))
+             xt/execute-tx (fn [& _]
+                             (swap! submissions inc)
+                             (throw (ex-info "should not submit" {})))]
+            (is (= ::collector/invalid-before-ledger-watermark
+                   (error-type #(collect-bracketed! action [rt]))))
+            (is (zero? @submissions))))))
+    (is (nil? (physical-document :requests (:xt/id req))))))
+
+(deftest unavailable-before-ledger-query-does-not-submit-test
+  (let [req (request "bracket-query-unavailable")
+        rt [:requests (:xt/id req)]
+        action (plan [(command/create :requests req version)])
+        failure (ex-info "No ledger available" {:error/type ::watermark-query-failed})
+        original-query xt/q
+        submissions (atom 0)
+        caught (try
+                 (with-redefs
+                   [xt/q (fn [& args]
+                           (if (= before-watermark-sql (second args))
+                             (throw failure)
+                             (apply original-query args)))
+                    xt/execute-tx (fn [& _]
+                                    (swap! submissions inc)
+                                    (throw (ex-info "unexpected submit" {})))]
+                   (collect-bracketed! action [rt]))
+                 nil
+                 (catch clojure.lang.ExceptionInfo e e))]
+    (is (identical? failure caught))
+    (is (zero? @submissions))
+    (is (nil? (physical-document :requests (:xt/id req))))))
+
+(deftest falsely-newer-before-watermark-rejects-correspondence-not-physical-commit-test
+  (let [req (seed! :requests (request "bracket-false-watermark"))
+        rt [:requests (:xt/id req)]
+        action (plan [(claim req "physical-commit-still-occurs")])
+        real-query xt/q
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (let [rows (apply real-query args)]
+                           (if (= before-watermark-sql (second args))
+                             [{:xt/id (+ 1000000000 (or (:xt/id (first rows)) 0))}]
+                             rows)))]
+                 (collect-bracketed! action [rt]))
+        checks (get-in report [:comparison :checks])]
+    (is (= :committed (get-in report [:execution :status])))
+    (is (false? (:executed-tx-after-before-watermark checks)))
+    (is (true? (:transaction-ledger-matches? report)))
+    (is (every? true? (vals (select-keys checks ledger-checks))))
+    (is (true? (:poststate checks)))
+    (is (false? (get-in report [:comparison :corresponds?])))
+    (is (= "physical-commit-still-occurs"
+           (:owner (physical-document :requests (:xt/id req)))))
+    (is (false? (:certifies-physical-execution? report)))))
+
+(deftest bracket-does-not-prove-absence-of-intervening-writers-test
+  (let [req (seed! :requests (request "bracket-intervening-request"))
+        outsider (membership "bracket-intervening-outsider")
+        rt [:requests (:xt/id req)]
+        real-query xt/q
+        real-execute xt/execute-tx
+        injected (atom 0)
+        report (with-redefs
+                 [xt/q (fn [& args]
+                         (let [rows (apply real-query args)]
+                           (when (and (= before-watermark-sql (second args))
+                                      (zero? @injected))
+                             ;; The watermark was already observed. An
+                             ;; unrelated writer commits before our submit.
+                             (swap! injected inc)
+                             (real-execute (node)
+                                           [[:put-docs :memberships outsider]]))
+                           rows))]
+                 (collect-bracketed!
+                  (plan [(claim req "bracket-intervening-helper")]) [rt]))]
+    (check-bracketed-report! report :committed)
+    (is (= 1 @injected))
+    (is (= outsider (physical-document :memberships (:xt/id outsider))))
+    (is (contains? (get-in report [:collection-scope :not-established])
+                   :no-intervening-external-transactions))))
+
+(deftest bracketed-input-shape-rejects-client-claimed-evidence-before-io-test
+  (let [req (request "bracket-input")
+        rt [:requests (:xt/id req)]
+        base {:node (node)
+              :plan (plan [(command/create :requests req version)])
+              :targets [rt]}
+        calls (atom [])]
+    (with-redefs [xt/q (fn [& _] (swap! calls conj :query) nil)
+                  xt/execute-tx (fn [& _] (swap! calls conj :submit) nil)]
+      (doseq [extra [:before-ledger-watermark :tx-key :recorded-tx-ops
+                     :observed-before :execution]]
+        (is (= ::collector/invalid-input
+               (error-type #(collector/observe-and-compare-bracketed!
+                             (assoc base extra :untrusted)))))
+        (is (empty? @calls)))
+      (is (= ::collector/untracked-dependencies
+             (error-type #(collector/observe-and-compare-bracketed!
+                           (assoc base :targets [[:memberships "other"]])))))
+      (is (empty? @calls)))))
