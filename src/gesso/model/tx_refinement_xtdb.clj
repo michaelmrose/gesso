@@ -20,9 +20,13 @@
 
    Matching observations are not proof of XTDB serialization, an authenticated
    execution receipt, completeness of policy dependencies, authorization,
-   or general physical-to-abstract refinement. In particular, a caller still
-   supplies the node, plan, and tracked target domain; this API does not
-   identify or attest the real application production boundary."
+   or general physical-to-abstract refinement. The optional
+   observe-and-compare-bracketed! further checks that the submitted tx ID
+   exceeds a ledger high watermark read from the pinned before-snapshot and
+   appears in the pinned after-snapshot. This does not exclude intervening
+   external transactions. In particular, a caller still supplies the node,
+   plan, and tracked target domain; this API does not identify or attest the
+   real application production boundary."
   (:require
    [clojure.set :as set]
    [clojure.string :as str]
@@ -208,6 +212,44 @@
     {:checks checks
      :matches? (every? true? (vals checks))}))
 
+(def bracketed-ledger-collection-scope
+  "The opt-in ledger-bracketed diagnostic captures the highest transaction
+   ID *already visible in the pinned before-snapshot*, before submitting the
+   new transaction. It checks that the execute-tx transaction has a strictly
+   greater ID and is present in the pinned after-snapshot's ledger. This
+   gives a concrete, two-sided physical transaction boundary provided that
+   XTDB ledger IDs are monotonically allocated. It does not establish the
+   transaction's internal read snapshot, the absence of intervening writers,
+   or general refinement."
+  (-> ledger-collection-scope
+      (assoc :collector :gesso.model.tx/direct-xtdb-ledger-bracketed-step-v1)
+      (update :collected into #{:pinned-before-ledger-high-watermark
+                                :executed-tx-id-greater-than-before-watermark})
+      (update :assumed conj :monotonic-xtdb-transaction-ids)
+      (update :not-established conj :no-intervening-external-transactions)))
+
+(defn- pre-transaction-ledger-watermark!
+  "Capture the highest ledger transaction ID at the ACTUAL pinned before
+   basis, before execute-tx. Empty history uses -1. A malformed result is
+   not considered an empty history. Nothing from this query is returned as
+   a database proof certificate."
+  [node basis]
+  (let [rows (xt/q node
+                   "SELECT _id FROM xt.txs ORDER BY _id DESC LIMIT 1"
+                   basis)]
+    (cond
+      (= [] rows) -1
+      (and (sequential? rows)
+           (= 1 (count rows))
+           (map? (first rows))
+           (integer? (:xt/id (first rows)))
+           (<= 0 (:xt/id (first rows))))
+      (:xt/id (first rows))
+      :else
+      (fail! ::invalid-before-ledger-watermark
+             "XTDB returned an invalid pinned-before ledger watermark."
+             {:row-count (when (sequential? rows) (count rows))}))))
+
 (defn- collect-step!
   "Execute one admitted finite transaction on a CONTROLLED XTDB node.
 
@@ -234,8 +276,10 @@
    payloads. It carries a bounded comparison, known physical outcome, and
    collection scope. For unknown outcomes the exception propagates instead
    of returning a misleading comparison or attempting reconciliation."
-  [input ledger?]
-  (let [{:keys [node plan targets]} (require-input! input)
+  [input ledger-mode]
+  (let [ledger? (not= :none ledger-mode)
+        bracketed? (= :bracketed ledger-mode)
+        {:keys [node plan targets]} (require-input! input)
         plan (model/admitted-plan plan)
         targets (refinement/require-targets targets)
         needed (required-targets plan)
@@ -249,6 +293,11 @@
       (safe-sql-table! table))
     (let [operations (:tx-ops (tx/prepare {} plan))
           before (observe-phase! node targets)
+          ;; Capture the high watermark before submission; never query an old
+          ;; snapshot for a future tx ID after execute-tx has returned.
+          before-ledger-watermark (when bracketed?
+                                    (pre-transaction-ledger-watermark!
+                                     node (:basis before)))
           reference-before (refinement/observation-state
                             targets (:documents before))
           {:keys [execution tx-key]} (execute-definitively! node operations)
@@ -276,7 +325,12 @@
       (if-not ledger?
         base-report
         (let [ledger (ledger-evidence! node (:basis after) tx-key execution)
-              checks (merge (:checks comparison) (:checks ledger))]
+              bracket-checks (when bracketed?
+                               {:executed-tx-after-before-watermark
+                                (< before-ledger-watermark (:tx-id tx-key))})
+              checks (merge (:checks comparison)
+                            (:checks ledger)
+                            bracket-checks)]
           (-> base-report
               (assoc :comparison
                      (assoc comparison
@@ -284,15 +338,19 @@
                             :corresponds? (every? true? (vals checks))))
               (assoc :physical-tx-id (:tx-id tx-key)
                      :transaction-ledger-matches? (:matches? ledger)
-                     :collection-scope ledger-collection-scope
-                     :evidence-kind :direct-controlled-xtdb-ledger-linked-observation)))))))
+                     :collection-scope (if bracketed?
+                                         bracketed-ledger-collection-scope
+                                         ledger-collection-scope)
+                     :evidence-kind (if bracketed?
+                                      :direct-controlled-xtdb-ledger-bracketed-observation
+                                      :direct-controlled-xtdb-ledger-linked-observation))))))))
 
 (defn observe-and-compare!
   "Original v1006 diagnostic API. Pin the two observation phases, submit once,
    and compare physical documents, lowering, and definitive outcome. No
    transaction-ledger query is performed by this compatibility entry point."
   [input]
-  (collect-step! input false))
+  (collect-step! input :none))
 
 (defn observe-and-compare-ledger!
   "Stronger, opt-in controlled-XTDB diagnostic, with the SAME exact three-key
@@ -310,4 +368,19 @@
    identity; the controlled-DB assumptions remain explicit. The returned
    report excludes raw tokens, document bodies, and transaction payloads."
   [input]
-  (collect-step! input true))
+  (collect-step! input :ledger))
+
+(defn observe-and-compare-bracketed!
+  "Opt-in stricter controlled-XTDB diagnostic. It extends the ledger-linked
+   comparison with one additional check: the identified tx-id must exceed
+   the highest tx-id visible at the pinned BEFORE basis and be independently
+   recorded at the pinned AFTER basis. The returned :comparison/:checks includes
+   :executed-tx-after-before-watermark. Any inability to check this
+   additional boundary is NOT silently promoted to correspondence.
+
+   The input shape is unchanged: {:node ... :plan ... :targets ...}.
+   The transaction is submitted only once. This API is unsuitable for
+   production or retry/reconciliation and must not be treated as proof of
+   backend isolation, an authenticated submission, or universal refinement."
+  [input]
+  (collect-step! input :bracketed))
