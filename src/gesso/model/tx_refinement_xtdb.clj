@@ -29,6 +29,11 @@
    pinned after-ledger watermark to equal that transaction ID. It detects
    ledger-visible intervening transactions in the observed interval, but
    is still not a proof of the transaction-internal read snapshot.
+   The optional repeatability check re-reads each phase at its EXACT
+   original snapshot token and clock after submission. A change to either
+   observed target documents or ledger watermarks fails the comparison.
+   This establishes only observed query-basis repeatability, not an internal
+   transaction snapshot or historical certainty beyond the samples.
    In particular, a caller still supplies the node,
    plan, and tracked target domain; this API does not identify or attest the
    real application production boundary."
@@ -149,6 +154,14 @@
                              [target (read-target! node basis target)]))
                       targets)}))
 
+(defn- read-target-domain!
+  "Re-read all targets at an already acquired, unchanged observation basis."
+  [node targets basis]
+  (into {}
+        (map (fn [target]
+               [target (read-target! node basis target)]))
+        targets))
+
 (defn- execute-definitively!
   [node operations]
   (try
@@ -258,6 +271,29 @@
                 :no-in-flight-or-future-external-commits
                 :transaction-snapshot-attestation})))
 
+(def repeatable-ledger-window-collection-scope
+  "Opt-in observation replay at EXACTLY the original pinned before/after
+   bases, including both snapshot-token and clock. The collector re-reads
+   each target and each ledger watermark after submission, and reports false
+   checks if any differ from the first read at that basis.
+
+   A snapshot token must never be silently reinterpreted with a later clock:
+   XTDB 2.2.0-beta1 can expose later rows when :current-time changes even
+   though :snapshot-token is unchanged. Replay deliberately reuses both
+   original values. This is only a bounded observation-consistency check."
+  (-> ledger-window-collection-scope
+      (assoc :collector :gesso.model.tx/direct-xtdb-repeatable-ledger-window-v1)
+      (update :collected into
+              #{:before-document-replay-at-identical-basis
+                :after-document-replay-at-identical-basis
+                :before-ledger-watermark-replay-at-identical-basis
+                :after-ledger-watermark-replay-at-identical-basis})
+      (update :not-established into
+              #{:transaction-internal-read-basis-attested
+                :all-possible-replays-are-repeatable
+                :concurrent-writers-are-excluded
+                :retroactive-basis-clock-rebinding-safe})))
+
 (defn- ledger-watermark!
   "Capture the highest ID visible at the actual pinned observation basis.
    Empty history uses -1. Malformed before evidence fails before submission;
@@ -310,8 +346,9 @@
    of returning a misleading comparison or attempting reconciliation."
   [input ledger-mode]
   (let [ledger? (not= :none ledger-mode)
-        window? (= :window ledger-mode)
-        bracketed? (contains? #{:bracketed :window} ledger-mode)
+        replay? (= :repeatable-window ledger-mode)
+        window? (contains? #{:window :repeatable-window} ledger-mode)
+        bracketed? (contains? #{:bracketed :window :repeatable-window} ledger-mode)
         {:keys [node plan targets]} (require-input! input)
         plan (model/admitted-plan plan)
         targets (refinement/require-targets targets)
@@ -370,10 +407,27 @@
                                (= (inc before-ledger-watermark) (:tx-id tx-key))
                                :executed-tx-equals-after-watermark
                                (= (:tx-id tx-key) after-watermark)})
+              ;; Replaying both pinned observations uses the ORIGINAL basis,
+              ;; not a newly captured token or a modified valid-time clock.
+              ;; Failure is a false comparison, never an execution retry.
+              replay-checks (when replay?
+                              {:before-documents-repeat-at-pinned-basis
+                               (= (:documents before)
+                                  (read-target-domain! node targets (:basis before)))
+                               :after-documents-repeat-at-pinned-basis
+                               (= (:documents after)
+                                  (read-target-domain! node targets (:basis after)))
+                               :before-ledger-watermark-repeats-at-pinned-basis
+                               (= before-ledger-watermark
+                                  (ledger-watermark! node (:basis before) :before))
+                               :after-ledger-watermark-repeats-at-pinned-basis
+                               (= after-watermark
+                                  (ledger-watermark! node (:basis after) :after))})
               checks (merge (:checks comparison)
                             (:checks ledger)
                             bracket-checks
-                            window-checks)]
+                            window-checks
+                            replay-checks)]
           (-> base-report
               (assoc :comparison
                      (assoc comparison
@@ -382,10 +436,12 @@
               (assoc :physical-tx-id (:tx-id tx-key)
                      :transaction-ledger-matches? (:matches? ledger)
                      :collection-scope (cond
+                                         replay? repeatable-ledger-window-collection-scope
                                          window? ledger-window-collection-scope
                                          bracketed? bracketed-ledger-collection-scope
                                          :else ledger-collection-scope)
                      :evidence-kind (cond
+                                      replay? :direct-controlled-xtdb-repeatable-ledger-window-observation
                                       window? :direct-controlled-xtdb-ledger-window-observation
                                       bracketed? :direct-controlled-xtdb-ledger-bracketed-observation
                                       :else :direct-controlled-xtdb-ledger-linked-observation))))))))
@@ -448,3 +504,18 @@
    database, or general XTDB refinement. Same strict three-key input."
   [input]
   (collect-step! input :window))
+
+(defn observe-and-compare-repeatable-window!
+  "Opt-in extension of observe-and-compare-ledger-window!. After submitting
+   the transaction ONCE, repeat the before- and after-phase document queries
+   and ledger watermark queries at each phase's EXACT original pinned basis.
+   Any changed result makes :comparison/:corresponds? false. Unknown XTDB
+   errors still propagate; no retry or claim of an authenticated receipt.
+
+   The snapshot-token and current-time fields must be preserved together:
+   a token reused at a different clock is NOT asserted to preserve visibility.
+   This diagnostic does not establish the execution's internal read snapshot,
+   complete policy dependencies, or general physical-to-abstract refinement.
+   The input remains exactly {:node ... :plan ... :targets ...}."
+  [input]
+  (collect-step! input :repeatable-window))
