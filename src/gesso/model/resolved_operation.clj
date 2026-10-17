@@ -22,7 +22,18 @@
                            {:required-guard-targets #{[:memberships (:membership-id ctx)]}
                             :allowed-guard-targets #{[:memberships (:membership-id ctx)]}
                             :required-write-targets #{[:requests (get-in binding [:arguments :request-id])]}
-                            :allowed-write-targets #{[:requests (get-in binding [:arguments :request-id])]}})})
+                            :allowed-write-targets #{[:requests (get-in binding [:arguments :request-id])]}})
+       ;; Optional, separate CLOSED equality-check contract. The trusted
+       ;; callback runs before :construct! and declares exact expected values:
+       :predicate-contract! (fn [ctx binding]
+                              {:required-guard-checks #{[[:memberships (:membership-id ctx)]
+                                                         :active true]}
+                               :allowed-guard-checks #{[[:memberships (:membership-id ctx)]
+                                                        :active true]
+                                                       [[:memberships (:membership-id ctx)]
+                                                        :revision (:membership-revision ctx)]}
+                               :required-update-checks #{}
+                               :allowed-update-checks #{}})})
 
    The result is a callable `(fn [ctx {:binding ... :mode ...}])`. Its modes
    are server-owned decisions, NEVER browser-provided authorization:
@@ -49,8 +60,11 @@
    When a registration ALSO supplies trusted :target-contract!, Gesso checks
    the final plan against closed required/allowed document targets derived
    from the context and command binding before domain construction begins.
-   Neither optional contract establishes business-rule completeness, policy
-   correctness, complete authorization dependencies, or constructor purity.
+   An additional optional :predicate-contract! checks exact declared equality
+   values in the final version guards and update-command preconditions for
+   those document targets. It cannot independently infer business rules or
+   certify that the declarations are authentic, complete, or correct.
+   None of these contracts establishes constructor purity or authorization.
 
    After a successful transaction commit, Gesso Live publication and any
    read-your-writes context remain owned by gesso.model.tx. This wrapper does
@@ -60,6 +74,7 @@
   (:require
    [clojure.set :as set]
    [gesso.live.core :as live]
+   [gesso.model.command :as command]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx :as tx]))
 
@@ -68,6 +83,11 @@
 
 (def construction-contract-key :construction-contract)
 (def target-contract-key :target-contract!)
+(def predicate-contract-key :predicate-contract!)
+
+(def predicate-contract-keys
+  #{:required-guard-checks :allowed-guard-checks
+    :required-update-checks :allowed-update-checks})
 
 (def target-contract-keys
   #{:required-guard-targets :allowed-guard-targets
@@ -144,6 +164,25 @@
                       :correct-predicate-values-or-document-versions
                       :constructor-purity
                       :all-executor-branches-and-prestates
+                      :xtdb-physical-refinement
+                      :application-certification}})
+
+(def predicate-contract-scope
+  {:construction :gesso.model.resolved-operation/closed-expected-checks-v1
+   :checked #{:predicate-requirements-computed-before-construction
+              :exact-guard-and-update-expected-check-coverage
+              :predicate-checks-bound-to-registered-document-targets
+              :no-transaction-submission-on-predicate-mismatch}
+   :assumed #{:trusted-predicate-requirements-callback
+              :requirements-independent-of-constructed-plan
+              :correct-expected-values-from-trusted-application-context
+              :application-guards-enforce-declared-equality-semantics}
+   :not-established #{:independent-authorization-policy-discovery
+                      :complete-authorization-or-business-predicates
+                      :authenticity-of-declared-inputs
+                      :complete-semantic-dependency-closure
+                      :arbitrary-sql-predicate-correspondence
+                      :constructor-purity
                       :xtdb-physical-refinement
                       :application-certification}})
 
@@ -405,17 +444,92 @@
                 :unexpected-write-target-count (count unexpected-writes)}))))
   incorporated)
 
+(defn- exact-check-set? [checks]
+  (and (set? checks)
+       (every? (fn [check]
+                 (and (vector? check)
+                      (= 3 (count check))
+                      (target-set? #{(first check)})
+                      (keyword? (second check))
+                      ;; gesso.model.command/expected-version disallows nil.
+                      (some? (nth check 2))))
+               checks)))
+
+(defn- require-predicate-contract! [declared targets]
+  ;; The declarations must originate independently of the constructed plan.
+  ;; Only checks on already declared guard/write targets can be admitted.
+  ;; Do not include sensitive expected values or document IDs in diagnostics.
+  (let [required-guard (:required-guard-checks declared)
+        allowed-guard (:allowed-guard-checks declared)
+        required-update (:required-update-checks declared)
+        allowed-update (:allowed-update-checks declared)]
+    (when-not (and (map? declared)
+                   (= predicate-contract-keys (set (keys declared)))
+                   (every? exact-check-set? (vals declared))
+                   (set/subset? required-guard allowed-guard)
+                   (set/subset? required-update allowed-update)
+                   (set/subset? (set (map first allowed-guard))
+                                (:allowed-guard-targets targets))
+                   (set/subset? (set (map first allowed-update))
+                                (:allowed-write-targets targets))
+                   ;; Update predicates refer to existing domain documents,
+                   ;; not the Gesso-created command-result document.
+                   (not-any? (fn [[target _ _]]
+                               (= (first target) resolution/command-entity-type))
+                             (concat required-guard allowed-guard
+                                     required-update allowed-update)))
+      (fail! :invalid-predicate-contract
+             "Trusted equality-check declaration is malformed or inconsistent with its document-target contract."
+             {:declared-shape-valid? false})))
+  declared)
+
+(defn- expected-check-triples [items target-f]
+  (into #{}
+        (mapcat (fn [item]
+                  (let [target (target-f item)]
+                    (map (fn [[attribute value]] [target attribute value])
+                         (get-in item [:model/expected :model/checks])))))
+        items))
+
+(defn- require-plan-predicate-coverage! [declared incorporated]
+  (when declared
+    (let [plan (:plan incorporated)
+          guard-checks (expected-check-triples (:guards plan) tx/guard-target)
+          update-checks (expected-check-triples
+                         (remove command/create? (:commands plan))
+                         tx/command-target)
+          missing-guards (set/difference (:required-guard-checks declared)
+                                         guard-checks)
+          extra-guards (set/difference guard-checks
+                                       (:allowed-guard-checks declared))
+          missing-updates (set/difference (:required-update-checks declared)
+                                          update-checks)
+          extra-updates (set/difference update-checks
+                                        (:allowed-update-checks declared))]
+      (when (or (seq missing-guards) (seq extra-guards)
+                (seq missing-updates) (seq extra-updates))
+        (fail! :construction-predicate-mismatch
+               "The final incorporated transaction does not match registered equality-check requirements."
+               {:missing-guard-check-count (count missing-guards)
+                :unexpected-guard-check-count (count extra-guards)
+                :missing-update-check-count (count missing-updates)
+                :unexpected-update-check-count (count extra-updates)}))))
+  incorporated)
+
 (defn- require-configuration [configuration]
   (when-not (and (map? configuration)
                  (contains? #{configuration-keys
                               (conj configuration-keys construction-contract-key)
                               (conj configuration-keys construction-contract-key
-                                    target-contract-key)}
+                                    target-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key predicate-contract-key)}
                             (set (keys configuration))))
     (fail! :invalid-configuration
            "Resolved operation configuration must use the exact admitted key set."
            {:expected configuration-keys
-            :optional #{construction-contract-key target-contract-key}}))
+            :optional #{construction-contract-key target-contract-key
+                        predicate-contract-key}}))
   (when (contains? configuration construction-contract-key)
     (require-construction-contract (:construction-contract configuration)))
   (when (and (contains? configuration target-contract-key)
@@ -423,6 +537,11 @@
     (fail! :invalid-target-contract
            "An enabled document-target contract requires a trusted function."
            {:callback target-contract-key}))
+  (when (contains? configuration predicate-contract-key)
+    (when-not (fn? (:predicate-contract! configuration))
+      (fail! :invalid-predicate-contract
+             "An enabled equality-check contract requires a trusted function and a document-target contract."
+             {:callback predicate-contract-key})))
   (let [{:keys [operation read-record! may-disclose? construct!]} configuration]
     (when-not (qualified-keyword? operation)
       (fail! :invalid-operation-id
@@ -507,10 +626,18 @@
    of required/allowed [table document-id] pairs for DOMAIN targets. Each
    required TABLE must have at least one required document target. The wrapper
    adds the exact command-ledger target derived from binding, never from the
-   constructor. Neither layer independently discovers business requirements."
+   constructor. Neither layer independently discovers business requirements.
+
+   Optional :predicate-contract! requires :target-contract! and declares four
+   required/allowed sets of [target attribute expected-value] triples. It is
+   evaluated from trusted [ctx binding] BEFORE :construct!, and compares
+   the final version guards and update command preconditions. All predicates
+   remain plain, canonical expected-version equalities; arbitrary HoneySQL
+   expressions are not admitted. Correct predicates still cannot establish
+   that all application authorization requirements were declared."
   [configuration]
   (let [{:keys [operation read-record! may-disclose? construct!
-                construction-contract target-contract!]}
+                construction-contract target-contract! predicate-contract!]}
         (require-configuration configuration)]
     (with-meta
       (fn resolved-operation [ctx input]
@@ -535,6 +662,10 @@
                                     (require-target-contract!
                                      (target-contract! ctx binding)
                                      construction-contract binding))
+                  predicate-contract (when predicate-contract!
+                                       (require-predicate-contract!
+                                        (predicate-contract! ctx binding)
+                                        target-contract))
                   _ (publish-construction-input! input-observer ctx binding)
                   {:keys [now plan outcome]} (construction! construct! ctx binding)
                   incorporated (resolution/incorporation-plan
@@ -548,6 +679,7 @@
                   _ (require-plan-table-coverage! construction-contract
                                                   incorporated)
                   _ (require-plan-target-coverage! target-contract incorporated)
+                  _ (require-plan-predicate-coverage! predicate-contract incorporated)
                   {:keys [transaction error]}
                   (transact-observed! ctx incorporated binding observer)]
               (if (and (nil? error)
@@ -570,4 +702,6 @@
                :gesso.model/construction-contract-scope
                construction-contract-scope)
         target-contract!
-        (assoc :gesso.model/target-contract-scope target-contract-scope)))))
+        (assoc :gesso.model/target-contract-scope target-contract-scope)
+        predicate-contract!
+        (assoc :gesso.model/predicate-contract-scope predicate-contract-scope)))))
