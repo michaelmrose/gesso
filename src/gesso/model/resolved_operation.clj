@@ -29,6 +29,24 @@
                                       (let [r (get-in binding [:arguments :request-id])]
                                         {:required-command-operations #{[:requests r :claim]}
                                          :allowed-command-operations #{[:requests r :claim]}}))
+       ;; Optional post-state document check from trusted invocation data.
+       ;; This is a closed declaration of actual domain command :model/after
+       ;; field/value tuples; unlike an operation name, it catches bad outputs.
+       :post-state-contract! (fn [ctx binding]
+                               (let [r (get-in binding [:arguments :request-id])]
+                                 {:required-post-state-values #{[:requests r :owner (:helper-id ctx)]}
+                                  :allowed-post-state-values #{[:requests r :xt/id r]
+                                                               [:requests r :revision (:next-revision ctx)]
+                                                               [:requests r :created-at (:created-at ctx)]
+                                                               [:requests r :updated-at (:now ctx)]
+                                                               [:requests r :owner (:helper-id ctx)]}}))
+       ;; Optional outcome declaration, tied to this invocation and checked
+       ;; against the command result that will be durably recorded. This
+       ;; requires post-state and write-operation contracts; it cannot prove
+       ;; that those independently declared business semantics are correct.
+       :outcome-contract! (fn [ctx binding]
+                            {:expected-outcome {:status :claimed
+                                                :request-id (get-in binding [:arguments :request-id])}})
        ;; Optional exact predicate declaration; requires both prior contracts.
        ;; Allowed includes every version/field check that can legitimately
        ;; appear in the final plan for these document identities.
@@ -74,6 +92,19 @@
    command-ledger :create requirement and checks the final plan before send.
    This is another opt-in consistency check, not semantic operation proof.
 
+   Optional :post-state-contract! independently declares required and
+   permitted exact final persisted field/value tuples for DOMAIN writes.
+   The closed allowed set covers every final field; Gesso's own command
+   ledger is excluded from application declarations and checked elsewhere.
+   A matching post-state contract still cannot prove that the declared
+   values represent the intended business rule.
+
+   Optional :outcome-contract! declares one deterministic, nonempty portable
+   command-result outcome from trusted invocation data before :construct!.
+   It is only admitted alongside closed command-operation and post-state
+   contracts, and is checked before the ledger record can be sent. The
+   declaration is still application-owned and does not prove semantic truth.
+
    A further optional :predicate-contract! independently declares exact
    required and permitted [table document-id field value] checks for both
    version guards and update-command optimistic conditions. It requires
@@ -101,6 +132,11 @@
 (def target-contract-key :target-contract!)
 (def predicate-contract-key :predicate-contract!)
 (def command-operation-contract-key :command-operation-contract!)
+(def post-state-contract-key :post-state-contract!)
+(def outcome-contract-key :outcome-contract!)
+(def outcome-contract-keys #{:expected-outcome})
+(def post-state-contract-keys
+  #{:required-post-state-values :allowed-post-state-values})
 
 (def command-operation-contract-keys
   #{:required-command-operations :allowed-command-operations})
@@ -223,6 +259,43 @@
    :not-established #{:correct-post-state-values
                       :authorization-or-policy-correctness
                       :independent-business-rule-discovery
+                      :all-executor-branches-and-prestates
+                      :xtdb-physical-refinement
+                      :application-certification}})
+
+(def post-state-contract-scope
+  {:construction :gesso.model.resolved-operation/closed-post-state-values-v1
+   :checked #{:post-state-requirements-computed-before-construction
+              :required-and-allowed-domain-post-state-values-match-final-plan
+              :independent-binding-derived-command-ledger-excluded
+              :post-state-declarations-restricted-to-registered-write-targets
+              :one-expected-value-per-target-field
+              :no-submission-on-post-state-mismatch}
+   :assumed #{:trusted-post-state-requirements-callback
+              :requirements-independent-of-constructed-plan
+              :trusted-invocation-context-and-binding
+              :stable-immutable-declared-and-constructed-values
+              :complete-declaration-of-domain-post-state-semantics}
+   :not-established #{:correct-meaning-of-declared-post-state-values
+                      :authorization-or-policy-correctness
+                      :independent-business-rule-discovery
+                      :all-executor-branches-and-prestates
+                      :xtdb-physical-refinement
+                      :application-certification}})
+
+(def outcome-contract-scope
+  {:construction :gesso.model.resolved-operation/closed-command-outcome-v1
+   :checked #{:outcome-requirement-computed-before-construction
+              :exact-durable-outcome-equals-independently-declared-outcome
+              :requires-closed-write-operation-and-post-state-contracts
+              :no-submission-on-outcome-mismatch}
+   :assumed #{:trusted-outcome-requirements-callback
+              :requirements-independent-of-constructed-plan-and-outcome
+              :trusted-invocation-context-and-binding
+              :declaration-expresses-correct-business-result}
+   :not-established #{:correctness-of-declared-business-result
+                      :complete-business-rules-or-authorization
+                      :constructor-purity
                       :all-executor-branches-and-prestates
                       :xtdb-physical-refinement
                       :application-certification}})
@@ -628,6 +701,125 @@
                 :unexpected-command-operation-count (count unexpected)}))))
   incorporated)
 
+(defn- post-state-tuple-set? [values]
+  (and (set? values)
+       (every? (fn [tuple]
+                 (and (vector? tuple)
+                      (= 4 (count tuple))
+                      (keyword? (nth tuple 0))
+                      (some? (nth tuple 1))
+                      (keyword? (nth tuple 2))))
+               values)))
+
+(defn- unique-post-state-fields? [tuples]
+  (= (count tuples)
+     (count (set (map (fn [[table id field _]] [table id field]) tuples)))))
+
+(defn- post-state-targets [tuples]
+  (set (map (fn [[table id _ _]] [table id]) tuples)))
+
+(defn- require-post-state-contract! [declared targets]
+  (let [required (:required-post-state-values declared)
+        allowed (:allowed-post-state-values declared)
+        required-targets (set (remove (fn [[table _]]
+                                        (= table resolution/command-entity-type))
+                                      (:required-write-targets targets)))
+        allowed-targets (set (remove (fn [[table _]]
+                                       (= table resolution/command-entity-type))
+                                     (:allowed-write-targets targets)))]
+    (when-not (and (map? declared)
+                   (= post-state-contract-keys (set (keys declared)))
+                   (post-state-tuple-set? required)
+                   (post-state-tuple-set? allowed)
+                   (set/subset? required allowed)
+                   (unique-post-state-fields? required)
+                   (unique-post-state-fields? allowed)
+                   (= required-targets (post-state-targets required))
+                   (set/subset? (post-state-targets allowed) allowed-targets)
+                   (not-any? (fn [[table _ _ _]]
+                               (= table resolution/command-entity-type)) allowed))
+      (fail! :invalid-post-state-contract
+             "Post-state declaration must give coherent, independently required values for each domain write target."
+             {:declared-shape-valid? false}))
+    declared))
+
+(defn- actual-post-state-values [incorporated]
+  (into #{}
+        (mapcat (fn [entry]
+                  (let [[table id] (tx/command-target entry)]
+                    (when-not (= table resolution/command-entity-type)
+                      (map (fn [[field value]] [table id field value])
+                           (command/after entry)))))
+                (get-in incorporated [:plan :commands]))))
+
+(defn- require-plan-post-state-coverage! [declared incorporated]
+  (when declared
+    (let [actual (actual-post-state-values incorporated)
+          missing (set/difference (:required-post-state-values declared) actual)
+          unexpected (set/difference actual (:allowed-post-state-values declared))]
+      (when (or (seq missing) (seq unexpected))
+        (fail! :construction-post-state-mismatch
+               "The final transaction's domain post-state values do not match the independently registered contract."
+               {:missing-post-state-value-count (count missing)
+                :unexpected-post-state-value-count (count unexpected)}))))
+  incorporated)
+
+(def ^:private stable-outcome-number-classes
+  #{Byte Short Integer Long java.math.BigInteger clojure.lang.BigInt
+    clojure.lang.Ratio java.math.BigDecimal Float Double})
+
+(defn- stable-outcome-data? [value]
+  ;; A command result will be persisted for replay. Do not admit mutable
+  ;; Java Number implementations through Number's open inheritance hierarchy.
+  ;; In particular AtomicLong can mutate between the declaration comparison
+  ;; and durable record creation. Bound recursion and visited nodes as well.
+  (let [visited (volatile! 0)]
+    (letfn [(stable? [x depth]
+              (vswap! visited inc)
+              (and (<= depth 64)
+                   (<= @visited 50000)
+                   (cond
+                     (or (nil? x) (boolean? x) (string? x) (keyword? x)
+                         (uuid? x)) true
+                     (contains? stable-outcome-number-classes (class x))
+                     (or (not (#{Float Double} (class x)))
+                         (Double/isFinite (double x)))
+                     (vector? x) (every? #(stable? % (inc depth)) x)
+                     (map? x) (and (every? #(stable? % (inc depth)) (keys x))
+                                   (every? #(stable? % (inc depth)) (vals x)))
+                     :else false)))]
+      (stable? value 0))))
+
+(defn- require-outcome-contract! [declared binding]
+  ;; A deterministic outcome contract is meaningful only for operations whose
+  ;; admitted result can be computed independently of their construction.
+  ;; Do not leak the expected outcome (or its binding) in error diagnostics.
+  (let [expected (:expected-outcome declared)]
+    (when-not (and (map? declared)
+                   (= outcome-contract-keys (set (keys declared)))
+                   (map? expected)
+                   (seq expected)
+                   (stable-outcome-data? expected))
+      (fail! :invalid-outcome-contract
+             "Outcome contract requires exactly one nonempty expected outcome map."
+             {:declared-shape-valid? false}))
+    (try
+      (resolution/command-record binding expected :contract-validation-time)
+      (catch clojure.lang.ExceptionInfo _
+        (fail! :invalid-outcome-contract
+               "Outcome declaration must be a portable, durable command result."
+               {:declared-shape-valid? false})))
+    declared))
+
+(defn- require-plan-outcome-coverage! [declared outcome]
+  (when (and declared
+             (or (not (stable-outcome-data? outcome))
+                 (not= (:expected-outcome declared) outcome)))
+    (fail! :construction-outcome-mismatch
+           "The command result does not match the independently declared invocation outcome."
+           {:outcome-match? false}))
+  outcome)
+
 (defn- require-configuration [configuration]
   (when-not (and (map? configuration)
                  (contains? #{configuration-keys
@@ -640,13 +832,29 @@
                                     target-contract-key command-operation-contract-key)
                               (conj configuration-keys construction-contract-key
                                     target-contract-key predicate-contract-key
-                                    command-operation-contract-key)}
-                            (set (keys configuration))))
+                                    command-operation-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key post-state-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key predicate-contract-key
+                                    post-state-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key command-operation-contract-key
+                                    post-state-contract-key)
+                              (conj configuration-keys construction-contract-key
+                                    target-contract-key predicate-contract-key
+                                    command-operation-contract-key
+                                    post-state-contract-key)}
+                            (disj (set (keys configuration)) outcome-contract-key))
+                 (or (not (contains? configuration outcome-contract-key))
+                     (and (contains? configuration post-state-contract-key)
+                          (contains? configuration command-operation-contract-key))))
     (fail! :invalid-configuration
            "Resolved operation configuration must use the exact admitted key set."
            {:expected configuration-keys
             :optional #{construction-contract-key target-contract-key predicate-contract-key
-                        command-operation-contract-key}}))
+                        command-operation-contract-key post-state-contract-key
+                        outcome-contract-key}}))
   (when (contains? configuration construction-contract-key)
     (require-construction-contract (:construction-contract configuration)))
   (when (and (contains? configuration target-contract-key)
@@ -664,6 +872,16 @@
     (fail! :invalid-command-operation-contract
            "An enabled command-operation contract requires a trusted function."
            {:callback command-operation-contract-key}))
+  (when (and (contains? configuration post-state-contract-key)
+             (not (fn? (:post-state-contract! configuration))))
+    (fail! :invalid-post-state-contract
+           "An enabled post-state contract requires a trusted function."
+           {:callback post-state-contract-key}))
+  (when (and (contains? configuration outcome-contract-key)
+             (not (fn? (:outcome-contract! configuration))))
+    (fail! :invalid-outcome-contract
+           "An enabled outcome contract requires a trusted function."
+           {:callback outcome-contract-key}))
   (let [{:keys [operation read-record! may-disclose? construct!]} configuration]
     (when-not (qualified-keyword? operation)
       (fail! :invalid-operation-id
@@ -756,12 +974,22 @@
    independently declares required and allowed [table id operation] triples
    for every required domain write target (e.g. :claim rather than :create).
    Gesso adds the binding-owned command-ledger :create requirement. These
-   checks reject wrong command operations before tx/transact!, but do not
-   prove semantic adequacy, domain postconditions, or authentic acquisition."
+   checks reject wrong command operations before tx/transact!. Optional
+   :post-state-contract! also requires the table and document-target contracts
+   and checks the final domain command :model/after field/value tuples against
+   independently declared required and allowed post-state values. It excludes
+   the Gesso-owned command ledger. Optional :outcome-contract! additionally
+   requires :command-operation-contract! and :post-state-contract! and checks
+   the independently declared exact durable result against :construct!'s
+   outcome before transaction submission. It cannot prove that a declared
+   outcome is truthful about the application's intended business semantics.
+   None of these checks proves the adequacy
+   of application business rules or the authenticity of acquired context."
   [configuration]
   (let [{:keys [operation read-record! may-disclose? construct!
                 construction-contract target-contract! predicate-contract!
-                command-operation-contract!]}
+                command-operation-contract! post-state-contract!
+                outcome-contract!]}
         (require-configuration configuration)]
     (with-meta
       (fn resolved-operation [ctx input]
@@ -797,8 +1025,17 @@
                     (require-command-operation-contract!
                      (command-operation-contract! ctx binding)
                      target-contract binding))
+                  post-state-contract
+                  (when post-state-contract!
+                    (require-post-state-contract!
+                     (post-state-contract! ctx binding) target-contract))
+                  outcome-contract
+                  (when outcome-contract!
+                    (require-outcome-contract!
+                     (outcome-contract! ctx binding) binding))
                   _ (publish-construction-input! input-observer ctx binding)
                   {:keys [now plan outcome]} (construction! construct! ctx binding)
+                  _ (require-plan-outcome-coverage! outcome-contract outcome)
                   incorporated (resolution/incorporation-plan
                                 {:binding binding
                                  :now now
@@ -813,6 +1050,8 @@
                   _ (require-plan-predicate-coverage! predicate-contract incorporated)
                   _ (require-plan-command-operation-coverage!
                      command-operation-contract incorporated)
+                  _ (require-plan-post-state-coverage!
+                     post-state-contract incorporated)
                   {:keys [transaction error]}
                   (transact-observed! ctx incorporated binding observer)]
               (if (and (nil? error)
@@ -840,4 +1079,10 @@
         (assoc :gesso.model/predicate-contract-scope predicate-contract-scope)
         command-operation-contract!
         (assoc :gesso.model/command-operation-contract-scope
-               command-operation-contract-scope)))))
+               command-operation-contract-scope)
+        post-state-contract!
+        (assoc :gesso.model/post-state-contract-scope
+               post-state-contract-scope)
+        outcome-contract!
+        (assoc :gesso.model/outcome-contract-scope
+               outcome-contract-scope)))))
