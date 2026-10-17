@@ -24,7 +24,12 @@
    observe-and-compare-bracketed! further checks that the submitted tx ID
    exceeds a ledger high watermark read from the pinned before-snapshot and
    appears in the pinned after-snapshot. This does not exclude intervening
-   external transactions. In particular, a caller still supplies the node,
+   external transactions. The further optional ledger-window comparison
+   requires the transaction ID to be exactly the next integer ID and the
+   pinned after-ledger watermark to equal that transaction ID. It detects
+   ledger-visible intervening transactions in the observed interval, but
+   is still not a proof of the transaction-internal read snapshot.
+   In particular, a caller still supplies the node,
    plan, and tracked target domain; this API does not identify or attest the
    real application production boundary."
   (:require
@@ -228,12 +233,36 @@
       (update :assumed conj :monotonic-xtdb-transaction-ids)
       (update :not-established conj :no-intervening-external-transactions)))
 
-(defn- pre-transaction-ledger-watermark!
-  "Capture the highest ledger transaction ID at the ACTUAL pinned before
-   basis, before execute-tx. Empty history uses -1. A malformed result is
-   not considered an empty history. Nothing from this query is returned as
-   a database proof certificate."
-  [node basis]
+(def ledger-window-collection-scope
+  "Opt-in, fail-closed LEDGER-WINDOW diagnostic. In addition to a valid
+   bracketed result, require the executed transaction ID to be the immediate
+   integer successor of the pinned before-ledger watermark and the largest
+   ID visible in the pinned after-ledger to be that same transaction ID.
+
+   This detects ledger-visible transactions in the observation window, and
+   conservatively rejects ID gaps even if they were not caused by another
+   writer. It cannot establish which snapshot the submitted transaction
+   used internally, policy dependency closure, future commits of in-flight
+   transactions, or the absence of activity outside the pinned window."
+  (-> bracketed-ledger-collection-scope
+      (assoc :collector :gesso.model.tx/direct-xtdb-ledger-window-step-v1)
+      (update :collected into
+              #{:pinned-after-ledger-high-watermark
+                :executed-tx-immediate-successor-of-before-watermark
+                :executed-tx-equals-after-ledger-watermark})
+      (update :assumed into
+              #{:ledger-high-watermarks-include-all-visible-tx-ids
+                :unique-monotonic-xtdb-transaction-ids})
+      (update :not-established into
+              #{:no-writer-outside-pinned-observation-window
+                :no-in-flight-or-future-external-commits
+                :transaction-snapshot-attestation})))
+
+(defn- ledger-watermark!
+  "Capture the highest ID visible at the actual pinned observation basis.
+   Empty history uses -1. Malformed before evidence fails before submission;
+   malformed after evidence fails AFTER submission with no retry."
+  [node basis phase]
   (let [rows (xt/q node
                    "SELECT _id FROM xt.txs ORDER BY _id DESC LIMIT 1"
                    basis)]
@@ -246,9 +275,12 @@
            (<= 0 (:xt/id (first rows))))
       (:xt/id (first rows))
       :else
-      (fail! ::invalid-before-ledger-watermark
-             "XTDB returned an invalid pinned-before ledger watermark."
-             {:row-count (when (sequential? rows) (count rows))}))))
+      (fail! (if (= phase :before)
+               ::invalid-before-ledger-watermark
+               ::invalid-after-ledger-watermark)
+             "XTDB returned an invalid pinned ledger watermark."
+             {:phase phase
+              :row-count (when (sequential? rows) (count rows))}))))
 
 (defn- collect-step!
   "Execute one admitted finite transaction on a CONTROLLED XTDB node.
@@ -278,7 +310,8 @@
    of returning a misleading comparison or attempting reconciliation."
   [input ledger-mode]
   (let [ledger? (not= :none ledger-mode)
-        bracketed? (= :bracketed ledger-mode)
+        window? (= :window ledger-mode)
+        bracketed? (contains? #{:bracketed :window} ledger-mode)
         {:keys [node plan targets]} (require-input! input)
         plan (model/admitted-plan plan)
         targets (refinement/require-targets targets)
@@ -296,8 +329,7 @@
           ;; Capture the high watermark before submission; never query an old
           ;; snapshot for a future tx ID after execute-tx has returned.
           before-ledger-watermark (when bracketed?
-                                    (pre-transaction-ledger-watermark!
-                                     node (:basis before)))
+                                    (ledger-watermark! node (:basis before) :before))
           reference-before (refinement/observation-state
                             targets (:documents before))
           {:keys [execution tx-key]} (execute-definitively! node operations)
@@ -328,9 +360,20 @@
               bracket-checks (when bracketed?
                                {:executed-tx-after-before-watermark
                                 (< before-ledger-watermark (:tx-id tx-key))})
+              ;; This read is pinned to the EXACT after basis used for the
+              ;; document observations and the transaction-specific ledger
+              ;; row. A later, unpinned SELECT must never supply its value.
+              after-watermark (when window?
+                                (ledger-watermark! node (:basis after) :after))
+              window-checks (when window?
+                              {:executed-tx-immediate-successor
+                               (= (inc before-ledger-watermark) (:tx-id tx-key))
+                               :executed-tx-equals-after-watermark
+                               (= (:tx-id tx-key) after-watermark)})
               checks (merge (:checks comparison)
                             (:checks ledger)
-                            bracket-checks)]
+                            bracket-checks
+                            window-checks)]
           (-> base-report
               (assoc :comparison
                      (assoc comparison
@@ -338,12 +381,14 @@
                             :corresponds? (every? true? (vals checks))))
               (assoc :physical-tx-id (:tx-id tx-key)
                      :transaction-ledger-matches? (:matches? ledger)
-                     :collection-scope (if bracketed?
-                                         bracketed-ledger-collection-scope
-                                         ledger-collection-scope)
-                     :evidence-kind (if bracketed?
-                                      :direct-controlled-xtdb-ledger-bracketed-observation
-                                      :direct-controlled-xtdb-ledger-linked-observation))))))))
+                     :collection-scope (cond
+                                         window? ledger-window-collection-scope
+                                         bracketed? bracketed-ledger-collection-scope
+                                         :else ledger-collection-scope)
+                     :evidence-kind (cond
+                                      window? :direct-controlled-xtdb-ledger-window-observation
+                                      bracketed? :direct-controlled-xtdb-ledger-bracketed-observation
+                                      :else :direct-controlled-xtdb-ledger-linked-observation))))))))
 
 (defn observe-and-compare!
   "Original v1006 diagnostic API. Pin the two observation phases, submit once,
@@ -384,3 +429,22 @@
    backend isolation, an authenticated submission, or universal refinement."
   [input]
   (collect-step! input :bracketed))
+
+(defn observe-and-compare-ledger-window!
+  "Strictly stronger opt-in diagnostic than observe-and-compare-bracketed!.
+
+   Verify the returned tx ID is the *immediate integer successor* of the
+   pinned before-ledger high watermark and equals the pinned after-ledger high
+   watermark. Both ledger high-watermark queries use the same respective
+   snapshot and clock as that phase's target reads. An observed intervening
+   transaction, an ID gap, or a later committed transaction makes
+   :comparison/:corresponds? false, even if document observations agree.
+   Missing or malformed pre-submission evidence fails before any submission;
+   post-submission evidence failure propagates without retry.
+
+   This is evidence only for the ledger-visible interval between these two
+   pinned bases. It is neither authenticated production evidence nor proof
+   of the transaction-internal read snapshot, exclusive control of the
+   database, or general XTDB refinement. Same strict three-key input."
+  [input]
+  (collect-step! input :window))
