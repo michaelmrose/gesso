@@ -11,7 +11,9 @@
    This is an active, write-performing DIAGNOSTIC intended for an exclusively
    controlled database. It is not a production Live execution wrapper, a
    transaction interceptor, a passive auditor, or a safe retry/reconciliation
-   API. Reads are separate SELECT queries, not one pinned database snapshot.
+   API. Before-reads share one explicit XTDB snapshot token and clock time;
+   after-reads share another. The two phases intentionally do NOT share one
+   snapshot. They are not a snapshot of the transaction's internal read set.
    No other writer may change these targets between the first and last read.
    A transaction error other than the recognized XTDB assertion rejection is
    propagated as unknown; no second submission is made.
@@ -28,11 +30,13 @@
    [gesso.model.tx :as tx]
    [gesso.model.tx-model :as model]
    [gesso.model.tx-refinement :as refinement]
-   [xtdb.api :as xt]))
+   [xtdb.api :as xt])
+  (:import [java.time Instant]))
 
 (def collection-scope
   {:collector :gesso.model.tx/direct-xtdb-step-observation-v1
-   :collected #{:reference-prestate-from-physical-reads
+   :collected #{:phase-local-pinned-snapshot-token-and-clock
+                :reference-prestate-from-physical-reads
                 :complete-explicit-target-reads
                 :operations-from-production-tx-prepare
                 :same-operations-passed-to-xtdb-execute-tx
@@ -41,10 +45,15 @@
                 :recorded-step-comparison}
    :assumed #{:exclusive-control-of-tracked-documents-during-collection
               :all-semantic-read-and-write-dependencies-identified
+              ;; Still required BETWEEN the two distinct observation phases:
+              ;; each phase is pinned, but an external writer can run before
+              ;; submission, during the transaction, or before after-reads.
               :consistent-series-of-separate-xtdb-reads
               :synchronous-execute-tx-outcome-is-definitive
               :supplied-node-is-the-intended-controlled-database}
-   :not-established #{:authenticated-physical-submission-receipt
+   :not-established #{:transaction-internal-snapshot-equals-observed-prestate
+                      :same-snapshot-for-before-and-after-phases
+                      :authenticated-physical-submission-receipt
                       :production-live-execution-correspondence
                       :one-pinned-snapshot-across-all-target-reads
                       :physical-read-completeness-outside-declared-targets
@@ -91,11 +100,29 @@
     (set (concat (map :target checks)
                  (map command/target (:commands plan))))))
 
+(defn- phase-basis!
+  "Acquire a database snapshot token and a fixed valid-time clock for ONE
+   observation phase. No unpinned fallback is allowed: partial/coincidentally
+   matching cross-table reads are not acceptable refinement evidence.
+
+   SHOW SNAPSHOT_TOKEN is supported by the XTDB2 2.2 Clojure SQL interface.
+   The token is intentionally kept internal and never included in reports."
+  [node]
+  (let [rows (xt/q node "SHOW SNAPSHOT_TOKEN")
+        token (when (and (sequential? rows) (= 1 (count rows)))
+                (:snapshot-token (first rows)))]
+    (when-not (and (string? token) (seq token))
+      (fail! ::missing-snapshot-token
+             "XTDB did not return exactly one usable snapshot token."
+             {:row-count (when (sequential? rows) (count rows))}))
+    {:snapshot-token token
+     :current-time (Instant/now)}))
+
 (defn- read-target!
-  [node [table id]]
+  [node basis [table id]]
   (let [query (str "SELECT * FROM " (safe-sql-table! table)
                    " WHERE _id = ? LIMIT 2")
-        rows (xt/q node [query id])]
+        rows (xt/q node [query id] basis)]
     (when-not (and (sequential? rows) (<= (count rows) 1))
       (fail! ::invalid-physical-read
              "Expected at most one row for each queried document."
@@ -104,8 +131,11 @@
 
 (defn- observe!
   [node targets]
-  ;; Exact keys, including nil for queried-absent documents.
-  (into {} (map (fn [target] [target (read-target! node target)])) targets))
+  ;; Capture the basis ONCE and pass it unchanged to every target query.
+  ;; Explicit nil still means 'queried and absent', never 'not queried'.
+  (let [basis (phase-basis! node)]
+    (into {} (map (fn [target] [target (read-target! node basis target)]))
+          targets)))
 
 (defn- execute-definitively!
   [node operations]
@@ -128,12 +158,18 @@
    declared physical footprint. Plan admission, footprint validation, and SQL
    table-name checks occur BEFORE the first read or transaction submission.
 
-   The collector itself obtains the physical before/after documents, captures
-   the exact canonical operation vector it submits, classifies the definitive
-   XTDB outcome, and delegates comparison to compare-recorded-step. It derives
+   Each physical observation phase pins all target reads to a single XTDB
+   snapshot token and fixed clock time, acquired by the collector itself.
+   The collector captures the canonical operation vector it submits,
+   classifies the definitive XTDB outcome, and delegates comparison to
+   compare-recorded-step. It derives
    :reference-before from the physical before-observation. This makes the
    result stronger than an arbitrary caller-composed seven-field comparison,
    but it remains controlled diagnostic evidence, never a certification.
+   Even pinned before-reads may differ from the database snapshot seen by the
+   submitted transaction if external writers are admitted. Pinned after-reads
+   may include subsequent external writes. Those cross-phase guarantees still
+   require controlled isolation and are not claimed by this collector.
 
    The returned report deliberately excludes document bodies and operation
    payloads. It carries a bounded comparison, known physical outcome, and
@@ -171,4 +207,5 @@
        :submitted-operation-count (count operations)
        :collection-scope collection-scope
        :evidence-kind :direct-controlled-xtdb-observation
+       :observation-basis :separate-pinned-before-and-after-phases
        :certifies-physical-execution? false})))
