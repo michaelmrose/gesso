@@ -41,6 +41,7 @@
    [gesso.live.application-preflight.semantic-audit :as semantic-audit]
    [gesso.live.optimistic.resolution-assurance :as resolution-assurance]
    [gesso.model.formal-observation :as formal-observation]
+   [gesso.model.tx-refinement-evidence :as tx-refinement-evidence]
    [gesso.live.application-preflight.affordance :as affordance]
    [gesso.live.application-preflight.biff :as biff-lifecycle]
    [gesso.live.application-preflight.rendered-surface :as rendered-surface]))
@@ -972,6 +973,158 @@
       :unrecognized-value
       "Expected an application preflight report or current ApplicationAssembly."
       {:value value}))))
+
+
+;; =============================================================================
+;; Opt-in aggregate XTDB candidate-evidence consumer (NOT admission)
+;; =============================================================================
+
+(def ^:private expected-tx-refinement-premise-count 9)
+
+(def ^:private tx-refinement-consumer-nonclaims
+  #{:actual-executor-to-transaction-plan-binding
+    :operation-branch-or-prestate-completeness
+    :application-policy-or-external-writer-closure
+    :evidence-artifact-authentication
+    :independent-proof-verification
+    :any-xtdb-refinement-premise-discharged
+    :physical-execution-refinement
+    :application-certification-or-admission})
+
+(defn- reject-refinement-candidates!
+  [reason operation]
+  ;; Do not include a supplied prestate, plan, descriptor, digest, claimed
+  ;; artifact, or exception cause. Those may contain confidential application
+  ;; data even if the upstream reviewer normally redacts its own reports.
+  (throw
+   (preflight-error
+    :refinement-candidate-review-failed
+    "The selected XTDB refinement candidate package is not ready for independent review."
+    {:reason reason
+     :operation operation})))
+
+(defn- aggregate-review-ready?
+  [review]
+  (let [aggregate (:aggregate-candidate-package review)
+        requirements (:requirements review)
+        proposals (:proposals review)]
+    ;; Require the actual v1039 aggregate decision and its independent
+    ;; non-certification statements. Per-premise completeness, or caller
+    ;; supplied booleans that merely resemble it, are not a substitute.
+    (and (= :gesso.model.tx/instance-refinement-evidence-review-v1
+            (:obligation review))
+         (= :independent-review-required (:status review))
+         (true? (:instance-subject-derived? review))
+         (true? (:plan-specific-subject-bound? review))
+         (= :checked (:local-argument-status review))
+         (= :complete-unverified-candidate-package (:status aggregate))
+         (= :declared-application-instance (:binding-scope aggregate))
+         (true? (:all-proposals-reviewable? aggregate))
+         (true? (:all-premise-candidate-packages-complete? aggregate))
+         (true? (:ready-for-independent-review? aggregate))
+         (vector? requirements)
+         (= expected-tx-refinement-premise-count (count requirements))
+         (= expected-tx-refinement-premise-count
+            (count (set (map :id requirements))))
+         (every? #(and (= :undischarged (:status %))
+                       (true? (:review-package-complete? %)))
+                 requirements)
+         (vector? proposals)
+         (seq proposals)
+         (every? #(and (= :review-required (:status %))
+                       (false? (:authenticated? %))
+                       (false? (:proof-checked? %))
+                       (false? (:discharges-premise? %)))
+                 proposals)
+         (= #{} (:external-premises-discharged review))
+         (every? false?
+                 [(:verified? aggregate)
+                  (:premises-discharged? aggregate)
+                  (:application-admitted? aggregate)
+                  (:certifies-physical-execution? aggregate)
+                  (:evidence-authenticated? review)
+                  (:any-proof-checked? review)
+                  (:backend-contract-admitted? review)
+                  (:general-refinement-proved? review)
+                  (:certifies-physical-execution? review)
+                  (:instance-declarations-authenticated? review)
+                  (:application-dependencies-proved-complete? review)
+                  (:instance-evidence-verified? review)]))))
+
+(defn require-refinement-candidate-packages!
+  "Check candidate evidence for explicitly selected registered operations.
+
+   Requires a CURRENT ApplicationAssembly, NOT a caller-supplied preflight
+   report. `cases` must be a nonempty map from a registered operation keyword
+   to exactly {:abstract-state :plan :environment :proposals}. For each
+   supplied selection this consumer derives a fresh instance-bound review and
+   requires the v1039 AGGREGATE complete/unverified decision; individual
+   :review-package-complete? flags never confer readiness. An incomplete,
+   rejected, malformed, or cross-instance batch fails closed.
+
+   This is an OPT-IN consumer for assembling candidate proof packages, not a
+   startup requirement or application-admission gate. It checks ONE caller-
+   selected state/plan per named operation, and does NOT establish that the
+   supplied plan is the actual registered executor, that every branch/prestate
+   was considered, or that supplied environment/source declarations are true.
+   Its returned summaries deliberately contain no proofs, subjects, hashes,
+   application states, executors, or source declarations. All nine external
+   XTDB premises remain undischarged; NO application guarantee is upgraded."
+  [application-assembly cases]
+  (if-let [report (current-application-report application-assembly)]
+    (let [registered (set (keys (get-in report [:analysis :operations])))]
+      (when-not (and (map? cases)
+                     (seq cases)
+                     (<= (count cases) (count registered))
+                     (every? #(and (keyword? %) (contains? registered %))
+                             (keys cases)))
+        (reject-refinement-candidates! :invalid-selected-operations nil))
+      (let [summaries
+            (into (sorted-map)
+                  (for [[operation candidate] cases]
+                    (do
+                      (when-not (and (map? candidate)
+                                     (= #{:abstract-state :plan :environment
+                                          :proposals}
+                                        (set (keys candidate)))
+                                     (map? (:environment candidate))
+                                     (= operation
+                                        (get-in candidate
+                                                [:environment :application
+                                                 :operation])))
+                        (reject-refinement-candidates!
+                         :invalid-or-mismatched-instance-declaration operation))
+                      (let [review
+                            (try
+                              (tx-refinement-evidence/review-instance-evidence
+                               (:abstract-state candidate)
+                               (:plan candidate)
+                               (:environment candidate)
+                               (:proposals candidate))
+                              (catch Exception _
+                                (reject-refinement-candidates!
+                                 :invalid-instance-or-evidence-input operation)))]
+                        (when-not (aggregate-review-ready? review)
+                          (reject-refinement-candidates!
+                           :aggregate-package-not-ready operation))
+                        [operation
+                         {:status :complete-unverified-candidate-package
+                          :ready-for-independent-review? true
+                          :instance-subject-derived? true
+                          :evidence-verified? false
+                          :premises-discharged? false
+                          :application-admitted? false}]))))]
+        {:status :selected-candidates-ready-for-independent-review
+         :scope :explicitly-selected-declared-transaction-instances
+         :reviewed-operation-count (count summaries)
+         :registered-operation-count (count registered)
+         :selected-operations summaries
+         :evidence-authenticated? false
+         :premises-discharged? false
+         :application-admitted? false
+         :application-guarantee-upgraded? false
+         :not-established tx-refinement-consumer-nonclaims}))
+    (reject-refinement-candidates! :invalid-or-stale-application-assembly nil)))
 
 
 ;; A physical execution witness is deliberately NOT included in the ordinary
