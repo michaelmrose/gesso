@@ -1543,7 +1543,7 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes]")
+   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory]")
   (System/exit
    2))
 
@@ -1609,18 +1609,70 @@
        [:integrity]
        requested))))
 
+;; Shard consumes a *description* of this runner's authoritative full suite.
+;; Gesso still owns what `bb test` runs. Inventory never executes, discovers,
+;; or selectively removes test namespaces; each gate's normal implementation
+;; continues to discover its own tests at execution time.
+;;
+;; The commands deliberately invoke the existing individual gate entrypoints.
+;; Those entrypoints rerun repository integrity within their own workspace,
+;; and `browser:integration` runs its own advanced compile. Shard workers do
+;; not share generated runtime bundles across separate ZFS clones. Until the
+;; isolated-workspace runner has an explicit prerequisite-artifact protocol,
+;; representing `:advanced` as a cross-clone file dependency would be false.
+(defn shard-job-inventory
+  []
+  (let [gates (command-gates "all")]
+    (when-not
+     (and (vector? gates)
+          (seq gates)
+          (= :integrity (first gates))
+          (= (count gates) (count (distinct gates)))
+          (every? (fn [gate]
+                    (and (keyword? gate)
+                         (fn? (get-in gate-specs [gate :run]))
+                         (string? (get-in gate-specs [gate :label]))))
+                  gates))
+      (fail!
+       "Cannot enumerate an invalid or incomplete full-suite gate definition."
+       {:gates gates
+        :known-gates (set (keys gate-specs))}))
+
+    ;; Format 1 is the generic Shard inventory-command contract. There is no
+    ;; run state in this response: Shard later validates IDs, prerequisites,
+    ;; runtime capabilities, and publishes the immutable run manifest.
+    {:jobs
+     (mapv
+      (fn [gate]
+        (let [gate-name (name gate)]
+          {:id (str "gesso-" (str/replace gate-name ":" "-"))
+           :gate gate
+           :runtime :gesso
+           :unit {:type :gesso-gate :name gate-name}
+           :command ["bb" "script/gesso_test.clj" gate-name]
+           :depends-on []
+           :timeout-ms 3600000
+           :requires #{}}))
+      gates)}))
+
 (defn -main
   []
   (ensure-project-root!)
-  (let [command (or (first *command-line-args*) "all")
-        gates (command-gates command)]
-    (when-not gates
-      (usage!))
-    (let [results (run-gates! gates)]
-      (when (failed-gates? results)
-        ;; Ordinary test/build gate failures are expected process outcomes, not
-        ;; harness exceptions. Exit nonzero without printing a Babashka stack
-        ;; trace. Unexpected harness/configuration exceptions still escape.
-        (System/exit 1)))))
+  (let [command (or (first *command-line-args*) "all")]
+    (if (= "inventory" command)
+      (do
+        (when-not (= 1 (count *command-line-args*))
+          (usage!))
+        ;; EDN only on stdout: no human-oriented labels or build output may
+        ;; contaminate the manifest consumed by Shard.
+        (prn (shard-job-inventory)))
+      (let [gates (command-gates command)]
+        (when-not gates
+          (usage!))
+        (let [results (run-gates! gates)]
+          (when (failed-gates? results)
+            ;; Ordinary gate failures exit nonzero without Babashka traces.
+            ;; Unexpected harness/configuration exceptions still escape.
+            (System/exit 1)))))))
 
 (-main)
