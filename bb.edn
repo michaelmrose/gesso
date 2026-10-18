@@ -23,9 +23,32 @@
      (println "done"))}
 
   test
-  {:doc "Full gate: JVM + Node + Chromium + real-browser integration + advanced compile + themes."
+  {:doc "Run the full suite sequentially, or use `bb test -n N` for N Shard workers."
    :task
-   (shell "bb" "script/gesso_test.clj" "all")}
+   (let [args (vec *command-line-args*)]
+     (cond
+       ;; Preserve the existing full sequential gate with no new runtime
+       ;; dependencies. Shard is only required when parallelism is requested.
+       (empty? args)
+       (shell "bb" "script/gesso_test.clj" "all")
+
+       (and (= 2 (count args))
+            (= "-n" (first args)))
+       (let [workers (try
+                       (Long/parseLong (second args))
+                       (catch NumberFormatException _ nil))]
+         (when-not (and workers (<= 1 workers 256))
+           (throw (ex-info "Worker count must be an integer from 1 to 256."
+                           {:usage "bb test [-n N]"
+                            :arguments args})))
+         ;; Shard runs from the current repository root. It owns workspace
+         ;; preparation under .ygg/ and consumes Gesso's EDN test inventory.
+         ;; A separate Shard revision implements this `run` entrypoint.
+         (shell "shard" "run" "--workers" (str workers)))
+
+       :else
+       (throw (ex-info "Usage: bb test [-n N]"
+                       {:arguments args}))))}
 
   test:jvm
   {:doc "Run all JVM tests. Included by `bb test`."
