@@ -257,3 +257,244 @@
         (is (= (edn/read-string (:out direct))
                (edn/read-string (:out adapted))))))
     (is true "Shard adapter is optional for ordinary sequential Gesso tests")))
+
+
+;; v1085: A separate, opt-in JVM namespace inventory is published by Gesso.
+;; This suite checks the correspondence between paths, declared namespaces,
+;; Shard job descriptors and exact-namespace dispatch without actually running
+;; XTDB/Recife/JVM tests. The normal eight-gate inventory stays unchanged.
+
+(def ^:private declared-jvm-ns-pattern
+  #"(?m)^[ \t]*\(ns[ \t\r\n]+([A-Za-z_][A-Za-z0-9_.-]*)")
+
+(defn- jvm-inventory-in! [dir]
+  (exec! dir [(bb-executable) "script/gesso_test.clj" "jvm:inventory"] {}))
+
+(defn- declared-jvm-namespace-files! [dir]
+  ;; Compute the expected namespace set independently of Gesso's enumerator.
+  ;; This explicitly includes .cljc but excludes .cljs and helper sources.
+  (let [base (.toPath (io/file dir "test"))]
+    (with-open [walk (Files/walk base (make-array java.nio.file.FileVisitOption 0))]
+      (->> (iterator-seq (.iterator walk))
+           (filter #(Files/isRegularFile ^Path % no-follow))
+           (filter #(re-find #"_test\.clj(?:c)?$" (str (.getFileName ^Path %))))
+           (map (fn [^Path path]
+                  (let [rel (str (.relativize base path))
+                        name (-> rel
+                                 (str/replace #"\.clj(?:c)?$" "")
+                                 (str/replace #"[/\\]" ".")
+                                 (str/replace "_" "-"))
+                        actual (second (re-find declared-jvm-ns-pattern
+                                                (slurp (.toFile path))))]
+                    {:path rel :name name :declared actual})))
+           (sort-by :path)
+           vec))))
+
+(defn- strict-jvm-inventory! [dir]
+  (let [result (jvm-inventory-in! dir)]
+    (when-not (zero? (:exit result))
+      (throw (ex-info "JVM namespace inventory command failed" result)))
+    (edn/read-string (:out result))))
+
+(defn- write-jvm-test-file! [repo basename namespace-name]
+  (let [f (io/file repo "test" "gesso" basename)]
+    (.mkdirs (.getParentFile f))
+    (spit f (str "(ns " namespace-name ")\n"))
+    f))
+
+(defn- prepare-jvm-dispatch-fixture! [temp]
+  (let [script (io/file temp "script")
+        bin (io/file temp "fake-bin")]
+    (.mkdirs script)
+    (.mkdirs bin)
+    (spit (io/file temp "deps.edn") "{:paths [\"src\"]}\n")
+    (io/copy (expected-source! "script/gesso_test.clj")
+             (io/file script "gesso_test.clj"))
+    (spit (io/file script "repo_integrity.fish") "# harmless fixture\n")
+    (write-jvm-test-file! temp "sample_test.clj" "gesso.sample-test")
+    (write-jvm-test-file! temp "portable_test.cljc" "gesso.portable-test")
+    ;; The parent bb command is NOT intercepted. The project test runner's
+    ;; fish + clojure children are controlled and logged independently.
+    (command-stub! bin "fish")
+    ;; Keep repository integrity successful so failures target the child JVM.
+    (spit (io/file bin "fish")
+          (str "#!/bin/sh" (System/lineSeparator)
+               "exit 0" (System/lineSeparator)))
+    (command-stub! bin "clojure")
+    {:root temp
+     :bin bin
+     :trace (io/file temp "invoked.txt")}))
+
+(defn- jvm-dispatch! [fixture args exit-code]
+  (let [trace (:trace fixture)]
+    (Files/deleteIfExists (.toPath trace))
+    (let [env {"PATH" (str (:bin fixture) java.io.File/pathSeparator
+                            (or (System/getenv "PATH") "/usr/bin:/bin"))
+               "GESSO_SHARD_TEST_TRACE" (.getPath trace)
+               "GESSO_SHARD_TEST_EXIT" (str exit-code)}
+          result (exec! (:root fixture)
+                        (into [(bb-executable) "script/gesso_test.clj"] args)
+                        env)]
+      (assoc result :invoked (when (.isFile trace)
+                               (str/split-lines (slurp trace)))))))
+
+(deftest jvm-namespace-inventory-has-exact-source-correspondence
+  (let [files (declared-jvm-namespace-files! (root))
+        result (jvm-inventory-in! (root))]
+    (is (= 0 (:exit result)) (:out result))
+    (is (seq files) "The repository must have JVM test namespaces")
+    (is (= (count files) (count (set (map :path files)))))
+    (doseq [{:keys [path name declared]} files]
+      (is (= name declared)
+          (str "Test file namespace/path mismatch: " path)))
+    (when (= 0 (:exit result))
+      (let [inventory (edn/read-string (:out result))
+            jobs (:jobs inventory)
+            source-names (mapv :name files)
+            listed-names (mapv #(get-in % [:unit :name]) jobs)
+            ids (mapv :id jobs)]
+        (is (= #{:jobs} (set (keys inventory))))
+        (is (vector? jobs))
+        (is (= (count files) (count jobs)))
+        (is (= (set source-names) (set listed-names)))
+        (is (= listed-names (vec (sort listed-names))))
+        (is (= (count ids) (count (set ids))))
+        (is (= (count listed-names) (count (set listed-names))))
+        (is (some #(str/ends-with? (:path %) ".cljc") files))
+        (is (some #(str/ends-with? (:path %) ".clj") files))
+        (doseq [{:keys [id gate runtime unit command depends-on timeout-ms requires]} jobs]
+          (let [n (:name unit)]
+            (is (= id (str "gesso-jvm-" n)))
+            (is (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" id))
+            (is (= :jvm gate))
+            (is (= :gesso runtime))
+            (is (= unit {:type :gesso-jvm-namespace :name n}))
+            (is (= ["bb" "script/gesso_test.clj" "jvm:namespace" n] command))
+            (is (= [] depends-on))
+            (is (= #{} requires))
+            (is (and (integer? timeout-ms) (pos? timeout-ms)))))))))
+
+(deftest jvm-namespace-inventory-is-stable-and-opt-in
+  (let [gate-before (inventory!)
+        first-run (jvm-inventory-in! (root))
+        second-run (jvm-inventory-in! (root))
+        gate-after (inventory!)]
+    (doseq [result [gate-before first-run second-run gate-after]]
+      (is (= 0 (:exit result)) (:out result)))
+    (when (every? #(zero? (:exit %))
+                  [gate-before first-run second-run gate-after])
+      (is (= (:out gate-before) (:out gate-after))
+          "The authoritative parallel full-suite inventory must be unchanged")
+      (is (= (:out first-run) (:out second-run)))
+      (let [old (edn/read-string (:out gate-after))
+            new (edn/read-string (:out first-run))]
+        (is (= 8 (count (:jobs old))))
+        (is (= 1 (count (filter #(= :jvm (:gate %)) (:jobs old)))))
+        (is (= :gesso-gate (get-in (first (filter #(= :jvm (:gate %))
+                                                    (:jobs old))) [:unit :type])))
+        (is (every? #(= :gesso-jvm-namespace (get-in % [:unit :type]))
+                    (:jobs new)))))))
+
+(deftest namespace-selection-dispatches-exactly-one-registered-jvm-test
+  (with-temp-repo
+    (fn [temp]
+      (let [fixture (prepare-jvm-dispatch-fixture! temp)
+            listed (strict-jvm-inventory! temp)]
+        (is (= #{"gesso.sample-test" "gesso.portable-test"}
+               (set (map #(get-in % [:unit :name]) (:jobs listed)))))
+        (doseq [n ["gesso.sample-test" "gesso.portable-test"]]
+          (let [r (jvm-dispatch! fixture ["jvm:namespace" n] 0)]
+            (is (= 0 (:exit r)) (:out r))
+            (is (= ["clojure" "-M:test:formal" "-n" n]
+                   (:invoked r))
+                "Every namespace must run exactly the requested -n selector")))))))
+
+(deftest namespace-selection-rejects-unknown-and-malformed-names
+  (with-temp-repo
+    (fn [temp]
+      (let [fixture (prepare-jvm-dispatch-fixture! temp)]
+        (doseq [name ["gesso.missing-test" "gesso.sample-test,other"
+                      "(do (println :unsafe))" ""]]
+          (let [r (jvm-dispatch! fixture ["jvm:namespace" name] 0)]
+            (is (not= 0 (:exit r)) (:out r))
+            (is (nil? (:invoked r))
+                "Unknown namespace must not launch a child JVM")))))))
+
+(deftest namespace-selection-propagates-jvm-process-failure
+  (with-temp-repo
+    (fn [temp]
+      (let [fixture (prepare-jvm-dispatch-fixture! temp)
+            r (jvm-dispatch! fixture ["jvm:namespace" "gesso.sample-test"] 17)]
+        (is (not= 0 (:exit r)) (:out r))
+        (is (= ["clojure" "-M:test:formal" "-n" "gesso.sample-test"]
+               (:invoked r)))))))
+
+(deftest namespace-inventory-rejects-mismatched-declarations
+  (with-temp-repo
+    (fn [temp]
+      (let [fixture (prepare-jvm-dispatch-fixture! temp)
+            file (io/file temp "test" "gesso" "sample_test.clj")]
+        (spit file "(ns gesso.wrong-test)\n")
+        (let [r (jvm-dispatch! fixture ["jvm:inventory"] 0)]
+          (is (not= 0 (:exit r)) (:out r))
+          (is (str/includes? (:out r) "disagrees with its path"))
+          (is (nil? (:invoked r))))))))
+
+(deftest namespace-inventory-ignores-cljs-and-non-test-helper-files
+  (with-temp-repo
+    (fn [temp]
+      (let [fixture (prepare-jvm-dispatch-fixture! temp)
+            ignored (io/file temp "test" "gesso" "browser_test.cljs")
+            helper (io/file temp "test" "gesso" "helper.clj")]
+        (spit ignored "(ns gesso.browser-test)\n")
+        (spit helper "(ns gesso.helper)\n")
+        (let [result (jvm-dispatch! fixture ["jvm:inventory"] 0)]
+          (is (= 0 (:exit result)) (:out result))
+          (when (= 0 (:exit result))
+            (is (= #{"gesso.sample-test" "gesso.portable-test"}
+                   (set (map #(get-in % [:unit :name])
+                             (:jobs (edn/read-string (:out result)))))))
+            (is (nil? (:invoked result)))))))))
+
+(deftest namespace-inventory-cli-enforces-arity-without-running-tests
+  (with-temp-repo
+    (fn [temp]
+      (let [fixture (prepare-jvm-dispatch-fixture! temp)]
+        (doseq [args [["jvm:inventory" "extra"]
+                      ["jvm:namespace"]
+                      ["jvm:namespace" "gesso.sample-test" "extra"]]]
+          (let [r (jvm-dispatch! fixture args 0)]
+            (is (= 2 (:exit r)) (:out r))
+            (is (nil? (:invoked r)))))))))
+
+
+(deftest optional-real-shard-accepts-fine-grained-jvm-manifest
+  ;; This is deliberately optional: normal sequential Gesso tests must pass
+  ;; without Ygg, Shard, ZFS or a separate integration installation.
+  (if-let [shard (System/getenv "GESSO_SHARD_TEST_SHARD")]
+    (with-temp-repo
+      (fn [temp]
+        (let [config (io/file temp "jvm-jobs.edn")
+              run (io/file temp "run")
+              config-data {:version 1
+                           :project-root (str (root))
+                           :runtimes {:gesso {:identity "gesso-jvm-test"
+                                              :capabilities #{}}}
+                           :inventory-command [(bb-executable)
+                                               "script/gesso_test.clj"
+                                               "jvm:inventory"]}
+              direct (strict-jvm-inventory! (root))]
+          (spit config (pr-str config-data))
+          (let [result (exec! (root)
+                              [shard "enumerate" (.getPath config) (.getPath run)]
+                              {})]
+            (is (= 0 (:exit result)) (:out result))
+            (when (= 0 (:exit result))
+              (let [manifest (edn/read-string
+                              (slurp (io/file run "jobs.edn")))]
+                (is (= :shard/jobs (:format manifest)))
+                (is (= 1 (:version manifest)))
+                (is (= (set (map :id (:jobs direct)))
+                       (set (map :id (:jobs manifest)))))
+                (is (= (count (:jobs direct)) (count (:jobs manifest))))))))))
+    (is true "Fine-grained Shard manifest validation is optional")))
