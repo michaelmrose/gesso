@@ -300,6 +300,79 @@
 (def formal-test-file-pattern
   #"(?:^|[_-])(?:recife|formal)(?:[_-]|\.)")
 
+;; The full JVM gate remains authoritative while namespace-level parallel
+;; execution is being integrated. Only *_test.clj and *_test.cljc files are
+;; candidates, matching the test corpus included by cognitect.test-runner.
+;; Reject a source/path mismatch rather than publishing a runnable-looking job
+;; that would silently miss the intended namespace.
+(def jvm-test-file-pattern #".*_test\.clj(?:c)?$")
+(def jvm-namespace-declaration-pattern
+  #"(?m)^[ \t]*\(ns[ \t\r\n]+([A-Za-z_][A-Za-z0-9_.-]*)")
+
+(defn jvm-test-namespaces
+  []
+  (let [paths (->> (concat (fs/glob "test" "**/*_test.clj")
+                           (fs/glob "test" "**/*_test.cljc"))
+                   (filter #(re-matches jvm-test-file-pattern
+                                         (str (fs/file-name %))))
+                   (sort-by str)
+                   vec)
+        entries (mapv (fn [path]
+                        (let [expected (test-namespace path)
+                              content (slurp (str path))
+                              declared (some-> (re-find jvm-namespace-declaration-pattern
+                                                       content)
+                                               second
+                                               symbol)]
+                          (when-not (= expected declared)
+                            (fail! "JVM test namespace declaration disagrees with its path."
+                                   {:file (str path)
+                                    :expected expected
+                                    :declared declared}))
+                          expected))
+                      paths)
+        unique-namespaces (vec (sort (distinct entries)))]
+    (when (or (empty? entries)
+              (not= (count entries) (count unique-namespaces)))
+      (fail! "JVM namespace inventory is empty or contains duplicate namespaces."
+             {:files (count entries)
+              :namespaces (count unique-namespaces)}))
+    unique-namespaces))
+
+(defn shard-jvm-namespace-inventory
+  []
+  ;; An opt-in inventory for the next integration stage. The existing Shard
+  ;; inventory stays at eight gate jobs until coverage/correspondence tests
+  ;; and switching the parallel adapter can be updated together.
+  {:jobs
+   (mapv (fn [test-ns]
+           (let [name (str test-ns)]
+             {:id (str "gesso-jvm-" name)
+              :gate :jvm
+              :runtime :gesso
+              :unit {:type :gesso-jvm-namespace :name name}
+              :command ["bb" "script/gesso_test.clj" "jvm:namespace" name]
+              :depends-on []
+              :timeout-ms jvm-wall-clock-timeout-ms
+              :requires #{}}))
+         (jvm-test-namespaces))})
+
+(declare run-repo-integrity!)
+
+(defn run-one-jvm-test-namespace!
+  [namespace-name]
+  (let [available (set (map str (jvm-test-namespaces)))]
+    (when-not (contains? available namespace-name)
+      (fail! "Unknown JVM test namespace; refusing to execute arbitrary code."
+             {:requested namespace-name
+              :available-count (count available)}))
+    (run-repo-integrity!)
+    (println)
+    (println "== JVM test namespace ==" namespace-name)
+    (run-command-streaming-with-timeout!
+     ["clojure" "-M:test:formal" "-n" namespace-name]
+     jvm-wall-clock-timeout-ms)))
+
 (defn formal-test-namespaces
   []
   (let [namespaces
@@ -1543,7 +1616,7 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory]")
+   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory|jvm:inventory|jvm:namespace NAMESPACE]")
   (System/exit
    2))
 
@@ -1658,21 +1731,42 @@
 (defn -main
   []
   (ensure-project-root!)
-  (let [command (or (first *command-line-args*) "all")]
-    (if (= "inventory" command)
+  (let [args (vec *command-line-args*)
+        command (or (first args) "all")]
+    (case command
+      "inventory"
       (do
-        (when-not (= 1 (count *command-line-args*))
-          (usage!))
-        ;; EDN only on stdout: no human-oriented labels or build output may
-        ;; contaminate the manifest consumed by Shard.
+        (when-not (= 1 (count args)) (usage!))
+        ;; The established eight-gate Shard inventory remains unchanged.
         (prn (shard-job-inventory)))
-      (let [gates (command-gates command)]
-        (when-not gates
-          (usage!))
-        (let [results (run-gates! gates)]
-          (when (failed-gates? results)
-            ;; Ordinary gate failures exit nonzero without Babashka traces.
-            ;; Unexpected harness/configuration exceptions still escape.
-            (System/exit 1)))))))
+
+      "jvm:inventory"
+      (do
+        (when-not (= 1 (count args)) (usage!))
+        ;; Strict EDN only; namespace discovery never launches a test.
+        (prn (shard-jvm-namespace-inventory)))
+
+      "jvm:namespace"
+      (do
+        (when-not (= 2 (count args)) (usage!))
+        (try
+          (run-one-jvm-test-namespace! (second args))
+          (catch Throwable error
+            (if (gate-failure? error)
+              (do
+                (binding [*out* *err*]
+                  (println (ex-message error)))
+                (System/exit 1))
+              (throw error)))))
+
+      (do
+        (when (> (count args) 1) (usage!))
+        (let [gates (command-gates command)]
+          (when-not gates (usage!))
+          (let [results (run-gates! gates)]
+            (when (failed-gates? results)
+              ;; Ordinary gate failures exit nonzero without Babashka traces.
+              ;; Unexpected harness/configuration exceptions still escape.
+              (System/exit 1))))))))
 
 (-main)
