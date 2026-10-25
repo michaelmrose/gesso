@@ -300,8 +300,8 @@
 (def formal-test-file-pattern
   #"(?:^|[_-])(?:recife|formal)(?:[_-]|\.)")
 
-;; The full JVM gate remains authoritative while namespace-level parallel
-;; execution is being integrated. Only *_test.clj and *_test.cljc files are
+;; Sequential JVM execution remains a full-suite gate. Parallel JVM execution
+;; expands it into individual namespaces. Only *_test.clj and *_test.cljc files are
 ;; candidates, matching the test corpus included by cognitect.test-runner.
 ;; Reject a source/path mismatch rather than publishing a runnable-looking job
 ;; that would silently miss the intended namespace.
@@ -341,9 +341,8 @@
 
 (defn shard-jvm-namespace-inventory
   []
-  ;; An opt-in inventory for the next integration stage. The existing Shard
-  ;; inventory stays at eight gate jobs until coverage/correspondence tests
-  ;; and switching the parallel adapter can be updated together.
+  ;; This is also the authoritative :jvm portion of the normal parallel
+  ;; inventory; it remains separately inspectable as jvm:inventory.
   {:jobs
    (mapv (fn [test-ns]
            (let [name (str test-ns)]
@@ -1682,17 +1681,28 @@
        [:integrity]
        requested))))
 
-;; Shard consumes a *description* of this runner's authoritative full suite.
-;; Gesso still owns what `bb test` runs. Inventory never executes, discovers,
-;; or selectively removes test namespaces; each gate's normal implementation
-;; continues to discover its own tests at execution time.
+;; Shard consumes an executable description of the authoritative full suite.
+;; The sequential `bb test` entry point still uses `run-all!` and runs the
+;; complete JVM test corpus in one process. Parallel execution replaces only
+;; the :jvm gate with the individually discovered JVM namespaces. Every other
+;; gate is unchanged, including Chromium's workspace-local build requirement.
 ;;
-;; The commands deliberately invoke the existing individual gate entrypoints.
-;; Those entrypoints rerun repository integrity within their own workspace,
-;; and `browser:integration` runs its own advanced compile. Shard workers do
-;; not share generated runtime bundles across separate ZFS clones. Until the
-;; isolated-workspace runner has an explicit prerequisite-artifact protocol,
-;; representing `:advanced` as a cross-clone file dependency would be false.
+;; No cross-clone prerequisites imply shared generated files: each Gesso gate
+;; executes its existing standalone command in its own clone. Namespace jobs
+;; likewise validate repository integrity before starting a JVM. A namespace
+;; must be in the exact discovered JVM test inventory to be executable.
+(defn shard-gate-job
+  [gate]
+  (let [gate-name (name gate)]
+    {:id (str "gesso-" (str/replace gate-name ":" "-"))
+     :gate gate
+     :runtime :gesso
+     :unit {:type :gesso-gate :name gate-name}
+     :command ["bb" "script/gesso_test.clj" gate-name]
+     :depends-on []
+     :timeout-ms 3600000
+     :requires #{}}))
+
 (defn shard-job-inventory
   []
   (let [gates (command-gates "all")]
@@ -1700,6 +1710,7 @@
      (and (vector? gates)
           (seq gates)
           (= :integrity (first gates))
+          (= 1 (count (filter #{:jvm} gates)))
           (= (count gates) (count (distinct gates)))
           (every? (fn [gate]
                     (and (keyword? gate)
@@ -1708,25 +1719,37 @@
                   gates))
       (fail!
        "Cannot enumerate an invalid or incomplete full-suite gate definition."
-       {:gates gates
-        :known-gates (set (keys gate-specs))}))
+       {:gates gates :known-gates (set (keys gate-specs))}))
 
-    ;; Format 1 is the generic Shard inventory-command contract. There is no
-    ;; run state in this response: Shard later validates IDs, prerequisites,
-    ;; runtime capabilities, and publishes the immutable run manifest.
-    {:jobs
-     (mapv
-      (fn [gate]
-        (let [gate-name (name gate)]
-          {:id (str "gesso-" (str/replace gate-name ":" "-"))
-           :gate gate
-           :runtime :gesso
-           :unit {:type :gesso-gate :name gate-name}
-           :command ["bb" "script/gesso_test.clj" gate-name]
-           :depends-on []
-           :timeout-ms 3600000
-           :requires #{}}))
-      gates)}))
+    ;; Construct the JVM inventory from exactly the same strict source scan
+    ;; exposed by jvm:inventory, not from a second manually maintained list.
+    (let [jvm-jobs (:jobs (shard-jvm-namespace-inventory))
+          jobs (vec (mapcat (fn [gate]
+                              (if (= :jvm gate)
+                                jvm-jobs
+                                [(shard-gate-job gate)]))
+                            gates))
+          ids (mapv :id jobs)
+          represented-gates (set (map :gate jobs))]
+      (when-not
+       (and (seq jvm-jobs)
+            (= (count jvm-jobs)
+               (count (set (map :id jvm-jobs))))
+            (= (set gates) represented-gates)
+            (= (count jobs) (count (distinct ids)))
+            (= (count jobs) (+ (dec (count gates)) (count jvm-jobs)))
+            (every? (fn [job]
+                      (and (= :jvm (:gate job))
+                           (= :gesso-jvm-namespace (get-in job [:unit :type]))))
+                    jvm-jobs))
+        (fail!
+         "Fine-grained JVM inventory does not cover the complete parallel suite."
+         {:gates gates
+          :represented-gates represented-gates
+          :jvm-job-count (count jvm-jobs)
+          :job-count (count jobs)
+          :distinct-id-count (count (distinct ids))}))
+      {:jobs jobs})))
 
 (defn -main
   []
@@ -1737,7 +1760,7 @@
       "inventory"
       (do
         (when-not (= 1 (count args)) (usage!))
-        ;; The established eight-gate Shard inventory remains unchanged.
+        ;; Full suite: seven original non-JVM gates plus discovered JVM jobs.
         (prn (shard-job-inventory)))
 
       "jvm:inventory"
