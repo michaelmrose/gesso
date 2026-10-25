@@ -357,22 +357,47 @@
           (str "#!/bin/sh" (System/lineSeparator)
                "exit 0" (System/lineSeparator)))
     (command-stub! bin "clojure")
+    ;; The real v1094 namespace runner requires Cognitect/clojure.test execution
+    ;; evidence; a bare exit 0 is deliberately insufficient. All variants below
+    ;; are deterministic stdout fixtures, not assertions about JVM internals.
+    (spit (io/file bin "clojure")
+          (str "#!/bin/sh\n"
+               "printf '%s\\n' 'clojure' \"$@\" > \"$GESSO_SHARD_TEST_TRACE\"\n"
+               "case \"${GESSO_SHARD_JVM_EVIDENCE_CASE:-valid}\" in\n"
+               "  valid) printf 'Testing %s\\n\\nRan 3 tests containing 6 assertions.\\n0 failures, 0 errors.\\n' \"$3\" ;;\n"
+               "  empty) printf 'Testing %s\\n\\nRan 0 tests containing 0 assertions.\\n0 failures, 0 errors.\\n' \"$3\" ;;\n"
+               "  no-assertions) printf 'Testing %s\\n\\nRan 1 test containing 0 assertions.\\n0 failures, 0 errors.\\n' \"$3\" ;;\n"
+               "  wrong-namespace) printf 'Testing gesso.other-test\\n\\nRan 3 tests containing 6 assertions.\\n0 failures, 0 errors.\\n' ;;\n"
+               "  extra-namespace) printf 'Testing %s\\nTesting gesso.other-test\\nRan 3 tests containing 6 assertions.\\n0 failures, 0 errors.\\n' \"$3\" ;;\n"
+               "  missing-testing) printf 'Ran 3 tests containing 6 assertions.\\n0 failures, 0 errors.\\n' ;;\n"
+               "  no-summary) printf 'Testing %s\\n' \"$3\" ;;\n"
+               "  missing-outcome) printf 'Testing %s\\nRan 3 tests containing 6 assertions.\\n' \"$3\" ;;\n"
+               "  reported-failures) printf 'Testing %s\\nRan 3 tests containing 6 assertions.\\n1 failures, 0 errors.\\n' \"$3\" ;;\n"
+               "  reported-errors) printf 'Testing %s\\nRan 3 tests containing 6 assertions.\\n0 failures, 1 errors.\\n' \"$3\" ;;\n"
+               "  mismatched-counts) printf 'Testing %s\\nRan 3 tests containing 6 assertions.\\n0 failures, 0 errors.\\nRan 1 test containing 2 assertions.\\n' \"$3\" ;;\n"
+               "  no-output) : ;;\n"
+               "  *) echo 'Unrecognized JVM fixture scenario' >&2; exit 90 ;;\n"
+               "esac\n"
+               "exit \"${GESSO_SHARD_TEST_EXIT:-0}\"\n"))
     {:root temp
      :bin bin
      :trace (io/file temp "invoked.txt")}))
 
-(defn- jvm-dispatch! [fixture args exit-code]
+(defn- jvm-dispatch!
+  ([fixture args exit-code] (jvm-dispatch! fixture args exit-code "valid"))
+  ([fixture args exit-code evidence-case]
   (let [trace (:trace fixture)]
     (Files/deleteIfExists (.toPath trace))
     (let [env {"PATH" (str (:bin fixture) java.io.File/pathSeparator
                             (or (System/getenv "PATH") "/usr/bin:/bin"))
                "GESSO_SHARD_TEST_TRACE" (.getPath trace)
-               "GESSO_SHARD_TEST_EXIT" (str exit-code)}
+               "GESSO_SHARD_TEST_EXIT" (str exit-code)
+               "GESSO_SHARD_JVM_EVIDENCE_CASE" evidence-case}
           result (exec! (:root fixture)
                         (into [(bb-executable) "script/gesso_test.clj"] args)
                         env)]
       (assoc result :invoked (when (.isFile trace)
-                               (str/split-lines (slurp trace)))))))
+                               (str/split-lines (slurp trace))))))))
 
 (deftest jvm-namespace-inventory-has-exact-source-correspondence
   (let [files (declared-jvm-namespace-files! (root))
@@ -441,6 +466,16 @@
         (is (= (set (map :id jvm-jobs))
                (set (map :id (filter #(= :jvm (:gate %)) jobs)))))))))
 
+(defn- jvm-evidence!
+  "Return the single machine-readable JVM record, or nil if absent.
+  Never mistake a child-process success exit for execution evidence."
+  [result]
+  (let [records (->> (str/split-lines (:out result))
+                     (filter #(str/starts-with? % "{:gesso/jvm-namespace-evidence "))
+                     vec)]
+    (when (= 1 (count records))
+      (edn/read-string (first records)))))
+
 (deftest namespace-selection-dispatches-exactly-one-registered-jvm-test
   (with-temp-repo
     (fn [temp]
@@ -451,6 +486,11 @@
         (doseq [n ["gesso.sample-test" "gesso.portable-test"]]
           (let [r (jvm-dispatch! fixture ["jvm:namespace" n] 0)]
             (is (= 0 (:exit r)) (:out r))
+            (is (= {:gesso/jvm-namespace-evidence 1
+                    :namespace n :tests 3 :assertions 6
+                    :failures 0 :errors 0}
+                   (jvm-evidence! r))
+                "Success must include verifiable namespace execution evidence")
             (is (= ["clojure" "-M:test:formal" "-n" n]
                    (:invoked r))
                 "Every namespace must run exactly the requested -n selector")))))))
@@ -750,7 +790,8 @@
                                    (or (System/getenv "PATH") "/usr/bin:/bin"))
                       "GESSO_SHARD_TEST_TRACE" (str (:trace fx))
                       "GESSO_SHARD_INTEGRITY_LOG" (str integrity-log)
-                      "GESSO_SHARD_TEST_EXIT" "0"}
+                      "GESSO_SHARD_TEST_EXIT" "0"
+                      "GESSO_SHARD_JVM_EVIDENCE_CASE" "valid"}
             run (fn [args environment]
                   (Files/deleteIfExists (.toPath (:trace fx)))
                   (let [r (exec! temp
@@ -774,8 +815,91 @@
           (is (not= 0 (:exit wrong)))
           (is (nil? (:invoked wrong)))
           (is (= 0 (:exit allowed)) (:out allowed))
+          (is (= {:gesso/jvm-namespace-evidence 1
+                  :namespace name :tests 3 :assertions 6
+                  :failures 0 :errors 0}
+                 (jvm-evidence! allowed)))
           (is (= ["clojure" "-M:test:formal" "-n" name]
                  (:invoked allowed))
               "One admitted JVM job must not invoke fish/repository integrity")
           (is (= ["integrity"] (str/split-lines (slurp integrity-log)))
               "Preflight must execute once across admission and test execution"))))))
+
+
+;; v1095: v1094 requires positive, namespace-specific Cognitect/clojure.test
+;; evidence, not merely a successful exit code. Keep these cases permanent;
+;; accepting an empty suite would silently weaken Gesso's assurance gates.
+(deftest namespace-success-requires-nonempty-matching-execution-evidence
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)]
+        (doseq [n ["gesso.sample-test" "gesso.portable-test"]]
+          (let [r (jvm-dispatch! fx ["jvm:namespace" n] 0)]
+            (is (= 0 (:exit r)) (:out r))
+            (is (= {:gesso/jvm-namespace-evidence 1
+                    :namespace n :tests 3 :assertions 6
+                    :failures 0 :errors 0}
+                   (jvm-evidence! r)))
+            (is (= ["clojure" "-M:test:formal" "-n" n]
+                   (:invoked r)))))))))
+
+(deftest legacy-jvm-namespace-rejects-empty-and-incomplete-execution
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)
+            namespace-name "gesso.sample-test"]
+        (doseq [scenario ["empty" "no-assertions" "wrong-namespace"
+                          "extra-namespace" "missing-testing" "no-summary"
+                          "missing-outcome" "reported-failures"
+                          "reported-errors" "mismatched-counts" "no-output"]]
+          (testing scenario
+            (let [r (jvm-dispatch! fx ["jvm:namespace" namespace-name] 0 scenario)]
+              (is (not= 0 (:exit r)) (:out r))
+              (is (= ["clojure" "-M:test:formal" "-n" namespace-name]
+                     (:invoked r)))
+              (is (nil? (jvm-evidence! r))
+                  "Rejected JVM execution must not emit an accepted evidence record"))))))))
+
+(deftest prepared-namespace-evidence-failures-never-repeat-integrity
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)
+            head (init-fixture-git! temp)
+            fish (io/file (:bin fx) "fish")
+            trace (:trace fx)
+            integrity-log (io/file temp "integrity-invocations.txt")
+            namespace-name "gesso.sample-test"
+            execute (fn [scenario child-exit]
+                      (Files/deleteIfExists (.toPath trace))
+                      (let [r (exec! temp
+                                     [(bb-executable) "script/gesso_test.clj"
+                                      "jvm:namespace:prepared" namespace-name]
+                                     {"PATH" (str (:bin fx) java.io.File/pathSeparator
+                                                  (or (System/getenv "PATH") "/usr/bin:/bin"))
+                                      "GESSO_SHARD_TEST_TRACE" (str trace)
+                                      "GESSO_SHARD_JVM_EVIDENCE_CASE" scenario
+                                      "GESSO_SHARD_TEST_EXIT" (str child-exit)
+                                      "GESSO_SHARD_PREFLIGHT_COMMIT" head
+                                      "GESSO_SHARD_INTEGRITY_LOG" (str integrity-log)})]
+                        (assoc r :invoked (when (.isFile trace)
+                                            (str/split-lines (slurp trace))))))]
+        (spit fish
+              "#!/bin/sh\nprintf 'unexpected-integrity\n' >> \"$GESSO_SHARD_INTEGRITY_LOG\"\nexit 0\n")
+        (.setExecutable fish true false)
+        (doseq [[scenario child-exit] [["empty" 0] ["wrong-namespace" 0]
+                                     ["no-summary" 0] ["reported-failures" 0]
+                                     ["valid" 17]]]
+          (testing (str scenario " / JVM exit " child-exit)
+            (let [r (execute scenario child-exit)]
+              (is (not= 0 (:exit r)) (:out r))
+              (is (= ["clojure" "-M:test:formal" "-n" namespace-name]
+                     (:invoked r)))
+              (is (nil? (jvm-evidence! r))))))
+        (let [success (execute "valid" 0)]
+          (is (= 0 (:exit success)) (:out success))
+          (is (= {:gesso/jvm-namespace-evidence 1
+                  :namespace namespace-name :tests 3 :assertions 6
+                  :failures 0 :errors 0}
+                 (jvm-evidence! success))))
+        (is (not (.exists integrity-log))
+            "Prepared jobs must not call the repository integrity script")))))
