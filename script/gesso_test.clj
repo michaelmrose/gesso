@@ -358,19 +358,44 @@
 
 (declare run-repo-integrity!)
 
+;; Prepared jobs are private to Shard's invocation-level preflight barrier. The
+;; commit binding prevents accidental reuse against a different clone/source.
+;; It is not an authentication or proof mechanism: the coordinator MUST run
+;; repository integrity successfully before setting the environment binding.
+(def prepared-head-environment "GESSO_SHARD_PREFLIGHT_COMMIT")
+
+(defn require-preflight-admission!
+  []
+  (let [expected (System/getenv prepared-head-environment)]
+    (when-not (and (string? expected)
+                   (re-matches #"(?:[0-9a-f]{40}|[0-9a-f]{64})" expected))
+      (fail! "Prepared test jobs require an invocation-level preflight binding."
+             {:required-environment prepared-head-environment}))
+    (let [result @(process/process ["git" "rev-parse" "HEAD"]
+                                   {:out :string :err :string})]
+      (when-not (and (zero? (:exit result))
+                     (= expected (str/trim (:out result))))
+        (fail! "Prepared test job source differs from the preflighted commit."
+               {:expected expected
+                :actual (when (zero? (:exit result))
+                          (str/trim (:out result)))})))))
+
 (defn run-one-jvm-test-namespace!
-  [namespace-name]
-  (let [available (set (map str (jvm-test-namespaces)))]
-    (when-not (contains? available namespace-name)
-      (fail! "Unknown JVM test namespace; refusing to execute arbitrary code."
-             {:requested namespace-name
-              :available-count (count available)}))
-    (run-repo-integrity!)
-    (println)
-    (println "== JVM test namespace ==" namespace-name)
-    (run-command-streaming-with-timeout!
-     ["clojure" "-M:test:formal" "-n" namespace-name]
-     jvm-wall-clock-timeout-ms)))
+  ([namespace-name] (run-one-jvm-test-namespace! namespace-name false))
+  ([namespace-name prepared?]
+   (let [available (set (map str (jvm-test-namespaces)))]
+     (when-not (contains? available namespace-name)
+       (fail! "Unknown JVM test namespace; refusing to execute arbitrary code."
+              {:requested namespace-name
+               :available-count (count available)}))
+     (if prepared?
+       (require-preflight-admission!)
+       (run-repo-integrity!))
+     (println)
+     (println "== JVM test namespace ==" namespace-name)
+     (run-command-streaming-with-timeout!
+      ["clojure" "-M:test:formal" "-n" namespace-name]
+      jvm-wall-clock-timeout-ms))))
 
 (defn formal-test-namespaces
   []
@@ -1615,7 +1640,7 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory|jvm:inventory|jvm:namespace NAMESPACE]")
+   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory [SCOPE]|inventory:prepared SCOPE|preflight|gate:prepared GATE|jvm:inventory|jvm:namespace NAMESPACE|jvm:namespace:prepared NAMESPACE]")
   (System/exit
    2))
 
@@ -1751,6 +1776,91 @@
           :distinct-id-count (count (distinct ids))}))
       {:jobs jobs})))
 
+;; Staged v1088 interface for Shard v1089. The existing zero-argument
+;; `inventory` remains unchanged until Shard enforces invocation-level preflight.
+;; This prepared inventory contains NO :integrity job and NO job command that
+;; invokes the ordinary integrity-bearing public gate. Only Shard may admit
+;; these commands after one successful preflight for this exact Git HEAD.
+(def prepared-standalone-gates
+  #{:advanced :node:choreo :node:browser :browser
+    :browser:integration :themes})
+
+(defn prepared-jvm-job
+  [test-ns gate]
+  (let [n (str test-ns)
+        family (if (= gate :formal) "formal" "jvm")]
+    {:id (str "gesso-" family "-" n)
+     :gate gate
+     :runtime :gesso
+     :unit {:type :gesso-jvm-namespace :name n}
+     :command ["bb" "script/gesso_test.clj" "jvm:namespace:prepared" n]
+     :depends-on []
+     :timeout-ms jvm-wall-clock-timeout-ms
+     :requires #{}}))
+
+(defn prepared-gate-job
+  [gate]
+  (when-not (contains? prepared-standalone-gates gate)
+    (fail! "Unsupported prepared gate." {:gate gate}))
+  (assoc (shard-gate-job gate)
+         :command ["bb" "script/gesso_test.clj" "gate:prepared" (name gate)]))
+
+(def prepared-inventory-scopes
+  #{"all" "jvm" "formal" "cljs" "node" "node:choreo" "node:browser"
+    "browser" "browser:integration" "advanced" "themes"})
+
+(defn shard-prepared-inventory
+  [scope]
+  (let [gates (command-gates scope)]
+    (when-not (and (vector? gates)
+                   (= :integrity (first gates))
+                   (seq (rest gates)))
+      (fail! "Unknown or empty Shard inventory scope."
+             {:scope scope}))
+    ;; `formal` is a subset of the authoritative JVM namespace corpus; no
+    ;; separate manually maintained namespace list or repeated integrity gate.
+    (let [selected-gates (if (= scope "browser:integration")
+                           [:browser:integration]
+                           (rest gates))
+          selected (if (= scope "formal")
+                     (mapv #(prepared-jvm-job % :formal)
+                           (formal-test-namespaces))
+                     (vec (mapcat (fn [gate]
+                                    (if (= :jvm gate)
+                                      (mapv #(prepared-jvm-job % :jvm)
+                                            (jvm-test-namespaces))
+                                      [(prepared-gate-job gate)]))
+                                  selected-gates)))
+          ids (mapv :id selected)]
+      (when-not (and (seq selected)
+                     (= (count ids) (count (distinct ids)))
+                     (every? #(not= :integrity (:gate %)) selected)
+                     (every? (fn [{:keys [command]}]
+                               (contains? #{"jvm:namespace:prepared"
+                                            "gate:prepared"}
+                                          (nth command 2 nil)))
+                             selected))
+        (fail! "Invalid preflight-ready inventory."
+               {:scope scope :job-count (count selected)}))
+      {:jobs selected})))
+
+(defn run-prepared-gate!
+  [name]
+  (let [gate (keyword name)]
+    (when-not (contains? prepared-standalone-gates gate)
+      (fail! "Unknown prepared gate; refusing arbitrary gate execution."
+             {:requested name}))
+    (require-preflight-admission!)
+    ;; A browser integration command needs its own workspace-local advanced
+    ;; build; an advanced job on another clone cannot provide that artifact.
+    ;; Neither path repeats invocation-level repository integrity.
+    (let [gates (if (= gate :browser:integration)
+                  [:advanced :browser:integration]
+                  [gate])
+          results (run-gates! gates)]
+      (when (failed-gates? results)
+        (System/exit 1)))))
+
 (defn -main
   []
   (ensure-project-root!)
@@ -1758,10 +1868,32 @@
         command (or (first args) "all")]
     (case command
       "inventory"
+      (case (count args)
+        1 ;; Legacy inventory keeps the old per-job integrity checks until
+          ;; Shard's v1089 preflight barrier becomes the execution owner.
+        (prn (shard-job-inventory))
+        2 (do
+            (when-not (contains? prepared-inventory-scopes (second args))
+              (usage!))
+            (prn (shard-prepared-inventory (second args))))
+        (usage!))
+
+      "inventory:prepared"
+      (do
+        (when-not (and (= 2 (count args))
+                       (contains? prepared-inventory-scopes (second args)))
+          (usage!))
+        (prn (shard-prepared-inventory (second args))))
+
+      "preflight"
       (do
         (when-not (= 1 (count args)) (usage!))
-        ;; Full suite: seven original non-JVM gates plus discovered JVM jobs.
-        (prn (shard-job-inventory)))
+        (run-repo-integrity!))
+
+      "gate:prepared"
+      (do
+        (when-not (= 2 (count args)) (usage!))
+        (run-prepared-gate! (second args)))
 
       "jvm:inventory"
       (do
@@ -1774,6 +1906,19 @@
         (when-not (= 2 (count args)) (usage!))
         (try
           (run-one-jvm-test-namespace! (second args))
+          (catch Throwable error
+            (if (gate-failure? error)
+              (do
+                (binding [*out* *err*]
+                  (println (ex-message error)))
+                (System/exit 1))
+              (throw error)))))
+
+      "jvm:namespace:prepared"
+      (do
+        (when-not (= 2 (count args)) (usage!))
+        (try
+          (run-one-jvm-test-namespace! (second args) true)
           (catch Throwable error
             (if (gate-failure? error)
               (do
