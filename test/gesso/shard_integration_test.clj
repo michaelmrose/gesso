@@ -157,36 +157,67 @@
       (assoc result :invoked (when (.isFile trace)
                                (str/split-lines (slurp trace)))))))
 
-(deftest shard-inventory-corresponds-to-full-sequential-gates
+(deftest shard-inventory-expands-only-jvm-in-declared-sequential-order
   (let [result (inventory!)
+        jvm-result (exec! (root)
+                          [(bb-executable) "script/gesso_test.clj" "jvm:inventory"]
+                          {})
         forms (forms-in "script/gesso_test.clj")
         sequential (declared-full-suite! forms)
         cli (cli-full-suite! forms)]
     (is (= 0 (:exit result)) (:out result))
-    (when (= 0 (:exit result))
+    (is (= 0 (:exit jvm-result)) (:out jvm-result))
+    (is (= sequential cli)
+        "Sequential all and CLI all must name the same authoritative gates")
+    (is (= 1 (count (filter #{:jvm} sequential)))
+        "The original JVM gate must have exactly one expansion point")
+    (is (= (count sequential) (count (distinct sequential)))
+        "The sequential suite must not repeat a gate")
+    (when (and (zero? (:exit result)) (zero? (:exit jvm-result)))
       (let [inventory (edn/read-string (:out result))
+            namespace-inventory (edn/read-string (:out jvm-result))
             jobs (:jobs inventory)
-            ids (mapv :id jobs)
-            gates (mapv :gate jobs)]
+            jvm-jobs (:jobs namespace-inventory)
+            non-jvm-gates (vec (remove #{:jvm} sequential))
+            non-jvm-jobs (filterv #(not= :jvm (:gate %)) jobs)
+            expected (vec (mapcat (fn [gate]
+                                    (if (= :jvm gate)
+                                      jvm-jobs
+                                      [{:id (str "gesso-" (str/replace (name gate) ":" "-"))
+                                        :gate gate
+                                        :runtime :gesso
+                                        :unit {:type :gesso-gate :name (name gate)}
+                                        :command ["bb" "script/gesso_test.clj" (name gate)]
+                                        :depends-on []
+                                        :timeout-ms 3600000
+                                        :requires #{}}]))
+                                  sequential))
+            ids (mapv :id jobs)]
         (is (= #{:jobs} (set (keys inventory))))
+        (is (= #{:jobs} (set (keys namespace-inventory))))
         (is (vector? jobs))
-        (is (= 8 (count jobs))
-            "Eight known full-suite gates must not silently disappear")
-        (is (= sequential cli)
-            "The actual full-suite and CLI 'all' declarations must agree")
-        (is (= sequential gates)
-            "Shard inventory must represent the exact sequential full-suite gates")
-        (is (= :integrity (first gates)))
+        (is (seq jvm-jobs) "The JVM namespace expansion must be nonempty")
+        (is (= (+ (count non-jvm-gates) (count jvm-jobs))
+               (count jobs))
+            "Replacing the JVM gate must neither omit nor add other work")
+        (is (= expected jobs)
+            "Expanded parallel jobs must exactly match sequential gate order")
+        (is (= non-jvm-gates (mapv :gate non-jvm-jobs)))
+        (is (= jvm-jobs (filterv #(= :jvm (:gate %)) jobs))
+            "The full-suite JVM jobs must exactly equal jvm:inventory")
         (is (= (count ids) (count (set ids))))
-        (is (= (count gates) (count (set gates))))
-        (is (every? #(and (string? %) (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" %)) ids))
-        (doseq [{:keys [id gate runtime unit command depends-on requires timeout-ms]} jobs]
-          (is (= id (str "gesso-" (str/replace (name gate) ":" "-"))))
-          (is (= runtime :gesso))
-          (is (= unit {:type :gesso-gate :name (name gate)}))
-          (is (= command ["bb" "script/gesso_test.clj" (name gate)]))
-          (is (= depends-on []))
-          (is (= requires #{}))
+        (is (every? #(and (string? %)
+                         (re-matches #"[A-Za-z0-9][A-Za-z0-9._-]*" %))
+                    ids))
+        (is (= (set sequential) (set (map :gate jobs))))
+        (is (not-any? #(= :gesso-gate (get-in % [:unit :type]))
+                      (filter #(= :jvm (:gate %)) jobs))
+            "The coarse JVM gate must not execute as well as its namespaces")
+        (doseq [{:keys [runtime command depends-on timeout-ms requires]} jobs]
+          (is (= :gesso runtime))
+          (is (vector? command))
+          (is (= [] depends-on))
+          (is (= #{} requires))
           (is (and (integer? timeout-ms) (pos? timeout-ms))))))))
 
 (deftest shard-inventory-is-deterministic-and-does-not-execute-gates
@@ -259,10 +290,12 @@
     (is true "Shard adapter is optional for ordinary sequential Gesso tests")))
 
 
-;; v1085: A separate, opt-in JVM namespace inventory is published by Gesso.
-;; This suite checks the correspondence between paths, declared namespaces,
-;; Shard job descriptors and exact-namespace dispatch without actually running
-;; XTDB/Recife/JVM tests. The normal eight-gate inventory stays unchanged.
+;; v1087: The JVM namespace inventory is an active expansion of the full
+;; parallel suite, not an opt-in substitute. These tests independently check
+;; source paths, declared namespaces, job descriptors and exact dispatch while
+;; preserving all seven other gates. They do not run XTDB/Recife/JVM tests.
+;; Repository integrity remains a gate in v1086; a later revision will move it
+;; to Shard's exactly-once invocation-level preflight barrier.
 
 (def ^:private declared-jvm-ns-pattern
   #"(?m)^[ \t]*\(ns[ \t\r\n]+([A-Za-z_][A-Za-z0-9_.-]*)")
@@ -374,26 +407,36 @@
             (is (= #{} requires))
             (is (and (integer? timeout-ms) (pos? timeout-ms)))))))))
 
-(deftest jvm-namespace-inventory-is-stable-and-opt-in
-  (let [gate-before (inventory!)
-        first-run (jvm-inventory-in! (root))
-        second-run (jvm-inventory-in! (root))
-        gate-after (inventory!)]
-    (doseq [result [gate-before first-run second-run gate-after]]
+(deftest jvm-namespace-inventory-is-stable-and-active-in-full-suite
+  (let [full-before (inventory!)
+        jvm-before (jvm-inventory-in! (root))
+        jvm-after (jvm-inventory-in! (root))
+        full-after (inventory!)]
+    (doseq [result [full-before jvm-before jvm-after full-after]]
       (is (= 0 (:exit result)) (:out result)))
     (when (every? #(zero? (:exit %))
-                  [gate-before first-run second-run gate-after])
-      (is (= (:out gate-before) (:out gate-after))
-          "The authoritative parallel full-suite inventory must be unchanged")
-      (is (= (:out first-run) (:out second-run)))
-      (let [old (edn/read-string (:out gate-after))
-            new (edn/read-string (:out first-run))]
-        (is (= 8 (count (:jobs old))))
-        (is (= 1 (count (filter #(= :jvm (:gate %)) (:jobs old)))))
-        (is (= :gesso-gate (get-in (first (filter #(= :jvm (:gate %))
-                                                    (:jobs old))) [:unit :type])))
+                  [full-before jvm-before jvm-after full-after])
+      (is (= (:out full-before) (:out full-after))
+          "The complete manifest must be deterministic")
+      (is (= (:out jvm-before) (:out jvm-after))
+          "The namespace inventory must be deterministic")
+      (let [full (edn/read-string (:out full-after))
+            jvm (edn/read-string (:out jvm-before))
+            jobs (:jobs full)
+            jvm-jobs (:jobs jvm)
+            non-jvm (remove #(= :jvm (:gate %)) jobs)
+            expected-gates (vec (remove #{:jvm}
+                                        (declared-full-suite!
+                                         (forms-in "script/gesso_test.clj"))))]
+        (is (seq jvm-jobs))
+        (is (= jvm-jobs (filterv #(= :jvm (:gate %)) jobs)))
+        (is (= expected-gates (mapv :gate non-jvm)))
+        (is (= (+ (count expected-gates) (count jvm-jobs))
+               (count jobs)))
         (is (every? #(= :gesso-jvm-namespace (get-in % [:unit :type]))
-                    (:jobs new)))))))
+                    jvm-jobs))
+        (is (= (set (map :id jvm-jobs))
+               (set (map :id (filter #(= :jvm (:gate %)) jobs)))))))))
 
 (deftest namespace-selection-dispatches-exactly-one-registered-jvm-test
   (with-temp-repo
