@@ -365,6 +365,7 @@
                "printf '%s\\n' 'clojure' \"$@\" > \"$GESSO_SHARD_TEST_TRACE\"\n"
                "case \"${GESSO_SHARD_JVM_EVIDENCE_CASE:-valid}\" in\n"
                "  valid) printf 'Testing %s\\n\\nRan 3 tests containing 6 assertions.\\n0 failures, 0 errors.\\n' \"$3\" ;;\n"
+               "  timed) sleep 0.12; printf 'Testing %s\n' \"$3\"; sleep 0.18; printf 'Ran 3 tests containing 6 assertions.\n0 failures, 0 errors.\n'; sleep 0.12 ;;\n"
                "  empty) printf 'Testing %s\\n\\nRan 0 tests containing 0 assertions.\\n0 failures, 0 errors.\\n' \"$3\" ;;\n"
                "  no-assertions) printf 'Testing %s\\n\\nRan 1 test containing 0 assertions.\\n0 failures, 0 errors.\\n' \"$3\" ;;\n"
                "  wrong-namespace) printf 'Testing gesso.other-test\\n\\nRan 3 tests containing 6 assertions.\\n0 failures, 0 errors.\\n' ;;\n"
@@ -903,3 +904,119 @@
                  (jvm-evidence! success))))
         (is (not (.exists integrity-log))
             "Prepared jobs must not call the repository integrity script")))))
+
+
+;; v1097: make v1096's timing observations a permanent regression contract.
+;; Intervals describe stdout milestones, not pure JVM startup time.
+(def ^:private timing-keys
+  #{:gesso/jvm-timing :namespace :wall-ms :launch-to-testing-ms
+    :testing-to-summary-ms :summary-to-exit-ms :method})
+
+(defn- timing-receipts [result]
+  (->> (str/split-lines (:out result))
+       (filter #(str/starts-with? % "{:gesso/jvm-timing "))
+       (mapv edn/read-string)))
+
+(defn- assert-timing-contract! [receipt namespace-name]
+  (is (= timing-keys (set (keys receipt))))
+  (is (= 1 (:gesso/jvm-timing receipt)))
+  (is (= namespace-name (:namespace receipt)))
+  (is (= :stdout-milestones (:method receipt)))
+  (doseq [k [:wall-ms :launch-to-testing-ms
+             :testing-to-summary-ms :summary-to-exit-ms]]
+    (is (and (integer? (get receipt k)) (<= 0 (get receipt k)))
+        (str "Bad timing interval " k ": " (pr-str receipt))))
+  (let [total (+ (:launch-to-testing-ms receipt)
+                 (:testing-to-summary-ms receipt)
+                 (:summary-to-exit-ms receipt))]
+    (is (<= total (:wall-ms receipt)))
+    (is (< (- (:wall-ms receipt) total) 3)
+        "Integer truncation must account for the whole process lifetime")))
+
+(deftest successful-jvm-jobs-emit-one-ordered-timing-receipt
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)]
+        (doseq [n ["gesso.sample-test" "gesso.portable-test"]]
+          (let [r (jvm-dispatch! fx ["jvm:namespace" n] 0)
+                lines (str/split-lines (:out r))
+                evidence-index (first (keep-indexed
+                                        (fn [i s] (when (str/starts-with? s "{:gesso/jvm-namespace-evidence ") i))
+                                        lines))
+                timing-index (first (keep-indexed
+                                      (fn [i s] (when (str/starts-with? s "{:gesso/jvm-timing ") i))
+                                      lines))
+                receipts (timing-receipts r)]
+            (is (= 0 (:exit r)) (:out r))
+            (is (= 1 (count receipts)))
+            (is (and (some? evidence-index) (some? timing-index)
+                     (< evidence-index timing-index))
+                "Execution evidence must precede timing evidence")
+            (when (= 1 (count receipts))
+              (assert-timing-contract! (first receipts) n))))))))
+
+(deftest timing-is-divided-by-observed-stdout-milestones
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)
+            r (jvm-dispatch! fx ["jvm:namespace" "gesso.sample-test"] 0 "timed")
+            receipts (timing-receipts r)]
+        (is (= 0 (:exit r)) (:out r))
+        (is (= 1 (count receipts)))
+        (when (= 1 (count receipts))
+          (let [t (first receipts)]
+            (assert-timing-contract! t "gesso.sample-test")
+            ;; The child sleeps 120/180/120 ms around its stdout markers.
+            ;; Keep generous slack for process and CI scheduling jitter.
+            (is (<= 70 (:launch-to-testing-ms t)) (pr-str t))
+            (is (<= 125 (:testing-to-summary-ms t)) (pr-str t))
+            (is (<= 70 (:summary-to-exit-ms t)) (pr-str t))
+            (is (<= 300 (:wall-ms t)) (pr-str t))))))))
+
+(deftest rejected-jvm-jobs-never-emit-accepted-timing
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)]
+        (doseq [[scenario child-exit] [["empty" 0] ["no-assertions" 0]
+                                     ["wrong-namespace" 0] ["extra-namespace" 0]
+                                     ["missing-testing" 0] ["no-summary" 0]
+                                     ["missing-outcome" 0] ["reported-failures" 0]
+                                     ["reported-errors" 0] ["mismatched-counts" 0]
+                                     ["no-output" 0] ["valid" 17]]]
+          (testing scenario
+            (let [r (jvm-dispatch! fx ["jvm:namespace" "gesso.sample-test"]
+                                   child-exit scenario)]
+              (is (not= 0 (:exit r)) (:out r))
+              (is (nil? (jvm-evidence! r)))
+              (is (empty? (timing-receipts r))
+                  "Rejected execution cannot publish accepted measurements"))))))))
+
+(deftest prepared-jvm-timing-does-not-rerun-integrity
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)
+            head (init-fixture-git! temp)
+            fish (io/file (:bin fx) "fish")
+            integrity-log (io/file temp "integrity-called.log")
+            env {"PATH" (str (:bin fx) java.io.File/pathSeparator
+                              (or (System/getenv "PATH") "/usr/bin:/bin"))
+                 "GESSO_SHARD_TEST_TRACE" (str (:trace fx))
+                 "GESSO_SHARD_INTEGRITY_LOG" (str integrity-log)
+                 "GESSO_SHARD_JVM_EVIDENCE_CASE" "valid"}
+            execute (fn [commit]
+                      (exec! temp [(bb-executable) "script/gesso_test.clj"
+                                   "jvm:namespace:prepared" "gesso.sample-test"]
+                             (assoc env "GESSO_SHARD_PREFLIGHT_COMMIT" commit)))]
+        (spit fish "#!/bin/sh\nprintf 'unexpected\n' >> \"$GESSO_SHARD_INTEGRITY_LOG\"\nexit 0\n")
+        (.setExecutable fish true false)
+        (doseq [r [(execute "") (execute (apply str (repeat 40 "0")))]]
+          (is (not= 0 (:exit r)) (:out r))
+          (is (empty? (timing-receipts r))))
+        (let [good (execute head)
+              receipts (timing-receipts good)]
+          (is (= 0 (:exit good)) (:out good))
+          (is (= 1 (count receipts)))
+          (when (= 1 (count receipts))
+            (assert-timing-contract! (first receipts) "gesso.sample-test"))
+          (is (not (.exists integrity-log))
+              "Prepared timing cannot trigger a second preflight"))))))
