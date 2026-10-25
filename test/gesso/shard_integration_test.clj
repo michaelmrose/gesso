@@ -144,18 +144,21 @@
      :bin bin
      :trace (io/file temp "invoked.txt")}))
 
-(defn- dispatch! [fx args exit-code]
+(defn- dispatch!
+  ([fx args exit-code]
+   (dispatch! fx "test" args exit-code))
+  ([fx task args exit-code]
   (let [trace (:trace fx)]
     (Files/deleteIfExists (.toPath trace))
     (let [path (str (:bin fx) java.io.File/pathSeparator
                     (or (System/getenv "PATH") "/usr/bin:/bin"))
           result (exec! (:root fx)
-                        (into [(bb-executable) "test"] args)
+                        (into [(bb-executable) task] args)
                         {"PATH" path
                          "GESSO_SHARD_TEST_TRACE" (.getPath trace)
                          "GESSO_SHARD_TEST_EXIT" exit-code})]
       (assoc result :invoked (when (.isFile trace)
-                               (str/split-lines (slurp trace)))))))
+                               (str/split-lines (slurp trace))))))))
 
 (deftest shard-inventory-expands-only-jvm-in-declared-sequential-order
   (let [result (inventory!)
@@ -541,3 +544,238 @@
                        (set (map :id (:jobs manifest)))))
                 (is (= (count (:jobs direct)) (count (:jobs manifest))))))))))
     (is true "Fine-grained Shard manifest validation is optional")))
+
+
+;; v1092: The selected scopes are projections of Gesso's authoritative suite,
+;; with repository integrity moved outside the basket into Shard's single
+;; invocation-level preflight. These checks exercise the actual BB commands;
+;; they do not create ZFS clones or run expensive production tests.
+
+(def ^:private selected-test-tasks
+  {"test" "all"
+   "test:jvm" "jvm"
+   "test:formal" "formal"
+   "test:cljs" "cljs"
+   "test:node" "node"
+   "test:node:choreo" "node:choreo"
+   "test:node:browser" "node:browser"
+   "test:browser" "browser"
+   "test:browser:integration" "browser:integration"
+   "test:advanced" "advanced"
+   "test:themes" "themes"})
+
+(def ^:private expected-prepared-gates
+  {"all" [:advanced :jvm :node:choreo :node:browser :browser
+          :browser:integration :themes]
+   "jvm" [:jvm]
+   "formal" [:formal]
+   "cljs" [:advanced :node:choreo :node:browser :browser
+           :browser:integration]
+   "node" [:node:choreo :node:browser]
+   "node:choreo" [:node:choreo]
+   "node:browser" [:node:browser]
+   "browser" [:browser]
+   ;; :advanced must run IN the same clone as browser integration; the
+   ;; integration job itself handles that prerequisite.
+   "browser:integration" [:browser:integration]
+   "advanced" [:advanced]
+   "themes" [:themes]})
+
+(defn- prepared-inventory! [scope]
+  (exec! (root)
+         [(bb-executable) "script/gesso_test.clj" "inventory:prepared" scope]
+         {}))
+
+(deftest scoped-bb-tasks-preserve-sequential-and-parallel-commands
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-dispatch-fixture! temp)]
+        (doseq [[task scope] (sort-by key selected-test-tasks)]
+          (testing (str task " sequential")
+            (let [r (dispatch! fx task [] 0)]
+              (is (= 0 (:exit r)) (:out r))
+              (is (= ["bb" "script/gesso_test.clj" scope]
+                     (:invoked r)))))
+          (testing (str task " parallel")
+            (doseq [n [1 4 8 256]]
+              (let [r (dispatch! fx task ["-n" (str n)] 0)
+                    expected (cond-> ["shard" "run" "--workers" (str n)]
+                               (not= "all" scope)
+                               (into ["--scope" scope]))]
+                (is (= 0 (:exit r)) (:out r))
+                (is (= expected (:invoked r)))))))))))
+
+(deftest scoped-bb-tasks-fail-closed-for-invalid-worker-arguments
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-dispatch-fixture! temp)]
+        (doseq [task (sort (keys selected-test-tasks))
+                args [["-n" "0"] ["-n" "257"] ["-n" "abc"]
+                      ["-n"] ["-n" "4" "extra"] ["--workers" "8"]]]
+          (let [r (dispatch! fx task args 0)]
+            (is (not= 0 (:exit r)) (str task " " args " " (:out r)))
+            (is (nil? (:invoked r))
+                (str "Unexpected child command: " task " " args))))))))
+
+(deftest scoped-bb-tasks-propagate-command-failures
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-dispatch-fixture! temp)]
+        (doseq [[task scope] (sort-by key selected-test-tasks)
+                args [[] ["-n" "3"]]]
+          (let [r (dispatch! fx task args 27)
+                expected (if (seq args)
+                           (cond-> ["shard" "run" "--workers" "3"]
+                             (not= "all" scope)
+                             (into ["--scope" scope]))
+                           ["bb" "script/gesso_test.clj" scope])]
+            (is (not= 0 (:exit r)) (str task " " args))
+            (is (= expected (:invoked r)))))))))
+
+(deftest every-prepared-inventory-exactly-represents-its-selected-scope
+  (let [namespaces (->> (jvm-inventory-in! (root))
+                        :out edn/read-string :jobs
+                        (mapv #(get-in % [:unit :name])))
+        all (prepared-inventory! "all")]
+    (is (= 0 (:exit all)) (:out all))
+    (is (seq namespaces))
+    (doseq [[scope gates] (sort-by key expected-prepared-gates)]
+      (testing scope
+        (let [result (prepared-inventory! scope)]
+          (is (= 0 (:exit result)) (:out result))
+          (when (= 0 (:exit result))
+            (let [jobs (:jobs (edn/read-string (:out result)))
+                  actual (mapv :gate jobs)
+                  expected (vec (mapcat (fn [gate]
+                                          (if (= gate :jvm)
+                                            (repeat (count namespaces) :jvm)
+                                            (if (= gate :formal)
+                                              (repeat (count jobs) :formal)
+                                              [gate])))
+                                        gates))
+                  ids (mapv :id jobs)]
+              (is (seq jobs))
+              (is (= expected actual)
+                  (str "Unexpected gate expansion for " scope))
+              (is (= (count ids) (count (distinct ids))))
+              (is (not-any? #(= :integrity (:gate %)) jobs))
+              (doseq [{:keys [command runtime depends-on requires unit gate]} jobs]
+                (is (= :gesso runtime))
+                (is (= [] depends-on))
+                (is (= #{} requires))
+                (is (= 4 (count command)))
+                (is (= ["bb" "script/gesso_test.clj"] (subvec command 0 2)))
+                (is (= (if (contains? #{:jvm :formal} gate)
+                         "jvm:namespace:prepared"
+                         "gate:prepared")
+                       (nth command 2)))
+                (is (= (if (contains? #{:jvm :formal} gate)
+                         :gesso-jvm-namespace
+                         :gesso-gate)
+                       (:type unit)))))))))))
+
+(deftest prepared-jvm-scope-has-one-job-per-authoritative-namespace
+  (let [normal (jvm-inventory-in! (root))
+        prepared (prepared-inventory! "jvm")]
+    (is (= 0 (:exit normal)) (:out normal))
+    (is (= 0 (:exit prepared)) (:out prepared))
+    (when (and (zero? (:exit normal)) (zero? (:exit prepared)))
+      (let [regular (:jobs (edn/read-string (:out normal)))
+            selected (:jobs (edn/read-string (:out prepared)))]
+        (is (= (count regular) (count selected)))
+        (is (= (mapv #(get-in % [:unit :name]) regular)
+               (mapv #(get-in % [:unit :name]) selected)))
+        (is (= (mapv :id regular) (mapv :id selected)))
+        (is (= (mapv #(subvec (:command %) 0 2) regular)
+               (mapv #(subvec (:command %) 0 2) selected)))
+        (is (every? #(= "jvm:namespace:prepared" (nth (:command %) 2))
+                    selected))))))
+
+(deftest prepared-formal-scope-is-a-subset-of-jvm-with-no-duplicates
+  (let [jvm (prepared-inventory! "jvm")
+        formal (prepared-inventory! "formal")]
+    (is (= 0 (:exit jvm)) (:out jvm))
+    (is (= 0 (:exit formal)) (:out formal))
+    (when (and (zero? (:exit jvm)) (zero? (:exit formal)))
+      (let [jvm-names (set (map #(get-in % [:unit :name])
+                                (:jobs (edn/read-string (:out jvm)))))
+            selected (:jobs (edn/read-string (:out formal)))
+            names (mapv #(get-in % [:unit :name]) selected)]
+        (is (seq names))
+        (is (= (count names) (count (set names))))
+        (is (every? jvm-names names))
+        (is (every? #(= :formal (:gate %)) selected))))))
+
+(deftest prepared-inventory-commands-are-deterministic-and-reject-invalid-scopes
+  (doseq [scope ["all" "jvm" "formal" "browser:integration"]]
+    (let [before (prepared-inventory! scope)
+          after (prepared-inventory! scope)]
+      (is (= 0 (:exit before)) (:out before))
+      (is (= 0 (:exit after)) (:out after))
+      (is (= (:out before) (:out after)))))
+  (doseq [args [["inventory:prepared"]
+                ["inventory:prepared" "unknown"]
+                ["inventory:prepared" "all" "extra"]
+                ["inventory" "unknown"]
+                ["inventory" "jvm" "extra"]]]
+    (let [r (exec! (root) (into [(bb-executable) "script/gesso_test.clj"] args) {})]
+      (is (= 2 (:exit r)) (str args " " (:out r))))))
+
+(defn- git-head-in! [directory]
+  (let [r (exec! directory ["git" "rev-parse" "HEAD"] {})]
+    (when-not (= 0 (:exit r))
+      (throw (ex-info "Git HEAD fixture is missing" r)))
+    (str/trim (:out r))))
+
+(defn- init-fixture-git! [directory]
+  (doseq [cmd [["git" "init" "-q"]
+               ["git" "add" "."]
+               ["git" "-c" "user.name=Gesso Test"
+                "-c" "user.email=gesso-test@example.invalid"
+                "commit" "-qm" "Fixture"]]]
+    (let [r (exec! directory cmd {})]
+      (when-not (= 0 (:exit r))
+        (throw (ex-info "Cannot initialize git test fixture" r)))))
+  (git-head-in! directory))
+
+(deftest prepared-jvm-command-requires-current-commit-and-never-repeats-integrity
+  (with-temp-repo
+    (fn [temp]
+      (let [fx (prepare-jvm-dispatch-fixture! temp)
+            head (init-fixture-git! temp)
+            fish (io/file (:bin fx) "fish")
+            integrity-log (io/file temp "integrity-invocations.txt")
+            name "gesso.sample-test"
+            env-base {"PATH" (str (:bin fx) java.io.File/pathSeparator
+                                   (or (System/getenv "PATH") "/usr/bin:/bin"))
+                      "GESSO_SHARD_TEST_TRACE" (str (:trace fx))
+                      "GESSO_SHARD_INTEGRITY_LOG" (str integrity-log)
+                      "GESSO_SHARD_TEST_EXIT" "0"}
+            run (fn [args environment]
+                  (Files/deleteIfExists (.toPath (:trace fx)))
+                  (let [r (exec! temp
+                                 (into [(bb-executable) "script/gesso_test.clj"] args)
+                                 (merge env-base environment))]
+                    (assoc r :invoked (when (.isFile (:trace fx))
+                                        (str/split-lines (slurp (:trace fx)))))))]
+        (spit fish "#!/bin/sh\nprintf 'fish\n' > \"$GESSO_SHARD_TEST_TRACE\"\nprintf 'integrity\n' >> \"$GESSO_SHARD_INTEGRITY_LOG\"\nexit 0\n")
+        (.setExecutable fish true false)
+        (let [preflight (run ["preflight"] {})
+              missing (run ["jvm:namespace:prepared" name]
+                           {"GESSO_SHARD_PREFLIGHT_COMMIT" ""})
+              wrong (run ["jvm:namespace:prepared" name]
+                         {"GESSO_SHARD_PREFLIGHT_COMMIT" (apply str (repeat 40 "0"))})
+              allowed (run ["jvm:namespace:prepared" name]
+                           {"GESSO_SHARD_PREFLIGHT_COMMIT" head})]
+          (is (= 0 (:exit preflight)) (:out preflight))
+          (is (= ["fish"] (:invoked preflight)))
+          (is (not= 0 (:exit missing)))
+          (is (nil? (:invoked missing)))
+          (is (not= 0 (:exit wrong)))
+          (is (nil? (:invoked wrong)))
+          (is (= 0 (:exit allowed)) (:out allowed))
+          (is (= ["clojure" "-M:test:formal" "-n" name]
+                 (:invoked allowed))
+              "One admitted JVM job must not invoke fish/repository integrity")
+          (is (= ["integrity"] (str/split-lines (slurp integrity-log)))
+              "Preflight must execute once across admission and test execution"))))))
