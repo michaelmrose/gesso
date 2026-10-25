@@ -393,17 +393,49 @@
 (def jvm-outcome-line-pattern
   #"^([0-9]+) failures?, ([0-9]+) errors?\.$")
 
+;; Timing is observation, not attribution.  The first "Testing" line follows
+;; JVM startup, classpath setup, namespace loading, and test discovery; it is
+;; NOT a measurement of JVM startup alone.  The final clojure.test outcome
+;; precedes any shutdown work or lingering background threads.
+(defn jvm-timing-receipt
+  [namespace-name started-at evidence finished-at]
+  (let [{:keys [first-testing-at last-outcome-at]} evidence]
+    (when-not (and (integer? first-testing-at)
+                   (integer? last-outcome-at)
+                   (<= started-at first-testing-at last-outcome-at finished-at))
+      (gate-failure!
+       "JVM namespace timing markers were missing or out of order."
+       {:namespace namespace-name
+        :markers (select-keys evidence [:first-testing-at :last-outcome-at])}))
+    (let [ms (fn [start end] (long (quot (- end start) 1000000)))]
+      {:gesso/jvm-timing 1
+       :namespace namespace-name
+       :wall-ms (ms started-at finished-at)
+       :launch-to-testing-ms (ms started-at first-testing-at)
+       :testing-to-summary-ms (ms first-testing-at last-outcome-at)
+       :summary-to-exit-ms (ms last-outcome-at finished-at)
+       :method :stdout-milestones})))
+
 (defn record-jvm-evidence-line!
   [evidence line]
-  (let [line (str/trim line)]
+  (let [line (str/trim line)
+        observed-at (monotonic-nanos)]
     (when-let [[_ name] (re-matches jvm-testing-line-pattern line)]
-      (swap! evidence update :testing conj name))
+      (swap! evidence
+             (fn [e]
+               (-> e
+                   (update :testing conj name)
+                   (cond-> (nil? (:first-testing-at e))
+                     (assoc :first-testing-at observed-at))))))
     (when-let [[_ tests assertions] (re-matches jvm-count-line-pattern line)]
       (swap! evidence update :counts conj
              [(parse-long tests) (parse-long assertions)]))
     (when-let [[_ failures errors] (re-matches jvm-outcome-line-pattern line)]
-      (swap! evidence update :outcomes conj
-             [(parse-long failures) (parse-long errors)]))))
+      (swap! evidence (fn [e]
+                        (-> e
+                            (update :outcomes conj
+                                    [(parse-long failures) (parse-long errors)])
+                            (assoc :last-outcome-at observed-at)))))))
 
 (defn valid-jvm-namespace-evidence?
   [namespace-name {:keys [testing counts outcomes]}]
@@ -426,6 +458,7 @@
   [namespace-name]
   (let [command ["clojure" "-M:test:formal" "-n" namespace-name]
         evidence (atom {:testing [] :counts [] :outcomes []})
+        started-at (monotonic-nanos)
         child (process/process command
                                {:in :inherit :out :pipe :err :inherit})
         java-process (:proc child)
@@ -465,13 +498,21 @@
           (gate-failure!
            "JVM namespace returned without verifiable nonempty test execution."
            {:namespace namespace-name :command command :evidence @evidence}))
-        (let [[tests assertions] (last (:counts @evidence))]
+        (let [finished-at (monotonic-nanos)
+              [tests assertions] (last (:counts @evidence))
+              timing (jvm-timing-receipt namespace-name
+                                         started-at @evidence finished-at)]
+          ;; Preserve the v1094 evidence record byte-for-byte at the EDN level:
+          ;; Gesso's existing correspondence checks consume precisely this map.
           (println (pr-str {:gesso/jvm-namespace-evidence 1
                             :namespace namespace-name
                             :tests tests
                             :assertions assertions
                             :failures 0
-                            :errors 0})))
+                            :errors 0}))
+          ;; Separate one-line EDN for empirical cost analysis by namespace.
+          ;; The timings do not gate test success or claim pure JVM startup.
+          (println (pr-str timing)))
         result))))
 
 (defn run-one-jvm-test-namespace!
