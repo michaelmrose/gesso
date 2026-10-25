@@ -3,6 +3,7 @@
    [babashka.fs :as fs]
    [babashka.process :as process]
    [clojure.edn :as edn]
+   [clojure.java.io :as io]
    [clojure.string :as str]))
 
 (def test-work-dir
@@ -380,6 +381,99 @@
                 :actual (when (zero? (:exit result))
                           (str/trim (:out result)))})))))
 
+;; A runner exit code by itself is not evidence that the selected namespace
+;; actually executed. In particular, a missing/empty test namespace can make a
+;; JVM subprocess exit normally while silently reducing the covered corpus.
+;; Observe Cognitect's clojure.test reports as they stream; do not accumulate
+;; the whole output or hide diagnostics until the JVM finishes.
+(def jvm-testing-line-pattern
+  #"^Testing ([A-Za-z_][A-Za-z0-9_.-]*)$")
+(def jvm-count-line-pattern
+  #"^Ran ([0-9]+) tests? containing ([0-9]+) assertions?\.$")
+(def jvm-outcome-line-pattern
+  #"^([0-9]+) failures?, ([0-9]+) errors?\.$")
+
+(defn record-jvm-evidence-line!
+  [evidence line]
+  (let [line (str/trim line)]
+    (when-let [[_ name] (re-matches jvm-testing-line-pattern line)]
+      (swap! evidence update :testing conj name))
+    (when-let [[_ tests assertions] (re-matches jvm-count-line-pattern line)]
+      (swap! evidence update :counts conj
+             [(parse-long tests) (parse-long assertions)]))
+    (when-let [[_ failures errors] (re-matches jvm-outcome-line-pattern line)]
+      (swap! evidence update :outcomes conj
+             [(parse-long failures) (parse-long errors)]))))
+
+(defn valid-jvm-namespace-evidence?
+  [namespace-name {:keys [testing counts outcomes]}]
+  ;; The Cognitect runner invokes clojure.test for precisely the requested -n
+  ;; selector. Nested clojure.test runs may generate additional reports; in
+  ;; that case require all named testing runs to refer to this namespace and
+  ;; trust only the last (outermost) summary. A printed summary is execution
+  ;; evidence, not a formal guarantee of test/fixture correspondence.
+  (let [[tests assertions] (last counts)
+        [failures errors] (last outcomes)]
+    (and (seq testing)
+         (every? #{namespace-name} testing)
+         (= (count counts) (count outcomes))
+         (pos-int? tests)
+         (pos-int? assertions)
+         (zero? failures)
+         (zero? errors))))
+
+(defn run-jvm-namespace-with-evidence!
+  [namespace-name]
+  (let [command ["clojure" "-M:test:formal" "-n" namespace-name]
+        evidence (atom {:testing [] :counts [] :outcomes []})
+        child (process/process command
+                               {:in :inherit :out :pipe :err :inherit})
+        java-process (:proc child)
+        ;; Drain stdout concurrently with the bounded JVM wait. Reading only
+        ;; after waiting risks a pipe-buffer deadlock for verbose test suites.
+        output-reader (future
+                        (with-open [reader (io/reader (.getInputStream java-process))]
+                          (doseq [line (line-seq reader)]
+                            (println line)
+                            (flush)
+                            (record-jvm-evidence-line! evidence line))))
+        completed? (.waitFor java-process
+                             jvm-wall-clock-timeout-ms
+                             java.util.concurrent.TimeUnit/MILLISECONDS)]
+    (when-not completed?
+      (terminate-process-tree! java-process))
+    ;; A background descendant can inherit the stdout pipe even after the JVM
+    ;; parent exits. Do not indefinitely block on its output stream; report a
+    ;; failed job so Shard retains the workspace on unsafe completion.
+    (let [reader-result (deref output-reader 5000 ::unclosed-output)]
+      (when (= ::unclosed-output reader-result)
+        (future-cancel output-reader)
+        (gate-failure!
+         "JVM namespace child left an unclosed output stream."
+         {:namespace namespace-name :command command}))
+      (when-not completed?
+        (gate-failure!
+         "JVM namespace exceeded its wall-clock timeout."
+         {:namespace namespace-name :command command
+          :timeout-ms jvm-wall-clock-timeout-ms}))
+      (let [result @child]
+        (when-not (zero? (:exit result))
+          (gate-failure!
+           "JVM namespace process failed."
+           {:namespace namespace-name :command command :exit (:exit result)}))
+        (when-not (valid-jvm-namespace-evidence? namespace-name @evidence)
+          (gate-failure!
+           "JVM namespace returned without verifiable nonempty test execution."
+           {:namespace namespace-name :command command :evidence @evidence}))
+        (let [[tests assertions] (last (:counts @evidence))]
+          (println (pr-str {:gesso/jvm-namespace-evidence 1
+                            :namespace namespace-name
+                            :tests tests
+                            :assertions assertions
+                            :failures 0
+                            :errors 0})))
+        result))))
+
 (defn run-one-jvm-test-namespace!
   ([namespace-name] (run-one-jvm-test-namespace! namespace-name false))
   ([namespace-name prepared?]
@@ -393,9 +487,7 @@
        (run-repo-integrity!))
      (println)
      (println "== JVM test namespace ==" namespace-name)
-     (run-command-streaming-with-timeout!
-      ["clojure" "-M:test:formal" "-n" namespace-name]
-      jvm-wall-clock-timeout-ms))))
+     (run-jvm-namespace-with-evidence! namespace-name))))
 
 (defn formal-test-namespaces
   []
