@@ -6,8 +6,11 @@
   PATH intercepts *only child commands* when testing bb.edn dispatch. The
   normal sequential JVM gate must remain runnable without Shard installed.
 
-  These tests establish job-inventory / command correspondence, not that the
-  gates produce equivalent outcomes under concurrent execution."
+  Prepared JVM namespace jobs must declare persistent execution, while the
+  six standalone gates remain subprocesses. Direct legacy inventories retain
+  their subprocess compatibility contract. These tests establish job-inventory
+  and command correspondence, not equivalent outcomes under concurrency or
+  successful native Bubblewrap admission."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]
@@ -685,7 +688,7 @@
         (let [result (prepared-inventory! scope)]
           (is (= 0 (:exit result)) (:out result))
           (when (= 0 (:exit result))
-            (let [jobs (:jobs (edn/read-string (:out result)))
+            (let [{:keys [jobs runtimes]} (edn/read-string (:out result))
                   actual (mapv :gate jobs)
                   expected (vec (mapcat (fn [gate]
                                           (if (= gate :jvm)
@@ -701,19 +704,142 @@
               (is (= (count ids) (count (distinct ids))))
               (is (not-any? #(= :integrity (:gate %)) jobs))
               (doseq [{:keys [command runtime depends-on requires unit gate]} jobs]
-                (is (= :gesso runtime))
-                (is (= [] depends-on))
-                (is (= #{} requires))
-                (is (= 4 (count command)))
-                (is (= ["bb" "script/gesso_test.clj"] (subvec command 0 2)))
-                (is (= (if (contains? #{:jvm :formal} gate)
-                         "jvm:namespace:prepared"
-                         "gate:prepared")
-                       (nth command 2)))
-                (is (= (if (contains? #{:jvm :formal} gate)
-                         :gesso-jvm-namespace
-                         :gesso-gate)
-                       (:type unit)))))))))))
+                (let [jvm? (contains? #{:jvm :formal} gate)
+                      expected-runtime (if jvm? :gesso-jvm :gesso)]
+                  (is (= expected-runtime runtime)
+                      "Prepared JVM namespaces must not fall back to per-job subprocesses")
+                  (is (= (if jvm? :persistent-jvm :subprocess)
+                         (get-in runtimes [runtime :execution])))
+                  (is (= [] depends-on))
+                  (is (= #{} requires))
+                  (is (= 4 (count command)))
+                  (is (= ["bb" "script/gesso_test.clj"] (subvec command 0 2)))
+                  (is (= (if jvm?
+                           "jvm:namespace:prepared"
+                           "gate:prepared")
+                         (nth command 2)))
+                  (is (= (if jvm? :gesso-jvm-namespace :gesso-gate)
+                         (:type unit))))))))))))
+
+;; v1124: Prepared parallel jobs have an execution CONTRACT, not merely
+;; a different runtime keyword. The legacy direct `inventory` and
+;; `jvm:inventory` intentionally retain their historical subprocess schemas.
+;; Assert the complete descriptor, selected-scope projection and fail-closed
+;; generation boundary. Neither these tests nor the legacy fallback command
+;; are evidence that native Bubblewrap admission or classpath provisioning works.
+(def ^:private expected-prepared-runtime-descriptors
+  {:gesso-jvm {:identity "gesso-clojure-1.12.5-test-formal-shard-protocol-v1"
+               :capabilities #{}
+               :execution :persistent-jvm
+               :session-command ["clojure" "-M:test:formal" "-m" "shard.worker.jvm"]}
+   :gesso {:identity "gesso-standalone-prepared-gates-v1"
+           :capabilities #{}
+           :execution :subprocess}})
+
+(defn- prepared-projection! [scope]
+  (let [r (prepared-inventory! scope)]
+    (when-not (zero? (:exit r))
+      (throw (ex-info "Prepared inventory failed" {:scope scope :result r})))
+    (edn/read-string (:out r))))
+
+(deftest prepared-runtime-descriptors-are-exact-and-scope-specific
+  ;; A subprocess-only scope must never request a JVM, and the inverse also
+  ;; holds. Mixed scope must retain both executors, not coerce one into the
+  ;; other. No platform-dependent claim about whether the binary can start.
+  (doseq [scope (sort (keys expected-prepared-gates))]
+    (testing scope
+      (let [{:keys [jobs runtimes]} (prepared-projection! scope)
+            used (set (map :runtime jobs))
+            jvm-jobs (filterv #(contains? #{:jvm :formal} (:gate %)) jobs)
+            other-jobs (filterv #(not (contains? #{:jvm :formal} (:gate %))) jobs)]
+        (is (= used (set (keys runtimes)))
+            "No unused or undeclared prepared runtime")
+        (is (= (select-keys expected-prepared-runtime-descriptors used) runtimes)
+            "Exact persistent JVM entry point and subprocess contract")
+        (is (every? #(= :gesso-jvm (:runtime %)) jvm-jobs))
+        (is (every? #(= :gesso (:runtime %)) other-jobs))
+        (is (every? #(= :gesso-jvm-namespace (get-in % [:unit :type])) jvm-jobs))
+        (is (every? #(= :gesso-gate (get-in % [:unit :type])) other-jobs))
+        (is (every? #(= "jvm:namespace:prepared" (get-in % [:command 2])) jvm-jobs))
+        (is (every? #(= "gate:prepared" (get-in % [:command 2])) other-jobs))
+        (is (= (count jobs) (+ (count jvm-jobs) (count other-jobs))))))))
+
+(deftest prepared-full-inventory-preserves-exact-legacy-work
+  ;; Compare against an *independently enumerated* legacy inventory. The
+  ;; changed runtime and prepared command are the only permitted job fields.
+  ;; This detects lost jobs, duplicated IDs, changed timeouts and coverage
+  ;; drift across advanced, JVM, Node, Chromium and theme gates.
+  (let [legacy-result (inventory!)
+        prepared-result (prepared-inventory! "all")]
+    (is (= 0 (:exit legacy-result)) (:out legacy-result))
+    (is (= 0 (:exit prepared-result)) (:out prepared-result))
+    (when (and (zero? (:exit legacy-result))
+               (zero? (:exit prepared-result)))
+      (let [legacy (->> legacy-result :out edn/read-string :jobs
+                        (remove #(= :integrity (:gate %))) vec)
+            {:keys [jobs runtimes]} (edn/read-string (:out prepared-result))
+            stable-fields [:id :gate :unit :depends-on :timeout-ms :requires]
+            keep-fields #(select-keys % stable-fields)
+            jvm-jobs (filterv #(= :jvm (:gate %)) jobs)
+            others (filterv #(not= :jvm (:gate %)) jobs)]
+        (is (= #{:gesso :gesso-jvm} (set (keys runtimes))))
+        (is (= (mapv keep-fields legacy) (mapv keep-fields jobs))
+            "Only runtime and prepared command may differ from the original inventory")
+        (is (= (mapv :id legacy) (mapv :id jobs)))
+        (is (= (count jobs) (count (set (map :id jobs)))))
+        (is (= (mapv #(get-in % [:unit :name]) jvm-jobs)
+               (mapv #(get-in % [:unit :name])
+                     (filterv #(= :jvm (:gate %)) legacy))))
+        (is (= 6 (count others))
+            "All six non-JVM gates must remain separate subprocess jobs")
+        (doseq [[a b] (map vector legacy jobs)]
+          (let [jvm? (= :jvm (:gate b))]
+            (is (= (vec (take 2 (:command a)))
+                   (vec (take 2 (:command b)))))
+            (is (= (if jvm? "jvm:namespace:prepared" "gate:prepared")
+                   (nth (:command b) 2)))
+            (is (= (last (:command a)) (last (:command b))))
+            (is (= (if jvm? :gesso-jvm :gesso) (:runtime b)))))))))
+
+(defn- corrupt-prepared-runner! [temp from to]
+  (let [path (io/file temp "script" "gesso_test.clj")
+        body (slurp path)]
+    (when-not (str/includes? body from)
+      (throw (ex-info "Expected prepared code to mutate is absent" {:from from})))
+    (spit path (str/replace body from to))))
+
+(deftest prepared-inventory-rejects-subprocess-routed-jvm-namespace
+  ;; Exercise the REAL runner's admission condition by mutating a disposable
+  ;; script, not a copy of the validation predicate inside this test.
+  (with-temp-repo
+    (fn [temp]
+      (prepare-jvm-dispatch-fixture! temp)
+      (corrupt-prepared-runner! temp
+                                ":runtime prepared-jvm-runtime"
+                                ":runtime prepared-subprocess-runtime")
+      (let [r (exec! temp [(bb-executable) "script/gesso_test.clj"
+                           "inventory:prepared" "jvm"] {})]
+        (is (not= 0 (:exit r)) (:out r))
+        (is (str/includes? (:out r) "Invalid preflight-ready inventory")
+            (:out r))
+        (is (not (str/includes? (:out r) ":jobs ["))
+            "No corrupted manifest may be emitted as a successful inventory")))))
+
+(deftest prepared-inventory-rejects-persistent-routed-standalone-gate
+  (with-temp-repo
+    (fn [temp]
+      (prepare-jvm-dispatch-fixture! temp)
+      (corrupt-prepared-runner!
+       temp
+       "(assoc (shard-gate-job gate)\n         :command"
+       "(assoc (shard-gate-job gate)\n         :runtime prepared-jvm-runtime\n         :command")
+      (let [r (exec! temp [(bb-executable) "script/gesso_test.clj"
+                           "inventory:prepared" "themes"] {})]
+        (is (not= 0 (:exit r)) (:out r))
+        (is (str/includes? (:out r) "Invalid preflight-ready inventory")
+            (:out r))
+        (is (not (str/includes? (:out r) ":jobs ["))
+            "A standalone gate may not masquerade as a JVM namespace")))))
 
 (deftest prepared-jvm-scope-has-one-job-per-authoritative-namespace
   (let [normal (jvm-inventory-in! (root))
