@@ -1,13 +1,21 @@
 (ns gesso.live.application-preflight.relational-definition.local-step-test
   "Relational definition: local step.
 
+   Tests the v874 redacted :local-step-observation synthesized from an
+   executor-bound root-step comparison and controlled domain after-read.
+   A matching local step establishes only one finite modeled ROOT step,
+   never pinned snapshots, non-root correspondence, general production
+   trace refinement, or application certification. The real-XTDB case
+   checks the executor-bound route; controlled comparator cases test
+   matching, unknown, mismatch, and counterexample behavior.
+
    Extracted from the 171-test regression suite without changing tests or assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]
    [gesso.live.application-preflight.relational-definition :as sut]
-   [gesso.live.application-preflight.relational-definition.support :refer [counter-key initial-state relational-model definition error-kind modeled-transition-tree with-stubbed-transition-comparison comparison-for-edge matching-root-observation root-step-for! v872-matched-poststate v874-established-dimensions v874-local-for!]]
+   [gesso.live.application-preflight.relational-definition.support :refer [counter-key definition error-kind modeled-transition-tree with-stubbed-transition-comparison comparison-for-edge matching-root-observation root-step-for! v872-matched-poststate v874-established-dimensions v874-local-for!]]
    [gesso.live.application-preflight.relational-definition.xtdb-fixture :refer [with-real-xtdb-root-step]]))
 
 (deftest v874-real-xtdb-execution-establishes-local-step-observation
@@ -239,10 +247,4 @@
             (is (= :stale-application-assembly
                    (error-kind #(sut/compare! handle (Object.)))))
             (is (= 2 @calls))))))))
-
-;; v876: The v875 sequence checker matches CALLER-ORDERED evidence against
-;; rooted finite choice/outcome paths. These are path-feasibility diagnostics,
-;; not real chronological evidence or a claim of production trace refinement.
-;; Stub ONLY the controlled downstream physical comparator for model-path
-;; permutations; one test below exercises genuine executor-bound XTDB evidence.
 
