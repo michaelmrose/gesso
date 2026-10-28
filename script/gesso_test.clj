@@ -1918,14 +1918,51 @@
   #{:advanced :node:choreo :node:browser :browser
     :browser:integration :themes})
 
+;; v1123: The prepared parallel inventory has TWO fundamentally different
+;; execution types. JVM namespace jobs are independently claimed *commands*
+;; addressed to an already-running, persistent JVM; the six other gates retain
+;; their isolated subprocess behavior. Keep the legacy unprepared inventory
+;; unchanged for compatibility with direct `jvm:namespace` execution.
+;;
+;; The session command requires shard.worker.jvm on the launched Clojure
+;; classpath. Gesso does not own Shard's source and must not copy or silently
+;; replace its worker. The Shard host must supply that source on the JVM
+;; classpath before enabling native execution (a subsequent integration gate).
+(def prepared-jvm-runtime :gesso-jvm)
+(def prepared-subprocess-runtime :gesso)
+(def prepared-jvm-session-command
+  ["clojure" "-M:test:formal" "-m" "shard.worker.jvm"])
+
+(defn prepared-runtime-descriptors [jobs]
+  (let [used (set (map :runtime jobs))]
+    (when-not (every? #{prepared-jvm-runtime prepared-subprocess-runtime} used)
+      (fail! "Prepared inventory contains an unknown runtime."
+             {:runtimes used}))
+    (cond-> {}
+      (contains? used prepared-jvm-runtime)
+      (assoc prepared-jvm-runtime
+             {:identity "gesso-clojure-1.12.5-test-formal-shard-protocol-v1"
+              :capabilities #{}
+              :execution :persistent-jvm
+              :session-command prepared-jvm-session-command})
+      (contains? used prepared-subprocess-runtime)
+      (assoc prepared-subprocess-runtime
+             {:identity "gesso-standalone-prepared-gates-v1"
+              :capabilities #{}
+              :execution :subprocess}))))
+
 (defn prepared-jvm-job
   [test-ns gate]
   (let [n (str test-ns)
         family (if (= gate :formal) "formal" "jvm")]
     {:id (str "gesso-" family "-" n)
      :gate gate
-     :runtime :gesso
+     :runtime prepared-jvm-runtime
      :unit {:type :gesso-jvm-namespace :name n}
+     ;; A deliberately nonempty compatibility/audit command. Shard's
+     ;; :persistent-jvm executor NEVER invokes this per-namespace subprocess.
+     ;; Retain it until the scheduler's prepared-inventory admission and
+     ;; historical command contracts have been migrated together.
      :command ["bb" "script/gesso_test.clj" "jvm:namespace:prepared" n]
      :depends-on []
      :timeout-ms jvm-wall-clock-timeout-ms
@@ -1968,14 +2005,22 @@
       (when-not (and (seq selected)
                      (= (count ids) (count (distinct ids)))
                      (every? #(not= :integrity (:gate %)) selected)
-                     (every? (fn [{:keys [command]}]
-                               (contains? #{"jvm:namespace:prepared"
-                                            "gate:prepared"}
-                                          (nth command 2 nil)))
+                     (every? (fn [{:keys [command gate runtime unit]}]
+                               (and (contains? #{"jvm:namespace:prepared"
+                                                 "gate:prepared"}
+                                               (nth command 2 nil))
+                                    (if (#{:jvm :formal} gate)
+                                      (and (= prepared-jvm-runtime runtime)
+                                           (= :gesso-jvm-namespace (:type unit))
+                                           (= "jvm:namespace:prepared" (nth command 2)))
+                                      (and (= prepared-subprocess-runtime runtime)
+                                           (= :gesso-gate (:type unit))
+                                           (= "gate:prepared" (nth command 2))))))
                              selected))
         (fail! "Invalid preflight-ready inventory."
                {:scope scope :job-count (count selected)}))
-      {:jobs selected})))
+      {:runtimes (prepared-runtime-descriptors selected)
+       :jobs selected})))
 
 (defn run-prepared-gate!
   [name]
