@@ -1,9 +1,16 @@
 (ns gesso.live.application-preflight.relational-definition.root-poststate-test
   "Relational definition: root poststate.
 
+   Checks one controlled executor-bound root transition against an admitted
+   finite model root, including exact pretransaction and posttransaction
+   dependency observations. A matching root and poststate are bounded
+   evidence, not a proof of arbitrary physical trace refinement or
+   application certification. Failure and stale-evidence cases must
+   continue to withhold stronger conclusions.
+
    Extracted from the 171-test regression suite without changing tests or assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]
    [gesso.live.application-preflight.relational-definition :as sut]
@@ -431,11 +438,4 @@
               (is (= :stale-application-assembly
                      (error-kind #(sut/explain handle))))
               (is (= 1 @calls)))))))))
-
-;; v874: v873's :local-step-observation is a redacted synthesis of an
-;; executor-bound root-step comparison and the controlled domain after-read.
-;; A local match is one finite modeled ROOT step, never a general proof of
-;; pinned snapshots, multi-step correspondence, or production refinement.
-;; Stub only the trusted downstream comparator for branch tests; also assert
-;; the complete executor-bound route with genuine embedded XTDB evidence.
 
