@@ -1,9 +1,20 @@
 (ns gesso.live.application-preflight.relational-definition.captured-history-test
   "Relational definition: captured history.
 
+   Covers three complementary, bounded evidence checks:
+   v880 joins finite caller-ordered model-path feasibility with controlled
+   captured-dependency adjacency; v882 incorporates root-anchor evidence;
+   v886 joins captured local-step outcomes with captured adjacency.
+
+   Their success does not establish authentic multi-step execution order,
+   absence of intervening writes, complete captured read coverage, pinned
+   XTDB snapshots, or general production trace refinement. Three genuine
+   executor-bound XTDB single-step checks retain fresh-node isolation;
+   controlled comparators exercise classification and fail-closed branches.
+
    Extracted from the 171-test regression suite without changing tests or assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.relational-definition :as sut]
    [gesso.live.application-preflight.relational-definition.support :refer [counter-key initial-state family relational-model definition error-kind comparison-for-edge with-v880-adjacency with-v882-root-anchor v882-anchor v886-matching-captured-local-step v886-local-joint v886-set-local!]]
    [gesso.live.application-preflight.relational-definition.xtdb-fixture :refer [with-real-xtdb-root-step]]))
@@ -601,9 +612,4 @@
         (is (= :not-established (:execution-chronology local)))
         (is (not (.contains (pr-str local) request-id)))))))
 
-
-;; v892: v891 joins the construction's ORIGINAL private finite occurrence
-;; witness with a REAL executor-bound, captured pretransaction state.  These
-;; tests do not mistake a matching state for a witnessed execution chronology,
-;; a plan match, a particular successor, or completeness of captured reads.
 
