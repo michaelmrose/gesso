@@ -1,11 +1,19 @@
 (ns gesso.live.application-preflight.relational-definition.sequence-test
   "Relational definition: sequence.
 
+   The v875/v876 sequence comparison checks whether caller-ordered,
+   executor-bound observations match a finite rooted choice/outcome path.
+   Matching does not authenticate the observations' physical chronology,
+   pin an XTDB snapshot, establish physical inter-step continuity, or
+   prove production trace refinement. Controlled comparator cases exercise
+   validity, redaction, and fail-closed behavior; one real-XTDB case
+   checks a single genuinely executed root step.
+
    Extracted from the 171-test regression suite without changing tests or assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.relational-definition :as sut]
-   [gesso.live.application-preflight.relational-definition.support :refer [counter-key initial-state relational-model definition error-kind modeled-transition-tree comparison-for-edge with-sequence-comparator set-sequence-response! sequence-root-edge sequence-child-edge]]
+   [gesso.live.application-preflight.relational-definition.support :refer [counter-key definition error-kind modeled-transition-tree comparison-for-edge with-sequence-comparator set-sequence-response! sequence-root-edge sequence-child-edge]]
    [gesso.live.application-preflight.relational-definition.xtdb-fixture :refer [with-real-xtdb-root-step]]))
 
 (deftest v876-matching-two-step-observations-reconstruct-an-explored-rooted-prefix
@@ -217,11 +225,4 @@
         (is (= :not-established (:physical-inter-step-state-continuity result)))
         (is (= :not-established (:production-trace-refinement result)))
         (is (not (.contains (pr-str result) request-id)))))))
-
-;; v880: the opt-in v879 join reports bounded model-path feasibility beside
-;; controlled captured-dependency adjacency. These are distinct observations.
-;; None authenticates caller order, excludes intervening writes, or proves
-;; a concrete production trace. Stub the PAIR comparator for classification;
-;; the single-observation integration below uses real executor-issued XTDB
-;; evidence, and the physical pair comparator is tested in its own namespace.
 
