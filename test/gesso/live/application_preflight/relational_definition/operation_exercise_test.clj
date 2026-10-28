@@ -1,15 +1,19 @@
 (ns gesso.live.application-preflight.relational-definition.operation-exercise-test
   "Relational definition: operation exercise.
 
-   Extracted from the 171-test regression suite without changing tests or assertions."
+   The bounded model distinguishes enabled attempts from disabled choices,
+   recognizes rejected transactions as attempts, and optionally requires
+   specified operations to have been attempted. These observations do not
+   establish complete production execution coverage.
+
+   Extracted from the 171-test regression suite without changing assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-application :as relational-app]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]
    [gesso.live.application-preflight.relational-definition :as sut]
    [gesso.model.command :as command]
-   [xtdb.api :as xt]
    [gesso.live.application-preflight.relational-definition.support :refer [version-keys counter-key initial-state family relational-model definition error-data error-kind relational-audit finite-exploration modeled-operation-exercise expected-operation-count-keys operation-attempt-audit]]))
 
 (deftest admitted-explanation-reports-exact-operation-exercise
@@ -483,9 +487,4 @@
         (is (= :unknown-construction
                (error-kind #(sut/inspect audit))))))))
 
-
-;; v855: The :require-operation-outcomes admission gate is intentionally
-;; narrower than production correspondence.  It demands observations of
-;; selected finite committed/rejected branches for registered operations;
-;; registration, enablement, and attempts alone cannot satisfy it.
 
