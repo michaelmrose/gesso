@@ -1,11 +1,16 @@
 (ns gesso.live.application-preflight.relational-definition.rule-exercise-test
   "Relational definition: rule exercise.
 
-   Extracted from the 171-test regression suite without changing tests or assertions."
+   The opt-in gate requires a rule's source to match in explored states;
+   a vacuously true invariant alone is insufficient. A bounded exercise
+   observation does not establish complete predicate or production coverage.
+
+   Extracted from the original regression suite without changing its assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-application :as relational-app]
+   [gesso.live.application-preflight.relational-rule-coverage :as relations]
    [gesso.live.application-preflight.relational-definition :as sut]
    [gesso.live.application-preflight.relational-definition.support :refer [initial-state parent-rule relational-model definition error-data error-kind relational-audit finite-exploration source-at]]))
 
@@ -188,16 +193,10 @@
                      (assoc :require-exercised-rule-ids
                             #{:counter/never-ninety-nine}))
             comparator-calls (atom 0)]
-        (with-redefs [gesso.live.application-preflight.relational-rule-coverage/build-comparator
+        (with-redefs [relations/build-comparator
                       (fn [& _]
                         (swap! comparator-calls inc)
                         (throw (ex-info "Unexpected comparator build" {})))]
           (is (= :required-relational-rules-unexercised
                  (error-kind #(sut/construct! base))))
           (is (zero? @comparator-calls)))))))
-
-
-;; v851: v850 exposes the v848 checker's source-ordered operation exercise
-;; through the actual admitted application. This is about modeled choices
-;; *evaluated within bounds*, not complete real input or production coverage.
-
