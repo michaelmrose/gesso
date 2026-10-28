@@ -1,5 +1,5 @@
 (ns gesso.model.resolved-operation-predicate-contract-test
-  "Permanent adversarial regressions for optional closed expected-value contracts.
+  "Permanent adversarial regressions for optional closed exact-check contracts.
 
    The predicate declarations are computed from trusted invocation inputs before
    domain construction, then checked against the final incorporated plan.
@@ -44,13 +44,13 @@
 (defn- predicates [ctx command-binding]
   (let [m (:membership-id ctx)
         r (get-in command-binding [:arguments :request-id])]
-    {:required-guard-checks #{[[:memberships m] :active true]}
-     :allowed-guard-checks #{[[:memberships m] :active true]
-                             [[:memberships m] :revision 7]
-                             [[:memberships m] :updated-at "t0"]}
-     :required-update-checks #{[[:requests r] :revision 0]}
-     :allowed-update-checks #{[[:requests r] :revision 0]
-                              [[:requests r] :updated-at "t0"]}}))
+    {:required-guard-checks #{[:memberships m :active true]}
+     :allowed-guard-checks #{[:memberships m :active true]
+                             [:memberships m :revision 7]
+                             [:memberships m :updated-at "t0"]}
+     :required-update-checks #{[:requests r :revision 0]}
+     :allowed-update-checks #{[:requests r :revision 0]
+                              [:requests r :updated-at "t0"]}}))
 
 (defn- plan
   ([] (plan member guarded-version version))
@@ -144,7 +144,7 @@
     (is (< (.indexOf (:calls a) :targets)
            (.indexOf (:calls a) :predicates)))
     (is (contains? (:assumed resolved/predicate-contract-scope)
-                   :requirements-independent-of-constructed-plan))))
+                   :requirements-derived-independently-of-constructed-plan))))
 
 (deftest same-document-without-active-condition-is-rejected-test
   (let [a (execute (configuration (plan member version version)))]
@@ -201,7 +201,7 @@
 (deftest missing-required-guard-and-update-declaration-fails-test
   (let [declared (predicates {:membership-id membership-id} command-binding)
         bad (assoc declared
-                   :required-guard-checks #{[[:memberships membership-id] :unknown 1]})
+                   :required-guard-checks #{[:memberships membership-id :unknown 1]})
         a (execute (configuration (plan) (fn [_ _] bad)))]
     (rejected-before-send a :invalid-predicate-contract)))
 
@@ -211,15 +211,15 @@
               (assoc good :surprise "PRIVATE-SURPRISE")
               (dissoc good :allowed-guard-checks)
               (assoc good :required-guard-checks [])
-              (assoc good :required-guard-checks #{[[:memberships membership-id] :active]})
-              (assoc good :required-guard-checks #{[[:memberships membership-id] :active true :extra]})
-              (assoc good :required-guard-checks #{[[:memberships membership-id] :active nil]})
-              (assoc good :required-guard-checks #{[[:memberships nil] :active true]})
-              (assoc good :required-guard-checks #{[["memberships" membership-id] :active true]})
-              (assoc good :allowed-guard-checks #{[[:other "PRIVATE"] :active true]})
-              (assoc good :allowed-update-checks #{[[:other "PRIVATE"] :revision 0]})
-              (assoc good :allowed-guard-checks #{[[:gesso_commands "PRIVATE"] :active true]})
-              (assoc good :allowed-update-checks #{[[:gesso_commands "PRIVATE"] :revision 0]})
+              (assoc good :required-guard-checks #{[[:memberships membership-id] :active true]})
+              (assoc good :required-guard-checks #{[:memberships membership-id :active true :extra]})
+              (assoc good :required-guard-checks #{[:memberships membership-id :active nil]})
+              (assoc good :required-guard-checks #{[:memberships nil :active true]})
+              (assoc good :required-guard-checks #{["memberships" membership-id :active true]})
+              (assoc good :allowed-guard-checks #{[:other "PRIVATE" :active true]})
+              (assoc good :allowed-update-checks #{[:other "PRIVATE" :revision 0]})
+              (assoc good :allowed-guard-checks #{[:gesso_commands "PRIVATE" :active true]})
+              (assoc good :allowed-update-checks #{[:gesso_commands "PRIVATE" :revision 0]})
               (assoc good :allowed-update-checks #{})
               (assoc good :allowed-guard-checks #{})]]
     (doseq [bad bads]
@@ -290,12 +290,12 @@
 
 (deftest predicate-report-does-not-claim-authorization-or-certification-test
   (let [scope resolved/predicate-contract-scope]
-    (is (= :gesso.model.resolved-operation/closed-expected-checks-v1
+    (is (= :gesso.model.resolved-operation/closed-exact-checks-v1
            (:construction scope)))
     (is (contains? (:not-established scope)
-                   :independent-authorization-policy-discovery))
+                   :independent-discovery-of-business-rule-predicates))
     (is (contains? (:not-established scope)
-                   :complete-authorization-or-business-predicates))
+                   :authorization-or-policy-correctness))
     (is (contains? (:not-established scope)
                    :application-certification))
     (is (not (contains? (:checked resolved/assurance-scope)
