@@ -1,13 +1,24 @@
 (ns gesso.live.application-preflight.relational-definition.predecessor-witness-test
   "Relational definition: predecessor witness.
 
+   Checks that an executor-bound captured prestate can be matched only to
+   an actual, admitted private model occurrence, including the non-root case.
+   Forged evidence and unknown nodes fail closed; comparison mismatches,
+   unavailable outcomes, and missing outgoing edges cannot be treated as
+   valid modeled transitions. Reports remain redacted and non-authorizing.
+
+   A matching predecessor is bounded evidence for the inspected occurrence;
+   it does not authenticate execution chronology, prove complete captured
+   dependency coverage, pin an XTDB snapshot, or prove trace refinement.
+   Genuine XTDB scenarios retain fresh-node-per-invocation isolation.
+
    Extracted from the 171-test regression suite without changing tests or assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-definition :as sut]
    [xtdb.api :as xt]
-   [gesso.live.application-preflight.relational-definition.support :refer [initial-state definition error-kind modeled-transition-tree v892-root-and-committed-claim-child]]
+   [gesso.live.application-preflight.relational-definition.support :refer [definition error-kind modeled-transition-tree v892-root-and-committed-claim-child]]
    [gesso.live.application-preflight.relational-definition.xtdb-fixture :refer [with-real-xtdb-root-step v892-with-authentic-nonroot-predecessor]]))
 
 (deftest v892-genuine-xtdb-prestate-matches-private-model-root
