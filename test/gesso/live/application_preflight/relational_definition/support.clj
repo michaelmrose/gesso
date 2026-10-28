@@ -4,12 +4,12 @@
    Test-only API; all helpers are inherited verbatim except private visibility.
    Mutable authority handles and browser artifacts remain per-test."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [is]]
    [gesso.live.application-preflight.fixture :as fixture]
+   [gesso.live.application-preflight.operation-family-correspondence :as correspondence]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]
    [gesso.live.application-preflight.relational-definition :as sut]
-   [gesso.model.command :as command]
-   [xtdb.api :as xt]))
+   [gesso.model.command :as command]))
 
 (def version-keys
   {:revision-key :revision
@@ -259,7 +259,7 @@
          (set-sequence-response! responses a first-edge)
          (set-sequence-response! responses b second-edge)
          (set-sequence-response! responses c first-edge)
-         (with-redefs [gesso.live.application-preflight.operation-family-correspondence/compare-observation-pair!
+         (with-redefs [correspondence/compare-observation-pair!
                        (fn [assembly earlier later]
                          (swap! pair-calls conj {:assembly assembly
                                                  :earlier earlier :later later})
