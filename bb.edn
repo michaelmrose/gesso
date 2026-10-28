@@ -29,6 +29,10 @@
         (throw (ex-info "Usage: bb test[:GATE] [-n N]"
                         {:scope scope :arguments args})))))
 
+  clean
+  {:doc "Safely clean current Ygg worker clones; preserve run history and source snapshots."
+   :task (shell "ygg" "clean")}
+
   runtime
   {:doc "Generate the composed Gesso Live browser runtime."
    :task
