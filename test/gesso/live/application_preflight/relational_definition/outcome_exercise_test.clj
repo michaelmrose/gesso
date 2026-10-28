@@ -1,9 +1,15 @@
 (ns gesso.live.application-preflight.relational-definition.outcome-exercise-test
   "Relational definition: outcome exercise.
 
+   Checks optional bounded outcome-exercise requirements over admitted
+   finite model executions. A required :committed or :rejected result must
+   actually occur on an explored branch: registration, enablement, and
+   attempted execution alone cannot satisfy the gate. Such model outcomes
+   do not establish production execution outcomes.
+
    Extracted from the 171-test regression suite without changing tests or assertions."
   (:require
-   [clojure.test :refer [deftest is testing]]
+   [clojure.test :refer [deftest is]]
    [gesso.live.application-preflight.fixture :as fixture]
    [gesso.live.application-preflight.relational-application :as relational-app]
    [gesso.live.application-preflight.relational-rule-coverage :as relations]
@@ -237,9 +243,4 @@
         (is (= :unknown-construction
                (error-kind #(sut/explain audit))))))))
 
-
-;; v860: v859 joins the checker-owned bounded transition prefix tree to the
-;; registered operations through the admitted finite family expansion. Test
-;; the PUBLIC opaque-handle explanation and fail-before-comparator boundary,
-;; not a separately crafted explanation or a model passed by the caller.
 
