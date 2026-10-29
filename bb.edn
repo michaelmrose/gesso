@@ -59,6 +59,45 @@
    :task
    (dispatch-gesso-test! "all" *command-line-args*)}
 
+  test:quick
+  {:doc "Fast deterministic JVM smoke gate: fixed high-value namespaces, one integrity check, one JVM. Does not replace bb test."
+   :task
+   (let [;; Deliberately fixed and version-controlled. Historical durations may
+         ;; inform a future explicit revision, but never change selection at run time.
+         namespaces
+         ["gesso.choreo.semantics-test"
+          "gesso.choreo.type-test"
+          "gesso.model.command-test"
+          "gesso.model.invariant-check-test"
+          "gesso.model.resolved-operation-test"
+          "gesso.model.tx-refinement-test"
+          "gesso.live.application-preflight.semantic-audit-test"
+          "gesso.live.browser.adapter-proof-test"
+          "gesso.live.optimistic.resolved-operation-test"]]
+     (when (seq *command-line-args*)
+       (throw (ex-info "Usage: bb test:quick (no arguments)"
+                       {:arguments (vec *command-line-args*)})))
+     ;; Do not quietly pass if a selected namespace is renamed or deleted.
+     ;; Both .clj and .cljc are valid in the authoritative JVM corpus.
+     (doseq [test-ns namespaces]
+       (let [relative (.replace (.replace test-ns "." "/") "-" "_")
+             paths [(str "test/" relative ".clj")
+                    (str "test/" relative ".cljc")]]
+         (when-not (some (fn [path] (.isFile (java.io.File. path))) paths)
+           (throw (ex-info "Quick gate references a missing JVM test namespace."
+                           {:namespace test-ns :checked-paths paths})))))
+     (println "== Gesso quick gate ==")
+     (println "Fixed JVM namespaces:" (count namespaces))
+     (doseq [test-ns namespaces]
+       (println " -" test-ns))
+     ;; Run integrity once, then use Cognitect's existing multiple -n support.
+     ;; One JVM avoids the repeated startup and duplicated fixture overhead of
+     ;; nine separate test invocations. Any test failure exits nonzero.
+     (shell "bb" "script/gesso_test.clj" "integrity")
+     (apply shell
+            (into ["clojure" "-M:test:formal"]
+                  (mapcat (fn [test-ns] ["-n" test-ns]) namespaces))))}
+
   test:jvm
   {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."
    :task
