@@ -1,7 +1,39 @@
 {:paths ["src" "resources"]
 
  :tasks
- {runtime
+ {:init
+  ;; Selection and execution strategy are independent. The ordinary command
+  ;; keeps its existing direct Gesso runner; -n N delegates just the selected
+  ;; scope to Shard's exactly-once-preflight supervisor.
+  (defn dispatch-gesso-test! [scope command-line]
+    (let [args (vec command-line)]
+      (cond
+        (empty? args)
+        (shell "bb" "script/gesso_test.clj" scope)
+
+        (and (= 2 (count args)) (= "-n" (first args)))
+        (let [workers (try
+                        (Long/parseLong (second args))
+                        (catch NumberFormatException _ nil))]
+          (when-not (and workers (<= 1 workers 256))
+            (throw (ex-info "Worker count must be an integer from 1 to 256."
+                            {:scope scope :arguments args})))
+          ;; Preserve the original no-scope full-suite invocation as well as
+          ;; its Gesso/Shard adapter tests. v1089 defaults this to scope all.
+          (if (= "all" scope)
+            (shell "shard" "run" "--workers" (str workers))
+            (shell "shard" "run" "--workers" (str workers)
+                   "--scope" scope)))
+
+        :else
+        (throw (ex-info "Usage: bb test[:GATE] [-n N]"
+                        {:scope scope :arguments args})))))
+
+  clean
+  {:doc "Safely clean current Ygg worker clones; preserve run history and source snapshots."
+   :task (shell "ygg" "clean")}
+
+  runtime
   {:doc "Generate the composed Gesso Live browser runtime."
    :task
    (shell "clojure"
@@ -23,56 +55,60 @@
      (println "done"))}
 
   test
-  {:doc "Full gate: JVM + Node + Chromium + real-browser integration + advanced compile + themes."
+  {:doc "Run the full suite sequentially, or use `bb test -n N` for N Shard workers."
    :task
-   (shell "bb" "script/gesso_test.clj" "all")}
+   (dispatch-gesso-test! "all" *command-line-args*)}
+
+  test:quick
+  {:doc "Run the fixed high-value JVM smoke gate; use -n N to execute it with N Shard workers."
+   :task (dispatch-gesso-test! "quick" *command-line-args*)}
 
   test:jvm
-  {:doc "Run all JVM tests. Included by `bb test`."
+  {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."
    :task
-   (shell "bb" "script/gesso_test.clj" "jvm")}
+   (dispatch-gesso-test! "jvm" *command-line-args*)}
 
   test:formal
-  {:doc "Run focused Recife/TLC verification tests. Also included by `bb test:jvm` and `bb test`."
+  {:doc "Run focused Recife/TLC verification tests (optionally with -n N). Also included by `bb test:jvm` and `bb test`."
    :task
-   (shell "bb" "script/gesso_test.clj" "formal")}
+   (dispatch-gesso-test! "formal" *command-line-args*)}
 
   test:cljs
-  {:doc "Run all CLJS/browser gates: Node groups + Chromium + real HTTP/HTMX/SSE integration. Included by `bb test`."
+  {:doc "Run all CLJS/browser gates; use -n N for parallel selected gates. Included by `bb test`."
    :task
-   (shell "bb" "script/gesso_test.clj" "cljs")}
+   (dispatch-gesso-test! "cljs" *command-line-args*)}
 
   test:node
-  {:doc "Run all Node CLJS tests: portable Choreo + browser semantics. Included by `bb test:cljs`."
+  {:doc "Run all Node CLJS tests; use -n N for parallel execution. Included by `bb test:cljs`."
    :task
-   (shell "bb" "script/gesso_test.clj" "node")}
+   (dispatch-gesso-test! "node" *command-line-args*)}
 
   test:node:choreo
   {:doc "Run the portable Choreo CLJS/CLJC corpus under Node. Included by `bb test:node`."
    :task
-   (shell "bb" "script/gesso_test.clj" "node:choreo")}
+   (dispatch-gesso-test! "node:choreo" *command-line-args*)}
 
   test:node:browser
   {:doc "Run host-independent browser semantic tests under Node. Included by `bb test:node`."
    :task
-   (shell "bb" "script/gesso_test.clj" "node:browser")}
+   (dispatch-gesso-test! "node:browser" *command-line-args*)}
 
   test:browser
   {:doc "Run every CLJS/CLJC test in real headless Chromium. Included by `bb test:cljs`."
    :task
-   (shell "bb" "script/gesso_test.clj" "browser")}
+   (dispatch-gesso-test! "browser" *command-line-args*)}
 
   test:browser:integration
   {:doc "Run production gesso-live.js against real Chromium + HTMX/SSE + deterministic HTTP fixtures. Included by `bb test:cljs`."
    :task
-   (shell "bb" "script/gesso_test.clj" "browser:integration")}
+   (dispatch-gesso-test! "browser:integration" *command-line-args*)}
 
   test:advanced
   {:doc "Verify the composed production browser runtime advanced-compiles. Included by `bb test`."
    :task
-   (shell "bb" "script/gesso_test.clj" "advanced")}
+   (dispatch-gesso-test! "advanced" *command-line-args*)}
 
   test:themes
   {:doc "Verify the theme build without overwriting checked-in CSS. Included by `bb test`."
    :task
-   (shell "bb" "script/gesso_test.clj" "themes")}}}
+   (dispatch-gesso-test! "themes" *command-line-args*)}}}

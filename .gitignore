@@ -27,3 +27,8 @@
 /checkouts
 /classes
 /target
+
+# Ygg/Shard workspace, ZFS clone mounts, run manifests and logs.
+/.ygg/
+# Legacy root lock from pre-v1074 Ygg; current Ygg refuses its presence.
+/.ygg.lock

@@ -3,6 +3,7 @@
    [babashka.fs :as fs]
    [babashka.process :as process]
    [clojure.edn :as edn]
+   [clojure.java.io :as io]
    [clojure.string :as str]))
 
 (def test-work-dir
@@ -299,6 +300,262 @@
 ;; `recife` or `formal` segment are eligible, not just one pilot namespace.
 (def formal-test-file-pattern
   #"(?:^|[_-])(?:recife|formal)(?:[_-]|\.)")
+
+;; Sequential JVM execution remains a full-suite gate. Parallel JVM execution
+;; expands it into individual namespaces. Only *_test.clj and *_test.cljc files are
+;; candidates, matching the test corpus included by cognitect.test-runner.
+;; Reject a source/path mismatch rather than publishing a runnable-looking job
+;; that would silently miss the intended namespace.
+(def jvm-test-file-pattern #".*_test\.clj(?:c)?$")
+(def jvm-namespace-declaration-pattern
+  #"(?m)^[ \t]*\(ns[ \t\r\n]+([A-Za-z_][A-Za-z0-9_.-]*)")
+
+(defn jvm-test-namespaces
+  []
+  (let [paths (->> (concat (fs/glob "test" "**/*_test.clj")
+                           (fs/glob "test" "**/*_test.cljc"))
+                   (filter #(re-matches jvm-test-file-pattern
+                                         (str (fs/file-name %))))
+                   (sort-by str)
+                   vec)
+        entries (mapv (fn [path]
+                        (let [expected (test-namespace path)
+                              content (slurp (str path))
+                              declared (some-> (re-find jvm-namespace-declaration-pattern
+                                                       content)
+                                               second
+                                               symbol)]
+                          (when-not (= expected declared)
+                            (fail! "JVM test namespace declaration disagrees with its path."
+                                   {:file (str path)
+                                    :expected expected
+                                    :declared declared}))
+                          expected))
+                      paths)
+        unique-namespaces (vec (sort (distinct entries)))]
+    (when (or (empty? entries)
+              (not= (count entries) (count unique-namespaces)))
+      (fail! "JVM namespace inventory is empty or contains duplicate namespaces."
+             {:files (count entries)
+              :namespaces (count unique-namespaces)}))
+    unique-namespaces))
+
+;; Intentionally fixed, version-controlled regression smoke selection.
+;; Keep the list in this single place so the direct and prepared parallel
+;; paths always run the same namespaces. This is NOT adaptive selection.
+(def quick-test-namespace-names
+  ["gesso.choreo.semantics-test"
+   "gesso.choreo.type-test"
+   "gesso.model.command-test"
+   "gesso.model.invariant-check-test"
+   "gesso.model.resolved-operation-test"
+   "gesso.model.tx-refinement-test"
+   "gesso.live.application-preflight.semantic-audit-test"
+   "gesso.live.browser.adapter-proof-test"
+   "gesso.live.optimistic.resolved-operation-test"])
+
+(defn quick-test-namespaces []
+  ;; Validate against the strict authoritative JVM test corpus, not just file
+  ;; existence. A renamed/deleted or incorrectly declared namespace must fail
+  ;; instead of making the smoke gate silently smaller.
+  (let [available (set (map str (jvm-test-namespaces)))
+        requested quick-test-namespace-names
+        missing (vec (remove available requested))]
+    (when (or (seq missing)
+              (not= (count requested) (count (distinct requested))))
+      (fail! "Quick JVM namespace selection is missing or duplicated."
+             {:missing missing :requested requested}))
+    (mapv symbol requested)))
+
+(defn shard-jvm-namespace-inventory
+  []
+  ;; This is also the authoritative :jvm portion of the normal parallel
+  ;; inventory; it remains separately inspectable as jvm:inventory.
+  {:jobs
+   (mapv (fn [test-ns]
+           (let [name (str test-ns)]
+             {:id (str "gesso-jvm-" name)
+              :gate :jvm
+              :runtime :gesso
+              :unit {:type :gesso-jvm-namespace :name name}
+              :command ["bb" "script/gesso_test.clj" "jvm:namespace" name]
+              :depends-on []
+              :timeout-ms jvm-wall-clock-timeout-ms
+              :requires #{}}))
+         (jvm-test-namespaces))})
+
+(declare run-repo-integrity!)
+
+;; Prepared jobs are private to Shard's invocation-level preflight barrier. The
+;; commit binding prevents accidental reuse against a different clone/source.
+;; It is not an authentication or proof mechanism: the coordinator MUST run
+;; repository integrity successfully before setting the environment binding.
+(def prepared-head-environment "GESSO_SHARD_PREFLIGHT_COMMIT")
+
+(defn require-preflight-admission!
+  []
+  (let [expected (System/getenv prepared-head-environment)]
+    (when-not (and (string? expected)
+                   (re-matches #"(?:[0-9a-f]{40}|[0-9a-f]{64})" expected))
+      (fail! "Prepared test jobs require an invocation-level preflight binding."
+             {:required-environment prepared-head-environment}))
+    (let [result @(process/process ["git" "rev-parse" "HEAD"]
+                                   {:out :string :err :string})]
+      (when-not (and (zero? (:exit result))
+                     (= expected (str/trim (:out result))))
+        (fail! "Prepared test job source differs from the preflighted commit."
+               {:expected expected
+                :actual (when (zero? (:exit result))
+                          (str/trim (:out result)))})))))
+
+;; A runner exit code by itself is not evidence that the selected namespace
+;; actually executed. In particular, a missing/empty test namespace can make a
+;; JVM subprocess exit normally while silently reducing the covered corpus.
+;; Observe Cognitect's clojure.test reports as they stream; do not accumulate
+;; the whole output or hide diagnostics until the JVM finishes.
+(def jvm-testing-line-pattern
+  #"^Testing ([A-Za-z_][A-Za-z0-9_.-]*)$")
+(def jvm-count-line-pattern
+  #"^Ran ([0-9]+) tests? containing ([0-9]+) assertions?\.$")
+(def jvm-outcome-line-pattern
+  #"^([0-9]+) failures?, ([0-9]+) errors?\.$")
+
+;; Timing is observation, not attribution.  The first "Testing" line follows
+;; JVM startup, classpath setup, namespace loading, and test discovery; it is
+;; NOT a measurement of JVM startup alone.  The final clojure.test outcome
+;; precedes any shutdown work or lingering background threads.
+(defn jvm-timing-receipt
+  [namespace-name started-at evidence finished-at]
+  (let [{:keys [first-testing-at last-outcome-at]} evidence]
+    (when-not (and (integer? first-testing-at)
+                   (integer? last-outcome-at)
+                   (<= started-at first-testing-at last-outcome-at finished-at))
+      (gate-failure!
+       "JVM namespace timing markers were missing or out of order."
+       {:namespace namespace-name
+        :markers (select-keys evidence [:first-testing-at :last-outcome-at])}))
+    (let [ms (fn [start end] (long (quot (- end start) 1000000)))]
+      {:gesso/jvm-timing 1
+       :namespace namespace-name
+       :wall-ms (ms started-at finished-at)
+       :launch-to-testing-ms (ms started-at first-testing-at)
+       :testing-to-summary-ms (ms first-testing-at last-outcome-at)
+       :summary-to-exit-ms (ms last-outcome-at finished-at)
+       :method :stdout-milestones})))
+
+(defn record-jvm-evidence-line!
+  [evidence line]
+  (let [line (str/trim line)
+        observed-at (monotonic-nanos)]
+    (when-let [[_ name] (re-matches jvm-testing-line-pattern line)]
+      (swap! evidence
+             (fn [e]
+               (-> e
+                   (update :testing conj name)
+                   (cond-> (nil? (:first-testing-at e))
+                     (assoc :first-testing-at observed-at))))))
+    (when-let [[_ tests assertions] (re-matches jvm-count-line-pattern line)]
+      (swap! evidence update :counts conj
+             [(parse-long tests) (parse-long assertions)]))
+    (when-let [[_ failures errors] (re-matches jvm-outcome-line-pattern line)]
+      (swap! evidence (fn [e]
+                        (-> e
+                            (update :outcomes conj
+                                    [(parse-long failures) (parse-long errors)])
+                            (assoc :last-outcome-at observed-at)))))))
+
+(defn valid-jvm-namespace-evidence?
+  [namespace-name {:keys [testing counts outcomes]}]
+  ;; The Cognitect runner invokes clojure.test for precisely the requested -n
+  ;; selector. Nested clojure.test runs may generate additional reports; in
+  ;; that case require all named testing runs to refer to this namespace and
+  ;; trust only the last (outermost) summary. A printed summary is execution
+  ;; evidence, not a formal guarantee of test/fixture correspondence.
+  (let [[tests assertions] (last counts)
+        [failures errors] (last outcomes)]
+    (and (seq testing)
+         (every? #{namespace-name} testing)
+         (= (count counts) (count outcomes))
+         (pos-int? tests)
+         (pos-int? assertions)
+         (zero? failures)
+         (zero? errors))))
+
+(defn run-jvm-namespace-with-evidence!
+  [namespace-name]
+  (let [command ["clojure" "-M:test:formal" "-n" namespace-name]
+        evidence (atom {:testing [] :counts [] :outcomes []})
+        started-at (monotonic-nanos)
+        child (process/process command
+                               {:in :inherit :out :pipe :err :inherit})
+        java-process (:proc child)
+        ;; Drain stdout concurrently with the bounded JVM wait. Reading only
+        ;; after waiting risks a pipe-buffer deadlock for verbose test suites.
+        output-reader (future
+                        (with-open [reader (io/reader (.getInputStream java-process))]
+                          (doseq [line (line-seq reader)]
+                            (println line)
+                            (flush)
+                            (record-jvm-evidence-line! evidence line))))
+        completed? (.waitFor java-process
+                             jvm-wall-clock-timeout-ms
+                             java.util.concurrent.TimeUnit/MILLISECONDS)]
+    (when-not completed?
+      (terminate-process-tree! java-process))
+    ;; A background descendant can inherit the stdout pipe even after the JVM
+    ;; parent exits. Do not indefinitely block on its output stream; report a
+    ;; failed job so Shard retains the workspace on unsafe completion.
+    (let [reader-result (deref output-reader 5000 ::unclosed-output)]
+      (when (= ::unclosed-output reader-result)
+        (future-cancel output-reader)
+        (gate-failure!
+         "JVM namespace child left an unclosed output stream."
+         {:namespace namespace-name :command command}))
+      (when-not completed?
+        (gate-failure!
+         "JVM namespace exceeded its wall-clock timeout."
+         {:namespace namespace-name :command command
+          :timeout-ms jvm-wall-clock-timeout-ms}))
+      (let [result @child]
+        (when-not (zero? (:exit result))
+          (gate-failure!
+           "JVM namespace process failed."
+           {:namespace namespace-name :command command :exit (:exit result)}))
+        (when-not (valid-jvm-namespace-evidence? namespace-name @evidence)
+          (gate-failure!
+           "JVM namespace returned without verifiable nonempty test execution."
+           {:namespace namespace-name :command command :evidence @evidence}))
+        (let [finished-at (monotonic-nanos)
+              [tests assertions] (last (:counts @evidence))
+              timing (jvm-timing-receipt namespace-name
+                                         started-at @evidence finished-at)]
+          ;; Preserve the v1094 evidence record byte-for-byte at the EDN level:
+          ;; Gesso's existing correspondence checks consume precisely this map.
+          (println (pr-str {:gesso/jvm-namespace-evidence 1
+                            :namespace namespace-name
+                            :tests tests
+                            :assertions assertions
+                            :failures 0
+                            :errors 0}))
+          ;; Separate one-line EDN for empirical cost analysis by namespace.
+          ;; The timings do not gate test success or claim pure JVM startup.
+          (println (pr-str timing)))
+        result))))
+
+(defn run-one-jvm-test-namespace!
+  ([namespace-name] (run-one-jvm-test-namespace! namespace-name false))
+  ([namespace-name prepared?]
+   (let [available (set (map str (jvm-test-namespaces)))]
+     (when-not (contains? available namespace-name)
+       (fail! "Unknown JVM test namespace; refusing to execute arbitrary code."
+              {:requested namespace-name
+               :available-count (count available)}))
+     (if prepared?
+       (require-preflight-admission!)
+       (run-repo-integrity!))
+     (println)
+     (println "== JVM test namespace ==" namespace-name)
+     (run-jvm-namespace-with-evidence! namespace-name))))
 
 (defn formal-test-namespaces
   []
@@ -759,6 +1016,17 @@
    ["clojure"
     "-M:test:formal"]
    jvm-wall-clock-timeout-ms))
+
+(defn run-quick-tests! []
+  (let [namespaces (quick-test-namespaces)
+        command (into ["clojure" "-M:test:formal"]
+                      (mapcat (fn [namespace] ["-n" (str namespace)])
+                              namespaces))]
+    (println "== Quick JVM tests (fixed selection) ==")
+    (println "Selected namespaces:" (pr-str namespaces))
+    ;; Use the same integrity boundary as the sequential JVM gate.
+    (run-repo-integrity!)
+    (run-command-streaming-with-timeout! command jvm-wall-clock-timeout-ms)))
 
 (defn run-formal-tests!
   []
@@ -1543,7 +1811,7 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes]")
+   "Usage: bb script/gesso_test.clj [all|integrity|quick|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory [SCOPE]|inventory:prepared SCOPE|preflight|gate:prepared GATE|jvm:inventory|jvm:namespace NAMESPACE|jvm:namespace:prepared NAMESPACE]")
   (System/exit
    2))
 
@@ -1562,6 +1830,9 @@
 
           "integrity"
           []
+
+          "quick"
+          [:jvm]
 
           "jvm"
           [:jvm]
@@ -1609,18 +1880,290 @@
        [:integrity]
        requested))))
 
+;; Shard consumes an executable description of the authoritative full suite.
+;; The sequential `bb test` entry point still uses `run-all!` and runs the
+;; complete JVM test corpus in one process. Parallel execution replaces only
+;; the :jvm gate with the individually discovered JVM namespaces. Every other
+;; gate is unchanged, including Chromium's workspace-local build requirement.
+;;
+;; No cross-clone prerequisites imply shared generated files: each Gesso gate
+;; executes its existing standalone command in its own clone. Namespace jobs
+;; likewise validate repository integrity before starting a JVM. A namespace
+;; must be in the exact discovered JVM test inventory to be executable.
+(defn shard-gate-job
+  [gate]
+  (let [gate-name (name gate)]
+    {:id (str "gesso-" (str/replace gate-name ":" "-"))
+     :gate gate
+     :runtime :gesso
+     :unit {:type :gesso-gate :name gate-name}
+     :command ["bb" "script/gesso_test.clj" gate-name]
+     :depends-on []
+     :timeout-ms 3600000
+     :requires #{}}))
+
+(defn shard-job-inventory
+  []
+  (let [gates (command-gates "all")]
+    (when-not
+     (and (vector? gates)
+          (seq gates)
+          (= :integrity (first gates))
+          (= 1 (count (filter #{:jvm} gates)))
+          (= (count gates) (count (distinct gates)))
+          (every? (fn [gate]
+                    (and (keyword? gate)
+                         (fn? (get-in gate-specs [gate :run]))
+                         (string? (get-in gate-specs [gate :label]))))
+                  gates))
+      (fail!
+       "Cannot enumerate an invalid or incomplete full-suite gate definition."
+       {:gates gates :known-gates (set (keys gate-specs))}))
+
+    ;; Construct the JVM inventory from exactly the same strict source scan
+    ;; exposed by jvm:inventory, not from a second manually maintained list.
+    (let [jvm-jobs (:jobs (shard-jvm-namespace-inventory))
+          jobs (vec (mapcat (fn [gate]
+                              (if (= :jvm gate)
+                                jvm-jobs
+                                [(shard-gate-job gate)]))
+                            gates))
+          ids (mapv :id jobs)
+          represented-gates (set (map :gate jobs))]
+      (when-not
+       (and (seq jvm-jobs)
+            (= (count jvm-jobs)
+               (count (set (map :id jvm-jobs))))
+            (= (set gates) represented-gates)
+            (= (count jobs) (count (distinct ids)))
+            (= (count jobs) (+ (dec (count gates)) (count jvm-jobs)))
+            (every? (fn [job]
+                      (and (= :jvm (:gate job))
+                           (= :gesso-jvm-namespace (get-in job [:unit :type]))))
+                    jvm-jobs))
+        (fail!
+         "Fine-grained JVM inventory does not cover the complete parallel suite."
+         {:gates gates
+          :represented-gates represented-gates
+          :jvm-job-count (count jvm-jobs)
+          :job-count (count jobs)
+          :distinct-id-count (count (distinct ids))}))
+      {:jobs jobs})))
+
+;; Staged v1088 interface for Shard v1089. The existing zero-argument
+;; `inventory` remains unchanged until Shard enforces invocation-level preflight.
+;; This prepared inventory contains NO :integrity job and NO job command that
+;; invokes the ordinary integrity-bearing public gate. Only Shard may admit
+;; these commands after one successful preflight for this exact Git HEAD.
+(def prepared-standalone-gates
+  #{:advanced :node:choreo :node:browser :browser
+    :browser:integration :themes})
+
+;; v1123: The prepared parallel inventory has TWO fundamentally different
+;; execution types. JVM namespace jobs are independently claimed *commands*
+;; addressed to an already-running, persistent JVM; the six other gates retain
+;; their isolated subprocess behavior. Keep the legacy unprepared inventory
+;; unchanged for compatibility with direct `jvm:namespace` execution.
+;;
+;; The session command requires shard.worker.jvm on the launched Clojure
+;; classpath. Gesso does not own Shard's source and must not copy or silently
+;; replace its worker. The Shard host must supply that source on the JVM
+;; classpath before enabling native execution (a subsequent integration gate).
+(def prepared-jvm-runtime :gesso-jvm)
+(def prepared-subprocess-runtime :gesso)
+(def prepared-jvm-session-command
+  ["clojure" "-M:test:formal" "-m" "shard.worker.jvm"])
+
+(defn prepared-runtime-descriptors [jobs]
+  (let [used (set (map :runtime jobs))]
+    (when-not (every? #{prepared-jvm-runtime prepared-subprocess-runtime} used)
+      (fail! "Prepared inventory contains an unknown runtime."
+             {:runtimes used}))
+    (cond-> {}
+      (contains? used prepared-jvm-runtime)
+      (assoc prepared-jvm-runtime
+             {:identity "gesso-clojure-1.12.5-test-formal-shard-protocol-v1"
+              :capabilities #{}
+              :execution :persistent-jvm
+              :session-command prepared-jvm-session-command})
+      (contains? used prepared-subprocess-runtime)
+      (assoc prepared-subprocess-runtime
+             {:identity "gesso-standalone-prepared-gates-v1"
+              :capabilities #{}
+              :execution :subprocess}))))
+
+(defn prepared-jvm-job
+  [test-ns gate]
+  (let [n (str test-ns)
+        family (if (= gate :formal) "formal" "jvm")]
+    {:id (str "gesso-" family "-" n)
+     :gate gate
+     :runtime prepared-jvm-runtime
+     :unit {:type :gesso-jvm-namespace :name n}
+     ;; A deliberately nonempty compatibility/audit command. Shard's
+     ;; :persistent-jvm executor NEVER invokes this per-namespace subprocess.
+     ;; Retain it until the scheduler's prepared-inventory admission and
+     ;; historical command contracts have been migrated together.
+     :command ["bb" "script/gesso_test.clj" "jvm:namespace:prepared" n]
+     :depends-on []
+     :timeout-ms jvm-wall-clock-timeout-ms
+     :requires #{}}))
+
+(defn prepared-gate-job
+  [gate]
+  (when-not (contains? prepared-standalone-gates gate)
+    (fail! "Unsupported prepared gate." {:gate gate}))
+  (assoc (shard-gate-job gate)
+         :command ["bb" "script/gesso_test.clj" "gate:prepared" (name gate)]))
+
+(def prepared-inventory-scopes
+  #{"all" "quick" "jvm" "formal" "cljs" "node" "node:choreo" "node:browser"
+    "browser" "browser:integration" "advanced" "themes"})
+
+(defn shard-prepared-inventory
+  [scope]
+  (let [gates (command-gates scope)]
+    (when-not (and (vector? gates)
+                   (= :integrity (first gates))
+                   (seq (rest gates)))
+      (fail! "Unknown or empty Shard inventory scope."
+             {:scope scope}))
+    ;; `formal` is a subset of the authoritative JVM namespace corpus; no
+    ;; separate manually maintained namespace list or repeated integrity gate.
+    (let [selected-gates (if (= scope "browser:integration")
+                           [:browser:integration]
+                           (rest gates))
+          selected (cond
+                     (= scope "formal")
+                     (mapv #(prepared-jvm-job % :formal)
+                           (formal-test-namespaces))
+                     (= scope "quick")
+                     (mapv #(prepared-jvm-job % :jvm)
+                           (quick-test-namespaces))
+                     :else
+                     (vec (mapcat (fn [gate]
+                                    (if (= :jvm gate)
+                                      (mapv #(prepared-jvm-job % :jvm)
+                                            (jvm-test-namespaces))
+                                      [(prepared-gate-job gate)]))
+                                  selected-gates)))
+          ids (mapv :id selected)]
+      (when-not (and (seq selected)
+                     (= (count ids) (count (distinct ids)))
+                     (every? #(not= :integrity (:gate %)) selected)
+                     (every? (fn [{:keys [command gate runtime unit]}]
+                               (and (contains? #{"jvm:namespace:prepared"
+                                                 "gate:prepared"}
+                                               (nth command 2 nil))
+                                    (if (#{:jvm :formal} gate)
+                                      (and (= prepared-jvm-runtime runtime)
+                                           (= :gesso-jvm-namespace (:type unit))
+                                           (= "jvm:namespace:prepared" (nth command 2)))
+                                      (and (= prepared-subprocess-runtime runtime)
+                                           (= :gesso-gate (:type unit))
+                                           (= "gate:prepared" (nth command 2))))))
+                             selected))
+        (fail! "Invalid preflight-ready inventory."
+               {:scope scope :job-count (count selected)}))
+      {:runtimes (prepared-runtime-descriptors selected)
+       :jobs selected})))
+
+(defn run-prepared-gate!
+  [name]
+  (let [gate (keyword name)]
+    (when-not (contains? prepared-standalone-gates gate)
+      (fail! "Unknown prepared gate; refusing arbitrary gate execution."
+             {:requested name}))
+    (require-preflight-admission!)
+    ;; A browser integration command needs its own workspace-local advanced
+    ;; build; an advanced job on another clone cannot provide that artifact.
+    ;; Neither path repeats invocation-level repository integrity.
+    (let [gates (if (= gate :browser:integration)
+                  [:advanced :browser:integration]
+                  [gate])
+          results (run-gates! gates)]
+      (when (failed-gates? results)
+        (System/exit 1)))))
+
 (defn -main
   []
   (ensure-project-root!)
-  (let [command (or (first *command-line-args*) "all")
-        gates (command-gates command)]
-    (when-not gates
-      (usage!))
-    (let [results (run-gates! gates)]
-      (when (failed-gates? results)
-        ;; Ordinary test/build gate failures are expected process outcomes, not
-        ;; harness exceptions. Exit nonzero without printing a Babashka stack
-        ;; trace. Unexpected harness/configuration exceptions still escape.
-        (System/exit 1)))))
+  (let [args (vec *command-line-args*)
+        command (or (first args) "all")]
+    (case command
+      "inventory"
+      (case (count args)
+        1 ;; Legacy inventory keeps the old per-job integrity checks until
+          ;; Shard's v1089 preflight barrier becomes the execution owner.
+        (prn (shard-job-inventory))
+        2 (do
+            (when-not (contains? prepared-inventory-scopes (second args))
+              (usage!))
+            (prn (shard-prepared-inventory (second args))))
+        (usage!))
+
+      "inventory:prepared"
+      (do
+        (when-not (and (= 2 (count args))
+                       (contains? prepared-inventory-scopes (second args)))
+          (usage!))
+        (prn (shard-prepared-inventory (second args))))
+
+      "quick"
+      (do
+        (when-not (= 1 (count args)) (usage!))
+        (run-quick-tests!))
+
+      "preflight"
+      (do
+        (when-not (= 1 (count args)) (usage!))
+        (run-repo-integrity!))
+
+      "gate:prepared"
+      (do
+        (when-not (= 2 (count args)) (usage!))
+        (run-prepared-gate! (second args)))
+
+      "jvm:inventory"
+      (do
+        (when-not (= 1 (count args)) (usage!))
+        ;; Strict EDN only; namespace discovery never launches a test.
+        (prn (shard-jvm-namespace-inventory)))
+
+      "jvm:namespace"
+      (do
+        (when-not (= 2 (count args)) (usage!))
+        (try
+          (run-one-jvm-test-namespace! (second args))
+          (catch Throwable error
+            (if (gate-failure? error)
+              (do
+                (binding [*out* *err*]
+                  (println (ex-message error)))
+                (System/exit 1))
+              (throw error)))))
+
+      "jvm:namespace:prepared"
+      (do
+        (when-not (= 2 (count args)) (usage!))
+        (try
+          (run-one-jvm-test-namespace! (second args) true)
+          (catch Throwable error
+            (if (gate-failure? error)
+              (do
+                (binding [*out* *err*]
+                  (println (ex-message error)))
+                (System/exit 1))
+              (throw error)))))
+
+      (do
+        (when (> (count args) 1) (usage!))
+        (let [gates (command-gates command)]
+          (when-not gates (usage!))
+          (let [results (run-gates! gates)]
+            (when (failed-gates? results)
+              ;; Ordinary gate failures exit nonzero without Babashka traces.
+              ;; Unexpected harness/configuration exceptions still escape.
+              (System/exit 1))))))))
 
 (-main)
