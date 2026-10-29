@@ -340,6 +340,33 @@
               :namespaces (count unique-namespaces)}))
     unique-namespaces))
 
+;; Intentionally fixed, version-controlled regression smoke selection.
+;; Keep the list in this single place so the direct and prepared parallel
+;; paths always run the same namespaces. This is NOT adaptive selection.
+(def quick-test-namespace-names
+  ["gesso.choreo.semantics-test"
+   "gesso.choreo.type-test"
+   "gesso.model.command-test"
+   "gesso.model.invariant-check-test"
+   "gesso.model.resolved-operation-test"
+   "gesso.model.tx-refinement-test"
+   "gesso.live.application-preflight.semantic-audit-test"
+   "gesso.live.browser.adapter-proof-test"
+   "gesso.live.optimistic.resolved-operation-test"])
+
+(defn quick-test-namespaces []
+  ;; Validate against the strict authoritative JVM test corpus, not just file
+  ;; existence. A renamed/deleted or incorrectly declared namespace must fail
+  ;; instead of making the smoke gate silently smaller.
+  (let [available (set (map str (jvm-test-namespaces)))
+        requested quick-test-namespace-names
+        missing (vec (remove available requested))]
+    (when (or (seq missing)
+              (not= (count requested) (count (distinct requested))))
+      (fail! "Quick JVM namespace selection is missing or duplicated."
+             {:missing missing :requested requested}))
+    (mapv symbol requested)))
+
 (defn shard-jvm-namespace-inventory
   []
   ;; This is also the authoritative :jvm portion of the normal parallel
@@ -989,6 +1016,17 @@
    ["clojure"
     "-M:test:formal"]
    jvm-wall-clock-timeout-ms))
+
+(defn run-quick-tests! []
+  (let [namespaces (quick-test-namespaces)
+        command (into ["clojure" "-M:test:formal"]
+                      (mapcat (fn [namespace] ["-n" (str namespace)])
+                              namespaces))]
+    (println "== Quick JVM tests (fixed selection) ==")
+    (println "Selected namespaces:" (pr-str namespaces))
+    ;; Use the same integrity boundary as the sequential JVM gate.
+    (run-repo-integrity!)
+    (run-command-streaming-with-timeout! command jvm-wall-clock-timeout-ms)))
 
 (defn run-formal-tests!
   []
@@ -1773,7 +1811,7 @@
 (defn usage!
   []
   (println
-   "Usage: bb script/gesso_test.clj [all|integrity|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory [SCOPE]|inventory:prepared SCOPE|preflight|gate:prepared GATE|jvm:inventory|jvm:namespace NAMESPACE|jvm:namespace:prepared NAMESPACE]")
+   "Usage: bb script/gesso_test.clj [all|integrity|quick|jvm|formal|cljs|node|node:choreo|node:browser|browser|browser:integration|advanced|themes|inventory [SCOPE]|inventory:prepared SCOPE|preflight|gate:prepared GATE|jvm:inventory|jvm:namespace NAMESPACE|jvm:namespace:prepared NAMESPACE]")
   (System/exit
    2))
 
@@ -1792,6 +1830,9 @@
 
           "integrity"
           []
+
+          "quick"
+          [:jvm]
 
           "jvm"
           [:jvm]
@@ -1976,7 +2017,7 @@
          :command ["bb" "script/gesso_test.clj" "gate:prepared" (name gate)]))
 
 (def prepared-inventory-scopes
-  #{"all" "jvm" "formal" "cljs" "node" "node:choreo" "node:browser"
+  #{"all" "quick" "jvm" "formal" "cljs" "node" "node:choreo" "node:browser"
     "browser" "browser:integration" "advanced" "themes"})
 
 (defn shard-prepared-inventory
@@ -1992,9 +2033,14 @@
     (let [selected-gates (if (= scope "browser:integration")
                            [:browser:integration]
                            (rest gates))
-          selected (if (= scope "formal")
+          selected (cond
+                     (= scope "formal")
                      (mapv #(prepared-jvm-job % :formal)
                            (formal-test-namespaces))
+                     (= scope "quick")
+                     (mapv #(prepared-jvm-job % :jvm)
+                           (quick-test-namespaces))
+                     :else
                      (vec (mapcat (fn [gate]
                                     (if (= :jvm gate)
                                       (mapv #(prepared-jvm-job % :jvm)
@@ -2062,6 +2108,11 @@
                        (contains? prepared-inventory-scopes (second args)))
           (usage!))
         (prn (shard-prepared-inventory (second args))))
+
+      "quick"
+      (do
+        (when-not (= 1 (count args)) (usage!))
+        (run-quick-tests!))
 
       "preflight"
       (do
