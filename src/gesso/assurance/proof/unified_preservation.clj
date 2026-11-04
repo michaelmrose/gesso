@@ -10,9 +10,13 @@
    In particular, a conjunction mixing a copy-equality clause with a literal
    clause remains OPEN unless an existing checker proves the entire rule.
 
-   Each family is run afresh against the ORIGINAL v1241 source, and every
-   report is checked against the source-derived obligation ledger before its
-   candidate judgment can participate. Returned data and SHA-256 fingerprints
+   Each family is run afresh against the ORIGINAL v1241 source using its
+   implementation captured when this checker loads. If the corresponding
+   public sibling Var has been replaced, that result is accepted only if its
+   COMPLETE report equals a fresh source-derived result from the captured
+   implementation, including each underlying derivation and open judgment.
+   This rejects consistent-looking forged success sets; it does NOT establish
+   independent checker soundness. Returned SHA-256 fingerprints
    are COPYABLE, UNADMITTED observations, never certificate credentials.
    Even a supported judgment remains conditional on the declared abstract
    transition; its checker soundness, initial states, assumptions, physical
@@ -51,13 +55,49 @@
   (and (string? value)
        (boolean (re-matches #"sha256:[0-9a-f]{64}" value))))
 
-(defn- report-for!
-  [family source]
+;; Freeze the real family function values at namespace initialization.
+;; Report data are never credentials. When a public family Var is replaced,
+;; its complete response must match the registered source-derived checker,
+;; including derivations, open judgments, and fingerprint. This catches
+;; with-redefs of a sibling that returns an internally consistent lie.
+;;
+;; Only replaced public sibling Vars trigger a second run. Ordinary calls use
+;; the captured source-derived checker once. This is NOT an independent formal
+;; soundness proof. Changes to these families require reloading this namespace
+;; and auditing the exact report contract. Shared primitive checker defects and
+;; a maliciously altered classpath remain separate trust assumptions.
+(def ^:private reference-family-checkers
+  {:frame frame/check-frame-preservation!
+   :literal literal/check-literal-assignment-preservation!
+   :mixed mixed/check-mixed-preservation!
+   :copy copy/check-copy-preservation!})
+
+(defn- public-family-var
+  [family]
   (case family
-    :frame (frame/check-frame-preservation! source)
-    :literal (literal/check-literal-assignment-preservation! source)
-    :mixed (mixed/check-mixed-preservation! source)
-    :copy (copy/check-copy-preservation! source)))
+    :frame #'frame/check-frame-preservation!
+    :literal #'literal/check-literal-assignment-preservation!
+    :mixed #'mixed/check-mixed-preservation!
+    :copy #'copy/check-copy-preservation!
+    (fail! :unknown-preservation-family {:family family})))
+
+(defn- verified-report-for!
+  "Evaluate the original source using the captured, source-deriving sibling.
+   If its public Var has been substituted, require that substitute to produce
+   the exact same complete report. The captured run is the source of truth."
+  [family source]
+  (let [reference (get reference-family-checkers family)
+        public (var-get (public-family-var family))]
+    (when-not reference
+      (fail! :unknown-preservation-family {:family family}))
+    (if (identical? public reference)
+      (reference source)
+      (let [reported (public source)
+            expected (reference source)]
+        (when-not (= reported expected)
+          (fail! :family-report-contract-changed
+                 {:family family :detail :source-derived-evidence-mismatch}))
+        expected))))
 
 (defn- contract-for
   [family]
@@ -161,12 +201,13 @@
 
 (defn check-unified-preservation!
   "Recheck original obligation SOURCE through all four existing restricted
-   checkers; select only complete, independently supported invariant judgments.
+   checkers; source-rederive whole sibling reports before accepting judgments.
 
    Successful candidate status is NOT a discharged v1241 proof obligation.
    No inference is invented by combining open fragments of different families.
-   A later certificate gate must independently rederive these judgments and
-   establish its remaining proof and production obligations."
+   The comparison is reproducibility against captured family implementations,
+   NOT independent rule soundness. A later certificate gate must recheck
+   these judgments and establish remaining proof and production obligations."
   [source]
   (let [obligations (obligation/derive-obligations! source)
         preservation (get-in obligations [:obligations :preservation])
@@ -189,7 +230,7 @@
           (into (array-map)
                 (map (fn [family]
                        [family (validate-family-report!
-                                family (report-for! family source)
+                                family (verified-report-for! family source)
                                 obligations expected-ids)]))
                 families)
           outcomes
