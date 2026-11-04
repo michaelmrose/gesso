@@ -685,7 +685,22 @@
      gesso.live.browser.optimistic-test
      gesso.live.browser.optimistic-htmx-test
      gesso.live.browser.runtime-test
-     gesso.live.browser.shell-test})
+     gesso.live.browser.shell-test
+     ;; v1327: Include the permanent shared CLJC semantics corpus in the
+     ;; existing Node gate. Chromium/JVM already discover *_test.cljc.
+     ;; This must be REQUIRED, not an optional discovery prefix: deleting or
+     ;; renaming the suite is an error, not silently reduced coverage.
+     gesso.assurance.proof.jvm-cljs-semantics-test})
+
+(def portable-semantics-test-namespace
+  'gesso.assurance.proof.jvm-cljs-semantics-test)
+
+(def portable-corpus-line-prefix
+  "GESSO_PORTABLE_SEMANTICS_CORPUS ")
+
+;; Guard against accidentally comparing two truncated or inert corpora. The
+;; v1326 source corpus contains 941 cases; later extensions may add cases.
+(def portable-minimum-cases 941)
 
 (defn portable-choreo-test-namespace?
   [test-ns]
@@ -829,6 +844,12 @@
       "    (.exit js/process (if (zero? failed) 0 1))))\n\n"
       "(defn main\n"
       "  []\n"
+      (when (= group-id :browser)
+        (str "  (println "
+             (pr-str portable-corpus-line-prefix)
+             " (pr-str ("
+             portable-semantics-test-namespace
+             "/shared-corpus-results)))\n"))
       "  (t/run-tests\n"
       "   (t/empty-env ::reporter)"
       (quoted-test-args
@@ -1090,6 +1111,88 @@
      :choreo
      portable-choreo-tests}))
 
+;; A shared CLJC test can pass independently on both hosts despite a latent
+;; disagreement if its assertions are weaker than the actual observable
+;; results. Compare every serialized corpus case, including typed rejection
+;; status, reason and source path, at the Node gate that is already present in
+;; direct bb, Ygg prepared scopes, and the full test suite.
+(defn require-portable-corpus!
+  [output host]
+  (let [lines (->> (str/split-lines output)
+                   (filter #(str/starts-with? % portable-corpus-line-prefix))
+                   vec)]
+    (when-not (= 1 (count lines))
+      (gate-failure!
+       "Cross-runtime semantic corpus output is missing or duplicated."
+       {:host host :matching-lines (count lines)}))
+    (let [serialized (subs (first lines) (count portable-corpus-line-prefix))
+          cases (try (edn/read-string serialized)
+                     (catch Exception error
+                       (gate-failure!
+                        "Cross-runtime semantic corpus is malformed EDN."
+                        {:host host :cause (ex-message error)})))
+          ids (when (vector? cases) (mapv first cases))]
+      (when-not
+       (and (vector? cases)
+            (<= portable-minimum-cases (count cases))
+            (= (count cases) (count (distinct ids)))
+            (every? (fn [entry]
+                      (and (vector? entry)
+                           (= 2 (count entry))
+                           (string? (first entry))
+                           (vector? (second entry))
+                           (contains? #{:ok :failure} (first (second entry)))))
+                    cases))
+        (gate-failure!
+         "Cross-runtime semantic corpus has missing or malformed cases."
+         {:host host :cases (when (vector? cases) (count cases))
+          :minimum-cases portable-minimum-cases}))
+      serialized)))
+
+(defn jvm-portable-corpus!
+  []
+  (let [expression
+        (str "(do (require '" portable-semantics-test-namespace ") "
+             "(println " (pr-str portable-corpus-line-prefix) " "
+             "(pr-str (" portable-semantics-test-namespace
+             "/shared-corpus-results))))")
+        result (run-command-captured-with-timeout!
+                ["clojure" "-Sdeps" (cljs-test-sdeps)
+                 "-M:dev:gesso-cljs-test" "-e" expression]
+                180000)]
+    (require-portable-corpus! (:out result) :jvm)))
+
+(defn run-node-portable-correspondence!
+  [output-to]
+  (let [result (run-command-captured-with-timeout!
+                ["node" output-to] 180000)
+        node-corpus (require-portable-corpus! (:out result) :node)
+        jvm-corpus (jvm-portable-corpus!)]
+    ;; Preserve the ordinary cljs.test summary without dumping 40+ KB of
+    ;; serialized cases into every successful build log.
+    (doseq [line (str/split-lines (:out result))
+            :when (not (str/starts-with? line portable-corpus-line-prefix))]
+      (println line))
+    (when (seq (:err result))
+      (binding [*out* *err*] (print (:err result))))
+    (when-not (= jvm-corpus node-corpus)
+      (let [expected (edn/read-string jvm-corpus)
+            observed (edn/read-string node-corpus)
+            mismatch (first (keep-indexed
+                             (fn [i [a b]] (when (not= a b) i))
+                             (map vector expected observed)))]
+        (gate-failure!
+         "JVM and Node typed-semantics results disagree."
+         {:first-mismatched-index mismatch
+          :jvm-case (get expected mismatch)
+          :node-case (get observed mismatch)
+          :jvm-case-count (count expected)
+          :node-case-count (count observed)})))
+    (println (str "Portable JVM/Node semantic corpus: PASS ("
+                  (count (edn/read-string node-corpus))
+                  " identical cases)"))
+    nil))
+
 (defn run-node-test-groups!
   [group-ids]
   (println)
@@ -1179,9 +1282,9 @@
           (str
            namespace)))
 
-        (run-command!
-         ["node"
-          output-to])))))
+        (if (= :browser group-id)
+          (run-node-portable-correspondence! output-to)
+          (run-command! ["node" output-to]))))))
 
 (defn run-node-browser-tests!
   []
