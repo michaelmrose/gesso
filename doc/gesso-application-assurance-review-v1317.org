@@ -1,0 +1,471 @@
+#+TITLE: Gesso Application Assurance — v1317 Acceptance Review
+#+SUBTITLE: Measured checkpoint, source/evidence traceability and open-assumption ledger
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Disposition and scope
+
+This v1317 deliverable is the *measured acceptance and open-assumption
+review* specified in the v1268–v1317 roadmap. It is documentation, not a
+new certificate, proof theorem, test runner, deployment hook, or change to
+authoritative transaction behavior. The v1317 acceptance decision is
+*bounded/source-relative checkpoint accepted; production certification NOT
+established*. Conditional induction, independently sampled finite semantics,
+and observed XTDB behavior remain distinct assurance classes.
+
+The reviewed source baseline is the assembled *in-session source overlay
+through v1316* rooted in the user's v1278 checkout at Git HEAD
+=17a1856c89201859ef2868f149f2edf44e918bf5=. The subsequent files in
+this overlay are independent revision artifacts, *not commits represented
+by that HEAD*. Installing their corresponding =ins= archives in the user's
+real checkout is a separate action. The source fingerprints below refer to
+this in-session overlay; they are not signatures, remote attestation, nor
+proof that the user's deployed tree matches it.
+
+This review is confined to the Gesso-local declared Request/Claim pilot,
+its source-bound induction/application machinery, and finite-state tests.
+The HumanHelp production application is not certified. The R4 canonical
+design is an *end-state contract*, not a description of completed proofs.
+Formal liveness, deadlines, cancellation fairness, distributed-node
+invariants and browser/CLJS/HTMX/SSE implementation refinement are outside
+this checkpoint.
+
+** Acceptance decision matrix
+
+| Question | v1317 disposition | Basis / limit |
+|----------+-------------------+---------------|
+| Is a declared nontrivial abstract machine checked inductively? | YES, conditionally | v1278/v1287; soundness and closed-world premises remain |
+| Does in-process evidence admission bind to original sources? | YES, relative to a trusted process | v1280–v1286; no independent cryptographic attestation |
+| Is an issued executor joined to a route and supplied app snapshot? | YES, source-relative | v1288–v1297; unknown writers and deployment adoption open |
+| Do controlled embedded XTDB commits agree or disagree with an abstract step? | YES, diagnostic per observation | v1298–v1307; copied witness is not authenticated |
+| Is there a separate finite-state semantic evaluator? | YES, bounded | v1309–v1312; cannot imply universal checker soundness |
+| Can a host opt in to strict source-relative admission? | YES, when host invokes it | v1315–v1316; not automatically installed at every route |
+| Are stable first-blocker explanations available? | YES, non-authoritative | v1313–v1314 |
+| Are all deployed state-changing writers proved covered? | NO | host inventory is supplied and bounded |
+| Is universal actual-XTDB-to-abstract refinement proved? | NO | no authenticated all-writer/all-execution argument |
+| Is the checker metatheoretically sound? | NO | S1–S9 below remain open |
+| Has the full Ygg/Chromium/JVM gate passed after installation? | NOT VERIFIED HERE | run in user's compatible checkout |
+| Is R4 production certification warranted? | NO | do not promote bounded evidence to a theorem |
+
+The acceptance decision is deliberately *not* a single green bit. A
+failed check, uncompleted process, unsupported expression, missing evidence,
+or still-open proof assumption is never silently counted as success.
+
+* Delivered assurance chain and source identity
+
+** Conditional abstract induction — v1278 through v1287
+
+Sources:
+- =src/gesso/assurance/proof/induction.clj=, v1278:
+  =check-induction!= checks source-derived base implications and whole-
+  invariant preservation for every declared operation and invariant.
+- =src/gesso/assurance/proof/certificate.clj=, extended v1280:
+  fresh in-process admission of the conditional-induction proof family.
+- =src/gesso/assurance/proof/induction_dependency.clj=, v1282:
+  dependency graph closure relative to supplied original sources.
+- =src/gesso/assurance/proof/induction_ledger.clj=, v1284:
+  separates checked abstract steps from original/open obligations.
+- =src/gesso/assurance/inductive_report.clj=, v1286:
+  joins current certificate and dependency handles, without turning a
+  fingerprint or report into a capability.
+
+Acceptance evidence:
+- =test/gesso/assurance/proof/induction_acceptance_test.clj= (v1287):
+  branching four-operation Request lifecycle, initial consequences,
+  preservation, dependency closure and adversarial evidence cases.
+- =test/gesso/assurance/proof/induction_forgery_test.clj= (v1312):
+  catalog, initializer, dependency, handle and checker-substitution attacks.
+
+Model universe and hypotheses: an exact, finite *declared operation list*,
+original typed rules, and whatever initial states satisfy the declared
+initializer. The abstract state may contain integer/keyword fields; a
+conditional inductive argument is not an exhaustive enumeration of their
+infinite or unbounded possible values. The induction checker uses supported
+restricted inference families; an unsupported valid inference can remain
+open. The premise that all physically relevant operations and initializers
+are in the declared machine remains external.
+
+** Bound application and authoritative plan — v1288 through v1297
+
+Sources:
+- =src/gesso/live/application_preflight/inductive_contract.clj= (v1288)
+- =src/gesso/model/inductive_plan.clj= (v1290)
+- =src/gesso/live/application_preflight/authoritative_coverage.clj= (v1292)
+- =src/gesso/assurance/application_induction.clj= (v1294)
+
+Acceptance evidence:
+- =test/gesso/assurance/application_induction_checkpoint_test.clj=
+  (v1297), against a real application assembly with a genuinely issued
+  plan and Ring handler.
+- =test/gesso/assurance/application_induction_mutation_test.clj=
+  (v1296), including substituted executors, plan mismatch and route
+  inventory inconsistencies.
+
+The checked operation set, issued plan objects, original transition source,
+route handlers, and *host-supplied* entry-point observations must agree.
+An additional entry point may be disclosed as unclassified; a missing
+required route or substituted handler fails closed. Exact object identity
+is verified *in this JVM and this supplied snapshot*. This is not a claim
+that the production router has adopted the snapshot or that non-HTTP jobs,
+maintenance writers, migrations, retries, and other state-changing paths
+have been enumerated.
+
+The v1287 four-operation abstract model and v1297's one-operation assembled
+Claim fixture are *different test models*. Do not combine their distinct
+scopes into an imaginary four-operation deployed machine.
+
+** Bounded observed XTDB correspondence — v1298 through v1307
+
+Sources:
+- =src/gesso/model/transition_observation.clj= (v1298): read-only,
+  ledger-confirmed, isolated before/after snapshot witness capture.
+- =src/gesso/model/transition_conformance.clj= (v1300): compare the
+  physical projection with a typed guarded transition and serial plan.
+- =src/gesso/assurance/observed_correspondence.clj= (v1302): bind the
+  observed step to the same supplied application's exact issued plan.
+
+Acceptance evidence:
+- =test/gesso/assurance/xtdb_inductive_claim_integration_test.clj=
+  (v1304): actual induction-bound executor and committed XTDB Claim pilot.
+- =test/gesso/assurance/xtdb_inductive_claim_concurrency_test.clj=
+  (v1305): bounded contending submissions and command-ID replay.
+- =test/gesso/assurance/xtdb_inductive_claim_mutation_test.clj=
+  (v1306): deliberately corrupt final submission after plan admission.
+- =test/gesso/assurance/xtdb_inductive_claim_checkpoint_test.clj=
+  (v1307): integrated positive/negative physical acceptance.
+- =test/gesso/model/transition_observation_test.clj= (v1299) and
+  =test/gesso/model/transition_conformance_test.clj= (v1301): lower-level
+  committed, aborted, invalid-footprint and wrong-poststate cases.
+
+A correct isolated physical Claim update can match the declared step. A
+*committed command record with no required domain update* produces a
+nonconforming diagnostic rather than a success; the same is true for
+incorrect persisted fields. An XTDB assertion abort cannot generate a
+successful committed witness. Tested competition produced a single
+observed durable winner in a specific embedded single-node run; that is
+*test evidence*, not a universal ownership, authorization, linearizability,
+or multi-node theorem. The Claim pilot's abstract invariant is deliberately
+narrower than production Claim ownership uniqueness.
+
+The observation data are copyable. A well-formed fabricated witness may
+produce a positive diagnostic comparison. Consequently, the source says
+=:physical-observation-provenance :caller-supplied-unauthenticated= and
+=:universal-xtdb-refinement :not-established=. No digest or source recheck
+authenticates an actual submitted transaction payload or the transaction's
+internal read snapshot.
+
+** Independent finite oracle — v1308 through v1312
+
+Sources:
+- =doc/gesso-assurance-rule-soundness-boundary.org= (v1308): nine
+  independent proof/implementation obligations S1–S9.
+- =src/gesso/assurance/proof/finite_model_oracle.clj= (v1309): a separate
+  data-only evaluator. It does not invoke Gesso's induction, rule, proof
+  kernel or certificate checkers to decide its finite judgments.
+
+Acceptance evidence:
+- =test/gesso/assurance/proof/finite_model_oracle_test.clj=
+  (v1310): hand-checkable Boolean, enum, integer, optional and malformed
+  finite models; deterministic base and step counterexamples.
+- =test/gesso/assurance/proof/induction_crosscheck_test.clj=
+  (v1311): same original catalog sent to both implementations, including
+  a four-operation finite lifecycle and guard/replacement mutations.
+- =test/gesso/assurance/proof/induction_forgery_test.clj= (v1312):
+  adversarial proof-source/authority tests.
+
+The supplied finite universe is explicit: chosen values for each state
+field and operation input, a bounded Cartesian product, and caps on
+expressions, fields, operations, invariants and total cases. Boolean/enum
+completeness is independently reported, while integer/keyword/string
+representatives are *not* entire mathematical types. Successful finite
+enumeration reports =:bounded-no-counterexample=, never a universal proof.
+Unsupported syntax, undefined partial reads, empty initial populations,
+truncated cases and budget exhaustion do not count as a successful result.
+A concrete counterexample can falsify a claimed universal inference.
+Conversely, a symbolic obligation remaining open while bounded
+enumeration finds no counterexample can be conservative incompleteness.
+
+Independence is at the level of a second *implemented evaluator* on the
+restricted fragment. Its correctness and its relationship to an
+independent mathematical semantics are not established metatheorems.
+
+** Diagnostics and opt-in startup policy — v1313 through v1316
+
+Sources:
+- =src/gesso/assurance/diagnostic.clj= (v1313): deterministic
+  first-blocker diagnostics from rechecked original sources.
+- =src/gesso/live/application_preflight/inductive_policy.clj= (v1315):
+  =check-inductive-policy!= and =require-inductive-policy!=.
+
+Acceptance evidence:
+- =test/gesso/assurance/diagnostic_test.clj= (v1314):
+  stable priority, source attribution, forged reports, bounded-only results,
+  missing route coverage and physical divergence.
+- =test/gesso/live/application_preflight/inductive_policy_test.clj=
+  (v1316): disabled mode, strict admission, original-source freshness,
+  exact issued handler identity, unavailable guarantees and forgery.
+
+Disabled mode accepts =nil= or an exact disabled request and performs no
+assurance work. Strict mode requires the original application source, both
+source-bound conditional induction and exact issued handler/plan binding;
+it can additionally demand no *observed unclassified* entry points. Any
+request for unavailable guarantees such as universal physical refinement or
+checker soundness fails closed. =:eligible-current-snapshot= is a report
+about this particular source/host snapshot, *not* installation or commit
+authority. A real host must invoke and honor =require-inductive-policy!=
+at startup/install and maintain runtime-binding stability afterwards. This
+revision does not establish that every host does so.
+
+* Evidence and reproducibility register
+
+** Source snapshot identifiers
+
+The following are *first 16 hex digits of SHA-256 of exact local bytes*.
+They are comparison aids only; for installing revisions use the exact
+versioned TAR payloads and verify their full bytes in the target checkout.
+
+| Local SHA-256 prefix | Source file (relative to repository) |
+|---------------------+--------------------------------------|
+| 1b0ba85c34c70a80 | =src/gesso/assurance/proof/induction.clj= |
+| eedcb639280cb21f | =src/gesso/assurance/proof/certificate.clj= |
+| 3df70d3d00042bd5 | =src/gesso/assurance/inductive_report.clj= |
+| cc86c0cdd19e6121 | =src/gesso/assurance/application_induction.clj= |
+| 7db2502293d0cd7e | =src/gesso/model/inductive_plan.clj= |
+| 72e069907d559629 | =src/gesso/model/transition_observation.clj= |
+| f079fc3e73a067bf | =src/gesso/model/transition_conformance.clj= |
+| 93bcf9e0c9773153 | =src/gesso/assurance/observed_correspondence.clj= |
+| d226ee5d79352170 | =src/gesso/assurance/proof/finite_model_oracle.clj= |
+| eccdea838cec377e | =src/gesso/assurance/diagnostic.clj= |
+| c74ecc33eabbb9c2 | =src/gesso/live/application_preflight/inductive_policy.clj= |
+
+** Measured acceptance run in the v1316 source overlay
+
+The table records *completed process results only*, not a forecast. It
+uses Java 21.0.12.1 with the supplied project dependency classpath and
+focused Clojure JVM test namespaces. No results here imply that the user's
+working checkout installed every corresponding TAR or that its full Ygg
+test job basket passed. Refer to the dated per-suite logs for additional
+warnings and runner details.
+
+| Exact test namespace | Tests | Assertions | Failures | Errors | Status |
+|----------------------+-------+------------+----------+--------+--------|
+| =gesso.assurance.proof.induction-acceptance-test= | 15 | 176 | 0 | 0 | PASS |
+| =gesso.assurance.proof.induction-crosscheck-test= | 24 | 236 | 0 | 0 | PASS |
+| =gesso.assurance.application-induction-checkpoint-test= | 17 | 184 | 0 | 0 | PASS |
+| =gesso.assurance.xtdb-inductive-claim-checkpoint-test= | 14 | 140 | 0 | 0 | PASS |
+| =gesso.live.application-preflight.inductive-policy-test= | 35 | 416 | 0 | 0 | PASS |
+| =gesso.assurance.diagnostic-test= | 40 | 905 | 0 | 0 | PASS |
+
+| *Six completed suites, total* | *145* | *2057* | *0* | *0* | *PASS* |
+
+The measured window ran from 2026-11-04 16:50:08 UTC to 16:53:51 UTC.
+All six JVM processes terminated successfully. These are independent
+namespace runs rather than a single process-wide all-suite invocation.
+
+These results are rechecks; the underlying pre-v1317 source modules and
+permanent tests were delivered as earlier revisions. The individual
+checkpoint tests do not cover every regression and do not replace the
+user's =bb test -n 6= whole-suite gate (or locally appropriate shard count).
+If any test process times out, record *unverified* rather than inferring a
+pass from partial output.
+
+** Adversarial coverage matrix and limits
+
+| Injected fault or missing condition | Test anchor | Expected finding | Evidence limit |
+|-------------------------------------+-------------+------------------+----------------|
+| Unsafe declared initial condition | v1287, v1311, v1312 | open base/counterexample/rejection | soundness of inference rules still open |
+| Changed abstract operation or dropped catalog entry | v1296, v1312 | source identity mismatch | external operation completeness unknown |
+| Replaced live certificate/dependency handle | v1281–v1285, v1312 | typed rejection | hostile JVM integrity not in scope |
+| Same ID, different issued executor object | v1297, v1316 | typed identity rejection | deployment binding continuity unknown |
+| Host-observed extra/unclassified writer | v1293, v1297, v1314, v1316 | inventory warning or strict blocker | inventory completeness unknown |
+| Committed command, omitted domain update | v1301, v1304, v1306, v1307 | diagnostic divergence | caller-supplied physical witness |
+| Wrong persisted type, value, frame or optional presence | v1301, v1306 | diagnostic divergence/rejection | no universal coverage theorem |
+| Aborted or intervening XTDB transaction | v1299, v1305, v1307 | no valid isolated commit witness | controlled single-node test setup |
+| Contending same-record Claim submissions | v1305, v1307 | one observed winner | not global linearizability proof |
+| Well-shaped fabricated physical witness | v1301, v1303 | may match only diagnostically | provenance unauthenticated |
+| Finite guard/replacement counterexample | v1310, v1311 | reproducible finite counterexample | only enumerated domains |
+| Unsupported fragment, empty init set, budget limit | v1310 | inconclusive/fail closed | not proof for omitted states |
+| Forged diagnostic or strict-policy report | v1314, v1316 | recheck original source / typed rejection | host must call enforcement function |
+
+* Explicit open-assumption ledger
+
+This is the decision-critical part of v1317. *OPEN* means no universal
+proof/discharge has been provided; a passing regression or in-process
+certificate does not close it. The S1–S9 identifiers are defined in
+=doc/gesso-assurance-rule-soundness-boundary.org= (v1308).
+
+** S1 — Typed source-language semantics: OPEN
+
+Claim required: for every admissible typed expression, Gesso's concrete
+rule evaluator agrees with a separately specified partial-map semantics,
+including undefinedness and optional presence. v1309–v1311 add a separate
+bounded evaluator and counterexamples, but do not cover all values or prove
+its own semantics. Needed: external semantics specification, total rule
+inventory and checked correspondence across every supported form.
+
+** S2 — Propositional kernel rule soundness: OPEN
+
+Claim required: every admitted kernel inference preserves semantic
+entailment under precisely its reported assumptions. Kernel source tests
+and substitution resistance are not formal semantics-preservation proofs.
+Needed: individual rule lemmas (including premise handling, references,
+normalization and nonclassical partial values) checked independently.
+
+** S3 — Initial-consequence validity and real initializer coverage: OPEN
+
+Claim required: base rule =Init(s) => I(s)= is sound, there are relevant
+initial states, and *every actual initializer* starts within them. Source
+checks do not enumerate production creation/seed/migration paths. Needed:
+nonvacuity proof plus per-initializer implementation correspondence.
+
+** S4 — Preservation-family soundness: OPEN
+
+Claim required: all frame, literal, mixed and same-origin copy families
+preserve the *whole invariant* under the declared transition semantics.
+Exact frame including optional-field presence and guard definedness needs
+independent justification. v1311 finite mutations add counterexample
+coverage but are not an exhaustive proof over unbounded types. Needed:
+family-specific rule theorems and a mechanically or independently checked
+implementation correspondence argument.
+
+** S5 — Induction composition and declared operation closure: OPEN
+
+Claim required: accepted base plus all per-operation preservation leads to
+invariants on every declared finite trace, and source/certification logic
+cannot omit a declared invariant or operation. v1287 exercises this chain,
+subject to S1–S4. Needed: independent composition theorem and explicit
+trust boundary of the abstract operation catalog. External writers are
+S7/S8, not discharged here.
+
+** S6 — Live admission provenance and dependencies: OPEN
+
+Claim required: certificate and dependency handles arise from fresh
+checking of the intended original catalog/graph in a trusted runtime.
+v1280–v1286 and v1312 check strong in-process identity and substitution
+cases, but assume trusted runtime, registry and checker implementations.
+Needed: defined trusted computing base, lifecycle and classloader threat
+model, and independently justified issuance/verification semantics.
+
+** S7 — Installed application and writer-set completeness: OPEN
+
+Claim required: every deployed state-changing entry point (HTTP, job,
+maintenance, migration, retry, direct XTDB write) is checked and remains
+bound to its issued executor. v1292/v1294 inspect only a host-provided
+snapshot and disclose unclassified entries. Strict policy does not by
+itself install this inventory. Needed: enforced registration/inventory
+at deployment, non-route writer audit, post-check binding stability,
+production-app integration test, and an explicit app-level composition proof.
+
+** S8 — Physical XTDB refinement and authorization: OPEN
+
+Claim required: each real authorized physical commit refines some declared
+abstract step with a trustworthy prestate, input/principal/command ID,
+atomicity and full relevant frame coverage. v1298–v1307 provide controlled,
+copyable, observed single-commit witnesses; v1300/v1302 compare those with
+source-bound abstract plans. Neither a successful comparison nor a one-
+winner contention test proves provenance or the all-transition property.
+Needed: trusted execution-bound trace capture, physical writer closure,
+real prestate/basis link, authorization dependency proof and actual XTDB
+commit/refinement correspondence.
+
+** S9 — Independent checker/metatheoretic soundness: OPEN
+
+Claim required: a small independent semantic model plus proof that all
+accepted checker rules are sound in it. A separately coded finite oracle
+is helpful error detection but not a proof of the oracle nor of all Gesso
+proof rules. Needed: a precisely stated logic/semantics, independent rule
+checks (potentially TLA+/Recife/Quint or a proof assistant as generated
+internal artifacts), and an explicit small trusted checker base. App
+users should still only declare Gesso rules, not author theorem scripts.
+
+** Additional R4 obligations outside the S1–S9 safety core
+
+- Browser/CLJS/HTMX/SSE implementation refinement and continuity: OPEN.
+- Liveness, timed timeout properties, fairness and scheduling: OPEN.
+- Multi-node XTDB/Redis coordination and cross-node convergence: OPEN.
+- HumanHelp production authorization, Claim owner uniqueness, production
+  rules and deployed initializer/writer closure: OPEN.
+- Durable observability, incident response and production evidence lineage:
+  OPEN; one test witness is not an operational audit policy.
+
+These are distinct from failed tests: they are unmet *proof obligations*.
+A passing bounded checkpoint cannot reclassify them as discharged.
+
+* Recommended admission and release rules
+
+1. *Allowed current description*: "Source-relative conditional abstract
+   induction with same-process admission, a checked supplied application
+   snapshot, bounded observed XTDB diagnostics, and independently evaluated
+   finite representative models."
+2. *Allowed application policy*: optional strict startup policy when the
+   host explicitly invokes =require-inductive-policy!= against its current
+   original sources. The result is snapshot eligibility only.
+3. *Disallowed description*: "Independently proved Gesso soundness",
+   "production application certified", "all XTDB transitions refine the
+   specification", "all writers/authorization dependencies covered", or
+   "diagnostic report provides transaction authority".
+4. *No implicit fallback*: unsupported guarantees, unclassified writers
+   when configured as mandatory, stale handles, failed source rechecks,
+   aborted observations, and counterexamples remain blocked/open.
+5. *No automatic enforcement claim*: installing v1315's namespace alone
+   does not attach the gate to a production startup/router boundary.
+
+** Required acceptance steps in the user's environment
+
+- Install every missing =ins= archive through v1317 in revision order.
+  Verify clean expected git status and inspect each revision's commit.
+- Run =bb test -n 6= (or a suitable local shard count) in the actual Gesso
+  checkout. Ygg must report a completed pass for the *entire* job inventory;
+  do not infer success from individual focused namespaces. Preserve
+  receipts and per-shard worker logs for failures and unexpected timeouts.
+- Exercise Chromium/Playwright and Node/CLJS gates included in that local
+  job set. This document's JVM-only sample is insufficient for Choreo R4.
+- Install and test the strict gate at a *real* host startup if a host will
+  claim strict preflight; test drift after startup and non-route writers.
+- Review the open S1–S9 ledger before any future certification claim.
+  Upgrade a status only when the corresponding *independent* evidence has
+  been checked; never replace an open obligation with a larger test count.
+
+** Highest-leverage work after v1317
+
+| Priority | Next work | Exit criterion |
+|----------+-----------+----------------|
+| P0 | Close the local full-suite gate | All Ygg jobs complete, no failures/timeouts |
+| P0 | Audit a real HumanHelp Claim assembly/writer inventory | Every effective writer and initializer accounted for |
+| P1 | Establish independent semantics for S1 and soundness of S4 rules | Checkable whole-invariant preservation lemmas |
+| P1 | Introduce trusted physical trace provenance and prestate binding | A physical witness cannot be forged by a copied map |
+| P1 | Integrate strict policy into the actual host boundary | Test shows source drift/writer addition blocks startup/install |
+| P2 | Verify S2/S3/S5/S6 in a small documented trusted base | Independent rule and composition soundness checked |
+| P2 | Extend end-to-end browser and multi-node refinement | Formal trace correspondence under explicit assumptions |
+
+* Final assessment
+
+The v1268–v1317 roadmap has produced a meaningful layered assurance
+system. It now has tests that can *find* incorrect declared transitions,
+changed source/handler bindings, incomplete observed inventories, wrong
+persisted XTDB writes, and differences exposed by an independently coded
+finite evaluator. The strict application gate can reject a *supplied*
+source snapshot that lacks the supported guarantees. Those are substantive
+engineering achievements.
+
+The remaining gap is not another status field or another "passed" report.
+It is an independent semantic proof for the rule checker, plus a trusted
+link from checked abstract operations to *all* actual deployed physical
+executions. Until both exist, the release status remains:
+
+#+BEGIN_EXAMPLE
+{:artifact-roadmap :v1268-v1317-delivered-subject-to-local-gate
+ :conditional-source-relative-assurance :available
+ :independent-bounded-oracle :available-diagnostic-only
+ :observed-xtdb-correspondence :available-diagnostic-only
+ :opt-in-strict-startup-policy :available-host-must-enforce
+ :full-ygg-gate :not-verified-in-this-environment
+ :independent-proof-soundness :not-established
+ :universal-physical-refinement :not-established
+ :production-certification :not-established
+ :transaction-authority :none}
+#+END_EXAMPLE
+
+This is a documentary summary of inspected sources and measured tests, not
+an executable result map, authority token, signed attestation, or theorem.
