@@ -1,0 +1,408 @@
+#+TITLE: Gesso Assurance — Rule Soundness and Trust Boundary
+#+SUBTITLE: v1308 | Independent-oracle preparation and explicit unproved obligations
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Status and scope
+
+This is the v1308 *boundary specification*, not an implementation, an
+independent soundness proof, an accepted formal theorem, or a runtime policy.
+It records what Gesso currently checks, the exact semantic implications that
+would make those checks sound, and what a future independent oracle may and
+may not establish. No Gesso API, certificate authority, or proof status is
+changed by installing this document.
+
+Source baseline: the in-session worktree after v1307. Source paths and
+functions cited below were inspected; the full Ygg suite has NOT been run in
+this environment. v1307's bounded embedded-XTDB checkpoint is test evidence,
+not a metatheorem. The R4 canonical design describes intended end-state
+requirements and must not be confused with implemented guarantees.
+
+Goal: a Gesso application author declares business rules and Gesso assembly
+in ordinary Clojure data. The author must not have to write TLA+, Quint,
+Recife, or a new proof language. Gesso's executable semantic core and a small
+independently justified proof/checker kernel have different responsibilities.
+A checker implemented in Clojure does not become independently sound merely
+because it is named a kernel or its reports are source-bound.
+
+* Vocabulary: assertions at distinct trust levels
+
+| Term | What can presently be asserted | What must NOT be inferred |
+|------+---------------------------------+---------------------------|
+| Typed declaration | Source fits a closed nominal type/syntax contract | Runtime snapshot is truthful |
+| Interpreted evaluation | v1223 evaluator yields a Boolean on supplied bindings | Universal validity or database authority |
+| Checked derivation | In-process proof rules accept a finite derivation, with premises retained | Proof of the implementation of those rules |
+| Conditional induction | Base and each *declared* operation satisfy restricted inference families | Correctness over undeclared operations or deployed writers |
+| In-process certificate | Current live handle was rechecked against the original supplied proof sources | Signed evidence, independent theorem, physical commit authority |
+| Application join | Checked executor/handler and declared source identities match a supplied assembly/host inventory | The deployed router and *every* physical writer were enumerated |
+| Persisted observation | Controlled reads find a bounded committed XTDB window and documents | Authenticated payload origin or all intervening effects |
+| Observed correspondence | Supplied physical before/after values agree with the checked abstract step | Universal refinement, even when the diagnostic says corresponds |
+| Independent finite oracle (planned) | Two implementations agree on enumerated bounded states/transitions | Soundness over unbounded domains or correctness of a shared primitive |
+| Independent soundness proof (unmet) | A metatheorem connects every accepted rule to an explicit semantics | Merely high test coverage, fingerprints, or another checker report |
+
+* Semantic objects to be defined independently
+
+** Values, variable domains, and state projections
+
+Let =Var= be the declared finite set of qualified state-field identifiers.
+A type environment =T= assigns each =v in Var= one of Gesso's supported
+nominal scalar descriptors, including explicitly optional and nullable
+variants. A state is a *partial* mapping from declared identifiers to typed
+values. Absence is a separate semantic case from presence with =nil=; a
+present nonnullable field cannot hold =nil=. Integer values use mathematical
+integer order, not machine-overflow arithmetic. Enum values are members of
+the declared finite keyword set.
+
+Let =State_T= denote the well-typed declared projections. Physical XTDB
+records may have additional fields and other tables. Projecting a database
+record into =State_T= is therefore a separate, explicitly scoped operation;
+proving a property of the projection does NOT prove unchanged extra fields.
+
+Let =eval_T(e, rho)= be evaluation of a closed typed rule expression on a
+binding map =rho=. Expression interpretation must specify short-circuit
+Boolean connectives, =:present= versus =:read=, exact equality, comparisons,
+set/enum membership, and whether a particular expression is undefined under
+a partial binding. An invalid or undefined evaluation is *not* a false
+Boolean result and must never be silently promoted to a checked theorem.
+
+Concrete present baseline:
+- =src/gesso/assurance/rule_type.clj= establishes the typed rule contract.
+- =src/gesso/assurance/rule_eval.clj= implements supplied-binding evaluation.
+- =src/gesso/assurance/proof/proposition.clj= describes typed closed
+  propositions; =src/gesso/assurance/proof/kernel.clj= checks a restricted
+  propositional derivation. The latter's rules are premise, truth introduction,
+  implication reflexivity, conjunction introduction/elimination, implication
+  elimination, and disjunction introduction; there are no arbitrary atomic
+  truth axioms, numerical solver, or premise discharge.
+
+** Guarded transition relation
+
+For declared operation =o=, input =x=, prestate =s=, and poststate =s'=,
+write =Step_o(s,x,s')= only when all of these are true:
+
+1. =s= and =s'= are valid declared state projections; =x= satisfies the
+   declared input-type environment and is bound to the checked operation.
+2. The closed guard is defined and evaluates to true on the declared
+   prestate/input bindings.
+3. Each declared replacement computes the specified typed post-value, with
+   presence/absence semantics preserved exactly as specified by its language.
+4. Every field in the *declared* frame preserves both presence and value.
+5. =writes= is exactly the set of replacement keys; =frame= is its complement
+   in the declared state projection; =reads= covers the required read set.
+6. No undeclared write or untracked side effect is inferred absent merely
+   from these declarations.
+
+This describes the intended abstract relation checked by
+=src/gesso/assurance/proof/transition.clj= and constructed through
+=src/gesso/assurance/transition.clj=. Independent semantics must be written
+without delegating the deciding logic to either implementation.
+
+** Predicate and invariant semantics
+
+Write =I(s)= for a typed invariant evaluated over a well-typed projected
+state. For an invariant =I= and an initial-condition predicate =Init=, the
+core induction obligations are:
+
+#+begin_src text
+Base(I):       for all s in State_T,
+               Init(s) => I(s)
+
+Step(I,o):     for all s,s' in State_T, all well-typed inputs x,
+               I(s) and Step_o(s,x,s') => I(s')
+
+ClosedStep(I): for every o in DeclaredOperations, Step(I,o)
+
+Inductive(I): Base(I) and ClosedStep(I)
+#+end_src
+
+If the proof system assumes a *conjunction* of declared invariants in a
+preservation premise, that stronger premise must be stated explicitly:
+=AllInvariants(s) and Step_o(s,x,s') => I(s')=. It must not be silently
+conflated with =I(s) and Step_o(s,x,s') => I(s')=. The actual obligation must
+match the precise inference-family rule; no checker report field alone can
+settle the metatheoretic reading.
+
+A syntactically contradictory =Init= makes =Base= vacuously true in ordinary
+logic. Gesso's restricted initial-consequence checker deliberately refuses
+to manufacture a positive checked-base claim from an explicitly manifest
+false initial condition. Initial-state existence and initializer coverage
+remain *separate* obligations even when the base implication is checked.
+
+Induction on a closed declared machine establishes safety only for traces
+whose first state satisfies =Init= and whose every subsequent transition is
+one of the checked declared operations. It says nothing about whether *real*
+initializers and deployed writers meet those hypotheses. Fairness, progress,
+timeouts, and liveness require additional transition/time assumptions; safety
+induction cannot establish them.
+
+* Current implementation and the trusted-computing boundary
+
+** Executable semantic core (not itself the proof checker)
+
+| Component | Observed role | Required semantic justification |
+|-----------+---------------+----------------------------------|
+| =gesso.assurance.rule-eval/evaluate-rule!= | Closed typed Boolean evaluation on caller-supplied bindings | Agreement with independent partial-map/nominal-type semantics |
+| =gesso.assurance.proof.transition= | Typed guarded replacement relation | Guard, assignment and exact frame correctness |
+| =gesso.model.tx= and XTDB | Authoritative attempted physical transaction | Atomicity, commit result, and trusted prestate/source correspondence |
+| =gesso.model.transition-observation= (v1298) | Read-only one-commit bounded observer | Read basis, footprint and provenance assumptions |
+| =gesso.model.transition-conformance= (v1300) | Compares observed physical fields to an abstract step | Correct projection and equality under declared field maps |
+
+** Restricted proof/checker core (metatheory still open)
+
+| Component | Checked property | Important non-claim |
+|-----------+------------------+---------------------|
+| =proof.kernel/check-derivation!= | Finite propositional proof using its seven declared rules | Does not establish its own soundness |
+| =proof.initial/check-initial-consequence!= | Restricted initial implications from original sources | Does not establish initializer existence or completeness |
+| =proof.unified-preservation/check-unified-preservation!= | Whole-invariant support from one of frame/literal/mixed/copy families | No unsound mixing of partial-family fragments |
+| =proof.induction/check-induction!= | Base plus every operation of exact *declared* catalog | External operation completeness is not checked |
+| =proof.certificate= (v1280) | In-process re-admission of original source derivations | No external signed proof or physical transaction permission |
+| =proof.induction-dependency= (v1282) | Exact supplied dependency-graph closure | Cannot enumerate unknown dependencies |
+| =proof.induction-ledger= (v1284) | Checked steps separated from retained original obligations | Obligations are not discharged by rewriting a report |
+| =gesso.assurance.inductive-report= (v1286) | Joins current handles and catalog source | Trust is same process, original checker and handle registries |
+
+The v1278 checker captures source-deriving sibling function values and detects
+public-Var substitutions when their reports disagree. This is useful
+anti-forgery hardening against =with-redefs=, NOT independent verification:
+shared incorrect helper code, bugs present at load time, malicious classpath
+changes, and misunderstandings of the semantics remain in its trust base.
+
+** Application, physical execution, and reporting
+
+v1288–v1297 bind conditional induction to issued executors, handlers,
+application assembly, and an observed host entry-point inventory. v1294's
+=check-application-induction!= checks exact issued executor identity against
+its handler and rechecks supplied sources. A host-supplied enumerator cannot
+prove complete deployed physical write paths, especially non-route writers.
+
+v1298–v1307 exercise embedded XTDB commits, observations, physical mutation,
+replay/contention, and =gesso.assurance.observed-correspondence= (v1302).
+=check-observed-correspondence!= joins a current application source with the
+same issued plan's abstract construction and one caller-supplied observation.
+Its report explicitly says:
+- =:physical-observation-provenance :caller-supplied-unauthenticated=;
+- =:authenticated-physical-correspondence :not-established=;
+- =:universal-xtdb-refinement :not-established=;
+- =:application-invariant-physical-preservation :not-established=;
+- =:independent-checker-soundness :not-established=;
+- =:transaction-authority :none= and =:authority :none=.
+
+v1307 passes its bounded integration acceptance test, but its deliberately
+narrow abstract Claim invariant does not prove ownership uniqueness. The
+existing physical contention tests demonstrate behavior of particular runs,
+not a universal serializability or ownership theorem.
+
+* Soundness obligations: specific acceptance criteria
+
+Each obligation below is OPEN until justified by evidence not already assumed
+in the assertion being checked. A finite oracle can *falsify* a purported
+universal claim by finding a counterexample, but agreement on its finite
+domain cannot discharge a universal proof obligation.
+
+** S1. Source-language semantic faithfulness — OPEN
+
+For every admitted typed expression =e= and valid declared binding =rho=,
+the production interpreter and the independently defined meaning must agree
+on (a) Boolean/value result or (b) the same definedness/rejection class.
+Include absent vs present-nil, optional nonnullable, enum boundaries, large
+integers, short-circuit branches, truth versus presence, and input rebinding.
+
+A checker that uses the same =rule-eval= implementation as its independent
+oracle cannot establish independence for this obligation.
+
+** S2. Each propositional inference rule preserves semantic entailment — OPEN
+
+For every conclusion admitted by =proof.kernel=, in every valuation that
+satisfies all its *reported open premises*, the conclusion holds. Prove or
+independently validate each of the seven rules under exactly the implemented
+normal-form semantics. Reject malformed references, unused or dangling
+steps, substituted conclusions, and hidden premises. Rule correctness must
+not depend on unadvertised classical, arithmetic, or equality axioms.
+
+** S3. Initial-consequence rules are sound and nonvacuous claims stay separate — OPEN
+
+Every positive =initial= inference must entail =Init(s) => I(s)= under the
+same typed valuation semantics. A manifestly false initial expression must
+not be advertised as an existence argument. Explicit initial-state existence
+and coverage of all actual initializer paths require separate evidence.
+
+** S4. Four preservation families are individually sound — OPEN
+
+For frame, literal assignment, mixed frame/literal, and same-origin copy,
+prove that each family's *whole-invariant* conclusion follows from its stated
+guard, precondition and abstract update semantics. In particular verify:
+- frame extensionality includes optional-field *presence* and value;
+- literal postconditions use checked expression and target types;
+- mixed clauses respect exact field separation and conjunction semantics;
+- copy equality has the same prestate origin and identity expected by the rule;
+- no proof of unrelated conjuncts is assembled across families;
+- failed guard or undefined assignment is not treated as a successful step.
+
+** S5. Induction composition and exact catalog closure — OPEN
+
+If S3 and S4 are sound and the checker establishes a base for every invariant
+and preservation for every declared operation, show that all *declared*
+finite traces from a satisfying initial state preserve each invariant.
+Prove that result aggregation never drops a declared invariant or operation,
+never treats =:open= as checked, and does not permit a changed source identity
+to reuse prior evidence. A smaller self-consistent catalog may prove a
+smaller machine; that is not external completeness.
+
+** S6. Admission, dependency identities, and anti-forgery — OPEN
+
+Show that an accepted live certificate and dependency handle originate from
+fresh checking of the exact intended source and graph in the trusted process,
+with original open premises preserved. Clarify assumptions about JVM process,
+registry lifetime, classloader, shared primitives, and verifier code integrity.
+The presence of a SHA-256 fingerprint is *not* a cryptographic attestation of
+who ran a checker. Matching copied reports is not evidence of independent
+rechecking, and no report may become a transaction capability.
+
+** S7. Application closure and installed authoritative behavior — OPEN
+
+Show that the source-checked operation set is exactly the set of deployed
+state-changing entry points, including jobs, retries, maintenance tools,
+migrations, trigger paths, and non-HTTP writers. Show installed routes use the
+same checked executor objects and that the mapping stays stable from
+preflight to invocation. Merely enumerating routes at one instant is weaker.
+
+** S8. Physical refinement, transaction basis, and authorization — OPEN
+
+For *every* committed physical transition on a relevant request, establish
+that there exist declared =o,x,s,s'= matching a trusted execution, where:
+- the actual transaction's read snapshot and guard correspond to =s=;
+- the trusted principal, authorization dependencies and command binding are
+  those approved by the abstract operation;
+- the actual persisted poststate projects to =s'= and every asserted
+  physical frame/relevant table was covered;
+- the XTDB commit was atomic and its command outcome bound to the same
+  operation, principal and command ID;
+- all other physical writers satisfy a matching refinement or are excluded
+  by a proven scope boundary.
+
+A v1298 witness is a bounded read-only snapshot pair, not an authenticated
+transaction payload. A caller may fabricate a *well-shaped* copyable witness
+which passes v1300/v1302 diagnostic comparison. Thus even a positive
+correspondence report must not discharge this obligation.
+
+** S9. Checker-to-implementation trust / independent metatheory — OPEN
+
+The semantic definition used to justify S1–S8 cannot simply quote the code
+under examination. A credible theorem requires a small, explicit inference
+system, semantic preservation arguments, an independent proof checker with a
+stated trust base, or mechanically checked proofs. Tests and the finite oracle
+below provide valuable counterexamples and regression evidence but not the
+universally quantified theorem. The first practical milestone is a
+*separately implemented* finite decision procedure on a tiny domain.
+
+* v1309–v1312 independent-oracle design contract
+
+** What independence means for the first oracle
+
+=src/gesso/assurance/proof/finite_model_oracle.clj= (planned v1309) should
+be an isolated *test oracle*, not an admission path or certificate issuer.
+It can share raw declaration *data* and simple structural copying, but it must
+not call =check-induction!=, =check-initial-consequence!=,
+=check-unified-preservation!=, =rule-eval/evaluate-rule!=, the kernel, or
+their internal inferencers to decide whether an implication holds. Use a
+second, plainly specified evaluator/transition relation for a deliberately
+small subset, or explicitly mark unsupported cases. Independence is a
+source-review requirement: duplicating a high-level API call under a new
+namespace is not independent testing.
+
+A suitable initial bounded model has:
+- one or two enum state fields plus an optional owner-like field;
+- one guarded operation with a literal status update and a framed field,
+  extended to two operations for the full induction cross-check;
+- a finite input set and finite state domain including absent, present-nil
+  when nullable, and present non-nil cases;
+- a finite set of declared initial states and predicates;
+- a strictly bounded Cartesian-product budget with explicit exhaustion and
+  =unsupported= / =budget-exceeded= results instead of false success.
+
+** Enumerated obligations and output
+
+The oracle must independently enumerate:
+1. Valid typed initial states and all admissible typed inputs in the selected
+   finite domain; malformed values must not be silently coerced.
+2. Every guarded transition from each state/input, including exact writes,
+   frame preservation, field presence and values.
+3. Base violations: one =s= with =Init(s)= true and =I(s)= false.
+4. Step violations: one =s,x,s'= satisfying the stated premise but not the
+   consequent, with the exact operation and invariant IDs.
+5. Whether the set is *exhaustive relative to the declared finite universe*;
+   a truncated run must have an explicit inconclusive result.
+
+Recommended result classes:
+- =:counterexample= with reproducible state, input, operation, invariant,
+  and the violated premise/conclusion;
+- =:bounded-no-counterexample= with exact finite universe and counts;
+- =:unsupported-language= for expressions outside oracle semantics;
+- =:budget-exceeded= or =:invalid-source=, neither of which implies success.
+
+It must not expose =:proved=, =:certified=, =:admitted=, or transaction authority.
+Use deterministic enumeration and stable, printable counterexamples for
+regression tests. Do not assume an unbounded integer or string domain has
+been exhaustively explored; record any finite representatives as a boundary.
+
+** Planned test obligations
+
+- v1310: prove the *oracle itself* gives expected results on hand-worked
+  finite models, including known counterexamples and unsupported types.
+- v1311: compare positive and negative v1278 induction judgments against
+  independently enumerated tiny models, including missing-base, one-bad-
+  operation, optional presence, and changing the declared operation set.
+  Any positive v1278 judgment with an actual finite counterexample is a
+  serious soundness defect and must block advancement until explained/fixed.
+- v1312: adversarially mutate catalog/base/step reports, proof source, live
+  handles and claimed authority. Ensure neither the real checker nor the
+  oracle mistakes a stale or forged report for semantic evidence.
+
+This effort tests *consistency with an independently implemented bounded
+semantics*. It is stronger than echoing the original checker; it is weaker
+than a machine-checked rule-soundness theorem.
+
+* Release gates and promotion restrictions
+
+** Explicit claim ladder
+
+1. =Source checked=: exact syntax, types and bounded structure were checked.
+2. =Conditional abstract induction checked=: base/step inferences cover
+   every declared invariant and declared operation, assuming checker rules.
+3. =Source-bound in-process admission=: current original sources and handle
+   graph rechecked; provenance confined to the trusted process.
+4. =Observed correspondence diagnostic=: one supplied physical observation
+   matched or diverged; no authenticated physical provenance is asserted.
+5. =Independent bounded agreement=: an independent finite oracle found no
+   counterexample in a stated finite domain; no universal theorem follows.
+6. =Independently proved soundness= (FUTURE): separately checked semantic
+   rule theorem with listed trust assumptions and complete proof artifacts.
+7. =Production physical refinement= (FUTURE): implemented write/initializer
+   closure, authorization, and all-transition correspondence established.
+
+Do not infer any stronger rung from a weaker one. In particular, a test
+failure, timeout, partial run, an unclassified writer, forged observation,
+or an =:open= obligation must never be silently converted to success.
+
+** v1317 acceptance review requirements
+
+The review should enumerate for every claimed guarantee: exact source
+revision, proof or test artifact, source identity, premises, assumptions,
+model domain, failure/counterexample coverage, and the remaining unverified
+boundary. It must clearly distinguish *observed single-node XTDB behavior*,
+*conditional abstract induction*, *bounded oracle agreement*, and
+*independent metatheoretic proof*. The last two are not interchangeable.
+
+The full Ygg gate must be run on the user's compatible environment; a focused
+JVM test result or this document alone is not a replacement. R4 certification
+should remain unavailable until its much stronger dependencies are proven,
+not merely described by reassuring status labels.
+
+* Immediate decision
+
+Proceed to v1309 only as an independent, finite, diagnostic semantic oracle.
+Keep the existing exact source checks and physical diagnostic checks intact.
+If the oracle finds a counterexample to a supported Gesso inference, preserve
+it as a failing regression and correct the checker before extending admission.
+If no counterexample appears, report only the enumerated coverage and the
+unresolved S1–S9 obligations. That is the soundness boundary for this phase.
