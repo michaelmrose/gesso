@@ -1,13 +1,26 @@
 (ns gesso.assurance.proof.certificate
-  "Source-relative, checker-backed proof admission (v1237).
+  "Source-relative, checker-backed proof admission (v1237; v1280 induction).
 
    A certificate is an opaque, JVM-local handle, NOT a signed document, runtime
    authorization, universal invariant, or proof of a Clojure/XTDB/CLJS effect.
-   This module accepts TWO DISTINCT theorem languages, without identifying
-   them with one another:
+   This module accepts THREE DISTINCT restricted proof kinds, without
+   identifying their different claims with one another:
 
    * :propositional       -> v1231 kernel/check-derivation! from original source
    * :guarded-transition  -> v1235 derivation/check-transition-derivation!
+   * :conditional-induction -> v1278 induction/check-induction! over an
+     ORIGINAL v1276 exact declared operation catalog, with every invariant
+     initially checked and preserved by every declared operation.
+
+   The induction kind admits a conditional abstract-machine argument only.
+   It explicitly does NOT prove that the operation catalog includes every
+   physical writer, that any real initializer satisfies the initial condition,
+   that the inference rules are independently sound, or that XTDB/CLJS execution
+   refines the abstract transitions. Rechecking never accepts a candidate
+   report as the proof source. The source-derived root can be obtained with
+   induction-certificate-subject! before constructing a dependency graph.
+   Exact source-dependency completeness is a later, separate obligation;
+   no caller-supplied dependency graph is inferred complete by this module.
 
    Usage:
      (admit-certificate!
@@ -47,6 +60,7 @@
   (:require [clojure.set :as set]
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.derivation :as derivation]
+            [gesso.assurance.proof.induction :as induction]
             [gesso.assurance.proof.kernel :as kernel]
             [gesso.assurance.proof.transition :as transition]
             [gesso.assurance.subject :as subject])
@@ -77,6 +91,96 @@
         :certificate-admission))
 (def ^:private abstract-relation-premise
   :gesso.assurance.proof.derivation/abstract-relation-match)
+(def ^:private matching-induction-premise
+  :gesso.assurance.proof.induction/matching-declared-abstract-machine)
+(def ^:private required-induction-open-obligations
+  #{:induction-rule-soundness
+    :initial-state-existence
+    :external-initializer-coverage
+    :external-operation-set-completeness
+    :physical-write-path-coverage
+    :implementation-correspondence
+    :checker-meta-soundness})
+
+;; Check the real source through the implementation captured when this namespace
+;; loads. A with-redefs replacement of the public checker cannot manufacture
+;; a successful certificate; it must agree with the actual recomputation.
+;; This is NOT an independent soundness proof of that implementation.
+(def ^:private original-induction-checker induction/check-induction!)
+
+(defn- recheck-induction! [catalog]
+  (let [public (var-get #'induction/check-induction!)
+        checked (original-induction-checker catalog)]
+    (when-not (identical? public original-induction-checker)
+      (when-not (= checked (public catalog))
+        (throw (ex-info "Induction checker was substituted."
+                        {:error/type ::invalid-certificate
+                         :reason :induction-checker-contract-changed
+                         :at [:proof-source]}))))
+    checked))
+
+(defn- induction-subject [report]
+  {:kind :rule
+   :id (:catalog-id report)
+   :interface {:proof-kind :conditional-induction
+               :induction-version induction/induction-version
+               :catalog-fingerprint (:catalog-fingerprint report)
+               :induction-fingerprint (:fingerprint report)
+               :operation-ids (:declared-operation-ids report)
+               :invariant-ids (:declared-invariant-ids report)}})
+
+(defn- valid-induction-report? [report]
+  (let [operations (:declared-operation-ids report)
+        invariants (:declared-invariant-ids report)
+        rows (:induction-outcomes report)
+        results (:operation-evidence report)
+        meta-open (:open-meta-obligations report)]
+    (and (= induction/report-type (:type report))
+         (= induction/induction-version (:version report))
+         (string? (:fingerprint report))
+         (re-matches #"sha256:[0-9a-f]{64}" (:fingerprint report))
+         (string? (:catalog-fingerprint report))
+         (re-matches #"sha256:[0-9a-f]{64}" (:catalog-fingerprint report))
+         (keyword? (:catalog-id report))
+         (some? (namespace (:catalog-id report)))
+         (set? operations) (seq operations)
+         (set? invariants) (seq invariants)
+         (= (:conditionally-checked-inductive-invariant-ids report) invariants)
+         (= #{} (:unsupported-inductive-invariant-ids report))
+         (true? (:all-declared-invariants-conditionally-inductive? report))
+         (vector? rows) (= (count rows) (count invariants))
+         (= invariants (set (map :invariant rows)))
+         (= (count rows) (count (distinct (map :invariant rows))))
+         (every? (fn [row]
+                   (and (= :checked-conditional-induction (:status row))
+                        (= :checked-conditional-inference (:initial-status row))
+                        (= operations (:preserving-operation-ids row))
+                        (= #{} (:unsupported-operation-ids row))))
+                 rows)
+         (vector? results) (= (count results) (count operations))
+         (= operations (set (map :operation-id results)))
+         (= (count results) (count (distinct (map :operation-id results))))
+         (= operations (set (keys (:original-open-obligation-ids-by-operation report))))
+         (= :exact-base-and-all-declared-transitions (:proof-rule report))
+         (= :closed-declared-abstract-machine-only (:scope report))
+         (= :conditional-induction-on-matching-declared-abstract-transitions
+            (:claim report))
+         (= :original-operation-set-and-original-initial-and-preservation-sources
+            (:checking report))
+         (= :restricted-conditional-induction-candidates-checked (:proof-status report))
+         (set? meta-open)
+         (set/subset? required-induction-open-obligations meta-open)
+         (contains? meta-open :certificate-admission)
+         (= :not-independently-proved (:checker-soundness report))
+         (= :not-established (:initial-state-existence report))
+         (= :not-established (:external-initialization-coverage report))
+         (= :not-established (:external-operation-set-completeness report))
+         (= :not-established (:physical-write-path-coverage report))
+         (= :not-issued (:certificate report))
+         (= :not-admitted (:admission report))
+         (= :not-established (:runtime-enforcement report))
+         (= :not-established (:implementation-correspondence report))
+         (= :none (:authority report)))))
 
 (deftype CertificateHandle []
   Object
@@ -181,7 +285,38 @@
        :scope :matching-abstract-transition-only
        :checker-version derivation/derivation-version})
 
+    :conditional-induction
+    (let [report (recheck-induction! proof-source)]
+      ;; No partial invariant set is admitted by this proof kind. Any open
+      ;; base case or operation step makes admission unsafe; the unadmitted
+      ;; induction report can still explain partial progress to its caller.
+      (when-not (valid-induction-report? report)
+        (fail! :unsafe-induction-judgment [:proof-source] {}))
+      (let [root (induction-subject report)]
+        {:report report
+         :subject root
+         :subject-fingerprint (:fingerprint (subject/describe-subject root))
+         :goal {:kind :all-declared-invariants-inductive
+                :catalog-id (:catalog-id report)
+                :invariant-ids (:declared-invariant-ids report)}
+         :open-premises #{matching-induction-premise}
+         :open-obligations
+         (set/union (disj (:open-meta-obligations report)
+                         :certificate-admission)
+                    external-transition-obligations)
+         :scope :closed-declared-abstract-machine-only
+         :checker-version induction/induction-version}))
+
     (fail! :unsupported-proof-kind [:proof-kind] {:kind kind})))
+
+(defn induction-certificate-subject!
+  "Derive the exact dependency-graph root for a complete source-owned
+   CONDITIONAL induction argument. Requires original operation-catalog input,
+   not a copied checker report. The returned raw subject is descriptive, not
+   admitted or proof evidence. Install it through subject admission and the
+   live dependency graph checker before requesting certificate admission."
+  [catalog]
+  (:subject (check-proof! :conditional-induction catalog)))
 
 (defn- checked-graph!
   [graph-handle current-graph raw-subject]
@@ -209,7 +344,8 @@
   (exact-keys! source input-keys [])
   (let [{:keys [proof-kind proof-source graph-handle current-graph
                 expected-open-premises expected-open-obligations]} source
-        {:keys [report subject open-premises open-obligations scope checker-version]}
+        {:keys [report subject subject-fingerprint goal open-premises
+                open-obligations scope checker-version]}
         (check-proof! proof-kind proof-source)
         graph (checked-graph! graph-handle current-graph subject)
         source-fp (source-fingerprint! proof-kind proof-source)
@@ -226,19 +362,21 @@
                       :checker-version checker-version
                       :proof-fingerprint (:fingerprint report)
                       :proof-source-fingerprint source-fp
-                      :subject-fingerprint (:subject-fingerprint report)
+                      :subject-fingerprint (or subject-fingerprint
+                                               (:subject-fingerprint report))
                       :dependency-graph-fingerprint graph-fp
                       :scope scope
                       :open-premises open-premises
                       :open-obligations open-obligations}})]
       {:proof-kind proof-kind
        :scope scope
-       :subject-fingerprint (:subject-fingerprint report)
+       :subject-fingerprint (or subject-fingerprint
+                                (:subject-fingerprint report))
        :derivation-fingerprint (:fingerprint report)
        :source-fingerprint source-fp
        :dependency-graph-fingerprint graph-fp
        :fingerprint (:fingerprint identity)
-       :goal (:goal proof-source)
+       :goal (or goal (:goal proof-source))
        :checker-version checker-version
        :open-premises open-premises
        :open-obligations open-obligations
@@ -261,7 +399,9 @@
    matching the sole dependency root to the exact subject, validating a live
    current DAG, and requiring exact acknowledgement of open obligations.
 
-   :proof-kind is either :propositional or :guarded-transition.
+   :proof-kind is :propositional, :guarded-transition, or
+   :conditional-induction. The latter admits ALL declared inductive invariants
+   only when every base and preservation inference was source-rechecked.
    :graph-handle is produced by dependency/check-graph!, never a copied map.
    :current-graph must be the consuming party's FRESH declaration; any claim
    of completeness is relative to that declared DAG, not arbitrary runtime code.
@@ -286,12 +426,17 @@
                :version certificate-version
                :certificate-scope :source-relative-abstract-proof-only
                :checking :original-source-independently-rechecked
-               :proof-status (if (seq (:open-premises entry))
-                               :checked-conditional-abstract-derivation
-                               :checked-abstract-derivation)
+               :proof-status (if (= :conditional-induction (:proof-kind entry))
+                               :checked-conditional-abstract-induction
+                               (if (seq (:open-premises entry))
+                                 :checked-conditional-abstract-derivation
+                                 :checked-abstract-derivation))
                :closed-local-obligations
-               #{:derivation-checked :declared-dependencies-checked
-                 :certificate-admission}
+               (if (= :conditional-induction (:proof-kind entry))
+                 #{:induction-rechecked :declared-dependencies-checked
+                   :certificate-admission}
+                 #{:derivation-checked :declared-dependencies-checked
+                   :certificate-admission})
                :assumption-discharge :not-performed
                :implementation-correspondence :not-established
                :runtime-enforcement :not-established
