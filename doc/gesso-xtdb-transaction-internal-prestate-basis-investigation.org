@@ -1,0 +1,296 @@
+#+TITLE: Gesso v1386 — XTDB Transaction-Internal Prestate and Basis Investigation
+#+SUBTITLE: Actual XTDB 2.2.0-beta1 capabilities, controlled experiment, and conditional refinement route
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Decision and scope
+
+*Decision:* The public XTDB 2.2.0-beta1 Clojure interface used by Gesso does
+not provide an authenticated read-snapshot token for the inside of a DML
+transaction. A token from a nearby external read is NOT that witness. The
+v1386 controlled experiment confirms the separation: a pinned pre-read can
+continue to see an older revision while a later DML ASSERT executes against
+newer committed state. A read-only =SHOW SNAPSHOT_TOKEN= statement is refused
+inside a DML transaction.
+
+Keep the =:transaction-internal-prestate= physical-refinement obligation OPEN.
+Do not add a fabricated basis to an executor report or promote a source-local
+snapshot to physical attestation. This is an investigation and backend boundary
+decision, NOT production runtime code, a proof certificate, or a new
+developer-facing specification interface.
+
+A critical positive result: an independent, authenticated *token* for the
+internal read state may be unnecessary for the eventual refinement theorem.
+If XTDB's durable-log serialization, pre-write ASSERT evaluation, atomicity,
+valid-time semantics, complete protected writer accounting, and source-to-
+physical operation correspondence are established, the transaction's abstract
+prestate can instead be defined by its position in the serial committed
+history. That is a PROPOSED proof route, not a proved result at v1386.
+
+* Version-locked evidence
+
+This review is against the Gesso snapshot supplied as
+=gesso.tar(20261105-031736).gz= and these installed files, plus v1382/v1384
+complete replacement source archives:
+
+- =deps.edn=: =com.xtdb/xtdb-api=, =com.xtdb/xtdb-core= and
+  =com.xtdb/xtdb-aws= =2.2.0-beta1=; Biff's XTDB integration is separate.
+- =xtdb-api-2.2.0-beta1.jar!/xtdb/api.clj=: actual installed implementation
+  of =begin-ro-sql=, =begin-rw-sql=, =plan-q=, =submit-tx*=,
+  =submit-tx= and =execute-tx=.
+- =src/gesso/live/consistency/xtdb.clj=: =query-option-keys= includes
+  =:snapshot-token=, =:snapshot-time= and =:current-time=;
+  =tx-option-keys= includes =:database=, =:system-time=, =:default-tz=,
+  =:metadata= and =:authn=, but NOT =:snapshot-token=.
+- =src/gesso/model/tx.clj=: canonical =tx/prepare= orders SQL ASSERTs
+  before =:put-docs= and forwards explicitly admitted =:tx-options= through
+  =live/transact-and-notify!=.
+- =src/gesso/model/resolved_operation.clj=: the controller observes an
+  intended plan before =tx/transact!= and classifies its result afterward.
+- =src/gesso/model/tx_refinement_prestate.clj=: checks local prewrite
+  lowering and records the internal prestate/backend assumptions as open.
+- =src/gesso/model/tx_refinement_xtdb.clj=: reads a pinned external before
+  basis, an independently pinned after basis, and optional transaction-ledger
+  windows. Its scope already says these DO NOT attest the internal basis.
+- =src/gesso/model/transition_observation.clj=: optional execute-tx-key and
+  pinned committed-ledger comparison; neither proves the inner read basis.
+- =src/gesso/assurance/proof/executor_controlled_acquisition.clj= v1384:
+  controls the observer and checks construction-site typed input projection,
+  but does not itself bind the internal XTDB read basis.
+- =doc/gesso-physical-execution-assurance-checkpoint.org= v1381 archive:
+  canonical nine-obligation physical-refinement ledger, all still open.
+
+Current XTDB documentation for transactions/basis was consulted as
+independent architectural context, but those webpages may describe changes
+subsequent to =2.2.0-beta1=. For version-specific behaviors, the archived JAR
+and the embedded-node probe below are the direct evidence.
+
+Reference URLs (read for guidance, not a substitute for pinned source):
+- https://docs.xtdb.com/about/txs-in-xtdb.html
+- https://docs.xtdb.com/reference/main/sql/txs.html
+- https://docs.xtdb.com/reference/main/sql/queries.html
+- https://docs.xtdb.com/guides/clojure-sql-cookbook.html
+
+* Public API capability matrix (beta1)
+
+| Capability | Observed source/path | What it establishes | What it does NOT establish |
+|------------+----------------------+---------------------+----------------------------|
+| Read-only snapshot token | =xt/q= via =begin-ro-sql=; =SHOW SNAPSHOT_TOKEN= | Repeatable upper-bound for separately issued queries | DML transaction internal prestate |
+| Read-only fixed clock | =:current-time= in =xt/q= | Same valid-time interpretation for pinned reads | Internal DML clock, valid-time theorem |
+| DML transaction operation list | =xt/execute-tx= via =begin-rw-sql= | Submitted batch of SQL/COPY operations, subject to XTDB semantics | Authenticated copy of executed operations or internal readset |
+| Prewrite SQL ASSERT | Canonical Gesso assertions before =:put-docs= | Transaction-local guard checks under assumed backend semantics | Independent output of values read to evaluate assertions |
+| DML transaction metadata | =:metadata= in =begin-rw-sql= | Caller-provided ledger correlation data | Authenticated origin or read-basis attestation |
+| Returned tx key | =xt/execute-tx= returns id + system time | Useful completed-transaction identifier under backend trust | Which snapshot/assertion inputs were read |
+| =xt.txs= ledger | Pinned readback in older Gesso diagnostics | Reported tx status, system time, and optional caller metadata | Full operations, exact internal prestate, or complete read footprint |
+| =:system-time= write option | =begin-rw-sql= | Requested transaction system-time override | A snapshot-token or historical prestate selector |
+| =:snapshot-token= supplied as write option | No mapping in beta1 =begin-rw-sql= | No reliable DML read-basis selection | MUST NOT be treated as honored or as a proof premise |
+
+The installed =xtdb.api= Clojure source constructs =BEGIN READ ONLY WITH=
+from =:snapshot-token=, =:snapshot-time= and =:current-time=, but constructs
+=BEGIN READ WRITE WITH= from =:system-time=, =:default-tz=, =:async?= and
+=:metadata=. A supplied =:snapshot-token= is not interpolated into that
+write statement. The Gesso adapter additionally omits it from allowed
+transaction options. No public internal-prestate getter was found in the
+reviewed write-transaction API. This is a restricted API finding, not an
+assertion about all hypothetical XTDB internals or future versions.
+
+* Controlled embedded-XTDB capability experiment
+
+** Environment and isolation
+
+Executed on a fresh embedded =xtdb.node/start-node {}= instance, using the
+supplied =xtdb-api/core 2.2.0-beta1= classpath, OpenJDK 21 and the same
+=--add-opens= Java flag already required by earlier embedded-XTDB tests.
+The test wrote to a fresh, UUID-suffixed =:gesso_prestate_probe= document,
+not to an application database. Its exit status was 0. It is a bounded one-run
+observation, not an exhaustive test of possible interleavings.
+
+** Steps
+
+1. =execute-tx= puts document with =:revision 1=.
+2. =xt/q= obtains =SHOW SNAPSHOT_TOKEN= and fixes an =Instant= clock.
+3. =execute-tx= updates the SAME document to =:revision 2=.
+4. A query with ={:snapshot-token token :current-time clock}= still reads 1;
+   the unpinned query reads 2.
+5. A write transaction is submitted with the STALE =:snapshot-token= option.
+   Its first operation is =ASSERT 1 = (SELECT COUNT(*) ... revision = 1)=;
+   its second operation, conditionally, would write =:revision 3=.
+6. The assertion fails with =:xtdb.error/code :xtdb/assert-failed=; the
+   document remains at revision 2.
+7. A write transaction containing =SHOW SNAPSHOT_TOKEN= fails with
+   =:xtdb.error/code :xtdb/queries-in-read-write-tx=.
+
+** Recorded result (bounded, redacted to nonsensitive values)
+
+#+begin_src clojure
+{:snapshot-token-present? true
+ :pinned {:revision 1}
+ :current {:revision 2}
+ :stale-assert-using-write-snapshot-option
+ {:status :exception :code :xtdb/assert-failed :message "Assert failed"}
+ :after {:revision 2}
+ :show-token-inside-write-tx
+ {:status :exception
+  :code :xtdb/queries-in-read-write-tx
+  :message "Queries are unsupported in a DML transaction"}}
+#+end_src
+
+The negative write experiment is *stronger* than simply reading the API docs:
+the stale read token genuinely pinned a query, and the attempted stale ASSERT
+still failed in the write transaction. This directly refutes the proposed
+shortcut that supplying a prior query's token to =execute-tx= binds its
+internal read basis in beta1. It does not prove that every DML statement,
+all SQL predicates, every valid-time interval, or every concurrency schedule
+behaves correctly.
+
+** Reproduction-critical operations
+
+The actual driver calls, omitting node construction and UUID allocation:
+
+#+begin_src clojure
+(xt/execute-tx node [[:put-docs :gesso_prestate_probe
+                      {:xt/id id :revision 1}]])
+(def token (:snapshot-token (first (xt/q node "SHOW SNAPSHOT_TOKEN"))))
+(def clock (java.time.Instant/now))
+(xt/execute-tx node [[:put-docs :gesso_prestate_probe
+                      {:xt/id id :revision 2}]])
+(xt/q node ["SELECT revision FROM gesso_prestate_probe WHERE _id = ?" id]
+      {:snapshot-token token :current-time clock})
+;; => [{:revision 1}]
+(try
+  (xt/execute-tx node
+    [["ASSERT 1 = (SELECT COUNT(*) FROM gesso_prestate_probe
+                   WHERE _id = ? AND revision = 1)" id]
+     [:put-docs :gesso_prestate_probe {:xt/id id :revision 3}]]
+    {:snapshot-token token})
+  (catch Throwable ex (:xtdb.error/code (ex-data ex))))
+;; => :xtdb/assert-failed
+#+end_src
+
+The multi-line SQL string above is displayed for reading; actual submitted
+SQL was a single-line string. Do not run the snippet against production data.
+
+* Two distinct meanings of prestate
+
+** Observed prestate (available)
+
+A client-created pinned snapshot =S_observed= can be recorded BEFORE the
+transaction is submitted. Within that separately fixed read phase the same
+=SNAPSHOT_TOKEN= and =CLOCK_TIME= can support repeatable target reads. An
+intervening committed writer can change the database before the submitted
+transaction is executed. Thus =S_observed= is neither guaranteed to be nor
+recoverably identifies the internal transaction prestate.
+
+** Abstract serial prestate (needed for a theorem)
+
+Let =H= be a complete, ordered, admitted history of physical write
+transactions for the protected domain, and =alpha= the verified concrete-to-
+abstract projection. For transaction =t_i=, define =S_i= as the protected
+concrete state immediately prior to =t_i= in that serial execution history.
+
+The desired conditional refinement step has the shape:
+
+#+begin_example
+  CompleteHistory(H) AND AdmittedWriter(t_i) AND BackendSerialAtomic(H)
+  AND SoundProjection(alpha) AND PhysicalGuardCorrespondence(t_i, S_i)
+  AND PhysicalWriteFrameCorrespondence(t_i, S_i)
+   =>
+  (Committed(t_i) => T_o(alpha(S_i), x_i, alpha(S_{i+1})))
+  AND (Rejected(t_i)  => alpha(S_{i+1}) = alpha(S_i))
+#+end_example
+
+This formula is a TARGET statement, not a verified implication. The bounded
+observations in v1386 do NOT discharge =CompleteHistory=,
+=AdmittedWriter=, =BackendSerialAtomic=, =SoundProjection=, guard soundness,
+write/frame completeness, or authenticated outcome binding. A failed
+transaction may have recorded ledger metadata even when it leaves the
+protected application state unchanged; rejection stuttering is scoped to
+that protected projection, not all observable database metadata.
+
+The important insight is that the abstract theorem can refer to the
+transaction's serial-position state *without ever exporting its internal
+snapshot token*. It must then prove assumptions about serialization,
+local ASSERT semantics, protected writers, valid time and the physical
+read/write relation, rather than substituting observational coincidence.
+
+* Required safety decisions for future implementation
+
+1. *Never treat external pinned before-reads as authenticated DML prestate.*
+   Status remains =:open= regardless of snapshot-token repeatability.
+2. *Never pass =:snapshot-token= as a DML option expecting it to pin reads.*
+   Beta1's public write path has no such interpretation. Do not use ignored
+   options as a certification mechanism.
+3. *Do not turn =SHOW SNAPSHOT_TOKEN= into a required DML operation.* It fails
+   in the observed beta1 backend and would alter actual submitted operations.
+4. *Keep =:system-time= separate from read basis.* This is not a mechanism for
+   reusing an old prestate; valid-time defaults need independent treatment.
+5. *Treat =:metadata= and returned =tx-id= as correlation, not attestation.*
+   Caller-supplied metadata is not a trusted record of internal predicate
+   reads or complete executed assignments.
+6. *Retain ASSERT-before-put and fail-closed canonical admission.* Gesso's
+   restricted admitted semantics may make a serial-history refinement proof
+   manageable. Neither success of an ASSERT nor its failure alone proves
+   entire application policy closure.
+7. *No automatic retries of indeterminate transactions.* A later matching
+   document does not establish which attempt caused it.
+8. *Keep authorization distinct from state/version guards.* Version ASSERTs
+   are not proofs that the correct actor or membership was authenticated.
+9. *Do not add a second downstream language.* Recife/TLC remains internal,
+   and downstream authors describe application rules through Gesso/Clojure.
+
+* v1387 empirical and adversarial acceptance targets
+
+The next revision should convert the capability experiment into permanent,
+controlled embedded-XTDB tests and separately classify each observation.
+The test code must run against the exact pinned beta1 API, use a fresh node
+and target IDs, and cleanly fail on a changed behavior. Proposed scenarios:
+
+- Repeat a read using the original snapshot token AND original clock after
+  an intervening write; compare it to an unpinned read.
+- Supply that stale token to the DML API and prove (boundedly) that a stale
+  ASSERT fails and the protected target does not change.
+- Attempt =SHOW SNAPSHOT_TOKEN= as a DML statement; require the observed
+  unsupported-query error, never pretend it yields a basis.
+- Exercise a canonical Gesso =tx/prepare= ASSERT-before-put plan over
+  intervening real transactions and verify the guard rejection with no
+  corresponding domain write.
+- Verify that transaction metadata and returned tx IDs do not leak into
+  =:authenticated-transaction-internal-prestate= claims.
+- Confirm the existing before/after reader uses the SAME snapshot-token AND
+  clock within each phase and never reuses an after basis for before.
+- Test an independent concurrent writer between the pinned read and DML
+  submission. Do not infer linearization from wall-clock order alone.
+- Bound assertions to admitted SQL/value/temporal shapes; unsupported forms
+  must not be generalized to the certified operation language.
+
+If the installed XTDB API changes, re-inspect version-specific =xtdb.api=
+source rather than guessing from web docs. In particular, a future backend
+could expose a proper transaction-snapshot witness; this experiment only
+settles the installed =2.2.0-beta1= surface.
+
+* Assurance checkpoint and handover
+
+| Original physical obligation | v1386 result |
+|------------------------------+--------------|
+| =:typed-input-binding= | v1384/v1385: bounded construction-site correspondence, not authenticated principal or universal coverage |
+| =:transaction-internal-prestate= | OPEN: confirmed no public beta1 DML snapshot witness in examined path |
+| =:guard-authorization= | OPEN: version/target guards do not establish authorization |
+| =:assignment-write-footprint= | OPEN: declared and recorded ops not complete physical write set |
+| =:frame-and-unmodeled-fields= | OPEN: bounded targeted rows only |
+| =:serial-concurrency-validation= | OPEN: empirical serial behavior is not universal backend proof |
+| =:committed-outcome-incorporation= | OPEN: outcomes remain limited by source and ledger authentication |
+| =:writer-provenance-and-deployment= | OPEN: source-relative inventory not deployed closed world |
+| =:universal-execution-refinement= | OPEN: serial-history bridge remains conditional |
+
+*Discharged physical-refinement obligations: 0 of 9.* The local experiment
+shows an unsupported shortcut; it does not regress earlier verified abstract
+assurance or create new executable production behavior.
+
+Validation for this document: inspected actual installed beta1 Clojure API,
+compared existing Gesso external collector and control path, executed one
+controlled embedded-XTDB capability probe (process exit 0), checked the
+recorded output/status classification and performed document-structure and
+=ins= archive-shape checks. This DOCUMENT-ONLY revision does not claim a
+new full JVM test gate, Ygg suite, Node/CLJS gate, Chromium run, or general
+formal proof.
