@@ -1,0 +1,471 @@
+#+TITLE: Gesso v1370 — Abstract Induction and Writer-Correspondence Acceptance Checkpoint
+#+SUBTITLE: Finite declared histories, literal initializer images, source-checked observed writers, and unproved physical refinement
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and acceptance verdict
+
+This v1370 review examines the installed-review-tree candidates from v1362
+through v1369. It is a *DOCUMENT-ONLY* source and evidence checkpoint: it does
+not change runtime assembly, public APIs, proof status, certificate admission,
+transaction authority, or the implementation of any proof rule.
+
+Verdict:
+
+  *RESTRICTED, CONDITIONAL DECLARED-MACHINE INDUCTION AND SOURCE-RELATIVE
+  OBSERVED-WRITER ACCOUNTING ACCEPTED; PHYSICAL APPLICATION COMPLETENESS,
+  EXECUTABLE REFINEMENT, AND UNIVERSAL SOUNDNESS REMAIN OPEN.*
+
+The positive claim is intentionally narrow. For the enumerated initial states
+and exactly the declared abstract operations, Gesso can assemble conditional
+base/step premises for mathematical induction. Declared literal initializers
+can be compared with that finite initial-state base. The newer assembly bridge
+can recheck an issued application and a supplied current host-observed routing
+snapshot, and it can compare operation identifiers across the two catalogs.
+
+None of this establishes that the host has enumerated every actual physical
+writer, that an identifier-matched handler realizes its abstract transition,
+that a physical XTDB snapshot is authenticated, or that the underlying
+Clojure checkers are independently proved sound. The v1368 per-writer ledger
+records nine such proof obligations; it discharges *zero* of them.
+
+The review tree is based on Git HEAD =e65820e= plus delivered installation
+files overlaid separately. Git HEAD alone does not identify those overlays or
+prove that the user's own repository has installed them. All eight v1362--v1369
+source/test payloads in this review tree match their original published
+installation TAR members byte-for-byte. The full Ygg/Shard, browser,
+ClojureScript, and live XTDB integration gates were NOT executed for v1370.
+
+* The exact conditional theorem we are approaching
+
+** Finite declared abstract induction
+
+Let =B= be the finite *enumerated* abstract initial-state set, =O= the
+*declared* abstract operation set, =I= the typed invariant, and =T_o= the
+abstract transition relation for an operation =o=.
+
+The desired premises are:
+
+#+begin_example
+  (Base)  for every b in B: I(b)
+  (Step)  for every o in O, every s,x,s':
+            I(s) AND T_o(s,x,s')  =>  I(s')
+#+end_example
+
+If the transition interpretation and conditional preservation rules are
+sound, ordinary induction then yields:
+
+#+begin_example
+  for every finite sequence
+    s0 --o1/x1--> s1 --o2/x2--> ... --on/xn--> sn
+  beginning in B and using only matching operations from O:
+    for every k in [0,n], I(sk).
+#+end_example
+
+This conclusion is about the declared abstract machine. It does not need a
+fixed bound on history length as a *mathematical* induction schema; the
+current executable =audit-finite-history!= independently checks individual
+history *witnesses* with a limit of 128 steps. Those are different claims.
+
+The implementation's finite source checks are evidence for the premises; the
+universal soundness of the implementing typed evaluator, transition checker,
+and preservation inference families is a separate, still-open obligation.
+
+** Conditional declared-initializer image
+
+Let =C= be a declared catalog of *total literal constructors*, each with one
+instruction for every projected state field. Its denotation is exactly one
+abstract state per constructor; a present =nil= is distinct from =[:absent]=.
+
+#+begin_example
+  Image(C) = { denote(c) | c in C }
+  every declared constructor starts in B  iff  Image(C) subset-of B
+#+end_example
+
+Equality of =Image(C)= and =B= is stronger source bookkeeping, but *subset*
+coverage is sufficient for the conditional starting-state argument. Neither
+relationship establishes that all deployed constructors or ad hoc writers
+are included in =C=.
+
+** Additional bridge required for actual applications
+
+To promote declared induction to a claim about actual application behavior,
+we would need evidence for the following separate implication:
+
+#+begin_example
+  Every physically admitted initialization maps into B,
+  AND every physically executable write maps to some o in O,
+  AND every actual execution of that writer refines T_o,
+  AND the invariant projection reflects the physical state claimed,
+  AND the premises and implementation of the checker are sound.
+
+  Therefore every covered physical execution preserves I.
+#+end_example
+
+The v1366 current-snapshot operation-ID join and v1368 obligation inventory
+are necessary engineering inputs to this bridge; *neither proves it*.
+
+* Delivered revisions and implementation contracts
+
+** v1362 — Independent abstract execution induction
+
+Source: =src/gesso/assurance/proof/abstract_execution_induction.clj=
+
+- =derive-induction-schema!= reconstructs a conditional v1359 composed
+  preservation lemma for EACH member of the exact declared operation set.
+- Every enumerated initial state must satisfy the full typed invariant. One
+  failing base or one open operation leaves the schema =:open-base-or-step=.
+- A supported source produces =:conditional-declared-induction-schema= and
+  =:every-finite-matching-declared-history-preserves-invariant=, *conditional*
+  on explicitly retained independent semantic and inference assumptions.
+- =audit-finite-history!= rederives the schema, checks each supplied guarded
+  before/input/after relation, stops on undeclared or nonmatching steps,
+  and never converts a finite sample into universal proof.
+- Implemented explicit bounds: 32 initial states, 32 operations, and 128
+  steps per executable finite-history audit. These bounds are on the current
+  checker inputs, not on the mathematical induction theorem.
+- Reports retain =:initializer-coverage :not-established=,
+  =:physical-operation-completeness :not-established=,
+  =:universal-implementation-soundness :not-established=, and
+  =:xtdb-correspondence :not-established=.
+
+** v1363 — Permanent abstract induction regression tests
+
+Source: =test/gesso/assurance/proof/abstract_execution_induction_test.clj=
+
+- 57 permanent tests exercise incomplete operation sets, multiple initial
+  states, invalid and interrupted histories, guard/assignment/frame checks,
+  optional values, forged reports, and 32/128 element boundaries.
+- A matching finite history must not override an open induction schema;
+  reports must not issue certificates, admission, or transaction authority.
+
+** v1364 — Declared literal-initializer image soundness
+
+Source: =src/gesso/assurance/proof/initial_state_coverage_soundness.clj=
+
+- =derive-initial-coverage!= rechecks the induction schema and independently
+  denotes every declared literal initializer using v1341 typed-state rules.
+- It records the exact =:constructor-image=, enumerated base set,
+  =:outside-declared-base-states=, and
+  =:unrepresented-enumerated-base-states=.
+- =:conditional-exact-declared-image= and
+  =:conditional-constructor-image-subset= are distinct successful forms;
+  =:open-constructor-outside-base= leaves the source argument open.
+- =audit-initializer-witness!= checks one caller-supplied state against its
+  literal constructor. Equality is not authenticated physical provenance.
+- The catalog is limited to 32 total literal initializers. Dynamic or
+  unregistered real-world constructors remain unmodeled.
+- Even successful reports retain =:real-initializer-coverage= and
+  =:physical-initialization-refinement= as =:not-established=.
+
+** v1365 — Permanent initializer-coverage regressions
+
+Source: =test/gesso/assurance/proof/initial_state_coverage_soundness_test.clj=
+
+- 44 permanent tests exercise exact/subset/outside-base construction,
+  present =nil= versus absent optional fields, invalid types, identifier
+  mismatches, source substitution, and maximum initializer counts.
+- A 27-state constructor-image grid checks independently expected states.
+- An initializer witness cannot repair incomplete induction or a catalog
+  whose declared constructor image falls outside the base set.
+
+** v1366 — Source-relative observed operation/writer join
+
+Source: =src/gesso/assurance/proof/operation_writer_coverage_soundness.clj=
+
+- =derive-observed-writer-coverage!= rechecks BOTH original input sources:
+  independent v1362 induction and the v1294 application-induction checker.
+- The v1294 path rechecks issued plans, Ring handler identities, and a
+  supplied current host-observed entry-point enumeration.
+- Exact qualified operation IDs are joined; missing issued operations,
+  issued-but-unmodeled operations, and host-observed unclassified entry
+  points remain separately visible.
+- There is NO assertion that independent v1362 and v1294 transition
+  fingerprints are equal: their source schemas and meanings differ. Every
+  operation row explicitly retains =:cross-source-transition-equivalence=
+  as =:not-established=.
+- Results distinguish =:conditional-observed-operation-id-join=,
+  =:open-operation-id-mismatch=,
+  =:open-observed-unclassified-entry-points=, and
+  =:open-independent-induction-premises=.
+- =require-current-observed-writer-coverage!= regenerates the current
+  report and rejects stale or altered report data. This is source-relative
+  freshness, not evidence of an exhaustive or authenticated host inventory.
+- =:actual-physical-writer-completeness=, deployed router adoption,
+  cross-source equivalence, and XTDB refinement all remain
+  =:not-established=.
+
+** v1367 — Permanent observed-writer coverage regressions
+
+Source: =test/gesso/assurance/proof/operation_writer_coverage_soundness_test.clj=
+
+- 35 permanent adversarial cases cover missing/extra operations, changed
+  handlers, current host enumeration, stale reports, incomplete induction,
+  forged authority and unclassified entry points.
+- The tests construct real closed-application assemblies; they do not
+  claim that unreported writers can be discovered from an incomplete host
+  enumerator.
+
+** v1368 — Executable writer correspondence obligation ledger
+
+Source: =src/gesso/assurance/proof/executable_writer_correspondence_obligations.clj=
+
+- =derive-executable-writer-obligations!= invokes the fresh v1366 source
+  coverage checker and reconstructs each independent operation's original
+  guard, typed inputs, state projection, read/write/frame footprints,
+  and assignment origins (=literal=, =prestate-read=, =operation-input-read=).
+- One row per operation in the UNION of independent and issued catalogs
+  avoids dropping an unmatched issued or abstract operation.
+- The nine required per-writer obligations are *all* emitted with
+  =:status :open=. No runtime observations or certificates are accepted
+  as proof for any of them.
+- =require-current-executable-writer-obligations!= rechecks original input
+  sources and rejects stale or forged ledger reports.
+- A clean source-relative join yields =:refinement-obligations-generated=,
+  not =:refinement-established=; the report's
+  =:all-executable-refinement-obligations-discharged?= is ALWAYS =false=.
+
+** v1369 — Permanent executable correspondence regressions
+
+Source: =test/gesso/assurance/proof/executable_writer_correspondence_obligations_test.clj=
+
+- 42 permanent tests exercise all nine open obligations, exact field and
+  assignment origins, unmodeled issuers, changed source/handler identities,
+  stale snapshots, forged report fields, and incomplete induction.
+- Tests use an actual closed Gesso application and issued executor but do
+  not execute authenticated XTDB transition refinement.
+
+* The nine physical-writer obligations at v1368
+
+The following IDs and required-evidence labels are transcribed from the
+v1368 =obligation-specs= vector. They are a ledger of *future evidence*, not
+nine proofs or nine checks that the physical implementation currently passes.
+
+| Obligation ID | Evidence that must eventually be provided |
+|---------------+------------------------------------------|
+| =:typed-input-binding= | =:executed-request-to-typed-input-projection= |
+| =:transaction-internal-prestate= | =:authenticated-transaction-snapshot-and-typed-projection= |
+| =:guard-authorization= | =:executed-guard-and-admitted-authorization-correspondence= |
+| =:assignment-write-footprint= | =:executed-assignments-and-complete-physical-write-set= |
+| =:frame-and-unmodeled-fields= | =:unchanged-state-and-physical-domain-frame-correspondence= |
+| =:serial-concurrency-validation= | =:atomic-version-check-and-serial-commit-history= |
+| =:committed-outcome-incorporation= | =:authenticated-commit-reject-or-unknown-resolution= |
+| =:writer-provenance-and-deployment= | =:deployed-executor-identity-and-origin-attestation= |
+| =:universal-execution-refinement= | =:sound-all-executions-refinement-argument= |
+
+The ledger does not assess a truth value for those premises; every entry
+has =:status :open= and the report retains =:proof-status :obligations-only=,
+=:certificate :not-issued=, =:admission :not-admitted=, and both authority
+fields equal to =:none=.
+
+* Trust-boundary analysis
+
+** What can be safely reused
+
+The following are conditional, source-grounded engineering products:
+
+1. Exact enumerated initial-state and declared operation coverage.
+2. Typed, guarded, independent finite abstract-history witnesses.
+3. Literal constructor images and source-relative subset/exact checks.
+4. Observed operation-ID and current issued handler/route joins relative to
+   the host enumeration actually supplied.
+5. Source-derived executable writer obligation inventories, including
+   explicit abstract input/read/write/frame contracts and assignment origins.
+6. Diagnostics that fail closed on malformed source and substituted or stale
+   report evidence in the covered in-process threat model.
+
+** What an apparently clean catalog still cannot prove
+
+- *Unobserved writers:* A direct XTDB call, a nonroute task, a foreign
+  component, or an entry point omitted by the host enumerator may mutate
+  protected state without appearing in the source-relative observed catalog.
+- *Handler equivalence:* A checked handler/operation ID does not show that
+  its real authorization, guards, read/write effects, and versions implement
+  the independent v1362 abstract relation.
+- *Initializer completeness:* A perfect image of declared literal
+  constructors is insufficient if another initialization path can create
+  the same domain entities.
+- *Projection completeness:* The declared finite field projection does not
+  automatically describe every physical document/table/field that a writer
+  can change. Correct frame reasoning needs an appropriate physical domain.
+- *Transaction provenance:* A post-hoc or caller-supplied before/after map
+  is not authenticated evidence of the transaction's internal read basis,
+  predicates, atomic commit, or outcome.
+- *Deployment closure:* Checking a current in-memory router is not proof
+  that the deployed router and all execution entry points use that snapshot
+  and remain stable until replaced under controlled admission.
+- *Checker metatheorem:* Two agreeing executable interpreters or a checked
+  proof-report shape do not establish universal soundness of the Clojure
+  algorithms implementing S1, S2, S4, and induction.
+- *Browser/HTMX/SSE refinement:* UI progression and commit-unknown handling
+  remain separate behavioral boundaries; abstract server safety does not
+  itself prove client observational equivalence.
+
+** Explicit counterexamples to invalid promotion
+
+1. =Image(C) subset-of B= and all =I(b)= hold, but a hidden import path
+   initializes a state outside =B=. Declared initializer coverage remains
+   true; real initializer completeness is false.
+2. Every observed route has a matching operation ID, but a background job
+   can write the same XTDB field. The ID join remains true; physical writer
+   closure is false.
+3. An issued handler uses the expected operation keyword but reads an old
+   version without an atomic compare-and-set. The ID join is true; transition
+   and serial-concurrency refinement may fail.
+4. A sample transaction's final fields match the abstract assignment, but
+   an unmodeled physical field was altered. One projected witness matches;
+   complete frame preservation has not been established.
+5. A complete v1368 ledger of nine rows is copied and all statuses are
+   replaced with =:discharged=. That modified data is neither authoritative
+   evidence nor a successful result of the source-checked function.
+
+* Verification evidence and its limits
+
+** Source and packaging integrity
+
+The source payload of each of v1362, v1363, v1364, v1365, v1366, v1367,
+v1368, and v1369 was extracted directly from its original individually
+published two-member installation TAR and compared *byte-for-byte* with
+the corresponding file in the review tree. All eight matched. Each TAR
+has exactly two flat regular members: source/test and =-commit.txt=.
+
+This establishes consistency of the REVIEWED files with the published
+installers. It is not a check of the user's live machine or of a deployed
+application. The v1366 source is the exact published source, not the
+previously reconstructed stand-in used during an interrupted earlier run.
+
+** Completed test evidence
+
+The v1370 checkpoint itself completed THREE new JVM regression gates against
+the exact archive-matching reviewed sources:
+
+| Gate | Tests | Assertions | Failures | Errors |
+|------+-------+------------+----------+--------|
+| v1363 + v1365 permanent induction/initializer suites | 101 | 858 | 0 | 0 |
+| Six v1367 real-assembly writer-coverage cases | 6 | 46 | 0 | 0 |
+| Seven v1369 real-assembly obligation-ledger cases | 7 | 66 | 0 | 0 |
+| *Total completed during v1370* | *114* | *970* | *0* | *0* |
+
+The real-assembly cases were chosen as representative source, route, handler,
+current-enumeration and obligation checks. They do not constitute a fresh
+re-execution of all 35 v1367 or all 42 v1369 tests.
+
+The permanent files delivered with v1363, v1365, v1367, and v1369 contain
+57, 44, 35, and 42 tests respectively. The original completed development
+runs reported:
+
+| Suite | Tests | Assertions | Failures/errors |
+|-------+-------+------------+-----------------|
+| v1363 abstract induction | 57 | 506 | 0 / 0 |
+| v1365 initial-state coverage | 44 | 352 | 0 / 0 |
+| v1367 observed-writer coverage | 35 | 232 | 0 / 0 |
+| v1369 executable obligation ledger | 42 | 270 | 0 / 0 |
+
+These are historical per-revision completed results; they are NOT one fresh
+full-suite run. A prior attempt to run all v1367 or v1369 real-assembly
+cases at once exceeded the available time window; those suites were then
+run in completed groups. Interrupted or timed-out runs are not counted as
+passes. The new v1370 checkpoint rechecks a focused subset and records its
+own completed gates separately.
+
+All of these tests are useful for detecting implementation regressions,
+missing source contracts, and fail-open evidence handling. They are NOT
+machine-checked universal mathematical proofs, authenticated runtime
+observations, or substitute evidence for XTDB refinement.
+
+** Gates not completed here
+
+- Full Ygg/Shard suite, all browser and CLJS tests, live XTDB integration,
+  whole-deployment provenance, and an external universal kernel proof.
+- Physical enumeration of ALL application-specific writers beyond the
+  currently supplied host observation function.
+- Formal demonstration that every production transaction refines one of
+  the abstract guarded transitions in its actual transaction-internal state.
+
+* Acceptance matrix
+
+| Layer or statement | Verdict at v1370 | Basis and limitation |
+|--------------------+------------------+----------------------|
+| S1/S4 guarded typed abstract interpretation | Restricted conditional foundation | Earlier independent checkers and bounded tests; universal soundness open |
+| S4 frame/literal/copy and conjunction | Restricted conditional foundation | Source-derived lemmas; constituent correctness assumed |
+| S5 finite declared induction schema | ACCEPTED conditionally | Exact enumerated base and declared-operation steps only |
+| Finite history witness audit | ACCEPTED as diagnostic | Maximum 128 observed steps; not a universal theorem |
+| Literal constructor image versus base | ACCEPTED conditionally | All declared total literal constructors only |
+| Current source-relative issued/observed ID join | ACCEPTED as diagnostic | Current supplied host enumeration; hidden writers remain possible |
+| Cross-source handler/abstract transition equivalence | OPEN | Different schemas; no physical execution refinement evidence |
+| Nine per-writer evidence requirements | ACCEPTED as open obligations | None discharged by v1368 |
+| Complete physical initializer and writer mediation | OPEN | No proof of exhaustive deployed execution paths |
+| Authenticated XTDB read/write/outcome refinement | OPEN | Transaction basis, atomicity, complete writes, commit unknown unresolved |
+| Universal S1/S2/S4 proof-kernel soundness | OPEN | No completed independent metatheorem |
+| End-to-end application certification | OPEN | Source diagnostics are not certificates or admission authority |
+
+The correct checkpoint status is *ACCEPTED CONDITIONAL ABSTRACT FOUNDATION*,
+not *CERTIFIED APPLICATION* or *VERIFIED PHYSICAL EXECUTION*.
+
+* Next implementation steps after v1370
+
+** v1371: Physical execution provenance boundary (priority)
+
+Define source-derived physical observation obligations around real XTDB
+transaction lifetimes, not merely arbitrary caller-provided before/after
+maps. Bind observed execution identifiers to checked plan, session, input
+projection, transaction-internal basis, write set, and outcome. Initially
+keep physical authentication and universal refinement explicitly OPEN.
+
+** Subsequent narrow steps
+
+1. Add permanent negative tests that distinguish authentic transaction
+   envelopes from fabricated or stale observations, without making a test
+   fixture itself a trusted production witness.
+2. Connect actual transaction-internal reads and guard/authorization
+   evaluations with the abstract =T(s,x,s')= inputs and pre-state.
+3. Check complete physical write and frame footprints, including fields
+   beyond the current invariant projection; require an explicit domain
+   boundary for any claim of completeness.
+4. Model compare-and-set/version checking and atomic commit behavior,
+   including conflicts, rejections, unknown commits, and eventual outcome
+   incorporation under the supported XTDB execution contract.
+5. Create an independently justified refinement rule or trusted small
+   checker which consumes authenticated evidence and makes the assumptions
+   and proof obligations explicit. It must reject all unsupported sources.
+6. Link the actual deployed router/handler and nonroute writer inventory
+   to the current issued source, with a credible completeness assumption or
+   enforced writer boundary.
+7. Preserve the separation between executable semantic core, independently
+   justified proof/checker kernel, bounded regression evidence, and final
+   admission authority. Application authors should declare Gesso rules, not
+   write TLA+, Quint, or Recife specifications manually.
+
+** Proposed release/admission gate
+
+A future assurance admission gate SHOULD require all the following, with no
+implicit downgrade or report-based authority escalation:
+
+#+begin_example
+  admitted original sources
+  AND accepted typed/abstract semantics and soundness evidence
+  AND all initializers and writers accounted for in the protected domain
+  AND each writer's physical transition refinement established
+  AND authenticated deployment/transaction provenance
+  AND explicit handling of conflicts and unknown outcomes
+  AND current, source-bound, independently checked certificate policy
+#+end_example
+
+Every absent premise must produce a typed OPEN or REJECTED result; it must
+not be renamed =proved=, =certified=, or =admitted= to unblock execution.
+
+* Final checkpoint decision
+
+v1362--v1369 meaningfully connect finite declared induction, source-derived
+literal initialization, current checked application operation identities,
+and the exact correspondence obligations needed for executable writers.
+These are coherent components of Gesso's intended proof-backed assembly
+system, and they now have dedicated permanent adversarial test suites.
+
+They establish a *conditional declared-machine safety argument*, not an
+independent universal theorem and not end-to-end proof over physical
+application executions. The next highest-value work is authentic,
+transaction-internal executable correspondence and a small independently
+justified checker, rather than adding another layer of trusted diagnostic
+reports without reducing those open assumptions.
