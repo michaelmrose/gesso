@@ -1,0 +1,395 @@
+#+TITLE: Gesso v1411 — Transaction Semantics and Concurrency Assurance Checkpoint
+#+SUBTITLE: v1396–v1410 evidence inventory, bounded single-node conclusions, unchanged physical proof obligations
+#+DATE: 2026-11-05
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and decision
+
+This is a *document-only* checkpoint of the work after v1395. It inspects the
+installed source and test artifacts for v1396–v1410, the prior v1395
+acquisition checkpoint, and completed focused-run records. It does not modify
+Gesso execution, XTDB planning, application admission, browser settlement,
+proof kernels, certificate construction, or downstream application interfaces.
+
+*Decision: ACCEPT a stronger BOUNDED SINGLE-NODE DIAGNOSTIC AND REGRESSION
+BASELINE; DO NOT ACCEPT physical execution refinement or production
+certification.* The evidence now includes a conservative unknown-outcome
+protocol vocabulary, a checkable durable-command abstract machine, explicit
+abstract serialization witnesses, adapter/ledger metadata comparisons,
+repeated real embedded-XTDB contention tests, and a conditional cross-report
+comparison. These are *different kinds of evidence*; their agreement must not
+be silently promoted to an authenticated end-to-end execution proof.
+
+All nine original per-writer physical-refinement obligations remain OPEN, as
+do all nine related acquisition/diagnostic obligation labels. Neither set
+has been discharged by v1410. No automatic retry, optimistic Live settlement,
+physical transaction authority, application admission, or certificate follows.
+
+HumanHelp, multi-node operation, deployed-route adoption, universal kernel
+soundness, and browser/CLJS/HTMX/SSE refinement are out of scope here.
+Recife/TLC is internal model-checking infrastructure; downstream application
+authors need neither Recife nor Quint nor TLA+ specifications.
+
+* Revision-by-revision ledger
+
+| Revision | Deliverable | Actual contribution and assurance class |
+|----------+-------------+-----------------------------------------|
+| v1396 | =transaction-outcome-progression-correspondence.clj= | Classifies controlled physical attempt, durable resolution, and reported Live basis; process-local/copyable diagnostic |
+| v1397 | =transaction_outcome_progression_correspondence_test.clj= | Permanent adversarial tests for outcome/replay/unknown/status distinctions |
+| v1398 | =commit_unknown_reconciliation.clj= | Later reported replay/absence/incompatible/unavailable classified without attributing earlier commit or granting retries |
+| v1399 | =commit_unknown_reconciliation_test.clj= | Permanent adversarial regression suite; synthetic lost-response and crash-window observations |
+| v1400 | =durable_command_retry_semantics.clj= | Pure atomic-command-ledger abstract transition machine; assumes single atomic incorporation and complete writer mediation |
+| v1401 | =durable_command_retry_recife_test.clj= | Permanent Recife/TLC specification of three bounded two-attempt scenarios and duplicate-incorporation mutant; *actual TLC run not verified in this environment* |
+| v1402 | =abstract_serial_history_witness.clj= | Replays abstract events and checks ordered incorporation/ledger deltas; entirely modeled, not physical serialization |
+| v1403 | =observed_serial_history_correspondence.clj= | Matches caller-associated attempts/commands to v1392 adapter/ledger metadata; ordered transaction IDs compared with abstract order |
+| v1404 | =gesso-xtdb-conflict-conditional-write-investigation.org= | Reproducible embedded-XTDB guarded-versus-blind-write probe and assumptions |
+| v1405 | =tx_refinement_conflict_conditional_write_xtdb_test.clj= | Permanent real-XTDB contention/ledger and atomic multi-document regression tests |
+| v1406 | =tx_refinement_concurrent_replay_fixture.clj= | Reusable wave-barrier fixture and serial-reference comparison; explicit ordering constraints |
+| v1407 | =tx_refinement_concurrent_serial_correspondence_test.clj= | Permanent real-XTDB Claim, membership, and multi-document replay tests across concurrent and ordered release waves |
+| v1408 | =committed_incorporation_progression.clj= | Caller-supplied durable-record/readback/Live progression three-way correspondence; replay stays unattributed |
+| v1409 | =committed_incorporation_progression_test.clj= | Permanent synthetic adversarial progression and incorporation regression tests |
+| v1410 | =conditional_single_node_refinement_evidence.clj= | Joins abstract history, reported transaction keys, and per-incorporation readback into *conditional reported-evidence agreement* only |
+| v1411 | This checkpoint | Freezes claims, test provenance, remaining assumptions, and required next gates |
+
+** Conservative outcome semantics (v1396–v1399)
+
+There are distinct events and interpretations:
+
+- An XTDB API return, throw, or later ledger row is a *physical observation*,
+  not automatically a durable-command resolution.
+- =:incorporated= is a resolved-operation result for a durable command; it
+  does not by itself authenticate which attempt caused the commit.
+- =:replay= can acknowledge a prior incorporation, even after an earlier
+  attempt lost its response. It does not identify the earlier committing
+  attempt or create another incorporation.
+- =:unresolved= after a thrown or uncertain execution is *not* a business
+  rejection. A later absent record does *not* prove physical noncommit.
+- A reported higher Live progression requirement is *not* independent
+  evidence resolving an unknown transaction attempt.
+- =:incompatible= and =:unavailable= are information/identity boundaries,
+  not permission to expose an outcome, retry, or settle.
+
+The v1398 classification does not execute reconciliation or read the database;
+it compares caller-supplied data after checking report shapes. v1397 and v1399
+exercise these safety classifications adversarially. Simulated crash windows
+are not process-kill or recovery tests. No automatic retry recovery protocol
+or liveness guarantee has been established.
+
+** Abstract command identity and serial-history witnesses (v1400–v1403)
+
+The v1400 machine distinguishes durable command identity from attempt
+identity; its transition function represents incorporation as one atomic
+ledger+business-outcome step. Within this model, multiple attempts for one
+command cannot legitimately create two incorporation entries. Response loss
+and later reconciliation do not change the physical abstract transition.
+
+The v1402 witness replays those *modeled* transitions, assigns an explicit
+serial position to each incorporation, and checks that no noncommit event
+silently changes the abstract ledger. A recheckable witness can detect altered
+reports but cannot authenticate who supplied its event history.
+
+The v1403 comparator correlates separately supplied attempt/command claims
+with public v1392 submission diagnostics, requiring positive committed
+=execute-tx= metadata and matching pinned =xt.txs= report fields for modeled
+incorporations. It flags missing, duplicate, contradictory, and reverse-order
+reported transaction IDs. The order of a supplied vector is never treated as
+physical transaction serialization. A genuine previous transaction key can
+be replayed by a substituted adapter and still agree with the ledger; this
+remains a critical causal-attribution counterexample.
+
+The v1401 Recife suite is a *permanent test source*, not a completed TLC
+verification result here. Direct ordinary-Clojure tests and a separate
+bounded state explorer ran, including a duplicate-incorporation mutant, but
+the container lacked the Recife/TLC JARs. The actual =recife/run-model=
+invocation, coverage, and counterexample rejection must be verified on the
+user's complete dependency environment. Even a passing finite TLC run would
+not establish physical XTDB atomicity or universal fairness/liveness.
+
+** Real single-node database evidence (v1404–v1407)
+
+In a bounded embedded-XTDB 2.2.0-beta1 probe, two stale-version updates
+lowered by =gesso.model.tx/prepare= yielded one committed transaction and
+one =:xtdb/assert-failed= rejection. In a different probe, two raw
+=:put-docs= writes without an application version assertion both committed,
+with the later persisted document visible. *The engine must not be presumed
+to reject blind same-target writes automatically.* A protected operation's
+actual ASSERT and the completeness of its writer paths therefore matter.
+
+The permanent v1405 tests repeat guarded conflict, unguarded writes,
+multi-document atomicity, guard/revocation behavior, and corresponding
+=xt.txs= readback under bounded contention. The v1406 fixture releases
+prepared transactions in explicitly ordered waves, including simultaneous
+release and A-before-B/B-before-A schedules. It permits only abstract serial
+histories respecting completed wave barriers, and rejects a superficially
+serializable observed outcome whose ordering contradicts those barriers.
+
+The permanent v1407 tests exercise Claim contention, Claim versus membership
+revocation, and guarded multi-document atomicity on real embedded XTDB under
+three wave schedules apiece. They check admitted-plan serial-reference
+outcomes, explicit readback targets, returned transaction IDs, and the
+reported committed transaction ledger.
+
+These runs are empirical tests of specific plans, scenario fixtures, and
+schedules. Multiple tasks released in one wave have no authenticated total
+physical serialization order. An abstract serial reference is an oracle
+under its own admitted assumptions; matching it in finite runs is not an
+independent theorem about arbitrary XTDB programs. The =xt.txs= ledger
+corroborates returned transaction metadata, not the exact payload executed
+by the physical engine. The fixture itself is *test infrastructure*, not a
+production executor or certified scheduler.
+
+** Incorporation, basis, and conditional composition (v1408–v1410)
+
+v1408 compares a previously acquired controlled outcome, a caller-supplied
+later durable-command record, and a caller-supplied progression requirement.
+It checks compatible command binding/outcome, reported transaction key,
+reported Live context basis, and readback requirements. It does not
+independently execute the read at the claimed basis; a matching readback
+is not an authenticated view of the write's transaction-internal prestate.
+Replay remains a previously incorporated command, not a current attempt's
+new commit.
+
+v1410 composes v1402/v1403 serial metadata with one v1408 incorporation
+comparison per modeled incorporation. It rejects missing, duplicated,
+unexpected or conflicting associations and mismatched reported transaction
+ID/system time. It verifies that upstream reports still carry their explicit
+no-authority/no-certificate status; it catches in-process replacement of
+selected upstream validator functions. *All cross-report attempt joins are
+caller claims.* No XTDB IO occurs in v1410, no process boundary is attested,
+and one-node origin is an *assumption*, not a runtime-checked fact.
+
+A positive =:bounded-conditional-single-node-evidence-agreement= means the
+supplied evidence is mutually consistent under its assumptions. It is not a
+physical execution certificate, even when every component report agrees.
+The no-incorporation case is separately labeled
+=:no-incorporations-to-correlate= with component comparisons not applicable;
+zero incorporated commands must never be mistaken for a successful physical
+incorporation proof.
+
+* Evidence provenance and completed tests
+
+The following are historical scoped runs from individual revisions and local
+logs, *not* a newly executed combined suite and not distinct additive tests.
+Temporary focused tests demonstrate local behavior but are not permanent
+deliverables. The source-only revisions with temporary tests require a
+separate permanent regression decision if they become a certification input.
+
+| Revision / scope | Observed result | Evidence type and limitation |
+|------------------+-----------------+------------------------------|
+| v1397 permanent outcome-regression tests | 22 tests, 982 assertions, no failures/errors | Synthetic/controlled JVM diagnostic cases |
+| v1398 combined focused suite | 27 tests, 1,499 assertions, no failures/errors | v1398 temporary plus existing v1397 cases; overlapping |
+| v1399 combined regression suite | 42 tests, 2,394 assertions, no failures/errors | Permanent v1399 plus v1397; overlapping with prior rows |
+| v1400 temporary abstract-machine suite | 9 tests, 52 assertions, no failures/errors | Pure model and bounded interleavings, no XTDB |
+| v1401 local direct Clojure and independent finite explorer | 3 direct tests / 20 assertions; three valid scenarios explored without observed violation | Real Recife/TLC invocation *not run*, cannot claim it green |
+| v1402 temporary abstract-witness suite | 10 tests, 490 assertions, no failures/errors | Abstract replay only |
+| v1403 combined comparator/witness suite | 25 tests, 561 assertions, no failures/errors | Synthetic/caller-supplied reports, overlapping with v1402 |
+| v1404 embedded XTDB probe | Exit 0 / =V1404_PROBE_PASS= | One explicit guarded/blind-write experiment |
+| v1405 permanent embedded XTDB suite | 4 tests, 314 assertions, no failures/errors | 22 bounded contention rounds; real database |
+| v1406 temporary fixture tests | 9 tests, 61 assertions, no failures/errors | Fixture incl. a real embedded-XTDB guarded race |
+| v1407 permanent embedded XTDB suite | 6 tests, 207 assertions, no failures/errors | 9 scenario/schedule combinations against real database |
+| v1408 temporary incorporation suite | 6 tests, 31 assertions, no failures/errors | Supplied record/progression evidence, no new XTDB integration |
+| v1409 permanent incorporation suite | 21 tests, 1,795 assertions, no failures/errors | Synthetic adversarial evidence |
+| v1410 temporary composition suite | 13 tests, 157 assertions, no failures/errors | Conditional composition; no new XTDB integration |
+
+A completed focused JVM test, an embedded database test, a bounded pure-model
+exploration, and a completed Recife/TLC model check are *four different
+claims*. They must be reported independently. This checkpoint itself adds
+no JVM, Recife/TLC, full-Ygg, Node, Playwright, Chromium, or deployment gate.
+
+* Original nine per-writer physical-refinement obligations
+
+These are the *original v1368 proof-obligation identifiers*, carried forward
+from v1395. Later evidence narrows uncertainty but does not discharge any.
+
+| Obligation ID | Relevant v1396–v1410 evidence | Unmet requirement and disposition |
+|---------------+-----------------------------+-----------------------------------|
+| =:typed-input-binding= | v1408/v1410 join caller-supplied command IDs and records | Authenticated actual request/principal and semantic projection from invoked handler; OPEN |
+| =:transaction-internal-prestate= | v1404 real stale ASSERT observation; v1406/v1407 serial-reference comparisons | Authenticated internal write prestate or independently proved conditional serial-history theorem; OPEN |
+| =:guard-authorization= | v1405/v1407 actual conditional-guard contention outcomes | Proved equivalence of actual executed guard, abstract authorization reader, and authenticated actor; OPEN |
+| =:assignment-write-footprint= | v1405/v1407 bounded whole-document effects; v1403/v1410 metadata | Complete physical document/field write set incl. all operation variants; OPEN |
+| =:frame-and-unmodeled-fields= | v1405/v1407 explicit target readbacks | All unmodeled fields, absent/created documents, and writes outside declared domain framed; OPEN |
+| =:serial-concurrency-validation= | v1400–v1403 abstract serial witness; v1405–v1407 real conflicts/waves | Universally justified atomic check/commit and physically admissible serialized history; OPEN |
+| =:committed-outcome-incorporation= | v1396–v1399 unknown/replay; v1408–v1410 record/progression joins | Authenticated commit/reject/unknown causal resolution and independent durable readback provenance; OPEN |
+| =:writer-provenance-and-deployment= | v1403/v1410 copyable reported IDs | Deployed handler provenance, complete mediation, and bypass exclusion; OPEN |
+| =:universal-execution-refinement= | v1410 conditional evidence composition | Independent all-executions refinement theorem with sound premises; OPEN |
+
+** Separate nine acquisition/diagnostic open-obligation labels
+
+These are not aliases of the original nine. v1392, v1394, v1396, v1398,
+v1403, v1408, and v1410 continue to report them as open:
+
+- =:authenticated-submitted-payload=
+- =:authenticated-transaction-internal-prestate=
+- =:actual-inputs-and-authorization-to-issued-executor-binding=
+- =:complete-executed-physical-write-footprint=
+- =:transaction-commit-and-conflict-outcome-authenticity=
+- =:deployed-handler-and-route-adoption=
+- =:all-physical-writer-paths-covered=
+- =:independent-abstract-to-physical-semantics-equivalence=
+- =:universal-physical-execution-refinement=
+
+A future certificate requires an explicit checked mapping from both ledgers
+to concrete dependencies and physical witnesses. No label in either ledger
+may be marked discharged merely because a diagnostic returns agreement.
+
+* Assumption register and counterexamples
+
+** A1. Atomic durable-command incorporation (assumption)
+
+The v1400 model commits one record and domain outcome in a single abstract
+step. v1405 and v1407 observed guarded atomic behavior, but this cannot
+prove every raw/unmodeled XTDB writer follows that contract. A raw blind
+=:put-docs= counterexample can bypass the intended guard.
+
+** A2. Complete physical writer mediation (assumption)
+
+The adapter observer only sees instrumented calls. Direct XTDB calls, batch
+jobs, handlers outside the checked route, initializers, migrations, and
+alternate deployed binaries remain outside its authenticated coverage.
+Enumerating known callers in one source tree is not itself a deployment
+closure proof.
+
+** A3. Attempt-to-commit identity (not authenticated)
+
+The v1392 transaction key can identify a committed row in a later ledger,
+but a substituted API response can replay a genuine old key. A v1403/v1410
+matching copied ID cannot authenticate the causal source of the commit.
+Attempt joins are not suitable evidence of physical write authorship.
+
+** A4. Transaction-internal prestate and actual guard evaluation (unobserved)
+
+A pinned external snapshot token is not the guarded write's internal
+snapshot. The bounded v1404–v1407 results constrain possible histories;
+they do not independently attest the internal prestate or every evaluation
+of the ASSERT predicates.
+
+** A5. Readback scope, time, and one-node origin (not authenticated)
+
+A later read may be stale, incomplete, from the wrong node, or missing
+unmodeled writes. Even if a transaction key and reported progression basis
+match, the caller has not proved that readback used that basis or that all
+of the compared reports came from the same actual node.
+
+** A6. Authorization and typed input (application links unproved)
+
+Prior v1384/v1388 links and v1408/v1410 command joins may be type-consistent
+while pointing at the wrong principal or policy dependency. The intended
+actor and checked abstract authorization must be bound to the executed
+handler by a stronger, independently justified argument.
+
+** A7. Model/checker and cross-report independence (not established)
+
+v1400 is the specification transition system whose invariants the finite
+explorers test; the exploration does not prove the abstract interpreter is
+semantically complete. v1402 replays the same transitions. v1410 composing
+multiple reports derived from related inputs does not make those sources
+independent or increase their authority. Generic kernel soundness belongs
+to the separate forthcoming assurance workstream.
+
+** A8. Response loss, recovery, and liveness (open)
+
+The model explicitly permits response loss. Absence of a later command
+record neither proves failure nor authorizes retry. No fair scheduler,
+crash-safe recovery, bounded completion deadline, or deployment-level
+idempotent retry protocol is proved. The single-invocation wrappers must
+retain their no-auto-retry behavior.
+
+* Decision matrix and allowed terminology
+
+| Claim | Verdict and allowed characterization |
+|-------+--------------------------------------|
+| A bounded model preserves unique durable command incorporation under its atomic-step semantics | ACCEPTED *within the v1400 model*; Recife/TLC pass not yet confirmed locally |
+| Abstract history witnesses can be replayed and internally checked | ACCEPTED *for supplied modeled histories* |
+| Public XTDB transaction IDs and a later ledger report can agree | ACCEPTED *metadata correspondence only* |
+| Embedded XTDB guarded conflicts and wave-ordered runs matched a finite serial reference | ACCEPTED *in the tested scenarios/schedules* |
+| Unguarded writes inherently conflict on a document | REJECTED by v1404/v1405 bounded observations |
+| Reported durable incorporation and Live basis can be cross-compared | ACCEPTED *for supplied readbacks/requirements* |
+| v1410 yields conditional bounded agreement across existing reports | ACCEPTED *diagnostic only* |
+| These tests establish actual XTDB serializability for arbitrary admitted executions | NOT ESTABLISHED |
+| These reports authenticate the actual submitted payload or committing attempt | NOT ESTABLISHED |
+| All physical writer paths and unmodeled fields are covered | NOT ESTABLISHED |
+| A previous unknown outcome may automatically be retried or settled | REJECTED |
+| A physical refinement or application certification may be issued | REJECTED: both nine-obligation ledgers remain OPEN |
+
+The strongest acceptable v1410 positive status is
+=:bounded-conditional-single-node-evidence-agreement=. Never rebrand it as
+=:verified=, =:physically-certified=, =:proved-serializable=, or a positive
+admission decision. Preserve =:physical-refinement :not-established=,
+=:certificate :not-issued=, =:admission :not-admitted=, =:authority :none=,
+=:safe-to-retry? false=, and =:safe-to-settle? false=.
+
+* Next required work and acceptance gates
+
+** v1412–v1423 — Complete physical write/frame accounting
+
+1. Register the declared protected document and field domain, including
+   deletes, creates, missing rows, reserved fields, and document identity.
+2. Compare every canonical lowered assignment to an independently captured
+   and normalized physical operation/write-effect footprint. Include guarded
+   conditional writes and the complete multi-document transaction.
+3. Demonstrate that unrelated fields and explicitly absent documents remain
+   unchanged for each admitted operation, or identify/record a divergence.
+4. Test malicious extra targets, stale readback, hidden out-of-domain writes,
+   aliasing, missing readback targets, and substituted operation vectors.
+5. Separate full physical domain accounting from the set of document IDs the
+   test happened to read. An observer limited to declared targets cannot
+   prove the absence of a write to an undeclared target.
+6. Integrate trusted acquisition when possible without claiming that an
+   instrumented adapter is an XTDB-signed payload attestation.
+7. Promote any test-only or temporary witnesses needed for a gate into
+   permanent adversarial regressions and run complete focused suites.
+
+Exit criterion: a reproducible, independently recheckable *bounded* physical
+write/frame comparison whose trust assumptions and uncovered writer classes
+are explicit. Do not mark original footprint or frame obligations discharged
+without physically justified completeness and semantics equivalence.
+
+** v1424–v1439 — Independent proof-kernel soundness
+
+- Prove/check the small kernel's constructor and derivation rules against
+  independently specified invariants, including a negative/mutant corpus.
+- Separate executable semantic-core validity from checker-kernel acceptance;
+  a certificate must not be derived by calling a classifier on its own input.
+- Validate sound composition of closed writer/reader assumptions and explicit
+  obligation dependencies; no copied report may issue an authority token.
+- Verify the actual v1401 Recife/TLC run and its mutant counterexample on
+  the supported Gesso toolchain. Keep finite exploration separate from
+  universal proofs.
+
+** v1440–v1451 — Application admission/certification chain
+
+- Connect declared business rules, admitted operations, assembled routes,
+  checked physical writers, deployed artifact identity, and audited kernel
+  evidence into one closed certification dependency graph.
+- Refuse admission whenever a required physical or kernel obligation is
+  unproved, unauthenticated, or out of scope. Preserve typed reasons.
+- Ensure downstream authors describe operations and rules in ordinary
+  Clojure/Gesso, not in a mandatory Recife/Quint/TLA+ language.
+
+** v1452–v1457 — Initial browser-side refinement
+
+- Add deterministic pure CLJS progression/optimistic-state transitions where
+  possible and exercise them with native Node-driven state-space fixtures.
+- Compare browser event traces with admitted operation outcomes, including
+  lost SSE messages, duplicated responses, replay and unknown outcomes.
+- Do not equate browser consistency tests with physical backend proof or
+  grant settlement authority for an unresolved command.
+
+* Handover and operator checklist
+
+- The next numbered revision is *v1412*: physical write/frame scope and
+  accounting. Maintain one complete replacement file per installation TAR.
+- Before a claim becomes stronger, identify its source-of-truth, exact
+  assumptions, independent witness, counterexample class, and failure gate.
+- Keep private =:execution= envelopes, command arguments, records,
+  authorization contexts, and throwable payloads out of redacted reports.
+- Use explicit unknown, incompatible, and unavailable statuses; never turn
+  indeterminate execution into business rejection by exception category.
+- Do not sum overlapping focused-test rows into a fictitious combined pass.
+- Full Ygg, Node, Chromium, and deployed integration gates are not claimed
+  for this checkpoint; re-run after integrating new modules.
+- An =ins= revision archive must contain exactly two flat regular files:
+  =gesso-v1411-doc-gesso-transaction-semantics-concurrency-assurance-checkpoint.org=
+  and the matching extensionless-stem =-commit.txt=. Install target:
+  =doc/gesso-transaction-semantics-concurrency-assurance-checkpoint.org=.
