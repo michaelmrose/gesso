@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.executor-controlled-acquisition
-  "v1382: A single-call, executor-owned observation session for a canonical
+  "v1382/v1384: A single-call, executor-owned observation session for a canonical
    Gesso resolved-operation submission. This is a safer *acquisition wiring*
    boundary than the v1373 public (:observe! session) interface: this entry
    point constructs the observer, installs it only for its own call, executes
@@ -23,6 +23,7 @@
    command and plan data. Keep them in a trusted server-side diagnostic scope;
    never return this map as an HTTP response or log it wholesale."
   (:require [gesso.assurance.proof.transaction-bound-evidence-acquisition :as acquisition]
+            [gesso.assurance.proof.typed-value-semantics :as typed]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.resolved-operation :as resolved]))
 
@@ -117,28 +118,120 @@
        :capture-reason (or (:reason (ex-data exception)) :acquisition-rejected)
        :acquisition-report nil})))
 
-(defn run-controlled-submit!
-  "Execute exactly ONE initial :submit using an observation callback created
-   and retained within this call. No external observe!/complete! callback is
-   accepted, and all application callbacks receive the original hook-free ctx.
+(def ^:private typed-source-keys (conj source-keys :input-paths))
+(def ^:private input-event-keys
+  #{:scope :phase :operation :context :binding})
+(def ^:private original-typed-observe typed/observe-state!)
+(def ^:private missing-path-value (Object.))
+(def ^:private max-input-path-depth 8)
 
-   source = {:writer-source <original checked writer-source>
-             :operation-id <qualified operation keyword>
-             :binding <canonical Gesso command binding>
-             :configuration <trusted resolved/build-operation configuration>}
+(defn- typed-input-declaration! [writer-source operation-id]
+  ;; The ORIGINAL catalog has just been rechecked by start-acquisition!.
+  ;; This lookup never derives types from the plan or a caller-supplied report.
+  (let [operations (get-in writer-source [:induction-catalog :operations])
+        matches (filterv #(= operation-id (:id %)) operations)]
+    (when-not (= 1 (count matches))
+      (reject! :missing-admitted-input-declaration [:writer-source]))
+    (let [types (get-in (first matches) [:declaration :input-types])]
+      (when-not (plain-map? types)
+        (reject! :invalid-admitted-input-types [:writer-source]))
+      types)))
 
-   The returned :resolution is the ORIGINAL authoritative application result.
-   When a prior durable record exists, or when a transaction outcome is
-   indeterminate, :acquisition-report is nil and :capture-status explains the
-   absence of completed evidence. Exceptions thrown by actual application or
-   transaction execution propagate unchanged; this wrapper does not turn them
-   into diagnostic success or retry the command.
+(defn- checked-paths! [paths types]
+  (when-not (and (plain-map? paths) (nil? (meta paths))
+                 (= (set (keys types)) (set (keys paths))))
+    (reject! :incomplete-input-projection [:input-paths]))
+  (doseq [[field path] paths]
+    (when-not (and (instance? clojure.lang.APersistentVector path)
+                   (nil? (meta path))
+                   (<= 2 (count path) max-input-path-depth)
+                   (#{:context :binding} (first path))
+                   (every? #(or (keyword? %)
+                                (and (integer? %) (<= 0 % 256)))
+                           (rest path))
+                   (not-any? application-context-keys (rest path)))
+      (reject! :invalid-input-path [:input-paths field])))
+  paths)
 
-   Even a captured committed outcome is NOT an authenticated XTDB receipt:
-   other writer paths, same-JVM code substitution, physical transaction
-   internals, deployed handler identity, and universal refinement remain open."
-  [source ctx]
-  (exact! source source-keys [])
+(defn- lookup-projected [root path]
+  (reduce (fn [value part]
+            (if (identical? missing-path-value value)
+              value
+              (cond
+                (plain-map? value)
+                (get value part missing-path-value)
+                (and (vector? value) (integer? part)
+                     (<= 0 part) (< part (count value)))
+                (nth value part)
+                :else missing-path-value)))
+          root (rest path)))
+
+(defn- project-inputs [paths context binding]
+  (reduce-kv
+   (fn [acc field path]
+     (let [root (if (= :context (first path)) context binding)
+           value (lookup-projected root path)]
+       ;; Absent input fields stay absent. The typed semantics distinguishes
+       ;; absence from present nil, false and any supported scalar.
+       (if (identical? missing-path-value value)
+         acc (assoc acc field value))))
+   {} paths))
+
+(defn- checked-typed-inputs! [writer-source operation-id paths ctx binding]
+  (when-not (identical? original-typed-observe
+                        (var-get #'typed/observe-state!))
+    (reject! :substituted-typed-input-interpreter []))
+  (let [types (typed-input-declaration! writer-source operation-id)
+        paths (checked-paths! paths types)
+        inputs (project-inputs paths ctx binding)]
+    ;; Validate before any executable callback, using the independent S1
+    ;; value semantics. The original input values are NEVER put in the report.
+    (try
+      (original-typed-observe types inputs)
+      (catch clojure.lang.ExceptionInfo _
+        (reject! :ill-typed-or-missing-input [:input-paths])))
+    {:types types :paths paths :projected inputs}))
+
+(defn- construction-input-matches?
+  [event original-ctx binding operation-id {:keys [types paths projected]}]
+  (and (plain-map? event)
+       (nil? (meta event))
+       (= input-event-keys (set (keys event)))
+       (= resolved/construction-input-observation-scope (:scope event))
+       (= :construction-input (:phase event))
+       (= operation-id (:operation event))
+       (= binding (:binding event))
+       (plain-map? (:context event))
+       (contains? (:context event) resolved/observation-context-key)
+       (contains? (:context event) resolved/construction-input-context-key)
+       (let [visible (apply dissoc (:context event) application-context-keys)]
+         (and (= original-ctx visible)
+              (= projected (project-inputs paths visible (:binding event)))
+              (try
+                (= projected
+                   (do (original-typed-observe types
+                                               (project-inputs paths visible binding))
+                       (project-inputs paths visible binding)))
+                (catch Throwable _ false))))))
+
+(defn- new-input-observer [ctx binding operation-id typed-inputs]
+  ;; A single construction-site event is captured. Swallowed hook failures
+  ;; remain visible as an INVALID diagnostic, never as a positive witness.
+  (let [state (atom {:events 0 :status :missing})]
+    {:state state
+     :observe! (fn [event]
+                 (locking state
+                   (let [already (:events @state)
+                         valid? (try
+                                  (construction-input-matches?
+                                   event ctx binding operation-id typed-inputs)
+                                  (catch Throwable _ false))]
+                     (reset! state
+                             {:events (inc already)
+                              :status (if (and (zero? already) valid?)
+                                        :matched :invalid)}))))}))
+
+(defn- run-core! [source ctx typed-paths]
   (original-functions!)
   (checked-context! ctx)
   (let [{:keys [writer-source operation-id binding configuration]} source]
@@ -147,17 +240,25 @@
                    (= operation-id (:operation binding))
                    (= operation-id (:operation configuration)))
       (reject! :operation-source-mismatch [:operation-id]))
-    (let [;; Source review occurs before ANY executable application callback.
+    (let [;; Recheck the ORIGINAL writer source before any application callback.
           session (original-acquire {:writer-source writer-source
                                      :operation-id operation-id
                                      :binding binding})
-          ;; Only this function has access to the actual observer closure.
+          typed-inputs (when (some? typed-paths)
+                         (checked-typed-inputs!
+                          writer-source operation-id typed-paths ctx binding))
+          input-observer (when typed-inputs
+                           (new-input-observer ctx binding operation-id typed-inputs))
           executor (original-build (isolated-configuration configuration))
-          controlled-ctx (assoc ctx resolved/observation-context-key
-                                (:observe! session))
+          controlled-ctx (cond-> (assoc ctx resolved/observation-context-key
+                                      (:observe! session))
+                           input-observer
+                           (assoc resolved/construction-input-context-key
+                                  (:observe! input-observer)))
           resolution-result (executor controlled-ctx {:binding binding
                                                      :mode :submit})
-          capture (completed-diagnostic session)]
+          capture (completed-diagnostic session)
+          input-capture (when input-observer @(:state input-observer))]
       (merge
        {:type boundary-type
         :version boundary-version
@@ -183,4 +284,49 @@
         :certificate :not-issued
         :transaction-authority :none
         :authority :none}
-       capture))))
+       capture
+       (when input-observer
+         {:typed-input-observation
+          {:checking :original-admitted-input-types-and-construction-call-site
+           :declared-input-field-ids (set (keys (:types typed-inputs)))
+           :projected-field-count (count (:projected typed-inputs))
+           :construction-input-events (:events input-capture)
+           :construction-site-correlation (:status input-capture)
+           :typed-projection-source :caller-supplied-closed-paths
+           :typed-input-value-provenance :trusted-invocation-not-authenticated
+           :executed-request-to-typed-input-proof :not-established
+           :physical-refinement-obligation :typed-input-binding
+           :physical-refinement-status :open
+           :scope :one-process-local-construction-hook-only
+           :certificate :not-issued
+           :authority :none}})))))
+
+(defn run-controlled-submit!
+  "v1382: Execute one initial submit with an executor-owned transaction
+   observer. Return the original resolution and bounded, noncertifying
+   acquisition report. No automatic retries, callbacks never see hooks."
+  [source ctx]
+  (exact! source source-keys [])
+  (run-core! source ctx nil))
+
+(defn run-controlled-typed-submit!
+  "v1384: Execute one controlled submission with an ADDITIONAL private input
+   observer at the original :construct! call site. Exactly one additional
+   source key is required: :input-paths maps each ORIGINAL declared abstract
+   input reader to a bounded path rooted at :context or :binding, e.g.
+   {:input/actor [:context :app/actor]}. Types are drawn from the freshly
+   checked original induction catalog, NEVER from caller-supplied type maps.
+
+   Inputs are independently type-checked before application callbacks and
+   compared at the actual construction hook. The complete original context,
+   typed values, and hook closures remain private. A replay or a swallowed
+   observation failure cannot produce :matched. Even :matched is ONLY a
+   process-local diagnostic; the path mapping is application-supplied and the
+   live request, authentication, deployed handler and physical transaction
+   are not independently authenticated. All nine obligations stay OPEN."
+  [source ctx]
+  (exact! source typed-source-keys [])
+  ;; Unlike the ordinary v1382 call, nil cannot disable the typed check.
+  (when (nil? (:input-paths source))
+    (reject! :incomplete-input-projection [:input-paths]))
+  (run-core! (dissoc source :input-paths) ctx (:input-paths source)))
