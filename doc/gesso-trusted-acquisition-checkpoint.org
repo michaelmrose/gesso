@@ -1,0 +1,338 @@
+#+TITLE: Gesso v1395 — Trusted Acquisition Checkpoint
+#+SUBTITLE: v1382–v1394 executor, XTDB adapter, and transaction-ledger evidence; unchanged physical proof boundary
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and disposition
+
+This is a *document-only* checkpoint following v1394. It consolidates the
+single-node acquisition work begun after the v1381 physical-execution
+checkpoint, using the local implementation of v1382–v1394 and the available
+focused test results. It does not change an executor, XTDB adapter, application
+preflight gate, proof constructor, or certification policy.
+
+*Decision: ACCEPT the acquisition chain as stronger BOUNDED DIAGNOSTIC
+EVIDENCE, but DO NOT ACCEPT it as trusted physical execution attestation.*
+
+In particular, v1394 can obtain controlled-executor, typed-input,
+application-guard, adapter-call, and later transaction-ledger observations
+inside *one synchronous process-local invocation*. This is more persuasive
+than correlating independently supplied reports after the fact. It is not an
+unforgeable record of the payload accepted by XTDB, transaction causality,
+transaction-internal prestate, deployed handler adoption, or universal
+physical refinement.
+
+All nine original per-writer physical-refinement obligations remain open.
+All nine additional diagnostic acquisition open-obligation labels remain open.
+No source in this checkpoint is authorized to issue a physical certificate.
+
+** Out of scope
+
+- HumanHelp application acceptance and production Claim certification.
+- Multi-node publication, consistency, failover, or distributed coordination.
+- Universal proof-kernel soundness, currently a separate assurance workstream.
+- Browser/HTMX/SSE formal refinement, though browser tests remain essential.
+- User-visible formal-language authoring. Recife/TLC remains internal finite
+  model checking; downstream apps need no Recife, Quint, or TLA+ model.
+
+* Evidence chain in source order
+
+| Revision | Primary implementation or test | Established diagnostic scope |
+|----------+--------------------------------+------------------------------|
+| v1382 | =gesso.assurance.proof.executor-controlled-acquisition= | One controller-owned observer installed and completed around an original resolved-operation invocation |
+| v1383 | =executor_controlled_acquisition_test.clj= | Permanent tests for injected observers, attempts, substituted functions, outcome preservation and callback isolation |
+| v1384 | Extended executor-controlled acquisition | Source-derived typed input declarations and closed projection checked against construction-site observation |
+| v1385 | =executor_typed_input_binding_test.clj= | Permanent adversarial input, identity, projection and construction-event tests |
+| v1386 | =doc/gesso-xtdb-transaction-internal-prestate-basis-investigation.org= | Public snapshot-token boundary and controlled embedded-XTDB probe |
+| v1387 | =tx_refinement_internal_basis_xtdb_test.clj= | Permanent pinned-read versus write-ASSERT basis behavior tests |
+| v1388 | =gesso.assurance.proof.executed-guard-authorization-correspondence= | Abstract reader links versus registered predicate-contract checks and prepared guards |
+| v1389 | =executed_guard_authorization_correspondence_test.clj= | Permanent missing, altered and substituted guard tests |
+| v1390 | =gesso.live.consistency.xtdb= | Opt-in call-site capture of ordered operations/options handed to adapter XTDB API functions |
+| v1391 | =xtdb_submission_boundary_test.clj= | Permanent adapter capture, exception, duplicate and embedded-XTDB regression cases |
+| v1392 | =gesso.assurance.proof.xtdb-submission-outcome-correlation= | Public tx-key and optional pinned =xt.txs= comparison for one adapter call |
+| v1393 | =xtdb_submission_outcome_correlation_test.clj= | Permanent forged tx-key, replay, ledger-divergence and substituted-API cases |
+| v1394 | =gesso.assurance.proof.classified-physical-acquisition= | Redacted, origin-classified coacquisition around one controlled invocation |
+| v1395 | This checkpoint | Bound claims, remaining evidence gaps, and transition to outcome/concurrency work |
+
+v1371–v1381 remain the prerequisite foundation: source-relative writer
+inventories; hook acquisition; canonical transaction lowering comparisons;
+bounded post-state readback; and finite declared-target write/frame
+comparisons. v1394 *does not replace* these earlier diagnostics with a proof.
+
+* Acquisition boundaries and permissible claims
+
+** A. Controlled executor and typed inputs (v1382–v1385)
+
+The controller creates and completes its own one-invocation observation
+session, rejects preinstalled observation hooks and substituted entry points,
+and hides observer-bearing context from registered application callbacks.
+Each attempt has its own identity; the controller neither retries nor
+reconstructs the authoritative transaction result.
+
+The v1384 typed-input extension gets the typed declaration from the checked
+abstract operation rather than a caller-supplied schema, checks a closed path
+projection, and compares it to a second construction-site observation.
+
+The *path mapping is application-supplied*. Even a type-correct match can
+project the semantically wrong value, such as treating an operation keyword
+as the principal. This is checked correspondence of supplied representations,
+not authenticated HTTP principal identity or universal request binding.
+
+=run-controlled-submit!= and =run-controlled-typed-submit!= retain the
+original resolution and sensitive plan details in private server-side
+results. Their diagnostics must not be copied wholesale to logs or returned
+as HTTP data. An incomplete observer capture remains missing evidence.
+
+** B. Transaction-internal basis (v1386–v1387)
+
+The installed XTDB 2.2.0-beta1 public query API accepts snapshot tokens for
+external reads. The controlled embedded-XTDB investigation demonstrated that
+a pinned external read can remain on revision 1 after revision 2 commits,
+whereas an intervening write's =ASSERT= evaluates against the newer state,
+not against a supplied stale read token. A query for =SHOW SNAPSHOT_TOKEN=
+inside the DML transaction is unsupported in that tested environment.
+
+Do not relabel a before/after pinned read, =xt.txs= ledger observation, or
+caller-supplied snapshot as *the write transaction's internal prestate*.
+The later single-node serial-history approach is a prospective proof route,
+conditional on independently justified XTDB transaction semantics and complete
+operation/writer mediation. It has not yet been established.
+
+** C. Guard links and physical authorization (v1388–v1389)
+
+The v1388 diagnostic obtains declared abstract guard readers from the checked
+induction/writer source, observes the registered =:predicate-contract!=
+callback, and compares linked required guards against the prepared transaction
+plan. Missing, altered or incomplete links fail before unsupported claims
+are made. The mechanism distinguishes declared dependency guards from
+update/CAS conditions.
+
+The links between abstract readers and physical predicate checks are still
+application-supplied. Matching checks in a prepared plan do not prove policy
+equivalence, the identity of an authorized principal, or that XTDB evaluated
+the asserted predicates for a particular committed attempt.
+
+** D. Adapter submission boundary (v1390–v1391)
+
+=gesso.live.consistency.xtdb/capture-tx-api-calls!= observes the actual
+adapter call sites for =submit-tx= and =execute-tx= when invoked within the
+instrumented path. It records an =:invoked= event and a =:returned= or
+=:threw= event for each captured call, preserving the ordered XTDB operations,
+filtered options, and call identifier. The ordinary transaction path remains
+unchanged when capture is absent.
+
+The captured operation vector is stronger evidence than a caller-reported
+vector. Nonetheless, this is *process-local instrumentation of a bound API
+function*, not an XTDB-signed payload receipt. An alternate writer or a
+substituted function can bypass or impersonate this boundary. Multiple calls,
+missing events, and nested captures are explicitly not equivalent to one
+verified physical submission. A failure of a later debug callback must not
+retroactively change the recorded API return into an API exception.
+
+** E. Transaction identity and later ledger read (v1392–v1393)
+
+=xtdb-submission-outcome-correlation/observe-one-submission!= captures a
+single adapter call once. A public =submit-tx= ID is *ID-only submission
+evidence* and does not prove a commit. A public =execute-tx= TransactionKey
+can expose a transaction ID and system time; an independently queried, pinned
+=xt.txs= row can corroborate those reported metadata values and committed
+status in the observed ledger.
+
+The observation node, the adapter-bound API function, and the source of the
+returned transaction key are not authenticated. A substituted API function
+can return an old legitimate transaction key; the ledger can agree without
+the claimed operation having been submitted. Thus even a corroborated key
+is not a payload delivery receipt or a causal witness. Query exceptions and
+post-execution diagnostic errors must not recast the execution outcome.
+
+** F. Classified coacquisition (v1394)
+
+=classified-physical-acquisition/run-classified-acquisition!= executes the
+original v1388 guard-corresponded typed submit *once*, inside the original
+v1392 adapter observation. Its source must have exactly =:guard-source= and
+=:observation-node=. It does not call the executor twice, retry, or apply
+independent reconciliation.
+
+It returns separate =:execution= and =:diagnostic= values. The execution
+value contains the original controlled result or throwable and may expose
+sensitive data. The diagnostic is a bounded redacted classification.
+
+The five origin/trust classes in the v1394 diagnostic are:
+
+| Evidence | Reported origin | Explicit trust limitation |
+|----------+-----------------+---------------------------|
+| Executor | =:controlled-process-local-resolved-operation= | =:process-local-unattested= |
+| Typed input | =:trusted-invocation-and-construction-hook= | =:application-path-mapping-unattested= |
+| Authorization guard | =:registered-callback-and-admitted-guard-links= | =:application-reader-links-unattested= |
+| XTDB API | =:instrumented-adapter-call-site= | =:process-local-bound-function-unattested= |
+| Ledger | =:pinned-query-on-caller-provided-node= | =:later-node-read-not-payload-attestation= |
+
+A report status of =:bounded-coobserved-metadata-agreement= requires a
+returned execution, structurally consistent controlled acquisition,
+matching typed/guard diagnostics, a committed observed physical outcome,
+a single returned =execute-tx= call, and a matching reported-key/ledger
+comparison. This is the *strongest diagnostic outcome*, not certification.
+
+The same report explicitly includes:
+
+- =:actual-payload-accepted-by-xtdb? :not-established=
+- =:transaction-internal-prestate :not-established=
+- =:causal-attribution-to-executor-attempt :not-established=
+- =:authenticated-request-or-authorization :not-established=
+- =:other-physical-writers-excluded? :not-established=
+- =:deployed-handler-or-route-identity :not-established=
+- =:proof-status :classified-coacquisition-diagnostic-only=
+- =:certificate :not-issued=, =:admission :not-admitted=
+- =:transaction-authority :none=, =:authority :none=
+
+No operator should derive a stronger Boolean =:verified?= or issue a
+certificate by stripping these qualifiers.
+
+* Two related, distinct sets of nine open requirements
+
+** A. Original per-writer obligations (v1368)
+
+These identifiers are defined in the source's =obligation-specs= and include
+required-evidence labels. They are proof requirements, *not discharged facts*.
+
+| Original obligation ID | Required evidence | Latest useful diagnostic; still missing |
+|------------------------+-------------------+-----------------------------------------|
+| =:typed-input-binding= | =:executed-request-to-typed-input-projection= | v1384/v1385 correlate typed projections; authenticated request source and semantic path identity missing |
+| =:transaction-internal-prestate= | =:authenticated-transaction-snapshot-and-typed-projection= | v1386/v1387 characterize external basis; internal transaction prestate not obtained |
+| =:guard-authorization= | =:executed-guard-and-admitted-authorization-correspondence= | v1388/v1389 compare claimed checks; actual authorized execution and equivalence open |
+| =:assignment-write-footprint= | =:executed-assignments-and-complete-physical-write-set= | v1380 declared targets, v1390 adapter call ops; complete physical effect set open |
+| =:frame-and-unmodeled-fields= | =:unchanged-state-and-physical-domain-frame-correspondence= | v1380 bounded supplied document comparisons; unobserved fields/targets open |
+| =:serial-concurrency-validation= | =:atomic-version-check-and-serial-commit-history= | v1387 one intervening write test; complete single-node serialization proof open |
+| =:committed-outcome-incorporation= | =:authenticated-commit-reject-or-unknown-resolution= | v1392/v1393 public key/ledger corroboration; rejected/unknown causal resolution open |
+| =:writer-provenance-and-deployment= | =:deployed-executor-identity-and-origin-attestation= | v1382/v1394 process-local identity only; deployed handler and bypass coverage open |
+| =:universal-execution-refinement= | =:sound-all-executions-refinement-argument= | No universal physical refinement theorem or complete mediation established |
+
+** B. Nine diagnostic acquisition open-obligation labels (v1392/v1394)
+
+The v1392 and v1394 reports carry a *different* set of nine labels:
+
+- =:authenticated-submitted-payload=
+- =:authenticated-transaction-internal-prestate=
+- =:actual-inputs-and-authorization-to-issued-executor-binding=
+- =:complete-executed-physical-write-footprint=
+- =:transaction-commit-and-conflict-outcome-authenticity=
+- =:deployed-handler-and-route-adoption=
+- =:all-physical-writer-paths-covered=
+- =:independent-abstract-to-physical-semantics-equivalence=
+- =:universal-physical-execution-refinement=
+
+These represent additional open evidence categories, not renamed copies of
+the v1368 per-writer ledger. Reconciliation between the two taxonomies will
+itself need an explicitly checked mapping before certification. At v1395
+*neither set has any discharged obligation*.
+
+* Historical test evidence and current limits
+
+The following results are from completed focused runs during the individual
+revisions, not a newly executed combined suite for this checkpoint:
+
+| Revision / scoped test | Tests | Assertions | Failures | Errors |
+|------------------------+-------+------------+----------+--------|
+| v1382 controller boundary | 7 | 33 | 0 | 0 |
+| v1383 permanent controller adversarial suite | 18 | 226 | 0 | 0 |
+| v1384 combined typed/controller suite | 24 | 261 | 0 | 0 |
+| v1385 permanent typed-input suite | 22 | 366 | 0 | 0 |
+| v1387 embedded-XTDB internal-basis tests | 7 | 44 | 0 | 0 |
+| v1388 combined guard/typed suite | 25 | 382 | 0 | 0 |
+| v1389 permanent guard adversarial suite | 13 | 200 | 0 | 0 |
+| v1390 adapter suite, including embedded XTDB | 62 | 196 | 0 | 0 |
+| v1391 adapter adversarial suite | 78 | 380 | 0 | 0 |
+| v1392 combined submission/adapter suite | 33 | 258 | 0 | 0 |
+| v1393 combined submission/adapter suite | 42 | 870 | 0 | 0 |
+| v1394 temporary classified-acquisition suite | 4 | 41 | 0 | 0 |
+
+The v1386 investigation included a separate real-XTDB capability probe;
+it was not a permanent universal semantics proof. v1394's own temporary
+fixture used an instrumented/stubbed adapter path: no new real-XTDB
+integration gate for the composed v1394 wrapper was established. Existing
+real-XTDB gates for v1387, v1390, v1391, v1392 and v1393 do not replace that
+missing end-to-end test. Several entries above *overlap in tests*; they must
+not be added to claim a distinct total or a new full Ygg pass.
+
+This document neither runs nor claims a new JVM, Node, CLJS, Chromium,
+full-Ygg, concurrency, or formal universal-soundness gate.
+
+* Acceptance matrix at v1395
+
+| Candidate assurance claim | Verdict | Boundary |
+|---------------------------+---------+----------|
+| A controller can capture one checked resolved-operation attempt without passing its observer to callbacks | ACCEPTED: process-local | v1382/v1383 focused tests |
+| The checked typed projection and separate construct-site event can agree | ACCEPTED: bounded diagnostic | Path semantics and invocation identity remain trusted |
+| Claimed physical guards can be compared with source-derived abstract readers and prepared plan guards | ACCEPTED: bounded diagnostic | Reader links and actual XTDB evaluation not proved |
+| The instrumented adapter can observe ordered operations handed to a bound XTDB API function | ACCEPTED: process-local | Bound function and other call paths not authenticated |
+| An =execute-tx= key can agree with a later pinned =xt.txs= row | ACCEPTED: public-metadata diagnostic | Not evidence that this payload caused that transaction |
+| A single nested invocation can coacquire these diagnostics | ACCEPTED: bounded diagnostic | Only the instrumented synchronous path is in scope |
+| The caller's submitted payload and transaction-internal state are authenticated | NOT ESTABLISHED | No independent backend payload/basis attestation |
+| All app/database writer paths are mediated by the checked executor | NOT ESTABLISHED | Source/deployment and hidden writer closure open |
+| Real concurrent committed histories refine admitted abstract transitions | NOT ESTABLISHED | Concurrency and physical serialization proof open |
+| The proof kernel and production/browser paths are universally sound/refining | NOT ESTABLISHED | Independent generic proof and browser correspondence work remain |
+| A physical-refinement certificate may be issued from v1394 report agreement | REJECTED | All original and diagnostic obligations open |
+
+* Next-stage plan and required gates
+
+** v1396–v1399 — Outcome classes and ambiguous completion
+
+- Define an explicit, conservative correspondence between resolved-operation
+  =:committed= / =:rejected= / =:already-incorporated= / =:commit-unknown=
+  and the public XTDB API observation/ledger states.
+- Keep the difference between a synchronous API return, a later ledger row,
+  and authoritative command incorporation. A definitive rejection must come
+  from actual resolved-operation semantics, not from the mere class of an
+  exception recorded by v1390.
+- Test lost responses, asynchronous processing, replayed ledger keys, duplicate
+  attempts, and post-return diagnostic failure. Do not retry automatically.
+- Preserve a durable command identity and an explicit unknown state where
+  neither commit nor rejection is established.
+
+** v1400–v1411 — Single-node ordering, retries, conflicts and serial history
+
+- Produce source-derived abstract interleavings and check finite cases with
+  Recife/TLC as internal tooling, then separately exercise real XTDB conflicts.
+- Investigate transaction ordering/version checks with physical observations;
+  where internally authenticated prestate is unavailable, formulate a
+  *conditional* serial-history refinement argument with clear prerequisites.
+- Test conflicting concurrent actions and idempotent command incorporation.
+  A finite test suite cannot establish a universal serializability theorem.
+
+** Later mandatory closure before stronger certification
+
+- Derive a checked mapping from both nine-obligation taxonomies to the exact
+  dependency graph and trusted physical witnesses each would require.
+- Prove or explicitly delimit complete mediation of every protected writer,
+  including alternate raw XTDB, scheduled jobs, initializers and deployment.
+- Determine whether an independent backend payload/commit receipt can be
+  obtained; otherwise express necessary physical semantics as explicit trusted
+  backend assumptions and prove the conditional refinement theorem.
+- Establish complete protected physical write/frame scope and independent
+  semantics correspondence; perform adversarial counterexample searches.
+- Bind certified source, runtime artifact and actual deployed handler identity
+  before declaring production application assurance.
+- Keep finite Recife exploration separate from universal rule soundness and
+  browser-realization correspondence. Do not require downstream applications
+  to write Recife/TLA+/Quint artifacts.
+
+* Handover and operational requirements
+
+- Next numbered revision is *v1396*, outcome classification and progression.
+- Keep Gesso v1394 =:execution= private and never log full command plans,
+  authenticated contexts, domain data or throwable payloads wholesale.
+- Keep =:certificate :not-issued=, =:admission :not-admitted=,
+  =:transaction-authority :none= and =:authority :none= at this boundary.
+- Maintain immutable origin classifications and report exact unknowns rather
+  than introducing implicit boolean or coercive success statuses.
+- Preserve the single-invocation, no-auto-retry property of v1394.
+- A process-local captured =:returned= does not establish a commit by itself.
+  A later matching =xt.txs= row does not establish payload provenance.
+- When the proof requires complete writer coverage, a submitted operation
+  vector (even observed at the adapter) cannot substitute for enumeration and
+  mediation of all possible writer entry points.
+- Produce each revision as a complete, atomic file replacement in one
+  uncompressed TAR with *exactly two flat regular members*: a source payload
+  and the matching extensionless-stem =-commit.txt=; validate through the
+  actual =ins= parser before delivering the link.
