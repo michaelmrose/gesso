@@ -1,0 +1,284 @@
+#+TITLE: Gesso v1404 — XTDB Conflict and Conditional-Write Investigation
+#+SUBTITLE: Bounded embedded-XTDB behavior, serial-model assumptions, and obligations for v1405
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and decision
+
+This is an *empirical, bounded single-node investigation*, not a code change
+or a physical-refinement certificate. It checks two independently executed
+cases against XTDB 2.2.0-beta1 with real =xtdb.api/execute-tx= calls and a
+fresh embedded =xtdb.node/start-node= instance. One case lowers ordinary
+Gesso commands with =gesso.model.tx/prepare=; the other uses raw =:put-docs=
+intentionally lacking the application's version/assertion guard.
+
+*Decision: Guarded conditional writes exhibited exclusion of the stale
+contender in this run. Unguarded blind writes to the same document were both
+accepted. The proof argument must therefore account for actual ASSERTs and
+complete writer mediation rather than presume automatic same-row conflicts.*
+
+A one-run experiment establishes neither a universal XTDB theorem nor a
+particular transaction-internal read basis. It also does not turn a returned
+transaction key or a later =xt.txs= row into authenticated payload delivery.
+
+* Source contracts used in the investigation
+
+- =src/gesso/model/command.clj=: =update-command= constructs the checked
+  canonical expected-version update description.
+- =src/gesso/model/tx.clj=: =prepare= lowers the plan's canonical ASSERT and
+  write operations; the probe uses the returned =:tx-ops= without rewriting
+  SQL in the test.
+- =src/gesso/model/tx_model.clj=: =step= and =explore-orders= describe a
+  *serial-commit reference*, explicitly assuming serialized atomic commits.
+  This reference does NOT prove actual XTDB serialization or isolation.
+- =src/gesso/live/consistency/xtdb.clj=: real XTDB submission boundary,
+  separately instrumented in v1390. The probe calls the public XTDB API
+  directly to avoid mistaking that adapter instrumentation for an engine
+  guarantee.
+- =test/gesso/model/tx_model_xtdb_concurrency_test.clj=: existing real
+  overlapping-submission tests for guarded Claims, guard/revoke competition,
+  disjoint targets, concurrent creates, and multi-write atomicity.
+- =test/gesso/model/tx_refinement_internal_basis_xtdb_test.clj=: v1387
+  demonstrates that an external pinned query basis is not a DML prestate
+  selection mechanism.
+- =src/gesso/assurance/proof/abstract_serial_history_witness.clj= (v1402)
+  and =observed_serial_history_correspondence.clj= (v1403): abstract and
+  reported order diagnostics; neither authenticates the physical order.
+
+The v1404 probe complements rather than replaces the earlier permanent
+concurrency tests. In particular, the blind-write experiment explicitly
+invalidates the unsafe premise that all same-document XTDB writes conflict.
+
+* Probe configuration
+
+- Backend: embedded XTDB 2.2.0-beta1, one fresh in-memory node.
+- Runtime: local OpenJDK 21 with
+  =--add-opens=java.base/java.nio=ALL-UNNAMED= (the project normally uses
+  Java 25); no JavaScript, browser or networked XTDB nodes involved.
+- Targets: unique generated document IDs in =:requests=.
+- Concurrency: two JVM futures reach a =CountDownLatch= release gate before
+  invoking =xtdb.api/execute-tx=; the gate does not force overlapping
+  *transaction-internal* evaluation or prove the storage engine's order.
+- Guarded case: both Gesso plans are prepared from the SAME revision-zero
+  document, with different desired owners; each has one ASSERT then a
+  =:put-docs= write.
+- Unguarded case: two direct =:put-docs= vectors for the same ID, with
+  different owners and NO ASSERT.
+- Classification: the probe counts success only when =execute-tx= returns
+  a public transaction key. Only =:xtdb/assert-failed= is admitted as an
+  assertion rejection; every other throwable propagates and fails the probe.
+- Readback: unpinned current document read after both futures finish;
+  unpinned =xt.txs= read for *returned committed* transaction IDs.
+
+* Observations from the completed controlled run
+
+** Guarded same-version competing updates
+
+- Submitted operation lengths: =[2 2]=, each corresponding to a canonical
+  precondition ASSERT and one document write.
+- Attempt 1: =:assert-rejected=, with =:xtdb/assert-failed=.
+- Attempt 2: =:committed=, public transaction ID =1=.
+- Current target document: ={:revision 1 :owner "B"}=.
+- A separately read =xt.txs= row for the returned transaction ID reported
+  ={:xt/id 1 :committed true}=.
+
+The test does not retrieve the failed attempt's transaction ID. Do not
+fabricate an =xt.txs= receipt for that attempt or equate an ASSERT exception
+with a universally attested no-op on all possible implementation paths.
+
+** Unguarded same-target writes
+
+- Both unguarded attempts returned =:committed=.
+- The two returned transaction IDs were =4= and =5=.
+- The current target after both attempts was ={:revision 0 :owner "B"}=.
+- A later =xt.txs= query found one =:committed true= row for each returned ID.
+
+The exact winning owner is schedule-dependent. Both successful calls do NOT
+contradict the guarded case: direct =:put-docs= carries no Gesso version
+precondition. For this observed run the later returned ID coincided with the
+persisted value; this is not general causal attribution from ID alone.
+
+** Exit and failure handling
+
+The probe printed =V1404_PROBE_PASS=. All assertions checked the guarded
+one-commit/one-rejection property and the blind two-commit property. No
+reported timeout, unexpected XTDB throwable, or fixture error occurred.
+This probe is one execution, NOT a permanent regression namespace; v1405
+must retain reproducible assertions in the repository.
+
+* Consequences for physical-refinement assumptions
+
+** 1. Guard presence is semantically essential
+
+For two attempts a and b against version zero, the admitted abstract model
+allows at most one successful version-preserving update. A physical trace
+with two blind successful writes is admissible only under a different,
+weaker operation definition: it is NOT a refinement of that guarded Claim.
+
+A correspondence checker must inspect the actual submitted ASSERTs, their
+read-set relationships, and all writers capable of changing protected fields.
+The existence of a guard in an abstract plan is insufficient if lowering,
+submission or alternative writers can omit it.
+
+** 2. Rejection and settlement must stay separate
+
+=:xtdb/assert-failed= is a bounded, explicit observed assertion outcome.
+A returned =TransactionKey= is a public success result for =execute-tx=.
+A missing response, exception after submission, or unobserved attempt
+cannot be silently classified as one of those observed outcomes.
+
+The durable-command resolution status =:replay= or =:incorporated= is a
+separate application-level fact, not a physical outcome for the current
+attempt. The v1398–v1399 =:commit-unknown= boundary remains unchanged.
+
+** 3. Ledger agreement is not payload authentication
+
+A matching =xt.txs= committed record corroborates the *reported ID*, not the
+submitted operation vector or identity of the attempt. Earlier v1393 tests
+showed that substituted API behavior can reuse a legitimate older key.
+The unpinned read used by this probe also supplies no independent authenticated
+transaction-internal prestate.
+
+** 4. Neither isolated success nor a bounded schedule proves isolation
+
+The gated futures can serialize inside XTDB. Even repeated successful tests
+for a few schedules cannot establish a universal isolation/linearizability
+theorem. The existing =tx_model_xtdb_concurrency_test= already checks finite
+executions against *some* serial model path. We should keep increasing
+observable adversarial coverage, but reserve proof status for an argument
+that establishes the backend premises and complete writer closure.
+
+** 5. The write footprint is still open
+
+The observed =:requests= document is one target within a controlled test.
+This probe does not exclude side effects elsewhere, authorize readers,
+account for every physical path, or establish every initial document and
+writer respects the invariant. v1380 whole-document comparison is still
+bounded to explicitly observed targets.
+
+* Acceptance requirements for v1405 (permanent regression)
+
+- Keep both guarded and unguarded cases, with distinct unique IDs, real
+  embedded XTDB, actual Gesso =tx/prepare= lowering for the guarded case,
+  and a deterministic start barrier; never assume a fixed winning thread.
+- Require exactly one canonical guarded contender to commit, the other to
+  reject specifically with =:xtdb/assert-failed=, and current state to match
+  that winner, in multiple bounded repetitions.
+- Require both naked =:put-docs= calls to return successfully and current
+  state to equal one submitted document (not some hybrid); neither result
+  may be incorrectly labeled an ASSERT conflict.
+- Observe actual =xt.txs= committed rows for successfully returned keys;
+  report missing/duplicate/contradictory rows as *test failures* without
+  pretending that these rows prove payload delivery.
+- Check all workers have settled within explicit time bounds and propagate
+  unexpected errors. A timeout must NEVER be counted as a rejection.
+- Check atomic all-or-none for multi-target plans under contention and the
+  guard-vs-revocation case, preferably reusing the existing finite serial
+  reference oracle rather than maintaining a competing interpreter.
+- Document the exact XTDB and JDK versions in the test's assertion scope.
+- Keep all nine physical-refinement obligations open; the suite remains
+  finite empirical evidence and must not issue admission or certificates.
+
+* Remaining physical proof obligations
+
+Neither this probe nor existing same-node tests discharge:
+
+1. Authenticated physical transaction-internal prestate/read set.
+2. Source-derived typed inputs tied to authenticated real executor inputs.
+3. Complete authorization dependency and guard correspondence.
+4. Complete physical write footprint and frame preservation.
+5. Authenticated commit/conflict outcomes for every admitted execution.
+6. Verified deployed handler and route adoption.
+7. Complete mediation of all physical writer paths.
+8. Independently proved abstract-to-physical semantics for the admitted subset.
+9. Universal physical execution refinement, including concurrency.
+
+* Reproduction script (standalone, not installed production code)
+
+The following script was executed in the project classpath with XTDB
+2.2.0-beta1 and the JVM opening described above. It is included verbatim
+so the observations can be repeated independently. The named experiment is
+not a permanent assertion until v1405 installs a regression test.
+
+#+begin_src clojure
+(require '[clojure.pprint :as pp]
+         '[gesso.model.command :as command]
+         '[gesso.model.tx :as tx]
+         '[xtdb.api :as xt]
+         '[xtdb.node :as xtn])
+(import '[java.util.concurrent CountDownLatch TimeUnit])
+(defn result! [node ops]
+  (try
+    (let [key (xt/execute-tx node ops)]
+      {:status :committed :tx-id (.getTxId ^xtdb.api.TransactionKey key)})
+    (catch Throwable e
+      (let [code (:xtdb.error/code (ex-data e))]
+        (if (= code :xtdb/assert-failed)
+          {:status :assert-rejected :error code}
+          (throw e))))))
+(defn overlap! [node operations]
+  (let [ready (CountDownLatch. (count operations))
+        gate (CountDownLatch. 1)
+        workers (mapv (fn [ops]
+                        (future (.countDown ready)
+                                (when-not (.await gate 30 TimeUnit/SECONDS)
+                                  (throw (ex-info "gate timeout" {})))
+                                (result! node ops)))
+                      operations)]
+    (try
+      (when-not (.await ready 30 TimeUnit/SECONDS)
+        (throw (ex-info "workers did not reach gate" {})))
+      (.countDown gate)
+      (let [results (mapv #(deref % 120000 ::timeout) workers)]
+        (when (some #{::timeout} results)
+          (throw (ex-info "transactions timed out" {:results results})))
+        results)
+      (finally (.countDown gate)
+               (doseq [w workers] (when-not (realized? w) (future-cancel w)))))))
+(def version {:revision-key :revision :created-at-key :created-at :updated-at-key :updated-at})
+(defn doc [id owner]
+  {:xt/id id :revision 0 :owner owner :created-at "t0" :updated-at "t0"})
+(defn updated [before owner]
+  (assoc before :revision 1 :owner owner :updated-at "t1"))
+(defn prepared [before owner]
+  (:tx-ops (tx/prepare {} {:commands [(command/update-command :requests :claim before (updated before owner) version)]
+                            :emit false})))
+(defn query-doc [node id]
+  (first (xt/q node ["SELECT revision, owner FROM requests WHERE _id = ?" id])))
+(defn ledger [node tx-id]
+  (let [rows (xt/q node ["SELECT _id, committed FROM xt.txs WHERE _id = ?" tx-id])]
+    (if (= 1 (count rows)) (first rows) {:status :not-single-row :row-count (count rows)})))
+(with-open [node (xtn/start-node {})]
+  (let [id (str "v1404-guarded-" (random-uuid))
+        before (doc id "unclaimed")
+        _ (xt/execute-tx node [[:put-docs :requests before]])
+        ops [(prepared before "A") (prepared before "B")]
+        results (overlap! node ops)
+        observed (query-doc node id)]
+    (pp/pprint {:case :guarded-same-version
+                :operation-counts (mapv count ops)
+                :outcomes results :persisted observed
+                :committed-ledger (mapv #(ledger node (:tx-id %)) (filter :tx-id results))})
+    (assert (= #{:committed :assert-rejected} (set (map :status results))))
+    (assert (= {:revision 1 :owner (if (= :committed (:status (first results))) "A" "B")}
+               observed)))
+  (let [id (str "v1404-unguarded-" (random-uuid))
+        _ (xt/execute-tx node [[:put-docs :requests (doc id "unclaimed")]])
+        results (overlap! node [[[:put-docs :requests (doc id "A")]]
+                                [[:put-docs :requests (doc id "B")]]])
+        observed (query-doc node id)]
+    (pp/pprint {:case :unguarded-same-target
+                :outcomes results :persisted observed
+                :committed-ledger (mapv #(ledger node (:tx-id %)) (filter :tx-id results))})
+    (assert (= [:committed :committed] (mapv :status results)))
+    (assert (#{"A" "B"} (:owner observed))))
+  (println "V1404_PROBE_PASS"))
+
+#+end_src
+
+* Status
+
+- v1404 disposition: *ACCEPT AS BOUNDED EMPIRICAL DIAGNOSTIC*.
+- Physical refinement or isolation proof: *NOT ESTABLISHED*.
+- Next revision: v1405, permanent conditional-write conflict regression.
