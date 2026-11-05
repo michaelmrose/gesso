@@ -1,0 +1,439 @@
+#+TITLE: Gesso v1360 — S4 Transition-Preservation Acceptance Checkpoint
+#+SUBTITLE: Independent guarded relations, conditional preservation schemas, conjunction composition, and open implementation proof obligations
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and acceptance verdict
+
+This is a source-grounded review of v1351--v1359, conducted for revision
+v1360 against the =application-assurance= review tree (recorded Git HEAD
+=e65820e= with separately overlaid installation revisions). It is a
+DOCUMENT-ONLY acceptance checkpoint. The Git HEAD is not evidence that
+these overlays have been installed in the user's working tree. The review
+checks the actual source and installed-test candidates, not just revision
+summaries.
+
+Verdict: *RESTRICTED, CONDITIONAL S4 SCHEMA FOUNDATION ACCEPTED; UNIVERSAL
+S4 TRANSITION-PRESERVATION SOUNDNESS OPEN*.
+
+The independent S4 work now provides:
+
+1. An executable reference for a typed guarded transition relation,
+   including simultaneous assignments and exact frame preservation.
+2. Three restricted, source-derived conditional preservation schemas:
+   unchanged-frame, fixed-literal, and same-origin field-copy.
+3. A restricted conjunction rule which demands a valid supporting schema
+   for EACH immediate conjunct and stays OPEN if any conjunct is open.
+4. Permanent adversarial regression suites for the reference relation and
+   each of the three individual families.
+5. Focused tests of source-derived composition, including witnesses that
+   use all three families, but NO PERMANENT v1359-SPECIFIC COMPOSITION TEST
+   FILE in the v1351--v1359 delivered archive sequence.
+
+These are useful conditional mathematical arguments, executable
+interpretations, and bounded comparisons. They are NOT universal theorems
+about the production transition implementation, independently proved
+correctness of S1 interpretation, successful initialization, actual XTDB
+writes, an authoritative installed operation catalog, or certificates.
+
+Installing this document MUST NOT change a proof status, discharge an
+obligation, confer operation admission, or mutate runtime certification.
+
+* Intended restricted S4 statement
+
+** Abstract relation and its premises
+
+For a declared operation T, well-typed pre-state s, inputs x, and
+post-state s', define the abstract guarded relation by:
+
+#+begin_example
+T(s,x,s') = G(s,x) AND A(s,x,s') AND F(s,s')
+#+end_example
+
+- G evaluates the admitted guard against PRE-state and inputs.
+- A requires EACH declared assignment to match its post-state target.
+  Every RHS reads only the PRE-state or inputs, even when its source is
+  also written; assignments are simultaneous.
+- F requires EVERY unwritten projected state field to preserve its
+  presence AND, if present, its value. Absent is not present nil.
+- All pre, input, and post maps must pass the closed typed-projection
+  checks; the source declaration must pass exact footprint checks.
+
+Let WF(s,x,s') denote the relevant well-typed projection assumptions,
+and I be a deterministic, source-declared, well-typed invariant. The
+preservation goal for one declared operation is:
+
+#+begin_example
+forall s,x,s':
+  WF(s,x,s') AND I(s) AND T(s,x,s')  =>  I(s').
+#+end_example
+
+The conditional schemas below explain when this implication follows
+from the abstract relation. They do not prove that the production
+implementation implements that relation on all cases, nor that every
+physical writer in a deployed application is described by it.
+
+The implication is vacuously true if T does not hold, or I(s) is false.
+Neither case demonstrates that an operation can execute or that a valid
+initial state exists. Witness status and derivation status must remain
+separate; a witness matching T is still caller-supplied, not an XTDB
+transaction receipt.
+
+** A family of conditional lemmas is not a formalized proof of its premises
+
+Each family's success status identifies a *schema instance*: a
+well-formed source with the syntactic, typing, origin, and footprint
+premises needed for the usual mathematical argument. Conditional on
+correct semantics of typed expressions and the guarded relation, the
+conclusion follows.
+
+The present implementation HAS NOT independently proved the correctness
+of every S1 evaluator branch or every admission rule, or verified that
+the production transition observer always agrees with the independent
+reference. Finite agreement tests are not a substitute for those
+universal arguments. No report from these modules is a proof kernel
+certificate, a cryptographic attestation, or a command capability.
+
+* v1351--v1359 inventory and review findings
+
+** v1351 / v1352 — Independent guarded transition relation
+
+Files:
+- =src/gesso/assurance/proof/independent_transition_semantics.clj=
+- =test/gesso/assurance/proof/independent_transition_semantics_test.clj=
+
+Entry point: =observe-transition!=.
+
+The reference interpreter reads ORIGINAL declarations, calls the
+production transition path for declaration typing and shape checks, and
+independently interprets typed guards, assignments, and before/after
+projections. It returns separate guard, assignment, frame, and matching
+facts. Valid typed witnesses failing the relation are NONMATCHING;
+invalid declarations or invalid typed projections are REJECTIONS.
+
+Important boundary: the interpreter is independent in its expression
+and transition observation, but its source admission still uses some
+production validation. Thus its existence alone cannot prove the
+source-admission check sound. Its abstract state projection does not
+claim coverage of every physical application field or writer.
+
+v1352 makes the relation tests permanent, including a finite
+independent-oracle matrix, simultaneous field swaps, optional presence,
+nullable assignments, malformed source, and forged observations. The
+finite grid is correspondence evidence, not exhaustive model checking
+of every possible typed state.
+
+** v1353 / v1354 — Frame preservation
+
+Files:
+- =src/gesso/assurance/proof/frame_soundness.clj=
+- =test/gesso/assurance/proof/frame_soundness_test.clj=
+
+Entry points: =derive-frame-lemma!= and =audit-frame-witness!=.
+
+Let R(I) be the exact readers of I and W(T) the transition's declared
+written fields. The frame premise is:
+
+#+begin_example
+R(I) INTERSECT W(T) = empty
+#+end_example
+
+Exact F preserves the complete projection on R(I), including absent
+versus present-nil distinctions. If I is a deterministic, well-typed
+function of that projection, then:
+
+#+begin_example
+I(s) AND T(s,x,s')  =>  I(s').
+#+end_example
+
+A written-field dependency stays OPEN even when one observed write
+happens to leave its value unchanged. A syntactically disjoint but
+ill-typed invariant cannot qualify. The permanent v1354 suite checks
+both premises and the counterexample boundaries.
+
+** v1355 / v1356 — Fixed-literal assignment preservation
+
+Files:
+- =src/gesso/assurance/proof/literal_assignment_soundness.clj=
+- =test/gesso/assurance/proof/literal_assignment_soundness_test.clj=
+
+Entry points: =derive-literal-lemma!= and =audit-literal-witness!=.
+
+Let L(T) be the fields receiving checked literal assignments. The
+restricted schema requires NONEMPTY exact readers R(I) contained in
+L(T), and independent S1 evaluation of I on the literal post-projection
+to be true:
+
+#+begin_example
+R(I) not empty
+R(I) SUBSET L(T)
+I(literal-post-projection) = true
+--------------------------------
+T(s,x,s')  =>  I(s')
+#+end_example
+
+The argument does not depend on a sample pre-state or satisfiable guard.
+It deliberately leaves untouched, copy-written, and otherwise
+nonliteral reader dependencies OPEN. A false fixed postcondition
+remains OPEN; an assigned optional field is PRESENT in the post-state,
+including when a nullable field is assigned nil.
+
+The permanent v1356 suite distinguishes a false postcondition from
+vacuous implication, validates nominal values and exact readers, checks
+source identity, and compares finite independent/production transition
+observations. Success reports remain unauthoritative.
+
+** v1357 / v1358 — Same-origin field-copy preservation
+
+Files:
+- =src/gesso/assurance/proof/field_copy_soundness.clj=
+- =test/gesso/assurance/proof/field_copy_soundness_test.clj=
+
+Entry points: =derive-copy-lemma!= and =audit-copy-witness!=.
+
+The restricted claim is POST equality between distinct fields a and b
+when they have exactly the same TOTAL original source, either one
+pre-state reader or one operation input, and at least one destination
+receives a =:read= assignment:
+
+#+begin_example
+origin_T(a) = origin_T(b) = o
+T(s,x,s')  =>  s'[a] = value_of(o,s,x) = s'[b]
+#+end_example
+
+An untouched REQUIRED source field can be its own total pre-state
+origin. Untouched optional fields need not exist and are not assumed
+total. The implementation supports the precise presence-guarded form
+for optional copy destinations, not arbitrary logical rewrites.
+
+A source that is itself written still supplies its PRE-state value.
+Two fields that happen to be equal in ONE example, but have distinct
+origins, do not justify a universal copy lemma. The permanent v1358
+suite checks that non-entailment, type admission, forged observation
+reports, exact source identity, and a 128-case finite grid.
+
+** v1359 — Conjunction composition of restricted schemas
+
+File:
+- =src/gesso/assurance/proof/preservation_composition_soundness.clj=
+
+Entry points: =derive-composed-lemma!= and =audit-composed-witness!=.
+
+For source-declared I = C1 AND ... AND Cn, the checker constructs a
+source-relative per-clause ledger. Each immediate conjunct MUST:
+
+1. Have its exact reader set reconstructed from the expression AST.
+2. Pass independent typed-fragment admission; no presence/non-nil guard
+   from a sibling conjunct may be silently borrowed.
+3. Have a supported source-derived conditional instance from the
+   frame, literal, or copy schema, in that order.
+
+Every clause must be covered. A single unsupported or independently
+ill-typed fragment makes the WHOLE composition =:open-unproved-clause=.
+If all clauses are conditionally supported, the restricted conjunction
+reasoning is:
+
+#+begin_example
+for each i,  I_i(s) AND T(s,x,s') => I_i(s')
+------------------------------------------------
+I(s) AND T(s,x,s') => I(s')  where I = AND_i I_i.
+#+end_example
+
+Literal and copy families can establish their respective clauses as
+true after T even if they were false before. Frame clauses rely on
+I_i(s) and extensionality; I(s) gives each conjunct's pre-truth.
+
+Only IMMEDIATE top-level =:and= operands are split; a nested =:and=
+remains an intact fragment so its own local presence guards can be
+typed together. The current maximum split is 32 immediate clauses.
+The whole invariant and each independently used fragment must pass
+admission. This is intentionally incomplete: some true preservation
+claims are beyond these syntactic constructors and remain OPEN.
+
+Family results are re-derived from the ORIGINAL sources and checked
+against source/fingerprint/report contracts. A public Var substituted
+with a contradictory report triggers rejection, but ordinary source
+fingerprints and copyable result maps are NOT independently trusted
+credentials or cryptographic provenance.
+
+Both =derive-composed-lemma!= and =audit-composed-witness!= retain
+=:conditional-schema-only= or =:not-universally-proved= proof status,
+=:not-issued= certificate, =:not-admitted= admission, and =:none=
+authority. The witness audit checks one supplied abstract transition,
+not actual XTDB behavior.
+
+* Acceptance evidence
+
+** Delivered source integrity
+
+On 2026-11-04, the nine v1351--v1359 archives were opened separately.
+Each had exactly TWO FLAT REGULAR members: its full source/test file and
+its corresponding =-commit.txt=. The extracted source bytes matched
+the current review-tree file byte-for-byte for ALL nine revisions.
+Each commit message contained the matching revision identifier. This
+validates the reviewed overlay files, not their installation in another
+repository or the correctness of the underlying implementation.
+
+** Fresh completed JVM gates for v1360
+
+The following gates executed against the review tree using the available
+Java 21 dependency bundle. All had ZERO failures and ZERO errors:
+
+| Gate | Namespaces | Tests | Assertions |
+|------+------------+-------+------------|
+| Independent transition, frame, production transition, typed-value, typed-presence | 5 | 131 | 9,451 |
+| Literal and field-copy soundness | 2 | 76 | 1,377 |
+| Existing assignment and copy preservation | 2 | 79 | 703 |
+| Existing mixed preservation | 1 | 37 | 292 |
+| Existing unified preservation | 1 | 42 | 324 |
+|------+------------+-------+------------|
+| COMPLETED PERMANENT NAMESPACE GATES | 11 | 365 | 12,147 |
+
+A single larger six-namespace batch stalled without a completed
+summary. It is NOT counted as a pass or failure. Running smaller gates
+produced the five successful summaries above.
+
+** Additional v1360 composition smoke checks (temporary)
+
+Ten SOURCE-BASED temporary tests were run in one extra namespace, with
+40 assertions, zero failures/errors. The tests exercise:
+
+- Frame + literal composition with an exact matching witness.
+- Frame + same-origin-copy composition with an exact matching witness.
+- A three-clause invariant supported separately by frame, literal, copy.
+- One open clause making a partially supported whole invariant OPEN.
+- A matching witness whose invariant is true after execution but whose
+  schema remains OPEN due to an unsupported clause.
+- An altered, nonmatching frame/witness and modified source fingerprints.
+- No certificate or admission authority on successful diagnostics.
+
+These tests are TEMPORARY verification evidence, not a delivered
+permanent v1359-specific suite. The 365/12,147 permanent gate counts
+ABOVE EXCLUDE the ten temporary composition tests. Counting both
+completed sets yields 375 tests and 12,187 assertions over 12
+namespaces, all passing. Neither total is a formal model-checking result.
+
+** Unrun gates
+
+The complete Ygg/Shard suite, Node/CLJS or Chromium gates for these S4
+changes, physical XTDB integration, multi-node concurrency, deployed
+application operation-closure audits, and proof-kernel equivalence
+checks were NOT run for this checkpoint. Earlier S1 JVM/Node corpus
+results are historical and do not serve as v1360 JVM/Node S4 evidence.
+
+* Critical open obligations and failure modes
+
+** S4-A — Soundness of the underlying interpretation: OPEN
+
+Prove or independently formalize, for ALL admitted typed declarations
+and all valid states/inputs, that the production evaluator and
+transition behavior correspond to the intended mathematical G, A,
+and F relation, including simultaneous pre-state reads, presence,
+nullable values, source/target type compatibility, and all branches.
+Production acceptance and the independent observer are still linked
+at source validation; independence is not end-to-end.
+
+** S4-B — Universal validity of each conditional family: OPEN
+
+Establish family-soundness beyond test matrices, including the total
+value-origin premise in copy, extensionality of typed expressions in
+frame, and correctness of fixed literal post-projection evaluation.
+The restricted source-derived arguments can be checked syntactically,
+but no trusted small formal proof kernel currently certifies their
+universal validity under executable semantics.
+
+** S4-C — Soundness and completeness of composition: OPEN
+
+For every positive composition result, show each recorded clause is
+exactly one independently well-typed fragment of the original whole
+source and that all clauses are covered; ensure every actual family
+result follows its advertised premises. Completeness for arbitrary
+valid invariants is NOT claimed, nor required for the restricted proof.
+
+A permanent, adversarial v1359-specific composition suite has NOT yet
+been delivered. The v1360 smoke checks demonstrate recent passing
+examples, but must not silently be counted as permanent regression
+coverage. This is the first immediate remediation item.
+
+** S3 and S5 — Base case, induction, catalog closure: OPEN
+
+For a finite declared transition system, an inductive invariant requires:
+
+#+begin_example
+BASE: for every admissible initializer s0, Init(s0) => I(s0)
+STEP: for every declared operation Tj,
+      I(s) AND Tj(s,x,s') => I(s')
+
+If BASE and every STEP are sound, every finite declared execution
+starting from Init preserves I.
+#+end_example
+
+A conditional step lemma cannot replace BASE. No result may omit a
+transition or invariant, or silently treat an OPEN lemma as proved.
+Completeness of the declared operation catalog relative to all deployed
+writers is an additional external obligation. Establishing a theorem
+about the declared machine does NOT automatically prove a deployment.
+
+** S6--S9 — Admission, provenance, runtime and physical refinement: OPEN
+
+Reports are mutable/copyable EDN-like values and ordinary fingerprints
+are source-identification aids, not attestation. Prove that a trusted
+checker revalidates original sources and required dependencies before
+certification; prevent stale or substituted reports from authorizing
+transactions. Establish actual installed writer closure, XTDB snapshot
+provenance, transaction outcome correspondence, browser projection
+refinement, and proof-kernel trust boundaries separately.
+
+The current soundness/checkpoint functions DO NOT alter Gesso's
+production proof admission path. They MUST NOT be described as
+independently certifying a live HumanHelp Claim operation or a running
+application.
+
+* Transition to v1361 and the S5 induction phase
+
+** Immediate prerequisite: permanent composition tests
+
+Before claiming that S4's restricted composition layer has its intended
+permanent regression suite, promote the v1359 and v1360 adversarial
+composition examples into a dedicated stable test namespace. Preserve
+positive mixed-family evidence, negative/open clauses, optional-field
+guard independence, source substitution checks, and no-authority status.
+This step is a regression/evidence prerequisite, not a formal proof.
+
+** Induction plan, without premature certification
+
+After the permanent composition gate, proceed with source-derived:
+
+1. A bounded abstract machine identity containing state types, declared
+   initializers, all declared operations, and invariants.
+2. Explicit BASE obligations for each invariant/initializer pair.
+3. Explicit STEP obligations for each invariant/operation pair.
+4. Exact matrix/cardinality checks: missing or OPEN cells must not be
+   collapsed into a positive machine result.
+5. A conditional finite-trace induction rule with the precise S3, S4,
+   and S1 dependencies carried as OPEN assumptions until justified.
+6. Source-identity checks and independent trace witnesses, always
+   distinct from actual deployed transaction provenance.
+
+This gives the next phase a useful, carefully bounded target: a
+soundly assembled conditional argument for a DECLARED abstract
+machine, rather than a premature claim that every physical execution
+of Gesso/XTDB has been formally verified.
+
+* Final verdict and installation policy
+
+*ACCEPTED, RESTRICTED:* The independent transition interpreter,
+source-derived frame/literal/copy schema instances, and conjunction
+composition form a coherent executable conditional S4 foundation.
+The current permanent tests and temporary composition smoke checks all
+pass in the explicitly listed completed gates.
+
+*NOT ACCEPTED AS UNIVERSAL S4:* No universal implementation
+correspondence theorem, formalized family-proof trust chain, permanent
+v1359 composition regression deliverable, exact application writer
+closure, runtime XTDB refinement, or certificate authority has been
+established by these nine revisions.
+
+The checkpoint is a review artifact ONLY; it changes neither production
+source code nor any machine-readable certification/admission policy.
