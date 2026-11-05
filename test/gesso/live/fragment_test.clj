@@ -678,6 +678,13 @@
                           (fragment/render-task manager fragment-key render-fn)))))
     (is (= 1 @render-count))
 
+    ;; The flight completion cell becomes available before its releasing
+    ;; callback emits this debug event. Await the event rather than assuming
+    ;; task completion and debug publication are one atomic operation.
+    (is (eventually
+         #(contains? (event-names @events)
+                     :gesso.live.fragment/singleflight-released)))
+
     (let [names (event-names @events)]
       (is (contains? names :gesso.live.fragment/cache-miss))
       (is (contains? names :gesso.live.fragment/singleflight-owner))
@@ -698,12 +705,20 @@
         runner-1 (start-task (fragment/protect-task manager fragment-key task))
         _ (is (= :started (deref started timeout-ms ::timeout)))
         runner-2 (start-task (fragment/protect-task manager fragment-key task))]
+    ;; Wait until the second request has actually joined the first flight.
+    ;; Starting the task alone does not guarantee the scheduler has run it.
+    (is (eventually
+         #(contains? (event-names @events)
+                     :gesso.live.fragment/singleflight-joined)))
     (deliver release :go)
 
     (is (= {:status :success :value :html}
            (task-result runner-1)))
     (is (= {:status :success :value :html}
            (task-result runner-2)))
+    (is (eventually
+         #(contains? (event-names @events)
+                     :gesso.live.fragment/singleflight-released)))
 
     (let [names (event-names @events)]
       (is (contains? names :gesso.live.fragment/singleflight-owner))
