@@ -181,7 +181,9 @@
 
 (deftest portable-corpus-exactly-requires-one-marker
   (is (= (pr-str @corpus) (corpus-check (corpus-output @corpus))))
-  (is (= 941 (count @corpus)))
+  ;; v1326 established a floor, not a fixed corpus size. New portable cases
+  ;; must not break the integrity gate merely because coverage grew.
+  (is (<= (var-get (gate-var 'portable-minimum-cases)) (count @corpus)))
   (doseq [[out expected]
           [["" 0]
            ["some unrelated test result\n" 0]
@@ -189,10 +191,14 @@
     (is (= expected (:matching-lines (rejected #(corpus-check out)))))))
 
 (deftest truncated-and-incomplete-corpora-fail-closed
-  (doseq [cases [[] (subvec @corpus 0 940) (vec (repeat 941 ["duplicate" [:ok true]]))]]
-    (is (some? (:minimum-cases (rejected #(corpus-check (corpus-output cases)))))))
-  (is (= 941 (count (edn/read-string (corpus-check (corpus-output @corpus)))))))
-  (is (nil? (rejected #(corpus-check (corpus-output (conj @corpus ["extra" [:ok true]]))))))
+  (let [minimum (var-get (gate-var 'portable-minimum-cases))]
+    (doseq [cases [[]
+                   (subvec @corpus 0 (dec minimum))
+                   (vec (repeat minimum ["duplicate" [:ok true]]))]]
+      (is (some? (:minimum-cases (rejected #(corpus-check (corpus-output cases))))))))
+  (is (= (count @corpus)
+         (count (edn/read-string (corpus-check (corpus-output @corpus))))))
+  (is (nil? (rejected #(corpus-check (corpus-output (conj @corpus ["extra" [:ok true]])))))))
 
 (deftest malformed-corpus-edn-rejected
   (doseq [data ["[" "{broken" "#=(+ 1 2)"]]
@@ -227,18 +233,33 @@
     (is (= [180000] (mapv second @events)))))
 
 (deftest first-and-last-mismatches-are-localized
-  (doseq [index [0 1 470 940]]
-    (let [cases (assoc-in @corpus [index 1] [:ok :intentionally-wrong])
+  (let [size (count @corpus)]
+    (doseq [index [0 1 (quot (dec size) 2) (dec size)]]
+      (let [cases (assoc-in @corpus [index 1] [:ok :intentionally-wrong])
           failure (stubbed {'run-command-captured-with-timeout!
                             (fn [& _] {:out (corpus-output cases) :err ""})
                             'jvm-portable-corpus! (fn [] (pr-str @corpus))}
                            #(rejected (fn []
                                         (gate 'run-node-portable-correspondence! "node.js"))))]
-      (is (= index (:first-mismatched-index failure)))
-      (is (= 941 (:jvm-case-count failure)))
-      (is (= 941 (:node-case-count failure)))
-      (is (= (nth @corpus index) (:jvm-case failure)))
-      (is (= (nth cases index) (:node-case failure))))))
+        (is (= index (:first-mismatched-index failure)))
+        (is (= size (:jvm-case-count failure)))
+        (is (= size (:node-case-count failure)))
+        (is (= (nth @corpus index) (:jvm-case failure)))
+        (is (= (nth cases index) (:node-case failure)))))))
+
+(deftest missing-tail-after-minimum-still-fails-correspondence
+  (let [size (count @corpus)
+        minimum (var-get (gate-var 'portable-minimum-cases))]
+    (when (> size minimum)
+      (let [cases (pop @corpus)
+            failure (stubbed {'run-command-captured-with-timeout!
+                              (fn [& _] {:out (corpus-output cases) :err ""})
+                              'jvm-portable-corpus! (fn [] (pr-str @corpus))}
+                             #(rejected (fn []
+                                          (gate 'run-node-portable-correspondence! "node.js"))))]
+        (is (= size (:jvm-case-count failure)))
+        (is (= (dec size) (:node-case-count failure)))
+        (is (nil? (:first-mismatched-index failure)))))))
 
 (deftest no-silent-success-on-node-parse-failure
   (is (some? (stubbed {'run-command-captured-with-timeout!
