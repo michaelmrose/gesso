@@ -1,0 +1,360 @@
+#+TITLE: Gesso v1350 — S1 Typed-Semantics Acceptance Checkpoint
+#+SUBTITLE: Independently interpreted typed rules, bounded correspondence, and remaining general proof obligations
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope, source baseline, and verdict
+
+This document is the v1350 acceptance *review* of the S1 typed-semantics
+work v1341--v1349. It does not alter production typing, evaluation,
+certificate admission, application installation, or runtime behavior.
+Installation of this document MUST NOT change an S1 obligation from OPEN to
+CLOSED in a machine-readable or user-facing certification result.
+
+Verdict: *RESTRICTED S1 SEMANTIC FOUNDATION ACCEPTED; UNIVERSAL S1 OPEN*.
+
+Gesso now has an independently written interpretation of a useful typed
+rule subset, permanent adversarial comparisons against the production
+checker/evaluator, branch-sensitive optional/nullable semantics, a bounded
+source-admission correspondence audit, and actual JVM/Node execution of one
+shared portable-semantics corpus. These are substantive executable
+assurance results, not a universal theorem that every production-admitted
+rule has the mathematical meaning intended by its declaration.
+
+This checkpoint was reviewed against the November 4 repository snapshot
+(branch =application-assurance=, recorded HEAD =e65820e=) with local
+v1330--v1349 development overlays. The overlays are files prepared for
+installation as separate =ins= archives; the recorded Git HEAD alone is
+not evidence that the user has installed those revisions. The reviewed
+v1349 test source is the complete shared CLJC replacement, not an isolated
+new test harness.
+
+The *full* Ygg/Shard, real-Chromium, XTDB integration, and deployment
+acceptance gates were not run for v1350. Focused JVM and Node gates are
+reported below with their exact scope.
+
+* Intended S1 statement and separate obligations
+
+** Typed states and admissible expressions
+
+Let Delta map declared reader identities to closed type descriptors and
+let s be a *partial* map from readers to values. A well-formed state
+WF_Delta(s) distinguishes three cases for a reader r:
+
+1. r is *absent* from s (permitted only when its descriptor is optional).
+2. r is *present* with value nil (permitted only when nullable).
+3. r is *present* with a conforming non-nil value, including Boolean false.
+
+Presence means key membership, not truthiness. A present nil does not prove
+that the field is absent; a present false is still present.
+
+For each statically admitted Boolean source expression e, an intended
+interpretation [[e]]_Delta(s) is defined when WF_Delta(s) holds and all
+reads are justified by the source's branch-sensitive typing facts.
+Conjunction, disjunction, implication and negation propagate these facts
+according to the branches on which their subexpressions execute. A
+particular runtime value which happens to short-circuit a bad read does
+NOT make an otherwise inadmissible source statically valid.
+
+A desirable GENERAL S1 implementation correspondence theorem would assert
+something like:
+
+#+begin_src text
+for every source declaration e, type environment Delta, and typed state s:
+  if production type admission accepts e under Delta,
+  and WF_Delta(s),
+  then the admitted expression has a defined independent meaning
+  and production evaluation of e on s equals [[e]]_Delta(s).
+#+end_src
+
+The v1341--v1349 software *does not prove this universal claim*. Source
+admission checks, finite state witnesses, and cross-runtime test cases
+support only their explicitly bounded forms. Nor does this statement
+itself prove that the expression's inputs are actual authoritative XTDB
+state, or that a browser projection matches those inputs.
+
+** S1 must not be confused with S2 and later refinement
+
+- S1 concerns typed interpretation, static read safety, and the meaning
+  of admitted atomic and composite expressions.
+- S2 concerns whether the propositional proof kernel preserves logical
+  entailment from open premises. v1340's S2 verdict remains CONDITIONAL.
+- S3--S5 concern initialization, transitions, preservation, and induction.
+- S6--S9 involve evidence provenance, application and executor closure,
+  physical correspondence, and independent checker justification.
+
+An S1 diagnostic report never closes those other obligations.
+
+* Source inventory and achieved restricted semantics
+
+** v1341 — Independent typed values and partial states
+
+Source: =src/gesso/assurance/proof/typed_value_semantics.clj=.
+
+Defines a closed independent model for declared integers, Booleans,
+strings, keywords, nominal enums, optional fields, nullable values, and
+partial state maps. Required fields must be present; nullable does not
+mean optional; optional does not mean nullable. Descriptor, value, state,
+metadata, and executable-payload validation fail closed.
+
+The semantics is written independently of the production
+=gesso.assurance.rule=, =rule-type=, and =rule-eval= paths.
+
+Remaining limitation: it is still an executable interpreter whose own
+soundness has not been independently proved; independently accepted
+examples do not establish universal production correspondence.
+
+** v1342 / v1343 — Direct typed comparison and membership
+
+Sources:
+- =src/gesso/assurance/proof/typed_comparison_semantics.clj=
+- =test/gesso/assurance/proof/typed_comparison_semantics_test.clj=
+
+The independent semantics interprets seven atomic operations:
+=:= (equality), =:not== (inequality), =:< (less than), =:<=
+(less than or equal), =:> (greater than), =:>= (greater than or
+equal), and =:in= (typed finite-set membership).
+
+The permanent tests compare the independent results to expected
+mathematical answers and the production rule evaluator. They include
+finite exhaustive integer matrices, large JVM integers, typed equality,
+finite membership, nominal enum identity, nil handling, and invalid
+operand/type combinations.
+
+A direct comparison cannot read an optional or nullable value without
+the required refinement facts. These independent direct-atom rules should
+not be confused with the guarded full-expression interpreter in v1344.
+
+One intentionally distinct admission responsibility is retained:
+production requires an exact *source* reader footprint, whereas the
+independent semantic interpreter can be given an additional declared,
+unused reader without changing the truth of a comparison. That is a
+source-admission difference, not automatically a disagreement about the
+result of a well-admitted comparison.
+
+** v1344 / v1345 — Branch-sensitive presence and nullable semantics
+
+Sources:
+- =src/gesso/assurance/proof/typed_presence_semantics.clj=
+- =test/gesso/assurance/proof/typed_presence_semantics_test.clj=
+
+The independent expression interpreter validates the static expression
+shape and propagates presence/non-nil facts through =:and=, =:or=,
+=:not=, and =:implies=. It distinguishes an absent field from present
+nil and present false. Branches are evaluated with short-circuit
+behavior; unsafe reads remain statically rejected even if a particular
+runtime evaluation would skip the branch.
+
+Example of an intended safe access sequence:
+
+#+begin_src clojure
+[:and
+ [:present [:read :request/score]]
+ [:not= [:read :request/score] [:literal nil]]
+ [:> [:read :request/score] [:literal 7]]]
+#+end_src
+
+Absent score and present-nil score both yield false without attempting
+numeric comparison. Present integer 8 yields true; present integer 7
+yields false. Present false is distinguishable from both absence and nil
+and does not become an integer by truthiness.
+
+This is not a proof that the independent source interpreter and every
+production evaluator path agree on all admissible states.
+
+** v1346 / v1347 — Production typed-rule admission correspondence
+
+Sources:
+- =src/gesso/assurance/proof/typed_rule_admission_correspondence.clj=
+- =test/gesso/assurance/proof/typed_rule_admission_correspondence_test.clj=
+
+The =audit-rule!= diagnostic rechecks the original source using the
+production type admission path, then uses the independent v1344 static
+semantics and three synthetic typed-state scenarios:
+
+- All readers present with valid non-nil values.
+- Optional readers absent where permitted.
+- Nullable readers present with nil where permitted.
+
+The status vocabulary separates =:witness-supported=,
+=:production-rejected=, =:disagreement=, and =:not-checked=. A
+production-admitted declaration exceeding the independent 64-reader
+limit remains =:not-checked=; the production checker can admit a wider
+reader footprint. Neither three synthetic witnesses nor a successful
+static pass proves equality of evaluation for *every* valid state.
+
+Adversarial tests cover forged production approvals, substituted
+independent reports, invalid reader sets, malformed source, and
+non-authority of copyable diagnostics.
+
+** v1348 — JVM candidate for portable correspondence
+
+Source: =src/gesso/assurance/proof/typed_portability_correspondence.clj=.
+
+The =audit-witness!= diagnostic connects production admission, independent
+S1 branch-sensitive interpretation, and the existing CLJC portable
+semantics probe, all executed on the JVM. It rejects unrepresentable
+JavaScript Number integers, including unreachable numeric literals and
+set members, rather than silently rounding or truncating them.
+
+The admitted portable integer subset is bounded by:
+
+#+begin_src text
+  -(2^53 - 1) <= n <= (2^53 - 1)
+#+end_src
+
+The portable CLJC probe has a 16-reader bound; independent S1 checks have
+a 64-reader bound. JVM-only arbitrary-precision semantics remain useful
+for server-side reasoning, but cannot be silently promoted to the JS
+Number-based portable subset.
+
+A JVM witness agreement is explicitly *not* a JVM/Node equivalence proof.
+
+** v1349 — Shared JVM/Node corpus, not a second runner
+
+Source: =test/gesso/assurance/proof/jvm_cljs_semantics_test.cljc=.
+
+The existing CLJC corpus and test namespace were extended by 30 v1349
+witnesses. They include exact safe integer boundaries, unsafe bindings
+and unreachable literals, nullable/optional guards, nominal enum
+membership, and invalid source rejection. The test remains part of the
+existing shared JVM/Node semantic comparison path.
+
+Running exactly the same corpus on two host runtimes is *stronger than*
+using only a JVM-side portability prediction, but is still finite
+observational correspondence. This test does not cover arbitrary
+ClojureScript expressions, all future CLJS compiler versions, browser
+runtime behavior, or an actual XTDB snapshot.
+
+* Acceptance ledger — do not conflate implementation and proof
+
+| Claim / obligation | v1350 verdict | Evidence / exact limitation |
+|--------------------+---------------+-----------------------------|
+| Closed independent typed-value interpretation | IMPLEMENTED | v1341; executable and source-defined, not metatheoretically proved |
+| Optional, nullable, absent, false distinguished | IMPLEMENTED; REGRESSION CHECKED | v1341/v1344/v1345 |
+| Nominal enums and direct typed operations | IMPLEMENTED; REGRESSION CHECKED | v1342/v1343; supported direct subset |
+| Branch-sensitive source read safety | IMPLEMENTED; REGRESSION CHECKED | v1344/v1345; independent static interpretation |
+| Production-admission overlap with independent S1 | BOUNDED SOURCE-RELATIVE CHECK | v1346/v1347; three synthetic states and <=64 readers |
+| JVM portable-witness comparison | BOUNDED CHECK | v1348; portable <=16 readers and JS-safe integers |
+| Same CLJC corpus executed on JVM and Node | OBSERVED AGREEMENT | v1349; 971 cases including 30 new, byte-identical results |
+| Universal production type-checker soundness | OPEN | No all-source theorem or implementation correspondence proof |
+| Universal production evaluator correspondence | OPEN | Finite witnesses and tests are not forall-state proof |
+| All typed normalization preserves denotation | OPEN | S1/S2 boundary: v1337 checked Boolean shape, not all typed meanings |
+| Universally sound independent S1 checker | OPEN | Independent program and tests are not a machine-checked soundness proof |
+| Universal JVM/CLJS numerical equivalence | NOT CLAIMED | Out-of-range integers excluded; cross-host evidence finite |
+| Source-to-authoritative XTDB correspondence | OPEN | Typed witness is not authenticated committed state |
+| Browser/Choreo/HTMX/SSE refinement | OPEN | No claim from these S1 modules |
+| Strict application admission or certification | UNCHANGED | These sources issue no certificate or install authority |
+| Full Ygg/Shard and Chromium regression gate | NOT RUN FOR CHECKPOINT | Separate host/acceptance gate required |
+
+* Focused checkpoint verification
+
+** JVM S1 regression gate (fresh v1350 review)
+
+With Java 21 and the supplied 270-entry local dependency classpath, the
+following nine JVM namespaces were loaded and run together against the
+v1330--v1349 overlaid November 4 source tree:
+
+- =gesso.assurance.proof.typed-value-semantics-test=
+- =gesso.assurance.proof.typed-comparison-semantics-test=
+- =gesso.assurance.proof.typed-presence-semantics-test=
+- =gesso.assurance.proof.typed-rule-admission-correspondence-test=
+- =gesso.assurance.rule-type-test=
+- =gesso.assurance.rule-eval-test=
+- =gesso.assurance.proof.typed-atom-oracle-test=
+- =gesso.assurance.proof.typed-proposition-bridge-test=
+- =gesso.assurance.proof.jvm-cljs-semantics-test=
+
+Actual completed result:
+
+#+begin_src text
+Ran 237 tests containing 15850 assertions.
+0 failures, 0 errors.
+Process exit: 0.
+#+end_src
+
+** Node/CLJS evidence (fresh v1350 review)
+
+A compiled Node CLJS runner for the same source corpus was executed
+independently. The existing shared corpus contained 971 entries,
+including 30 new v1349 cases.
+
+The independently produced JVM and Node serialized corpus result streams
+had identical 42,475-character payloads and SHA-256:
+
+#+begin_src text
+a3220dd4aa5942a75803bb973b18ae3a0238a4dd7c303be9a3afc59c2321d26d
+#+end_src
+
+The compiled Node namespace's tests also completed:
+
+#+begin_src text
+Ran 23 tests containing 1030 assertions.
+0 failures, 0 errors.
+#+end_src
+
+The Node runner had already been compiled from the v1349 shared corpus
+source during that revision's development; it was *re-executed* and
+compared for this checkpoint. This v1350 review did not itself regenerate
+a fresh CLJS build, run Chromium, or execute the complete Ygg suite.
+Thus the result is a successful cross-host check of the inspected compiled
+artifact and current JVM source, not a proof of general build reproducibility.
+
+** Acceptance items
+
+- [X] An independent typed-value and partial-state model is implemented.
+- [X] The seven supported direct comparison/membership operators are covered.
+- [X] Presence and nullable guard refinement have permanent adversarial tests.
+- [X] Reader footprint, admission disagreement, and checker budget limits
+      remain visibly distinct.
+- [X] The v1349 corpus includes actual Node execution and deterministic
+      cross-host results, not merely a JVM-side forecast.
+- [X] Source-bound diagnostic reports cannot confer proof, application
+      admission, or physical transaction authority.
+- [X] Focused nine-namespace JVM regression gate passed.
+- [X] Compiled Node corpus and JVM corpus matched byte-for-byte.
+- [ ] Universal typed source and evaluator implementation correspondence.
+- [ ] A proved sound independent S1 reference semantics/checker.
+- [ ] Universal normalization denotation for typed atoms.
+- [ ] Full repository Ygg/Node/Chromium/XTDB gate on the installed tree.
+
+* Open risks and recommended continuation
+
+1. *Universal S1 is still open.* A separate evaluator that agrees on
+   selected states does not establish that production typing admits only
+   expressions with independently defined semantics for all inputs.
+   Future reports must retain this distinction.
+2. *Source admission and semantic evaluation differ.* Extra declared but
+   unused readers change production source admissibility without
+   necessarily changing a comparison's truth. Correspondence results must
+   compare the proper contract at each boundary.
+3. *Capacity limits are meaningful.* 64-reader S1 interpretation and
+   16-reader portable evaluation are smaller than production capacity.
+   Over-limit applications must remain explicitly not checked.
+4. *Integer semantics split by host.* Mathematical JVM integers and
+   JavaScript's exact Number integers have different supported domains.
+   Reject, constrain, or explicitly reify larger integers before
+   claiming portable correspondence.
+5. *Canonicalization remains cross-cutting.* v1337/v1338's Boolean shape
+   audits do not establish denotational equivalence of arbitrary typed
+   atoms before and after normalization. S1/S2 composition still needs
+   a general argument.
+6. *Generated artifacts and install provenance.* The review tree contains
+   local revision overlays, and the Node output was already built. Exact
+   installed source identity and a clean complete host gate remain
+   necessary for deployment-level assertions.
+7. *The next high-value work is transition soundness.* The v1351--v1360
+   plan should exploit the restricted S1 semantics when defining guarded
+   transitions, frame conditions, assignment effects, copy effects, and
+   invariant preservation, while retaining S1's open universal claims.
+
+* Revision and archive contract
+
+Revision: v1350.
+Destination: =doc/gesso-assurance-s1-typed-semantics-checkpoint.org=.
+
+This revision delivers one complete Org document, not a patch. The =ins=
+archive MUST have exactly two flat regular members: the full document and
+its =-commit.txt= companion, with one =-v1350-= marker in the archive
+filename. No production code or test file changes are part of v1350.
