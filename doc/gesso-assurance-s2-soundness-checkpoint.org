@@ -1,0 +1,307 @@
+#+TITLE: Gesso v1340 — S2 Propositional Soundness Acceptance Checkpoint
+#+SUBTITLE: Restricted proof kernel: established evidence, conditional theorem, and open obligations
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and acceptance verdict
+
+This document is the v1340 acceptance *review* of the propositional
+soundness work v1331--v1339. It changes no runtime API, proof kernel,
+certificate, application installation, or assurance policy. In particular,
+installing this review MUST NOT change an S2 proof obligation from OPEN to
+CLOSED in machine-readable or user-facing certification reports.
+
+Verdict: *CONDITIONAL SOURCE-LEVEL S2 MILESTONE ACCEPTED; UNIVERSAL S2 OPEN*.
+
+For a concrete, admitted source derivation within the configured checking
+limits, the new machinery can independently evaluate the local Boolean
+inference obligations, reconstruct dependencies, and compose those
+instance-level results by induction over proof steps. The result is a
+conditional entailment statement about opaque propositional atoms and
+named, still-open premises. The production kernel's universal implementation
+soundness, including universal normalization correspondence, remains OPEN.
+
+This is intentionally weaker than the R4 goal of independently justified
+kernel soundness and end-to-end application certification. A bound-respecting
+source-instance audit and a finite test suite are not a proof that every
+Clojure execution of the production kernel is correct.
+
+This review was prepared against the November 4 repository snapshot
+(branch application-assurance, HEAD e65820e) with locally overlaid
+v1330--v1339 files. Those overlays are the same development files intended
+for installation as separate ins archives; the Git HEAD itself is v1329.
+The full Ygg / Chromium / Node / XTDB gate was not run for this checkpoint.
+
+* Sources audited and exact boundaries
+
+** Seven-rule production kernel
+
+Source: =src/gesso/assurance/proof/kernel.clj=.
+
+The closed source-level rule family used by this checkpoint is:
+
+1. =:premise= -- select one declared premise, leaving it OPEN.
+2. =:truth-introduction= -- infer Boolean truth without cited premises.
+3. =:implication-reflexivity= -- infer P -> P.
+4. =:conjunction-introduction= -- infer conjunction of cited conclusions.
+5. =:conjunction-elimination= -- infer an indexed conjunct.
+6. =:implication-elimination= -- infer consequent from implication and antecedent.
+7. =:disjunction-introduction= -- infer a disjunction containing a cited fact.
+
+This is NOT a system with arbitrary atomic axioms, premise discharge,
+quantifier elimination, arithmetic solving, or arbitrary Clojure computation
+as an inference rule. Those cannot be inferred from the rule catalog.
+
+** v1331 — Reference propositional meaning
+
+=src/gesso/assurance/proof/propositional_semantics.clj= defines opaque-atom
+truth-functional interpretation, exact total valuations, premise entailment,
+and bounded exhaustive enumeration. Its =truth-at!= and
+=enumerate-entailment!= operations do not call the production kernel.
+
+It treats an entire typed atomic declaration as an uninterpreted Boolean
+variable: no corresponding claim is made about a typed field, actual
+application state, or runtime evaluator. Exhaustive enumeration is limited
+by explicit atom, node, depth and work budgets. The code's normal atom-count
+limit for direct entailment enumeration is 12.
+
+** v1332 — Rule obligations
+
+=src/gesso/assurance/proof/propositional_rule_obligations.clj=
+independently describes the seven rule schemata and reconstructs local
+hypotheses and conclusion. Its =instantiate!= creates UNCHECKED,
+source-level local obligations. The map of rule declarations is not itself
+a proof that the production kernel implements them.
+
+** v1333 / v1334 — Finite rule-instance checking
+
+=src/gesso/assurance/proof/propositional_rule_schema_audit.clj= and
+=test/gesso/assurance/proof/propositional_rule_schema_audit_test.clj=
+check concrete local instances under every admitted Boolean valuation.
+The hypothetical audit entry point supports corrupted-rule negative controls.
+
+Statuses distinguish =:complete-for-instance= from =:counterexample=,
+=:vacuous-hypotheses=, and =:not-checked=. Catalog checking establishes
+sample coverage of the closed rule inventory, not a universally quantified
+schema theorem.
+
+** v1335 / v1336 — Production/source correspondence
+
+=src/gesso/assurance/proof/propositional_kernel_correspondence.clj= and
+=test/gesso/assurance/proof/propositional_kernel_correspondence_test.clj=
+re-run the production kernel on ORIGINAL derivation source and independently
+reconstruct source-step shape, derived conclusions, earlier-step references,
+and inherited open premises. The audit uses the independent local Boolean
+checker instead of treating a kernel success result as semantic evidence.
+
+The correspondence audit has a 48-step per-derivation limit; over-limit
+sources explicitly return =:not-checked=. An accepted instance is still not
+a universal proof of implementation correspondence.
+
+** v1337 / v1338 — Normalization audit
+
+=src/gesso/assurance/proof/propositional_normalization_audit.clj= and
+=test/gesso/assurance/proof/propositional_normalization_audit_test.clj=
+compare original and normalized connective structure, independently
+reconstruct canonical atomic forms, detect collisions, and compare Boolean
+shadows under all source valuations when <=8 distinct atoms and within work
+limits.
+
+This establishes an instance-level source-to-normalized *Boolean shape*
+relation. It does not show that original and canonical TYPED atoms have the
+same denotation across all well-typed application states. That belongs to S1.
+Universal correctness of the normalizer's implementation also remains open.
+
+** v1339 — Compositional derivation check
+
+=src/gesso/assurance/proof/propositional_derivation_soundness.clj=,
+with its development regression tests, independently rebuilds the raw
+inherited-premise ledger and reruns local Boolean implications before
+composing them into a stepwise conditional conclusion.
+
+It can report =:conditional-source-derivation-soundness= for a derivation
+whose aggregate atom count exceeds the budget for ONE global truth table,
+provided every LOCAL rule instance was completely checked, non-vacuous,
+and its dependencies correspond exactly. A 13-atom, 25-step chain exercises
+this distinction. A 48-step limit inherited from correspondence still
+applies, and local budget failures remain inconclusive.
+
+Reports are copyable diagnostics: no certificates, admissions, trusted
+physical observations, or deployed application guarantees are produced.
+
+* The mathematical argument established conditionally
+
+** Interpretation
+
+Let A be the finite set of opaque atoms in a source derivation. For every
+total valuation v : A -> {false,true}, define the usual classical meanings
+of NOT, AND, OR, and IMPLIES. For a set of named assumptions Gamma and a
+formula P, write Gamma |= P when every v satisfying ALL formulas in Gamma
+also satisfies P. A checked open premise is still an assumption.
+
+** Local inference
+
+For step i let H_i be the cited source conclusions, C_i its original
+conclusion, and Gamma_i its inherited named open premises. For a premise
+step, its cited assumption is added to Gamma_i; for a premise-free rule,
+Gamma_i is empty; for other rules, Gamma_i is the union of the open
+premises inherited from cited earlier steps.
+
+The checked LOCAL obligation is:
+
+#+begin_src text
+  for every total valuation v:
+    (every H in H_i: H(v))  =>  C_i(v)
+#+end_src
+
+For =:premise=, the local hypothesis is the selected open premise. The
+checker does not pretend that it has proved that premise independently.
+
+** Stepwise induction
+
+Assume, for the particular source, that (a) each source step matches its
+independently described rule schema, (b) earlier references are the exact
+ones reconstructed from source, and (c) each local implication above is
+correctly checked, not vacuous and not over-budget.
+
+Induct on the ordered source steps:
+
+- Base: a premise step's selected assumption entails its source conclusion;
+  a premise-free rule's valid conclusion follows from the empty context.
+- Step: a valuation satisfying Gamma_i also satisfies every assumption
+  inherited by its cited parent steps. By the parent induction hypotheses,
+  it therefore satisfies every cited conclusion H in H_i. By the checked
+  local implication, it satisfies C_i.
+
+Therefore Gamma_i |= C_i for each step, and for the final step:
+
+#+begin_src text
+  Gamma_final |= Goal
+#+end_src
+
+This is a *valid compositional mathematical argument*, conditional on the
+local implication and correspondence premises. It does not require
+enumerating every valuation of the global formula once the local checks
+are complete. It also does not establish that all source derivations pass,
+that arbitrary typed atoms mean what a developer intended, or that real
+application execution refines the source machine.
+
+** Why this is not a universal checker soundness proof
+
+A universal S2 claim must justify something of the following form for the
+ACTUAL production implementation, not merely for reviewed examples:
+
+#+begin_src text
+  for all admitted source derivations D:
+    if kernel.check(D) succeeds,
+    then open-premises(D) |= source-goal(D)
+#+end_src
+
+That requires a general correspondence argument between every successful
+kernel execution and the formal rule schemata, preservation of meaning
+through production normalization and source comparison, and confidence
+in the mathematical reference semantics and inference rules themselves.
+The v1331--v1339 code supplies useful concrete cross-checks but no complete
+independent machine-checked argument covering every program path or all
+admitted input sizes. In particular, an instance-level checker that returns
+=:not-checked= for a budget does not close such a universal theorem.
+
+* Acceptance ledger
+
+| Obligation | Status at v1340 | Basis / limitation |
+|------------+-----------------+--------------------|
+| Closed seven-rule source vocabulary | IMPLEMENTED | Kernel and independent v1332 inventory |
+| Opaque-Boolean source semantics | IMPLEMENTED, BOUNDED EXECUTABLE AUDIT | v1331 validates and enumerates supplied sources |
+| Local inference entailment for checked instances | ESTABLISHED FOR THOSE INSTANCES | v1333 exhaustive local valuations, no vacuity/budget promotion |
+| Exact original-source premise inheritance for checked derivations | CROSS-CHECKED | v1335/v1339 independently rebuild ledgers; <=48 steps |
+| Propositional normalizer shape preservation | CHECKED PER INSTANCE | v1337 checks <=8 distinct atoms, atom collisions fail closed |
+| Compositional source-derivation entailment | CONDITIONAL ARGUMENT | v1339 induction, given sound local checks and correspondence |
+| Universal seven-rule semantic validity | GENERAL MATHEMATICAL ARGUMENT STILL TO FORMALIZE | Truth-functional schemata are amenable to a finite case proof; tests alone do not discharge this |
+| Universal production kernel rule correspondence | OPEN | Checked source instances do not cover all implementation paths |
+| Universal production normalizer semantic preservation | OPEN | v1337 is bounded and S1 typed-atom semantics are separate |
+| Typed atomic interpretation (S1) | OPEN | Opaque Booleans are intentionally uninterpreted |
+| Independent soundness of the checker (S9) | OPEN | Reference implementations and test agreement are not a verified checker kernel |
+| S2 globally closed for application certification | NO | Above universal obligations remain open |
+| Certificate admission / physical XTDB / browser refinement | UNCHANGED, OPEN | None of v1331--v1339 confers execution authority |
+
+* Focused verification for the checkpoint
+
+** Environment and gate
+
+The v1340 focused gate ran against the v1330--v1339 overlaid source tree with
+Java 21 and the supplied local dependency classpath (270 entries). Eight
+JVM namespaces were loaded and executed in a single process:
+
+- =gesso.assurance.proof.propositional-semantics-test=
+- =gesso.assurance.proof.propositional-rule-obligations-test=
+- =gesso.assurance.proof.propositional-rule-schema-audit-test=
+- =gesso.assurance.proof.propositional-kernel-correspondence-test=
+- =gesso.assurance.proof.propositional-normalization-audit-test=
+- =gesso.assurance.proof.propositional-derivation-soundness-test=
+- =gesso.assurance.proof.kernel-test=
+- =gesso.assurance.proof.propositional-soundness-test=
+
+Actual result:
+
+#+begin_src text
+Ran 184 tests containing 2616 assertions.
+0 failures, 0 errors.
+Process exit: 0.
+#+end_src
+
+This is a fresh focused gate result for the v1340 checkpoint. It does NOT
+replace the complete Ygg test run, and does not claim JVM/CLJS equivalence
+for all typed predicates, execution-path completeness, XTDB refinement, or
+an independently checked general soundness theorem.
+
+** Acceptance status
+
+- [X] All seven rule families covered by source-level obligation audits.
+- [X] Negative controls for corrupted premises, conclusions, provenance,
+      and normalization sources present in the permanent regression suites.
+- [X] Compositional derivation result retains its named open premises.
+- [X] Local and global budget limitations do not become proof authority.
+- [X] Focused JVM gate green (184 tests; 2616 assertions; 0 failures).
+- [ ] Independent general theorem for every admitted production kernel run.
+- [ ] Universal typed atomic canonicalization denotation (S1).
+- [ ] Independent checker/implementation correspondence and assurance admission.
+- [ ] Full repository Ygg/Node/Chromium/XTDB gate at installed baseline.
+
+* Risks and prioritized continuation
+
+1. *S2 remains open*: the independent v1332 rule generator and v1335
+   correspondence audit are software. Checking their samples does not prove
+   every accepting production execution follows the mathematical rules.
+   Preserve this gap in all future assurance reports.
+2. *Normalizing typed atoms is a separate semantic step*: canonical
+   equality of source/normalized forms is not the same as equality of their
+   interpretation in arbitrary typed states. Address this explicitly in S1.
+3. *Budgets define the evidence class*: direct global <=12 opaque atoms,
+   normalization <=8, correspondence <=48 source steps. Do not conflate
+   a compositional conditional proof with a completed global search.
+4. *Opaque and contradictory premises*: an open premise is neither true by
+   fiat nor automatically satisfiable. Local vacuity is guarded against, but
+   application-level consistency and trusted premises remain separate.
+5. *Uninstalled worktree versus deployed source*: the review's overlaid
+   source and tests must be installed on the user's checkout before local
+   Ygg can validate the same tree. Neither a document nor a copied report
+   installs or enforces a runtime gate.
+
+The v1341--v1350 plan next develops independently specified *typed*
+semantics, including absence versus nil, integer and enum operations,
+partial evaluation, and JVM/CLJS correspondence. That is the correct next
+step while the universal implementation/S9 proof obligations are retained
+and targeted separately. Do not mark S2 completely discharged simply
+because this checkpoint document is accepted.
+
+* Revision accounting
+
+Revision: v1340.
+Proposed installed destination:
+=doc/gesso-assurance-s2-soundness-checkpoint.org=.
+
+This is a single-document acceptance review. The ins archive is expected
+to contain exactly two flat regular files: this complete document and one
+revision-numbered =-commit.txt= member. No production code or tests are
+modified by v1340.
