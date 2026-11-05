@@ -7,11 +7,15 @@
    cross-host agreement. The JVM-only production-evaluator tests are an
    additional check, not a claim that the authoritative evaluator runs in JS.
 
+   v1349 extends that JVM/Node corpus with v1348 typed-portability witnesses.
    This suite is finite diagnostic evidence, never an assurance credential."
-  (:require #?(:clj [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            #?(:clj [clojure.test :refer [deftest is testing]]
                :cljs [cljs.test :refer-macros [deftest is testing]])
             [gesso.assurance.proof.jvm-cljs-semantics :as probe]
-            #?(:clj [gesso.assurance.rule-eval :as production])))
+            #?(:clj [gesso.assurance.rule-eval :as production])
+            #?(:clj [gesso.assurance.proof.typed-portability-correspondence
+                     :as typed-portability])))
 
 (def safe-max 9007199254740991)
 (def int-samples [-9007199254740991 -9007199254740990 -101 -8 -1
@@ -178,9 +182,71 @@
    ["overdepth" (source (nth (iterate (fn [x] [:not x]) [:literal true]) 34))]
    ["overbudget" (source (into [:and] (repeat 513 [:literal true])))]])
 
+(defn typed-portability-cases
+  "v1349: pretyped portable witnesses selected from the v1348 S1 bridge.
+   All of these become part of the existing JVM/Node byte-for-byte corpus;
+   a separate JVM-only test checks the source against the independent S1
+   evaluator. Neither the portable probe nor Node trusts a copied report."
+  []
+  (let [integer-type {:request/score {:type :integer}}
+        integer-expr [:>= [:read :request/score] [:literal 0]]
+        nullable-type {:request/value {:type :integer
+                                       :optional? true :nullable? true}}
+        value-read [:read :request/value]
+        guarded [:and [:present value-read]
+                 [:not= value-read [:literal nil]]
+                 [:>= value-read [:literal 7]]]
+        enum-expr [:in [:read :request/status]
+                   [:literal #{:request/open :request/done}]]]
+    (vec
+     (concat
+      (for [v [(- safe-max) (inc (- safe-max)) -7 0 7
+               (dec safe-max) safe-max]]
+        [(str "v1349/safe-integer/" v)
+         (source integer-expr integer-type {:request/score v})])
+      (for [[id expr] [["minimum" [:<= [:literal (- safe-max)]
+                                          [:literal safe-max]]]
+                       ["maximum" [:>= [:literal safe-max]
+                                          [:literal (- safe-max)]]]
+                       ["membership" [:in [:literal safe-max]
+                                           [:literal #{0 7 9007199254740991}]]]]]
+        [(str "v1349/safe-literal/" id) (source expr)])
+      (for [[id v] [["positive" 9007199254740992]
+                    ["negative" -9007199254740992]]]
+        [(str "v1349/nonportable-binding/" id)
+         (source integer-expr integer-type {:request/score v})])
+      [["v1349/nonportable-unreachable"
+        (source [:or [:literal true]
+                 [:> [:literal 9007199254740992] [:literal 0]]])]
+       ["v1349/nonportable-set-member"
+        (source [:in [:literal 1]
+                 [:literal #{1 9007199254740992}]])]]
+      (for [[id bindings] [["absent" {}]
+                            ["nil" {:request/value nil}]
+                            ["false" {:request/value false}]
+                            ["below" {:request/value 6}]
+                            ["equal" {:request/value 7}]
+                            ["above" {:request/value 8}]]]
+        [(str "v1349/optional-nullable/" id)
+         (source guarded nullable-type bindings)])
+      (for [state [:request/open :request/done]]
+        [(str "v1349/enum/" (name state))
+         (source enum-expr enum-type {:request/status state})])
+      (for [v [-1 0 7 8 9]]
+        [(str "v1349/membership/" v)
+         (source [:in [:literal v] [:literal #{0 7 8}]])])
+      [["v1349/unsafe-optional-read"
+        (source [:>= [:read :request/value] [:literal 7]]
+                nullable-type {:request/value 8})]
+       ["v1349/missing-required"
+        (source integer-expr integer-type {})]
+       ["v1349/unsupported-precision-from-literal"
+        (source [:< [:literal (- 9007199254740992)] [:literal 0]])]]))))
+
 (defn shared-cases []
   (vec (concat (boolean-cases) (integer-cases) (optional-cases)
-               (enum-cases) (rejection-cases))))
+               (enum-cases) (rejection-cases)
+               (typed-portability-cases))))
 
 (defn shared-corpus-results
   "Value-only artifact to print and compare byte-for-byte across two hosts.
@@ -487,3 +553,63 @@
        (is (= (:value (probe/probe! src))
               (:value (production/evaluate-rule!
                        (:rule src) (:reader-types src) (:bindings src))))))))
+
+(deftest typed-portability-shared-witnesses-are-distinct
+  (let [cases (typed-portability-cases)
+        ids (mapv first cases)
+        by-id (into {} cases)]
+    (is (>= (count cases) 25))
+    (is (= (count ids) (count (set ids))))
+    (is (every? #(str/starts-with? % "v1349/") ids))
+    (doseq [id ["v1349/safe-integer/9007199254740991"
+                "v1349/safe-integer/-9007199254740991"
+                "v1349/optional-nullable/absent"
+                "v1349/optional-nullable/nil"
+                "v1349/optional-nullable/equal"
+                "v1349/enum/done"]]
+      (is (= :ok (first (captured (get by-id id)))) id))
+    (doseq [id ["v1349/nonportable-binding/positive"
+                "v1349/nonportable-binding/negative"
+                "v1349/nonportable-unreachable"
+                "v1349/nonportable-set-member"
+                "v1349/unsupported-precision-from-literal"]]
+      (is (= :unsafe-integer-precision
+             (nth (captured (get by-id id)) 2)) id))
+    (is (= [:ok false]
+           (captured (get by-id "v1349/optional-nullable/absent"))))
+    (is (= [:ok false]
+           (captured (get by-id "v1349/optional-nullable/nil"))))
+    (is (= [:ok true]
+           (captured (get by-id "v1349/optional-nullable/equal"))))
+    (is (= [:failure :invalid-source :incorrect-binding-type
+            [:bindings :request/value]]
+           (captured (get by-id "v1349/optional-nullable/false"))))
+    (is (= :missing-required-binding
+           (nth (captured (get by-id "v1349/missing-required")) 2)))))
+
+#?(:clj
+   (deftest typed-portability-witnesses-match-independent-s1-on-jvm
+     (doseq [[id src] (typed-portability-cases)]
+       (let [r (typed-portability/audit-witness! src)
+             observed (captured src)]
+         (is (= src (:source r)) id)
+         (is (= :not-established (:cross-host-correspondence r)) id)
+         (is (= :not-proved (:proof-status r)) id)
+         (is (= :not-admitted (:admission r)) id)
+         (is (= :none (:authority r)) id)
+         (is (not (contains? r :certificate)) id)
+         (case (:status r)
+           :witness-agreement
+           (is (= [:ok (:independent-value r)] observed) id)
+
+           :nonportable
+           (is (= :unsafe-integer-precision (nth observed 2 nil)) id)
+
+           :invalid-witness
+           (is (= :failure (first observed)) id)
+
+           :production-rejected
+           (is (contains? #{:ok :failure} (first observed)) id)
+
+           (is false (str "Unexpected v1348 audit status for " id
+                          ": " (:status r))))))))
