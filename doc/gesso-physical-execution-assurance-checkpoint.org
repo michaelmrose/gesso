@@ -1,0 +1,330 @@
+#+TITLE: Gesso v1381 — Physical Execution Assurance Checkpoint
+#+SUBTITLE: v1371–v1380 diagnostic evidence, exact nine-obligation ledger, and the trusted-acquisition boundary
+#+DATE: 2026-11-04
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and acceptance decision
+
+This is a *DOCUMENT-ONLY* checkpoint after v1380. It changes no runtime
+operation, checker, certificate gate, authorization rule, HTMX behavior, or
+public API. It reviews the actual v1371–v1376 source in the supplied Gesso
+repository snapshot and the original v1378, v1379, and v1380 installation TAR
+payloads. v1377 repaired a separate test-corpus integrity expectation.
+
+*Decision: THE BOUNDED PHYSICAL-EXECUTION DIAGNOSTIC FOUNDATION IS ACCEPTED AS
+ENGINEERING EVIDENCE; NO PHYSICAL REFINEMENT OBLIGATION IS DISCHARGED.*
+
+The observed path now connects four *different kinds* of evidence:
+
+1. Source-relative issued operation and writer obligations (v1366–v1371).
+2. Process-local preparation and physical-outcome hook events (v1373).
+3. Caller-recorded low-level transaction operations (v1375).
+4. Post-attempt physical readback (v1378) and supplied before/after comparison
+   over the admitted, finite target set (v1380).
+
+The evidence can detect inconsistencies between these sources. It does not
+authenticate their origin, the transaction-internal basis, the complete
+physical write set, or the identity of the execution causing a later read.
+Successful correlation or matching rows *must not* be promoted into a proof
+certificate, admission, or transaction authority.
+
+This checkpoint covers Gesso's single-node server-side assurance development.
+HumanHelp production assurance, multi-node execution, browser/HTMX/SSE
+refinement, and universal checker-kernel soundness are outside its established
+claims. They remain part of the broader R4 goal.
+
+* Source-of-truth and reviewed files
+
+** Baseline and revision integrity
+
+- The supplied repository snapshot is the v1376 baseline; the earlier v1376
+  handover is historical context, not a machine-checked certificate.
+- The v1378 source, v1379 test, and v1380 source were read from their original
+  individual installation TAR payloads and byte-compared to the files in the
+  local review tree. *All three match exactly.*
+- The v1378–v1380 TARs each have exactly two flat regular-file members with
+  the expected source name and extension-free =-commit.txt= suffix.
+- This review does *not* attest that the user's installed repository, another
+  checkout, or the running deployment has the same bytes.
+- The available test logs record completed focused gates; interrupted runs
+  and test-launch errors are not counted as passes.
+
+** Implementation chain
+
+| Revision | Source / test path | New evidence or limitation |
+|----------+--------------------+----------------------------|
+| v1368–v1369 | =src/gesso/assurance/proof/executable_writer_correspondence_obligations.clj= and permanent test | Nine *open* per-writer physical obligations, source-relative writer inventory; no completion proof |
+| v1370 | =doc/gesso-assurance-induction-and-writer-correspondence-checkpoint.org= | Accepts only conditional declared-machine induction and relative writer accounting |
+| v1371 | =src/gesso/assurance/proof/physical_execution_provenance_boundary.clj= | Bounded supplied before/after evidence and capture requirements; unauthenticated |
+| v1372 | =test/gesso/assurance/proof/physical_execution_provenance_boundary_test.clj= | Permanent forged/mismatched observation tests |
+| v1373 | =src/gesso/assurance/proof/transaction_bound_evidence_acquisition.clj= | One-attempt =:prepared= / =:physical-outcome= hook acquisition; injectable, process-local |
+| v1374 | =test/gesso/assurance/proof/transaction_bound_evidence_acquisition_test.clj= | Permanent adversarial hook tests and controlled embedded-XTDB Claim execution |
+| v1375 | =src/gesso/assurance/proof/transaction_submission_correspondence.clj= | Recompute canonical =tx/prepare= and compare to separately recorded =execute-tx= operations, order included |
+| v1376 | =test/gesso/assurance/proof/transaction_submission_correspondence_test.clj= | Permanent adversarial cases and controlled embedded-XTDB low-level submission comparison |
+| v1377 | =test/gesso/script/gesso_test_integrity_test.clj= | Fixes stale portable-semantics corpus-count assumptions; unrelated to discharging physical obligations |
+| v1378 | =src/gesso/assurance/proof/transaction_outcome_state_provenance.clj= | Correlates attempt/outcome/receipt with bounded post-read projection; caller-selected node and basis unverified |
+| v1379 | =test/gesso/assurance/proof/transaction_outcome_state_provenance_test.clj= | Permanent outcome/state adversarial tests, including real embedded-XTDB readback |
+| v1380 | =src/gesso/assurance/proof/physical_write_footprint_observation.clj= | Declared =:put-docs= targets, field deltas and claimed whole-document pre/post frame; not the total physical write set |
+
+* Evidence inventory and precise boundaries
+
+** A. Source-relative writer and issued-executor accounting
+
+The v1366/v1368 bridge rechecks a declared operation catalog against an issued
+application, its handler identities, and a *supplied* host enumeration of
+observed entry points. It derives per-operation abstract read/write/frame
+requirements and nine per-writer obligations. This is useful source-relative
+accounting. It cannot prove that the supplied enumeration covers hidden
+jobs, raw XTDB callers, initializers, alternate routes, or deployed binaries.
+It also does not prove that an identifier-matched concrete handler implements
+its independent abstract transition relation.
+
+** B. One-attempt hook observations (v1373)
+
+Namespace: =gesso.assurance.proof.transaction-bound-evidence-acquisition=.
+
+=start-acquisition!= accepts the original checked writer source, operation
+identifier, and canonical command binding. The returned =:observe!= function
+receives a =:prepared= event and a =:physical-outcome= event on the specific
+resolved-operation invocation; =:complete!= can return a report only after
+one eligible, definitively classified attempt. Missing, duplicate,
+reordered, inconsistent, or observer-poisoned events fail closed. A genuine
+indeterminate outcome does not become a definitive completed report.
+
+The observer is installed through an injected context hook, not an
+independently authenticated XTDB event stream. A report is replayable and
+copyable. It retains =:hook-origin-authenticated? false= and
+=:transaction-id-authenticated? false=.
+
+** C. Canonical lowering versus caller-recorded submission (v1375)
+
+Namespace: =gesso.assurance.proof.transaction-submission-correspondence=.
+
+=audit-recorded-submission!= replays upstream acquisition and lowers the
+captured admitted plan using =gesso.model.tx/prepare=. It compares the entire
+ordered operation vector with caller-supplied =:recorded-tx-ops=. It can
+reject an altered, incomplete or reordered vector and accepts at most 128
+recorded operations. The comparison is about *what those two vectors say*;
+it is not an authenticated observation of the bytes submitted to XTDB.
+
+** D. Bounded post-attempt state (v1378–v1379)
+
+Namespace: =gesso.assurance.proof.transaction-outcome-state-provenance=.
+
+=audit-outcome-state!= rechecks the original v1375 evidence, attempt ID,
+operation ID, binding, command-record identity, observed outcome, and
+reported receipt. It compares expected *fields* of each admitted target
+against ordered supplied =:post-rows=. =capture-xtdb-poststate!= can issue
+real =xt/q= SELECT queries against a *caller-supplied* XTDB node, for at
+most 64 distinct plan targets including the command record. The node's
+identity, query basis, and relation to the transaction are not attested.
+Neither a matching row nor a matching recorded receipt establishes causality.
+
+The report differentiates =:observed-committed-projection-agrees=,
+=:observed-committed-projection-diverges=, and
+=:rejected-outcome-no-causal-attribution=. Its agreement predicate covers
+expected fields only: unexpected physical fields may be omitted from that
+particular comparison.
+
+The real-XTDB test also revealed an exact representation mismatch in the
+stored command record's timestamp fields: a sub-microsecond fraction of an
+expected =java.time.Instant= was not preserved in the observed value. A
+=ZonedDateTime= readback is compared to =Instant= by their *exact instants*,
+not by printed text or silent truncation. For that controlled case, the
+mismatch remains visible; the test does not assert a general storage-precision
+theorem for every XTDB write or type.
+
+** E. Declared write footprint and bounded frame (v1380)
+
+Namespace: =gesso.assurance.proof.physical-write-footprint-observation=.
+
+=audit-declared-write-frame!= rechecks the entire v1378 source/report chain
+and derives admitted command targets, declared before/after documents,
+declared guard/assertion counts, and the ordered caller-recorded =:put-docs=
+count. It supports at most 64 unique declared targets. The restricted shape
+requires one supported =:put-docs= per admitted command, plus supported
+ASSERT statements; other recorded operation shapes fail closed.
+
+The v1380 input supplies pre-attempt document rows, explicitly marked
+=:caller-supplied-unattested=. It compares them with declared prestates,
+then compares whole *supplied target documents* after the attempt against
+the declared results. It reports missing fields, additional post-fields,
+field-delta disagreement, and differing target indices without returning
+sensitive domain documents in the report or typed errors.
+
+This strengthens the observed *declared target set* relative to v1378's
+expected-fields-only projection. It still cannot detect writes to entirely
+unlisted documents, authenticate a transaction-internal prestate, exclude
+concurrent writers, or prove that this attempt caused the observed poststate.
+For a rejected attempt, the result remains a rejected-attempt diagnostic,
+not a successful frame or commit proof.
+
+** F. Origin distinctions that must not collapse
+
+| Evidence | Claimed source | Authentication established here? | Permissible use |
+|----------+----------------+-----------------------------------+----------------|
+| Declared abstract operations | Original source-rechecked Gesso catalogs | No full physical/deployment closure | Generate conditional obligations |
+| Preparation/outcome events | Injected process-local executor hook | No | Correlate one observed invocation and detect mismatches |
+| Low-level =tx-ops= | Separately supplied operation vector | No | Compare ordered canonical lowering to recorded data |
+| Post-state SELECT rows | Caller-selected XTDB node via =xt/q=, or supplied maps | No node/basis/causality attestation | Bounded target-field diagnostic |
+| Pre-state rows | Caller-supplied pre-attempt maps | No transaction-internal basis | Bounded before/after frame diagnostic |
+| Full physical writes | Not acquired | No | *Open proof obligation* |
+
+* Exact nine physical-refinement obligations (v1368)
+
+The original obligation identifiers and required-evidence labels are
+preserved. *Every obligation remains =:open= at v1381.* The right column
+identifies progress toward acquisition, NOT evidence of discharge.
+
+| ID | Required evidence label | v1381 evidence and still-open gap |
+|----+-------------------------+-----------------------------------|
+| =:typed-input-binding= | =:executed-request-to-typed-input-projection= | Command binding and operation ID checked within supplied/injected events; actual incoming request-to-typed projection not authenticated |
+| =:transaction-internal-prestate= | =:authenticated-transaction-snapshot-and-typed-projection= | v1380 supplied before rows; no transaction-internal snapshot, read basis, or certified typed projection |
+| =:guard-authorization= | =:executed-guard-and-admitted-authorization-correspondence= | Guard count/plan available; no proof executed physical authorization equals admitted policy |
+| =:assignment-write-footprint= | =:executed-assignments-and-complete-physical-write-set= | v1375 canonical-vs-recorded operations; v1380 declared =:put-docs= footprint; actual full write set unobserved |
+| =:frame-and-unmodeled-fields= | =:unchanged-state-and-physical-domain-frame-correspondence= | v1380 full-field comparison within supplied target documents; no frame over unenumerated targets or real protected domain |
+| =:serial-concurrency-validation= | =:atomic-version-check-and-serial-commit-history= | Controlled single-attempt executions, no authenticated concurrent history or isolation/conflict proof |
+| =:committed-outcome-incorporation= | =:authenticated-commit-reject-or-unknown-resolution= | Hook outcome and readback correlation; unknown outcome is not reclassified, but no authenticated commit/reject/unknown history |
+| =:writer-provenance-and-deployment= | =:deployed-executor-identity-and-origin-attestation= | Source-relative issued-handler/writer check; not deployed artifact/entry-point or origin attestation |
+| =:universal-execution-refinement= | =:sound-all-executions-refinement-argument= | Finite, conditional abstract proofs plus bounded physical examples; no all-executions refinement theorem |
+
+Discharged obligations: *0 of 9*.
+
+The reports' exact status vocabularies are purpose-specific; do not normalize
+=:recorded-operations-agree=, =:bounded-post-state-agreement? true=, or
+=:bounded-declared-domain-agreement? true= to =:established= for one of
+these nine obligations. All such matches remain diagnostic unless their
+relevant physical provenance and completeness premises are independently
+satisfied. The inherited ledger rows retain =:status :open=.
+
+* Physical correspondence theorem still required
+
+Let =alpha= project an authenticated concrete XTDB state onto the typed
+abstract state, =Init= denote admitted initialization, =T_o= denote an
+admitted guarded abstract operation, and =C_o= a concrete execution of its
+checked implementation. The desired bridge has at least the following
+premises for the claimed domain and deployment:
+
+#+begin_example
+  (1) Every real initialization is represented by an admitted base state.
+  (2) Every writer of protected physical state is mediated and classified.
+  (3) The request's typed input, principal, and permissions are trustworthy.
+  (4) The transaction-internal prestate and guard checks are coherent.
+  (5) Each committed C_o either refines T_o under alpha or is allowed
+      abstract stuttering; rejected/unknown outcomes do not forge success.
+  (6) Physical writes and untouched frame fields are completely accounted for.
+  (7) Concurrent histories satisfy the serial/atomic model's assumptions.
+  (8) Source, proof evidence, checked handlers and deployed artifacts are bound.
+  (9) The independent abstract semantics and preservation rules are sound.
+
+  THEN, conditional on these premises, abstract invariant preservation
+  transfers to the claimed concrete executions.
+#+end_example
+
+The v1380 observed path addresses small, diagnostic portions of (3)–(6)
+under explicit, unauthenticated premises. It has *not* established those
+premises. Finite Recife/TLC exploration of abstract interleavings and
+successful embedded-XTDB tests cannot substitute for the missing universal
+implementation/refinement obligations. Recife remains internal tooling;
+application authors do not write Recife, Quint or TLA+ specifications.
+
+* Completed testing evidence and limits
+
+The figures below are *independent, historically completed focused runs*.
+They are not a new combined gate, and none is a formal soundness proof.
+
+| Revision / scope | Tests | Assertions | Failures | Errors | Distinctive limitation |
+|------------------+-------+------------+----------+--------+------------------------|
+| v1374 permanent acquisition | 44 | 280 | 0 | 0 | Controlled embedded-XTDB Claim, no verified transaction-internal provenance |
+| v1376 permanent submission | 44 | 249 | 0 | 0 | Controlled embedded-XTDB submission comparison, caller-recorded ops |
+| v1376 neighboring induction/initializer/writer gate | 101 | 858 | 0 | 0 | Source-relative abstract and application tests |
+| v1377 harness integrity | 21 | 123 | 0 | 0 | Separate portability-corpus regression, not new physical refinement |
+| v1378 focused outcome/state | 6 | 31 | 0 | 0 | Includes controlled embedded-XTDB post-readback; bounded projection |
+| v1379 permanent outcome/state synthetic subset | 16 | 288 | 0 | 0 | Adversarial source/replay/identity/row mismatch tests |
+| v1379 permanent controlled XTDB case | 1 | 30 | 0 | 0 | Actual readback; timestamp mismatch remains diagnostic |
+| v1380 temporary footprint/frame suite | 6 | 38 | 0 | 0 | No new embedded-XTDB gate; temporary fixture not a delivered test revision |
+
+The v1376 latest previously reported paired gate was *145 tests / 1,107
+assertions, zero failures/errors* (44 + 101 tests). v1379's independently
+completed 16-test synthetic and 1-test XTDB runs correspond to *17 tests /
+318 assertions*; that is an arithmetic aggregation of two completed runs,
+not a single combined run. In particular, v1380's temporary fixture is not
+yet a permanent separately delivered test archive.
+
+No fresh full Ygg/Shard pass, Node/CLJS correspondence, Chromium/browser gate,
+concurrent embedded-XTDB certification suite, or external universal proof is
+established by this document. Failures from environment setup or interrupted
+runs do not imply test success. The document itself is not a test gate.
+
+* Acceptance and rejection matrix
+
+| Proposed statement | Verdict | Reason |
+|--------------------+---------+--------|
+| Declared per-operation obligations can be derived and rechecked | ACCEPTED, source-relative | v1368 ledgers and source-bound checkers |
+| One prepared/outcome event pair can be correlated | ACCEPTED, process-local | v1373 rejects duplicate/malformed/reordered event pairs |
+| Canonical lowering matches a separately recorded op vector in controlled cases | ACCEPTED, diagnostic | v1375/v1376 compare without attesting actual submission |
+| Expected plan fields can be compared with real post-attempt XTDB reads | ACCEPTED, bounded | v1378/v1379; caller-selected node, unknown basis |
+| Whole supplied before/after documents can be compared within declared targets | ACCEPTED, bounded | v1380; unobserved targets remain outside scope |
+| The captured transaction origin, basis or commit is authenticated | REJECTED | Hook/recording/readback cannot establish origin or causality |
+| The complete XTDB physical write set and protected frame are known | REJECTED | Unknown writers, unlisted targets, unmeasured physical effects |
+| All admitted single-node executions refine the abstract machine | NOT ESTABLISHED | Missing complete mediation, concurrency, soundness and trusted provenance |
+| A production application can receive a physical-refinement certificate | NOT ADMITTED | Nine obligations open and no deployment binding |
+
+* Prioritized next steps
+
+** v1382 — Executor-controlled acquisition boundary
+
+Design an acquisition boundary in which the observed operation vector and
+outcome are collected by a controlled executor rather than supplied freely
+by an external caller. First identify exactly which lower-level Clojure/XTDB
+callsite is under Gesso's control and which facts XTDB genuinely exposes.
+Preserve an explicit attacker/bypass model: instrumenting an optional callback
+is not an attestation of every physical transaction. Do not claim trusted
+origin until excluded bypasses and artifact identity are established.
+
+** v1383 — Caller impersonation and observer bypass tests
+
+Permanently test forged hook events, fake low-level operation vectors,
+replaced receipts, stale reports and bypassed/disabled observers. Any
+certificate-like promotion must fail closed. Preserve redaction of domain
+values, command bindings and receipts from diagnostic errors.
+
+** v1384–v1387 — Typed binding and transaction-internal prestate
+
+Trace a checked request to typed input and inspect the actual XTDB facilities
+for transaction-relative snapshot/basis and guard observation. Only claim
+facts supported by a genuine trusted execution interface. A caller-supplied
+=before= map or postcommit SELECT cannot establish transaction-internal
+prestate. Capture failure/unavailability remains a typed open obligation.
+
+** v1388 onward — Guard, authorization and physical effect fidelity
+
+Tie source-derived guards and =tx/prepare= lowering to the actual execution
+boundary; then validate conflict outcomes, complete write mediation, and
+physical frame preservation. Distinguish normal transient failures from a
+known rejection and from =:commit-unknown=. Use Recife for appropriate finite
+abstract interleavings, with separate real-XTDB checks and universal-proof
+obligations. Later stages address proof-kernel soundness, certificate policy,
+and portable JVM/Node/browser correspondence, without introducing Quint or
+requiring downstream formal-language authoring.
+
+* Operational guardrails and v1381 handover
+
+- Preserve the exact nine v1368 obligation identifiers and their original
+  evidence labels. No broad =:verified true= substitute is acceptable.
+- =:commit-unknown= must never be recast as committed from matching readback.
+  Current v1373 completion does not support an indeterminate attempt.
+- Never compare imprecise timestamps by silently rounding/truncating them.
+  Establish any storage-time abstraction rule independently and test it.
+- A target-document projection, even with all its fields, is not a complete
+  write footprint unless target enumeration and physical write mediation
+  are separately justified.
+- Neither a matching source fingerprint nor self-replayed checker result
+  authenticates the physical host, executable, transaction, or deployment.
+- Retain =:admission :not-admitted=, =:certificate :not-issued=, and
+  =:authority :none= (and =:transaction-authority :none= wherever returned).
+- Preserve the separation between historical test evidence and tests
+  actually completed in a new revision; do not count timed-out gates.
+- Next numbered revision: *v1382*; it should be a complete file replacement
+  in a two-member =ins=-compatible TAR, with independent focused testing.
