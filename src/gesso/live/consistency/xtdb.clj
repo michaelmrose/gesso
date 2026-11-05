@@ -9,6 +9,7 @@
    - explicit read-consistency/query option helpers
    - thin q/plan-q task wrappers
    - thin submit-tx/execute-tx task wrappers
+   - opt-in diagnostic capture at the actual adapter submission call sites
    - portable XTDB-backed authoritative progression bases/requirements
    - authoritative request-frontier binding for Biff + Gesso contexts
    - trusted XTDB progression comparison and query-option translation
@@ -72,6 +73,91 @@
 
 (def ^:private ^:dynamic *status*
   xt/status)
+
+(def ^:private ^:dynamic *submission-capture* nil)
+
+(def submission-capture-type
+  :gesso.live.consistency.xtdb/adapter-submission-capture)
+(def submission-capture-version 1)
+
+(defn capture-tx-api-calls!
+  "Execute a zero-argument thunk while capturing THIS adapter's actual calls to
+   its bound XTDB submit-tx/execute-tx functions, including the exact tx-ops
+   and filtered options passed at the call site. Capture is opt-in, local to
+   this invocation, and disabled when the thunk completes. No caller supplies
+   a recorded operation vector, and ordinary transactions are unchanged.
+
+   The result is {:type ... :version 1 :outcome :returned/:threw
+                  :result .../:error ... :events [...]}.
+   It intentionally includes raw submitted operations, possible sensitive
+   document values and exception objects: NEVER publish or log the report.
+
+   This is process-local ADAPTER evidence, not authenticated evidence that
+   XTDB received the payload, no guarantee that the bound functions are
+   authentic, and no universal writer coverage. Futures/async writes outside
+   the live capture window may be absent. Test var-redefinitions remain
+   supported; this helper does not authenticate them. A separate controlled
+   executor can correlate this with its existing attempt observations later."
+  [thunk]
+  (when-not (fn? thunk)
+    (throw (ex-info "Submission capture requires a zero-argument function."
+                    {:submission-capture/rejection true
+                     :reason :invalid-thunk})))
+  (when *submission-capture*
+    (throw (ex-info "Nested XTDB submission capture is unsupported."
+                    {:submission-capture/rejection true
+                     :reason :nested-capture})))
+  (let [events (atom [])
+        active (atom true)
+        session {:events events :active active}
+        execution (binding [*submission-capture* session]
+                    (try
+                      {:outcome :returned :result (thunk)}
+                      (catch Throwable e
+                        {:outcome :threw :error e})
+                      (finally (reset! active false))))]
+    (merge {:type submission-capture-type
+            :version submission-capture-version
+            :observation-origin :instrumented-xtdb-adapter-call-site
+            :actual-xtdb-api-authenticated? false
+            :complete-writer-coverage :not-established
+            :transaction-internal-prestate :not-established
+            :proof-status :submission-diagnostic-only
+            :certificate :not-issued
+            :authority :none
+            :events @events}
+           execution)))
+
+(defn- capture-api-event! [event]
+  (when-let [{:keys [events active]} *submission-capture*]
+    (when @active
+      ;; The diagnostic must not change the transaction's outcome. In practice
+      ;; ordinary persistent-vector swap! cannot fail except for resource issues.
+      (try (swap! events conj event)
+           (catch Throwable _ nil)))))
+
+(defn- invoke-xtdb-api! [api operation connectable tx-ops tx-options]
+  ;; Capture immediately adjacent to the *actual* adapter API invocation, not
+  ;; by replaying prepare or accepting an application-reported operation list.
+  ;; The recorded argument object is the exact argument handed to the bound
+  ;; XTDB API function. This remains spoofable by alternate writer paths,
+  ;; with-redefs, and malicious code inside the same process.
+  (let [capture? (boolean *submission-capture*)
+        call-id (when capture? (random-uuid))]
+    (when capture?
+      (capture-api-event! {:call-id call-id :api api :phase :invoked
+                           :tx-ops tx-ops :tx-options tx-options}))
+    (try
+      (let [result (operation connectable tx-ops tx-options)]
+        (when capture?
+          (capture-api-event! {:call-id call-id :api api :phase :returned
+                               :tx-result result}))
+        result)
+      (catch Throwable e
+        (when capture?
+          (capture-api-event! {:call-id call-id :api api :phase :threw
+                               :exception-class (.getName (class e))}))
+        (throw e)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Debug
@@ -1091,7 +1177,8 @@
       {:tx-opts tx-options
        :at (now-ms)})
      (try
-       (let [tx-result   (*submit-tx* connectable' tx-ops tx-options)
+       (let [tx-result   (invoke-xtdb-api! :submit-tx *submit-tx*
+                                           connectable' tx-ops tx-options)
              consistency (tx-consistency tx-result)
              progression-value
              (tx-result-progression tx-result (:database tx-options))]
@@ -1166,7 +1253,8 @@
       {:tx-opts tx-options
        :at (now-ms)})
      (try
-       (let [tx-result   (*execute-tx* connectable' tx-ops tx-options)
+       (let [tx-result   (invoke-xtdb-api! :execute-tx *execute-tx*
+                                            connectable' tx-ops tx-options)
              consistency (tx-consistency tx-result)
              progression-value
              (tx-result-progression tx-result (:database tx-options))]
