@@ -1197,10 +1197,29 @@
                 180000)]
     (require-portable-corpus! (:out result) :jvm)))
 
+;; Each browser gate owns one scoped Node execution. Keeping the captured
+;; result in a dynamic binding avoids a global cache that could survive a
+;; rebuild, a failed gate, or a second invocation in the same JVM/Babashka
+;; session. The existing portable and refinement checker APIs stay unchanged.
+;; The integrity tests evaluate selected runner definitions in isolated
+;; namespaces, so the two comparison functions resolve this optional scoped
+;; binding by its production namespace; independently executed comparisons
+;; continue to run Node themselves.
+(def ^:dynamic *node-browser-captured-run* nil)
+
 (defn run-node-portable-correspondence!
   [output-to]
   (let [result (run-command-captured-with-timeout!
                 ["node" output-to] 180000)
+        cache-var (some-> (find-ns 'gesso.script.gesso-test)
+                          (ns-resolve '*node-browser-captured-run*))
+        cache (when cache-var (var-get cache-var))
+        _ (when cache
+            (when @cache
+              (gate-failure!
+               "Node browser corpus was already captured for this gate."
+               {:previous-path (:path @cache) :current-path output-to}))
+            (reset! cache {:path output-to :result result}))
         node-corpus (require-portable-corpus! (:out result) :node)
         jvm-corpus (jvm-portable-corpus!)]
     ;; Preserve the ordinary cljs.test summary without dumping 40+ KB of
@@ -1303,12 +1322,26 @@
 
 (defn run-node-browser-refinement-correspondence!
   "Require exact JVM/Node equality for the browser-observation/refinement
-   corpus. The existing v1328 portable gate remains untouched; this additional
-   Node replay consumes its already compiled browser runner. It is intentionally
-   a separate pass until the original runner-integrity test seams are updated."
+   corpus. Reuse the exact Node stdout captured by the portable comparison
+   when this function runs inside the browser gate. Standalone calls still
+   execute Node."
   [output-to]
-  (let [result (run-command-captured-with-timeout!
-                ["node" output-to] 180000)
+  (let [cache-var (some-> (find-ns 'gesso.script.gesso-test)
+                          (ns-resolve '*node-browser-captured-run*))
+        cache (when cache-var (var-get cache-var))
+        cached (when cache @cache)
+        _ (when (and cache (nil? cached))
+            (gate-failure!
+             "Browser refinement comparison has no previously checked Node run."
+             {:requested-path output-to}))
+        _ (when (and cache (not= output-to (:path cached)))
+            (gate-failure!
+             "Browser refinement comparison changed the captured Node source."
+             {:captured-path (:path cached) :requested-path output-to}))
+        result (if cached
+                 (:result cached)
+                 (run-command-captured-with-timeout!
+                  ["node" output-to] 180000))
         node-serialized (require-browser-refinement-corpus! (:out result) :node)
         jvm-serialized (jvm-browser-refinement-corpus!)
         node-cases (edn/read-string node-serialized)
@@ -1325,9 +1358,9 @@
           :node-case (get node-cases index)
           :jvm-case-count (count jvm-cases)
           :node-case-count (count node-cases)})))
-    ;; The Node test run was already printed by the older portable checker;
-    ;; suppress the duplicate full test summary, but preserve diagnostics.
-    (when (seq (:err result))
+    ;; The first comparison already printed Node stderr in a shared run.
+    ;; Standalone refinement comparisons must still report their diagnostics.
+    (when (and (not cached) (seq (:err result)))
       (binding [*out* *err*] (print (:err result))))
     (println (str "Browser refinement JVM/Node corpus: PASS ("
                   (count node-cases) " identical cases)"))
@@ -1428,13 +1461,22 @@
 
 (defn run-node-browser-tests!
   []
-  (run-node-test-groups!
-   [:browser])
-  ;; The v1328 portable correspondence and cljs.test summary must already
-  ;; have passed. Compare the independent v1456 browser-refinement corpus
-  ;; before this gate can return successfully to direct bb, Ygg, or Shard.
-  (run-node-browser-refinement-correspondence!
-   (str test-work-dir "/node/browser-tests.js")))
+  ;; Do not cache across gate invocations. The two existing comparison steps
+  ;; still run in their original order, but share one completed Node process
+  ;; result (including both independently validated corpus markers).
+  ;; Isolated source-execution integrity tests intentionally have no cache
+  ;; definition; their original injected host boundaries remain supported.
+  (let [cache-var (some-> (find-ns 'gesso.script.gesso-test)
+                          (ns-resolve '*node-browser-captured-run*))
+        run-gate! (fn []
+                    (run-node-test-groups!
+                     [:browser])
+                    ;; Neither comparison may be skipped on success.
+                    (run-node-browser-refinement-correspondence!
+                     (str test-work-dir "/node/browser-tests.js")))]
+    (if cache-var
+      (with-bindings {cache-var (atom nil)} (run-gate!))
+      (run-gate!))))
 
 (defn run-node-choreo-tests!
   []
