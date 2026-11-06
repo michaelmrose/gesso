@@ -1,0 +1,230 @@
+(ns gesso.assurance.proof.xtdb-write-footprint-accounting
+  "v1517: Complete accounting of the WRITE FORMS in one supported, supplied
+   Gesso transaction vector, not complete accounting of physical XTDB writes.
+
+   Reuse v1412's admitted model transaction and whole-document protection
+   semantics, then independently reprepare the complete operation vector.
+   No operation may be ignored: canonical generated SQL ASSERTs are read-only
+   preconditions; :put-docs replaces the ENTIRE named document, even when the
+   syntactic before/after delta is empty. Delete, patch, erase, arbitrary SQL,
+   unsupported transaction options and extra/missing/reordered operations
+   fail closed instead of being counted as no-ops.
+
+   The :candidate-tx-ops vector is CALLER SUPPLIED, not an authenticated XTDB
+   adapter observation. An exact match only establishes source-relative
+   agreement over the finite declared targets and the entire supplied vector.
+   This checker performs no transaction, query or side-effectful callback.
+   It does not authenticate executed bytes, complete deployed writers,
+   transaction-internal prestate, field preservation, or refinement.
+   Reports and errors deliberately omit document identifiers and values."
+  (:require [clojure.set :as set]
+            [gesso.assurance.proof.protected-write-domain :as domain]
+            [gesso.model.command :as command]
+            [gesso.model.tx :as tx])
+  (:import [java.security SecureRandom]
+           [java.util Base64]
+           [javax.crypto Mac]
+           [javax.crypto.spec SecretKeySpec]))
+
+(def report-type
+  :gesso.assurance.proof.xtdb-write-footprint-accounting/declared-vector)
+(def report-version 1)
+
+(def ^:private input-keys
+  #{:plan :protected-documents :candidate-tx-ops})
+(def ^:private original-domain domain/derive-protected-write-domain!)
+(def ^:private original-domain-check
+  domain/require-current-protected-write-domain!)
+(def ^:private original-prepare tx/prepare)
+(def ^:private original-target command/target)
+(def ^:private original-after command/after)
+(def ^:private original-create? command/create?)
+(def ^:private max-operations 256)
+(def ^:private process-fingerprint-key
+  ;; Private per-process salt. A digest is only a local report/recheck binding,
+  ;; never evidence of physical or deployed source authenticity.
+  (let [bytes (byte-array 32)]
+    (.nextBytes (SecureRandom.) bytes)
+    bytes))
+
+(defn- source-binding [source]
+  (let [mac (Mac/getInstance "HmacSHA256")
+        key (SecretKeySpec. process-fingerprint-key "HmacSHA256")]
+    (.init mac key)
+    (.encodeToString (.withoutPadding (Base64/getUrlEncoder))
+                     (.doFinal mac (.getBytes (pr-str source) "UTF-8")))))
+
+(defn- reject! [reason at]
+  (throw (ex-info "Unsupported declared XTDB write-footprint accounting."
+                  {:xtdb-write-footprint-accounting/rejection true
+                   :reason reason
+                   :at at})))
+
+(defn- plain-map? [v]
+  (and (or (instance? clojure.lang.PersistentArrayMap v)
+           (instance? clojure.lang.PersistentHashMap v))
+       (nil? (meta v))))
+
+(defn- plain-vector? [v]
+  (and (instance? clojure.lang.APersistentVector v)
+       (nil? (meta v))))
+
+(defn- seams! []
+  ;; In-process Var substitution detection, not signed code provenance.
+  (when-not (and (identical? original-domain
+                             (var-get #'domain/derive-protected-write-domain!))
+                 (identical? original-domain-check
+                             (var-get #'domain/require-current-protected-write-domain!))
+                 (identical? original-prepare (var-get #'tx/prepare))
+                 (identical? original-target (var-get #'command/target))
+                 (identical? original-after (var-get #'command/after))
+                 (identical? original-create? (var-get #'command/create?)))
+    (reject! :substituted-upstream-checker [])))
+
+(defn- statement-class! [op index]
+  (when-not (and (plain-vector? op) (seq op))
+    (reject! :invalid-transaction-operation [:candidate-tx-ops index]))
+  (let [head (first op)]
+    (cond
+      (and (string? head)
+           (re-find #"(?is)^\s*ASSERT\s+" head)
+           (not (re-find #";" head))
+           (<= 1 (count op)))
+      :canonical-sql-assertion
+
+      (and (= head :put-docs)
+           (= 3 (count op))
+           (keyword? (second op))
+           (plain-map? (nth op 2))
+           (some? (:xt/id (nth op 2))))
+      :whole-document-replacement
+
+      :else
+      (reject! :unsupported-write-or-sql-form [:candidate-tx-ops index]))))
+
+(defn inspect-footprint!
+  "Input exactly {:plan <ordinary Gesso model transaction plan>
+                  :protected-documents <v1412 finite protection entries>
+                  :candidate-tx-ops <claimed, already lowered XTDB vector>}.
+
+   v1412 re-admits the plan with gesso.model.tx-model. All current admitted
+   commands are :put-docs whole-document replacements; assertions must be
+   generated by the admitted transaction subset. All written targets require
+   :fields :all, not a finite set of changed fields. Frame-only targets may
+   declare a subset, but no preservation claim follows from that declaration.
+
+   Every candidate operation must match freshly lowered source operations in
+   the same position. A source-relative complete write footprint does NOT
+   establish complete real-world/deployed physical write coverage."
+  [source]
+  (when-not (and (plain-map? source)
+                 (= input-keys (set (keys source)))
+                 (plain-vector? (:candidate-tx-ops source))
+                 (<= 1 (count (:candidate-tx-ops source)) max-operations))
+    (reject! :invalid-source-shape []))
+  (seams!)
+  (let [{:keys [plan protected-documents candidate-tx-ops]} source
+        domain-source {:plan plan :protected-documents protected-documents}
+        protected (try
+                    (let [r (original-domain domain-source)]
+                      (original-domain-check domain-source r))
+                    (catch Exception _
+                      (reject! :unsupported-declared-domain [:plan])))
+        _ (when-not (and (= domain/domain-type (:type protected))
+                         (= domain/domain-version (:version protected))
+                         (= :declared-finite-domain-only (:proof-status protected))
+                         (= :not-admitted (:admission protected))
+                         (= :not-issued (:certificate protected))
+                         (= :none (:authority protected)))
+            (reject! :unexpected-domain-contract [:plan]))
+        _ (when-not (:declared-replacement-domain-covered? protected)
+            (reject! :incomplete-whole-document-protection
+                     [:protected-documents]))
+        prepared (try
+                   (original-prepare nil (:plan (:source protected)))
+                   (catch Exception _
+                     (reject! :unsupported-transaction-preparation [:plan])))
+        expected-ops (:tx-ops prepared)
+        commands (get-in prepared [:plan :commands])]
+    (when-not (and (plain-vector? expected-ops)
+                   (<= 1 (count expected-ops) max-operations)
+                   (= expected-ops candidate-tx-ops))
+      (reject! :changed-missing-extra-or-reordered-operation
+               [:candidate-tx-ops]))
+    ;; Check the whole vector, including assertions and all write positions.
+    ;; No filtering can turn a DML operation or a second write into an ASSERT.
+    (let [classes (mapv statement-class! candidate-tx-ops
+                        (range (count candidate-tx-ops)))
+          first-write (or (first (keep-indexed
+                                  (fn [i cls]
+                                    (when (= :whole-document-replacement cls) i))
+                                  classes))
+                          (reject! :no-canonical-physical-writes []))
+          writes (subvec candidate-tx-ops first-write)
+          expected-targets (mapv original-target commands)
+          observed-targets (mapv (fn [op] [(second op) (:xt/id (nth op 2))])
+                                 writes)
+          declared-after (mapv original-after commands)
+          declared-effect-domains (:declared-command-domains protected)
+          declared-frame (set (map :target
+                                   (:frame-only-protected-documents protected)))
+          written-targets (set observed-targets)]
+      (when-not (and (= (count writes) (count commands))
+                     (every? #{:canonical-sql-assertion}
+                             (subvec classes 0 first-write))
+                     (every? #{:whole-document-replacement}
+                             (subvec classes first-write))
+                     (= expected-targets observed-targets)
+                     (= (count observed-targets) (count written-targets))
+                     (= declared-after (mapv #(nth % 2) writes))
+                     (= (count declared-effect-domains) (count commands))
+                     (every? #(and (= :whole-document-replacement (:effect %))
+                                   (true? (:declared-full-document-covered? %)))
+                             declared-effect-domains)
+                     (empty? (set/intersection declared-frame written-targets)))
+        (reject! :divergent-declared-write-effects [:candidate-tx-ops]))
+      {:type report-type
+       :version report-version
+       :process-local-source-binding (source-binding source)
+       :source-binding-authenticates-execution? false
+       :checking :source-readmitted-whole-transaction-vector-and-finite-protection
+       :supported-operation-classes
+       #{:canonical-sql-assertion :whole-document-replacement}
+       :operation-classes classes
+       :candidate-operation-count (count classes)
+       :prewrite-assertion-count first-write
+       :whole-document-replacement-count (count writes)
+       :declared-command-count (count commands)
+       :create-command-count (count (filter original-create? commands))
+       :update-command-count (count (remove original-create? commands))
+       :declared-frame-only-target-count (count declared-frame)
+       :syntactic-changed-field-count
+       (reduce + (map #(count (:syntactic-delta-fields %))
+                      declared-effect-domains))
+       :all-declared-writes-whole-document-replacements? true
+       :all-declared-write-targets-covered-in-finite-domain? true
+       :all-candidate-operations-accounted-for? true
+       :candidate-submission-authenticated? false
+       :actual-xtdb-execution :not-observed
+       :complete-physical-writer-coverage :not-established
+       :physical-write-footprint-completeness :not-established
+       :transaction-internal-prestate :not-authenticated
+       :physical-frame-preservation :not-established
+       :universal-physical-refinement :not-established
+       :proof-status :bounded-declared-transaction-vector-only
+       :certificate :not-issued
+       :admission :not-admitted
+       :authority :none})))
+
+(defn require-current-footprint!
+  "Recompute from the original source and reject stale or elevated reports."
+  [source report]
+  (let [current (inspect-footprint! source)]
+    (when-not (= current report)
+      (reject! :stale-or-forged-footprint-report [:report]))
+    current))
+
+(defn redacted-summary
+  "A checked report containing counts and statuses only; never raw targets."
+  [source report]
+  (require-current-footprint! source report))
