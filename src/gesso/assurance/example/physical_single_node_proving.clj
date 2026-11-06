@@ -195,3 +195,97 @@
                   :abstract! abstract!
                   :execute! execute!}]
          (f app))))))
+
+;; =============================================================================
+;; v1501: adversarial two-actor reservation scenario
+;; =============================================================================
+
+(def competing-actor-ids #{:actor/one :actor/two})
+
+(defn with-two-actor-reservation!
+  "Construct two independent, one-shot :slot/reserve attempts against ONE real
+   embedded XTDB document. Both Gesso model plans are prepared from the SAME
+   observed prestate before either attempt can submit. The scenario never
+   auto-retries a failed or uncertain transaction. A caller may submit the
+   attempts sequentially or concurrently, but must join all work before this
+   callback returns and the shared node closes.
+
+   Actor IDs are diagnostic labels ONLY. The physical document has no owner ID
+   and this example neither authenticates the actors nor establishes which
+   actor is the rightful owner. The state invariant is at most one active
+   claim, not authenticated owner uniqueness. Source/host/writer completeness,
+   transaction-internal prestate, and universal refinement remain OPEN.
+
+   Exposed :prepared-tx-ops are descriptive, not a certified operation source;
+   :submit! always uses its own closed-over, originally prepared plan. Each
+   actor is allowed one attempted submission, including if it throws. A
+   rejected XTDB assertion propagates unchanged, without automatic retry."
+  ([f]
+   (with-two-actor-reservation! (str "v1501-" (random-uuid)) f))
+  ([slot-id f]
+   (when-not (fn? f)
+     (reject! :invalid-scenario-callback))
+   (with-proving-application!
+     slot-id
+     (fn [app]
+       (let [before ((:read! app))
+             original-state (physical->abstract before)
+             _ (when-not (and (= :available (:slot/status original-state))
+                              (zero? (:slot/active-claims original-state)))
+                 (reject! :scenario-not-in-initial-state))
+             ctx (:biff-context app)
+             ;; Derive both plans using the SAME internal builder as :execute!
+             ;; rather than duplicating the reservation guard or write shape.
+             plans (into {}
+                         (map (fn [actor]
+                                [actor (transition-plan before :slot/reserve)]))
+                         competing-actor-ids)
+             prepared-ops (into {}
+                                (map (fn [[actor plan]]
+                                       [actor (:tx-ops (tx/prepare ctx plan))]))
+                                plans)
+             _ (when-not (apply = (vals prepared-ops))
+                 (reject! :different-competing-transaction-plans))
+             attempts (atom (zipmap competing-actor-ids
+                                    (repeat :prepared)))
+             submit! (fn [actor]
+                       (when-not (contains? competing-actor-ids actor)
+                         (reject! :unknown-competing-actor))
+                       ;; swap-vals! atomically reserves this actor's single
+                       ;; submission permission before calling the database.
+                       (let [[previous _]
+                             (swap-vals! attempts
+                                         (fn [state]
+                                           (if (= :prepared (get state actor))
+                                             (assoc state actor :attempted)
+                                             state)))]
+                         (when-not (= :prepared (get previous actor))
+                           (reject! :competing-actor-already-attempted))
+                         (tx/transact! ctx (get plans actor))))
+             report {:type :gesso.assurance.example.physical-single-node-proving/two-actor-scenario
+                     :version 1
+                     :operation-id :slot/reserve
+                     :catalog-id (:id (:catalog app))
+                     :actor-ids competing-actor-ids
+                     :actor-identity :diagnostic-label-only
+                     :observed-revision (:revision before)
+                     :prepared-from-one-observed-state? true
+                     :one-attempt-per-actor? true
+                     :scope :one-embedded-xtdb-node-one-slot-two-prepared-plans
+                     :complete-writer-coverage :not-established
+                     :authorization :not-established
+                     :transaction-internal-prestate :not-authenticated
+                     :physical-refinement :not-established
+                     :proof-status :not-proved
+                     :certificate :not-issued
+                     :admission :not-admitted
+                     :authority :none}]
+         (f {:actor-ids competing-actor-ids
+             :submit! submit!
+             :attempt-state! (fn [] @attempts)
+             :prepared-tx-ops prepared-ops
+             :before-abstract original-state
+             :before-revision (:revision before)
+             :read! (:read! app)
+             :abstract! (:abstract! app)
+             :report report}))))))
