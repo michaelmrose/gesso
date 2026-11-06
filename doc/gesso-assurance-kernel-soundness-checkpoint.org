@@ -1,0 +1,286 @@
+#+TITLE: Gesso v1439 — Restricted Proof-Kernel Assurance Checkpoint
+#+SUBTITLE: Independent semantic evidence, conditional abstract induction, and explicitly open production obligations
+#+DATE: 2026-11-05
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope, provenance, and acceptance verdict
+
+This is a DOCUMENT-ONLY checkpoint following v1430--v1438. It changes no
+Gesso runtime API, inference rule, certificate admission path, operational
+policy, model-checking result, or installed application guarantee. It is not a
+proof certificate and MUST NOT promote any open obligation to discharged.
+
+VERDICT: *RESTRICTED ABSTRACT-SEMANTICS AND PROOF-DERIVATION CORRESPONDENCE
+SUPPORTED BY INDEPENDENT, BOUNDED EVIDENCE; UNIVERSAL PROOF-KERNEL SOUNDNESS,
+COMPLETE APPLICATION MEDIATION, AND PHYSICAL/BROWSER REFINEMENT REMAIN OPEN.*
+
+The current source baseline is the November 5 Gesso archive, branch
+=application-assurance=, Git HEAD =e17b2ee56b1c646ce9346e3c9c021156233787f0=
+(v1428). The later changes v1429--v1438 were supplied as separate
+=ins=-installation TAR files. This review examined the complete source member
+of each v1430--v1438 archive and the relevant v1428 source and existing
+checkpoints. An archive existing in the assistant environment is NOT proof
+that the developer installed it in the working repository. The v1429 change
+is a fragment-test concurrency repair, not a proof-kernel advancement.
+
+Earlier v1424--v1428 focused JVM verification and v1430--v1438 focused
+verification results were reported with the individual revision deliveries.
+They are historical, scoped observations; this document does not aggregate
+overlapping assertion counts into a synthetic suite result. The whole Ygg,
+Node, Chromium, real-XTDB and release gates were not rerun for v1439. The two
+new real-Recife/TLC tests in v1438 were NOT executed in the supplied tooling
+environment because the available dependency bundle lacks Recife; they must
+be run using the repository's =:formal= alias.
+
+The operative design remains the canonical twelve-part R4 specification,
+especially Parts IX, X and XII. R4 describes intended guarantees, not the
+current level of completed proof. Application developers continue to author
+ordinary Clojure and admitted Gesso constructions; they must not be required
+to write Recife, Quint, TLA+ or another specification language.
+
+* Mathematical claims must be separated
+
+** S1 — Typed source interpretation
+
+The intended typed-atom correspondence is, for every valid source expression
+=e=, declared environment =Delta= and valid partial state =s=:
+
+#+begin_example
+  Admitted(e, Delta) AND WF_Delta(s)
+    => Eval_Production(e, s) = Interpret_Independent(e, s)
+#+end_example
+
+A correct result includes definedness/rejection behavior. Optional absence,
+present nil, and present false are separate cases; nominal enum identity,
+short-circuit branch admission, and typed reader footprints matter. The
+v1427--v1428 tests and v1430--v1431 mutations provide substantial sampled
+correspondence and rejection evidence. They do not prove this quantified
+statement for every admitted declaration and runtime binding.
+
+** S2 — Propositional proof rules and premises
+
+The production checker at
+=src/gesso/assurance/proof/kernel.clj= has exactly seven admitted rules:
+
+| Rule | Required local justification |
+|------+------------------------------|
+| =:premise= | Selected named premise is available; it stays OPEN |
+| =:truth-introduction= | =true= is valid without a cited premise |
+| =:implication-reflexivity= | =P => P= is valid without a cited premise |
+| =:conjunction-introduction= | All cited conjuncts imply their conjunction |
+| =:conjunction-elimination= | A cited conjunction implies its selected child |
+| =:implication-elimination= | =P => Q= and =P= imply =Q= |
+| =:disjunction-introduction= | A cited disjunct implies the containing disjunction |
+
+The independent reference vocabulary is in
+=src/gesso/assurance/proof/propositional_rule_obligations.clj= and the
+truth-functional interpretation in =propositional_semantics.clj=.
+For every accepted proof step with inherited open premises =Gamma=, the
+semantic requirement is =Gamma |= conclusion=. This requirement is not
+satisfied by dropping, relabeling or implicitly discharging =Gamma=.
+
+The source includes independently written local rule checks, mutation suites,
+source-relative normalizer audit, derivation composition, and checks of
+premise preservation across alternative checking routes. These support a
+conditional induction-on-proof-steps argument. They do NOT yet establish a
+machine-checked, universal correctness theorem for production normalization
+or for every possible program path through the kernel. No arbitrary atomic
+truth axioms, arithmetic solver, excluded-middle axiom, or hypothesis
+discharge may be silently added to the seven-rule fragment.
+
+** S3--S5 — Initial states, guarded transitions and induction
+
+Let =B= be the exact DECLARED initial-state set, =O= the exact DECLARED
+operation catalog and =T_o= an admitted abstract transition. The desired
+abstract invariant statement is conditional on:
+
+#+begin_example
+  BASE: for every b in B, I(b)
+  STEP: for every o in O and all well-typed s,x,s',
+          I(s) AND T_o(s,x,s') => I(s')
+  CLOSURE: every abstract execution begins in B and uses only o in O
+  ------------------------------------------------------------
+  for every finite declared execution s0,...,sn: all I(si)
+#+end_example
+
+The independent abstract transition relation enforces the source guard,
+SIMULTANEOUS assignments from prestate/inputs, exact writer footprints, and
+frame equivalence including optional-field presence. The restricted
+preservation schemas cover frame, fixed literal, same-origin field copy,
+and supported conjunction composition. An undefined read, false guard,
+wrong copy origin, unmodeled field write, or omitted conjunct must not
+be accepted as a matching transition or as a whole-invariant proof.
+
+The v1432--v1437 tests provide independent finite witnesses, counterexamples,
+mutation checks, per-step derivation checks, and bounded-history induction
+audit. A complete catalog relative to a developer-supplied SOURCE does not
+establish that all actual production writers have been discovered. A single
+extra physical writer invalidates a deployment-level completeness inference,
+even if the smaller declared machine is consistent.
+
+* Revision-by-revision evidence inventory
+
+The paths below identify complete permanent test sources delivered as
+=ins=-compatible TAR files. They may require installation in the developer's
+checkout before the corresponding test can run there.
+
+| Revision | Permanent test source basename | Evidential contribution |
+|----------+-------------------------------+-------------------------|
+| v1424 | =kernel_independent_soundness_test.clj= | Independently evaluates seven propositional rules and unsound mutations |
+| v1425 | =kernel_systematic_mutation_test.clj= | Bounded systematic mutation of all rule/step positions |
+| v1426 | =kernel_acceptance_rejection_correspondence_test.clj= | Exact named open-premise inheritance across checking routes |
+| v1427 | =kernel_normalization_semantic_preservation_test.clj= | Whole-source propositional/typed-atom normalization checks |
+| v1428 | =kernel_typed_atom_semantic_correspondence_test.clj= | Branch-sensitive independent typed interpretation |
+| v1430 | =kernel_typed_atom_evaluator_mutation_test.clj= | Presence, nominal enum, dead-branch and short-circuit mutants |
+| v1431 | =kernel_typed_atom_normalization_mutation_test.clj= | Altered nested/dead atoms, identity and metadata smuggling |
+| v1432 | =guarded_preservation_semantics_test.clj= | Test-local abstract poststate transformer and schema witnesses |
+| v1433 | =guarded_transition_mutation_test.clj= | Changed writes, stale inputs, false guards and frame corruption |
+| v1434 | =finite_preservation_rule_correspondence_test.clj= | 648-state bounded domain; 1,296 candidate transitions; negative witnesses |
+| v1435 | =derivation_finite_correspondence_test.clj= | Independent checking of each accepted derivation step |
+| v1436 | =conditional_induction_audit_test.clj= | Three initial states, 255 bounded histories, exact declared operation coverage |
+| v1437 | =induction_premise_mutation_test.clj= | Forged bases, narrow catalogs, weakened clauses and stale dependencies |
+| v1438 | =recife_finite_correspondence_test.clj= | Local oracle/observer comparison plus two PENDING Recife/TLC cases |
+
+All listed test sources are under =test/gesso/assurance/proof/=.
+The v1430--v1438 archives contain 56 =deftest= definitions in total; this
+is a SOURCE INVENTORY, not a claim that 56 tests were executed together.
+In v1438 five non-TLC tests were reported passing (44 assertions), while
+its two real TLC tests were not executed. The v1438 real formal run remains a
+specific acceptance prerequisite, NOT an implicit pass from successful
+namespace compilation or temporary local substitutes.
+
+* Existing source modules and distinct trust levels
+
+| Mechanism | Exact source | Evidence / limitation |
+|-----------+--------------+-----------------------|
+| Production propositional proof | =proof/kernel.clj= | Closed seven-rule checker, not independently proved universally sound |
+| Independent propositional meaning | =proof/propositional_semantics.clj= | Opaque-Boolean, bounded truth-functional oracle |
+| Source-to-normalized audit | =proof/propositional_normalization_audit.clj= | Bounded source-relative comparison, no normalization theorem |
+| Typed semantic interpretation | =proof/typed_value_semantics.clj= and =proof/typed_presence_semantics.clj= | Explicit partial-value model; JVM correspondence still bounded |
+| Guarded transition meaning | =proof/independent_transition_semantics.clj= | Independent ABSTRACT observer; no XTDB authority |
+| Preservation schemas | =proof/frame_soundness.clj=, =proof/literal_assignment_soundness.clj=, =proof/field_copy_soundness.clj= | Conditional arguments for supported syntactic families |
+| Preservation conjunction | =proof/preservation_composition_soundness.clj= | Only if ALL independently well-typed clauses are covered |
+| Abstract induction | =proof/induction.clj= and =proof/abstract_execution_induction.clj= | Declared-machine candidate, not complete writer proof |
+| Dependency/obligation ledgers | =proof/induction_dependency.clj= and =proof/induction_ledger.clj= | Rechecked original-source dependencies; open assumptions retained |
+| Finite independent oracle | =proof/finite_model_oracle.clj= | Bounded counterexamples, not proof checker or certificate |
+| JVM-local proof admission | =proof/certificate.clj= | In-process rechecked handle; not signed/durable or transaction authority |
+| Physical writer obligations | =proof/executable_writer_correspondence_obligations.clj= | Obligations enumerated, none discharged universally |
+
+Paths in this table are relative to =src/gesso/assurance/= unless another
+prefix is shown. The =proof/= prefix means =src/gesso/assurance/proof/=.
+Preservation reports, proof witness maps and SHA-256 fingerprints remain
+COPYABLE DATA; an identity hash is not an execution attestation. The JVM-local
+certificate handle cannot by itself authorize a database transaction or
+prove deployed-handler adoption.
+
+* Open-obligation ledger — checkpoint verdict
+
+| ID | Scope | v1439 disposition | What still has to be established |
+|----+-------+-------------------+----------------------------------|
+| S1 | Typed semantics | OPEN universal | Every admitted source/read binding agrees with independent semantics, including rejection |
+| S2 | Seven-rule propositional kernel | CONDITIONAL / OPEN universal | All kernel paths and normalization are sound, independently of their implementation |
+| S3 | Initial states | OPEN universal and physical | Complete actual initializer set, existence/coverage, and correct initial inference |
+| S4 | Guarded preservation | CONDITIONAL / OPEN universal | All supported families and composition match the abstract relation for all admitted values |
+| S5 | Induction and operation closure | CONDITIONAL / OPEN physical | Abstract induction is sound; every actual operation/initializer is represented |
+| S6 | Admission, dependencies, anti-forgery | OPEN production trust | Fresh trusted recheck, graph closure, process/classloader assumptions and no proof promotion |
+| S7 | Application/deployment closure | OPEN | Every deployed route, job, task and direct writer is mediated by the checked executor |
+| S8 | Single-node physical XTDB refinement | OPEN | Real transaction prestate, authorization, effects, outcomes and writer set refine the abstract machine |
+| S9 | Independent metatheory | OPEN | Small independent formal argument or mechanically checked soundness of inference/reification |
+
+* Nine physical writer-refinement obligations remain open
+
+The authoritative inventory is the =obligation-specs= vector in
+=src/gesso/assurance/proof/executable_writer_correspondence_obligations.clj=.
+It currently enumerates, for every relevant admitted writer:
+
+1. =:typed-input-binding= — actual request and actor bind to the typed input.
+2. =:transaction-internal-prestate= — independently authenticated XTDB read basis.
+3. =:guard-authorization= — executed checks match admitted business policy.
+4. =:assignment-write-footprint= — all executed writes match declared effects.
+5. =:frame-and-unmodeled-fields= — untouched fields and all relevant physical domains are covered.
+6. =:serial-concurrency-validation= — actual conflict/commit ordering matches the model.
+7. =:committed-outcome-incorporation= — commit/reject/unknown outcomes are bound to authoritative results.
+8. =:writer-provenance-and-deployment= — current deployed executor and all entry paths are authenticated.
+9. =:universal-execution-refinement= — a sound argument covers ALL admitted physical executions.
+
+v1371--v1423 introduce increasingly detailed process-local acquisition,
+controlled XTDB readback, write accounting, and =xt.txs= correlation. These
+can detect contradictions within their observed scope. They cannot infer a
+transaction-internal prestate, unseen writes, exact causality or complete
+writer mediation merely from a matching poststate or ledger row.
+
+* Assurance claim ladder and promotion restrictions
+
+| Claim class | Permitted wording | Promotion requirements |
+|-------------+-------------------+------------------------|
+| Source admitted | Exact declaration passed well-formedness checking | Source-bound current checker result |
+| Finite semantic correspondence | All enumerated cases agree / counterexample found | Concrete universe and bounds; nonvacuity recorded |
+| Checked conditional derivation | Conclusion follows *if* named premises hold | Exact named premises retained; independent rule correspondence appropriately scoped |
+| Declared abstract induction | Every declared finite history preserves I IF base/step/closure are sound | Complete declared catalog, all clauses, all local premises |
+| Source-bound in-process certificate | Current source and declared graph rechecked in trusted JVM | Current handle + graph; no inferred deployment authority |
+| Production physical certification | NOT YET ADMITTED | S6--S9 and relevant nine physical obligations soundly discharged or explicitly scoped |
+| General cross-runtime refinement | NOT YET ADMITTED | JVM/CLJS/DOM/SSE/HTMX trace mapping and trusted browser effect realization |
+
+No positive instance of the first five categories may be silently rewritten
+as the sixth or seventh. A false or unproved premise remains OPEN even when
+other parts of the derivation are satisfied. A deliberately narrower, valid
+catalog describes a narrower model; it cannot inherit assurance over a
+larger external application.
+
+* Acceptance work required before advancing the claim
+
+** Immediate v1438 verification debt
+
+- Install v1438's permanent test source in the developer repository.
+- Execute =bb test:formal= with the actual =pfeodrippe/recife 0.22.0=
+  dependency resolved. Require both new TLC tests to execute and pass;
+  confirm safe reachability and a genuine mutant counterexample.
+- Run full =bb test -n 6= on a clean working tree. Include the fragment-test
+  event-race repair from v1429 and newly installed v1430--v1438 suites.
+- Fail or investigate honestly on timeout, unknown termination, or missing
+  a purported formal test. Neither a stalled gate nor a stub counts as PASS.
+
+** Later independent proof work
+
+- Distinguish a semantic *schema proof* for the seven propositional rules
+  from an *implementation correspondence proof* for the actual production
+  Clojure checker and normalizer. These are separate required results.
+- Formalize or independently justify typed-expression admission/evaluation,
+  partial-field presence, and simultaneous guarded-transition semantics.
+- Prove the supported frame, literal, copy, and conjunction schemas over
+  those semantics rather than extrapolating from finite samples.
+- Establish exact source-to-dependency closure through the current
+  application, active handler, writer catalog, and evidence dependencies.
+- Do not declare source-derived operator coverage equivalent to exhaustive
+  discovery of jobs, migrations, internal TX paths, or alternate writers.
+
+* Handover to v1440–v1451 — compositional application assurance
+
+v1440 should USE the already-existing =gesso.assurance.dependency=,
+=proof/induction_dependency.clj= and certificate/dependency checks as the
+starting point, not create a duplicate generic dependency-graph engine.
+
+The next material advance is a source-derived end-to-end dependency closure
+for *supported* application assurances: business rule -> typed semantic source
+-> operation catalog -> initial and preservation obligations -> checked
+proof -> issued operation -> installed entry points -> physical and browser
+obligations. Every unresolved edge is an explicitly typed assumption.
+
+A useful v1451 pilot is NOT a dashboard showing many green local checks. It
+is one small, real, single-node Gesso application constructed using ordinary
+APIs whose reported assurance has a checkable source identity, exact claim
+scope, complete declared operation and invariant coverage, and honest open
+physical/browser premises. An adversarial missing writer or stale proof
+must prevent the stronger claim. Formal specifications remain internal.
+
+* Final verdict
+
+At v1439, Gesso has accumulated serious independent evidence for its
+restricted abstract semantics, proof derivations, and declared-machine
+induction. The source-level conditional mathematics is much better supported
+than at the original R4 snapshot. The unfinished work is NOT another report
+shape: it is independent universal semantic justification and the trustworthy
+bridge from declarations to installed, actually executed applications.
+
+This document records that boundary without changing it.
