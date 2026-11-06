@@ -689,6 +689,8 @@
      ;; v1457: This exact 14-case corpus must run in every Node browser gate.
      ;; A missing/renamed namespace rejects the gate before CLJS compilation.
      gesso.live.browser.refinement-node-parity-test
+     ;; v1463: Never omit the 18-case browser-state-space parity corpus.
+     gesso.live.browser.refinement-exploration-parity-test
      ;; v1327: Include the permanent shared CLJC semantics corpus in the
      ;; existing Node gate. Chromium/JVM already discover *_test.cljc.
      ;; This must be REQUIRED, not an optional discovery prefix: deleting or
@@ -730,6 +732,22 @@
 
 (def browser-refinement-corpus-namespace
   'gesso.live.browser.refinement-node-parity-test)
+
+;; The v1462 source-executed exploration corpus is separate from the 14-case
+;; refinement corpus. All 18 scenarios must remain present in this order;
+;; checks below also reject plausible but inert all-success corpora.
+(def browser-exploration-corpus-line-prefix
+  "GESSO_BROWSER_EXPLORATION_PARITY ")
+
+(def browser-exploration-case-ids
+  [:full-bound :counterexample :depth-zero :depth-one :empty-generator
+   :adapter-rejection :physical-delivery-identity :strict-replay
+   :replay-mutants :duplicate-choices :nonvector-choices :fanout-budget
+   :node-budget :edge-budget :invalid-bound :invalid-predicate
+   :forged-adapter-rejection :generator-exception])
+
+(def browser-exploration-corpus-namespace
+  'gesso.live.browser.refinement-exploration-parity-test)
 
 (defn portable-choreo-test-namespace?
   [test-ns]
@@ -885,12 +903,21 @@
         ;; second corpus must be present without changing that test seam.
         (str "  (println \"GESSO_BROWSER_REFINEMENT_PARITY \" "
              "(pr-str (gesso.live.browser.refinement-node-parity-test/portable-corpus)))\n"))
+      (when (= group-id :browser)
+        ;; Literal source keeps the v1328/v1458 source-executed test seams
+        ;; intact: those tests intentionally evaluate selected runner forms.
+        (str "  (println \"GESSO_BROWSER_EXPLORATION_PARITY \" "
+             "(pr-str (gesso.live.browser.refinement-exploration-parity-test/portable-corpus)))\n"))
       "  (t/run-tests\n"
       "   (t/empty-env ::reporter)"
       (quoted-test-args
        namespaces)
       "))\n\n"
-      "(main)\n"))
+      ;; Node's CLI wrapper calls *main-cli-fn*. Individual test namespaces
+      ;; also set that Var, so calling (main) here would run a second test
+      ;; namespace after this runner, duplicating corpus markers and allowing
+      ;; successful assertions to hide a parity-gate failure.
+      "(set! *main-cli-fn* main)\n"))
 
     {:namespace
      runner-ns
@@ -1366,6 +1393,144 @@
                   (count node-cases) " identical cases)"))
     nil))
 
+(defn require-browser-exploration-corpus!
+  "Require one complete, ordered, non-inert 18-case bounded exploration
+   corpus in captured host output. This reports choice-relative evidence, not
+   certified exhaustive host-event coverage."
+  [output host]
+  (let [lines (->> (str/split-lines output)
+                   (filter #(str/starts-with? %
+                             browser-exploration-corpus-line-prefix))
+                   vec)]
+    (when-not (= 1 (count lines))
+      (gate-failure!
+       "Browser exploration corpus output is missing or duplicated."
+       {:host host :matching-lines (count lines)}))
+    (let [serialized (subs (first lines)
+                           (count browser-exploration-corpus-line-prefix))
+          cases (try
+                  (edn/read-string serialized)
+                  (catch Exception error
+                    (gate-failure!
+                     "Browser exploration corpus is malformed EDN."
+                     {:host host :cause (ex-message error)})))
+          entries? (and (vector? cases)
+                        (every? (fn [entry]
+                                  (and (vector? entry)
+                                       (= 2 (count entry))
+                                       (keyword? (first entry))))
+                                cases))
+          by-id (when entries? (into {} cases))
+          full (get by-id :full-bound)
+          bad (get by-id :counterexample)
+          mutations (get by-id :replay-mutants)
+          rejections {:duplicate-choices :duplicate-event-choices
+                      :nonvector-choices :nonvector-event-choices
+                      :fanout-budget :choice-fanout-limit-exceeded
+                      :node-budget :node-limit-exceeded
+                      :edge-budget :edge-limit-exceeded
+                      :invalid-bound :invalid-exploration-bound
+                      :invalid-predicate :nonboolean-transition-predicate
+                      :forged-adapter-rejection :forged-adapter-error
+                      :generator-exception :generator-error}]
+      (when-not
+       (and entries?
+            (= browser-exploration-case-ids (mapv first cases))
+            (vector? full) (= 15 (count full))
+            (= :bounded-no-counterexamples (nth full 0))
+            (= [9 9 8 3] (subvec full 1 5))
+            (= 9 (count (nth full 5)))
+            (= 1 (count (nth full 6)))
+            (empty? (nth full 7))
+            (= true (nth full 10))
+            (= false (nth full 11))
+            (= false (nth full 12))
+            (= :none (nth full 13))
+            (some #{:caller-event-choices-not-proven-exhaustive}
+                  (nth full 14))
+            (some #{:not-physical-transport-correspondence}
+                  (nth full 14))
+            (= full (get by-id :strict-replay))
+            (vector? bad) (= 15 (count bad))
+            (= :counterexamples-found (first bad))
+            (= :caller-transition-predicate-failed
+               (get-in bad [7 0 0]))
+            (= [true true [:rejected :exploration-report-mismatch]]
+               (get by-id :physical-delivery-identity))
+            (vector? mutations) (= 11 (count mutations))
+            (every? (fn [entry]
+                      (and (vector? entry) (= 2 (count entry))
+                           (= [:rejected :exploration-report-mismatch]
+                              (second entry))))
+                    mutations)
+            (every? (fn [[id rejection]]
+                      (= [:rejected rejection] (get by-id id)))
+                    rejections))
+        (gate-failure!
+         "Browser exploration corpus has missing, reordered, or inert cases."
+         {:host host
+          :expected-case-ids browser-exploration-case-ids
+          :case-ids (when (vector? cases) (mapv first cases))
+          :case-count (when (vector? cases) (count cases))}))
+      serialized)))
+
+(defn jvm-browser-exploration-corpus!
+  "Execute the original CLJC state-space corpus independently on the JVM."
+  []
+  (let [expression
+        (str "(do (require '" browser-exploration-corpus-namespace ") "
+             "(println " (pr-str browser-exploration-corpus-line-prefix) " "
+             "(pr-str (" browser-exploration-corpus-namespace
+             "/portable-corpus))))")
+        result (run-command-captured-with-timeout!
+                ["clojure" "-Sdeps" (cljs-test-sdeps)
+                 "-M:dev:gesso-cljs-test" "-e" expression]
+                180000)]
+    (require-browser-exploration-corpus! (:out result) :jvm)))
+
+(defn run-node-browser-exploration-correspondence!
+  "Require exact JVM/Node equality for all 18 bounded exploration scenarios.
+   Inside the browser group, reuse the Node result captured by the portable
+   checker; a standalone invocation runs Node itself."
+  [output-to]
+  (let [cache-var (some-> (find-ns 'gesso.script.gesso-test)
+                          (ns-resolve '*node-browser-captured-run*))
+        cache (when cache-var (var-get cache-var))
+        cached (when cache @cache)
+        _ (when (and cache (nil? cached))
+            (gate-failure!
+             "Browser exploration comparison has no checked Node run."
+             {:requested-path output-to}))
+        _ (when (and cache (not= output-to (:path cached)))
+            (gate-failure!
+             "Browser exploration comparison changed the captured Node source."
+             {:captured-path (:path cached) :requested-path output-to}))
+        result (if cached
+                 (:result cached)
+                 (run-command-captured-with-timeout!
+                  ["node" output-to] 180000))
+        node-serialized (require-browser-exploration-corpus! (:out result) :node)
+        jvm-serialized (jvm-browser-exploration-corpus!)
+        node-cases (edn/read-string node-serialized)
+        jvm-cases (edn/read-string jvm-serialized)]
+    (when-not (= jvm-serialized node-serialized)
+      (let [index (first (keep-indexed
+                          (fn [i [expected observed]]
+                            (when-not (= expected observed) i))
+                          (map vector jvm-cases node-cases)))]
+        (gate-failure!
+         "JVM and Node bounded browser exploration disagree."
+         {:first-mismatched-index index
+          :jvm-case (get jvm-cases index)
+          :node-case (get node-cases index)
+          :jvm-case-count (count jvm-cases)
+          :node-case-count (count node-cases)})))
+    (when (and (not cached) (seq (:err result)))
+      (binding [*out* *err*] (print (:err result))))
+    (println (str "Browser exploration JVM/Node corpus: PASS ("
+                  (count node-cases) " identical cases)"))
+    nil))
+
 (defn run-node-test-groups!
   [group-ids]
   (println)
@@ -1456,7 +1621,23 @@
            namespace)))
 
         (if (= :browser group-id)
-          (run-node-portable-correspondence! output-to)
+          (do
+            (run-node-portable-correspondence! output-to)
+            ;; The production plan REQUIRES this namespace. Only then must
+            ;; the third parity check exist and succeed. Older source-executed
+            ;; test seams deliberately stub a narrower browser plan; they
+            ;; remain compatible without a second Node invocation.
+            (when (some #{'gesso.live.browser.refinement-exploration-parity-test}
+                        namespaces)
+              (let [check-var
+                    (some-> (find-ns 'gesso.script.gesso-test)
+                            (ns-resolve 'run-node-browser-exploration-correspondence!))]
+                (when-not check-var
+                  (gate-failure!
+                   "Required Node browser exploration checker is absent."
+                   {:required-namespace
+                    'gesso.live.browser.refinement-exploration-parity-test}))
+                (check-var output-to))))
           (run-command! ["node" output-to]))))))
 
 (defn run-node-browser-tests!
