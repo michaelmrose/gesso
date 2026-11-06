@@ -1,0 +1,360 @@
+#+TITLE: Gesso v1475 — Physical Execution Correspondence Checkpoint
+#+SUBTITLE: v1465–v1474 evidence, same-execution ledger join, and the remaining nine physical refinement obligations
+#+DATE: 2026-11-06
+#+OPTIONS: toc:3 num:t
+#+STARTUP: overview
+
+* Scope and decision
+
+This is a *document-only, non-authoritative checkpoint* of the single-node
+physical correspondence work through v1474. It makes no runtime, checker,
+admission, browser, database, or certificate changes. HumanHelp, multi-node
+operation, and universal proof-kernel soundness are not claimed by this
+checkpoint. The R4 canonical design describes the intended system, not an
+assertion that the current implementation has achieved it.
+
+*Decision: ACCEPT the newly observed, bounded issued-executor-to-physical-
+ledger correspondence as process-local engineering evidence. DO NOT discharge
+any of the nine original physical refinement obligations or issue a production
+certificate.*
+
+This decision is deliberately narrower than "physical execution verified":
+
+- The v1473 bridge runs a newly issued checked handler once, observes one
+  adapter call, forwards it to the original XTDB execute function, then
+  checks the transaction key against a pinned =xt.txs= ledger read on the
+  exact caller-supplied node.
+- The full v1465/v1467 controlled collector reads separate before and after
+  snapshots, but also *submits its own transaction*. It has *not* been joined
+  to the same v1473 execution. Running both in sequence would create two
+  physical writes, not a stronger single-execution witness.
+- Neither branch authenticates the installed production route, the origin
+  of a production node, a complete writer inventory, a transaction-internal
+  snapshot, or an independent XTDB receipt. Local equality and private
+  handle identity do not supply those missing premises.
+
+** Source basis and revision integrity
+
+This checkpoint was prepared against the repository working tree containing
+v1465–v1474 sources and permanent tests. The source objects below were
+inspected at their implementation boundaries. The earlier v1381 checkpoint
+is preserved as the baseline for the nine original physical obligations.
+This review is NOT an attestation of the user's installed repository, running
+node, deployed artifact, router, or complete test suite.
+
+| Revision | Actual file | Evidence added or permanently tested |
+|----------+-------------+--------------------------------------|
+| v1465 | =src/gesso/assurance/proof/physical_xtdb_transition_observation.clj= | Strict redacted phase classification of the existing controlled XTDB collector |
+| v1466 | =test/gesso/assurance/proof/physical_xtdb_transition_observation_mutation_test.clj= | Real commit/conflict and contradictory-evidence rejection |
+| v1467 | =src/gesso/assurance/proof/physical_xtdb_transition_provenance.clj= | Private live witness for one controlled collector return |
+| v1468 | =test/gesso/assurance/proof/physical_xtdb_transition_provenance_mutation_test.clj= | Forged handle, source substitution, unknown-result, and real-XTDB cases |
+| v1469 | =src/gesso/assurance/proof/physical_handler_correlation.clj= | Opt-in same-thread handler and exact request identity around the controlled collector |
+| v1470 | =test/gesso/assurance/proof/physical_handler_correlation_mutation_test.clj= | Missing/duplicate instrumentation, request substitution, source pinning |
+| v1471 | =src/gesso/assurance/proof/issued_executor_physical_plan_correspondence.clj= | Fresh issued executor, canonical prepared plan, and instrumented adapter call agreement |
+| v1472 | =test/gesso/assurance/proof/issued_executor_plan_mutation_test.clj= | Forged commit, duplicate/missing adapter observation, and stale witness cases |
+| v1473 | =src/gesso/assurance/proof/issued_executor_ledger_join.clj= | Same-invocation physical execute, TransactionKey, and pinned ledger row |
+| v1474 | =test/gesso/assurance/proof/issued_executor_ledger_join_mutation_test.clj= | Actual XTDB commit/ledger read, prestate seed, missing/duplicate write, and unknown outcomes |
+
+Important upstream implementation sources remain
+=gesso.model.tx-refinement-xtdb=, =gesso.model.tx-refinement=,
+=gesso.model.tx=, =gesso.model.certified-plan=,
+=gesso.live.consistency.xtdb=, and
+=gesso.assurance.proof.executable-writer-correspondence-obligations=.
+The v1368 writer ledger generates nine open obligations per applicable writer.
+The source-derived application reporting in v1440–v1451 is complementary:
+operation ID matching and conditional abstract preservation are not physical
+execution refinement.
+
+* Physical evidence paths: established facts versus missing links
+
+** Path A: actively controlled snapshot/transition collection (v1465–v1470)
+
+#+begin_example
+controlled test node + plan + targets
+   -> original controlled XTDB collector (ONE actual transaction)
+   -> separately pinned before/after observations and ledger comparison
+   -> v1465 strict redacted phase report
+   -> v1467 in-process live collector-return witness
+   -> optional v1469 same-thread handler extent / exact request identity
+#+end_example
+
+The phase report distinguishes recorded submission, committed or recognized
+assertion-rejected outcome, repeatable pinned reads, and conditional model
+agreement. The mandatory comparison flags include transaction ledger row,
+ledger transaction ID and system time, outcome, before/after state, recorded
+operations, and repeated pinned basis observations. A mismatch remains a
+mismatch. An error after submission is *not* safe evidence of rollback and
+must never trigger an automatic retry.
+
+The private witness registry prevents an unregistered or serialized handle
+from masquerading as one issued by this JVM. It does not independently
+authenticate the node, submitted payload, physical receipt, or deployed
+handler. A redacted report may be identical for different transactions.
+
+The v1469 handler scope is opt-in: a synchronous callable explicitly invokes
+=observe-in-handler!= exactly once. Nested, cross-thread, omitted, and
+repeated observation fail closed. An identity-matched function is not proof
+that this function is installed in a production router, or that its issued
+executor produced the collector's plan.
+
+** Path B: newly issued executor with same-invocation ledger join (v1471–v1474)
+
+#+begin_example
+original source-checked issued executor / fresh handler
+   -> actual resolved :prepared and :physical-outcome events
+   -> canonical tx/prepare versus actual adapter call site
+   -> ONE forwarded XTDB execute-tx on the same supplied node
+   -> physical TransactionKey returned from that call
+   -> read-only pinned xt.txs query (ID / committed / system-time agreement)
+   -> v1473 bounded join report + private process-local witness
+#+end_example
+
+=v1471= observes one fresh issued handler invocation; it accepts no positive
+plan match without both the resolved executor events and adapter call record.
+Its canonical operation vector and transaction options must agree with the
+recorded adapter invocation. A =submit-tx= acknowledgement or invented commit
+status is not a definitive =execute-tx= key.
+
+=v1473= intercepts the adapter's dynamic =*execute-tx*= seam and forwards
+only the first call to the originally captured =xt/execute-tx= function.
+The bridge checks that the node is the *same object*, not just an equal map
+or equivalent connection string. The returned key must have a valid ID and
+system timestamp. A post-submission pinned ledger query checks a row for
+that transaction ID, committed status, and exact system time. A duplicate
+attempt is rejected *before* a second physical write. Rechecking an issued
+handle is read-only: it neither executes the handler nor submits another
+transaction. A missing ledger row or failed readback does not authorize
+retrying the underlying transaction.
+
+The v1474 embedded-XTDB fixture first seeds a request at version 2; this
+prestate transaction is test setup and *not* the correlated operation. The
+issued claim operation's assertion depends on that prestate. In the fixture,
+=tx/transact!= is replaced by an explicitly controlled test wrapper. Thus
+real XTDB and pinned ledger behavior are exercised, but that success does
+not yet validate the unmodified deployed production transaction wrapper.
+
+** The paths are not merged
+
+The full snapshot collector in Path A actively performs its own transaction.
+Path B does not execute that collector; the v1473 report states
+=:controlled-v1467-collector :not-executed=. A "successful" v1467 report
+cannot be attached to a v1473 report by matching operation names, timestamp,
+plan, redacted contents, or an after-the-fact transaction ID assertion.
+This restriction prevents accidental *double-write evidence laundering*.
+
+No public v1473 API authenticates a foreign v1467 handle as having been
+issued by its same XTDB call. Its proof status is explicitly
+=:bounded-readback-diagnostic-only= and its certificate is =:not-issued=.
+The central unclosed link is *same-transaction atomic prestate and complete
+physical state projection*, not simply the lack of another matching map.
+
+* Nine original physical refinement obligations: exact ledger
+
+The identifiers and required evidence labels below are the originals from
+=gesso.assurance.proof.executable-writer-correspondence-obligations= (v1368).
+These are not newly invented proof goals. Each remains =:open= under the
+existing ledger's status contract at v1475. The following descriptions
+identify genuine reductions of uncertainty, *not discharge*.
+
+** =:typed-input-binding=
+
+Required: =:executed-request-to-typed-input-projection=.
+
+Progress: v1471 issues a source-checked handler and observes one resolved
+execution. v1469 binds an exact request object to a different opt-in handler
+observation. Open: independently attest the real routed request, principal,
+typed input projection, and actual issued command binding *in one deployment*.
+
+** =:transaction-internal-prestate=
+
+Required: =:authenticated-transaction-snapshot-and-typed-projection=.
+
+Progress: v1465 classifies separate pinned before/after collector reads;
+v1473 reads a pinned postcommit ledger row. Open: the *actual transaction-
+internal snapshot* seen by assertions and guards, and a sound projection of
+that snapshot into admitted abstract state. A before-query and later ledger
+row do not establish this equivalence.
+
+** =:guard-authorization=
+
+Required: =:executed-guard-and-admitted-authorization-correspondence=.
+
+Progress: source-checked issued executor and real controlled assertion
+handling can detect conflicting claims. Open: prove concrete guard decisions,
+principal provenance, and authorization match the admitted policy at the
+transaction's effective state. An assertion failure alone is not this proof.
+
+** =:assignment-write-footprint=
+
+Required: =:executed-assignments-and-complete-physical-write-set=.
+
+Progress: v1471 compares actual adapter operation order and options with
+canonical lowering. v1473 forwards that one call to XTDB. Open: full and
+independently accounted write effects, including unexpected physical targets,
+triggered paths, other writers, and supported transaction forms.
+
+** =:frame-and-unmodeled-fields=
+
+Required: =:unchanged-state-and-physical-domain-frame-correspondence=.
+
+Progress: Path A has separately pinned document and frame observations on a
+finite declared target set. Open: authentication of the full protected
+domain, its unchanged frame, and the transaction's causality over unlisted
+documents or fields. Path B's =xt.txs= row is not a document-frame proof.
+
+** =:serial-concurrency-validation=
+
+Required: =:atomic-version-check-and-serial-commit-history=.
+
+Progress: v1474 proves a controlled commit with seeded prestate and tests
+single-invocation no-second-write behavior. Open: concurrent transactions,
+version/assertion linearization, serial ordering, and the model's isolation
+assumptions under adversarial interleavings.
+
+** =:committed-outcome-incorporation=
+
+Required: =:authenticated-commit-reject-or-unknown-resolution=.
+
+Progress: v1465 separates committed from recognized assertion-rejected
+outcomes; v1473 reads the matching commit ledger row for a positive case;
+v1474 tests an exception raised *after* a real commit without retry.
+Open: independent end-to-end receipt identity, rejection and unknown-outcome
+reconciliation, and authoritative incorporation into subsequent state.
+
+** =:writer-provenance-and-deployment=
+
+Required: =:deployed-executor-identity-and-origin-attestation=.
+
+Progress: v1469 preserves an exact in-process handler/request binding;
+v1471–v1473 preserve issued executor and adapter/node identity for a fresh
+diagnostic invocation. Open: attest the actual installed router handler,
+deployed executable and complete host inventory, including direct/raw,
+background, initialization, and asynchronous database writers.
+
+** =:universal-execution-refinement=
+
+Required: =:sound-all-executions-refinement-argument=.
+
+Progress: bounded conditional induction, adversarial finite models, real
+XTDB examples, process-local provenance, and browser/Node parity now cover
+many independent parts of the proof story. Open: a justified universal
+simulation/refinement argument that survives all admitted input states,
+operations, concurrency histories, environment behaviors, and physical
+writer paths; this also depends on the kernel's separate soundness claims.
+
+*Discharged at v1475: 0 of 9.* No previous physical evidence module is an
+implementation of a general discharger for these nine obligations. A future
+checker must require original-source replay and independently sufficient
+evidence for EACH identified property; it must not infer =:closed= from all
+observed local booleans being true.
+
+* Threat / bypass model that remains in scope
+
+| Boundary | What is currently checked | How a false general claim could arise |
+|----------+---------------------------+---------------------------------------|
+| Original declarations | Source-based type, invariant and catalog checks | Omitted real writer or changed deployed binary |
+| Issued executor | Current source check; plan prepared during one invocation | Production route uses another handler or raw XTDB code |
+| Adapter capture | Ordered operations and options at an instrumented call site | Alternate or asynchronous adapter bypass |
+| Original XTDB execute function | Exact in-JVM captured function; first forwarded call | Caller-supplied node is not the deployed node; backend not independently attested |
+| Transaction ledger | Pinned row with key, committed flag, and system time | Ledger row does not authenticate complete request or internal read basis |
+| Before/after collector | Separate pinned snapshot windows and declared targets | Concurrent writes, different internal prestate, unlisted domain |
+| Live witness | Registered handle with source/object identity | Process authority is not deployment or backend authority |
+| Error / unknown outcome | No automatic retry and no positive witness | Postcommit exception leaves outcome unresolved |
+
+A malicious or defective *caller-controlled callback* is outside these
+provenance guarantees unless independently constrained. Capturing the Clojure
+Var root and examining an instrumented dynamic binding protect against
+specific substitutions in this process, not arbitrary native/JVM tampering.
+
+* Acceptance gates for the next implementation phase
+
+** A. Reconcile issued operation with a real installed route
+
+Select an application with a real route table, checked issued executor,
+actual request conversion, and no unrelated synthetic issued fixture. Acquire
+an independently enumerated installed-route/handler identity from the host.
+Demonstrate that altered routing, missing handlers, or changed executable
+sources fail before the report is promoted. A newly *created* handler is not
+an observation of the one already installed in the server.
+
+** B. Observe actual physical submission through the production wrapper
+
+Keep exactly one XTDB submission. Do not test correspondence by performing a
+second collector write. Record the canonical operation vector AND the
+unmodified production transaction wrapper's actual adapter invocation.
+Test both successful and recognized rejected outcomes, plus a postcommit
+exception that remains unknown. Prevent observation hooks from submitting,
+retrying, or changing operation semantics.
+
+** C. Establish transaction-internal basis or retain an explicit gap
+
+Investigate which XTDB transaction interface exposes the snapshot used by
+assertions, checks and writes. A fresh external =xt/q= before submission and a
+postcommit =xt.txs= row do not identify that internal snapshot. If XTDB cannot
+expose an authenticated basis, model that premise as open rather than
+approximating the basis with wall-clock time or the last known snapshot token.
+
+** D. Complete writer accounting and physical frame checks
+
+Enumerate all routes, registered issued executors, raw XTDB call sites,
+asynchronous jobs, initializers and background writes that can change the
+protected domain. Fail on unknowns. Bind complete physical effects and
+unmodified fields to the declared transition's reads, assignments and frame.
+Use a deliberate rogue writer to verify rejection at the acceptance boundary.
+
+** E. Independent concurrency and refinement argument
+
+Test actual overlapping claims, compare committed transaction history to the
+abstract serial model, and handle unknown outcomes without retry. Separately
+establish any general refinement theorem and supporting kernel soundness.
+Finite examples and even an exhaustive *bounded* schedule cannot substitute
+for the universal quantification over the claimed execution domain.
+
+* Next revision allocation (proposed, not certification promises)
+
+- *v1476*: Acquire installed-route / issued-handler inventory from original
+  application source, with exact operation and identity binding. Do not rely
+  on previously prepared report maps.
+- *v1477*: Permanent mutation tests: substituted route, missing handler,
+  copied handles, and hidden raw-XTDB bypass.
+- *v1478–v1481*: Production transaction-wrapper observation and no-second-write
+  tests; establish which XTDB facts can really be authenticated.
+- *v1482–v1486*: Transaction-internal basis and guarded/authorization
+  correspondence investigation, implementation and negative cases.
+- *v1487–v1493*: Physical write-frame / complete host inventory and rogue
+  writer detection. A partial inventory must not be reported complete.
+- *v1494 onward*: Real matching single-node proving application, concurrent
+  negative tests, and a separately justified refinement argument.
+
+Discoveries may change these allocations. The objective is to reduce the
+remaining *actual* proof gaps, not to minimize revision count or discard
+useful technical work.
+
+* Verification and release boundary for this checkpoint
+
+The source tree includes the permanent v1474 ledger-join mutation suite.
+The locally available completed JVM regression log for v1472 + v1474 records
+*37 tests, 216 assertions, zero failures and zero errors* (exit status 0).
+The v1474 focused result was 14 tests and 99 assertions. Those runs cover a
+controlled test wrapper and real embedded XTDB, not an unmodified deployed
+router. Earlier v1473 focused integration also checked the read-only ledger
+join; it does not replace a fresh full-suite pass.
+
+This document itself changes no executable contract and therefore has no
+new JVM/Node/Chromium acceptance result. It must be installed as documentation
+only. Full Ygg/JVM, Node/CLJS and Chromium gates are NOT claimed as run for
+v1475. Local Org/source-reference validation and installation TAR integrity
+are packaging checks, not implementation proofs.
+
+Every later proof/certification boundary must continue to distinguish:
+=:certificate :not-issued=, =:admission :not-admitted=,
+=:transaction-authority :none= and =:authority :none=. No consumer may use
+an opaque local witness or a copyable diagnostic to authorize a transaction.
+
+* Handover invariant
+
+*Never transform agreement among source-derived plans, a local XTDB adapter
+call, and a pinned ledger row into universal execution refinement without
+closing the transaction-internal, complete-writer, deployment and independent
+soundness obligations.* A matching observation is valuable evidence precisely
+because its limits remain visible.
