@@ -686,6 +686,9 @@
      gesso.live.browser.optimistic-htmx-test
      gesso.live.browser.runtime-test
      gesso.live.browser.shell-test
+     ;; v1457: This exact 14-case corpus must run in every Node browser gate.
+     ;; A missing/renamed namespace rejects the gate before CLJS compilation.
+     gesso.live.browser.refinement-node-parity-test
      ;; v1327: Include the permanent shared CLJC semantics corpus in the
      ;; existing Node gate. Chromium/JVM already discover *_test.cljc.
      ;; This must be REQUIRED, not an optional discovery prefix: deleting or
@@ -701,6 +704,32 @@
 ;; Guard against accidentally comparing two truncated or inert corpora. The
 ;; v1326 source corpus contains 941 cases; later extensions may add cases.
 (def portable-minimum-cases 941)
+
+;; Browser/Choreo refinement is a second, independent JVM/Node corpus. Each
+;; result is derived by executing production observation/refinement/checker
+;; functions; merely passing the same CLJC assertions on both hosts does not
+;; guarantee identical results. Require all 14 cases in the declared order.
+(def browser-refinement-corpus-line-prefix
+  "GESSO_BROWSER_REFINEMENT_PARITY ")
+
+(def browser-refinement-case-ids
+  [:checked-two-receives
+   :actual-browser-trace
+   :duplicate-physical-id
+   :incomplete-alignment
+   :reused-alignment
+   :reordered-alignment
+   :substituted-choreo-source
+   :invalid-independent-schedule
+   :forged-correspondence-authority
+   :wrong-receive-payload
+   :stuttering-only
+   :physical-id-is-not-semantic-identity
+   :imported-preexisting-history
+   :observer-rejects-substituted-state])
+
+(def browser-refinement-corpus-namespace
+  'gesso.live.browser.refinement-node-parity-test)
 
 (defn portable-choreo-test-namespace?
   [test-ns]
@@ -850,6 +879,12 @@
              " (pr-str ("
              portable-semantics-test-namespace
              "/shared-corpus-results)))\n"))
+      (when (= group-id :browser)
+        ;; Use literal source here: the pre-existing v1328 integrity tests
+        ;; evaluate this original function in an isolated namespace. The
+        ;; second corpus must be present without changing that test seam.
+        (str "  (println \"GESSO_BROWSER_REFINEMENT_PARITY \" "
+             "(pr-str (gesso.live.browser.refinement-node-parity-test/portable-corpus)))\n"))
       "  (t/run-tests\n"
       "   (t/empty-env ::reporter)"
       (quoted-test-args
@@ -1193,6 +1228,111 @@
                   " identical cases)"))
     nil))
 
+(defn require-browser-refinement-corpus!
+  "Parse and structurally validate exactly one complete browser-refinement
+   corpus from JVM or Node output. Never accept a successful test summary as
+   a substitute for the full semantic results."
+  [output host]
+  (let [lines (->> (str/split-lines output)
+                   (filter #(str/starts-with? %
+                               browser-refinement-corpus-line-prefix))
+                   vec)]
+    (when-not (= 1 (count lines))
+      (gate-failure!
+       "Browser refinement corpus output is missing or duplicated."
+       {:host host :matching-lines (count lines)}))
+    (let [serialized (subs (first lines)
+                           (count browser-refinement-corpus-line-prefix))
+          cases (try
+                  (edn/read-string serialized)
+                  (catch Exception error
+                    (gate-failure!
+                     "Browser refinement corpus is malformed EDN."
+                     {:host host :cause (ex-message error)})))
+          entries-well-formed?
+          (and (vector? cases)
+               (every? (fn [entry]
+                         (and (vector? entry)
+                              (= 2 (count entry))
+                              (keyword? (first entry))))
+                       cases))
+          by-id (when entries-well-formed? (into {} cases))
+          matched (get by-id :checked-two-receives)]
+      (when-not
+       (and (vector? cases)
+            (= browser-refinement-case-ids (mapv first cases))
+            entries-well-formed?
+            (vector? matched)
+            (= 12 (count matched))
+            (= [:matched :conditionally-matched-model-witness]
+               (subvec matched 0 2))
+            (= 2 (nth matched 3))
+            (= [:notice/one :notice/two] (nth matched 5))
+            (= false (nth matched 9))
+            (= false (nth matched 10))
+            (= :none (nth matched 11))
+            (some #{:actual-transport-send-and-delivery-identity}
+                  (nth matched 8))
+            (= [:rejected :invalid-or-reordered-alignment]
+               (get by-id :reused-alignment))
+            (= [:rejected :candidate-witness-mismatch]
+               (get by-id :substituted-choreo-source))
+            (= [:rejected :correspondence-report-mismatch]
+               (get by-id :forged-correspondence-authority))
+            (= true (get by-id :physical-id-is-not-semantic-identity)))
+        (gate-failure!
+         "Browser refinement corpus has missing, reordered, or inert cases."
+         {:host host
+          :expected-case-ids browser-refinement-case-ids
+          :case-ids (when (vector? cases) (mapv first cases))
+          :case-count (when (vector? cases) (count cases))}))
+      serialized)))
+
+(defn jvm-browser-refinement-corpus!
+  []
+  (let [expression
+        (str "(do (require '" browser-refinement-corpus-namespace ") "
+             "(println " (pr-str browser-refinement-corpus-line-prefix) " "
+             "(pr-str (" browser-refinement-corpus-namespace
+             "/portable-corpus))))")
+        result (run-command-captured-with-timeout!
+                ["clojure" "-Sdeps" (cljs-test-sdeps)
+                 "-M:dev:gesso-cljs-test" "-e" expression]
+                180000)]
+    (require-browser-refinement-corpus! (:out result) :jvm)))
+
+(defn run-node-browser-refinement-correspondence!
+  "Require exact JVM/Node equality for the browser-observation/refinement
+   corpus. The existing v1328 portable gate remains untouched; this additional
+   Node replay consumes its already compiled browser runner. It is intentionally
+   a separate pass until the original runner-integrity test seams are updated."
+  [output-to]
+  (let [result (run-command-captured-with-timeout!
+                ["node" output-to] 180000)
+        node-serialized (require-browser-refinement-corpus! (:out result) :node)
+        jvm-serialized (jvm-browser-refinement-corpus!)
+        node-cases (edn/read-string node-serialized)
+        jvm-cases (edn/read-string jvm-serialized)]
+    (when-not (= jvm-serialized node-serialized)
+      (let [index (first (keep-indexed
+                          (fn [i [expected observed]]
+                            (when-not (= expected observed) i))
+                          (map vector jvm-cases node-cases)))]
+        (gate-failure!
+         "JVM and Node browser-refinement semantics disagree."
+         {:first-mismatched-index index
+          :jvm-case (get jvm-cases index)
+          :node-case (get node-cases index)
+          :jvm-case-count (count jvm-cases)
+          :node-case-count (count node-cases)})))
+    ;; The Node test run was already printed by the older portable checker;
+    ;; suppress the duplicate full test summary, but preserve diagnostics.
+    (when (seq (:err result))
+      (binding [*out* *err*] (print (:err result))))
+    (println (str "Browser refinement JVM/Node corpus: PASS ("
+                  (count node-cases) " identical cases)"))
+    nil))
+
 (defn run-node-test-groups!
   [group-ids]
   (println)
@@ -1289,7 +1429,12 @@
 (defn run-node-browser-tests!
   []
   (run-node-test-groups!
-   [:browser]))
+   [:browser])
+  ;; The v1328 portable correspondence and cljs.test summary must already
+  ;; have passed. Compare the independent v1456 browser-refinement corpus
+  ;; before this gate can return successfully to direct bb, Ygg, or Shard.
+  (run-node-browser-refinement-correspondence!
+   (str test-work-dir "/node/browser-tests.js")))
 
 (defn run-node-choreo-tests!
   []
