@@ -16,6 +16,7 @@
    path that future completeness checks must account for. No hidden route,
    deployment identity, principal, or certificate is asserted here."
   (:require [gesso.assurance.example.single-node-proving :as pilot]
+            [gesso.assurance.proof.typed-presence-semantics :as typed]
             [gesso.model.command :as command]
             [gesso.model.tx :as tx]
             [xtdb.api :as xt]
@@ -31,6 +32,7 @@
 (def ^:private open-obligations
   #{:physical-value-mapping-not-independently-certified
     :model-transition-to-issued-executor-binding
+    :prewrite-guard-observation-not-authenticated-by-xtdb
     :installed-biff-handler-and-route-provenance
     :authorization-and-principal-provenance
     :complete-writer-coverage-including-bootstrap
@@ -131,6 +133,138 @@
                                      [:= :audit-tag (:audit-tag before)]])]
        :emit false})))
 
+;; =============================================================================
+;; v1509: source-derived abstract guard -> actual prepared XTDB ASSERT checks
+;; =============================================================================
+
+(def ^:private original-catalog pilot/reservation-catalog)
+(def ^:private original-prepare tx/prepare)
+(def ^:private original-typed-evaluate typed/evaluate-expression!)
+(def ^:private guard-report-type
+  :gesso.assurance.example.physical-single-node-proving/guard-plan-correspondence)
+
+(defn- checked-guard-plan!
+  "Check a concrete plan BEFORE submission. The source-derived typed guard,
+   assignments and frame must agree with the actual lowered SQL ASSERTs and
+   :put-docs operation. This restricted fixture pins the SQL/parameter shape
+   rather than trusting an assertion count, command ID or predicate callback.
+   This does NOT attest the later XTDB transaction or its internal prestate."
+  [catalog ctx before op plan]
+  (when-not (and (identical? original-catalog
+                             (var-get #'pilot/reservation-catalog))
+                 (identical? original-prepare (var-get #'tx/prepare))
+                 (identical? original-typed-evaluate
+                             (var-get #'typed/evaluate-expression!))
+                 (= catalog (original-catalog))
+                 (= operation-ids (:declared-operation-ids catalog))
+                 (= operation-ids (set (map :id (:operations catalog))))
+                 (= 2 (count (:operations catalog))))
+    (reject! :unbound-or-substituted-guard-source))
+  (let [operation (first (filter #(= op (:id %)) (:operations catalog)))
+        construction (:construction operation)
+        guard (:guard construction)
+        types (:state-types construction)
+        abstract (physical->abstract before)
+        literal (get-in guard [:expression 2])
+        expected-from (when (and (vector? literal)
+                                 (= :literal (first literal))
+                                 (= 2 (count literal)))
+                        (second literal))
+        expected-claims (case expected-from
+                          :available 0
+                          :reserved 1
+                          (reject! :unsupported-abstract-guard))
+        expected-to (get-in construction [:replacements :slot/status 1])
+        expected-to-claims
+        (get-in construction [:replacements :slot/active-claims 1])
+        checked-expression
+        (when (and (= #{:slot/status :slot/active-claims :slot/audit-tag}
+                      (set (keys types)))
+                   (= #{:slot/status} (:readers guard))
+                   (= [:= [:read :slot/status] [:literal expected-from]]
+                      (:expression guard))
+                   (= #{:slot/status :slot/active-claims} (:writes construction))
+                   (= #{:slot/audit-tag} (:frame construction))
+                   (= op (get-in construction [:subject :id]))
+                   (= #{:slot/status :slot/active-claims}
+                      (set (keys (:replacements construction))))
+                   (= [:literal expected-to]
+                      (get-in construction [:replacements :slot/status]))
+                   (= [:literal expected-to-claims]
+                      (get-in construction [:replacements :slot/active-claims]))
+                   (= #{:available :reserved}
+                      (get-in types [:slot/status :values])))
+          (original-typed-evaluate (:expression guard)
+                                   (select-keys types (:readers guard))
+                                   (select-keys abstract (:readers guard))))
+        expected-target (case expected-to
+                          :available ["available" 0]
+                          :reserved ["reserved" 1]
+                          (reject! :unsupported-abstract-assignment))
+        expected-row (-> before
+                         (assoc :status (first expected-target)
+                                :claims (second expected-target)
+                                :updated-at (str "v1494-revision-"
+                                                 (inc (:revision before))))
+                         (update :revision inc))
+        required-guard (tx/assert-one
+                        table
+                        [:and [:= :xt/id (:xt/id before)]
+                         [:= :status (name expected-from)]
+                         [:= :claims expected-claims]
+                         [:= :audit-tag (:audit-tag before)]])
+        prepared (original-prepare ctx plan)
+        tx-ops (:tx-ops prepared)
+        expected-guard-sql
+        ["ASSERT ? = (SELECT COUNT(*) FROM gesso_v1494_reservation_slots WHERE (_id = ?) AND (status = ?) AND (claims = ?) AND (audit_tag = ?))"
+         1 (:xt/id before) (name expected-from)
+         expected-claims (:audit-tag before)]
+        expected-cas-sql
+        ["ASSERT ? = (SELECT COUNT(*) FROM gesso_v1494_reservation_slots WHERE (_id = ?) AND (revision = ?) AND (updated_at = ?))"
+         1 (:xt/id before) (:revision before) (:updated-at before)]]
+    (when-not (and (map? checked-expression)
+                   (true? (:value checked-expression))
+                   (= :not-proved (:proof-status checked-expression))
+                   (= :not-admitted (:admission checked-expression))
+                   (= expected-from (:slot/status abstract))
+                   (= expected-claims (:slot/active-claims abstract))
+                   (= (name expected-to) (:status expected-row))
+                   (= expected-to-claims (:claims expected-row))
+                   (= (:slot/audit-tag abstract)
+                      (:slot/audit-tag (physical->abstract expected-row)))
+                   (= #{:commands :assertions :emit} (set (keys plan)))
+                   (= false (:emit plan))
+                   (= [required-guard] (:assertions plan))
+                   (= 1 (count (:commands plan)))
+                   (= [table (:xt/id before)]
+                      (tx/command-target (first (:commands plan))))
+                   (= before (command/before (first (:commands plan))))
+                   (= expected-row (command/after (first (:commands plan))))
+                   (= op (get-in (first (:commands plan)) [:model/operation]))
+                   (= 3 (count tx-ops))
+                   (= expected-guard-sql (nth tx-ops 0))
+                   (= expected-cas-sql (nth tx-ops 1))
+                   (= [:put-docs table expected-row] (nth tx-ops 2)))
+      (reject! :source-guard-and-concrete-plan-diverge))
+    ;; No raw SQL, physical row, document IDs, or callbacks in diagnostics.
+    {:type guard-report-type
+     :version 1
+     :operation-id op
+     :catalog-id (:id catalog)
+     :source-guard-and-prepared-assertions-agree? true
+     :prewrite-assertion-count 2
+     :observed-plan-write-count 1
+     :checking :original-typed-guard-and-actual-lowered-gesso-plan
+     :executed-plan-binding :not-established
+     :xtdb-internal-prestate :not-authenticated
+     :principal-authenticity :not-established
+     :complete-writer-coverage :not-established
+     :physical-refinement :not-established
+     :proof-status :not-proved
+     :certificate :not-issued
+     :admission :not-admitted
+     :authority :none}))
+
 (defn- application-report [slot-id]
   {:type :gesso.assurance.example.physical-single-node-proving/real-xtdb-pilot
    :version 1
@@ -156,7 +290,10 @@
    :abstract! (unproved but checked projection), and :execute! (one Gesso
    model transaction for :slot/reserve or :slot/release). The caller may
    inspect the returned :catalog, :biff-context, :biff-model-module, and
-   :report. No live notification or HTTP route is installed here.
+   :report. :guard-preflight! performs a read-only, source-derived check of
+   the concrete plan that :execute! also validates before submitting once.
+   Its report is bounded and not a certificate. No live notification or HTTP
+   route is installed here.
 
    Do not retain the callbacks or node after the supplied function returns.
    This fixture is for a single test/application invocation, not production
@@ -181,10 +318,17 @@
                         (when-not (contains? operation-ids op)
                           (reject! :unknown-operation))
                         (let [before (read!)
-                              plan (transition-plan before op)]
-                          ;; One actual submission. A conflicting XTDB ASSERT
-                          ;; propagates as an error: never reissue automatically.
+                              plan (transition-plan before op)
+                              _ (checked-guard-plan! catalog ctx before op plan)]
+                          ;; Check the SAME plan submitted exactly once. This
+                          ;; does not authenticate the later physical commit.
                           (tx/transact! ctx plan)))
+             guard-preflight! (fn [op]
+                                (when-not (contains? operation-ids op)
+                                  (reject! :unknown-operation))
+                                (let [before (read!)
+                                      plan (transition-plan before op)]
+                                  (checked-guard-plan! catalog ctx before op plan)))
              app {:node node
                   :slot-id slot-id
                   :biff-context ctx
@@ -193,6 +337,7 @@
                   :report (application-report slot-id)
                   :read! read!
                   :abstract! abstract!
+                  :guard-preflight! guard-preflight!
                   :execute! execute!}]
          (f app))))))
 
@@ -242,6 +387,8 @@
                          competing-actor-ids)
              prepared-ops (into {}
                                 (map (fn [[actor plan]]
+                                       (checked-guard-plan! (:catalog app)
+                                                            ctx before :slot/reserve plan)
                                        [actor (:tx-ops (tx/prepare ctx plan))]))
                                 plans)
              _ (when-not (apply = (vals prepared-ops))
