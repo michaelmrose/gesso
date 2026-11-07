@@ -1,6 +1,6 @@
 (ns gesso.assurance.proof.xtdb-restricted-submission-gateway-test
-  "v1528: Permanent adversarial checks of the opt-in, one-use XTDB sink
-   and v1527's process-local exact-return linkage.
+  "v1530: Permanent adversarial checks of the opt-in, one-use XTDB sink,
+   v1527 exact-return linkage, and v1529 local attempt observations.
 
    These are bounded tests of the *actual owned execute-tx call*, not a proof
    of application authority, physical causality, transaction-internal prestate,
@@ -10,7 +10,9 @@
 
    A genuine TransactionKey means XTDB accepted the API call, not that the
    caller has established a certified abstract business transition. All
-   uncertain outcomes remain uncertain; no automatic retries are performed."
+   uncertain outcomes remain uncertain; no automatic retries are performed.
+   Attempt observations are process-local snapshots of this gateway's code
+   path, never a durable XTDB receipt or authenticated deployment identity."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [gesso.assurance.example.physical-single-node-proving :as physical]
@@ -623,3 +625,297 @@
           (finally
             (.countDown go)
             (doseq [task tasks] (future-cancel task))))))))
+
+
+;; v1530: the attempt journal is observed, not supplied. Test every finite
+;; state as a whole coherent snapshot; no independent status/counter reads
+;; should be needed to explain what the gateway has observed locally.
+(def ^:private allowed-attempt-events
+  {:prepared [:prepared]
+   :checking [:prepared :checking]
+   :preflight-rejected [:prepared :checking :preflight-rejected]
+   :submitting [:prepared :checking :submitting]
+   :returned-transaction-key
+   [:prepared :checking :submitting :returned-transaction-key]
+   :returned-unrecognized
+   [:prepared :checking :submitting :returned-unrecognized]
+   :threw-outcome-unknown
+   [:prepared :checking :submitting :threw-outcome-unknown]})
+
+(def ^:private attempt-nonclaims
+  {:committed-transaction :not-established
+   :xtdb-receipt :not-established
+   :public-key-to-ledger-join :not-checked
+   :physical-poststate-causality :not-established
+   :transaction-internal-prestate :not-authenticated
+   :principal-authorization :not-established
+   :complete-deployment-writer-coverage :not-established
+   :physical-refinement :not-established
+   :proof-status :process-local-attempt-observation-only
+   :admission :not-admitted
+   :certificate :not-issued
+   :authority :none})
+
+(defn- bounded-attempt-evidence! [e]
+  (is (= gateway/local-attempt-type (:type e)))
+  (is (= gateway/local-attempt-version (:version e)))
+  (is (= gateway/gateway-version (:gateway-version e)))
+  (is (= :process-local-nonauthenticating (:source-binding-scope e)))
+  (is (string? (:process-local-attempt-id e)))
+  (is (not (str/blank? (:process-local-attempt-id e))))
+  (is (string? (:process-local-source-binding e)))
+  (is (not (str/blank? (:process-local-source-binding e))))
+  (is (= (get allowed-attempt-events (:status e))
+         (:observed-local-events e))
+      (str "Inconsistent attempt lifecycle: " (:status e)))
+  (is (<= 0 (:owned-execute-tx-call-entries e) 1))
+  (let [entered? (#{:submitting :returned-transaction-key
+                    :returned-unrecognized :threw-outcome-unknown}
+                  (:status e))]
+    (is (= (if entered? 1 0) (:owned-execute-tx-call-entries e)))
+    (is (= (if entered? :entered-locally :not-entered)
+           (:call-site-entry e))))
+  (is (= (if (= :preflight-rejected (:status e))
+           :no-gateway-call :not-established)
+         (:physical-outcome e)))
+  (is (= (case (:status e)
+           :returned-transaction-key :public-transaction-key
+           :returned-unrecognized :unrecognized-xtdb-api-return
+           :none)
+         (:observed-result-kind e)))
+  (doseq [[k expected] attempt-nonclaims]
+    (is (= expected (get e k)) (str "Attempt overclaimed " k)))
+  (doseq [forbidden [:node :plan :tx-ops :tx-key :principal
+                     :before :after :source :protected-documents
+                     :physical-document :exception :error :sql]]
+    (is (not (contains? e forbidden))
+        (str "Attempt evidence exposed " forbidden)))
+  (is (not (str/includes? (pr-str e) secret)))
+  e)
+
+(defn- checked-attempt! [prepared expected-status]
+  (let [snapshot (bounded-attempt-evidence!
+                  (gateway/require-local-attempt! prepared))]
+    (is (= expected-status (:status snapshot)))
+    snapshot))
+
+(deftest local-attempt-preparation-is-read-only-and-unique-per-gateway
+  (with-physical
+    (fn [app before]
+      (let [a (gate (:node app) [before])
+            b (gate (:node app) [before])
+            ae (checked-attempt! a :prepared)
+            be (checked-attempt! b :prepared)]
+        (is (not= (:process-local-attempt-id ae)
+                  (:process-local-attempt-id be)))
+        (is (= (:process-local-source-binding ae)
+               (:process-local-source-binding be))
+            "Equal admitted sources may share a source binding")
+        (is (= 3 (:candidate-operation-count ae)))
+        (is (= 2 (:prewrite-assertion-count ae)))
+        (is (= 1 (:whole-document-replacement-count ae)))
+        (is (= ae (gateway/require-local-attempt! (into {} a)))
+            "A map copy retaining the same registered functions is valid")
+        (is (= before ((:read! app))))
+        (is (= :prepared (:status ((:summary! a)))))))))
+
+(deftest local-attempt-normal-return-links-to-exact-return-without-a-commit-claim
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            prepared (checked-attempt! g :prepared)
+            result ((:submit! g))
+            finished (checked-attempt! g :returned-transaction-key)
+            local-return (gateway/require-local-return! g result)]
+        (is (instance? TransactionKey (:tx-key result)))
+        (is (= (:process-local-attempt-id prepared)
+               (:process-local-attempt-id finished)
+               (:process-local-attempt-id local-return)))
+        (is (= (:process-local-source-binding prepared)
+               (:process-local-source-binding finished)
+               (:process-local-source-binding local-return)))
+        (is (= 1 (:owned-execute-tx-call-entries finished)))
+        (is (= finished (gateway/require-local-attempt! g)))
+        (reject! :one-shot-already-attempted (:submit! g))
+        (is (= finished (gateway/require-local-attempt! g))
+            "A refused retry cannot create a second journal event")
+        (is (= (next-document before) ((:read! app))))))))
+
+(deftest preflight-refusal-consumes-one-shot-without-an-xtdb-call
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            prepared (checked-attempt! g :prepared)]
+        (reject! :substituted-gateway-or-upstream-seam
+                 #(with-redefs [tx/prepare (fn [& _] {:tx-ops []})]
+                    ((:submit! g))))
+        (let [rejected (checked-attempt! g :preflight-rejected)]
+          (is (= (:process-local-attempt-id prepared)
+                 (:process-local-attempt-id rejected)))
+          (is (= :no-gateway-call (:physical-outcome rejected)))
+          (is (= 0 (:owned-execute-tx-call-entries rejected)))
+          (reject! :not-this-gateway-local-return
+                   #(gateway/require-local-return! g
+                      {:tx-key nil :diagnostic ((:summary! g))}))
+          (reject! :one-shot-already-attempted (:submit! g))
+          (is (= rejected (gateway/require-local-attempt! g)))
+          (is (= before ((:read! app)))))))))
+
+(deftest thrown-xtdb-invocation-remains-physically-unknown
+  ;; An unsupported node deliberately throws AFTER entry into the gateway's
+  ;; owned execute-tx call site, with no potentially successful API return.
+  (let [before (physical/initial-document
+                (str "v1530-throw-" (random-uuid)))
+        g (gate (Object.) [before])
+        prior (checked-attempt! g :prepared)
+        failure (try ((:submit! g)) nil (catch Throwable t t))
+        after (checked-attempt! g :threw-outcome-unknown)]
+    (is (instance? Throwable failure))
+    (is (= (:process-local-attempt-id prior)
+           (:process-local-attempt-id after)))
+    (is (= :not-established (:physical-outcome after)))
+    (is (= :none (:observed-result-kind after)))
+    (reject! :not-this-gateway-local-return
+             #(gateway/require-local-return!
+               g {:tx-key nil :diagnostic ((:summary! g))}))
+    (reject! :one-shot-already-attempted (:submit! g))
+    (is (= after (gateway/require-local-attempt! g)))))
+
+(deftest caller-forged-gateway-parts-do-not-confer-attempt-provenance
+  (let [before (physical/initial-document
+                (str "v1530-forge-" (random-uuid)))
+        a (gate (Object.) [before])
+        b (gate (Object.) [before])
+        authentic (checked-attempt! a :prepared)]
+    (doseq [candidate [nil [] {}
+                       (dissoc a :summary!)
+                       (assoc a :type :forged)
+                       (assoc a :version 0)
+                       (assoc a :certificate :issued)
+                       (assoc a :attempt-id (:process-local-attempt-id authentic))
+                       (with-meta a {:certified true})]]
+      (reject! :invalid-local-gateway
+               #(gateway/require-local-attempt! candidate)))
+    (doseq [candidate [(assoc a :submit! (:submit! b))
+                       (assoc a :summary! (:summary! b))
+                       (assoc a :submit! (fn [] :forged))
+                       (assoc a :summary! (fn [] authentic))]]
+      (reject! :not-this-gateway-local-attempt
+               #(gateway/require-local-attempt! candidate)))
+    (is (= authentic (gateway/require-local-attempt! a)))
+    (is (not= (:process-local-attempt-id authentic)
+              (:process-local-attempt-id
+               (checked-attempt! b :prepared))))))
+
+(deftest snapshots-are-only-observations-and-not-caller-writable-journals
+  (let [before (physical/initial-document
+                (str "v1530-snapshot-" (random-uuid)))
+        g (gate (Object.) [before])
+        snapshot (checked-attempt! g :prepared)
+        invented (-> snapshot
+                     (assoc :status :returned-transaction-key
+                            :observed-result-kind :public-transaction-key
+                            :owned-execute-tx-call-entries 4
+                            :certificate :issued)
+                     (update :observed-local-events conj :submitting))]
+    (is (not= snapshot invented))
+    (is (= snapshot (gateway/require-local-attempt! g))
+        "Editing returned data does not edit the gateway's private atom")
+    (reject! :invalid-local-gateway
+             #(gateway/require-local-attempt! invented))
+    (is (thrown? clojure.lang.ArityException
+                 (gateway/require-local-attempt! g invented)))
+    (is (not (contains? ((:summary! g)) :observed-local-events)))
+    (is (not (contains? ((:summary! g)) :process-local-attempt-id)))))
+
+(deftest preparation-rejects-invalid-source-without-issuing-attempt-evidence
+  (let [before (physical/initial-document
+                (str "v1530-invalid-" (random-uuid)))
+        source (assoc (source-for [before]) :certificate :issued)]
+    (reject! :invalid-gateway-source
+             #(gateway/prepare-one-shot! (Object.) source))
+    (reject! :invalid-local-gateway
+             #(gateway/require-local-attempt! source))))
+
+(deftest concurrent-submitters-expose-only-valid-journal-prefixes
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            prepared (checked-attempt! g :prepared)
+            ready (CountDownLatch. 6)
+            go (CountDownLatch. 1)
+            tasks (mapv (fn [_]
+                          (future
+                            (.countDown ready)
+                            (when-not (.await go 20 TimeUnit/SECONDS)
+                              (throw (ex-info "Submission race not released" {})))
+                            (let [observed-before
+                                  (gateway/require-local-attempt! g)
+                                  outcome (try
+                                            {:kind :return
+                                             :result ((:submit! g))}
+                                            (catch clojure.lang.ExceptionInfo e
+                                              (if (:xtdb-restricted-submission-gateway/rejection
+                                                   (ex-data e))
+                                                {:kind :refusal
+                                                 :reason (:reason (ex-data e))}
+                                                (throw e))))]
+                              {:observed-before observed-before
+                               :outcome outcome
+                               :observed-after
+                               (gateway/require-local-attempt! g)})))
+                        (range 6))]
+        (try
+          (is (.await ready 20 TimeUnit/SECONDS))
+          (.countDown go)
+          (let [outcomes (mapv #(deref % 60000 :timeout) tasks)
+                completed (remove #{:timeout} outcomes)
+                returns (filter #(= :return (get-in % [:outcome :kind]))
+                                completed)
+                refused (filter #(= :refusal (get-in % [:outcome :kind]))
+                                completed)
+                ending (checked-attempt! g :returned-transaction-key)]
+            (is (not-any? #{:timeout} outcomes))
+            (is (= 1 (count returns)))
+            (is (= 5 (count refused)))
+            (is (every? #(= :one-shot-already-attempted
+                            (get-in % [:outcome :reason]))
+                        refused))
+            (doseq [o completed
+                    :when (map? o)
+                    e [(:observed-before o) (:observed-after o)]]
+              (bounded-attempt-evidence! e)
+              (is (= (:process-local-attempt-id prepared)
+                     (:process-local-attempt-id e)))
+              (is (<= (count (:observed-local-events prepared))
+                      (count (:observed-local-events e))
+                      (count (:observed-local-events ending))))
+              (is (= (:observed-local-events e)
+                     (subvec (:observed-local-events ending)
+                             0 (count (:observed-local-events e))))))
+            (when-let [result (get-in (first returns) [:outcome :result])]
+              (is (= (:process-local-attempt-id ending)
+                     (:process-local-attempt-id
+                      (gateway/require-local-return! g result)))))
+            (is (= (next-document before) ((:read! app)))))
+          (finally
+            (.countDown go)
+            (doseq [task tasks] (future-cancel task))))))))
+
+(deftest unrelated-xtdb-writes-do-not-enter-this-gateways-journal
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            first-snapshot (checked-attempt! g :prepared)
+            outside (assoc before :audit-tag secret)
+            key (xt/execute-tx (:node app)
+                               [[:put-docs physical/table outside]])
+            later-snapshot (checked-attempt! g :prepared)]
+        (is (instance? TransactionKey key))
+        (is (= outside ((:read! app))))
+        (is (= first-snapshot later-snapshot)
+            "An outside writer is NOT an event in this gateway's lifecycle")
+        (is (= :not-established
+               (:complete-deployment-writer-coverage later-snapshot)))
+        (is (= :not-established
+               (:physical-poststate-causality later-snapshot)))))))
