@@ -10,8 +10,10 @@
    handlers that cooperate with this accessor. It is not an exhaustive host
    inventory. Direct XTDB writes, retained old Biff handlers, arbitrary
    instrumentation, deployed-server adoption, and abstract operation
-   refinement are NOT proved. For this first revision a single certified
-   literal route is required; multi-route per-request coverage is future work."
+   refinement are NOT proved. v1569 supports multiple certified literal routes
+   with total STATIC route-to-writer declarations, but issues and checks an
+   actual registered writer only for the selected route on each request.
+   Unselected routes are NOT represented as dynamically registered or invoked."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as adoption]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
@@ -31,12 +33,13 @@
 (def ^:private original-adoption adoption/require-current-biff-host-adoption!)
 (def ^:private original-issue writers/issue-request-scoped-monotonic-writer!)
 (def ^:private original-observe assembly/observe-current-biff-registered-writer-assembly!)
+(def ^:private original-biff-observe writers/observe-checked-biff-host-registered-writer!)
 (def ^:private original-summary application/operation-summary)
 (def ^:private handler-slot application/biff-ring-handler-key)
 (def ^:dynamic ^:private *current-request-writer* nil)
 (def ^:private open-obligations
   #{:checked-handler-must-use-the-request-local-writer-accessor
-    :only-one-source-certified-literal-route-supported
+    :unselected-routes-are-declared-not-dynamically-registered-or-observed
     :the-source-builder-must-produce-fresh-authorized-transaction-input
     :shared-target-concurrent-transactions-may-conflict
     :host-enumerator-exhaustiveness-not-established
@@ -67,6 +70,8 @@
                              (var-get #'writers/issue-request-scoped-monotonic-writer!))
                  (identical? original-observe
                              (var-get #'assembly/observe-current-biff-registered-writer-assembly!))
+                 (identical? original-biff-observe
+                             (var-get #'writers/observe-checked-biff-host-registered-writer!))
                  (identical? original-summary
                              (var-get #'application/operation-summary))
                  (= handler-slot application/biff-ring-handler-key))
@@ -86,28 +91,74 @@
       (reject! :no-matching-active-thread-bound-request-writer))
     (writer)))
 
-(defn- single-literal-binding! [source route-writer-paths checked-route-ids]
+(defn- checked-literal-bindings!
+  "Independently rederive ALL certified literal routes. Reject ambiguous
+   method/URI selection, duplicate IDs, reused writer paths, or partial
+   bindings. This is static route coverage, not issuance for unselected routes."
+  [source route-writer-paths checked-route-ids]
   (let [summary (original-summary
                  (:operation-acquisition-assembly (:application-assembly source)))
         routes (vec (for [[operation entry] summary
                           route (:routes entry)]
                       {:operation operation :id (:route-id route)
                        :method (:method route) :uri (:path route)}))
-        selected (first routes)]
-    (when-not (and (= 1 (count routes))
-                   (= 1 (count checked-route-ids))
-                   (= (set (map :id routes)) checked-route-ids)
-                   (qualified-id? (:operation selected))
-                   (qualified-id? (:id selected))
-                   (keyword? (:method selected))
-                   (string? (:uri selected))
-                   (.startsWith ^String (:uri selected) "/")
-                   (not (re-find #"[{}:*]" (:uri selected)))
+        ids (mapv :id routes)
+        selectors (mapv (juxt :method :uri) routes)
+        paths (vals route-writer-paths)]
+    (when-not (and (seq routes) (<= (count routes) 512)
+                   (= (count ids) (count (set ids)))
+                   (= (count selectors) (count (set selectors)))
+                   (= (set ids) checked-route-ids)
+                   (every? (fn [{:keys [operation id method uri]}]
+                             (and (qualified-id? operation)
+                                  (qualified-id? id)
+                                  (keyword? method)
+                                  (string? uri)
+                                  (.startsWith ^String uri "/")
+                                  (not (re-find #"[{}:*]" uri))))
+                           routes)
                    (plain-map? route-writer-paths)
-                   (= #{(:id selected)} (set (keys route-writer-paths)))
-                   (qualified-id? (get route-writer-paths (:id selected))))
+                   (= (set ids) (set (keys route-writer-paths)))
+                   (= (count paths) (count (set paths)))
+                   (every? qualified-id? paths))
+      ;; Preserve the existing rejection contract for incomplete singleton
+      ;; route tables as well as invalid multi-route declarations.
       (reject! :requires-one-certified-literal-route-and-writer-binding))
-    (assoc selected :path (get route-writer-paths (:id selected)))))
+    (mapv (fn [route] (assoc route :path (get route-writer-paths (:id route))))
+          routes)))
+
+(defn- per-operation-inventory-sources!
+  "A writer-coverage source certifies its independently enumerated operation
+   IDs. With multiple distinct operations it MUST be supplied independently
+   for each operation; a source for one operation cannot attest another.
+   The upstream writer-coverage checker rechecks the selected source at each
+   issuance/dispatch. No unchecked filtering or fabricated inventory is used."
+  [inventory-source routes]
+  (let [operations (set (map :operation routes))
+        grouped? (contains? inventory-source :per-operation-writer-sources)
+        sources (if grouped?
+                  (:per-operation-writer-sources inventory-source)
+                  (when (= 1 (count operations))
+                    {(first operations) inventory-source}))]
+    (when-not (and (plain-map? sources)
+                   (= operations (set (keys sources)))
+                   (every? plain-map? (vals sources))
+                   (or (not grouped?)
+                       (= #{:per-operation-writer-sources}
+                          (set (keys inventory-source)))))
+      (reject! :requires-independent-operation-writer-coverage-sources))
+    sources))
+
+(defn- selected-literal-route! [routes request]
+  (when-not (plain-map? request)
+    (reject! :unmatched-parallel-request-route))
+  (let [matches (filterv (fn [route]
+                           (= [(:method route) (:uri route)]
+                              [(:request-method request) (:uri request)]))
+                         routes)]
+    (when-not (= 1 (count matches))
+      (reject! :unmatched-parallel-request-route))
+    (first matches)))
 
 (defn- entry [handle]
   (when (instance? ParallelContextHandle handle)
@@ -115,10 +166,17 @@
 
 (defn issue-isolated-parallel-biff-request-module!
   "Issue a single-start Biff module providing parallel, request-ISOLATED
-   guarded execution for ONE certified literal route.
+   guarded execution for one of several certified literal routes.
 
    [adoption-handle contract-source operation-writer-source
     route-writer-paths node request->admitted-source! revision-field]
+
+   `operation-writer-source` is the existing independent writer-coverage
+   source when all routes name the same operation. For routes naming multiple
+   distinct operations, pass exactly {:per-operation-writer-sources
+   {operation-id independent-source ...}}. Every operation must have its own
+   fully checked source; this module does not narrow or forge one. The host
+   still owns request->admitted-source! and its business-rule correspondence.
 
    Install AFTER checked Biff host adoption and BEFORE server start. A
    participating certified handler must call `invoke-current-request-writer!`
@@ -127,10 +185,13 @@
    logic by this module. Two requests operating on the same XTDB document may
    legitimately conflict at the transaction-time guard.
 
-   Every dispatch issues a separate identity-authenticated one-shot, constructs
-   a private registry and source-derived inventory, verifies the complete
-   source/handler/writer assembly, observes one actual synchronous invocation,
-   retires the private registration, and returns ONLY the Ring response.
+   Every dispatch issues a separate identity-authenticated one-shot ONLY for
+   its matched route, constructs a private registry and source-derived inventory,
+   verifies the actual Biff handler's selected route/writer invocation, retires
+   the private registration, and returns ONLY the Ring response. At startup
+   ALL source routes must have distinct, unambiguous, certified literal routes
+   and complete writer-path declarations. For multiple routes the other paths
+   are not claimed as dynamically installed or observed by this request.
    There is no global writer table to mutate and no queue serializing handlers."
   [adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field]
@@ -169,19 +230,19 @@
                                (:handler-slot host))
                             (fn? intermediate-handler))
                (reject! :unverified-intermediate-biff-handler))
-             (let [{:keys [operation id method uri path] :as route}
-                   (single-literal-binding!
-                    contract-source route-writer-paths
-                    (:checked-certified-route-ids host))
+             (let [routes (checked-literal-bindings!
+                           contract-source route-writer-paths
+                           (:checked-certified-route-ids host))
+                   singleton? (= 1 (count routes))
+                   writer-sources (per-operation-inventory-sources!
+                                   operation-writer-source routes)
                    final-handler
                    (fn [request]
                      (pinned!)
                      (when *current-request-writer*
                        (reject! :nested-parallel-request-dispatch))
-                     (when-not (and (plain-map? request)
-                                    (= method (:request-method request))
-                                    (= uri (:uri request)))
-                       (reject! :unmatched-parallel-request-route))
+                     (let [{:keys [operation id path] :as selected}
+                           (selected-literal-route! routes request)]
                      (original-adoption adoption-handle contract-source
                                         intermediate-system)
                      (let [source (source! request)]
@@ -194,7 +255,7 @@
                              registry (atom {path {:kind :issued-operation
                                                    :operation-id operation
                                                    :writer writer}})
-                             inventory {:operation-writer-source operation-writer-source
+                             inventory {:operation-writer-source (get writer-sources operation)
                                         :enumerate-write-paths! (fn [] @registry)}
                              handles {path (:handle issuance)}
                              installed @registry
@@ -206,10 +267,15 @@
                                    (binding [*current-request-writer*
                                              {:owner (Thread/currentThread)
                                               :path path :writer writer}]
-                                     (original-observe
-                                      adoption-handle contract-source
-                                      intermediate-system inventory handles
-                                      route-writer-paths request))))}
+                                     (if singleton?
+                                       (original-observe
+                                        adoption-handle contract-source
+                                        intermediate-system inventory handles
+                                        route-writer-paths request)
+                                       (original-biff-observe
+                                        adoption-handle contract-source
+                                        intermediate-system request inventory
+                                        handles path))))) }
                                (catch Throwable t {:thrown t})
                                (finally
                                  ;; Private registry cannot be accidentally
@@ -220,19 +286,31 @@
                          (when-let [thrown (:thrown outcome)] (throw thrown))
                          (when-not (and (= :closed ((:request-scope-status! issuance)))
                                         (= {} @registry)
-                                        (= assembly/invocation-report-type
+                                        (= (if singleton?
+                                             assembly/invocation-report-type
+                                             writers/biff-observation-type)
                                            (get-in outcome [:result :report :type]))
-                                        (= :conditional-observed-route-invoked-joined-one-shot-writer
-                                           (get-in outcome [:result :report :status])))
+                                        (= (if singleton?
+                                             :conditional-observed-route-invoked-joined-one-shot-writer
+                                             :observed-checked-biff-handler-invoked-exact-registered-writer)
+                                           (get-in outcome [:result :report :status]))
+                                        (= 1 (get-in outcome [:result :report :observed-registered-callback-invocations]))
+                                        (if singleton?
+                                          (and (= 1 (get-in outcome [:result :report :checked-certified-route-count]))
+                                               (true? (get-in outcome [:result :report :all-source-checked-routes-locally-joined?])))
+                                          (and (= id (get-in outcome [:result :report :observed-route-id]))
+                                               (= operation (get-in outcome [:result :report :observed-operation-id]))
+                                               (= path (get-in outcome [:result :report :observed-writer-path-id]))
+                                               (true? (get-in outcome [:result :report :registered-callback-returned?])))))
                            (reject! :unexpected-parallel-invocation-evidence))
-                         (get-in outcome [:result :response]))))
+                         (get-in outcome [:result :response])))))
                    final-system (assoc intermediate-system handler-slot final-handler)]
                (reset! started {:source contract-source
                                 :intermediate-system intermediate-system
                                 :intermediate-handler intermediate-handler
                                 :final-system final-system
                                 :final-handler final-handler
-                                :route route})
+                                :route-count (count routes)})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
@@ -271,6 +349,8 @@
      :status :conditional-request-local-writer-mediation-installed
      :scope :one-process-local-final-biff-system
      :registered-writer-context :independent-per-request
+     :certified-literal-route-count (:route-count state)
+     :unselected-route-invocations :not-observed
      :parallel-handler-dispatch :permitted
      :request-scoped-one-shot :fresh-per-request
      :in-process-callback-trace :one-checked-invocation-per-request
