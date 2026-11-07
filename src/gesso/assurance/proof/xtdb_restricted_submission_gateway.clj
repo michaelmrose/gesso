@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-restricted-submission-gateway
-  "v1529: Experimental, opt-in, ONE-SHOT physical XTDB submission boundary.
+  "v1531: Experimental, opt-in, ONE-SHOT physical XTDB submission boundary.
 
    This gateway owns a real xtdb.api/execute-tx call. A caller supplies an
    ordinary Gesso model plan and a finite protected-document declaration,
@@ -32,6 +32,15 @@
    non-durable, and not a cryptographically authenticated execution record.
    A call-site entry proves neither XTDB receipt nor transaction commit.
 
+   v1531 adds require-local-ledger-observation!: an opt-in, read-only,
+   same-captured-node query of a pinned xt.txs ledger row, using ONLY the
+   exact response map returned by this gateway. The local source/attempt
+   binding and public TransactionKey must agree before any ledger query.
+   Query failures become diagnostic statuses; no transaction is retried.
+   A matching committed ledger row corroborates a returned key, but cannot
+   prove that this gateway caused a physical application poststate or that
+   other writers are absent. The caller-provided node is not authenticated.
+
    Do not pass gateway summaries as certificates. The returned TransactionKey
    is kept separate from redacted diagnostics and is public API evidence, not
    proof that the caller's abstract business transition was refined."
@@ -39,7 +48,8 @@
             [gesso.model.tx :as tx]
             [gesso.model.tx-model :as tx-model]
             [xtdb.api :as xt])
-  (:import [java.util WeakHashMap]
+  (:import [java.time Instant ZonedDateTime]
+           [java.util WeakHashMap]
            [xtdb.api TransactionKey]))
 
 (def gateway-type
@@ -51,6 +61,9 @@
 (def local-attempt-type
   :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-attempt)
 (def local-attempt-version 1)
+(def local-ledger-type
+  :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-ledger)
+(def local-ledger-version 1)
 
 ;; The weak key is the unique :submit! function, not a source string or a
 ;; caller-provided transaction key. Values must NEVER hold the submit closure
@@ -64,6 +77,7 @@
 (def ^:private original-inspect footprint/inspect-footprint!)
 (def ^:private original-recheck footprint/require-current-footprint!)
 (def ^:private original-execute xt/execute-tx)
+(def ^:private original-query xt/q)
 (def ^:private source-keys #{:plan :protected-documents})
 
 (defn- plain-map? [value]
@@ -85,7 +99,8 @@
                              (var-get #'footprint/inspect-footprint!))
                  (identical? original-recheck
                              (var-get #'footprint/require-current-footprint!))
-                 (identical? original-execute (var-get #'xt/execute-tx)))
+                 (identical? original-execute (var-get #'xt/execute-tx))
+                 (identical? original-query (var-get #'xt/q)))
     (reject! :substituted-gateway-or-upstream-seam [])))
 
 (defn- immutable-wire-value?
@@ -315,6 +330,7 @@
     (locking local-gateways
       (.put local-gateways submit!
             {:summary! summary!
+             :observation-node node
              :returned returned
              :attempt attempt
              :attempt-id attempt-id
@@ -452,3 +468,135 @@
        :admission :not-admitted
        :certificate :not-issued
        :authority :none})))
+
+
+(defn- public-key-point [^TransactionKey key]
+  (try
+    (let [id (.getTxId key)
+          time (.getSystemTime key)]
+      (when (and (integer? id) (<= 0 id Long/MAX_VALUE)
+                 (instance? Instant time))
+        {:tx-id id :system-time time}))
+    (catch Throwable _ nil)))
+
+(defn- ledger-time [value]
+  (cond
+    (instance? Instant value) value
+    (instance? ZonedDateTime value) (.toInstant ^ZonedDateTime value)
+    :else nil))
+
+(defn- observe-owned-key-ledger [node {:keys [tx-id system-time]}]
+  ;; Two *read-only* queries on the same node supplied to execute-tx.
+  ;; The token pins the subsequent ledger query, NOT the transaction's
+  ;; internal prestate and NOT any application poststate. No retry on error.
+  (try
+    (let [tokens (original-query node "SHOW SNAPSHOT_TOKEN")
+          token (when (and (sequential? tokens) (= 1 (count tokens))
+                           (plain-map? (first tokens)))
+                  (:snapshot-token (first tokens)))]
+      (if-not (and (string? token) (seq token))
+        {:status :snapshot-token-unavailable :checks {}}
+        (let [rows (original-query
+                    node
+                    ["SELECT _id, committed, system_time FROM xt.txs WHERE _id = ?"
+                     tx-id]
+                    {:snapshot-token token :current-time (Instant/now)})]
+          (cond
+            (not (sequential? rows))
+            {:status :invalid-ledger-query-result :checks {}}
+
+            (empty? rows)
+            {:status :not-visible-at-observed-basis :checks {}}
+
+            (not= 1 (count rows))
+            {:status :ambiguous-ledger-result :checks {}}
+
+            (not (and (plain-map? (first rows))
+                      (= #{:xt/id :committed :system-time}
+                         (set (keys (first rows))))))
+            {:status :invalid-ledger-row :checks {}}
+
+            :else
+            (let [row (first rows)
+                  checks {:tx-id (= tx-id (:xt/id row))
+                          :committed (true? (:committed row))
+                          :system-time (= system-time
+                                          (ledger-time (:system-time row)))}]
+              {:status (if (every? true? (vals checks))
+                         :reported-key-matches-committed-ledger-row
+                         :reported-key-diverges-from-ledger-row)
+               :checks checks})))))
+    (catch Throwable _
+      ;; A later read exception must not change the completed execute-tx
+      ;; return into an invented rejection, and cannot trigger a retry.
+      {:status :ledger-query-failed :checks {}})))
+
+(defn require-local-ledger-observation!
+  "Inspect a *reported* committed XTDB ledger row for this exact local return.
+
+   Input: the original prepared gateway descriptor and the original result
+   object from its one and only :submit! call. The function first checks
+   require-local-return! and require-local-attempt!; forged, copied, foreign,
+   thrown, or preflight-rejected results are refused before database reads.
+
+   Only a genuine public TransactionKey with well-formed tx-id/system-time
+   is eligible. Queries use the SAME node object previously supplied to the
+   gateway's execute-tx call. This caller-provided node and its code are NOT
+   authenticated; the result is a bounded, post-submission ledger diagnostic.
+   An observed committed row corroborates the public return, not the
+   submitted operation payload, transaction-internal prestate, causal
+   poststate, outside-writer closure, or universal physical refinement.
+
+   The report contains no raw tx id, timestamps, snapshot token, SQL result,
+   operation vector, node, principal, or exception payload. This function
+   does not resubmit, re-admit, or otherwise modify persistent data."
+  [gateway result]
+  (let [local-return (require-local-return! gateway result)
+        local-attempt (require-local-attempt! gateway)
+        {:keys [observation-node]} (locking local-gateways
+                                     (.get local-gateways (:submit! gateway)))
+        _ (when-not (and (= (:process-local-attempt-id local-return)
+                            (:process-local-attempt-id local-attempt))
+                         (= (:process-local-source-binding local-return)
+                            (:process-local-source-binding local-attempt))
+                         (= :returned-transaction-key
+                            (:status local-attempt))
+                         (= [:prepared :checking :submitting
+                             :returned-transaction-key]
+                            (:observed-local-events local-attempt))
+                         (= 1 (:owned-execute-tx-call-entries local-attempt)))
+            (reject! :incoherent-local-submission-evidence []))
+        _ (seams!)
+        tx-key (:tx-key result)
+        key (when (instance? TransactionKey tx-key)
+              (public-key-point tx-key))
+        ledger (if key
+                 (observe-owned-key-ledger observation-node key)
+                 {:status :not-a-complete-public-transaction-key :checks {}})]
+    {:type local-ledger-type
+     :version local-ledger-version
+     :gateway-version gateway-version
+     :process-local-attempt-id (:process-local-attempt-id local-return)
+     :source-binding-scope :process-local-nonauthenticating
+     :process-local-source-binding
+     (:process-local-source-binding local-return)
+     :owned-execute-tx-call-entries 1
+     :return-linkage :exact-object-from-owned-call-site
+     :ledger-status (:status ledger)
+     :ledger-checks (:checks ledger)
+     :ledger-observation-origin :read-only-pinned-xt-txs-on-submission-node
+     :caller-node-authenticity :not-established
+     :xtdb-receipt :not-established
+     :committed-transaction :not-established
+     :physical-poststate-causality :not-established
+     :physical-frame-preservation :not-established
+     :transaction-internal-prestate :not-authenticated
+     :outside-gateway-writer-closure :not-established
+     :complete-deployment-writer-coverage :not-established
+     :principal-authorization :not-established
+     :physical-refinement :not-established
+     :universal-physical-refinement :not-established
+     :proof-status :bounded-local-return-and-ledger-corroboration-only
+     :admission :not-admitted
+     :certificate :not-issued
+     :authority :none}))
