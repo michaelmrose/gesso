@@ -13,13 +13,16 @@
    refinement are NOT proved. v1569 supports multiple certified literal routes
    with total STATIC route-to-writer declarations, but issues and checks an
    actual registered writer only for the selected route on each request.
-   Unselected routes are NOT represented as dynamically registered or invoked."
+   Unselected routes are NOT represented as dynamically registered or invoked.
+   v1571 optionally bounds concurrent guarded handler execution while retaining
+   independent per-request registries and actual parallel execution."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as adoption]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
             [gesso.assurance.proof.xtdb-gateway-biff-writer-assembly :as assembly]
             [gesso.live.application-preflight :as application])
-  (:import (java.util WeakHashMap)))
+  (:import (java.util WeakHashMap)
+           (java.util.concurrent Semaphore TimeUnit)))
 
 (def module-id :gesso.assurance.proof.xtdb-gateway-biff-parallel-request-context/install)
 (def report-type :gesso.assurance.proof.xtdb-gateway-biff-parallel-request-context/installed)
@@ -37,6 +40,7 @@
 (def ^:private original-summary application/operation-summary)
 (def ^:private handler-slot application/biff-ring-handler-key)
 (def ^:dynamic ^:private *current-request-writer* nil)
+(def ^:dynamic ^:private *bounded-parallel-dispatch* false)
 (def ^:private open-obligations
   #{:checked-handler-must-use-the-request-local-writer-accessor
     :unselected-routes-are-declared-not-dynamically-registered-or-observed
@@ -47,7 +51,8 @@
     :deployment-server-uses-final-handler-not-established
     :external-writers-and-xtdb-node-identity-not-established
     :abstract-operation-to-command-correspondence-not-established
-    :transaction-commit-causality-and-refinement-not-established})
+    :transaction-commit-causality-and-refinement-not-established
+    :admission-limits-apply-only-to-this-issued-mediator-instance})
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid parallel Biff request writer boundary."
@@ -164,7 +169,61 @@
   (when (instance? ParallelContextHandle handle)
     (locking issued (.get issued handle))))
 
-(defn issue-isolated-parallel-biff-request-module!
+(defn- bounded-parallel-policy!
+  "Validate a finite limit on running plus waiting requests and a separate
+   genuinely parallel execution limit. Clojure integers are required; no
+   coercion, decimals or caller-supplied semaphore instances are accepted."
+  [policy]
+  (when-not (and (plain-map? policy)
+                 (= #{:max-active-requests :max-pending-requests
+                      :wait-timeout-ms}
+                    (set (keys policy)))
+                 (every? integer? (vals policy))
+                 (<= 2 (:max-active-requests policy) 64)
+                 (<= (:max-active-requests policy)
+                     (:max-pending-requests policy) 256)
+                 (<= 1 (:wait-timeout-ms policy) 60000))
+    (reject! :invalid-bounded-parallel-policy))
+  policy)
+
+(defn- bounded-parallel-dispatch
+  "An independent fair permit pool bounds ACTIVE handler executions without
+   serializing them. `pending` counts ACTIVE + WAITING entrants. All entrances
+   and exits, including interruption and handler exceptions, release their own
+   accounting. Semaphore fairness applies to waiting permit acquisition, not
+   a proof of strict scheduling order or backend transaction fairness."
+  [dispatch! {:keys [max-active-requests max-pending-requests wait-timeout-ms]}]
+  (let [^Semaphore permits (Semaphore. (int max-active-requests) true)
+        pending (atom 0)]
+    (fn [request]
+      (when *bounded-parallel-dispatch*
+        (reject! :recursive-bounded-parallel-request-dispatch))
+      (when-not (loop []
+                  (let [n @pending]
+                    (cond
+                      (>= n max-pending-requests) false
+                      (compare-and-set! pending n (inc n)) true
+                      :else (recur))))
+        (reject! :bounded-parallel-admission-full))
+      (try
+        (let [acquired?
+              (try
+                (.tryAcquire permits (long wait-timeout-ms)
+                             TimeUnit/MILLISECONDS)
+                (catch InterruptedException _
+                  (.interrupt (Thread/currentThread))
+                  (reject! :bounded-parallel-admission-interrupted)))]
+          (when-not acquired?
+            (reject! :bounded-parallel-admission-timeout))
+          (try
+            (binding [*bounded-parallel-dispatch* true]
+              (dispatch! request))
+            (finally
+              (.release permits))))
+        (finally
+          (swap! pending dec))))))
+
+(defn- issue-parallel-request-module*
   "Issue a single-start Biff module providing parallel, request-ISOLATED
    guarded execution for one of several certified literal routes.
 
@@ -194,7 +253,7 @@
    are not claimed as dynamically installed or observed by this request.
    There is no global writer table to mutate and no queue serializing handlers."
   [adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field]
+   route-writer-paths node source! revision-field policy]
   (pinned!)
   (when-not (and (plain-map? contract-source)
                  (plain-map? operation-writer-source)
@@ -304,19 +363,48 @@
                                                (true? (get-in outcome [:result :report :registered-callback-returned?])))))
                            (reject! :unexpected-parallel-invocation-evidence))
                          (get-in outcome [:result :response])))))
+                   final-handler (if policy
+                                   (bounded-parallel-dispatch final-handler policy)
+                                   final-handler)
                    final-system (assoc intermediate-system handler-slot final-handler)]
                (reset! started {:source contract-source
                                 :intermediate-system intermediate-system
                                 :intermediate-handler intermediate-handler
                                 :final-system final-system
                                 :final-handler final-handler
-                                :route-count (count routes)})
+                                :route-count (count routes)
+                                :admission-policy policy})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
                                        :started started
                                        :adoption-handle adoption-handle}))
     {:module module :handle handle}))
+
+(defn issue-isolated-parallel-biff-request-module!
+  "Original v1567/v1569 unbounded parallel request-local mediation API.
+   This issuer retains its existing registration and handler semantics."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field]
+  (issue-parallel-request-module*
+   adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field nil))
+
+(defn issue-bounded-isolated-parallel-biff-request-module!
+  "Issue the same independent request-local Biff mediator with bounded active
+   parallelism and bounded WAITING+ACTIVE admission. The finite policy is
+   {:max-active-requests N :max-pending-requests M :wait-timeout-ms T},
+   2 <= N <= 64, N <= M <= 256, 1 <= T <= 60000. It never serializes all
+   handlers: up to N real handlers may run simultaneously. It does not issue
+   writer capabilities to waiting or rejected requests, nor authorize writes
+   by alternate handlers or unregistered XTDB clients. A caller may be rejected
+   on timeout, overload or interruption; ordinary handler failure propagates."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field policy]
+  (issue-parallel-request-module*
+   adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field
+   (bounded-parallel-policy! policy)))
 
 (defn require-current-isolated-parallel-biff-request-module!
   "Read-only inspection of exact locally installed final Biff handler.
@@ -352,6 +440,13 @@
      :certified-literal-route-count (:route-count state)
      :unselected-route-invocations :not-observed
      :parallel-handler-dispatch :permitted
+     :parallel-admission-policy
+     (if (:admission-policy state)
+       :bounded-fair-permits-with-request-local-registries
+       :unbounded-per-issued-mediator)
+     :max-active-requests (get-in state [:admission-policy :max-active-requests])
+     :max-pending-requests (get-in state [:admission-policy :max-pending-requests])
+     :wait-timeout-ms (get-in state [:admission-policy :wait-timeout-ms])
      :request-scoped-one-shot :fresh-per-request
      :in-process-callback-trace :one-checked-invocation-per-request
      :biff-handler-slot :exact-local-identity-checked
