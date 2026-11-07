@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-acquired-poststate-correspondence
-  "v1541: Opt-in, ONE-document source-bound execution/poststate diagnostic.
+  "v1543: Opt-in, ONE-document source-bound execution/poststate diagnostic.
 
    Compose v1539's same-node pinned external-before acquisition, v1537's
    complete top-level transaction-time ASSERTs, the v1525+ restricted one-shot
@@ -14,6 +14,18 @@
    to the transaction, and XTDB ASSERT semantics are a trusted backend premise.
    Nor does this authenticate a principal, the caller-supplied node, complete
    writer coverage, application installation, or a universal refinement.
+   v1543 adds an explicitly CONDITIONAL transaction-local write-effect
+   inference. If the source-owned transaction returned its exact public key,
+   the later pinned ledger confirms that key was committed, and we TRUST
+   XTDB's atomic transaction and :put-docs semantics, then that transaction's
+   admitted single whole-document replacement wrote its declared post-image
+   AT EXECUTION. If the physical poststate is unavailable, the separate
+   exact-return-bound ledger observer may corroborate the transaction without
+   inventing a physical poststate. This does not imply anything about a LATER
+   read, nor certify backend semantics, writer closure, transaction history
+   or causality of an observed poststate. Missing ledger evidence NEVER
+   yields this inference.
+
    Source, target IDs, rows, SQL, snapshot tokens and transaction keys remain
    inside closures. Diagnostics are redacted, not certificates or authority."
   (:require [gesso.assurance.proof.physical-domain-projection :as projection]
@@ -30,6 +42,7 @@
 (def ^:private original-prepare acquired/prepare-acquired-complete-guard-one-shot!)
 (def ^:private original-return gateway/require-local-return!)
 (def ^:private original-attempt gateway/require-local-attempt!)
+(def ^:private original-ledger gateway/require-local-ledger-observation!)
 (def ^:private original-poststate poststate/acquire-poststate-basis!)
 (def ^:private original-poststate-check poststate/require-live-poststate-basis!)
 (def ^:private original-poststate-summary poststate/redacted-summary)
@@ -54,6 +67,8 @@
                              (var-get #'gateway/require-local-return!))
                  (identical? original-attempt
                              (var-get #'gateway/require-local-attempt!))
+                 (identical? original-ledger
+                             (var-get #'gateway/require-local-ledger-observation!))
                  (identical? original-poststate
                              (var-get #'poststate/acquire-poststate-basis!))
                  (identical? original-poststate-check
@@ -127,9 +142,13 @@
    Multiple read-only observations are allowed and can disagree. A divergent
    observation is never itself evidence of a failed or retried submission.
 
-   Failure to read the later state is returned as an unavailable diagnostic;
-   failures in source validation or identity checking are never downgraded.
-   No assertion of transaction-internal prestate or physical causality follows."
+   Failure to read the later physical state is reported as unavailable. An
+   independently pinned, gateway-bound ledger observation can still support
+   a CONDITIONAL statement about the transaction's own single PUT under
+   trusted XTDB semantics, but never about the later physical document.
+   Failures in source validation or identity checking are never downgraded.
+   No assertion of transaction-internal prestate or observed-state causality
+   follows; this is not an independently checked backend execution proof."
   [node projection-source]
   (when (nil? node)
     (reject! :missing-xtdb-node))
@@ -202,6 +221,36 @@
                                         (plain-map? (:document row)))
                          equal? (boolean (and complete?
                                               (= expected-after (:document row))))
+                         ;; A poststate read can be unavailable (e.g. a later
+                         ;; DELETE). A separate exact-return-bound ledger
+                         ;; observation can still corroborate that transaction
+                         ;; without yielding ANY poststate evidence. Only make
+                         ;; that second read when the shared-basis join failed.
+                         ledger (when-not joined?
+                                  (try (original-ledger gate response)
+                                       (catch Exception _ nil)))
+                         ledger-only?
+                         (boolean (and ledger
+                                       (= (:process-local-attempt-id returned)
+                                          (:process-local-attempt-id ledger))
+                                       (= (:process-local-source-binding returned)
+                                          (:process-local-source-binding ledger))
+                                       (= 1 (:owned-execute-tx-call-entries ledger))
+                                       (= :reported-key-matches-committed-ledger-row
+                                          (:ledger-status ledger))
+                                       (= {:tx-id true :committed true :system-time true}
+                                          (:ledger-checks ledger))))
+                         ledger-corroborated? (boolean (or joined? ledger-only?))
+                         ;; A narrowly derived statement about the admitted
+                         ;; transaction's OWN write, not the origin of a later
+                         ;; physical snapshot. These premises are independent
+                         ;; of whether the later document still matches.
+                         conditional-effect?
+                         (boolean (and ledger-corroborated?
+                                       (= 1 (:owned-execute-tx-call-entries returned))
+                                       (= 3 (:candidate-operation-count returned))
+                                       (= 2 (:prewrite-assertion-count returned))
+                                       (= 1 (:whole-document-replacement-count returned))))
                          status (cond
                                   (nil? post) :poststate-or-ledger-unavailable
                                   (not complete?) :protected-poststate-not-observable
@@ -224,6 +273,24 @@
                       :observed-ledger-joined-poststate? (boolean joined?)
                       :observed-complete-protected-document? (boolean complete?)
                       :observed-whole-document-equals-source-after? equal?
+                      ;; This inference is conditional on the actual XTDB
+                      ;; backend semantics, not an independently verified
+                      ;; effect or an assertion about current database state.
+                      :transaction-local-write-effect
+                      (if conditional-effect?
+                        :declared-postimage-under-trusted-xtdb-semantics
+                        :not-established)
+                      :transaction-local-write-effect-premises
+                      {:source-vector :rederived-and-one-shot-owned
+                       :whole-document-put :exactly-one-target
+                       :transaction-ledger
+                       (cond joined? :same-basis-matching-committed-key
+                             ledger-only? :separately-pinned-matching-committed-key
+                             :else :not-established)
+                       :backend-atomic-put-semantics :trusted-not-proved}
+                      :transaction-local-effect-time-scope :execution-only
+                      :transaction-local-effect-physical-verification
+                      :not-independently-established
                       :poststate-basis-ordering
                       (or (:basis-ordering redacted) :not-established)
                       :physical-poststate-origin :later-pinned-external-read
