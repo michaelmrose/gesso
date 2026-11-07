@@ -1,6 +1,7 @@
 (ns gesso.assurance.proof.xtdb-restricted-submission-gateway-test
-  "v1530: Permanent adversarial checks of the opt-in, one-use XTDB sink,
-   v1527 exact-return linkage, and v1529 local attempt observations.
+  "v1532: Permanent adversarial checks of the opt-in, one-use XTDB sink,
+   exact-return linkage, local attempt observations, and the v1531
+   same-node, read-only ledger correlation.
 
    These are bounded tests of the *actual owned execute-tx call*, not a proof
    of application authority, physical causality, transaction-internal prestate,
@@ -12,7 +13,9 @@
    caller has established a certified abstract business transition. All
    uncertain outcomes remain uncertain; no automatic retries are performed.
    Attempt observations are process-local snapshots of this gateway's code
-   path, never a durable XTDB receipt or authenticated deployment identity."
+   path, never a durable XTDB receipt or authenticated deployment identity.
+   A matching xt.txs record corroborates one returned key, not application
+   poststate causality, writer completeness, or physical refinement."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [gesso.assurance.example.physical-single-node-proving :as physical]
@@ -919,3 +922,256 @@
                (:complete-deployment-writer-coverage later-snapshot)))
         (is (= :not-established
                (:physical-poststate-causality later-snapshot)))))))
+
+
+;; v1532: The ledger observation is an opt-in READ of a pinned xt.txs row,
+;; not a second submission or a certificate. An exact return and valid local
+;; attempt are prerequisites. Invalid/missing observations must never turn
+;; into an invented committed business transition.
+
+(def ^:private ledger-nonclaims
+  {:source-binding-scope :process-local-nonauthenticating
+   :return-linkage :exact-object-from-owned-call-site
+   :ledger-observation-origin :read-only-pinned-xt-txs-on-submission-node
+   :caller-node-authenticity :not-established
+   :xtdb-receipt :not-established
+   :committed-transaction :not-established
+   :physical-poststate-causality :not-established
+   :physical-frame-preservation :not-established
+   :transaction-internal-prestate :not-authenticated
+   :outside-gateway-writer-closure :not-established
+   :complete-deployment-writer-coverage :not-established
+   :principal-authorization :not-established
+   :physical-refinement :not-established
+   :universal-physical-refinement :not-established
+   :proof-status :bounded-local-return-and-ledger-corroboration-only
+   :admission :not-admitted
+   :certificate :not-issued
+   :authority :none})
+
+(defn- checked-ledger! [g original-result expected-status expected-checks]
+  (let [r (gateway/require-local-ledger-observation! g original-result)
+        local (gateway/require-local-return! g original-result)
+        attempt (gateway/require-local-attempt! g)]
+    (is (= gateway/local-ledger-type (:type r)))
+    (is (= gateway/local-ledger-version (:version r)))
+    (is (= gateway/gateway-version (:gateway-version r)))
+    (is (= (:process-local-attempt-id local)
+           (:process-local-attempt-id attempt)
+           (:process-local-attempt-id r)))
+    (is (= (:process-local-source-binding local)
+           (:process-local-source-binding attempt)
+           (:process-local-source-binding r)))
+    (is (= 1 (:owned-execute-tx-call-entries r)))
+    (is (= expected-status (:ledger-status r)) (pr-str r))
+    (is (= expected-checks (:ledger-checks r)))
+    (doseq [[k expected] ledger-nonclaims]
+      (is (= expected (get r k)) (str "Overstated ledger claim: " k)))
+    (doseq [k [:node :plan :protected-documents :tx-ops :tx-key :tx-id
+               :system-time :snapshot-token :sql :principal :result
+               :physical-document :poststate :before :after :exception]]
+      (is (not (contains? r k)) (str "Ledger leaked: " k)))
+    (is (not (str/includes? (pr-str r) secret)))
+    r))
+
+(deftest genuine-key-correlates-with-ledger-without-certifying-its-effects
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            prepared (gateway/require-local-attempt! g)
+            result ((:submit! g))
+            expected {:tx-id true :committed true :system-time true}
+            first-report (checked-ledger!
+                          g result
+                          :reported-key-matches-committed-ledger-row expected)]
+        (is (= (next-document before) ((:read! app))))
+        (is (= first-report (checked-ledger!
+                             g result
+                             :reported-key-matches-committed-ledger-row
+                             expected)))
+        (is (= (:process-local-attempt-id prepared)
+               (:process-local-attempt-id first-report)))
+        (reject! :one-shot-already-attempted (:submit! g))
+        (is (= 1 (:owned-execute-tx-call-entries
+                  (gateway/require-local-attempt! g))))))))
+
+(deftest ledger-observation-corroborates-one-atomic-two-document-submission
+  (with-physical
+    (fn [app before]
+      (let [other (physical/initial-document
+                   (str "v1532-second-" (random-uuid)))
+            other-id (:xt/id other)
+            seeded (xt/execute-tx (:node app)
+                                  [[:put-docs physical/table other]])
+            g (gate (:node app) [before other])
+            result ((:submit! g))
+            observation (checked-ledger!
+                         g result :reported-key-matches-committed-ledger-row
+                         {:tx-id true :committed true :system-time true})]
+        (is (instance? TransactionKey seeded))
+        (is (= 1 (:owned-execute-tx-call-entries observation)))
+        (is (= (next-document before) ((:read! app))))
+        (is (= (select-keys (next-document other) [:revision :claims :status])
+               (select-keys
+                (first (xt/q (:node app)
+                             ["SELECT * FROM gesso_v1494_reservation_slots WHERE _id = ?"
+                              other-id]))
+                [:revision :claims :status])))))))
+
+(deftest copied-forged-and-foreign-results-never-become-ledger-evidence
+  (with-physical
+    (fn [app before]
+      (let [a (gate (:node app) [before])
+            b (gate (:node app) [before])
+            result ((:submit! a))
+            wrong-source (assoc a :summary! (:summary! b))]
+        (doseq [copy [(into {} result)
+                      (assoc result :tx-key nil)
+                      (assoc result :diagnostic {:status :returned-transaction-key})
+                      {:tx-key (:tx-key result)
+                       :diagnostic (:diagnostic result)}]]
+          (reject! :not-this-gateway-local-return
+                   #(gateway/require-local-ledger-observation! a copy)))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-ledger-observation! b result))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-ledger-observation!
+                   wrong-source result))
+        (doseq [forged [(assoc a :type :forged)
+                        (assoc a :version 999)
+                        (assoc a :certificate :issued)
+                        (with-meta a {:authorized true})]]
+          (reject! :invalid-local-gateway
+                   #(gateway/require-local-ledger-observation! forged result)))
+        (checked-ledger! a result :reported-key-matches-committed-ledger-row
+                         {:tx-id true :committed true :system-time true})
+        (is (= :prepared (:status (gateway/require-local-attempt! b))))))))
+
+(deftest neither-preflight-refusal-nor-thrown-sink-can-produce-ledger-evidence
+  (let [before (physical/initial-document
+                (str "v1532-failure-" (random-uuid)))
+        source (source-for [before])
+        preflight (gateway/prepare-one-shot! (Object.) source)
+        throwing (gateway/prepare-one-shot! (Object.) source)]
+    (reject! :substituted-gateway-or-upstream-seam
+             #(with-redefs [tx/prepare (fn [& _] {:tx-ops []})]
+                ((:submit! preflight))))
+    (is (= :preflight-rejected
+           (:status (gateway/require-local-attempt! preflight))))
+    (is (= 0 (:owned-execute-tx-call-entries
+              (gateway/require-local-attempt! preflight))))
+    (is (instance? Throwable
+                   (try ((:submit! throwing)) nil (catch Throwable e e))))
+    (is (= :threw-outcome-unknown
+           (:status (gateway/require-local-attempt! throwing))))
+    (doseq [g [preflight throwing]]
+      (reject! :not-this-gateway-local-return
+               #(gateway/require-local-ledger-observation!
+                 g {:tx-key nil :diagnostic ((:summary! g))}))
+      (reject! :one-shot-already-attempted (:submit! g)))))
+
+(deftest stale-xtdb-conflict-cannot-be-misattributed-to-gateway-return
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            outsider (next-document before)
+            external-key (xt/execute-tx
+                          (:node app) [[:put-docs physical/table outsider]])
+            failure (try ((:submit! g)) nil (catch Throwable e e))]
+        (is (instance? TransactionKey external-key))
+        (is (instance? Throwable failure))
+        (is (= :threw-outcome-unknown
+               (:status (gateway/require-local-attempt! g))))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-ledger-observation!
+                   g {:tx-key external-key :diagnostic ((:summary! g))}))
+        (is (= outsider ((:read! app))))))))
+
+(deftest external-writer-can-change-poststate-without-changing-ledger-join
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            result ((:submit! g))
+            prior (checked-ledger!
+                   g result :reported-key-matches-committed-ledger-row
+                   {:tx-id true :committed true :system-time true})
+            outside (assoc before :status "outside" :audit-tag secret)
+            outsider-key (xt/execute-tx
+                          (:node app) [[:put-docs physical/table outside]])
+            later (checked-ledger!
+                   g result :reported-key-matches-committed-ledger-row
+                   {:tx-id true :committed true :system-time true})
+            row (first (xt/q (:node app)
+                             ["SELECT * FROM gesso_v1494_reservation_slots WHERE _id = ?"
+                              (:xt/id before)]))]
+        (is (instance? TransactionKey outsider-key))
+        (is (= "outside" (:status row)))
+        (is (= secret (:audit-tag row)))
+        (is (= (:ledger-status prior) (:ledger-status later)))
+        (is (= (:ledger-checks prior) (:ledger-checks later)))
+        (is (not= (next-document before) row))
+        (is (= :not-established (:physical-poststate-causality later)))
+        (is (= 1 (:owned-execute-tx-call-entries
+                  (gateway/require-local-attempt! g))))))))
+
+(deftest concurrent-ledger-reads-never-retry-one-shot-submission
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            result ((:submit! g))
+            expected {:tx-id true :committed true :system-time true}
+            jobs (mapv (fn [_]
+                         (future (gateway/require-local-ledger-observation!
+                                  g result)))
+                       (range 5))]
+        (try
+          (let [reports (mapv #(deref % 60000 :timed-out) jobs)]
+            (is (not-any? #{:timed-out} reports))
+            (is (= 5 (count reports)))
+            (doseq [r reports]
+              (is (= :reported-key-matches-committed-ledger-row
+                     (:ledger-status r)))
+              (is (= expected (:ledger-checks r)))
+              (is (= :not-established (:committed-transaction r))))
+            (reject! :one-shot-already-attempted (:submit! g))
+            (is (= (next-document before) ((:read! app))))
+            (is (= 1 (:owned-execute-tx-call-entries
+                      (gateway/require-local-attempt! g)))))
+          (finally
+            (doseq [job jobs] (future-cancel job))))))))
+
+(deftest closed-submission-node-produces-a-read-failure-not-a-fake-commit
+  ;; The physical fixture closes its node AFTER the real gateway return.
+  ;; A later ledger query must remain diagnostic and must never retry writes.
+  (let [retained (atom nil)]
+    (with-physical
+      (fn [app before]
+        (let [g (gate (:node app) [before])
+              result ((:submit! g))]
+          (is (instance? TransactionKey (:tx-key result)))
+          (reset! retained [g result])
+          (is (= (next-document before) ((:read! app)))))))
+    (let [[g result] @retained
+          evidence (checked-ledger! g result :ledger-query-failed {})]
+      (is (= :not-established (:committed-transaction evidence)))
+      (is (= :not-established (:xtdb-receipt evidence)))
+      (is (= :not-established (:physical-poststate-causality evidence)))
+      (is (= :returned-transaction-key
+             (:status (gateway/require-local-attempt! g))))
+      (reject! :one-shot-already-attempted (:submit! g)))))
+
+(deftest substituted-ledger-query-cannot-invent-a-matching-or-divergent-row
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            result ((:submit! g))
+            actual (checked-ledger!
+                    g result :reported-key-matches-committed-ledger-row
+                    {:tx-id true :committed true :system-time true})]
+        (reject! :substituted-gateway-or-upstream-seam
+                 #(with-redefs [xt/q (fn [& _]
+                                       [{:xt/id -1 :committed false
+                                         :system-time java.time.Instant/EPOCH}])]
+                    (gateway/require-local-ledger-observation! g result)))
+        (is (= actual (gateway/require-local-ledger-observation! g result)))
+        (is (= (next-document before) ((:read! app))))))))
