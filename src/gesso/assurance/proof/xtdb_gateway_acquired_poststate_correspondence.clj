@@ -26,9 +26,19 @@
    or causality of an observed poststate. Missing ledger evidence NEVER
    yields this inference.
 
+   v1545 fails closed unless the currently loaded XTDB API artifact is the
+   exact beta1 interface under which the bounded ASSERT, atomic PUT, and
+   ledger probes were run, and Gesso's option filters still match their
+   reviewed contract. This checks an API VERSION/OPTION premise, NOT the
+   correctness of XTDB internals, the deployed node or its writer history.
+   Preparation, each submission attempt and each observation recheck that
+   premise; a failed pre-submit check consumes this wrapper's one-shot permit
+   without invoking XTDB. Reports do not turn compatibility into a proof.
+
    Source, target IDs, rows, SQL, snapshot tokens and transaction keys remain
    inside closures. Diagnostics are redacted, not certificates or authority."
   (:require [gesso.assurance.proof.physical-domain-projection :as projection]
+            [gesso.assurance.proof.xtdb-internal-prestate-capability :as backend]
             [gesso.assurance.proof.xtdb-gateway-acquired-complete-guard-execution :as acquired]
             [gesso.assurance.proof.xtdb-restricted-submission-gateway :as gateway]
             [gesso.assurance.proof.xtdb-poststate-basis-acquisition :as poststate])
@@ -38,6 +48,7 @@
   :gesso.assurance.proof.xtdb-gateway-acquired-poststate-correspondence/bounded-observation)
 (def correspondence-version 1)
 
+(def ^:private original-backend-report backend/capability-report!)
 (def ^:private original-project projection/describe-physical-domain-projection!)
 (def ^:private original-prepare acquired/prepare-acquired-complete-guard-one-shot!)
 (def ^:private original-return gateway/require-local-return!)
@@ -59,7 +70,9 @@
 
 (defn- seams! []
   ;; Ordinary Var-replacement detection, NOT an authenticated JVM boundary.
-  (when-not (and (identical? original-project
+  (when-not (and (identical? original-backend-report
+                             (var-get #'backend/capability-report!))
+                 (identical? original-project
                              (var-get #'projection/describe-physical-domain-projection!))
                  (identical? original-prepare
                              (var-get #'acquired/prepare-acquired-complete-guard-one-shot!))
@@ -76,6 +89,36 @@
                  (identical? original-poststate-summary
                              (var-get #'poststate/redacted-summary)))
     (reject! :substituted-correspondence-seam)))
+
+(def ^:private expected-backend-checks
+  #{:pinned-runtime-api-version
+    :gesso-query-basis-options-present
+    :gesso-write-options-present
+    :gesso-does-not-forward-query-basis-as-write-options})
+
+(defn- require-reviewed-backend! []
+  ;; This is an exact loaded-API/option-surface compatibility check, NOT an
+  ;; internal isolation proof. Never promote historical beta1 probes to a
+  ;; positive physical-effect conclusion on an unrecognized backend.
+  (seams!)
+  (let [r (try (original-backend-report)
+               (catch Throwable _ (reject! :backend-capability-unavailable)))
+        checks (:checks r)]
+    (when-not (and (= backend/report-type (:type r))
+                   (= backend/report-version (:version r))
+                   (= :pinned-api-and-gesso-option-surface (:compatibility r))
+                   (= backend/pinned-backend-version
+                      (get-in r [:backend :expected-version]))
+                   (= backend/pinned-backend-version
+                      (get-in r [:backend :loaded-api-version]))
+                   (= expected-backend-checks (set (keys checks)))
+                   (every? true? (vals checks))
+                   (false? (:prior-experiments-reexecuted? r))
+                   (= :not-established (:proof-status r))
+                   (= :not-issued (:certificate r))
+                   (= :none (:authority r)))
+      (reject! :unreviewed-backend-api-or-option-surface))
+    true))
 
 (defn- source! [projection-source]
   (when-not (and (plain-map? projection-source)
@@ -152,7 +195,7 @@
   [node projection-source]
   (when (nil? node)
     (reject! :missing-xtdb-node))
-  (seams!)
+  (require-reviewed-backend!)
   (let [{:keys [gateway-source target expected-after]} (source! projection-source)
         prepared (original-prepare node gateway-source)
         gate (:gateway prepared)
@@ -165,6 +208,21 @@
                          (fn? (:submit! prepared))
                          (fn? (:summary! prepared)))
             (reject! :unusable-acquired-before-gateway))
+        ;; This wrapper is itself one-shot even if the runtime premise fails
+        ;; before the underlying restricted gateway has entered execute-tx.
+        permit (atom :prepared)
+        submit! (fn []
+                  (when-not (compare-and-set! permit :prepared :checking-backend)
+                    (reject! :one-shot-already-attempted))
+                  (try
+                    (require-reviewed-backend!)
+                    (catch Throwable failure
+                      (reset! permit :backend-preflight-rejected)
+                      (throw failure)))
+                  ;; Delegation is also one-shot. A subsequent XTDB exception
+                  ;; remains the underlying gateway's unknown outcome.
+                  (reset! permit :delegated)
+                  ((:submit! prepared)))
         summary! (fn []
                    (merge
                     {:type correspondence-type
@@ -175,6 +233,7 @@
                      :admitted-write-footprint :one-whole-document-replacement
                      :transaction-internal-prestate :not-authenticated
                      :backend-assert-semantics :trusted-bounded-premise
+                     :backend-api-check-at-preparation :pinned-2_2_0-beta1-interface-only
                      :aba-history-detection :not-established
                      :physical-causality :not-established
                      :complete-deployment-writer-coverage :not-established
@@ -185,12 +244,18 @@
                      :certificate :not-issued
                      :admission :not-admitted
                      :authority :none}
-                    (select-keys ((:summary! prepared))
-                                 [:status :owned-execute-tx-call-entries
-                                  :compared-top-level-field-count
-                                  :added-snapshot-comparison-count])))
+                    (let [inner ((:summary! prepared))]
+                      (assoc (select-keys inner
+                                          [:status :owned-execute-tx-call-entries
+                                           :compared-top-level-field-count
+                                           :added-snapshot-comparison-count])
+                             :status (case @permit
+                                       :checking-backend :checking-backend
+                                       :backend-preflight-rejected
+                                       :backend-preflight-rejected
+                                       (:status inner))))))
         observe! (fn [response]
-                   (seams!)
+                   (require-reviewed-backend!)
                    (let [returned (checked-return! gate response)
                          post (try (original-poststate node projection-source
                                                        (:tx-key response))
@@ -268,6 +333,7 @@
                       :return-linkage :exact-gateway-owned-transaction-key-object
                       :prestate-origin :source-matched-pinned-external-read
                       :transaction-time-preconditions :complete-top-level-cas
+                      :backend-api-check-at-observation :pinned-2_2_0-beta1-interface-only
                       :submitted-footprint :one-rechecked-whole-document-replacement
                       :prewrite-assertion-count 2
                       :observed-ledger-joined-poststate? (boolean joined?)
@@ -310,6 +376,6 @@
                       :authority :none}))]
     {:type correspondence-type
      :version correspondence-version
-     :submit! (:submit! prepared)
+     :submit! submit!
      :observe! observe!
      :summary! summary!}))
