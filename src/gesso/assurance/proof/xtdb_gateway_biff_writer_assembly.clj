@@ -15,7 +15,11 @@
    supplied and may omit writers; direct XTDB clients, later mutations,
    actual command-to-operation correspondence, and physical effects remain
    open. Call the separate Biff route-to-writer observer for evidence about
-   an actual request; its post-dispatch rejection cannot undo writes."
+   an actual request; its post-dispatch rejection cannot undo writes.
+
+   v1557: an additional composed, post-dispatch observer checks the TOTAL
+   local assembly both before and after one exact Biff handler invocation.
+   This does not convert a single observed request into route-wide coverage."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as biff]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
@@ -24,10 +28,15 @@
 (def report-type
   :gesso.assurance.proof.xtdb-gateway-biff-writer-assembly/local-join)
 (def report-version 1)
+(def invocation-report-type
+  :gesso.assurance.proof.xtdb-gateway-biff-writer-assembly/observed-invocation)
+(def invocation-report-version 1)
 (def ^:private max-bindings 512)
 (def ^:private original-host biff/require-current-biff-host-adoption!)
 (def ^:private original-writers writers/require-registered-writer-coverage!)
 (def ^:private original-summary application/operation-summary)
+(def ^:private original-biff-invocation
+  writers/observe-checked-biff-host-registered-writer!)
 (def ^:private open-obligations
   #{:host-enumerator-exhaustiveness-and-after-check-stability
     :deployed-server-uses-this-biff-system-handler
@@ -38,7 +47,9 @@
     :writer-history-monotonicity-outside-issued-gateways
     :one-shot-callback-lifetime-versus-repeated-http-requests
     :transaction-commit-and-poststate-causality
-    :physical-refinement-and-deployment-certification})
+    :physical-refinement-and-deployment-certification
+    :untested-routes-and-requests-still-need-invocation-observations
+    :one-shot-callback-reissuance-for-subsequent-requests})
 
 (defn- reject! [reason]
   ;; Deliberately omit source values, operation IDs, writer handles, paths,
@@ -225,3 +236,132 @@
          :admission :not-admitted
          :transaction-authority :none
          :authority :none}))))
+
+
+(defn- invocation-pinned! []
+  ;; Keep this additional seam specific to the composed observer. The v1555
+  ;; no-dispatch assembly check must not depend on optional route observation.
+  (pinned!)
+  (when-not (identical? original-biff-invocation
+                        (var-get #'writers/observe-checked-biff-host-registered-writer!))
+    (reject! :substituted-biff-invocation-checker)))
+
+(defn- requested-literal-route!
+  [source known-route-operations route-writer-paths request]
+  ;; The assembly check has already checked EVERY source route. Re-derive the
+  ;; request match rather than trust caller-supplied operation/route/path IDs.
+  (when-not (and (plain-map? request)
+                 (keyword? (:request-method request))
+                 (string? (:uri request)))
+    (reject! :invalid-observed-biff-request))
+  (let [summary (original-summary
+                 (:operation-acquisition-assembly
+                  (:application-assembly source)))
+        matches (vec (for [[operation row] summary
+                           route (:routes row)
+                           :when (= [(:request-method request) (:uri request)]
+                                    [(:method route) (:path route)])]
+                       {:operation operation :route-id (:route-id route)
+                        :route route}))]
+    (when-not (and (= 1 (count matches))
+                   (literal-route? (:route (first matches)))
+                   (= (:operation (first matches))
+                      (get known-route-operations (:route-id (first matches))))
+                   (contains? route-writer-paths (:route-id (first matches))))
+      (reject! :request-not-one-source-checked-literal-bound-route))
+    (let [matched (first matches)]
+      {:route-id (:route-id matched)
+       :operation-id (:operation matched)
+       :path-id (get route-writer-paths (:route-id matched))})))
+
+(defn observe-current-biff-registered-writer-assembly!
+  "Observe ONE request against a complete, freshly joined Biff/writer assembly.
+
+   [host-handle contract-source returned-system inventory-source
+    issued-writer-handles route-writer-paths request]
+
+   The total route/writer assembly is checked BEFORE dispatch. The selected
+   literal route is independently matched to the supplied request and its
+   bound writer. The ORIGINAL Biff-installed-handler observer must witness
+   exactly one synchronous invocation/normal return of that exact issued
+   callback. The TOTAL assembly is then rechecked after dispatch. A positive
+   report is evidence only for THIS one local request, NOT all routes, future
+   requests, writer-history closure, deployed-server identity, or a committed
+   physical effect. This function cannot undo writes on post-dispatch failure.
+
+   Each issued callback is a ONE-SHOT. A successful dispatch consumes it;
+   a later HTTP request requires a newly prepared and issued capability.
+   This observer does NOT silently reissue the callback or certify its reuse."
+  [host-handle contract-source returned-system inventory-source
+   issued-writer-handles route-writer-paths request]
+  (invocation-pinned!)
+  (let [pre (require-current-biff-registered-writer-assembly!
+             host-handle contract-source returned-system inventory-source
+             issued-writer-handles route-writer-paths)
+        known (checked-routes!
+               contract-source
+               (:checked-route-ids
+                (original-host host-handle contract-source returned-system)))
+        {:keys [route-id operation-id path-id]}
+        (requested-literal-route!
+         contract-source known route-writer-paths request)
+        observed (original-biff-invocation
+                  host-handle contract-source returned-system request
+                  inventory-source issued-writer-handles path-id)
+        evidence (:report observed)]
+    ;; The original observer traces one invocation. Fail closed if a future
+    ;; implementation changes the shape or weakens its declared conclusion.
+    (when-not (and (= writers/biff-observation-type (:type evidence))
+                   (= writers/biff-observation-version (:version evidence))
+                   (= :observed-checked-biff-handler-invoked-exact-registered-writer
+                      (:status evidence))
+                   (= :one-synchronous-in-process-biff-handler-dispatch
+                      (:scope evidence))
+                   (= route-id (:observed-route-id evidence))
+                   (= operation-id (:observed-operation-id evidence))
+                   (= path-id (:observed-writer-path-id evidence))
+                   (= 1 (:observed-registered-callback-invocations evidence))
+                   (true? (:registered-callback-returned? evidence))
+                   (true? (:biff-handler-and-writer-registrations-rechecked?
+                           evidence))
+                   (= :not-issued (:certificate evidence))
+                   (= :not-admitted (:admission evidence))
+                   (= :none (:authority evidence))
+                   (= :none (:transaction-authority evidence)))
+      (reject! :unexpected-or-mismatched-biff-invocation-evidence))
+    ;; Fresh inspection after actual handler dispatch is essential: the host
+    ;; can replace the handler or writer table while servicing this request.
+    (invocation-pinned!)
+    (let [post (require-current-biff-registered-writer-assembly!
+                host-handle contract-source returned-system inventory-source
+                issued-writer-handles route-writer-paths)]
+      (when-not (= pre post)
+        (reject! :assembly-changed-during-observed-dispatch))
+      {:response (:response observed)
+       :report
+       {:type invocation-report-type
+        :version invocation-report-version
+        :status :conditional-observed-route-invoked-joined-one-shot-writer
+        :scope :one-synchronous-process-local-biff-handler-dispatch
+        :all-source-checked-routes-locally-joined? true
+        :all-surveyed-writer-paths-locally-joined? true
+        :observed-route-bound-to-exact-invoked-registered-writer? true
+        :observed-registered-callback-invocations 1
+        :biff-handler-and-full-writer-assembly-rechecked-after-dispatch? true
+        :checked-certified-route-count (:checked-certified-route-count pre)
+        :covered-surveyed-writer-count (:covered-surveyed-writer-count pre)
+        :invocation-coverage :only-this-observed-request
+        :other-routes-and-future-requests :not-established
+        :issued-callback-for-next-request :requires-new-one-shot
+        :host-enumerator-exhaustiveness :not-established
+        :deployed-server-handler-identity :not-established
+        :direct-and-external-xtdb-writer-closure :not-established
+        :abstract-operation-refinement :not-established
+        :transaction-commit-and-physical-causality :not-established
+        :open-obligations (set/union open-obligations
+                                     (:open-obligations pre)
+                                     (:open-obligations evidence))
+        :certificate :not-issued
+        :admission :not-admitted
+        :transaction-authority :none
+        :authority :none}})))
