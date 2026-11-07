@@ -41,10 +41,22 @@
    prove that this gateway caused a physical application poststate or that
    other writers are absent. The caller-provided node is not authenticated.
 
+   v1533 adds require-local-poststate-observation!: a fresh, read-only,
+   pinned physical-domain acquisition and xt.txs join on the SAME captured
+   node as the gateway submission. A caller must supply the original,
+   source-checked physical projection whose protected-domain source matches
+   this gateway's whole admitted plan and protection declaration exactly.
+   A positive observation is still only bounded external state/ledger
+   agreement: the later state may have been changed by a different writer.
+   No internal prestate, frame preservation, write causality or installed
+   host admission is inferred. Reports are redacted and non-certifying.
+
    Do not pass gateway summaries as certificates. The returned TransactionKey
    is kept separate from redacted diagnostics and is public API evidence, not
    proof that the caller's abstract business transition was refined."
-  (:require [gesso.assurance.proof.xtdb-write-footprint-accounting :as footprint]
+  (:require [gesso.assurance.proof.physical-domain-projection :as projection]
+            [gesso.assurance.proof.xtdb-poststate-basis-acquisition :as poststate]
+            [gesso.assurance.proof.xtdb-write-footprint-accounting :as footprint]
             [gesso.model.tx :as tx]
             [gesso.model.tx-model :as tx-model]
             [xtdb.api :as xt])
@@ -64,6 +76,9 @@
 (def local-ledger-type
   :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-ledger)
 (def local-ledger-version 1)
+(def local-poststate-type
+  :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-poststate)
+(def local-poststate-version 1)
 
 ;; The weak key is the unique :submit! function, not a source string or a
 ;; caller-provided transaction key. Values must NEVER hold the submit closure
@@ -78,6 +93,9 @@
 (def ^:private original-recheck footprint/require-current-footprint!)
 (def ^:private original-execute xt/execute-tx)
 (def ^:private original-query xt/q)
+(def ^:private original-projection projection/describe-physical-domain-projection!)
+(def ^:private original-poststate-acquire poststate/acquire-poststate-basis!)
+(def ^:private original-poststate-summary poststate/redacted-summary)
 (def ^:private source-keys #{:plan :protected-documents})
 
 (defn- plain-map? [value]
@@ -335,6 +353,7 @@
              :attempt attempt
              :attempt-id attempt-id
              :source-binding source-binding
+             :source input
              :stats stats}))
     {:type gateway-type
      :version gateway-version
@@ -600,3 +619,116 @@
      :admission :not-admitted
      :certificate :not-issued
      :authority :none}))
+
+
+(defn require-local-poststate-observation!
+  "Acquire one bounded, read-only physical poststate on this gateway's node.
+
+   Require the ORIGINAL gateway descriptor, its EXACT returned result map,
+   and a fresh original v1491 physical-projection source. That projection's
+   :protected-domain-source must equal the complete plan and finite document
+   protection captured when the gateway was prepared. Recheck projection
+   declarations, source binding, local attempt, and committed xt.txs join
+   before reading the physical domain. A separate v1521 acquisition then
+   pins the domain and its own ledger query to ONE common read basis.
+
+   Never accept a caller-supplied node, raw tx key, acquisition report,
+   source-binding string or query function as authority. An unrelated writer
+   can alter the state before our read; even a positive observation is NOT
+   proof of transaction causality, transaction-internal prestate, frame
+   preservation, correct physical typing, deployment writer closure, or
+   universal refinement. The function is read-only, never retries writes,
+   returns no raw documents/keys/tokens and issues no certificate."
+  [gateway result projection-source]
+  (let [local-return (require-local-return! gateway result)
+        local-attempt (require-local-attempt! gateway)
+        registration (locking local-gateways
+                       (.get local-gateways (:submit! gateway)))
+        {:keys [source observation-node]} registration]
+    (when-not (and (plain-map? projection-source)
+                   (= #{:obligation-source :protected-domain-source
+                        :field-locations}
+                      (set (keys projection-source)))
+                   (= source (:protected-domain-source projection-source)))
+      (reject! :projection-not-bound-to-gateway-source []))
+    (when-not (and (= (:process-local-attempt-id local-return)
+                      (:process-local-attempt-id local-attempt))
+                   (= (:process-local-source-binding local-return)
+                      (:process-local-source-binding local-attempt))
+                   (= :returned-transaction-key (:status local-attempt))
+                   (= 1 (:owned-execute-tx-call-entries local-attempt)))
+      (reject! :incoherent-local-submission-evidence []))
+    (seams!)
+    (when-not (and (identical? original-projection
+                               (var-get #'projection/describe-physical-domain-projection!))
+                   (identical? original-poststate-acquire
+                               (var-get #'poststate/acquire-poststate-basis!))
+                   (identical? original-poststate-summary
+                               (var-get #'poststate/redacted-summary)))
+      (reject! :substituted-physical-observation-seam []))
+    ;; Source structure must be rederived before querying. Do not convert a
+    ;; forged/malformed projection into an apparently successful read report.
+    (let [projection-report (try
+                              (original-projection projection-source)
+                              (catch Exception _
+                                (reject! :invalid-physical-projection [])))]
+      (when-not (and (= projection/projection-type (:type projection-report))
+                     (= projection/projection-version (:version projection-report))
+                     (= :declarations-only (:proof-status projection-report))
+                     (= :not-issued (:certificate projection-report))
+                     (= :none (:authority projection-report)))
+        (reject! :unexpected-physical-projection-contract [])))
+    ;; The v1531 ledger diagnostic is corroboration of a reported key, not
+    ;; a claim about any physical row or the transaction's causal writes.
+    (let [ledger (require-local-ledger-observation! gateway result)]
+      (when-not (and (= :reported-key-matches-committed-ledger-row
+                        (:ledger-status ledger))
+                     (= {:tx-id true :committed true :system-time true}
+                        (:ledger-checks ledger)))
+        (reject! :no-corroborated-gateway-ledger-return []))
+      ;; The v1521 checker acquires the domain and ledger on a NEW single
+      ;; pinned basis; it receives only the exact returned key, not a key
+      ;; supplied independently by the caller. Failures never retry writes.
+      (let [observed (try
+                       (let [{:keys [report handle]}
+                             (original-poststate-acquire
+                              (:observation-node registration)
+                              projection-source (:tx-key result))]
+                         (original-poststate-summary report handle))
+                       (catch Exception _
+                         nil))
+            positive? (= :bounded-poststate-and-committed-ledger-agreement
+                         (:status observed))]
+        {:type local-poststate-type
+         :version local-poststate-version
+         :gateway-version gateway-version
+         :process-local-attempt-id (:process-local-attempt-id local-return)
+         :source-binding-scope :process-local-nonauthenticating
+         :process-local-source-binding
+         (:process-local-source-binding local-return)
+         :owned-execute-tx-call-entries 1
+         :return-linkage :exact-object-from-owned-call-site
+         :ledger-status (:ledger-status ledger)
+         :poststate-status (if observed
+                             (:status observed)
+                             :poststate-acquisition-unavailable)
+         :poststate-basis-ordering (if observed
+                                     (:basis-ordering observed)
+                                     :not-established)
+         :poststate-and-ledger-shared-read-basis?
+         (true? (:poststate-read-basis-joined-to-ledger? observed))
+         :poststate-at-or-after-public-transaction-time? positive?
+         :poststate-observation-origin
+         :bounded-pinned-external-read-on-captured-gateway-node
+         :caller-node-authenticity :not-established
+         :transaction-internal-prestate :not-authenticated
+         :physical-poststate-causality :not-established
+         :physical-frame-preservation :not-established
+         :physical-value-type-correspondence :not-established
+         :outside-gateway-writer-closure :not-established
+         :principal-authorization :not-established
+         :universal-physical-refinement :not-established
+         :proof-status :bounded-external-poststate-and-ledger-diagnostic-only
+         :admission :not-admitted
+         :certificate :not-issued
+         :authority :none}))))
