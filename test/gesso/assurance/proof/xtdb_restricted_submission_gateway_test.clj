@@ -1,5 +1,6 @@
 (ns gesso.assurance.proof.xtdb-restricted-submission-gateway-test
-  "v1526: Permanent adversarial checks of v1525's opt-in, one-use XTDB sink.
+  "v1528: Permanent adversarial checks of the opt-in, one-use XTDB sink
+   and v1527's process-local exact-return linkage.
 
    These are bounded tests of the *actual owned execute-tx call*, not a proof
    of application authority, physical causality, transaction-internal prestate,
@@ -407,3 +408,218 @@
         ;; intentionally leaves that physical assumption visible.
         (is (= :not-established
                (:outside-gateway-writer-closure ((:summary! g)))))))))
+
+
+;; v1528: The exact returned map is evidence of THIS call site's normal
+;; return. It is NOT a certificate of XTDB commitment or of abstract-model
+;; refinement. The exported gateway map itself is data containing the two
+;; original closures; copying that map without replacing either function is
+;; allowed. Copying the *result* map is deliberately not allowed.
+
+(def ^:private unestablished-local-claims
+  {:source-binding-scope :process-local-nonauthenticating
+   :local-return-linkage :exact-object-from-owned-call-site
+   :operation-origin :readmitted-source-derived-finite-vector
+   :committed-transaction :not-established
+   :public-key-to-ledger-join :not-checked
+   :physical-poststate-causality :not-established
+   :transaction-internal-prestate :not-authenticated
+   :complete-deployment-writer-coverage :not-established
+   :principal-authorization :not-established
+   :physical-refinement :not-established
+   :proof-status :process-local-result-correspondence-only
+   :admission :not-admitted
+   :certificate :not-issued
+   :authority :none})
+
+(defn- bounded-return-evidence! [prepared result]
+  (let [evidence (gateway/require-local-return! prepared result)]
+    (is (= gateway/local-return-type (:type evidence)))
+    (is (= gateway/local-return-version (:version evidence)))
+    (is (= gateway/gateway-version (:gateway-version evidence)))
+    (is (string? (:process-local-source-binding evidence)))
+    (is (not (str/blank? (:process-local-source-binding evidence))))
+    (is (= 1 (:owned-execute-tx-call-entries evidence)))
+    (is (= 3 (:candidate-operation-count evidence)))
+    (is (= 2 (:prewrite-assertion-count evidence)))
+    (is (= 1 (:whole-document-replacement-count evidence)))
+    (is (= :public-transaction-key (:observed-result-kind evidence)))
+    (doseq [[k expected] unestablished-local-claims]
+      (is (= expected (get evidence k)) (str "Overclaimed: " k)))
+    (doseq [secret-key [:tx-key :node :plan :tx-ops :principal :document
+                        :before :after :protected-documents :source]]
+      (is (not (contains? evidence secret-key))))
+    (is (not (str/includes? (pr-str evidence) secret)))
+    evidence))
+
+(deftest local-return-accepts-only-a-normal-return-from-owned-call
+  (with-physical
+    (fn [app before]
+      (let [prepared (gate (:node app) [before])]
+        (is (= 0 (:owned-execute-tx-call-entries ((:summary! prepared)))))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-return! prepared nil))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-return! prepared {:tx-key nil}))
+        (let [result ((:submit! prepared))
+              evidence (bounded-return-evidence! prepared result)]
+          (is (instance? TransactionKey (:tx-key result)))
+          (is (= 1 (:owned-execute-tx-call-entries ((:summary! prepared)))))
+          (is (= :returned-transaction-key (:status ((:summary! prepared)))))
+          (is (= (:process-local-source-binding evidence)
+                 (:process-local-source-binding
+                  (bounded-return-evidence! (into {} prepared) result)))
+              "Copying the gateway map with its ORIGINAL functions is fine")
+          (is (= (next-document before) ((:read! app))))
+          (reject! :one-shot-already-attempted (:submit! prepared)))))))
+
+(deftest copied-or-altered-results-never-become-owned-local-returns
+  (with-physical
+    (fn [app before]
+      (let [prepared (gate (:node app) [before])
+            result ((:submit! prepared))
+            fake-result (into {} result)]
+        (is (= result fake-result))
+        (is (not (identical? result fake-result)))
+        (doseq [candidate [fake-result
+                           (assoc result :tx-key nil)
+                           (assoc result :diagnostic {:status :committed})
+                           (assoc result :certificate :issued)
+                           (dissoc result :diagnostic)
+                           (with-meta result {:asserted-authority true})
+                           (:tx-key result)
+                           {:tx-key (:tx-key result)
+                            :diagnostic (:diagnostic result)}]]
+          (reject! :not-this-gateway-local-return
+                   #(gateway/require-local-return! prepared candidate)))
+        (bounded-return-evidence! prepared result)
+        (is (= (next-document before) ((:read! app))))))))
+
+(deftest other-gateway-cannot-claim-a-genuine-return-even-with-same-source
+  (with-physical
+    (fn [app before]
+      (let [a (gate (:node app) [before])
+            b (gate (:node app) [before])
+            result ((:submit! a))]
+        (is (= :prepared (:status ((:summary! b)))))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-return! b result))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-return!
+                   (assoc a :submit! (:submit! b)) result))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-return!
+                   (assoc a :summary! (:summary! b)) result))
+        (bounded-return-evidence! a result)
+        (is (= 0 (:owned-execute-tx-call-entries ((:summary! b)))))
+        (is (= (next-document before) ((:read! app))))))))
+
+(deftest invalid-gateway-map-is-not-an-authority-token
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            result ((:submit! g))]
+        (doseq [candidate [nil {} []
+                           (dissoc g :summary!)
+                           (assoc g :type :wrong)
+                           (assoc g :version (dec gateway/gateway-version))
+                           (assoc g :extra :certificate)
+                           (assoc g :submit! (fn [] result))
+                           (assoc g :summary! (fn [] ((:summary! g))))
+                           (with-meta g {:certified true})]]
+          (let [reason (rejection #(gateway/require-local-return!
+                                   candidate result))]
+            (is (#{:invalid-local-gateway :not-this-gateway-local-return}
+                 reason) (str "Invalid gate accepted: " (pr-str candidate)))))
+        (bounded-return-evidence! g result)
+        (is (= 1 (:owned-execute-tx-call-entries ((:summary! g)))))
+        (is (= (next-document before) ((:read! app))))))))
+
+(deftest preflight-failure-has-no-return-and-consumes-only-attempt
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])]
+        (reject! :substituted-gateway-or-upstream-seam
+                 #(with-redefs [tx/prepare (fn [& _] {:tx-ops []})]
+                    ((:submit! g))))
+        (is (= :preflight-rejected (:status ((:summary! g)))))
+        (is (= 0 (:owned-execute-tx-call-entries ((:summary! g)))))
+        (reject! :not-this-gateway-local-return
+                 #(gateway/require-local-return!
+                   g {:tx-key nil :diagnostic ((:summary! g))}))
+        (reject! :one-shot-already-attempted (:submit! g))
+        (is (= before ((:read! app))))))))
+
+(deftest execution-exception-produces-no-owned-return-or-false-commit
+  (let [before (physical/initial-document
+                (str "v1528-bad-node-" (random-uuid)))
+        g (gate (Object.) [before])
+        failure (try ((:submit! g)) nil (catch Throwable t t))]
+    (is (instance? Throwable failure))
+    (is (= :threw-outcome-unknown (:status ((:summary! g)))))
+    (is (= 1 (:owned-execute-tx-call-entries ((:summary! g)))))
+    (reject! :not-this-gateway-local-return
+             #(gateway/require-local-return! g
+                {:tx-key nil :diagnostic ((:summary! g))}))
+    (reject! :one-shot-already-attempted (:submit! g))
+    (is (= :not-established (:physical-refinement ((:summary! g)))))))
+
+(deftest a-public-key-and-a-visible-poststate-do-not-prove-causality
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            result ((:submit! g))
+            _ (bounded-return-evidence! g result)
+            outside (assoc (next-document before) :audit-tag secret)
+            outside-key (xt/execute-tx
+                         (:node app) [[:put-docs physical/table outside]])
+            evidence (gateway/require-local-return! g result)]
+        (is (instance? TransactionKey outside-key))
+        (is (= outside ((:read! app))))
+        ;; A later physical mutation must not be interpreted as caused by
+        ;; the original gateway simply because its TransactionKey was real.
+        (doseq [k [:committed-transaction :physical-poststate-causality
+                   :complete-deployment-writer-coverage :physical-refinement]]
+          (is (= :not-established (get evidence k))))
+        (is (= :not-issued (:certificate evidence)))
+        (is (= :none (:authority evidence)))))))
+
+(deftest racing-one-shot-has-one-valid-local-return-and-no-spares
+  (with-physical
+    (fn [app before]
+      (let [g (gate (:node app) [before])
+            ready (CountDownLatch. 6)
+            go (CountDownLatch. 1)
+            tasks (mapv (fn [_]
+                          (future
+                            (.countDown ready)
+                            (when-not (.await go 15 TimeUnit/SECONDS)
+                              (throw (ex-info "Race not released" {})))
+                            (try
+                              {:kind :return :value ((:submit! g))}
+                              (catch clojure.lang.ExceptionInfo e
+                                (if (:xtdb-restricted-submission-gateway/rejection
+                                     (ex-data e))
+                                  {:kind :refusal :reason (:reason (ex-data e))}
+                                  (throw e))))))
+                        (range 6))]
+        (try
+          (is (.await ready 15 TimeUnit/SECONDS))
+          (.countDown go)
+          (let [results (mapv #(deref % 30000 :timeout) tasks)
+                successes (filter #(= :return (:kind %)) results)
+                refusals (filter #(= :refusal (:kind %)) results)]
+            (is (= 1 (count successes)))
+            (is (= 5 (count refusals)))
+            (is (every? #(= :one-shot-already-attempted (:reason %))
+                        refusals))
+            (is (not-any? #{:timeout} results))
+            (is (= 1 (:owned-execute-tx-call-entries ((:summary! g)))))
+            (when-let [result (:value (first successes))]
+              (bounded-return-evidence! g result)
+              (reject! :not-this-gateway-local-return
+                       #(gateway/require-local-return! g (into {} result))))
+            (is (= (next-document before) ((:read! app)))))
+          (finally
+            (.countDown go)
+            (doseq [task tasks] (future-cancel task))))))))
