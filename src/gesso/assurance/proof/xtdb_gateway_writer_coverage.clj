@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-writer-coverage
-  "v1549: bind host-OBSERVED writer registrations to Gesso-ISSUED one-shot
+  "v1551: bind host-OBSERVED writer registrations to Gesso-ISSUED one-shot
    monotonic XTDB gateway callbacks. This is an execution-capability identity
    check for the surveyed host table, not a closed-world writer proof.
 
@@ -20,12 +20,17 @@
   (:require [clojure.set :as set]
             [gesso.assurance.proof.physical-writer-inventory :as inventory]
             [gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution
-             :as monotonic])
+             :as monotonic]
+            [gesso.assurance.proof.installed-route-provenance :as routes]
+            [gesso.live.application-preflight :as application])
   (:import (java.util WeakHashMap)))
 
 (def report-type
   :gesso.assurance.proof.xtdb-gateway-writer-coverage/registered-one-shots)
 (def report-version 1)
+(def route-observation-type
+  :gesso.assurance.proof.xtdb-gateway-writer-coverage/route-invocation)
+(def route-observation-version 1)
 
 (deftype WriterHandle []
   Object
@@ -34,6 +39,12 @@
 (def ^:private ^WeakHashMap issued (WeakHashMap.))
 (def ^:private original-prepare monotonic/prepare-monotonic-revision-one-shot!)
 (def ^:private original-inventory inventory/describe-physical-writer-inventory!)
+(def ^:private original-route-observe routes/observe-checked-ring-route!)
+(def ^:private original-route-recheck routes/require-current-route-dispatch!)
+(def ^:private original-route-description routes/describe-checked-ring-router)
+(def ^:private original-operation-summary application/operation-summary)
+(def ^:dynamic ^:private *route-writer-observation* nil)
+(def ^:dynamic ^:private *observing-route-writer* false)
 (def ^:private max-writers 512)
 (def ^:private open-obligations
   #{:host-enumerator-exhaustiveness-and-post-inspection-stability
@@ -44,6 +55,9 @@
     :xtdb-node-deployment-and-backend-identity
     :all-writers-preserve-monotonic-revision-history
     :host-operation-id-matches-prepared-command-semantics
+    :route-writer-observation-is-local-and-post-dispatch
+    :unchecked-direct-and-asynchronous-writes-during-route-dispatch
+    :callback-result-not-xtdb-commit-authentication
     :transaction-internal-prestate-and-write-causality
     :physical-refinement-and-certification})
 
@@ -62,16 +76,39 @@
   (and (keyword? x) (some? (namespace x))))
 
 (defn- seams! []
-  ;; An ordinary Var-seam sanity check, not hostile-JVM attestation.
+  ;; Preserve v1549's original issuer/inventory boundary: unrelated Ring
+  ;; function replacement must not affect writer issuance or host inspection.
   (when-not (and (identical? original-prepare
                              (var-get #'monotonic/prepare-monotonic-revision-one-shot!))
                  (identical? original-inventory
                              (var-get #'inventory/describe-physical-writer-inventory!)))
     (reject! :substituted-issuer-or-inventory)))
 
+(defn- route-seams! []
+  (seams!)
+  (when-not (and (identical? original-route-observe
+                             (var-get #'routes/observe-checked-ring-route!))
+                 (identical? original-route-recheck
+                             (var-get #'routes/require-current-route-dispatch!))
+                 (identical? original-route-description
+                             (var-get #'routes/describe-checked-ring-router))
+                 (identical? original-operation-summary
+                             (var-get #'application/operation-summary)))
+    (reject! :substituted-route-observation-boundary)))
+
 (defn- issued-entry [handle]
   (when (instance? WriterHandle handle)
     (locking issued (.get issued handle))))
+
+(defn- trace-invocation! [token phase]
+  ;; The tracer stores ONLY private object identity, phase and thread agreement;
+  ;; never a transaction result, protected row, request, or exception.
+  (when *route-writer-observation*
+    (swap! (:events *route-writer-observation*) conj
+           {:token token
+            :phase phase
+            :same-thread? (identical? (Thread/currentThread)
+                                      (:thread *route-writer-observation*))})))
 
 (defn issue-monotonic-registered-writer!
   "Issue a single locally owned, zero-argument host writer and opaque handle.
@@ -98,14 +135,23 @@
       (reject! :unexpected-monotonic-gateway-contract))
     (let [submit! (:submit! gateway)
           handle (WriterHandle.)
+          token (Object.)
           writer (fn [& args]
                    (when (seq args)
                      (reject! :registered-writer-requires-zero-arguments))
-                   (submit!))]
+                   (trace-invocation! token :invoked)
+                   (try
+                     (let [result (submit!)]
+                       (trace-invocation! token :returned)
+                       result)
+                     (catch Throwable t
+                       (trace-invocation! token :threw)
+                       (throw t))))]
       (locking issued
         (.put issued handle {:path-id path-id
                              :operation-id operation-id
-                             :writer writer}))
+                             :writer writer
+                             :trace-token token}))
       {:handle handle :writer writer})))
 
 (defn- enumerate-twice! [source expected-paths]
@@ -215,3 +261,93 @@
     (when-not (:all-currently-surveyed-writers-locally-bound? report)
       (reject! :unverified-or-unaccounted-registered-writers))
     report))
+
+
+(defn observe-checked-route-registered-writer!
+  "Invoke ONE actual locally checked Ring route, and check that during that
+   synchronous dispatch it invoked the exact Gesso-issued, host-registered
+   monotonic writer callback once and returned normally from that callback.
+
+   [router route-source request inventory-source registered-handles path-id]
+   The Ring route must be a *literal* method/path declaration (dynamic route
+   matching is a separate, not-yet-admitted case). The operation declared for
+   the route must equal that of the selected issued writer; neither caller-
+   supplied route labels nor a copied writer report are sufficient.
+
+   This is deliberately a POST-DISPATCH verification: a bypass or side effect
+   may already have occurred when it rejects. The host enumerator and route
+   installation are not attested as exhaustive or deployed. A callback RETURN
+   is not an XTDB commit receipt, and an additional raw XTDB call remains
+   invisible. A handler can also do unrelated work before or after the
+   registered callback. The result provides no new transaction authority."
+  [router route-source request inventory-source registered-handles path-id]
+  (route-seams!)
+  (when *observing-route-writer*
+    (reject! :nested-route-writer-observation))
+  (when-not (and (qualified-id? path-id)
+                 (plain-map? request)
+                 (keyword? (:request-method request))
+                 (string? (:uri request))
+                 (plain-map? route-source)
+                 (plain-map? registered-handles))
+    (reject! :invalid-route-writer-observation-source))
+  (let [local (issued-entry (get registered-handles path-id))]
+    (when-not (and local (= path-id (:path-id local))
+                   (fn? (:writer local)))
+      (reject! :unknown-or-foreign-route-writer))
+    ;; This authenticates the checked in-process router and rederives all
+    ;; certified route/handler identities before any handler is executed.
+    (original-route-description router route-source)
+    (let [summary (original-operation-summary
+                   (:operation-acquisition-assembly
+                    (:application-assembly route-source)))
+          matches (vec (for [[operation entry] summary
+                             route (:routes entry)
+                             :when (= [(:request-method request) (:uri request)]
+                                      [(:method route) (:path route)])]
+                         {:operation operation :route-id (:route-id route)}))]
+      (when-not (and (= 1 (count matches))
+                     (= (:operation-id local) (:operation (first matches))))
+        (reject! :route-not-literal-or-wrong-operation))
+      ;; Recheck the actual host writer table independently of the route
+      ;; source. No writer is called during this preflight.
+      (require-registered-writer-coverage! inventory-source registered-handles)
+      (let [observer {:thread (Thread/currentThread) :events (atom [])}
+            observed (binding [*observing-route-writer* true
+                               *route-writer-observation* observer]
+                       (original-route-observe router route-source request))
+            events @(:events observer)
+            token (:trace-token local)
+            expected [{:token token :phase :invoked :same-thread? true}
+                      {:token token :phase :returned :same-thread? true}]]
+        ;; Invalid evidence never becomes a success report. The prior route
+        ;; dispatch may have performed writes and cannot be rolled back here.
+        (when-not (= expected events)
+          (reject! :missing-extra-or-foreign-writer-invocation))
+        (when-not (= (:route-id (first matches))
+                     (get-in observed [:report :observed-route-id]))
+          (reject! :route-dispatch-identity-mismatch))
+        (original-route-recheck (:witness observed) router route-source request)
+        (require-registered-writer-coverage! inventory-source registered-handles)
+        {:response (:response observed)
+         :route-witness (:witness observed)
+         :report
+         {:type route-observation-type
+          :version route-observation-version
+          :status :observed-checked-ring-dispatch-invoked-exact-registered-writer
+          :scope :one-synchronous-in-process-route-dispatch
+          :observed-route-id (:route-id (first matches))
+          :observed-operation-id (:operation (first matches))
+          :observed-writer-path-id path-id
+          :observed-registered-callback-invocations 1
+          :registered-callback-returned? true
+          :post-dispatch-route-and-host-registration-rechecked? true
+          :host-deployment :not-established
+          :other-xtdb-writer-bypasses :not-established
+          :abstract-operation-correspondence :not-established
+          :physical-commit-and-causality :not-established
+          :open-obligations open-obligations
+          :certificate :not-issued
+          :admission :not-admitted
+          :transaction-authority :none
+          :authority :none}}))))
