@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-restricted-submission-gateway
-  "v1527: Experimental, opt-in, ONE-SHOT physical XTDB submission boundary.
+  "v1529: Experimental, opt-in, ONE-SHOT physical XTDB submission boundary.
 
    This gateway owns a real xtdb.api/execute-tx call. A caller supplies an
    ordinary Gesso model plan and a finite protected-document declaration,
@@ -24,6 +24,14 @@
    authenticated receipt, persisted audit trail, anti-tamper guarantee,
    XTDB commit witness or proof of physical causality.
 
+   v1529 records a monotonic process-local attempt lifecycle in one atom,
+   binding the prepared gateway to preflight reservation, entry into its
+   execute-tx call-site, and return/exception observations. The added
+   require-local-attempt! API checks the original local gateway functions
+   before exposing a redacted attempt snapshot. The journal is in-memory,
+   non-durable, and not a cryptographically authenticated execution record.
+   A call-site entry proves neither XTDB receipt nor transaction commit.
+
    Do not pass gateway summaries as certificates. The returned TransactionKey
    is kept separate from redacted diagnostics and is public API evidence, not
    proof that the caller's abstract business transition was refined."
@@ -40,6 +48,9 @@
 (def local-return-type
   :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-return)
 (def local-return-version 1)
+(def local-attempt-type
+  :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-attempt)
+(def local-attempt-version 1)
 
 ;; The weak key is the unique :submit! function, not a source string or a
 ;; caller-provided transaction key. Values must NEVER hold the submit closure
@@ -192,11 +203,16 @@
   (when (nil? node)
     (reject! :missing-xtdb-node []))
   (let [{:keys [candidate footprint]} (derived-source! input)
-        ;; :prepared -> :checking is an atomic reservation. Each exported
-        ;; closure may submit at most once, even when invoked concurrently.
-        status (atom :prepared)
-        owned-calls (atom 0)
+        ;; One atomic, monotonic process-local record: callers cannot observe
+        ;; a returned state with zero owned entries or a preflight rejection
+        ;; with a purported physical invocation. No ledger fact is recorded.
+        initial-attempt {:phase :prepared
+                         :owned-call-entries 0
+                         :observed-result-kind :none
+                         :events [:prepared]}
+        attempt (atom initial-attempt)
         returned (atom nil)
+        attempt-id (str (java.util.UUID/randomUUID))
         source-binding (:process-local-source-binding footprint)
         _ (when-not (and (string? source-binding)
                          (not (empty? source-binding)))
@@ -208,10 +224,11 @@
                             :declared-command-count
                             :declared-frame-only-target-count])
         summary! (fn []
-                   (merge {:type gateway-type
+                   (let [{:keys [phase owned-call-entries]} @attempt]
+                     (merge {:type gateway-type
                            :version gateway-version
-                           :status @status
-                           :owned-execute-tx-call-entries @owned-calls
+                           :status phase
+                           :owned-execute-tx-call-entries owned-call-entries
                            :gateway-owned-submission-call-site? true
                            :submitted-operation-origin
                            :source-derived-finite-admitted-vector
@@ -227,9 +244,13 @@
                            :admission :not-admitted
                            :certificate :not-issued
                            :authority :none}
-                          stats))
+                          stats)))
         submit! (fn []
-                  (when-not (compare-and-set! status :prepared :checking)
+                  (when-not (compare-and-set!
+                             attempt initial-attempt
+                             (-> initial-attempt
+                                 (assoc :phase :checking)
+                                 (update :events conj :checking)))
                     (reject! :one-shot-already-attempted [:submit!]))
                   ;; Recheck while still pre-submission. If this fails, NO
                   ;; physical API invocation occurs, and the attempt is spent.
@@ -246,22 +267,38 @@
                                         (:tx-ops again)))
                         (reject! :changed-prepared-transaction [:plan])))
                     (catch Throwable failure
-                      (reset! status :preflight-rejected)
+                      (swap! attempt (fn [a]
+                                       (-> a
+                                           (assoc :phase :preflight-rejected)
+                                           (update :events conj :preflight-rejected))))
                       (throw failure)))
-                  (reset! status :submitting)
-                  ;; Counts entries into THIS call-site, never commits or
-                  ;; transaction ledger records. No extra XTDB call is made.
-                  (reset! owned-calls 1)
+                  ;; The transition records entry into OUR call-site, not
+                  ;; receipt by XTDB, a ledger record, or a durable commit.
+                  (swap! attempt (fn [a]
+                                   (-> a
+                                       (assoc :phase :submitting
+                                              :owned-call-entries 1)
+                                       (update :events conj :submitting))))
                   ;; EXACTLY one direct call with the checked vector. Do not
                   ;; use an arbitrary caller thunk or tx/transact! (which
                   ;; recompiles the plan and adds Live side effects).
                   (try
                     (let [key (original-execute node
                                                 (:candidate-tx-ops candidate))]
-                      (reset! status
-                              (if (instance? TransactionKey key)
-                                :returned-transaction-key
-                                :returned-unrecognized))
+                      (swap! attempt
+                             (fn [a]
+                               (let [recognized?
+                                     (instance? TransactionKey key)
+                                     phase (if recognized?
+                                             :returned-transaction-key
+                                             :returned-unrecognized)]
+                                 (-> a
+                                     (assoc :phase phase
+                                            :observed-result-kind
+                                            (if recognized?
+                                              :public-transaction-key
+                                              :unrecognized-xtdb-api-return))
+                                     (update :events conj phase)))))
                       (let [response {:tx-key key :diagnostic (summary!)}]
                         ;; Preserve object identity, not just structural
                         ;; equality: a copied/edited response is not the
@@ -269,14 +306,18 @@
                         (reset! returned response)
                         response))
                     (catch Throwable failure
-                      (reset! status :threw-outcome-unknown)
+                      (swap! attempt (fn [a]
+                                       (-> a
+                                           (assoc :phase :threw-outcome-unknown
+                                                  :observed-result-kind :none)
+                                           (update :events conj :threw-outcome-unknown))))
                       (throw failure))))]
     (locking local-gateways
       (.put local-gateways submit!
             {:summary! summary!
              :returned returned
-             :status status
-             :owned-calls owned-calls
+             :attempt attempt
+             :attempt-id attempt-id
              :source-binding source-binding
              :stats stats}))
     {:type gateway-type
@@ -307,15 +348,16 @@
     (reject! :invalid-local-gateway []))
   (let [registration (locking local-gateways
                        (.get local-gateways (:submit! gateway)))
-        {:keys [summary! returned status owned-calls source-binding stats]}
+        {:keys [summary! returned attempt attempt-id source-binding stats]}
         registration
         observed (when returned @returned)
-        phase (when status @status)]
+        snapshot (when attempt @attempt)
+        phase (:phase snapshot)]
     (when-not (and registration
                    (identical? summary! (:summary! gateway))
                    (map? result)
                    (identical? observed result)
-                   (= 1 (when owned-calls @owned-calls))
+                   (= 1 (:owned-call-entries snapshot))
                    (#{:returned-transaction-key :returned-unrecognized} phase)
                    (= phase (get-in observed [:diagnostic :status]))
                    (= (:diagnostic observed) (summary!)))
@@ -325,7 +367,8 @@
      :source-binding-scope :process-local-nonauthenticating
      :process-local-source-binding source-binding
      :gateway-version gateway-version
-     :owned-execute-tx-call-entries @owned-calls
+     :process-local-attempt-id attempt-id
+     :owned-execute-tx-call-entries (:owned-call-entries snapshot)
      :observed-result-kind (if (instance? TransactionKey (:tx-key observed))
                              :public-transaction-key
                              :unrecognized-xtdb-api-return)
@@ -345,3 +388,67 @@
      :admission :not-admitted
      :certificate :not-issued
      :authority :none}))
+
+
+(defn require-local-attempt!
+  "Recheck a genuine gateway's local, redacted submission-attempt journal.
+
+   The original :submit!/:summary! functions must be registered together.
+   The bounded event sequence tracks this process' control flow: :prepared,
+   :checking, then either :preflight-rejected or :submitting followed by a
+   return/exception observation. An entered call-site is NOT proof XTDB
+   received or committed the transaction. Exceptions leave the physical
+   outcome unknown and never produce an invented TransactionKey.
+
+   This is a transient observation, not a transferable certificate, durable
+   audit log, authenticated source identity, causal evidence, or deployment
+   writer-closure claim. It contains neither transaction operations nor
+   physical identifiers, and accepts no caller-authored event log."
+  [gateway]
+  (when-not (and (plain-map? gateway)
+                 (= #{:type :version :submit! :summary!}
+                    (set (keys gateway)))
+                 (= gateway-type (:type gateway))
+                 (= gateway-version (:version gateway)))
+    (reject! :invalid-local-gateway []))
+  (let [registration (locking local-gateways
+                       (.get local-gateways (:submit! gateway)))]
+    (when-not (and registration
+                   (identical? (:summary! registration)
+                               (:summary! gateway)))
+      (reject! :not-this-gateway-local-attempt []))
+    (let [{:keys [attempt attempt-id source-binding stats]} registration
+          {:keys [phase owned-call-entries observed-result-kind events]}
+          @attempt]
+      {:type local-attempt-type
+       :version local-attempt-version
+       :gateway-version gateway-version
+       :process-local-attempt-id attempt-id
+       :source-binding-scope :process-local-nonauthenticating
+       :process-local-source-binding source-binding
+       :status phase
+       :observed-local-events events
+       :owned-execute-tx-call-entries owned-call-entries
+       :call-site-entry (if (pos? owned-call-entries)
+                          :entered-locally
+                          :not-entered)
+       :observed-result-kind observed-result-kind
+       :physical-outcome (if (= phase :preflight-rejected)
+                           :no-gateway-call
+                           :not-established)
+       :candidate-operation-count (:candidate-operation-count stats)
+       :prewrite-assertion-count (:prewrite-assertion-count stats)
+       :whole-document-replacement-count
+       (:whole-document-replacement-count stats)
+       :committed-transaction :not-established
+       :xtdb-receipt :not-established
+       :public-key-to-ledger-join :not-checked
+       :physical-poststate-causality :not-established
+       :transaction-internal-prestate :not-authenticated
+       :principal-authorization :not-established
+       :complete-deployment-writer-coverage :not-established
+       :physical-refinement :not-established
+       :proof-status :process-local-attempt-observation-only
+       :admission :not-admitted
+       :certificate :not-issued
+       :authority :none})))
