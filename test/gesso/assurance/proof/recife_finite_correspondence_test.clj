@@ -127,20 +127,26 @@
       after)))
 
 (defn- advance [state id]
-  (let [before (::model state)
-        after (production-constrained-next before id)]
-    (if-not after
-      state
-      (let [after (if (and (= ::corrupt-release (::mode state))
-                           (= id :request/release))
-                    ;; Corrupt the *result* after checking the original
-                    ;; source-derived transition. The oracle sees a separate
-                    ;; mutation of the actual source declaration below.
-                    (assoc after :request/flag true)
-                    after)]
-        (-> state
-            (assoc ::model after)
-            (update ::trace conj id))))))
+  ;; A defproc can be reconsidered after an earlier execution. The local
+  ;; oracle enumerates each attempt once, including attempts disabled at the
+  ;; time they occur. Track that bound explicitly in the TLC-visible state.
+  (if (contains? (::attempted state) id)
+    state
+    (let [state (update state ::attempted conj id)
+          before (::model state)
+          after (production-constrained-next before id)]
+      (if-not after
+        state
+        (let [after (if (and (= ::corrupt-release (::mode state))
+                             (= id :request/release))
+                      ;; Corrupt the *result* after checking the original
+                      ;; source-derived transition. The oracle sees a separate
+                      ;; mutation of the actual source declaration below.
+                      (assoc after :request/flag true)
+                      after)]
+          (-> state
+              (assoc ::model after)
+              (update ::trace conj id)))))))
 
 (recife/defproc attempt-claim (fn [state] (advance state :request/claim)))
 (recife/defproc attempt-release (fn [state] (advance state :request/release)))
@@ -165,7 +171,7 @@
 
 (defn- run-recife! [mode]
   (let [result (recife/run-model
-                {::model initial-state ::trace [] ::mode mode}
+                {::model initial-state ::trace [] ::mode mode ::attempted #{}}
                 components
                 {:no-deadlock true :workers 1})]
     (if (instance? clojure.lang.IDeref result) @result result)))
@@ -248,6 +254,25 @@
     ;; relation membership alone cannot establish that a business rule holds.
     (is (true? (:matches?
                 (transition/observe-transition! changed before {} bad))))))
+
+
+(deftest recife-attempts-are-explicitly-one-shot
+  (let [initial {::model initial-state ::trace []
+                 ::mode ::correct ::attempted #{}}
+        once (advance initial :request/claim)
+        twice (advance once :request/release)
+        thrice (advance twice :request/claim)
+        disabled-first (advance initial :request/release)
+        after-claim (advance disabled-first :request/claim)
+        after-retry (advance after-claim :request/release)]
+    (is (= #{:request/claim :request/release} (::attempted twice)))
+    (is (= [:request/claim :request/release] (::trace twice)))
+    (is (= twice thrice) "claim cannot run a second time after release")
+    (is (= #{:request/release} (::attempted disabled-first)))
+    (is (empty? (::trace disabled-first)) "disabled attempt is consumed")
+    (is (= [:request/claim] (::trace after-claim)))
+    (is (= after-claim after-retry)
+        "a previously disabled release cannot run later")))
 
 (deftest recife-and-local-oracle-agree-on-safe-two-operation-machine
   (let [{:keys [trace trace-info distinct-states generated-states] :as result}
