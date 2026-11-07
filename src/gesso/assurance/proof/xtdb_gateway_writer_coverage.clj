@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-writer-coverage
-  "v1551: bind host-OBSERVED writer registrations to Gesso-ISSUED one-shot
+  "v1553: bind host-OBSERVED writer registrations to Gesso-ISSUED one-shot
    monotonic XTDB gateway callbacks. This is an execution-capability identity
    check for the surveyed host table, not a closed-world writer proof.
 
@@ -22,6 +22,7 @@
             [gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution
              :as monotonic]
             [gesso.assurance.proof.installed-route-provenance :as routes]
+            [gesso.assurance.proof.checked-biff-host-adoption :as biff-host]
             [gesso.live.application-preflight :as application])
   (:import (java.util WeakHashMap)))
 
@@ -31,6 +32,9 @@
 (def route-observation-type
   :gesso.assurance.proof.xtdb-gateway-writer-coverage/route-invocation)
 (def route-observation-version 1)
+(def biff-observation-type
+  :gesso.assurance.proof.xtdb-gateway-writer-coverage/biff-host-invocation)
+(def biff-observation-version 1)
 
 (deftype WriterHandle []
   Object
@@ -43,6 +47,8 @@
 (def ^:private original-route-recheck routes/require-current-route-dispatch!)
 (def ^:private original-route-description routes/describe-checked-ring-router)
 (def ^:private original-operation-summary application/operation-summary)
+(def ^:private original-biff-adoption
+  biff-host/require-current-biff-host-adoption!)
 (def ^:dynamic ^:private *route-writer-observation* nil)
 (def ^:dynamic ^:private *observing-route-writer* false)
 (def ^:private max-writers 512)
@@ -56,6 +62,8 @@
     :all-writers-preserve-monotonic-revision-history
     :host-operation-id-matches-prepared-command-semantics
     :route-writer-observation-is-local-and-post-dispatch
+    :biff-host-module-start-not-deployed-http-server-proof
+    :biff-handler-slot-not-immutable-after-observation
     :unchecked-direct-and-asynchronous-writes-during-route-dispatch
     :callback-result-not-xtdb-commit-authentication
     :transaction-internal-prestate-and-write-causality
@@ -95,6 +103,15 @@
                  (identical? original-operation-summary
                              (var-get #'application/operation-summary)))
     (reject! :substituted-route-observation-boundary)))
+
+(defn- biff-seams! []
+  ;; Only the Biff-specific observer depends on this additional host
+  ;; boundary. Existing issuance/inspection/Ring observation retain v1551
+  ;; compatibility when host adoption is independently redefined.
+  (route-seams!)
+  (when-not (identical? original-biff-adoption
+                        (var-get #'biff-host/require-current-biff-host-adoption!))
+    (reject! :substituted-biff-host-adoption-boundary)))
 
 (defn- issued-entry [handle]
   (when (instance? WriterHandle handle)
@@ -347,6 +364,105 @@
           :abstract-operation-correspondence :not-established
           :physical-commit-and-causality :not-established
           :open-obligations open-obligations
+          :certificate :not-issued
+          :admission :not-admitted
+          :transaction-authority :none
+          :authority :none}}))))
+
+
+(defn observe-checked-biff-host-registered-writer!
+  "Invoke the ACTUAL :biff.ring/handler installed by Gesso's one-shot
+   checked Biff module, and observe its synchronous call to an exact issued
+   and host-registered guarded writer.
+
+   [adoption-handle contract-source system request inventory-source
+    registered-handles path-id]
+
+   Before dispatch, recheck the issued Biff module's completed start, exact
+   handler-slot identity, source-checked certified literal route, and the
+   host's fresh writer registrations. Invoke that Biff HANDLER (including
+   its canonical Gesso response wrapper), not a separately installed Ring
+   router. After dispatch, require exactly one same-thread call+normal return
+   from the expected issued callback and recheck both host boundaries.
+
+   A successful result establishes only this process-local handler SLOT and
+   this observed invocation. It does NOT authenticate a deployed HTTP server,
+   an exhaustive host registry, route-to-command semantic equivalence,
+   absence of raw XTDB writes, or transaction commit. Rejection is
+   POST-DISPATCH and cannot roll back any physical side effect."
+  [adoption-handle contract-source system request
+   inventory-source registered-handles path-id]
+  (biff-seams!)
+  (when *observing-route-writer*
+    (reject! :nested-route-writer-observation))
+  (when-not (and (qualified-id? path-id)
+                 (plain-map? contract-source)
+                 (plain-map? request)
+                 (keyword? (:request-method request))
+                 (string? (:uri request))
+                 (plain-map? registered-handles))
+    (reject! :invalid-biff-writer-observation-source))
+  (let [local (issued-entry (get registered-handles path-id))]
+    (when-not (and local (= path-id (:path-id local))
+                   (fn? (:writer local)))
+      (reject! :unknown-or-foreign-route-writer))
+    ;; This is the original Biff module's local start-and-slot evidence, not
+    ;; the identity of a caller-chosen router or a copied adoption report.
+    (let [host-report (original-biff-adoption
+                       adoption-handle contract-source system)
+          summary (original-operation-summary
+                   (:operation-acquisition-assembly
+                    (:application-assembly contract-source)))
+          matches (vec (for [[operation entry] summary
+                             route (:routes entry)
+                             :when (= [(:request-method request) (:uri request)]
+                                      [(:method route) (:path route)])]
+                         {:operation operation :route-id (:route-id route)}))
+          selected (first matches)
+          handler (get system application/biff-ring-handler-key)]
+      (when-not (and (= 1 (count matches))
+                     (= (:operation-id local) (:operation selected))
+                     (contains? (:checked-certified-route-ids host-report)
+                                (:route-id selected))
+                     (fn? handler))
+        (reject! :biff-route-not-literal-certified-or-wrong-operation))
+      ;; No registered writer or checked Ring handler is invoked by preflight.
+      (require-registered-writer-coverage! inventory-source registered-handles)
+      (let [observer {:thread (Thread/currentThread) :events (atom [])}
+            response (binding [*observing-route-writer* true
+                               *route-writer-observation* observer]
+                       (handler request))
+            expected [{:token (:trace-token local)
+                       :phase :invoked :same-thread? true}
+                      {:token (:trace-token local)
+                       :phase :returned :same-thread? true}]]
+        (when-not (= expected @(:events observer))
+          (reject! :missing-extra-or-foreign-writer-invocation))
+        ;; A copied system map with this exact function can still pass; the
+        ;; Biff module and system-map slot are process-local observations only.
+        (original-biff-adoption adoption-handle contract-source system)
+        (require-registered-writer-coverage! inventory-source registered-handles)
+        {:response response
+         :report
+         {:type biff-observation-type
+          :version biff-observation-version
+          :status :observed-checked-biff-handler-invoked-exact-registered-writer
+          :scope :one-synchronous-in-process-biff-handler-dispatch
+          :observed-route-id (:route-id selected)
+          :observed-operation-id (:operation selected)
+          :observed-writer-path-id path-id
+          :observed-registered-callback-invocations 1
+          :registered-callback-returned? true
+          :biff-module-start :locally-observed
+          :biff-handler-slot :exact-checked-html-wrapped-handler
+          :biff-handler-and-writer-registrations-rechecked? true
+          :host-deployment :not-established
+          :host-writer-enumeration-exhaustiveness :not-established
+          :other-xtdb-writer-bypasses :not-established
+          :abstract-operation-correspondence :not-established
+          :physical-commit-and-causality :not-established
+          :open-obligations (set/union open-obligations
+                                       (:open-obligations host-report))
           :certificate :not-issued
           :admission :not-admitted
           :transaction-authority :none
