@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-restricted-submission-gateway
-  "v1525: Experimental, opt-in, ONE-SHOT physical XTDB submission boundary.
+  "v1527: Experimental, opt-in, ONE-SHOT physical XTDB submission boundary.
 
    This gateway owns a real xtdb.api/execute-tx call. A caller supplies an
    ordinary Gesso model plan and a finite protected-document declaration,
@@ -16,6 +16,14 @@
    describes one locally owned call-site and the public XTDB API result.
    Exception outcomes are indeterminate and are rethrown unchanged.
 
+   v1527 adds a weak, process-local registry of freshly prepared gateway
+   functions and the exact response object returned by their one physical
+   submission call. require-local-return! accepts only that exact response
+   together with the original two gateway functions, then reports its
+   source-local binding and scoped observation. The registry is NOT an
+   authenticated receipt, persisted audit trail, anti-tamper guarantee,
+   XTDB commit witness or proof of physical causality.
+
    Do not pass gateway summaries as certificates. The returned TransactionKey
    is kept separate from redacted diagnostics and is public API evidence, not
    proof that the caller's abstract business transition was refined."
@@ -23,11 +31,22 @@
             [gesso.model.tx :as tx]
             [gesso.model.tx-model :as tx-model]
             [xtdb.api :as xt])
-  (:import [xtdb.api TransactionKey]))
+  (:import [java.util WeakHashMap]
+           [xtdb.api TransactionKey]))
 
 (def gateway-type
   :gesso.assurance.proof.xtdb-restricted-submission-gateway/one-shot)
-(def gateway-version 1)
+(def gateway-version 2)
+(def local-return-type
+  :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-return)
+(def local-return-version 1)
+
+;; The weak key is the unique :submit! function, not a source string or a
+;; caller-provided transaction key. Values must NEVER hold the submit closure
+;; (directly or indirectly), or the weak registry would retain it forever.
+;; This only protects local bookkeeping from simple caller-made maps; arbitrary
+;; code with JVM introspection/access to private Vars remains outside scope.
+(def ^:private ^WeakHashMap local-gateways (WeakHashMap.))
 
 (def ^:private original-prepare tx/prepare)
 (def ^:private original-admit tx-model/admitted-plan)
@@ -161,6 +180,8 @@
 
    :submit! returns {:tx-key <original public XTDB result>
                      :diagnostic <redacted summary>} on normal return.
+   The exact returned map may be checked with require-local-return! while
+   the original gateway remains reachable in the same process.
    Unexpected API results are reported UNKNOWN, never automatically called
    committed. Any original XTDB exception is propagated unchanged, with
    :summary! retaining only a safe status, never its message or payload.
@@ -174,6 +195,12 @@
         ;; :prepared -> :checking is an atomic reservation. Each exported
         ;; closure may submit at most once, even when invoked concurrently.
         status (atom :prepared)
+        owned-calls (atom 0)
+        returned (atom nil)
+        source-binding (:process-local-source-binding footprint)
+        _ (when-not (and (string? source-binding)
+                         (not (empty? source-binding)))
+            (reject! :missing-process-local-source-binding []))
         stats (select-keys footprint
                            [:candidate-operation-count
                             :prewrite-assertion-count
@@ -184,6 +211,7 @@
                    (merge {:type gateway-type
                            :version gateway-version
                            :status @status
+                           :owned-execute-tx-call-entries @owned-calls
                            :gateway-owned-submission-call-site? true
                            :submitted-operation-origin
                            :source-derived-finite-admitted-vector
@@ -221,6 +249,9 @@
                       (reset! status :preflight-rejected)
                       (throw failure)))
                   (reset! status :submitting)
+                  ;; Counts entries into THIS call-site, never commits or
+                  ;; transaction ledger records. No extra XTDB call is made.
+                  (reset! owned-calls 1)
                   ;; EXACTLY one direct call with the checked vector. Do not
                   ;; use an arbitrary caller thunk or tx/transact! (which
                   ;; recompiles the plan and adds Live side effects).
@@ -231,11 +262,86 @@
                               (if (instance? TransactionKey key)
                                 :returned-transaction-key
                                 :returned-unrecognized))
-                      {:tx-key key :diagnostic (summary!)})
+                      (let [response {:tx-key key :diagnostic (summary!)}]
+                        ;; Preserve object identity, not just structural
+                        ;; equality: a copied/edited response is not the
+                        ;; exact response emitted by this owned invocation.
+                        (reset! returned response)
+                        response))
                     (catch Throwable failure
                       (reset! status :threw-outcome-unknown)
                       (throw failure))))]
+    (locking local-gateways
+      (.put local-gateways submit!
+            {:summary! summary!
+             :returned returned
+             :status status
+             :owned-calls owned-calls
+             :source-binding source-binding
+             :stats stats}))
     {:type gateway-type
      :version gateway-version
      :submit! submit!
      :summary! summary!}))
+
+(defn require-local-return!
+  "Check the EXACT in-process result map returned by THIS prepared gateway.
+
+   A caller-supplied TransactionKey, a map copied from a genuine return, or
+   functions from a different gateway cannot substitute for that result.
+   The returned source binding came from the finite write-footprint checker
+   at preparation and was rechecked before the sole execute-tx call. This
+   reports a process-local linkage from admitted source to call-site result;
+   it does not establish database commit, a ledger match, source authenticity,
+   actual per-field causality, or the absence of writers outside this gateway.
+
+   Only a normal API return can be checked here. On a thrown exception, the
+   original :summary! remains :threw-outcome-unknown, and no key may be
+   inferred. Neither reports nor accepted keys are certificates."
+  [gateway result]
+  (when-not (and (plain-map? gateway)
+                 (= #{:type :version :submit! :summary!}
+                    (set (keys gateway)))
+                 (= gateway-type (:type gateway))
+                 (= gateway-version (:version gateway)))
+    (reject! :invalid-local-gateway []))
+  (let [registration (locking local-gateways
+                       (.get local-gateways (:submit! gateway)))
+        {:keys [summary! returned status owned-calls source-binding stats]}
+        registration
+        observed (when returned @returned)
+        phase (when status @status)]
+    (when-not (and registration
+                   (identical? summary! (:summary! gateway))
+                   (map? result)
+                   (identical? observed result)
+                   (= 1 (when owned-calls @owned-calls))
+                   (#{:returned-transaction-key :returned-unrecognized} phase)
+                   (= phase (get-in observed [:diagnostic :status]))
+                   (= (:diagnostic observed) (summary!)))
+      (reject! :not-this-gateway-local-return []))
+    {:type local-return-type
+     :version local-return-version
+     :source-binding-scope :process-local-nonauthenticating
+     :process-local-source-binding source-binding
+     :gateway-version gateway-version
+     :owned-execute-tx-call-entries @owned-calls
+     :observed-result-kind (if (instance? TransactionKey (:tx-key observed))
+                             :public-transaction-key
+                             :unrecognized-xtdb-api-return)
+     :local-return-linkage :exact-object-from-owned-call-site
+     :operation-origin :readmitted-source-derived-finite-vector
+     :candidate-operation-count (:candidate-operation-count stats)
+     :prewrite-assertion-count (:prewrite-assertion-count stats)
+     :whole-document-replacement-count (:whole-document-replacement-count stats)
+     :committed-transaction :not-established
+     :public-key-to-ledger-join :not-checked
+     :physical-poststate-causality :not-established
+     :transaction-internal-prestate :not-authenticated
+     :complete-deployment-writer-coverage :not-established
+     :principal-authorization :not-established
+     :physical-refinement :not-established
+     :proof-status :process-local-result-correspondence-only
+     :admission :not-admitted
+     :certificate :not-issued
+     :authority :none}))
