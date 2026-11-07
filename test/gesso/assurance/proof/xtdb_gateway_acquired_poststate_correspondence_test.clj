@@ -1,7 +1,8 @@
 (ns gesso.assurance.proof.xtdb-gateway-acquired-poststate-correspondence-test
-  "v1542: Permanent adversarial embedded-XTDB coverage for v1541's
+  "v1544: Permanent adversarial embedded-XTDB coverage for v1541's
    acquired-prestate -> guarded one-shot -> exact-return -> later pinned
-   whole-document-and-ledger observation.
+   whole-document-and-ledger observation, including v1543's independently
+   corroborated CONDITIONAL transaction-local effect under XTDB premises.
 
    Physical before/after reads are external to the transaction; a matching
    later document is not proof of causal attribution, transaction-internal
@@ -461,4 +462,203 @@
     (is (every? #(= :bounded-later-poststate-matches-after (:status %))
                 reports))
     (is (= 1 (count (set (map :process-local-attempt-id reports)))))
+    (assert-read-only! p)))
+
+
+;; v1544: Keep transaction-LOCAL effect conditional on an exact gateway
+;; return, a committed transaction-ledger match, and *trusted* XTDB atomic
+;; PUT semantics. None of those premises attributes a later snapshot to the
+;; gateway, authenticates transaction-internal prestate, or proves frame
+;; preservation. Deliberate outside writes below are independent of the gate.
+(def ^:private conditional-effect
+  :declared-postimage-under-trusted-xtdb-semantics)
+(def ^:private execution-premises
+  {:source-vector :rederived-and-one-shot-owned
+   :whole-document-put :exactly-one-target
+   :backend-atomic-put-semantics :trusted-not-proved})
+(defn- assert-conditional-effect! [report ledger-kind]
+  (is (= conditional-effect (:transaction-local-write-effect report)))
+  (is (= ledger-kind
+         (get-in report [:transaction-local-write-effect-premises
+                         :transaction-ledger])))
+  (doseq [[k v] execution-premises]
+    (is (= v (get-in report [:transaction-local-write-effect-premises k]))))
+  (is (= :execution-only (:transaction-local-effect-time-scope report)))
+  (is (= :not-independently-established
+         (:transaction-local-effect-physical-verification report)))
+  (assert-no-authority! report nonclaims))
+(defn- assert-effect-withheld! [report]
+  (is (= :not-established (:transaction-local-write-effect report)))
+  (is (= :not-established
+         (get-in report [:transaction-local-write-effect-premises
+                         :transaction-ledger])))
+  (is (= :trusted-not-proved
+         (get-in report [:transaction-local-write-effect-premises
+                         :backend-atomic-put-semantics])))
+  (is (= :execution-only (:transaction-local-effect-time-scope report)))
+  (is (= :not-independently-established
+         (:transaction-local-effect-physical-verification report)))
+  (assert-no-authority! report nonclaims))
+
+(deftest v1543-conditional-effect-requires-committed-matching-ledger
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p)) report ((:observe! p) response)]
+    (is (= :bounded-later-poststate-matches-after (:status report)))
+    (is (true? (:observed-ledger-joined-poststate? report)))
+    (is (true? (:observed-whole-document-equals-source-after? report)))
+    (assert-conditional-effect! report :same-basis-matching-committed-key)
+    (assert-read-only! p)))
+
+(deftest v1543-later-overwrite-does-not-undo-the-transaction-local-effect
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))
+        _ (put! (assoc (after b) :value "private-v1541-outsider"))
+        report ((:observe! p) response)]
+    (is (= :bounded-later-poststate-diverges (:status report)))
+    (is (true? (:observed-ledger-joined-poststate? report)))
+    (is (false? (:observed-whole-document-equals-source-after? report)))
+    (assert-conditional-effect! report :same-basis-matching-committed-key)
+    (is (= "private-v1541-outsider" (:value (raw (:xt/id b)))))))
+
+(deftest v1543-later-deletion-can-retain-only-ledger-corroboration
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))
+        _ (xt/execute-tx @!node [[:delete-docs table (:xt/id b)]])
+        report ((:observe! p) response)]
+    (is (nil? (raw (:xt/id b))))
+    (is (= :poststate-or-ledger-unavailable (:status report)))
+    (is (false? (:observed-ledger-joined-poststate? report)))
+    (is (false? (:observed-complete-protected-document? report)))
+    (is (false? (:observed-whole-document-equals-source-after? report)))
+    (assert-conditional-effect! report :separately-pinned-matching-committed-key)
+    (assert-read-only! p)))
+
+(deftest v1543-deletion-effect-does-not-imply-present-poststate
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))
+        _ (xt/execute-tx @!node [[:delete-docs table (:xt/id b)]])
+        first-report ((:observe! p) response)
+        _ (put! (after b))
+        second-report ((:observe! p) response)]
+    (is (= :poststate-or-ledger-unavailable (:status first-report)))
+    (is (= :bounded-later-poststate-matches-after (:status second-report)))
+    (assert-conditional-effect! first-report
+                                :separately-pinned-matching-committed-key)
+    (assert-conditional-effect! second-report
+                                :same-basis-matching-committed-key)
+    (is (= (:process-local-attempt-id first-report)
+           (:process-local-attempt-id second-report)))
+    (assert-read-only! p)))
+
+(deftest v1543-outside-restoration-cannot-assert-later-causality
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))
+        _ (put! b)
+        _ (put! (after b))
+        report ((:observe! p) response)]
+    (is (= :bounded-later-poststate-matches-after (:status report)))
+    (is (= :not-established (:actual-transaction-caused-poststate report)))
+    (is (= :not-established (:outside-gateway-writer-closure report)))
+    (assert-conditional-effect! report :same-basis-matching-committed-key)))
+
+(deftest v1543-aba-before-submission-does-not-become-history-proof
+  (let [b (before) _ (put! b) p (prep b)
+        _ (put! (assoc b :value "private-v1541-aba-intermediate"))
+        _ (put! b)
+        response ((:submit! p)) report ((:observe! p) response)]
+    (is (= :bounded-later-poststate-matches-after (:status report)))
+    (is (= :not-established (:aba-history-detection report)))
+    (is (= :not-authenticated (:transaction-internal-prestate report)))
+    (assert-conditional-effect! report :same-basis-matching-committed-key)))
+
+(deftest v1543-unavailable-backend-cannot-supply-commit-evidence
+  (with-open [foreign (xtn/start-node {})]
+    (let [b (before) _ (xt/execute-tx foreign [[:put-docs table b]])
+          p (correspondence/prepare-acquired-poststate-one-shot!
+             foreign (projection-source b))
+          response ((:submit! p))]
+      (.close foreign)
+      (let [report ((:observe! p) response)]
+        (is (= :poststate-or-ledger-unavailable (:status report)))
+        (is (false? (:observed-ledger-joined-poststate? report)))
+        (is (false? (:observed-whole-document-equals-source-after? report)))
+        (assert-effect-withheld! report)))))
+
+(deftest v1543-fake-query-cannot-fabricate-a-matching-committed-ledger
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))]
+    (with-redefs [xt/q (fn [& _] [{:transaction-id "private-v1541-forged"}])]
+      (let [report ((:observe! p) response)]
+        (is (= :poststate-or-ledger-unavailable (:status report)))
+        (is (false? (:observed-ledger-joined-poststate? report)))
+        (assert-effect-withheld! report)))
+    (assert-conditional-effect! ((:observe! p) response)
+                                :same-basis-matching-committed-key)))
+
+(deftest v1543-return-copies-and-cross-gateway-returns-cannot-claim-effect
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))]
+    (is (= :not-this-gateway-local-return
+           (rejection #((:observe! p) (into {} response)))))
+    (is (= :not-this-gateway-local-return
+           (rejection #((:observe! p) (assoc response :extra :forged)))))
+    (let [b2 (before) _ (put! b2) p2 (prep b2)
+          response2 ((:submit! p2))]
+      (is (= :not-this-gateway-local-return
+             (rejection #((:observe! p) response2))))
+      (is (= :not-this-gateway-local-return
+             (rejection #((:observe! p2) response)))))
+    (assert-conditional-effect! ((:observe! p) response)
+                                :same-basis-matching-committed-key)))
+
+(deftest v1543-stale-cas-does-not-expose-any-local-effect-report
+  (let [b (before) _ (put! b) p (prep b)
+        _ (put! (assoc b :value "private-v1541-stale"))]
+    (is (= :xtdb/assert-failed (rejection (:submit! p))))
+    (is (= :threw-outcome-unknown (:status ((:summary! p)))))
+    (is (= :not-this-gateway-local-return
+           (rejection #((:observe! p) {}))))
+    (is (= :one-shot-already-attempted (rejection (:submit! p))))))
+
+(deftest v1543-ledger-observer-substitution-rejected-before-observation
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))]
+    (with-redefs [gateway/require-local-ledger-observation!
+                  (fn [& _]
+                    {:ledger-status :reported-key-matches-committed-ledger-row
+                     :ledger-checks {:tx-id true :committed true :system-time true}})]
+      (is (= :substituted-correspondence-seam
+             (rejection #((:observe! p) response)))))
+    (assert-conditional-effect! ((:observe! p) response)
+                                :same-basis-matching-committed-key)))
+
+(deftest v1543-repeated-reads-remain-read-only-and-conditionally-scoped
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))
+        r1 ((:observe! p) response)
+        _ (put! (assoc (after b) :value "private-v1541-other"))
+        r2 ((:observe! p) response)
+        _ (xt/execute-tx @!node [[:delete-docs table (:xt/id b)]])
+        r3 ((:observe! p) response)]
+    (is (= [:bounded-later-poststate-matches-after
+            :bounded-later-poststate-diverges
+            :poststate-or-ledger-unavailable]
+           (mapv :status [r1 r2 r3])))
+    (doseq [r [r1 r2]]
+      (assert-conditional-effect! r :same-basis-matching-committed-key))
+    (assert-conditional-effect! r3 :separately-pinned-matching-committed-key)
+    (is (= 1 (count (set (map :process-local-attempt-id [r1 r2 r3])))))
+    (is (= 1 (count (set (map :process-local-source-binding [r1 r2 r3])))))
+    (assert-read-only! p)))
+
+(deftest v1543-parallel-ledger-observations-never-increase-submit-count
+  (let [b (before) _ (put! b) p (prep b)
+        response ((:submit! p))
+        _ (xt/execute-tx @!node [[:delete-docs table (:xt/id b)]])
+        futures (doall (repeatedly 4 #(future ((:observe! p) response))))
+        reports (mapv #(deref % 70000 :timed-out) futures)]
+    (is (not-any? #{:timed-out} reports))
+    (doseq [r reports]
+      (is (= :poststate-or-ledger-unavailable (:status r)))
+      (assert-conditional-effect! r :separately-pinned-matching-committed-key))
     (assert-read-only! p)))
