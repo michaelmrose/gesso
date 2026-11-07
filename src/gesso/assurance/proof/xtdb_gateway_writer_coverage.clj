@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-writer-coverage
-  "v1553: bind host-OBSERVED writer registrations to Gesso-ISSUED one-shot
+  "v1559: bind host-OBSERVED writer registrations to Gesso-ISSUED one-shot
    monotonic XTDB gateway callbacks. This is an execution-capability identity
    check for the surveyed host table, not a closed-world writer proof.
 
@@ -16,6 +16,9 @@
    complete monotonic revision history. No inspected writer is invoked.
    The registered operation ID is a host label; this module does NOT prove
    that the prepared command implements that operation's abstract semantics.
+   v1559 additionally permits a freshly prepared, identity-preserving
+   REQUEST-SCOPED issuance. Its exact callback rejects use outside the one
+   owning synchronous scope, without changing legacy writer semantics.
    Handles and diagnostics are NOT certificates or transaction authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.physical-writer-inventory :as inventory]
@@ -127,18 +130,8 @@
             :same-thread? (identical? (Thread/currentThread)
                                       (:thread *route-writer-observation*))})))
 
-(defn issue-monotonic-registered-writer!
-  "Issue a single locally owned, zero-argument host writer and opaque handle.
-
-   [path-id operation-id node gateway-source revision-field]. Both IDs must
-   be qualified keywords. `gateway-source` is the original one-command,
-   one-protected-document source accepted by v1547. No operation, transaction
-   or writer is executed at issuance; prestate acquisition DOES read XTDB.
-
-   Register the returned :writer itself (not a delegating wrapper) in the
-   host's actual writer registry. It can submit exactly once, and only the
-   prepared source-bound transaction. The handle must not be serialized."
-  [path-id operation-id node gateway-source revision-field]
+(defn- issue-writer-core!
+  [path-id operation-id node gateway-source revision-field request-scoped?]
   (seams!)
   (when-not (and (qualified-id? path-id) (qualified-id? operation-id))
     (reject! :invalid-path-or-operation-id))
@@ -153,9 +146,18 @@
     (let [submit! (:submit! gateway)
           handle (WriterHandle.)
           token (Object.)
+          ;; The scope is local to this ONE issuance. It never provides a
+          ;; reusable transaction factory or permits a stale callback to be
+          ;; reactivated by a later HTTP request.
+          scope (when request-scoped? (atom {:state :available}))
           writer (fn [& args]
                    (when (seq args)
                      (reject! :registered-writer-requires-zero-arguments))
+                   (when request-scoped?
+                     (let [{:keys [state owner]} @scope]
+                       (when-not (and (= :active state)
+                                      (identical? owner (Thread/currentThread)))
+                         (reject! :writer-outside-owning-request-scope))))
                    (trace-invocation! token :invoked)
                    (try
                      (let [result (submit!)]
@@ -163,13 +165,75 @@
                        result)
                      (catch Throwable t
                        (trace-invocation! token :threw)
-                       (throw t))))]
+                       (throw t))))
+          with-request!
+          (when request-scoped?
+            (fn [dispatch!]
+              (when-not (fn? dispatch!)
+                (reject! :invalid-request-scope-dispatch))
+              (let [active {:state :active :owner (Thread/currentThread)}
+                    prior @scope]
+                (when-not (and (= :available (:state prior))
+                               (compare-and-set! scope prior active))
+                  ;; Compare against the observed Atom value (not a new
+                  ;; equal map); never reopen an active or closed scope.
+                  (reject! :request-scope-already-used-or-active))
+                (try
+                  (dispatch!)
+                  (finally
+                    ;; The permit closes even if the handler omits its writer,
+                    ;; throws after a write, or catches a failed submission.
+                    ;; An already committed write cannot be rolled back here.
+                    (reset! scope {:state :closed}))))))]
       (locking issued
         (.put issued handle {:path-id path-id
                              :operation-id operation-id
                              :writer writer
                              :trace-token token}))
-      {:handle handle :writer writer})))
+      (cond-> {:handle handle :writer writer}
+        request-scoped?
+        (assoc :with-request! with-request!
+               :request-scope-status!
+               (fn [] (:state @scope)))))))
+
+(defn issue-monotonic-registered-writer!
+  "Issue one locally recognized, zero-argument monotonic XTDB writer.
+
+   [path-id operation-id node gateway-source revision-field]. Both IDs must
+   be qualified keywords. Register the exact returned :writer in the host's
+   writer table. Its source-bound gateway may submit ONCE. This legacy API
+   does not impose a separate request-scope lifetime. No write occurs at
+   issuance; the acquired-prestate gateway DOES read XTDB."
+  [path-id operation-id node gateway-source revision-field]
+  (issue-writer-core! path-id operation-id node gateway-source revision-field
+                      false))
+
+(defn issue-request-scoped-monotonic-writer!
+  "Issue ONE new, source-bound, registered XTDB writer for ONE request scope.
+
+   [path-id operation-id node gateway-source revision-field]. The input is a
+   freshly admitted, complete-guard source for this request; the same v1547
+   monotonic and XTDB prestate checks run BEFORE this scope is issued.
+
+   Return {:handle :writer :with-request! :request-scope-status!}. Register
+   the EXACT returned :writer (not a wrapper); it remains a valid locally
+   issued callback for the existing inventory, route, and Biff identity
+   checks. Call (:with-request! issuance) with a zero-argument, synchronous
+   handler function. Only the scope-owning thread may invoke :writer, and
+   the scope cannot be activated again after it exits or throws. The XTDB
+   gateway itself remains one-shot even INSIDE the active scope. Obtain a
+   NEW issuance from a freshly admitted source for each later request.
+
+   This is a request-lifetime CAPABILITY RESTRICTION, not proof that a real
+   deployed HTTP request was dispatched. The caller must install the exact
+   issued callback in its real registry, use checked Biff observation for
+   invocation evidence, and control registry replacement and cleanup.
+   An unregistered direct XTDB client may still bypass this mechanism.
+   Neither registration nor scoped dispatch proves application authorization,
+   writer completeness, transaction commit, or physical refinement."
+  [path-id operation-id node gateway-source revision-field]
+  (issue-writer-core! path-id operation-id node gateway-source revision-field
+                      true))
 
 (defn- enumerate-twice! [source expected-paths]
   (let [enumerate! (:enumerate-write-paths! source)
