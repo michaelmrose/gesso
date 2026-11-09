@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution
-  "v1547: Opt-in monotonic-revision admission for ONE acquired, complete-CAS
+  "v1590: Opt-in monotonic-revision admission for ONE acquired, complete-CAS
    XTDB update. The existing model command constructor checks revision bumps,
    but a structurally valid hand-authored command can bypass that constructor:
    a generic :model/expected guard need not include the intended revision
@@ -20,17 +20,34 @@
    is NOT enforced against direct XTDB writers. Physical-history authenticity,
    other-writer closure, internal prestate, node identity, authorization,
    poststate causality and universal refinement remain UNESTABLISHED.
+   v1590 adds a distinct opt-in plan-bound constructor that REUSES this exact
+   monotonic revision policy and the v1586 certified-plan-bound acquired
+   complete-CAS submission, not two separately prepared gateways. It owns
+   only ONE underlying actual XTDB submission capability, with its existing
+   plan-target recheck and an additional one-shot revision recheck. This is
+   a gateway-building block, NOT yet a registered Biff writer: the earlier
+   v1588 Biff mediator continues to prepare two independent gateways until
+   the writer-identity integration is explicitly changed and tested.
+
    Results are redacted and do not confer certificates or admission authority."
   (:require [gesso.assurance.proof.xtdb-gateway-acquired-complete-guard-execution
              :as acquired]
-            [gesso.model.command :as command]))
+            [gesso.model.command :as command]
+            [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate
+             :as plan-bound])
+  (:import (java.util.concurrent.atomic AtomicBoolean)))
 
 (def monotonic-type
   :gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution/one-document)
 (def monotonic-version 1)
+(def plan-bound-monotonic-type
+  :gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution/plan-bound)
+(def plan-bound-monotonic-version 1)
 
 (def ^:private original-acquired acquired/prepare-acquired-complete-guard-one-shot!)
 (def ^:private original-update? command/update?)
+(def ^:private original-plan-bound
+  plan-bound/prepare-plan-bound-acquired-one-shot!)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported XTDB monotonic revision gateway."
@@ -163,3 +180,118 @@
                      [:status :owned-execute-tx-call-entries
                       :compared-top-level-field-count
                       :added-snapshot-comparison-count])))}))
+
+
+(defn- plan-bound-seams! []
+  ;; Preserve the original monotonic gateway's independent source check and
+  ;; the plan-bound gateway's current identity. Ordinary Var replacement is
+  ;; rejected; hostile bytecode/JVM modification is outside this boundary.
+  (seams!)
+  (when-not (identical? original-plan-bound
+                        (var-get #'plan-bound/prepare-plan-bound-acquired-one-shot!))
+    (reject! :substituted-plan-bound-prestate-gateway)))
+
+(defn prepare-plan-bound-monotonic-revision-one-shot!
+  "v1590: Prepare one AND ONLY ONE XTDB submission capability satisfying
+   both the v1547 exact-successor/source-version-guard policy and the v1586
+   issued-certified-plan-target/external-prestate/complete-CAS policy.
+
+   Inputs: [node contract-source resolver-issuance selected-operation request
+            candidate-source revision-field]. The strict revision check is
+   run BEFORE any XTDB prestate acquisition. The plan-bound gateway performs
+   plan-target and command/protected-document checks and makes the only
+   underlying acquired gateway, with its own revalidation on submit.
+
+   Return only {:type :version :submit! :summary!}. No raw XTDB client,
+   prepared SQL, gateway descriptor, document ID, or protected prestate is
+   exposed. A submission attempt consumes the outer permit even if its final
+   revision check or the underlying plan-target recheck fails. The original
+   v1547 and v1586 public constructors remain unchanged.
+
+   This is NOT a Biff writer issuance. It does not grant route authority,
+   prove application target-table truth, close direct writers, establish
+   actual transaction-internal prestate/physical causality, or rule out ABA
+   without the stated complete-writer monotonicity premise."
+  [node contract-source resolver-issuance selected-operation request
+   candidate-source revision-field]
+  (plan-bound-seams!)
+  (require-source-revision! candidate-source revision-field)
+  (let [prepared (original-plan-bound node contract-source resolver-issuance
+                                      selected-operation request candidate-source)
+        initial (try ((:summary! prepared))
+                     (catch Throwable _
+                       (reject! :invalid-plan-bound-prestate-summary)))]
+    (when-not (and (= plan-bound/report-type (:type prepared))
+                   (= plan-bound/report-version (:version prepared))
+                   (fn? (:submit! prepared))
+                   (fn? (:summary! prepared))
+                   (= :prepared (:status initial))
+                   (= :prepared (:underlying-gateway-status initial))
+                   (= :same-node-pinned-read-matched-at-preparation
+                      (:external-before initial))
+                   (= :canonical-complete-top-level-cas
+                      (:transaction-preconditions initial))
+                   (= :conditional-plan-bound-acquired-prestate
+                      (:proof-status initial))
+                   (= :one-shot-submission-capability
+                      (:transaction-authority initial))
+                   (= :not-issued (:certificate initial))
+                   (= :not-admitted (:admission initial)))
+      (reject! :unexpected-plan-bound-prestate-contract))
+    (plan-bound-seams!)
+    (let [attempted (AtomicBoolean. false)
+          submit! (fn []
+                    (when-not (.compareAndSet attempted false true)
+                      (reject! :one-shot-already-attempted))
+                    (plan-bound-seams!)
+                    (require-source-revision! candidate-source revision-field)
+                    ;; This is the ONLY physical submit. The inner wrapper
+                    ;; independently revalidates current plan-target identity.
+                    ((:submit! prepared)))
+          summary! (fn []
+                     (let [underlying ((:summary! prepared))]
+                       {:type plan-bound-monotonic-type
+                        :version plan-bound-monotonic-version
+                        :status (if (.get attempted) :permit-consumed :prepared)
+                        :underlying-gateway-status
+                        (:underlying-gateway-status underlying)
+                        :physical-submission-gateways-prepared 1
+                        :revision-policy
+                        :source-checked-exactly-one-nonwrapping-successor
+                        :original-revision-version-guard
+                        :required-and-source-matched
+                        :pre-submit-revision-recheck :required
+                        :plan-target-correspondence
+                        :exact-current-issued-callback-checked-at-preparation
+                        :pre-submit-plan-target-recheck :required
+                        :external-prestate
+                        :same-node-pinned-read-matched-at-preparation
+                        :transaction-time-revision-guard
+                        :canonical-complete-top-level-cas
+                        :prestate-submission-correspondence
+                        :one-prepared-acquired-gateway-for-this-submission
+                        :monotonic-complete-writer-premise :not-established
+                        :external-writer-aba :not-excluded
+                        :aba-history-detection :not-established
+                        :caller-node-authenticity :not-established
+                        :transaction-internal-prestate :not-authenticated
+                        :backend-assert-semantics :trusted-bounded-premise
+                        :physical-poststate-causality :not-established
+                        :complete-deployment-writer-coverage :not-established
+                        :principal-authorization :not-established
+                        :abstract-operation-refinement :not-established
+                        :target-table-business-truth :application-premise
+                        :registered-biff-writer-adoption :not-established
+                        :proof-status :conditional-plan-bound-monotonic-prestate
+                        :certificate :not-issued
+                        :admission :not-admitted
+                        :transaction-authority :one-shot-submission-capability
+                        :open-obligations
+                        (conj (:open-obligations underlying)
+                              :complete-deployment-monotonic-writer-discipline
+                              :biff-writer-identity-not-yet-integrated)}))]
+      (plan-bound-seams!)
+      {:type plan-bound-monotonic-type
+       :version plan-bound-monotonic-version
+       :submit! submit!
+       :summary! summary!})))
