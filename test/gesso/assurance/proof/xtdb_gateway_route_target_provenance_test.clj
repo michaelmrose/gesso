@@ -1,6 +1,7 @@
 (ns gesso.assurance.proof.xtdb-gateway-route-target-provenance-test
-  "v1579: permanent adversarial regression for v1578's source-backed,
-   literal-route, fixed-document XTDB target resolver.
+  "v1579/v1583: permanent adversarial regression for v1578's
+   source-backed, literal-route, fixed-document XTDB target resolver,
+   including v1582's certified-plan command-operation join.
 
    Uses the existing genuine certified two-operation Biff application fixture
    rather than synthetic certificate reports. Checks closed route coverage,
@@ -10,8 +11,9 @@
 
    This does NOT establish startup declaration authenticity, dynamic document
    binding, user authorization, deployment adoption, physical transaction
-   causality, or full business-rule refinement. The resolver is not yet
-   required by the target-bound Biff mediator."
+   causality, or full business-rule refinement. v1580's source-backed
+   mediator requires an issued resolver; legacy and callback-based
+   mediation retain narrower guarantees."
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing use-fixtures]]
             [gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test :as multi]
@@ -106,6 +108,8 @@
     (is (true? (:every-declared-route-certified? report)))
     (is (= :rederived-from-current-certified-contract
            (:operation-identity report)))
+    (is (= :joined-to-current-certified-plan-source
+           (:command-operation-identity report)))
     (is (= :closed-startup-route-declaration (:target-identity report)))
     (is (false? (:candidate-command-used-to-derive-target? report)))
     (is (false? (:request-document-parameters-used? report)))
@@ -294,3 +298,76 @@
       (assert-rejection! :substituted-certification-or-route-checker
                          #(resolver claim-request)))
     (is (= :example/claim (:operation-id (resolver claim-request))))))
+
+
+(deftest declared-command-operations-must-agree-with-both-current-certified-plans
+  ;; Both application operations in the real fixture deliberately use the
+  ;; SAME physical command operation. The route ID and application operation
+  ;; name must not become a substitute source of command semantics.
+  (let [contract (checked-source)
+        current-commands
+        (into {} (for [op [multi/claim multi/cancel]]
+                   [op (get-in contract
+                               [:certified-operations op :current-source
+                                :command-operation])]))]
+    (is (= {multi/claim :claim multi/cancel :claim} current-commands))
+    (is (not= multi/cancel (:command-operation
+                            (get declarations multi/cancel-route))))
+    (doseq [route [multi/claim-route multi/cancel-route]
+            wrong [:cancel :create :delete :update :unrelated-operation]]
+      (testing (str "certified-plan command operation at " route
+                    " cannot be overridden by " wrong)
+        ;; All of these declarations are well-formed maps with well-formed
+        ;; targets. They must reach the NEW semantic disagreement guard,
+        ;; rather than being rejected by an earlier shape/type check.
+        (let [candidate (assoc-in declarations [route :command-operation]
+                                  wrong)]
+          (is (= (get-in declarations [route :target])
+                 (get-in candidate [route :target])))
+          (assert-rejection!
+           :declared-command-operation-disagrees-with-certified-plan
+           #(issue! candidate)))))
+    ;; A legitimate declaration still resolves to the actual plan's
+    ;; command identity independently of request parameters.
+    (let [resolver (issued!)]
+      (doseq [[request app-operation] [[claim-request multi/claim]
+                                       [cancel-request multi/cancel]]]
+        (is (= app-operation (:operation-id (resolver request))))
+        (is (= (get current-commands app-operation)
+               (:command-operation (resolver request))))))))
+
+(deftest later-host-redeclaration-cannot-rewrite-an-issued-command-identity
+  (let [source (checked-source)
+        resolver (issued!)
+        original-claim (resolver claim-request)
+        original-cancel (resolver cancel-request)
+        wrong-claim (assoc-in declarations
+                              [multi/claim-route :command-operation] :cancel)
+        wrong-cancel (assoc-in declarations
+                               [multi/cancel-route :command-operation] :cancel)]
+    ;; An immutable replacement of the application's declaration does not
+    ;; alter an already-issued, source-checked resolver; the replacement
+    ;; cannot obtain a new issued resolver either.
+    (assert-rejection!
+     :declared-command-operation-disagrees-with-certified-plan
+     #(issue! wrong-claim))
+    (assert-rejection!
+     :declared-command-operation-disagrees-with-certified-plan
+     #(issue! wrong-cancel))
+    (is (= original-claim (resolver claim-request)))
+    (is (= original-cancel (resolver cancel-request)))
+    (is (= :joined-to-current-certified-plan-source
+           (:command-operation-identity
+            (provenance/require-current-certified-literal-route-target-resolver!
+             resolver source))))
+    (is (= [:claims private-claim-id] (:target (resolver claim-request))))
+    (is (= [:claims private-cancel-id] (:target (resolver cancel-request))))
+    ;; Fixed document identities are still independent application premises;
+    ;; successfully matching command operations cannot certify their truth.
+    (let [report (provenance/require-current-certified-literal-route-target-resolver!
+                  resolver source)]
+      (is (= :application-premise-not-proved
+             (:static-declaration-authenticity report)))
+      (is (= :not-established (:abstract-operation-to-command-refinement report)))
+      (is (= :not-established (:physical-transaction-causality report)))
+      (is (= :not-issued (:certificate report))))))
