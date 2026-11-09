@@ -29,13 +29,27 @@
    v1588 Biff mediator continues to prepare two independent gateways until
    the writer-identity integration is explicitly changed and tested.
 
+   v1602 additionally exposes an opt-in two-write incorporation bridge:
+   the same exact-successor policy and certified-plan target checks are
+   combined with a pinned read-only prestate observation, followed by ONE
+   atomic domain UPDATE / durable command-record CREATE gateway. This does
+   not switch the registered Biff writer and does not authenticate command
+   arguments, principals, outcomes or external writer behavior.
+
    Results are redacted and do not confer certificates or admission authority."
   (:require [gesso.assurance.proof.xtdb-gateway-acquired-complete-guard-execution
              :as acquired]
             [gesso.model.command :as command]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate
-             :as plan-bound])
-  (:import (java.util.concurrent.atomic AtomicBoolean)))
+             :as plan-bound]
+            [gesso.assurance.proof.xtdb-gateway-complete-guard-execution :as complete]
+            [gesso.assurance.proof.xtdb-gateway-route-target-provenance :as provenance]
+            [gesso.assurance.proof.xtdb-gateway-operation-target-binding :as target-binding]
+            [xtdb.api :as xt]
+            [xtdb.basis :as basis])
+  (:import (java.util.concurrent.atomic AtomicBoolean)
+           (java.time Instant)
+           (java.util UUID)))
 
 (def monotonic-type
   :gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution/one-document)
@@ -293,5 +307,247 @@
       (plan-bound-seams!)
       {:type plan-bound-monotonic-type
        :version plan-bound-monotonic-version
+       :submit! submit!
+       :summary! summary!})))
+
+
+;; v1602: Opt-in single-capability combination of the exact v1590 monotonic
+;; revision policy, the v1584 issued certified-plan target source, an
+;; independent same-node XTDB snapshot read, and the v1600 TWO-write atomic
+;; domain/command incorporation. Do not build a disposable v1586/v1590
+;; submission capability just to observe its read: only the TWO-write
+;; incorporation constructor below may prepare a physical submission.
+(def plan-bound-incorporation-type
+  :gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution/plan-bound-incorporation)
+(def plan-bound-incorporation-version 1)
+
+(def ^:private original-incorporation-gateway
+  complete/prepare-complete-guard-command-incorporation-one-shot!)
+(def ^:private original-target-resolver-check
+  provenance/require-current-certified-literal-route-target-resolver!)
+(def ^:private original-target-binding-check
+  target-binding/require-declared-operation-target!)
+(def ^:private original-xtdb-query xt/q)
+(def ^:private original-basis-decode basis/<-time-basis-str)
+
+(defn- incorporation-seams! []
+  (plan-bound-seams!)
+  (when-not (and (identical? original-incorporation-gateway
+                             (var-get #'complete/prepare-complete-guard-command-incorporation-one-shot!))
+                 (identical? original-target-resolver-check
+                             (var-get #'provenance/require-current-certified-literal-route-target-resolver!))
+                 (identical? original-target-binding-check
+                             (var-get #'target-binding/require-declared-operation-target!))
+                 (identical? original-xtdb-query (var-get #'xt/q))
+                 (identical? original-basis-decode
+                             (var-get #'basis/<-time-basis-str)))
+    (reject! :substituted-incorporation-correspondence-seam)))
+
+(defn- checked-plan-incorporation-target!
+  [contract-source resolver-issuance selected-operation request candidate]
+  (incorporation-seams!)
+  (when-not (and (plain-map? resolver-issuance)
+                 (= #{:expected-target!} (set (keys resolver-issuance)))
+                 (fn? (:expected-target! resolver-issuance))
+                 (plain-map? request)
+                 (keyword? selected-operation)
+                 (some? (namespace selected-operation)))
+    (reject! :invalid-incorporation-target-input))
+  (let [resolver (:expected-target! resolver-issuance)
+        report (try (original-target-resolver-check resolver contract-source)
+                    (catch Throwable _
+                      (reject! :unissued-or-changed-target-resolver)))]
+    (when-not (and (= provenance/report-type (:type report))
+                   (= provenance/report-version (:version report))
+                   (= :closed-issued-certified-plan-target-callback
+                      (:target-identity report))
+                   (= :exact-issued-source-callback-checked
+                      (:certified-plan-target-callback-identity report))
+                   (= :none (:transaction-authority report))
+                   (= :not-issued (:certificate report)))
+      (reject! :requires-exact-issued-plan-bound-resolver))
+    (let [expected (try (resolver request)
+                        (catch Throwable _
+                          (reject! :plan-bound-target-resolution-failed)))
+          checked (try (original-target-binding-check
+                       selected-operation expected candidate)
+                       (catch Throwable _
+                         (reject! :command-or-protection-disagrees-with-plan-target)))]
+      (when-not (and (= target-binding/report-type (:type checked))
+                     (= target-binding/report-version (:version checked))
+                     (= :conditional-declared-command-target-match
+                        (:status checked))
+                     (true? (:selected-route-operation-checked? checked))
+                     (true? (:canonical-command-operation-checked? checked))
+                     (true? (:declared-command-and-protected-document-match-expected-target?
+                             checked)))
+        (reject! :unexpected-plan-bound-command-target-report))))
+  (incorporation-seams!)
+  true)
+
+(defn- require-pinned-external-before!
+  [node candidate]
+  ;; This performs only a read. It intentionally parallels the narrow v1539
+  ;; snapshot protocol, but DOES NOT prepare its one-UPDATE submit gateway.
+  ;; The sole gateway is instead v1600's two-write incorporation gateway.
+  (when-not node (reject! :missing-xtdb-node))
+  (incorporation-seams!)
+  (let [c (first (get-in candidate [:plan :commands]))
+        table (:model/entity-type c)
+        id (:model/id c)
+        before (:model/before c)]
+    (when-not (and (keyword? table)
+                   (re-matches #"[A-Za-z_][A-Za-z0-9_]*" (name table))
+                   (or (nil? (namespace table))
+                       (re-matches #"[A-Za-z_][A-Za-z0-9_]*" (namespace table)))
+                   (plain-map? before)
+                   (= id (:xt/id before))
+                   (or (string? id) (instance? UUID id) (integer? id)))
+      (reject! :unsupported-incorporation-prestate-read))
+    (let [snapshot-rows (try (original-xtdb-query node "SHOW SNAPSHOT_TOKEN")
+                             (catch Throwable _
+                               (reject! :incorporation-snapshot-unavailable)))
+          token (when (and (sequential? snapshot-rows)
+                           (= 1 (count snapshot-rows))
+                           (plain-map? (first snapshot-rows))
+                           (= #{:snapshot-token} (set (keys (first snapshot-rows)))))
+                  (:snapshot-token (first snapshot-rows)))
+          _ (when-not (and (string? token) (seq token)
+                           (try (map? (original-basis-decode token))
+                                (catch Throwable _ false)))
+              (reject! :invalid-incorporation-snapshot))
+          table-name (if-let [schema (namespace table)]
+                       (str schema "." (name table)) (name table))
+          sql (str "SELECT * FROM " table-name " WHERE _id = ? LIMIT 2")
+          rows (try (original-xtdb-query
+                     node [sql id]
+                     {:snapshot-token token :current-time (Instant/now)})
+                    (catch Throwable _
+                      (reject! :incorporation-prestate-read-failed)))]
+      (when-not (and (sequential? rows) (= 1 (count rows))
+                     (plain-map? (first rows))
+                     (= before (first rows)))
+        (reject! :incorporation-before-disagrees-with-external-read))))
+  (incorporation-seams!)
+  true)
+
+(defn prepare-plan-bound-monotonic-command-incorporation-one-shot!
+  "v1602: Build one guarded XTDB transaction incorporating BOTH a domain
+   UPDATE and a canonical durable command record, binding its domain target
+   to the Gesso-issued certified-plan :target! callback, acquiring its
+   external prestate from the same supplied XTDB node, and enforcing the
+   existing exact-successor revision policy. No second submit capability
+   is prepared. One consumed submit! revalidates the plan and revision.
+
+   Inputs: [node contract-source resolver-issuance selected-operation request
+            candidate-source revision-field incorporation-input]. The
+   incorporation input's :binding/:operation must match selected-operation;
+   its principal, arguments, outcome and timestamp remain application-owned.
+
+   This is not yet an identity-registered Biff writer, an authorization proof,
+   transaction-internal read attestation, physical causality proof, a proof
+   of the target table's business meaning, or a deployment-wide writer audit.
+   Backend transaction assertions/atomicity remain explicit assumptions."
+  [node contract-source resolver-issuance selected-operation request
+   candidate-source revision-field incorporation-input]
+  (incorporation-seams!)
+  (require-source-revision! candidate-source revision-field)
+  (when-not (and (plain-map? incorporation-input)
+                 (= #{:binding :outcome :now} (set (keys incorporation-input)))
+                 (plain-map? (:binding incorporation-input))
+                 (= selected-operation
+                    (get-in incorporation-input [:binding :operation])))
+    (reject! :incorporation-binding-operation-disagrees-with-route))
+  (checked-plan-incorporation-target!
+   contract-source resolver-issuance selected-operation request candidate-source)
+  (require-pinned-external-before! node candidate-source)
+  ;; The one and only gateway re-derives the full two-write transaction:
+  ;; v1600's canonical domain-field+count CAS and command-ID absence ASSERT.
+  (let [prepared (original-incorporation-gateway
+                  node candidate-source incorporation-input)
+        initial (try ((:summary! prepared))
+                     (catch Throwable _
+                       (reject! :invalid-atomic-incorporation-report)))]
+    (when-not (and (= complete/incorporation-type (:type prepared))
+                   (= complete/incorporation-version (:version prepared))
+                   (fn? (:submit! prepared))
+                   (fn? (:summary! prepared))
+                   (= :prepared (:status initial))
+                   (= :prepared (:underlying-gateway-status initial))
+                   (= 2 (:admitted-transaction-write-count initial))
+                   (= :one-derived-xtdb-vector
+                      (:single-restricted-submission initial))
+                   (= :complete-top-level-cas (:domain-update initial))
+                   (= :canonical-absence-precondition-prepared
+                      (:command-record-create initial))
+                   (= :not-issued (:certificate initial))
+                   (= :not-admitted (:admission initial)))
+      (reject! :unexpected-atomic-incorporation-contract))
+    (incorporation-seams!)
+    (let [attempted (AtomicBoolean. false)
+          submit! (fn []
+                    (when-not (.compareAndSet attempted false true)
+                      (reject! :one-shot-already-attempted))
+                    (incorporation-seams!)
+                    (require-source-revision! candidate-source revision-field)
+                    (checked-plan-incorporation-target!
+                     contract-source resolver-issuance selected-operation
+                     request candidate-source)
+                    ;; Rechecks are read-only. The *only* physical submission
+                    ;; is through the original v1600 two-write capability.
+                    ((:submit! prepared)))
+          summary! (fn []
+                     (let [underlying ((:summary! prepared))]
+                       {:type plan-bound-incorporation-type
+                        :version plan-bound-incorporation-version
+                        :status (if (.get attempted) :permit-consumed :prepared)
+                        :underlying-gateway-status
+                        (:underlying-gateway-status underlying)
+                        :owned-execute-tx-call-entries
+                        (:owned-execute-tx-call-entries underlying)
+                        :physical-submission-gateways-prepared 1
+                        :admitted-transaction-write-count 2
+                        :domain-update :complete-top-level-cas
+                        :command-record-create
+                        :canonical-absence-precondition-prepared
+                        :atomicity :conditional-on-xtdb-assert-and-put-semantics
+                        :revision-policy
+                        :source-checked-exactly-one-nonwrapping-successor
+                        :original-revision-version-guard :required-and-source-matched
+                        :plan-target-correspondence
+                        :exact-current-issued-callback-checked-at-preparation
+                        :pre-submit-plan-target-recheck :required
+                        :external-prestate
+                        :same-node-pinned-read-matched-at-preparation
+                        :pre-submit-revision-recheck :required
+                        :command-record-operation :bound-to-selected-route
+                        :command-arguments-target-correspondence :not-established
+                        :application-target-table-truth :not-established
+                        :principal-authorization :not-established
+                        :outcome-and-time-authenticity :application-premise
+                        :physical-commit-causality :not-established
+                        :durable-record-readback :not-observed
+                        :record-immutability-after-commit :not-established
+                        :external-writer-aba :not-excluded
+                        :transaction-internal-prestate :not-authenticated
+                        :complete-deployment-writer-coverage :not-established
+                        :registered-biff-writer-adoption :not-established
+                        :abstract-operation-refinement :not-established
+                        :proof-status :conditional-plan-bound-atomic-incorporation
+                        :certificate :not-issued
+                        :admission :not-admitted
+                        :transaction-authority :one-shot-submission-capability
+                        :open-obligations
+                        #{:authenticate-principal-outcome-and-timestamp
+                          :check-command-arguments-against-selected-target
+                          :prove-static-target-table-business-correctness
+                          :verify-command-record-readback-and-retention
+                          :establish-deployment-wide-writer-closure
+                          :integrate-identity-registered-biff-request-writer
+                          :assume-xtdb-atomic-assert-and-put-semantics
+                          :establish-physical-commit-causality}}))]
+      (incorporation-seams!)
+      {:type plan-bound-incorporation-type
+       :version plan-bound-incorporation-version
        :submit! submit!
        :summary! summary!})))
