@@ -37,6 +37,9 @@
    and its public transaction key is observed together with the expected
    domain poststate, command record and ledger on one pinned XTDB basis.
    Readback is a request-local diagnostic, NOT commit causality or settlement.
+   v1620 adds distinct opt-in mediators that call v1618's issued request-scoped
+   observe-return! on the EXACT registered writer result, retaining the
+   original callback identity and single two-write submission capability.
    No constructor proves
    application target-table truth, principal authorization, command-argument
    target correspondence, deployed adoption, physical causality, or absence
@@ -49,6 +52,7 @@
             [gesso.assurance.proof.xtdb-gateway-route-target-provenance :as provenance]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate :as guarded]
             [gesso.assurance.proof.xtdb-gateway-atomic-readback :as readback]
+            [gesso.assurance.proof.xtdb-gateway-atomic-submitted-readback :as submitted]
             [gesso.live.application-preflight :as application])
   (:import (java.util WeakHashMap)
            (java.util.concurrent Semaphore TimeUnit)
@@ -69,6 +73,8 @@
   writers/issue-request-scoped-plan-bound-monotonic-writer!)
 (def ^:private original-atomic-issue
   writers/issue-request-scoped-plan-bound-atomic-incorporation-writer!)
+(def ^:private original-scoped-readback-issue
+  writers/issue-request-scoped-plan-bound-atomic-readback-writer!)
 (def ^:private original-observe assembly/observe-current-biff-registered-writer-assembly!)
 (def ^:private original-biff-observe writers/observe-checked-biff-host-registered-writer!)
 (def ^:private original-summary application/operation-summary)
@@ -147,15 +153,21 @@
     (reject! :substituted-atomic-incorporation-request-writer-issuer)))
 
 (defn- issuer-seams!
-  ([unified? atomic?] (issuer-seams! unified? atomic? false))
+  ([unified? atomic?] (issuer-seams! unified? atomic? false false))
   ([unified? atomic? observe?]
+   (issuer-seams! unified? atomic? observe? false))
+  ([unified? atomic? observe? source-bound?]
    (cond atomic? (atomic-incorporation-pinned!)
          unified? (unified-pinned!)
          :else (pinned!))
-   (when (and observe?
+   (when (and observe? (not source-bound?)
               (not (identical? original-atomic-readback
                                (var-get #'readback/acquire-atomic-command-readback!))))
-     (reject! :substituted-atomic-readback-observer))))
+     (reject! :substituted-atomic-readback-observer))
+   (when (and source-bound?
+              (not (identical? original-scoped-readback-issue
+                               (var-get #'writers/issue-request-scoped-plan-bound-atomic-readback-writer!))))
+     (reject! :substituted-source-bound-request-writer-issuer))))
 
 (defn- checked-readback! [observe! result observation]
   ;; The EXACT registered writer has already returned. Readback never
@@ -184,6 +196,36 @@
       (reject! :unexpected-postsubmission-observation-report))
     (reset! observation {:state :observed :report report})))
 
+(defn- checked-source-bound-readback! [observe! result observation]
+  ;; v1618 owns the exact returned object and request-scope/one-shot guards.
+  ;; Do not synthesize a key from a caller-supplied map or wrap the writer.
+  ;; Failure here can occur AFTER the two-write transaction commits.
+  (let [report (try (observe! result)
+                    (catch Throwable _
+                      (reject! :postsubmission-observation-unavailable-outcome-unknown)))]
+    (when-not (and (= submitted/report-type (:type report))
+                   (= submitted/report-version (:version report))
+                   (contains? #{:bounded-local-return-and-pinned-readback-coobservation
+                                :postsubmission-correspondence-not-established}
+                              (:status report))
+                   (= :exact-object-from-this-issued-submission
+                      (:process-local-return report))
+                   (= :certified-plan-bound-monotonic-atomic-two-write-one-shot
+                      (:submitted-gateway report))
+                   (= :same-captured-submission-inputs
+                      (:readback-node-and-inputs report))
+                   (= :bounded-process-local-return-and-pinned-coobservation
+                      (:proof-status report))
+                   (true? (:three-observations-share-pinned-basis? report))
+                   (= :not-established (:transaction-causality report))
+                   (false? (:retry-authorized? report))
+                   (= :none (:transaction-authority report)
+                      (:live-settlement-authority report) (:authority report))
+                   (= :not-issued (:certificate report))
+                   (= :not-admitted (:admission report)))
+      (reject! :unexpected-source-bound-observation-report))
+    (reset! observation {:state :observed :report report})))
+
 (defn invoke-current-request-writer!
   "Invoke the EXACT current request's registered one-shot writer, without
    changing its identity or return value. For the opt-in readback mediator,
@@ -191,7 +233,8 @@
    request scope. If observation fails AFTER submission, the request outcome
    is uncertain; such failure is NOT evidence that the write was rejected."
   [path-id]
-  (let [{:keys [owner path writer observe! observation]} *current-request-writer*]
+  (let [{:keys [owner path writer observe! observation source-bound?]}
+        *current-request-writer*]
     (when-not (and (qualified-id? path-id)
                    (identical? owner (Thread/currentThread))
                    (= path path-id)
@@ -199,7 +242,9 @@
       (reject! :no-matching-active-thread-bound-request-writer))
     (let [result (writer)]
       (when observe!
-        (checked-readback! observe! result observation))
+        (if source-bound?
+          (checked-source-bound-readback! observe! result observation)
+          (checked-readback! observe! result observation)))
       result)))
 
 (defn current-request-atomic-readback-report!
@@ -537,12 +582,22 @@
   ([adoption-handle contract-source operation-writer-source
     route-writer-paths node source! revision-field policy expected-target!
     source-backed? plan-bound-prestate? unified? incorporation-input! observe?]
+   (issue-parallel-request-module*
+    adoption-handle contract-source operation-writer-source
+    route-writer-paths node source! revision-field policy expected-target!
+    source-backed? plan-bound-prestate? unified? incorporation-input! observe? false))
+  ([adoption-handle contract-source operation-writer-source
+    route-writer-paths node source! revision-field policy expected-target!
+    source-backed? plan-bound-prestate? unified? incorporation-input!
+    observe? source-bound?]
   (let [atomic? (some? incorporation-input!)]
-  (issuer-seams! unified? atomic? observe?)
+  (issuer-seams! unified? atomic? observe? source-bound?)
   (when-not (and (boolean? source-backed?)
                  (boolean? plan-bound-prestate?)
                  (boolean? unified?)
                  (boolean? observe?)
+                 (boolean? source-bound?)
+                 (or (not source-bound?) observe?)
                  (or (not observe?) atomic?)
                  (or (not atomic?)
                      (and unified? source-backed? plan-bound-prestate?
@@ -574,7 +629,7 @@
            {})
          :biff.core/start
          (fn [intermediate-system]
-           (issuer-seams! unified? atomic? observe?)
+           (issuer-seams! unified? atomic? observe? source-bound?)
            ;; Poison a first startup attempt before doing any host work.
            (when-not (compare-and-set! started nil :starting)
              (reject! :repeated-parallel-module-start))
@@ -600,7 +655,7 @@
                                    operation-writer-source routes)
                    final-handler
                    (fn [request]
-                     (issuer-seams! unified? atomic? observe?)
+                     (issuer-seams! unified? atomic? observe? source-bound?)
                      (when *current-request-writer*
                        (reject! :nested-parallel-request-dispatch))
                      (let [{:keys [operation id path] :as selected}
@@ -630,7 +685,7 @@
                        ;; Unified issuance performs its own strict revision
                        ;; check and SAME-capability acquired prestate/CAS.
                        ;; No discarded second preparation is made here.
-                       (issuer-seams! unified? atomic? observe?)
+                       (issuer-seams! unified? atomic? observe? source-bound?)
                        ;; This input is derived from the original Ring request,
                        ;; never from the candidate physical UPDATE. Its
                        ;; application-owned business meaning is NOT proved.
@@ -639,8 +694,14 @@
                                (try (incorporation-input! request)
                                     (catch Throwable _
                                       (reject! :command-incorporation-input-builder-failed))))
-                             _ (issuer-seams! unified? atomic? observe?)
+                             _ (issuer-seams! unified? atomic? observe? source-bound?)
                              issuance (cond
+                                        source-bound?
+                                        (original-scoped-readback-issue
+                                         path operation node contract-source
+                                         {:expected-target! expected-target!}
+                                         request source revision-field
+                                         incorporation-input)
                                         atomic?
                                         (original-atomic-issue
                                          path operation node contract-source
@@ -655,14 +716,21 @@
                                         :else
                                         (original-issue path operation node
                                                         source revision-field))
-                             _ (issuer-seams! unified? atomic? observe?)
+                             _ (issuer-seams! unified? atomic? observe? source-bound?)
                              writer (:writer issuance)
                              observation (when observe? (atom {:state :not-observed}))
+                             _ (when (and source-bound?
+                                          (not (fn? (:observe-return! issuance))))
+                                 (reject! :missing-source-bound-readback-callback))
                              observe! (when observe?
-                                        (fn [result-key]
-                                          (issuer-seams! unified? atomic? observe?)
-                                          (original-atomic-readback
-                                           node source incorporation-input result-key)))
+                                        (if source-bound?
+                                          (fn [result]
+                                            (issuer-seams! unified? atomic? observe? source-bound?)
+                                            ((:observe-return! issuance) result))
+                                          (fn [result-key]
+                                            (issuer-seams! unified? atomic? observe? source-bound?)
+                                            (original-atomic-readback
+                                             node source incorporation-input result-key))))
                              registry (atom {path {:kind :issued-operation
                                                    :operation-id operation
                                                    :writer writer}})
@@ -679,7 +747,8 @@
                                              {:owner (Thread/currentThread)
                                               :path path :writer writer
                                               :observe! observe!
-                                              :observation observation}]
+                                              :observation observation
+                                              :source-bound? source-bound?}]
                                      (if singleton?
                                        (original-observe
                                         adoption-handle contract-source
@@ -735,7 +804,8 @@
                                 plan-bound-prestate?
                                 :unified-plan-bound-submission? unified?
                                 :atomic-command-incorporation? atomic?
-                                :postsubmission-readback? observe?})
+                                :postsubmission-readback? observe?
+                                :source-bound-return-readback? source-bound?})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
@@ -968,6 +1038,39 @@
      (bounded-parallel-policy! policy) resolver true true true
      incorporation-input! true)))
 
+(defn issue-plan-bound-source-return-readback-isolated-parallel-biff-request-module!
+  "v1620 opt-in Biff mediation with v1618's exact identity-registered
+   atomic writer and its own request-scoped, one-shot :observe-return!.
+   No independent transaction-key-based observer is supplied by this module.
+   Physical co-observation remains noncausal and grants no retry authority."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field resolver-issuance
+   incorporation-input!]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (when-not (fn? incorporation-input!)
+      (reject! :requires-independent-command-incorporation-input-builder))
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field nil resolver true true
+     true incorporation-input! true true)))
+
+(defn issue-plan-bound-source-return-readback-bounded-isolated-parallel-biff-request-module!
+  "v1620 bounded-admission counterpart. Independent request-local writers
+   and exact-return observers execute within their owning request scopes."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field policy resolver-issuance
+   incorporation-input!]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (when-not (fn? incorporation-input!)
+      (reject! :requires-independent-command-incorporation-input-builder))
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field
+     (bounded-parallel-policy! policy) resolver true true
+     true incorporation-input! true true)))
+
 (defn require-current-isolated-parallel-biff-request-module!
   "Read-only inspection of exact locally installed final Biff handler.
    Does not execute requests, create writers, or claim that HTTP server uses
@@ -987,7 +1090,8 @@
     ;; writer issuer has been replaced since startup.
     (issuer-seams! (:unified-plan-bound-submission? state)
                    (:atomic-command-incorporation? state)
-                   (:postsubmission-readback? state))
+                   (:postsubmission-readback? state)
+                   (boolean (:source-bound-return-readback? state)))
     (when-not (and (identical? final-system (:final-system state))
                    (identical? (get final-system handler-slot)
                                (:final-handler state))
@@ -1030,9 +1134,14 @@
      :postsubmission-atomic-readback-required?
      (boolean (:postsubmission-readback? state))
      :postsubmission-atomic-readback-policy
-     (if (:postsubmission-readback? state)
+     (cond
+       (:source-bound-return-readback? state)
+       :same-request-exact-issued-writer-return-pinned-basis
+       (:postsubmission-readback? state)
        :same-request-after-registered-writer-return-pinned-basis
-       :not-required-by-this-mediator)
+       :else :not-required-by-this-mediator)
+     :source-bound-return-readback-required?
+     (boolean (:source-bound-return-readback? state))
      :postsubmission-readback-causality :not-established
      :postsubmission-readback-retry-authority :none
      :atomic-command-commit-claim :not-established
