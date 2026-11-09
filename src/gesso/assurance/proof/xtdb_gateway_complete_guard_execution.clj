@@ -20,8 +20,10 @@
    v1600 adds an independent OPT-IN two-write constructor: strengthen the
    domain UPDATE as above, append the canonical durable command outcome CREATE
    with an absence ASSERT, then delegate the whole five-operation vector to
-   ONE restricted XTDB submission. This is a physical building block, not yet
-   the certified-plan-bound, externally acquired, monotonic, Biff-issued path."
+   ONE restricted XTDB submission. v1612 additionally requires the exact
+   restricted-gateway return object and its source-bound one-attempt journal
+   before that public key can propagate to Biff readback. This is process-
+   local provenance, not authenticated physical transaction causality."
   (:require [gesso.assurance.proof.xtdb-restricted-submission-gateway :as gateway]
             [gesso.model.command :as command]
             [gesso.model.command-resolution :as resolution]
@@ -204,14 +206,85 @@
 (def incorporation-version 1)
 (def ^:private original-incorporation resolution/incorporation-plan)
 (def ^:private original-require-record resolution/require-record)
+(def ^:private original-local-return gateway/require-local-return!)
+(def ^:private original-local-attempt gateway/require-local-attempt!)
 
 (defn- incorporation-seams! []
   (check-seams!)
   (when-not (and (identical? original-incorporation
                              (var-get #'resolution/incorporation-plan))
                  (identical? original-require-record
-                             (var-get #'resolution/require-record)))
+                             (var-get #'resolution/require-record))
+                 (identical? original-local-return
+                             (var-get #'gateway/require-local-return!))
+                 (identical? original-local-attempt
+                             (var-get #'gateway/require-local-attempt!)))
     (reject! :substituted-command-incorporation-seam)))
+
+(defn- require-atomic-local-return!
+  "v1612: Check only the SAME registered restricted gateway and the exact
+   in-process response object from its ONE two-write execute-tx call.
+   This is an execution-origin check, NOT a durable or causal proof.
+   Failed checks occur after a potentially committed submission and MUST be
+   treated by callers as an UNKNOWN outcome, never as safe retry authority."
+  [prepared response]
+  (incorporation-seams!)
+  (let [returned (try (original-local-return prepared response)
+                      (catch Throwable _
+                        (reject! :atomic-return-origin-not-established)))
+        attempt (try (original-local-attempt prepared)
+                     (catch Throwable _
+                       (reject! :atomic-attempt-origin-not-established)))]
+    (incorporation-seams!)
+    (when-not
+      (and (= gateway/local-return-type (:type returned))
+           (= gateway/local-return-version (:version returned))
+           (= gateway/local-attempt-type (:type attempt))
+           (= gateway/local-attempt-version (:version attempt))
+           (= gateway/gateway-version (:gateway-version returned)
+              (:gateway-version attempt))
+           (= :exact-object-from-owned-call-site
+              (:local-return-linkage returned))
+           (= :readmitted-source-derived-finite-vector
+              (:operation-origin returned))
+           (= :process-local-nonauthenticating
+              (:source-binding-scope returned)
+              (:source-binding-scope attempt))
+           (string? (:process-local-source-binding returned))
+           (seq (:process-local-source-binding returned))
+           (= (:process-local-source-binding returned)
+              (:process-local-source-binding attempt))
+           (= (:process-local-attempt-id returned)
+              (:process-local-attempt-id attempt))
+           (= 1 (:owned-execute-tx-call-entries returned)
+              (:owned-execute-tx-call-entries attempt))
+           (= 5 (:candidate-operation-count returned)
+              (:candidate-operation-count attempt))
+           (= 3 (:prewrite-assertion-count returned)
+              (:prewrite-assertion-count attempt))
+           (= 2 (:whole-document-replacement-count returned)
+              (:whole-document-replacement-count attempt))
+           (= :public-transaction-key
+              (:observed-result-kind returned)
+              (:observed-result-kind attempt))
+           (= :returned-transaction-key (:status attempt))
+           (= [:prepared :checking :submitting :returned-transaction-key]
+              (:observed-local-events attempt))
+           (= :process-local-result-correspondence-only
+              (:proof-status returned))
+           (= :not-established (:committed-transaction returned)
+              (:committed-transaction attempt))
+           (= :not-checked (:public-key-to-ledger-join returned)
+              (:public-key-to-ledger-join attempt))
+           (= :not-established (:physical-poststate-causality returned)
+              (:physical-poststate-causality attempt))
+           (= :not-issued (:certificate returned))
+           (= :not-admitted (:admission returned))
+           (= :none (:authority returned)))
+      (reject! :atomic-return-attempt-linkage-not-established))
+    ;; Return the original object unchanged; Biff's later readback uses its
+    ;; public :tx-key. No new token, transaction authority, or receipt is made.
+    response))
 
 (defn prepare-complete-guard-command-incorporation-one-shot!
   "v1600: Prepare a SINGLE restricted XTDB submission with TWO writes:
@@ -319,7 +392,11 @@
                   (incorporation-seams!)
                   ;; The actual gateway independently re-admits and re-lowers
                   ;; its closed source immediately before the ONLY submission.
-                  ((:submit! prepared)))
+                  ;; Check its exact locally registered result and attempt
+                  ;; BEFORE the response reaches the issued Biff writer.
+                  ;; An after-submit check failure is outcome-unknown.
+                  (let [response ((:submit! prepared))]
+                    (require-atomic-local-return! prepared response)))
         summary! (fn []
                    (let [s ((:summary! prepared))]
                      {:type incorporation-type
