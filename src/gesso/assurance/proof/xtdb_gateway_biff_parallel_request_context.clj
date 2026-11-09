@@ -15,11 +15,17 @@
    actual registered writer only for the selected route on each request.
    Unselected routes are NOT represented as dynamically registered or invoked.
    v1571 optionally bounds concurrent guarded handler execution while retaining
-   independent per-request registries and actual parallel execution."
+   independent per-request registries and actual parallel execution.
+   v1576 adds explicit target-bound issuance variants. They require a second,
+   request-derived expected-target callback and check the exact candidate
+   gateway source before issuing any guarded writer. The caller still owns
+   independent target provenance and business semantics; legacy variants
+   remain opt-in, without target-binding assurance."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as adoption]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
             [gesso.assurance.proof.xtdb-gateway-biff-writer-assembly :as assembly]
+            [gesso.assurance.proof.xtdb-gateway-operation-target-binding :as targets]
             [gesso.live.application-preflight :as application])
   (:import (java.util WeakHashMap)
            (java.util.concurrent Semaphore TimeUnit)))
@@ -38,6 +44,7 @@
 (def ^:private original-observe assembly/observe-current-biff-registered-writer-assembly!)
 (def ^:private original-biff-observe writers/observe-checked-biff-host-registered-writer!)
 (def ^:private original-summary application/operation-summary)
+(def ^:private original-target-check targets/require-declared-operation-target!)
 (def ^:private handler-slot application/biff-ring-handler-key)
 (def ^:dynamic ^:private *current-request-writer* nil)
 (def ^:dynamic ^:private *bounded-parallel-dispatch* false)
@@ -79,6 +86,8 @@
                              (var-get #'writers/observe-checked-biff-host-registered-writer!))
                  (identical? original-summary
                              (var-get #'application/operation-summary))
+                 (identical? original-target-check
+                             (var-get #'targets/require-declared-operation-target!))
                  (= handler-slot application/biff-ring-handler-key))
     (reject! :substituted-parallel-mediation-boundary)))
 
@@ -223,6 +232,32 @@
         (finally
           (swap! pending dec))))))
 
+(defn- require-target-binding-before-issuance!
+  "Run v1574 against the precise candidate that will be handed to the writer
+   issuer. The expected target comes from a separate callback receiving ONLY
+   the original Ring request, never the candidate source. No authorization is
+   inferred from the callback's result; independent provenance is a premise.
+   Exceptions from an external expectation builder are redacted."
+  [selected-operation request source expected-target!]
+  (let [expectation (try
+                      (expected-target! request)
+                      (catch Throwable _
+                        (reject! :independent-target-derivation-failed)))]
+    (pinned!)
+    (let [result (original-target-check selected-operation expectation source)]
+      (when-not (and (= targets/report-type (:type result))
+                     (= targets/report-version (:version result))
+                     (= :conditional-declared-command-target-match
+                        (:status result))
+                     (= :local-structural-comparison-only
+                        (:proof-status result))
+                     (true? (:selected-route-operation-checked? result))
+                     (true? (:declared-command-and-protected-document-match-expected-target?
+                             result)))
+        (reject! :unexpected-target-binding-result)))
+    (pinned!)
+    nil))
+
 (defn- issue-parallel-request-module*
   "Issue a single-start Biff module providing parallel, request-ISOLATED
    guarded execution for one of several certified literal routes.
@@ -251,14 +286,21 @@
    ALL source routes must have distinct, unambiguous, certified literal routes
    and complete writer-path declarations. For multiple routes the other paths
    are not claimed as dynamically installed or observed by this request.
-   There is no global writer table to mutate and no queue serializing handlers."
+   There is no global writer table to mutate and no queue serializing handlers.
+
+   `expected-target!`, when provided by the explicit target-bound issuers,
+   accepts ONLY the Ring request and supplies {:operation-id
+   :command-operation :target}. It is evaluated independently of `source!`
+   and the selected route's operation is compared before any writer issuance.
+   Ordinary (legacy) issuers pass nil and remain WITHOUT this guarantee."
   [adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field policy]
+   route-writer-paths node source! revision-field policy expected-target!]
   (pinned!)
   (when-not (and (plain-map? contract-source)
                  (plain-map? operation-writer-source)
                  (plain-map? route-writer-paths)
                  (fn? source!)
+                 (or (nil? expected-target!) (fn? expected-target!))
                  (keyword? revision-field)
                  (some? node))
     (reject! :invalid-parallel-mediation-issuance))
@@ -308,6 +350,12 @@
                        (pinned!)
                        (original-adoption adoption-handle contract-source
                                           intermediate-system)
+                       ;; All target checks precede the ONLY issuance call.
+                       ;; This checks source identity, NOT the independent
+                       ;; business meaning or authority of expected-target!.
+                       (when expected-target!
+                         (require-target-binding-before-issuance!
+                          operation request source expected-target!))
                        (let [issuance (original-issue path operation node
                                                       source revision-field)
                              writer (:writer issuance)
@@ -373,7 +421,8 @@
                                 :final-system final-system
                                 :final-handler final-handler
                                 :route-count (count routes)
-                                :admission-policy policy})
+                                :admission-policy policy
+                                :target-binding-required? (boolean expected-target!)})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
@@ -388,7 +437,7 @@
    route-writer-paths node source! revision-field]
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field nil))
+   route-writer-paths node source! revision-field nil nil))
 
 (defn issue-bounded-isolated-parallel-biff-request-module!
   "Issue the same independent request-local Biff mediator with bounded active
@@ -404,7 +453,40 @@
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field
-   (bounded-parallel-policy! policy)))
+   (bounded-parallel-policy! policy) nil))
+
+(defn issue-target-bound-isolated-parallel-biff-request-module!
+  "Explicit unbounded request-local mediator that requires a separate
+   request->expected-target! callback. For EVERY matched request, check the
+   selected certified operation and the exact candidate source's UPDATE and
+   protected document against that expectation BEFORE writer issuance.
+   Wrong-document substitutions fail without submitting an XTDB transaction.
+
+   The callback must derive a trustworthy expected target independently of the
+   transaction source. Gesso cannot authenticate that external premise, nor
+   prove a matching command's business semantics. Direct writers remain open.
+   The legacy 7-argument issuer deliberately retains its prior behavior."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field expected-target!]
+  (when-not (fn? expected-target!)
+    (reject! :requires-independent-request-target-builder))
+  (issue-parallel-request-module*
+   adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field nil expected-target!))
+
+(defn issue-target-bound-bounded-isolated-parallel-biff-request-module!
+  "Bounded parallel variant requiring an independent request target callback.
+   A rejected target uses no writer permit or transaction authority beyond
+   the already admitted request slot. The caller must independently ground
+   its expectation in the declared operation and the request, not in source!."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field policy expected-target!]
+  (when-not (fn? expected-target!)
+    (reject! :requires-independent-request-target-builder))
+  (issue-parallel-request-module*
+   adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field
+   (bounded-parallel-policy! policy) expected-target!))
 
 (defn require-current-isolated-parallel-biff-request-module!
   "Read-only inspection of exact locally installed final Biff handler.
@@ -448,6 +530,14 @@
      :max-pending-requests (get-in state [:admission-policy :max-pending-requests])
      :wait-timeout-ms (get-in state [:admission-policy :wait-timeout-ms])
      :request-scoped-one-shot :fresh-per-request
+     :operation-target-binding-policy
+     (if (:target-binding-required? state)
+       :required-before-each-request-writer-issuance
+       :not-installed-for-legacy-issuer)
+     :expected-target-provenance
+     (if (:target-binding-required? state)
+       :independent-host-callback-not-authenticated
+       :not-established)
      :in-process-callback-trace :one-checked-invocation-per-request
      :biff-handler-slot :exact-local-identity-checked
      :actual-http-server-adoption :not-established
