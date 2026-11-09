@@ -1,5 +1,6 @@
 (ns gesso.assurance.proof.xtdb-gateway-route-target-provenance
-  "v1578/v1582: issue an identity-recognizable, source-linked request target resolver
+  "v1578/v1582/v1584: source-linked request target resolution and optional
+   sealed certified-plan target callback correspondence
    from a COMPLETE static route/physical-target declaration.
 
    Unlike a freely supplied request->expected-target callback, this resolver
@@ -17,8 +18,12 @@
    request. Matching a certified source's command-operation declaration does
    not establish the independently intended document ID. This does not prove
    business semantics, deployed installation, XTDB causality, or exclusion of
-   raw writers. v1580's source-backed mediator requires the issued resolver;
-   the legacy/callback-based paths retain their narrower guarantees."
+   raw writers. The v1584 plan-bound path additionally checks that its
+   immutable route targets are the SAME targets selected by the exact :target!
+   callable installed in each current certified plan. The application still
+   supplies that callback's table; this is correspondence, not a proof of
+   the table's business truth. v1580's source-backed mediator requires the
+   issued resolver; legacy/callback-based paths retain narrower guarantees."
   (:require [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified])
   (:import (java.util UUID WeakHashMap)))
@@ -30,6 +35,11 @@
 (def ^:private original-check certified/check-certified-contracts!)
 (def ^:private original-summary application/operation-summary)
 (def ^:private ^WeakHashMap issued (WeakHashMap.))
+;; A plan's original :target! callback can be bound to an issued literal
+;; route/target table BEFORE the certified plan is assembled. This separate
+;; registry is identity-based: a wrapper or a function returning the same
+;; target is not the originally issued plan callback.
+(def ^:private ^WeakHashMap issued-plan-targets (WeakHashMap.))
 
 (defn- reject! [reason]
   (throw (ex-info "Invalid source-linked XTDB route target provenance."
@@ -154,6 +164,128 @@
   (when (fn? resolver)
     (locking issued (.get issued resolver))))
 
+(defn- plan-target-entry [target!]
+  (when (fn? target!)
+    (locking issued-plan-targets (.get issued-plan-targets target!))))
+
+(defn issue-literal-route-plan-target!
+  "Issue a callback suitable for a v1251 certified plan's :target! slot.
+
+   The source is an immutable, application-declared route table:
+     route-id -> {:method :post :uri <literal-path> :target [table id]}
+
+   The resulting callback accepts [Ring-context binding] as expected by the
+   certified plan and selects a fixed target using ONLY the Ring method and
+   literal URI. It does not examine candidate commands, mutable request
+   parameters, or the binding. Unknown routes fail closed. This issuance
+   does not certify the truth or authorization of the declared document IDs.
+
+   To obtain stronger *cross-layer correspondence*, install this EXACT
+   callback as :target! when building the v1251 certified plan, then use
+   issue-certified-plan-bound-literal-route-target-resolver! after assembling
+   the application's checked route contract. This opt-in path cannot safely
+   retrofit an arbitrary existing application-supplied :target! function."
+  [declarations]
+  (when-not (and (plain-map? declarations)
+                 (seq declarations)
+                 (<= (count declarations) 512)
+                 (every? qualified-id? (keys declarations))
+                 (every? (fn [row]
+                           (and (plain-map? row)
+                                (= #{:method :uri :target} (set (keys row)))
+                                (keyword? (:method row))
+                                (string? (:uri row))
+                                (.startsWith ^String (:uri row) "/")
+                                (not (re-find #"[{}:*]" (:uri row)))
+                                (physical-target? (:target row))))
+                         (vals declarations))
+                 (= (count declarations)
+                    (count (set (map (juxt :method :uri)
+                                     (vals declarations))))))
+    (reject! :invalid-or-ambiguous-literal-plan-target-declarations))
+  (let [by-selector (into {}
+                          (map (fn [[_ {:keys [method uri target]}]]
+                                 [[method uri] target])
+                               declarations))
+        target! (fn [ctx _binding]
+                  (when-not (plain-map? ctx)
+                    (reject! :unmatched-issued-literal-plan-target))
+                  (or (get by-selector [(:request-method ctx) (:uri ctx)])
+                      (reject! :unmatched-issued-literal-plan-target)))]
+    (locking issued-plan-targets
+      (.put issued-plan-targets target! {:declarations declarations}))
+    target!))
+
+(defn- checked-plan-target-declarations!
+  "Reconstruct target expectations from EXACT issued certified-plan :target!
+   callables. Never infer a target from a candidate transaction."
+  [contract-source route-index plan-targets]
+  (let [operations (set (map :operation (vals route-index)))]
+    (when-not (and (plain-map? plan-targets)
+                   (= operations (set (keys plan-targets)))
+                   (every? fn? (vals plan-targets)))
+      (reject! :invalid-or-incomplete-issued-plan-targets))
+    (reduce-kv
+     (fn [acc operation target!]
+       (let [sealed (or (plan-target-entry target!)
+                        (reject! :unissued-certified-plan-target-callback))
+             actual-target! (get-in contract-source
+                                    [:certified-operations operation
+                                     :current-source :target!])
+             expected (into {}
+                            (for [[[method uri] row] route-index
+                                  :when (= operation (:operation row))]
+                              [(:route-id row)
+                               (assoc row :method method :uri uri)]))
+             declarations (:declarations sealed)]
+         (when-not (identical? target! actual-target!)
+           (reject! :certified-plan-target-callback-identity-mismatch))
+         (when-not (= (set (keys expected)) (set (keys declarations)))
+           (reject! :issued-plan-target-route-coverage-mismatch))
+         (reduce-kv
+          (fn [result route-id {:keys [method uri target]}]
+            (let [row (get expected route-id)]
+              (when-not (and (= method (:method row))
+                             (= uri (:uri row)))
+                (reject! :issued-plan-target-selector-mismatch))
+              (assoc result route-id
+                     {:command-operation (:command-operation row)
+                      :target target})))
+          acc declarations)))
+     {} plan-targets)))
+
+(defn- issue-resolver! [contract-source routes declarations plan-targets]
+  (let [declarations (checked-static-target-declarations! routes declarations)
+        resolver (fn [request]
+                   (pinned!)
+                   (when-not (plain-map? request)
+                     (reject! :unmatched-certified-literal-request))
+                   (let [current (current-literal-route-index! contract-source)]
+                     (when-not (= routes current)
+                       (reject! :certified-route-index-changed))
+                     (when plan-targets
+                       (when-not (= declarations
+                                    (checked-plan-target-declarations!
+                                     contract-source current plan-targets))
+                         (reject! :certified-plan-target-expectation-changed)))
+                     (let [{:keys [route-id operation]}
+                           (get current [(:request-method request)
+                                         (:uri request)])]
+                       (when-not route-id
+                         (reject! :unmatched-certified-literal-request))
+                       (let [{:keys [command-operation target]}
+                             (get declarations route-id)]
+                         {:operation-id operation
+                          :command-operation command-operation
+                          :target target}))))]
+    (pinned!)
+    (locking issued
+      (.put issued resolver {:source contract-source
+                             :routes routes
+                             :declarations declarations
+                             :plan-targets plan-targets}))
+    {:expected-target! resolver}))
+
 (defn issue-certified-literal-route-target-resolver!
   "Issue a process-local resolver from one CURRENT certified contract and a
    complete startup map of route ID -> {:command-operation :target}.
@@ -173,30 +305,28 @@
    This is NOT an authentication of the startup declarations, request, user,
    physical document, or deployment; the caller must discharge those premises."
   [contract-source route-target-declarations]
+  (let [routes (current-literal-route-index! contract-source)]
+    (issue-resolver! contract-source routes route-target-declarations nil)))
+
+(defn issue-certified-plan-bound-literal-route-target-resolver!
+  "Opt-in stronger static target correspondence for certified literal routes.
+
+   `plan-targets` is a COMPLETE map of application operation ID -> EXACT
+   Gesso-issued :target! callable returned by issue-literal-route-plan-target!.
+   Each callable MUST be the callback installed in that operation's current,
+   reverified v1251 certified-plan source. Its closed route target table must
+   cover exactly that operation's certified literal routes and selectors.
+
+   Returns {:expected-target! issued-resolver}, compatible with the v1580
+   source-backed Biff mediator. Each lookup rechecks the current certified
+   source, callback identities, and sealed static targets. This establishes
+   agreement of the route target with the installed certified PLAN callback,
+   NOT independent truth of a business document ID or its authorization."
+  [contract-source plan-targets]
   (let [routes (current-literal-route-index! contract-source)
-        declarations (checked-static-target-declarations!
-                      routes route-target-declarations)
-        resolver (fn [request]
-                   (pinned!)
-                   (when-not (plain-map? request)
-                     (reject! :unmatched-certified-literal-request))
-                   (let [current (current-literal-route-index! contract-source)]
-                     (when-not (= routes current)
-                       (reject! :certified-route-index-changed))
-                     (let [{:keys [route-id operation]}
-                           (get current [(:request-method request) (:uri request)])]
-                       (when-not route-id
-                         (reject! :unmatched-certified-literal-request))
-                       (let [{:keys [command-operation target]}
-                             (get declarations route-id)]
-                         {:operation-id operation
-                          :command-operation command-operation
-                          :target target}))))]
-    (pinned!)
-    (locking issued (.put issued resolver {:source contract-source
-                                          :routes routes
-                                          :declarations declarations}))
-    {:expected-target! resolver}))
+        declarations (checked-plan-target-declarations!
+                      contract-source routes plan-targets)]
+    (issue-resolver! contract-source routes declarations plan-targets)))
 
 (defn require-current-certified-literal-route-target-resolver!
   "Inspect an EXACT issued resolver against its original contract source.
@@ -205,7 +335,7 @@
    mediator uses this resolver; legacy and callback-based issuers do not."
   [resolver contract-source]
   (pinned!)
-  (let [{:keys [source routes declarations] :as issued-entry}
+  (let [{:keys [source routes declarations plan-targets] :as issued-entry}
         (or (entry resolver) (reject! :unissued-target-resolver))]
     (when-not (and (identical? source contract-source)
                    issued-entry)
@@ -213,7 +343,12 @@
     (let [current (current-literal-route-index! contract-source)]
       (when-not (= routes current)
         (reject! :certified-route-index-changed))
-      (checked-static-target-declarations! current declarations))
+      (checked-static-target-declarations! current declarations)
+      (when plan-targets
+        (when-not (= declarations
+                     (checked-plan-target-declarations!
+                      contract-source current plan-targets))
+          (reject! :certified-plan-target-expectation-changed))))
     (pinned!)
     {:type report-type
      :version report-version
@@ -222,7 +357,11 @@
      :every-declared-route-certified? true
      :operation-identity :rederived-from-current-certified-contract
      :command-operation-identity :joined-to-current-certified-plan-source
-     :target-identity :closed-startup-route-declaration
+     :target-identity (if plan-targets
+                        :closed-issued-certified-plan-target-callback
+                        :closed-startup-route-declaration)
+     :certified-plan-target-callback-identity
+     (if plan-targets :exact-issued-source-callback-checked :not-established)
      :candidate-command-used-to-derive-target? false
      :request-document-parameters-used? false
      :request-match :exact-ring-method-and-literal-uri
