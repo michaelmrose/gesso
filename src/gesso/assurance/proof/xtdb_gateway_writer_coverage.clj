@@ -26,6 +26,13 @@
    new constructor. The certified application's target-table business truth,
    deployed handler adoption, transaction causality and bypass closure remain
    outside these local observations.
+   v1604 adds a separate opt-in identity-registered request-local writer
+   backed by v1602's ONE atomic domain UPDATE and durable command-record
+   CREATE gateway. This preserves the existing scope and callback-identity
+   restrictions, but does NOT yet install that issuer into the Biff mediator.
+   Command-argument/target correspondence, principal authorization, outcome
+   authenticity, record readback, external writer closure, commit causality,
+   and abstract refinement remain unproved.
    Handles and diagnostics are NOT certificates or transaction authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.physical-writer-inventory :as inventory]
@@ -54,6 +61,8 @@
 (def ^:private original-prepare monotonic/prepare-monotonic-revision-one-shot!)
 (def ^:private original-plan-bound-prepare
   monotonic/prepare-plan-bound-monotonic-revision-one-shot!)
+(def ^:private original-incorporation-prepare
+  monotonic/prepare-plan-bound-monotonic-command-incorporation-one-shot!)
 (def ^:private original-inventory inventory/describe-physical-writer-inventory!)
 (def ^:private original-route-observe routes/observe-checked-ring-route!)
 (def ^:private original-route-recheck routes/require-current-route-dispatch!)
@@ -112,6 +121,76 @@
                         (var-get #'monotonic/prepare-plan-bound-monotonic-revision-one-shot!))
     (reject! :substituted-plan-bound-writer-issuer)))
 
+(defn- incorporation-seams! []
+  ;; Additional v1602 constructor is pinned only on the opt-in two-write path.
+  ;; Existing request-scoped and v1592 writer issuances retain their contracts.
+  (plan-bound-seams!)
+  (when-not (identical?
+             original-incorporation-prepare
+             (var-get #'monotonic/prepare-plan-bound-monotonic-command-incorporation-one-shot!))
+    (reject! :substituted-incorporation-writer-issuer)))
+
+(defn- prepared-seams! [kind]
+  (case kind
+    :ordinary (seams!)
+    :plan-bound (plan-bound-seams!)
+    :plan-bound-incorporation (incorporation-seams!)
+    (reject! :unsupported-registered-writer-gateway-kind)))
+
+(defn- expected-prepared-contract! [kind gateway summary]
+  ;; These are checks of the ORIGINAL constructor's redacted output, not
+  ;; independently issued certificates or evidence of physical commit.
+  (when-not
+    (and (fn? (:submit! gateway))
+         (fn? (:summary! gateway))
+         (= :prepared (:status summary))
+         (case kind
+           :ordinary
+           (and (= monotonic/monotonic-type (:type gateway))
+                (= monotonic/monotonic-version (:version gateway)))
+
+           :plan-bound
+           (and (= monotonic/plan-bound-monotonic-type (:type gateway))
+                (= monotonic/plan-bound-monotonic-version (:version gateway))
+                (= 1 (:physical-submission-gateways-prepared summary))
+                (= :source-checked-exactly-one-nonwrapping-successor
+                   (:revision-policy summary))
+                (= :one-prepared-acquired-gateway-for-this-submission
+                   (:prestate-submission-correspondence summary))
+                (= :conditional-plan-bound-monotonic-prestate
+                   (:proof-status summary))
+                (= :not-issued (:certificate summary))
+                (= :not-admitted (:admission summary)))
+
+           :plan-bound-incorporation
+           (and (= monotonic/plan-bound-incorporation-type (:type gateway))
+                (= monotonic/plan-bound-incorporation-version (:version gateway))
+                (= :prepared (:underlying-gateway-status summary))
+                (= 1 (:physical-submission-gateways-prepared summary))
+                (= 2 (:admitted-transaction-write-count summary))
+                (= :complete-top-level-cas (:domain-update summary))
+                (= :canonical-absence-precondition-prepared
+                   (:command-record-create summary))
+                (= :conditional-on-xtdb-assert-and-put-semantics
+                   (:atomicity summary))
+                (= :source-checked-exactly-one-nonwrapping-successor
+                   (:revision-policy summary))
+                (= :exact-current-issued-callback-checked-at-preparation
+                   (:plan-target-correspondence summary))
+                (= :same-node-pinned-read-matched-at-preparation
+                   (:external-prestate summary))
+                (= :bound-to-selected-route
+                   (:command-record-operation summary))
+                (= :conditional-plan-bound-atomic-incorporation
+                   (:proof-status summary))
+                (= :not-established
+                   (:registered-biff-writer-adoption summary))
+                (= :not-established (:physical-commit-causality summary))
+                (= :not-issued (:certificate summary))
+                (= :not-admitted (:admission summary)))
+           false))
+    (reject! :unexpected-monotonic-gateway-contract)))
+
 (defn- route-seams! []
   (seams!)
   (when-not (and (identical? original-route-observe
@@ -150,41 +229,28 @@
 (defn- issue-writer-core!
   ([path-id operation-id node gateway-source revision-field request-scoped?]
    (issue-writer-core! path-id operation-id node gateway-source revision-field
-                       request-scoped? nil))
+                       request-scoped? nil :ordinary))
   ([path-id operation-id node gateway-source revision-field request-scoped?
     prepared-plan-bound-gateway]
-   ;; This private extra argument is supplied ONLY by the plan-bound issuer.
-   ;; An already prepared v1590 gateway, rather than a second generic gateway,
-   ;; becomes the exact registered callback's one permitted submission.
-   (if prepared-plan-bound-gateway (plan-bound-seams!) (seams!))
+   (issue-writer-core! path-id operation-id node gateway-source revision-field
+                       request-scoped? prepared-plan-bound-gateway :plan-bound))
+  ([path-id operation-id node gateway-source revision-field request-scoped?
+    prepared-gateway kind]
+   ;; A prepared v1590 or v1602 gateway is the ONE physical submission
+   ;; behind the same locally issued, exact identity-registered callback.
+   ;; The additional kind is private, supplied only by the matching issuer.
+   (when-not (= (= kind :ordinary) (nil? prepared-gateway))
+     (reject! :unexpected-registered-writer-gateway-kind))
+   (prepared-seams! kind)
    (when-not (and (qualified-id? path-id) (qualified-id? operation-id))
      (reject! :invalid-path-or-operation-id))
-   (let [gateway (or prepared-plan-bound-gateway
+   (let [gateway (or prepared-gateway
                      (original-prepare node gateway-source revision-field))
          summary (try ((:summary! gateway))
                       (catch Throwable _
                         (reject! :invalid-prepared-writer-summary)))]
-     (if prepared-plan-bound-gateway (plan-bound-seams!) (seams!))
-     (when-not (and (= (if prepared-plan-bound-gateway
-                         monotonic/plan-bound-monotonic-type
-                         monotonic/monotonic-type) (:type gateway))
-                    (= (if prepared-plan-bound-gateway
-                         monotonic/plan-bound-monotonic-version
-                         monotonic/monotonic-version) (:version gateway))
-                    (fn? (:submit! gateway))
-                    (fn? (:summary! gateway))
-                    (= :prepared (:status summary))
-                    (or (not prepared-plan-bound-gateway)
-                        (and (= 1 (:physical-submission-gateways-prepared summary))
-                             (= :source-checked-exactly-one-nonwrapping-successor
-                                (:revision-policy summary))
-                             (= :one-prepared-acquired-gateway-for-this-submission
-                                (:prestate-submission-correspondence summary))
-                             (= :conditional-plan-bound-monotonic-prestate
-                                (:proof-status summary))
-                             (= :not-issued (:certificate summary))
-                             (= :not-admitted (:admission summary)))))
-       (reject! :unexpected-monotonic-gateway-contract))
+     (prepared-seams! kind)
+     (expected-prepared-contract! kind gateway summary)
     (let [submit! (:submit! gateway)
           handle (WriterHandle.)
           token (Object.)
@@ -193,7 +259,7 @@
           ;; reactivated by a later HTTP request.
           scope (when request-scoped? (atom {:state :available}))
           writer (fn [& args]
-                   (when prepared-plan-bound-gateway (plan-bound-seams!))
+                   (prepared-seams! kind)
                    (when (seq args)
                      (reject! :registered-writer-requires-zero-arguments))
                    (when request-scoped?
@@ -212,7 +278,7 @@
           with-request!
           (when request-scoped?
             (fn [dispatch!]
-              (when prepared-plan-bound-gateway (plan-bound-seams!))
+              (prepared-seams! kind)
               (when-not (fn? dispatch!)
                 (reject! :invalid-request-scope-dispatch))
               (let [active {:state :active :owner (Thread/currentThread)}
@@ -310,6 +376,41 @@
     (plan-bound-seams!)
     (issue-writer-core! path-id operation-id node candidate-source revision-field
                         true prepared)))
+
+(defn issue-request-scoped-plan-bound-atomic-incorporation-writer!
+  "v1604: Issue a recognized, ZERO-argument, request-scoped registered writer
+   backed by the SAME v1602 ONE-SUBMISSION atomic-incorporation gateway.
+
+   [path-id operation-id node contract-source resolver-issuance request
+    candidate-source revision-field incorporation-input]
+
+   The selected certified operation is bound to the command record, the
+   current issued plan callback independently selects the protected domain
+   document, the complete pinned prestate and exact-successor monotonic
+   revision are checked, and the original two-write gateway owns the one
+   permitted domain UPDATE + durable command-record CREATE transaction.
+
+   Return {:handle :writer :with-request! :request-scope-status!}. Register
+   the exact returned :writer, NOT a wrapper, in the observed host table.
+   Invoke it only synchronously inside its one-use :with-request! scope, on
+   the owning thread, with no arguments. Existing inventory and checked
+   Biff writer-identity observers recognize the exact same issuance.
+
+   This constructor DOES NOT install the Biff mediator or prove application
+   authorization, command argument correctness, final XTDB commit, durable
+   readback, physical causality, external writer closure, or refinement.
+   Those remain separate obligations. Older issuers are unchanged."
+  [path-id operation-id node contract-source resolver-issuance request
+   candidate-source revision-field incorporation-input]
+  (incorporation-seams!)
+  (when-not (and (qualified-id? path-id) (qualified-id? operation-id))
+    (reject! :invalid-path-or-operation-id))
+  (let [prepared (original-incorporation-prepare
+                  node contract-source resolver-issuance operation-id request
+                  candidate-source revision-field incorporation-input)]
+    (incorporation-seams!)
+    (issue-writer-core! path-id operation-id node candidate-source revision-field
+                        true prepared :plan-bound-incorporation)))
 
 (defn- enumerate-twice! [source expected-paths]
   (let [enumerate! (:enumerate-write-paths! source)
