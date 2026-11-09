@@ -33,11 +33,20 @@
    Command-argument/target correspondence, principal authorization, outcome
    authenticity, record readback, external writer closure, commit causality,
    and abstract refinement remain unproved.
+   v1618 adds an opt-in request-scoped writer backed by v1616's single
+   plan-bound atomic submission plus exact-return pinned readback. The issued
+   writer remains the original zero-argument identity-registered callback;
+   the separate observation callback is callable only in the SAME owning
+   request scope for the EXACT result returned by that callback. Readback is
+   an observation, not proof of physical causality, retry authorization, or
+   installed Biff mediator adoption. Older issuers remain unchanged.
    Handles and diagnostics are NOT certificates or transaction authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.physical-writer-inventory :as inventory]
             [gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution
              :as monotonic]
+            [gesso.assurance.proof.xtdb-gateway-atomic-submitted-readback
+             :as submitted]
             [gesso.assurance.proof.installed-route-provenance :as routes]
             [gesso.assurance.proof.checked-biff-host-adoption :as biff-host]
             [gesso.live.application-preflight :as application])
@@ -63,6 +72,8 @@
   monotonic/prepare-plan-bound-monotonic-revision-one-shot!)
 (def ^:private original-incorporation-prepare
   monotonic/prepare-plan-bound-monotonic-command-incorporation-one-shot!)
+(def ^:private original-readback-prepare
+  submitted/prepare-plan-bound-atomic-return-readback-one-shot!)
 (def ^:private original-inventory inventory/describe-physical-writer-inventory!)
 (def ^:private original-route-observe routes/observe-checked-ring-route!)
 (def ^:private original-route-recheck routes/require-current-route-dispatch!)
@@ -130,11 +141,21 @@
              (var-get #'monotonic/prepare-plan-bound-monotonic-command-incorporation-one-shot!))
     (reject! :substituted-incorporation-writer-issuer)))
 
+(defn- return-readback-seams! []
+  ;; The extra dependency belongs ONLY to this opt-in issuer. Retain all
+  ;; earlier registered-writer contracts and their original pinning rules.
+  (incorporation-seams!)
+  (when-not (identical?
+             original-readback-prepare
+             (var-get #'submitted/prepare-plan-bound-atomic-return-readback-one-shot!))
+    (reject! :substituted-atomic-return-readback-issuer)))
+
 (defn- prepared-seams! [kind]
   (case kind
     :ordinary (seams!)
     :plan-bound (plan-bound-seams!)
     :plan-bound-incorporation (incorporation-seams!)
+    :plan-bound-return-readback (return-readback-seams!)
     (reject! :unsupported-registered-writer-gateway-kind)))
 
 (defn- expected-prepared-contract! [kind gateway summary]
@@ -143,7 +164,9 @@
   (when-not
     (and (fn? (:submit! gateway))
          (fn? (:summary! gateway))
-         (= :prepared (:status summary))
+         (= :prepared (if (= kind :plan-bound-return-readback)
+                        (:submission-status summary)
+                        (:status summary)))
          (case kind
            :ordinary
            (and (= monotonic/monotonic-type (:type gateway))
@@ -186,6 +209,30 @@
                 (= :not-established
                    (:registered-biff-writer-adoption summary))
                 (= :not-established (:physical-commit-causality summary))
+                (= :not-issued (:certificate summary))
+                (= :not-admitted (:admission summary)))
+           :plan-bound-return-readback
+           (and (= #{:type :version :submit! :observe-return! :summary!}
+                   (set (keys gateway)))
+                (= submitted/plan-bound-gateway-type (:type gateway)
+                   (:type summary))
+                (= submitted/plan-bound-gateway-version (:version gateway)
+                   (:version summary))
+                (fn? (:observe-return! gateway))
+                (= :not-observed (:readback-status summary))
+                (= :one-certified-plan-bound-monotonic-atomic-two-write-gateway
+                   (:underlying-submission summary))
+                (= :requires-exact-local-return-object
+                   (:public-key-origin summary))
+                (= :same-captured-node-and-source
+                   (:readback-identity summary))
+                (= :not-established (:transaction-causality summary))
+                (= :caller-supplied-unattested
+                   (:backend-node-authenticity summary))
+                (= :not-established (:external-writer-closure summary))
+                (false? (:retry-authorized? summary))
+                (= :none (:live-settlement-authority summary)
+                   (:authority summary))
                 (= :not-issued (:certificate summary))
                 (= :not-admitted (:admission summary)))
            false))
@@ -251,7 +298,12 @@
                         (reject! :invalid-prepared-writer-summary)))]
      (prepared-seams! kind)
      (expected-prepared-contract! kind gateway summary)
-    (let [submit! (:submit! gateway)
+    (let [readback? (= kind :plan-bound-return-readback)
+          _ (when (and readback? (not request-scoped?))
+              (reject! :readback-writer-requires-request-scope))
+          submit! (:submit! gateway)
+          returned (when readback? (atom nil))
+          observed (when readback? (atom false))
           handle (WriterHandle.)
           token (Object.)
           ;; The scope is local to this ONE issuance. It never provides a
@@ -270,11 +322,56 @@
                    (trace-invocation! token :invoked)
                    (try
                      (let [result (submit!)]
+                       (when readback? (reset! returned result))
                        (trace-invocation! token :returned)
                        result)
                      (catch Throwable t
                        (trace-invocation! token :threw)
                        (throw t))))
+          observe-return!
+          (when readback?
+            (fn [result]
+              ;; Observer is not a second writer and cannot operate after
+              ;; the request has closed or from another thread. A copied or
+              ;; foreign return never consumes the sole observation permit.
+              (let [{:keys [state owner]} @scope]
+                (when-not (and (= :active state)
+                               (identical? owner (Thread/currentThread)))
+                  (reject! :readback-outside-owning-request-scope)))
+              (when-not (and (some? @returned)
+                             (identical? result @returned))
+                (reject! :not-the-registered-writer-return))
+              (when-not (compare-and-set! observed false true)
+                (reject! :readback-already-attempted))
+              (prepared-seams! kind)
+              (let [report ((:observe-return! gateway) result)]
+                ;; Preserve v1616's redacted bounded observation. No
+                ;; admission, retry, settlement or causality is conferred.
+                (when-not (and (= submitted/report-type (:type report))
+                               (= submitted/report-version (:version report))
+                               (contains?
+                                #{:bounded-local-return-and-pinned-readback-coobservation
+                                  :postsubmission-correspondence-not-established}
+                                (:status report))
+                               (= :exact-object-from-this-issued-submission
+                                  (:process-local-return report))
+                               (= :certified-plan-bound-monotonic-atomic-two-write-one-shot
+                                  (:submitted-gateway report))
+                               (= :same-captured-submission-inputs
+                                  (:readback-node-and-inputs report))
+                               (true? (:three-observations-share-pinned-basis? report))
+                               (= :not-established (:transaction-causality report))
+                               (false? (:retry-authorized? report))
+                               (= :none (:transaction-authority report)
+                                  (:live-settlement-authority report)
+                                  (:authority report))
+                               (= :not-issued (:certificate report))
+                               (= :not-admitted (:admission report))
+                               (= :bounded-process-local-return-and-pinned-coobservation
+                                  (:proof-status report)))
+                  (reject! :unexpected-scoped-atomic-readback-report))
+                (prepared-seams! kind)
+                report)))
           with-request!
           (when request-scoped?
             (fn [dispatch!]
@@ -304,7 +401,9 @@
         request-scoped?
         (assoc :with-request! with-request!
                :request-scope-status!
-               (fn [] (:state @scope))))))))
+               (fn [] (:state @scope)))
+        readback?
+        (assoc :observe-return! observe-return!))))))
 
 (defn issue-monotonic-registered-writer!
   "Issue one locally recognized, zero-argument monotonic XTDB writer.
@@ -411,6 +510,39 @@
     (incorporation-seams!)
     (issue-writer-core! path-id operation-id node candidate-source revision-field
                         true prepared :plan-bound-incorporation)))
+
+(defn issue-request-scoped-plan-bound-atomic-readback-writer!
+  "v1618: Issue ONE exact identity-registered, zero-argument request-scoped
+   atomic writer with a separate one-shot, exact-return pinned readback.
+
+   [path-id operation-id node contract-source resolver-issuance request
+    candidate-source revision-field incorporation-input]
+
+   The ONE underlying v1616 gateway preserves certified target provenance,
+   independently acquired complete-CAS prestate, exact-successor revision,
+   atomic domain and durable command-record incorporation, and one-shot
+   submission. Return {:handle :writer :with-request! :request-scope-status!
+   :observe-return!}. Register ONLY the exact :writer in the observed host
+   registry. Within its single owning-thread :with-request! scope, call
+   :writer, then pass that IDENTICAL return object to :observe-return!.
+   Observation is single-use; incorrect returns do not consume it. Errors
+   after submission leave the outcome UNKNOWN, never rejected or retryable.
+
+   The observation is not automatic yet: the Biff mediator must invoke it
+   while its request scope is active. This issuer does not establish deployed
+   handler adoption, application authorization, correct command arguments,
+   transaction causality, record immutability or external-writer closure."
+  [path-id operation-id node contract-source resolver-issuance request
+   candidate-source revision-field incorporation-input]
+  (return-readback-seams!)
+  (when-not (and (qualified-id? path-id) (qualified-id? operation-id))
+    (reject! :invalid-path-or-operation-id))
+  (let [prepared (original-readback-prepare
+                  node contract-source resolver-issuance operation-id request
+                  candidate-source revision-field incorporation-input)]
+    (return-readback-seams!)
+    (issue-writer-core! path-id operation-id node candidate-source revision-field
+                        true prepared :plan-bound-return-readback)))
 
 (defn- enumerate-twice! [source expected-paths]
   (let [enumerate! (:enumerate-write-paths! source)
