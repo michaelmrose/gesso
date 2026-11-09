@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-atomic-submitted-readback
-  "v1614: Opt-in, read-only join of v1612's authenticated PROCESS-LOCAL
+  "v1614/v1616: Opt-in, read-only join of v1612's authenticated PROCESS-LOCAL
    two-write submission return with v1608's single-basis XTDB observation.
 
    Prepare exactly ONE canonical atomic domain UPDATE + command-record CREATE
@@ -17,9 +17,12 @@
    command authorization, record immutability, external-writer closure,
    universal refinement, retry safety, or Live settlement. If observation
    fails after submission, the transaction's outcome is UNKNOWN, not rejected.
+   v1616 adds the stronger v1602 certified-plan-bound monotonic two-write
+   constructor, still without an identity-registered Biff request writer.
    Reports are redacted internal diagnostics, not certificates or authority."
   (:require [gesso.assurance.proof.xtdb-gateway-atomic-readback :as readback]
-            [gesso.assurance.proof.xtdb-gateway-complete-guard-execution :as complete])
+            [gesso.assurance.proof.xtdb-gateway-complete-guard-execution :as complete]
+            [gesso.assurance.proof.xtdb-gateway-monotonic-revision-execution :as monotonic])
   (:import [java.util.concurrent.atomic AtomicBoolean]
            [xtdb.api TransactionKey]))
 
@@ -33,6 +36,12 @@
 (def ^:private original-incorporation
   complete/prepare-complete-guard-command-incorporation-one-shot!)
 (def ^:private original-readback readback/acquire-atomic-command-readback!)
+(def ^:private original-plan-bound
+  monotonic/prepare-plan-bound-monotonic-command-incorporation-one-shot!)
+
+(def plan-bound-gateway-type
+  :gesso.assurance.proof.xtdb-gateway-atomic-submitted-readback/plan-bound-one-shot)
+(def plan-bound-gateway-version 1)
 
 (defn- reject! [reason]
   (throw (ex-info "Unsupported XTDB source-bound atomic return/readback."
@@ -74,50 +83,82 @@
     (reject! :invalid-pinned-readback-report))
   report)
 
-(defn prepare-source-bound-atomic-return-readback-one-shot!
-  "[node original-one-update-source incorporation-input] ->
-   {:type :version :submit! :observe-return! :summary!}.
 
-   :submit! is one-shot and returns the EXACT underlying v1612 submission map.
-   :observe-return! must be called with THAT map, exactly once, after the
-   successful local return. It queries the same captured node/source/input,
-   never an independently supplied key or expected document. A reported
-   failure after submission is an INDETERMINATE physical outcome.
-
-   The result is a redacted, bounded co-observation with an additional local
-   return-origin claim. It does NOT imply the returned key caused the writes.
-   This is a building block, not yet installed in the certified Biff writer."
-  [node source incorporation-input]
+(defn- plan-bound-seams! []
   (seams!)
-  (let [prepared (original-incorporation node source incorporation-input)
-        initial (try ((:summary! prepared))
+  (when-not (identical?
+             original-plan-bound
+             (var-get #'monotonic/prepare-plan-bound-monotonic-command-incorporation-one-shot!))
+    (reject! :substituted-certified-plan-incorporation-seam)))
+
+(defn- require-prepared! [kind prepared]
+  (let [initial (try ((:summary! prepared))
                      (catch Throwable _
-                       (reject! :invalid-atomic-gateway-summary)))
-        _ (when-not
-            (and (= complete/incorporation-type (:type prepared))
-                 (= complete/incorporation-version (:version prepared))
-                 (fn? (:submit! prepared)) (fn? (:summary! prepared))
-                 (= :prepared (:status initial))
-                 (= :prepared (:underlying-gateway-status initial))
-                 (= 0 (:owned-execute-tx-call-entries initial))
-                 (= 2 (:admitted-transaction-write-count initial))
-                 (= :one-derived-xtdb-vector
-                    (:single-restricted-submission initial))
-                 (= :not-issued (:certificate initial))
-                 (= :not-admitted (:admission initial)))
-            (reject! :unexpected-atomic-gateway-contract))
+                       (reject! :invalid-atomic-gateway-summary)))]
+    (when-not
+      (and (map? prepared)
+           (= #{:type :version :submit! :summary!} (set (keys prepared)))
+           (fn? (:submit! prepared)) (fn? (:summary! prepared))
+           (case kind
+             :ordinary
+             (and (= complete/incorporation-type (:type prepared))
+                  (= complete/incorporation-version (:version prepared))
+                  (= :prepared (:status initial))
+                  (= :prepared (:underlying-gateway-status initial))
+                  (= 0 (:owned-execute-tx-call-entries initial))
+                  (= 2 (:admitted-transaction-write-count initial))
+                  (= :one-derived-xtdb-vector
+                     (:single-restricted-submission initial)))
+             :plan-bound
+             (and (= monotonic/plan-bound-incorporation-type (:type prepared))
+                  (= monotonic/plan-bound-incorporation-version (:version prepared))
+                  (= :prepared (:status initial))
+                  (= :prepared (:underlying-gateway-status initial))
+                  (= 0 (:owned-execute-tx-call-entries initial))
+                  (= 1 (:physical-submission-gateways-prepared initial))
+                  (= 2 (:admitted-transaction-write-count initial))
+                  (= :complete-top-level-cas (:domain-update initial))
+                  (= :canonical-absence-precondition-prepared
+                     (:command-record-create initial))
+                  (= :conditional-on-xtdb-assert-and-put-semantics
+                     (:atomicity initial))
+                  (= :source-checked-exactly-one-nonwrapping-successor
+                     (:revision-policy initial))
+                  (= :exact-current-issued-callback-checked-at-preparation
+                     (:plan-target-correspondence initial))
+                  (= :same-node-pinned-read-matched-at-preparation
+                     (:external-prestate initial))
+                  (= :bound-to-selected-route
+                     (:command-record-operation initial))
+                  (= :conditional-plan-bound-atomic-incorporation
+                     (:proof-status initial)))
+             false)
+           (= :not-issued (:certificate initial))
+           (= :not-admitted (:admission initial)))
+      (reject! :unexpected-atomic-gateway-contract))))
+
+(defn- wrap-submission! [kind node source incorporation-input prepared]
+  ;; Only one already prepared gateway is accepted. No disposable second
+  ;; gateway may be prepared for a preflight or a readback operation.
+  (let [check! (if (= kind :plan-bound) plan-bound-seams! seams!)
+        _ (check!)
+        _ (require-prepared! kind prepared)
         attempted (AtomicBoolean. false)
         observation-attempted (AtomicBoolean. false)
-        ;; Keep the exact returned object private, as v1527 does. It must
-        ;; not be reconstructed from its public :tx-key or supplied by host.
         local-return (atom nil)
         observation-state (atom :not-observed)
+        gate-type (if (= kind :plan-bound) plan-bound-gateway-type gateway-type)
+        gate-version (if (= kind :plan-bound) plan-bound-gateway-version gateway-version)
+        submission-name (if (= kind :plan-bound)
+                          :certified-plan-bound-monotonic-atomic-two-write-one-shot
+                          :source-bound-two-write-one-shot)
         submit! (fn []
                   (when-not (.compareAndSet attempted false true)
                     (reject! :one-shot-already-attempted))
-                  (seams!)
-                  ;; v1612 checks source-bound restricted return and journal
-                  ;; before it permits this exact object to propagate.
+                  (check!)
+                  ;; v1602's submission rechecks its issued certified plan
+                  ;; target and exact-successor policy after this permit
+                  ;; has been irrevocably consumed.
                   (let [response ((:submit! prepared))]
                     (when-not (and (map? response)
                                    (instance? TransactionKey (:tx-key response)))
@@ -126,15 +167,13 @@
                     response))
         observe-return!
         (fn [response]
-          ;; Checking exact identity BEFORE any physical read rules out a
-          ;; foreign or reconstructed public TransactionKey as readback input.
           (when-not (and (some? @local-return)
                          (identical? response @local-return))
             (reject! :not-this-submission-local-return))
           (when-not (.compareAndSet observation-attempted false true)
             (reject! :readback-already-attempted))
           (reset! observation-state :outcome-unknown-or-unobserved)
-          (seams!)
+          (check!)
           (let [r (require-observation!
                    (original-readback node source incorporation-input
                                       (:tx-key response)))
@@ -147,7 +186,7 @@
                            :bounded-local-return-and-pinned-readback-coobservation
                            :postsubmission-correspondence-not-established)
                  :process-local-return :exact-object-from-this-issued-submission
-                 :submitted-gateway :source-bound-two-write-one-shot
+                 :submitted-gateway submission-name
                  :readback-node-and-inputs :same-captured-submission-inputs
                  :readback-status (:status r)
                  :domain-poststate-status (:domain-poststate-status r)
@@ -169,17 +208,19 @@
                  :admission :not-admitted
                  :authority :none
                  :proof-status :bounded-process-local-return-and-pinned-coobservation}]
-            (seams!)
+            (check!)
             (reset! observation-state (:status report))
             report))
         summary!
         (fn []
-          (seams!)
-          {:type gateway-type
-           :version gateway-version
+          (check!)
+          {:type gate-type
+           :version gate-version
            :submission-status (if (.get attempted) :permit-consumed :prepared)
            :readback-status @observation-state
-           :underlying-submission :one-source-derived-atomic-two-write-gateway
+           :underlying-submission (if (= kind :plan-bound)
+                                    :one-certified-plan-bound-monotonic-atomic-two-write-gateway
+                                    :one-source-derived-atomic-two-write-gateway)
            :public-key-origin :requires-exact-local-return-object
            :readback-identity :same-captured-node-and-source
            :transaction-causality :not-established
@@ -190,9 +231,41 @@
            :certificate :not-issued
            :admission :not-admitted
            :authority :none})]
-    (seams!)
-    {:type gateway-type
-     :version gateway-version
+    (check!)
+    {:type gate-type
+     :version gate-version
      :submit! submit!
      :observe-return! observe-return!
      :summary! summary!}))
+
+(defn prepare-source-bound-atomic-return-readback-one-shot!
+  "v1614: Read back the exact local return from one canonical atomic
+   two-write gateway, on the captured node/source/command inputs. This
+   preexisting constructor does NOT certify a plan or monotonic policy."
+  [node source incorporation-input]
+  (seams!)
+  (wrap-submission! :ordinary node source incorporation-input
+                    (original-incorporation node source incorporation-input)))
+
+(defn prepare-plan-bound-atomic-return-readback-one-shot!
+  "v1616: Prepare ONE certified-plan-bound, monotonic, complete-CAS,
+   two-write atomic incorporation gateway, and observe only its EXACT local
+   submission return on a pinned XTDB snapshot. The certified operation and
+   issued target resolver are rechecked by the v1602 gateway on submission.
+
+   [node contract-source resolver-issuance selected-operation request
+    candidate-source revision-field incorporation-input]
+
+   This is a building block for request-scoped registration, not an issued
+   Biff callback itself. It does NOT authenticate the caller-supplied node,
+   principal, command arguments, outcomes, transaction causality or deployed
+   writer coverage. Observation failure after submission is UNKNOWN, never
+   evidence of rejection or a permission to retry."
+  [node contract-source resolver-issuance selected-operation request
+   candidate-source revision-field incorporation-input]
+  (plan-bound-seams!)
+  (wrap-submission!
+   :plan-bound node candidate-source incorporation-input
+   (original-plan-bound node contract-source resolver-issuance
+                        selected-operation request candidate-source
+                        revision-field incorporation-input)))
