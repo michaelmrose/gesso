@@ -21,14 +21,20 @@
    source-backed target-bound issuers that REQUIRE a v1578 issued resolver
    linked by identity to the SAME certified contract, revalidated at issuance,
    startup, and before EACH request's candidate source and writer issuance.
-   The startup declaration's independent correctness remains an application
-   premise. Prior issuers retain their behavior and assurance scope."
+   v1588 adds a separate, opt-in certified-PLAN-bound prestate gate BEFORE
+   the existing request-scoped monotonic writer is issued. This first bridge
+   prepares an independent read-and-CAS capability but NEVER exposes or invokes
+   that capability: the actual registered writer is still the original
+   monotonic, independently prepared one-shot. This does not yet unify the
+   two preparations or certify the installed target table. Prior issuers
+   retain their behavior and assurance scope."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as adoption]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
             [gesso.assurance.proof.xtdb-gateway-biff-writer-assembly :as assembly]
             [gesso.assurance.proof.xtdb-gateway-operation-target-binding :as targets]
             [gesso.assurance.proof.xtdb-gateway-route-target-provenance :as provenance]
+            [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate :as guarded]
             [gesso.live.application-preflight :as application])
   (:import (java.util WeakHashMap)
            (java.util.concurrent Semaphore TimeUnit)))
@@ -50,6 +56,8 @@
 (def ^:private original-target-check targets/require-declared-operation-target!)
 (def ^:private original-provenance-check
   provenance/require-current-certified-literal-route-target-resolver!)
+(def ^:private original-plan-bound-prestate
+  guarded/prepare-plan-bound-acquired-one-shot!)
 (def ^:private handler-slot application/biff-ring-handler-key)
 (def ^:dynamic ^:private *current-request-writer* nil)
 (def ^:dynamic ^:private *bounded-parallel-dispatch* false)
@@ -95,6 +103,8 @@
                              (var-get #'targets/require-declared-operation-target!))
                  (identical? original-provenance-check
                              (var-get #'provenance/require-current-certified-literal-route-target-resolver!))
+                 (identical? original-plan-bound-prestate
+                             (var-get #'guarded/prepare-plan-bound-acquired-one-shot!))
                  (= handler-slot application/biff-ring-handler-key))
     (reject! :substituted-parallel-mediation-boundary)))
 
@@ -245,7 +255,7 @@
    inventory at every boundary; do not rely on a caller-generated report.
    Foreign resolvers, ordinary callbacks, checker substitutions, and errors
    from the independent verifier are rejected with redacted diagnostics."
-  [expected-target! contract-source]
+  [expected-target! contract-source plan-bound?]
   (pinned!)
   (when-not (fn? expected-target!)
     (reject! :requires-exact-issued-route-target-resolver))
@@ -260,8 +270,14 @@
                    (true? (:every-declared-route-certified? report))
                    (= :rederived-from-current-certified-contract
                       (:operation-identity report))
-                   (= :closed-startup-route-declaration
+                   (= (if plan-bound?
+                        :closed-issued-certified-plan-target-callback
+                        :closed-startup-route-declaration)
                       (:target-identity report))
+                   (if plan-bound?
+                     (= :exact-issued-source-callback-checked
+                        (:certified-plan-target-callback-identity report))
+                     true)
                    (false? (:candidate-command-used-to-derive-target? report))
                    (false? (:request-document-parameters-used? report))
                    (= :exact-ring-method-and-literal-uri (:request-match report))
@@ -278,12 +294,12 @@
   "Accept only the exact one-field v1578 issuance shape. Its callable must
    already be identity-registered for the selected contract; copying or
    wrapping the function does not create an issued provenance capability."
-  [resolver-issuance contract-source]
+  [resolver-issuance contract-source plan-bound?]
   (when-not (and (plain-map? resolver-issuance)
                  (= #{:expected-target!} (set (keys resolver-issuance))))
     (reject! :requires-exact-issued-route-target-resolver))
   (let [resolver (:expected-target! resolver-issuance)]
-    (require-issued-source-backed-target-resolver! resolver contract-source)
+    (require-issued-source-backed-target-resolver! resolver contract-source plan-bound?)
     resolver))
 
 (defn- require-target-binding-before-issuance!
@@ -310,6 +326,50 @@
                              result)))
         (reject! :unexpected-target-binding-result)))
     (pinned!)
+    nil))
+
+(defn- require-plan-bound-prestate-before-issuance!
+  "v1588: prepare (without invoking!) the current certified-plan-bound,
+   independently acquired complete-CAS gateway BEFORE issuing a separately
+   monotonic request writer. No capability from this extra preparation escapes.
+   This deliberately does not claim that the later writer uses the *same*
+   prepared submission: both gateways independently check the supplied node
+   and source, and the actual registered monotonic gateway owns its own CAS.
+   Any errors from the physical prestate read are reported without raw data."
+  [node contract-source expected-target! operation request source]
+  (pinned!)
+  (let [prepared (try
+                   (original-plan-bound-prestate
+                    node contract-source {:expected-target! expected-target!}
+                    operation request source)
+                   (catch Throwable _
+                     (reject! :plan-bound-guarded-prestate-preparation-failed)))
+        report (try
+                 ((:summary! prepared))
+                 (catch Throwable _
+                   (reject! :invalid-plan-bound-guarded-prestate-report)))]
+    (when-not (and (= guarded/report-type (:type prepared))
+                   (= guarded/report-version (:version prepared))
+                   (fn? (:submit! prepared))
+                   (fn? (:summary! prepared))
+                   (= guarded/report-type (:type report))
+                   (= guarded/report-version (:version report))
+                   (= :prepared (:status report))
+                   (= :same-node-pinned-read-matched-at-preparation
+                      (:external-before report))
+                   (= :canonical-complete-top-level-cas
+                      (:transaction-preconditions report))
+                   (= :conditional-plan-bound-acquired-prestate
+                      (:proof-status report))
+                   (= :one-shot-submission-capability
+                      (:transaction-authority report))
+                   (= :not-issued (:certificate report))
+                   (= :not-admitted (:admission report)))
+      (reject! :unexpected-plan-bound-guarded-prestate-report))
+    (pinned!)
+    ;; Deliberately discard the prepared submission. The only writer that may
+    ;; enter the inspected Biff registry is the separately issued monotonic
+    ;; request-scoped writer below. Consolidation is a future revision.
     nil))
 
 (defn- issue-parallel-request-module*
@@ -347,13 +407,18 @@
    :command-operation :target}. It is evaluated independently of `source!`
    and the selected route's operation is compared before any writer issuance.
    Ordinary (legacy) issuers pass nil and remain WITHOUT this guarantee.
-   When source-backed?, expected-target! MUST be a v1578-issued resolver for
-   this exact contract, rechecked at issuance, startup and every dispatch."
+   When source-backed?, expected-target! MUST be an issued resolver for
+   this exact contract, rechecked at issuance, startup and every dispatch.
+   `plan-bound-prestate?` additionally requires the *stronger* issued plan
+   target callback and a successful pre-issuance acquired-prestate gateway.
+   The actual writer remains the independent v1547 monotonic gateway."
   [adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field policy expected-target!
-   source-backed?]
+   source-backed? plan-bound-prestate?]
   (pinned!)
   (when-not (and (boolean? source-backed?)
+                 (boolean? plan-bound-prestate?)
+                 (or (not plan-bound-prestate?) source-backed?)
                  (or (not source-backed?) (fn? expected-target!))
                  (plain-map? contract-source)
                  (plain-map? operation-writer-source)
@@ -365,7 +430,7 @@
     (reject! :invalid-parallel-mediation-issuance))
   (when source-backed?
     (require-issued-source-backed-target-resolver!
-     expected-target! contract-source))
+     expected-target! contract-source plan-bound-prestate?))
   (let [handle (ParallelContextHandle.)
         initialized (atom false)
         started (atom nil)
@@ -387,7 +452,7 @@
              (reject! :parallel-module-not-initialized))
            (when source-backed?
              (require-issued-source-backed-target-resolver!
-              expected-target! contract-source))
+              expected-target! contract-source plan-bound-prestate?))
            (let [host (original-adoption adoption-handle contract-source
                                          intermediate-system)
                  intermediate-handler (get intermediate-system handler-slot)]
@@ -414,7 +479,7 @@
                      ;; writer, irrespective of the supplied candidate.
                      (when source-backed?
                        (require-issued-source-backed-target-resolver!
-                        expected-target! contract-source))
+                        expected-target! contract-source plan-bound-prestate?))
                      (original-adoption adoption-handle contract-source
                                         intermediate-system)
                      (let [source (source! request)]
@@ -427,6 +492,10 @@
                        (when expected-target!
                          (require-target-binding-before-issuance!
                           operation request source expected-target!))
+                       (when plan-bound-prestate?
+                         (require-plan-bound-prestate-before-issuance!
+                          node contract-source expected-target! operation
+                          request source))
                        (let [issuance (original-issue path operation node
                                                       source revision-field)
                              writer (:writer issuance)
@@ -495,7 +564,9 @@
                                 :admission-policy policy
                                 :target-binding-required? (boolean expected-target!)
                                 :source-backed-target-resolver-required?
-                                source-backed?})
+                                source-backed?
+                                :plan-bound-prestate-required?
+                                plan-bound-prestate?})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
@@ -510,7 +581,7 @@
    route-writer-paths node source! revision-field]
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field nil nil false))
+   route-writer-paths node source! revision-field nil nil false false))
 
 (defn issue-bounded-isolated-parallel-biff-request-module!
   "Issue the same independent request-local Biff mediator with bounded active
@@ -526,7 +597,7 @@
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field
-   (bounded-parallel-policy! policy) nil false))
+   (bounded-parallel-policy! policy) nil false false))
 
 (defn issue-target-bound-isolated-parallel-biff-request-module!
   "Explicit unbounded request-local mediator that requires a separate
@@ -545,7 +616,7 @@
     (reject! :requires-independent-request-target-builder))
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field nil expected-target! false))
+   route-writer-paths node source! revision-field nil expected-target! false false))
 
 (defn issue-target-bound-bounded-isolated-parallel-biff-request-module!
   "Bounded parallel variant requiring an independent request target callback.
@@ -559,7 +630,7 @@
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field
-   (bounded-parallel-policy! policy) expected-target! false))
+   (bounded-parallel-policy! policy) expected-target! false false))
 
 (defn issue-source-backed-target-bound-isolated-parallel-biff-request-module!
   "v1580 unbounded request-local mediator that REQUIRES a v1578 issuance map
@@ -575,10 +646,10 @@
   [adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field resolver-issuance]
   (let [resolver (require-resolver-issuance!
-                  resolver-issuance contract-source)]
+                  resolver-issuance contract-source false)]
     (issue-parallel-request-module*
      adoption-handle contract-source operation-writer-source
-     route-writer-paths node source! revision-field nil resolver true)))
+     route-writer-paths node source! revision-field nil resolver true false)))
 
 (defn issue-source-backed-target-bound-bounded-isolated-parallel-biff-request-module!
   "Bounded-parallel version of the v1580 issued source-backed target
@@ -588,11 +659,43 @@
   [adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field policy resolver-issuance]
   (let [resolver (require-resolver-issuance!
-                  resolver-issuance contract-source)]
+                  resolver-issuance contract-source false)]
     (issue-parallel-request-module*
      adoption-handle contract-source operation-writer-source
      route-writer-paths node source! revision-field
-     (bounded-parallel-policy! policy) resolver true)))
+     (bounded-parallel-policy! policy) resolver true false)))
+
+(defn issue-plan-bound-guarded-prestate-isolated-parallel-biff-request-module!
+  "v1588 opt-in unbounded mediator. Require an EXACT Gesso-issued resolver
+   whose sealed static targets equal the :target! callbacks in current
+   certified plans. Before issuing each request's registered monotonic writer,
+   independently acquire a full guarded XTDB prestate through v1586.
+   The acquired gateway's submit! NEVER enters the Biff handler registry and
+   is never invoked. The real registered writer is still prepared separately
+   through v1547, with its original monotonic-revision guard intact.
+
+   This is pre-issuance enforcement and observational correspondence, NOT a
+   unified submission-capability refinement or authenticated business target."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field resolver-issuance]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field nil resolver true true)))
+
+(defn issue-plan-bound-guarded-prestate-bounded-isolated-parallel-biff-request-module!
+  "Bounded parallel variant of the v1588 plan-bound, pre-issuance guarded
+   prestate mediator. Both real handler concurrency limits and the original
+   monotonic one-shot writer identity remain intact."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field policy resolver-issuance]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field
+     (bounded-parallel-policy! policy) resolver true true)))
 
 (defn require-current-isolated-parallel-biff-request-module!
   "Read-only inspection of exact locally installed final Biff handler.
@@ -638,12 +741,20 @@
      :request-scoped-one-shot :fresh-per-request
      :source-backed-target-resolver-required?
      (boolean (:source-backed-target-resolver-required? state))
+     :plan-bound-guarded-prestate-required?
+     (boolean (:plan-bound-prestate-required? state))
+     :prestate-submission-correspondence
+     (if (:plan-bound-prestate-required? state)
+       :independent-preparation-before-monotonic-writer-not-same-capability
+       :not-established)
      :operation-target-binding-policy
      (if (:target-binding-required? state)
        :required-before-each-request-writer-issuance
        :not-installed-for-legacy-issuer)
      :expected-target-provenance
      (cond
+       (:plan-bound-prestate-required? state)
+       :issued-certified-plan-callback-identity-checked-table-not-authenticated
        (:source-backed-target-resolver-required? state)
        :issued-source-linked-static-route-declaration-not-authenticated
        (:target-binding-required? state)
@@ -654,7 +765,10 @@
      :actual-http-server-adoption :not-established
      :other-writer-closure :not-established
      :operation-refinement :not-established
-     :open-obligations open-obligations
+     :open-obligations
+     (cond-> open-obligations
+       (:plan-bound-prestate-required? state)
+       (conj :acquired-prestate-probe-and-real-monotonic-writer-are-distinct-preparations))
      :certificate :not-issued
      :admission :not-admitted
      :transaction-authority :none
