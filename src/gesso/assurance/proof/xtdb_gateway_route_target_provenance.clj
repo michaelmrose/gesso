@@ -1,21 +1,24 @@
 (ns gesso.assurance.proof.xtdb-gateway-route-target-provenance
-  "v1578: issue an identity-recognizable, source-linked request target resolver
+  "v1578/v1582: issue an identity-recognizable, source-linked request target resolver
    from a COMPLETE static route/physical-target declaration.
 
    Unlike a freely supplied request->expected-target callback, this resolver
    takes operation identity and literal route selection from the current
    certified application contract, and takes the physical document target
-   from an immutable, independently declared startup table. The candidate
-   XTDB command is never an input to the resolver. Each lookup rechecks the
+   from an immutable, independently declared startup table. The declaration
+   of the *command operation* must also agree with the actual current
+   certified-plan source bound to that operation by the certified contract.
+   The candidate XTDB command is never an input to the resolver. Each lookup rechecks the
    certified contract and exact route index before returning an expectation.
 
    This is a deliberately NARROW first provenance step: literal routes with
    fixed document targets only. The application still owns the correctness
-   and authorization of its static target declarations and the host request.
-   It does not establish operation semantics, deployed installation, XTDB
-   causality, or exclusion of raw writers. v1576's mediator does not yet
-   require an issued resolver; it accepts an arbitrary host callback. That
-   integration obligation remains open until separately enforced."
+   and authorization of its static document-target declarations and the host
+   request. Matching a certified source's command-operation declaration does
+   not establish the independently intended document ID. This does not prove
+   business semantics, deployed installation, XTDB causality, or exclusion of
+   raw writers. v1580's source-backed mediator requires the issued resolver;
+   the legacy/callback-based paths retain their narrower guarantees."
   (:require [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified])
   (:import (java.util UUID WeakHashMap)))
@@ -80,10 +83,18 @@
         summary (original-summary
                  (get-in contract-source
                          [:application-assembly :operation-acquisition-assembly]))
+        ;; Source of the command-operation identity is the CURRENT certified
+        ;; plan binding already rechecked by original-check, never a second
+        ;; application-authored route/target table. No candidate transaction
+        ;; participates in this extraction.
+        certified-sources (:certified-operations contract-source)
         rows (vec (for [[operation entry] summary
                         route (:routes entry)]
                     {:id (:route-id route)
                      :operation operation
+                     :command-operation
+                     (get-in certified-sources
+                             [operation :current-source :command-operation])
                      :method (:method route)
                      :uri (:path route)}))
         ids (mapv :id rows)
@@ -95,9 +106,11 @@
                    (= (set ids) (:route-ids verified))
                    (= (:route-ids verified)
                       (:matched-certified-route-ids verified))
-                   (every? (fn [{:keys [id operation method uri]}]
+                   (every? (fn [{:keys [id operation command-operation method uri]}]
                              (and (qualified-id? id)
                                   (qualified-id? operation)
+                                  (keyword? command-operation)
+                                  (not= :create command-operation)
                                   (keyword? method)
                                   (string? uri)
                                   (.startsWith ^String uri "/")
@@ -107,7 +120,8 @@
     (pinned!)
     (into {} (map (fn [row] [[(:method row) (:uri row)]
                              {:route-id (:id row)
-                              :operation (:operation row)}])
+                              :operation (:operation row)
+                              :command-operation (:command-operation row)}])
                   rows))))
 
 (defn- checked-static-target-declarations! [route-index declarations]
@@ -123,6 +137,15 @@
                                   (physical-target? (:target entry))))
                            (vals declarations)))
       (reject! :invalid-or-incomplete-static-route-target-declarations))
+    ;; A well-formed startup declaration is not evidence of its own command
+    ;; semantics. Join it to the independently issued/rechecked certified-plan
+    ;; operation that owns the installed route. Every route is covered; a
+    ;; second table cannot invent or override the canonical command operation.
+    (when-not (every? (fn [[_ {:keys [route-id command-operation]}]]
+                        (= command-operation
+                           (get-in declarations [route-id :command-operation])))
+                      route-index)
+      (reject! :declared-command-operation-disagrees-with-certified-plan))
     ;; The resulting closed declaration cannot derive a new target from any
     ;; candidate command, user-supplied :params, or mutable host callback.
     declarations))
@@ -134,6 +157,8 @@
 (defn issue-certified-literal-route-target-resolver!
   "Issue a process-local resolver from one CURRENT certified contract and a
    complete startup map of route ID -> {:command-operation :target}.
+   The command operation in each row is cross-checked against the current,
+   issued certified-plan source for that route's application operation.
 
    Physical target IDs are fixed per literal route. This does not support
    routes with per-request document identifiers; those need a separately
@@ -176,8 +201,8 @@
 (defn require-current-certified-literal-route-target-resolver!
   "Inspect an EXACT issued resolver against its original contract source.
    The returned redacted report is not a certificate, writer capability, or
-   proof of the host's physical target declaration. The v1576 mediator does
-   NOT currently require this report; integration remains a separate step."
+   proof of the host's physical target declaration. The v1580 source-backed
+   mediator uses this resolver; legacy and callback-based issuers do not."
   [resolver contract-source]
   (pinned!)
   (let [{:keys [source routes declarations] :as issued-entry}
@@ -196,6 +221,7 @@
      :certified-route-count (count routes)
      :every-declared-route-certified? true
      :operation-identity :rederived-from-current-certified-contract
+     :command-operation-identity :joined-to-current-certified-plan-source
      :target-identity :closed-startup-route-declaration
      :candidate-command-used-to-derive-target? false
      :request-document-parameters-used? false
