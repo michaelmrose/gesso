@@ -16,16 +16,19 @@
    Unselected routes are NOT represented as dynamically registered or invoked.
    v1571 optionally bounds concurrent guarded handler execution while retaining
    independent per-request registries and actual parallel execution.
-   v1576 adds explicit target-bound issuance variants. They require a second,
-   request-derived expected-target callback and check the exact candidate
-   gateway source before issuing any guarded writer. The caller still owns
-   independent target provenance and business semantics; legacy variants
-   remain opt-in, without target-binding assurance."
+   v1576 adds explicit callback-based target-bound issuance variants, which
+   compare the candidate source before writer issuance. v1580 adds distinct
+   source-backed target-bound issuers that REQUIRE a v1578 issued resolver
+   linked by identity to the SAME certified contract, revalidated at issuance,
+   startup, and before EACH request's candidate source and writer issuance.
+   The startup declaration's independent correctness remains an application
+   premise. Prior issuers retain their behavior and assurance scope."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as adoption]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
             [gesso.assurance.proof.xtdb-gateway-biff-writer-assembly :as assembly]
             [gesso.assurance.proof.xtdb-gateway-operation-target-binding :as targets]
+            [gesso.assurance.proof.xtdb-gateway-route-target-provenance :as provenance]
             [gesso.live.application-preflight :as application])
   (:import (java.util WeakHashMap)
            (java.util.concurrent Semaphore TimeUnit)))
@@ -45,6 +48,8 @@
 (def ^:private original-biff-observe writers/observe-checked-biff-host-registered-writer!)
 (def ^:private original-summary application/operation-summary)
 (def ^:private original-target-check targets/require-declared-operation-target!)
+(def ^:private original-provenance-check
+  provenance/require-current-certified-literal-route-target-resolver!)
 (def ^:private handler-slot application/biff-ring-handler-key)
 (def ^:dynamic ^:private *current-request-writer* nil)
 (def ^:dynamic ^:private *bounded-parallel-dispatch* false)
@@ -88,6 +93,8 @@
                              (var-get #'application/operation-summary))
                  (identical? original-target-check
                              (var-get #'targets/require-declared-operation-target!))
+                 (identical? original-provenance-check
+                             (var-get #'provenance/require-current-certified-literal-route-target-resolver!))
                  (= handler-slot application/biff-ring-handler-key))
     (reject! :substituted-parallel-mediation-boundary)))
 
@@ -232,6 +239,53 @@
         (finally
           (swap! pending dec))))))
 
+(defn- require-issued-source-backed-target-resolver!
+  "Only the exact v1578 issued function for this *same* certified contract is
+   admissible. Re-evaluate the source-backed declaration and certified route
+   inventory at every boundary; do not rely on a caller-generated report.
+   Foreign resolvers, ordinary callbacks, checker substitutions, and errors
+   from the independent verifier are rejected with redacted diagnostics."
+  [expected-target! contract-source]
+  (pinned!)
+  (when-not (fn? expected-target!)
+    (reject! :requires-exact-issued-route-target-resolver))
+  (let [report (try
+                 (original-provenance-check expected-target! contract-source)
+                 (catch Throwable _
+                   (reject! :unissued-or-incompatible-route-target-resolver)))]
+    (when-not (and (= provenance/report-type (:type report))
+                   (= provenance/report-version (:version report))
+                   (= :conditional-certified-literal-route-static-target-resolver
+                      (:status report))
+                   (true? (:every-declared-route-certified? report))
+                   (= :rederived-from-current-certified-contract
+                      (:operation-identity report))
+                   (= :closed-startup-route-declaration
+                      (:target-identity report))
+                   (false? (:candidate-command-used-to-derive-target? report))
+                   (false? (:request-document-parameters-used? report))
+                   (= :exact-ring-method-and-literal-uri (:request-match report))
+                   (= :application-premise-not-proved
+                      (:static-declaration-authenticity report))
+                   (= :not-issued (:certificate report))
+                   (= :not-admitted (:admission report))
+                   (= :none (:transaction-authority report) (:authority report)))
+      (reject! :unexpected-issued-route-target-resolver-report)))
+  (pinned!)
+  nil)
+
+(defn- require-resolver-issuance!
+  "Accept only the exact one-field v1578 issuance shape. Its callable must
+   already be identity-registered for the selected contract; copying or
+   wrapping the function does not create an issued provenance capability."
+  [resolver-issuance contract-source]
+  (when-not (and (plain-map? resolver-issuance)
+                 (= #{:expected-target!} (set (keys resolver-issuance))))
+    (reject! :requires-exact-issued-route-target-resolver))
+  (let [resolver (:expected-target! resolver-issuance)]
+    (require-issued-source-backed-target-resolver! resolver contract-source)
+    resolver))
+
 (defn- require-target-binding-before-issuance!
   "Run v1574 against the precise candidate that will be handed to the writer
    issuer. The expected target comes from a separate callback receiving ONLY
@@ -292,11 +346,16 @@
    accepts ONLY the Ring request and supplies {:operation-id
    :command-operation :target}. It is evaluated independently of `source!`
    and the selected route's operation is compared before any writer issuance.
-   Ordinary (legacy) issuers pass nil and remain WITHOUT this guarantee."
+   Ordinary (legacy) issuers pass nil and remain WITHOUT this guarantee.
+   When source-backed?, expected-target! MUST be a v1578-issued resolver for
+   this exact contract, rechecked at issuance, startup and every dispatch."
   [adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field policy expected-target!]
+   route-writer-paths node source! revision-field policy expected-target!
+   source-backed?]
   (pinned!)
-  (when-not (and (plain-map? contract-source)
+  (when-not (and (boolean? source-backed?)
+                 (or (not source-backed?) (fn? expected-target!))
+                 (plain-map? contract-source)
                  (plain-map? operation-writer-source)
                  (plain-map? route-writer-paths)
                  (fn? source!)
@@ -304,6 +363,9 @@
                  (keyword? revision-field)
                  (some? node))
     (reject! :invalid-parallel-mediation-issuance))
+  (when source-backed?
+    (require-issued-source-backed-target-resolver!
+     expected-target! contract-source))
   (let [handle (ParallelContextHandle.)
         initialized (atom false)
         started (atom nil)
@@ -323,6 +385,9 @@
            (pinned!)
            (when-not @initialized
              (reject! :parallel-module-not-initialized))
+           (when source-backed?
+             (require-issued-source-backed-target-resolver!
+              expected-target! contract-source))
            (let [host (original-adoption adoption-handle contract-source
                                          intermediate-system)
                  intermediate-handler (get intermediate-system handler-slot)]
@@ -344,6 +409,12 @@
                        (reject! :nested-parallel-request-dispatch))
                      (let [{:keys [operation id path] :as selected}
                            (selected-literal-route! routes request)]
+                     ;; Provenance revalidation precedes source construction,
+                     ;; so an unissued or foreign resolver never obtains a
+                     ;; writer, irrespective of the supplied candidate.
+                     (when source-backed?
+                       (require-issued-source-backed-target-resolver!
+                        expected-target! contract-source))
                      (original-adoption adoption-handle contract-source
                                         intermediate-system)
                      (let [source (source! request)]
@@ -422,7 +493,9 @@
                                 :final-handler final-handler
                                 :route-count (count routes)
                                 :admission-policy policy
-                                :target-binding-required? (boolean expected-target!)})
+                                :target-binding-required? (boolean expected-target!)
+                                :source-backed-target-resolver-required?
+                                source-backed?})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
@@ -437,7 +510,7 @@
    route-writer-paths node source! revision-field]
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field nil nil))
+   route-writer-paths node source! revision-field nil nil false))
 
 (defn issue-bounded-isolated-parallel-biff-request-module!
   "Issue the same independent request-local Biff mediator with bounded active
@@ -453,7 +526,7 @@
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field
-   (bounded-parallel-policy! policy) nil))
+   (bounded-parallel-policy! policy) nil false))
 
 (defn issue-target-bound-isolated-parallel-biff-request-module!
   "Explicit unbounded request-local mediator that requires a separate
@@ -472,7 +545,7 @@
     (reject! :requires-independent-request-target-builder))
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field nil expected-target!))
+   route-writer-paths node source! revision-field nil expected-target! false))
 
 (defn issue-target-bound-bounded-isolated-parallel-biff-request-module!
   "Bounded parallel variant requiring an independent request target callback.
@@ -486,7 +559,40 @@
   (issue-parallel-request-module*
    adoption-handle contract-source operation-writer-source
    route-writer-paths node source! revision-field
-   (bounded-parallel-policy! policy) expected-target!))
+   (bounded-parallel-policy! policy) expected-target! false))
+
+(defn issue-source-backed-target-bound-isolated-parallel-biff-request-module!
+  "v1580 unbounded request-local mediator that REQUIRES a v1578 issuance map
+   {:expected-target! exact-issued-resolver} for the very same certified
+   contract. Unlike v1576's host-callback issuer, arbitrary target callbacks,
+   forged resolver wrappers, and resolvers from another contract are rejected.
+   Issued provenance is rechecked at startup and on every matched request,
+   and the separately declared document is checked against the actual command
+   before any guarded XTDB writer is issued.
+
+   These checks do NOT authenticate the application-owned target declaration,
+   prove business-rule refinement, or close bypasses by external XTDB writers."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field resolver-issuance]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source)]
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field nil resolver true)))
+
+(defn issue-source-backed-target-bound-bounded-isolated-parallel-biff-request-module!
+  "Bounded-parallel version of the v1580 issued source-backed target
+   mediator. Uses the same exact independently declared and certified literal
+   routes, with finite request concurrency and no fall back to host callbacks.
+   Rejected provenance or mismatched physical targets issue no XTDB writer."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field policy resolver-issuance]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source)]
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field
+     (bounded-parallel-policy! policy) resolver true)))
 
 (defn require-current-isolated-parallel-biff-request-module!
   "Read-only inspection of exact locally installed final Biff handler.
@@ -530,14 +636,19 @@
      :max-pending-requests (get-in state [:admission-policy :max-pending-requests])
      :wait-timeout-ms (get-in state [:admission-policy :wait-timeout-ms])
      :request-scoped-one-shot :fresh-per-request
+     :source-backed-target-resolver-required?
+     (boolean (:source-backed-target-resolver-required? state))
      :operation-target-binding-policy
      (if (:target-binding-required? state)
        :required-before-each-request-writer-issuance
        :not-installed-for-legacy-issuer)
      :expected-target-provenance
-     (if (:target-binding-required? state)
+     (cond
+       (:source-backed-target-resolver-required? state)
+       :issued-source-linked-static-route-declaration-not-authenticated
+       (:target-binding-required? state)
        :independent-host-callback-not-authenticated
-       :not-established)
+       :else :not-established)
      :in-process-callback-trace :one-checked-invocation-per-request
      :biff-handler-slot :exact-local-identity-checked
      :actual-http-server-adoption :not-established
