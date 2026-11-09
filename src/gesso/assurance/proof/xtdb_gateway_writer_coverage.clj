@@ -19,6 +19,13 @@
    v1559 additionally permits a freshly prepared, identity-preserving
    REQUEST-SCOPED issuance. Its exact callback rejects use outside the one
    owning synchronous scope, without changing legacy writer semantics.
+   v1592 additionally supports an opt-in plan-bound monotonic registered
+   writer using v1590's ONE combined XTDB submission gateway. Its issued
+   callback uses the SAME request-scoped identity, thread and one-shot
+   restrictions; it does NOT yet switch the existing Biff mediator to this
+   new constructor. The certified application's target-table business truth,
+   deployed handler adoption, transaction causality and bypass closure remain
+   outside these local observations.
    Handles and diagnostics are NOT certificates or transaction authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.physical-writer-inventory :as inventory]
@@ -45,6 +52,8 @@
 
 (def ^:private ^WeakHashMap issued (WeakHashMap.))
 (def ^:private original-prepare monotonic/prepare-monotonic-revision-one-shot!)
+(def ^:private original-plan-bound-prepare
+  monotonic/prepare-plan-bound-monotonic-revision-one-shot!)
 (def ^:private original-inventory inventory/describe-physical-writer-inventory!)
 (def ^:private original-route-observe routes/observe-checked-ring-route!)
 (def ^:private original-route-recheck routes/require-current-route-dispatch!)
@@ -95,6 +104,14 @@
                              (var-get #'inventory/describe-physical-writer-inventory!)))
     (reject! :substituted-issuer-or-inventory)))
 
+(defn- plan-bound-seams! []
+  ;; The opt-in constructor must use the exact v1590 builder; ordinary Var
+  ;; substitution is rejected at issuance, scope entry, and invocation.
+  (seams!)
+  (when-not (identical? original-plan-bound-prepare
+                        (var-get #'monotonic/prepare-plan-bound-monotonic-revision-one-shot!))
+    (reject! :substituted-plan-bound-writer-issuer)))
+
 (defn- route-seams! []
   (seams!)
   (when-not (and (identical? original-route-observe
@@ -131,18 +148,43 @@
                                       (:thread *route-writer-observation*))})))
 
 (defn- issue-writer-core!
-  [path-id operation-id node gateway-source revision-field request-scoped?]
-  (seams!)
-  (when-not (and (qualified-id? path-id) (qualified-id? operation-id))
-    (reject! :invalid-path-or-operation-id))
-  (let [gateway (original-prepare node gateway-source revision-field)]
-    (seams!)
-    (when-not (and (= monotonic/monotonic-type (:type gateway))
-                   (= monotonic/monotonic-version (:version gateway))
-                   (fn? (:submit! gateway))
-                   (fn? (:summary! gateway))
-                   (= :prepared (:status ((:summary! gateway)))))
-      (reject! :unexpected-monotonic-gateway-contract))
+  ([path-id operation-id node gateway-source revision-field request-scoped?]
+   (issue-writer-core! path-id operation-id node gateway-source revision-field
+                       request-scoped? nil))
+  ([path-id operation-id node gateway-source revision-field request-scoped?
+    prepared-plan-bound-gateway]
+   ;; This private extra argument is supplied ONLY by the plan-bound issuer.
+   ;; An already prepared v1590 gateway, rather than a second generic gateway,
+   ;; becomes the exact registered callback's one permitted submission.
+   (if prepared-plan-bound-gateway (plan-bound-seams!) (seams!))
+   (when-not (and (qualified-id? path-id) (qualified-id? operation-id))
+     (reject! :invalid-path-or-operation-id))
+   (let [gateway (or prepared-plan-bound-gateway
+                     (original-prepare node gateway-source revision-field))
+         summary (try ((:summary! gateway))
+                      (catch Throwable _
+                        (reject! :invalid-prepared-writer-summary)))]
+     (if prepared-plan-bound-gateway (plan-bound-seams!) (seams!))
+     (when-not (and (= (if prepared-plan-bound-gateway
+                         monotonic/plan-bound-monotonic-type
+                         monotonic/monotonic-type) (:type gateway))
+                    (= (if prepared-plan-bound-gateway
+                         monotonic/plan-bound-monotonic-version
+                         monotonic/monotonic-version) (:version gateway))
+                    (fn? (:submit! gateway))
+                    (fn? (:summary! gateway))
+                    (= :prepared (:status summary))
+                    (or (not prepared-plan-bound-gateway)
+                        (and (= 1 (:physical-submission-gateways-prepared summary))
+                             (= :source-checked-exactly-one-nonwrapping-successor
+                                (:revision-policy summary))
+                             (= :one-prepared-acquired-gateway-for-this-submission
+                                (:prestate-submission-correspondence summary))
+                             (= :conditional-plan-bound-monotonic-prestate
+                                (:proof-status summary))
+                             (= :not-issued (:certificate summary))
+                             (= :not-admitted (:admission summary)))))
+       (reject! :unexpected-monotonic-gateway-contract))
     (let [submit! (:submit! gateway)
           handle (WriterHandle.)
           token (Object.)
@@ -151,6 +193,7 @@
           ;; reactivated by a later HTTP request.
           scope (when request-scoped? (atom {:state :available}))
           writer (fn [& args]
+                   (when prepared-plan-bound-gateway (plan-bound-seams!))
                    (when (seq args)
                      (reject! :registered-writer-requires-zero-arguments))
                    (when request-scoped?
@@ -169,6 +212,7 @@
           with-request!
           (when request-scoped?
             (fn [dispatch!]
+              (when prepared-plan-bound-gateway (plan-bound-seams!))
               (when-not (fn? dispatch!)
                 (reject! :invalid-request-scope-dispatch))
               (let [active {:state :active :owner (Thread/currentThread)}
@@ -194,7 +238,7 @@
         request-scoped?
         (assoc :with-request! with-request!
                :request-scope-status!
-               (fn [] (:state @scope)))))))
+               (fn [] (:state @scope))))))))
 
 (defn issue-monotonic-registered-writer!
   "Issue one locally recognized, zero-argument monotonic XTDB writer.
@@ -234,6 +278,38 @@
   [path-id operation-id node gateway-source revision-field]
   (issue-writer-core! path-id operation-id node gateway-source revision-field
                       true))
+
+(defn issue-request-scoped-plan-bound-monotonic-writer!
+  "v1592: Issue the EXACT ordinary identity-registered request-local writer,
+   but back its one-shot submission with the SINGLE v1590 certified-plan,
+   source-checked monotonic, acquired-prestate complete-CAS gateway.
+
+   [path-id operation-id node contract-source resolver-issuance request
+    candidate-source revision-field]
+
+   The selected operation is independently checked by the plan-bound gateway.
+   Its target expectation comes from the exact issued certified-plan callback,
+   not the candidate transaction. This prepares ONE submission gateway and
+   returns only {:handle :writer :with-request! :request-scope-status!}.
+   The exact :writer can be registered and inspected by the existing Biff
+   callback-identity observation, WITHOUT wrapping it. Both scope ownership
+   and one-shot execution remain unchanged from v1559.
+
+   This issuer does not independently authenticate the operation's business
+   meaning or target table; it is not an installed Biff request mediator or
+   evidence that other writers cannot bypass Gesso. Use of this opt-in issuer
+   by the actual request mediator remains a separate integration step."
+  [path-id operation-id node contract-source resolver-issuance request
+   candidate-source revision-field]
+  (plan-bound-seams!)
+  (when-not (and (qualified-id? path-id) (qualified-id? operation-id))
+    (reject! :invalid-path-or-operation-id))
+  (let [prepared (original-plan-bound-prepare
+                  node contract-source resolver-issuance operation-id request
+                  candidate-source revision-field)]
+    (plan-bound-seams!)
+    (issue-writer-core! path-id operation-id node candidate-source revision-field
+                        true prepared)))
 
 (defn- enumerate-twice! [source expected-paths]
   (let [enumerate! (:enumerate-write-paths! source)
