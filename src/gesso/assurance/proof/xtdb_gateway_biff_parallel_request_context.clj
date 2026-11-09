@@ -22,12 +22,13 @@
    linked by identity to the SAME certified contract, revalidated at issuance,
    startup, and before EACH request's candidate source and writer issuance.
    v1588 adds a separate, opt-in certified-PLAN-bound prestate gate BEFORE
-   the existing request-scoped monotonic writer is issued. This first bridge
-   prepares an independent read-and-CAS capability but NEVER exposes or invokes
-   that capability: the actual registered writer is still the original
-   monotonic, independently prepared one-shot. This does not yet unify the
-   two preparations or certify the installed target table. Prior issuers
-   retain their behavior and assurance scope."
+   an independently prepared request-scoped monotonic writer. v1593 adds
+   DISTINCT opt-in Biff constructors using v1592's plan-bound monotonic
+   writer: one acquired-prestate, complete-CAS, monotonic submission gateway
+   backs the identity-registered request-local callback. Earlier constructors
+   retain their separate-preparation or legacy contracts. No constructor
+   proves application target-table truth, deployed adoption, physical
+   causality, or absence of bypassing writers."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as adoption]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
@@ -50,6 +51,8 @@
 (def ^:private ^WeakHashMap issued (WeakHashMap.))
 (def ^:private original-adoption adoption/require-current-biff-host-adoption!)
 (def ^:private original-issue writers/issue-request-scoped-monotonic-writer!)
+(def ^:private original-unified-issue
+  writers/issue-request-scoped-plan-bound-monotonic-writer!)
 (def ^:private original-observe assembly/observe-current-biff-registered-writer-assembly!)
 (def ^:private original-biff-observe writers/observe-checked-biff-host-registered-writer!)
 (def ^:private original-summary application/operation-summary)
@@ -107,6 +110,14 @@
                              (var-get #'guarded/prepare-plan-bound-acquired-one-shot!))
                  (= handler-slot application/biff-ring-handler-key))
     (reject! :substituted-parallel-mediation-boundary)))
+
+(defn- unified-pinned! []
+  ;; Only the new opt-in path relies on this issuer. Preserve the previous
+  ;; substitution contract for legacy and independent-preparation callers.
+  (pinned!)
+  (when-not (identical? original-unified-issue
+                        (var-get #'writers/issue-request-scoped-plan-bound-monotonic-writer!))
+    (reject! :substituted-unified-request-writer-issuer)))
 
 (defn invoke-current-request-writer!
   "Invoke the EXACT current request's Gesso-issued guarded writer, no args.
@@ -410,14 +421,26 @@
    When source-backed?, expected-target! MUST be an issued resolver for
    this exact contract, rechecked at issuance, startup and every dispatch.
    `plan-bound-prestate?` additionally requires the *stronger* issued plan
-   target callback and a successful pre-issuance acquired-prestate gateway.
-   The actual writer remains the independent v1547 monotonic gateway."
-  [adoption-handle contract-source operation-writer-source
-   route-writer-paths node source! revision-field policy expected-target!
-   source-backed? plan-bound-prestate?]
-  (pinned!)
+   target callback. The older path independently acquires and discards a
+   prestate gateway before using the legacy monotonic writer. The v1593
+   `unified?` path instead obtains the SAME acquired-prestate and monotonic
+   guarantees from v1592's exact registered request-local writer, with only
+   one underlying XTDB submission capability."
+  ([adoption-handle contract-source operation-writer-source
+    route-writer-paths node source! revision-field policy expected-target!
+    source-backed? plan-bound-prestate?]
+   (issue-parallel-request-module*
+    adoption-handle contract-source operation-writer-source
+    route-writer-paths node source! revision-field policy expected-target!
+    source-backed? plan-bound-prestate? false))
+  ([adoption-handle contract-source operation-writer-source
+    route-writer-paths node source! revision-field policy expected-target!
+    source-backed? plan-bound-prestate? unified?]
+  (if unified? (unified-pinned!) (pinned!))
   (when-not (and (boolean? source-backed?)
                  (boolean? plan-bound-prestate?)
+                 (boolean? unified?)
+                 (or (not unified?) plan-bound-prestate?)
                  (or (not plan-bound-prestate?) source-backed?)
                  (or (not source-backed?) (fn? expected-target!))
                  (plain-map? contract-source)
@@ -444,6 +467,7 @@
            {})
          :biff.core/start
          (fn [intermediate-system]
+           (when unified? (unified-pinned!))
            ;; Poison a first startup attempt before doing any host work.
            (when-not (compare-and-set! started nil :starting)
              (reject! :repeated-parallel-module-start))
@@ -469,7 +493,7 @@
                                    operation-writer-source routes)
                    final-handler
                    (fn [request]
-                     (pinned!)
+                     (if unified? (unified-pinned!) (pinned!))
                      (when *current-request-writer*
                        (reject! :nested-parallel-request-dispatch))
                      (let [{:keys [operation id path] :as selected}
@@ -492,12 +516,22 @@
                        (when expected-target!
                          (require-target-binding-before-issuance!
                           operation request source expected-target!))
-                       (when plan-bound-prestate?
+                       (when (and plan-bound-prestate? (not unified?))
                          (require-plan-bound-prestate-before-issuance!
                           node contract-source expected-target! operation
                           request source))
-                       (let [issuance (original-issue path operation node
-                                                      source revision-field)
+                       ;; Unified issuance performs its own strict revision
+                       ;; check and SAME-capability acquired prestate/CAS.
+                       ;; No discarded second preparation is made here.
+                       (when unified? (unified-pinned!))
+                       (let [issuance (if unified?
+                                        (original-unified-issue
+                                         path operation node contract-source
+                                         {:expected-target! expected-target!}
+                                         request source revision-field)
+                                        (original-issue path operation node
+                                                        source revision-field))
+                             _ (when unified? (unified-pinned!))
                              writer (:writer issuance)
                              registry (atom {path {:kind :issued-operation
                                                    :operation-id operation
@@ -566,13 +600,14 @@
                                 :source-backed-target-resolver-required?
                                 source-backed?
                                 :plan-bound-prestate-required?
-                                plan-bound-prestate?})
+                                plan-bound-prestate?
+                                :unified-plan-bound-submission? unified?})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
                                        :started started
                                        :adoption-handle adoption-handle}))
-    {:module module :handle handle}))
+    {:module module :handle handle})))
 
 (defn issue-isolated-parallel-biff-request-module!
   "Original v1567/v1569 unbounded parallel request-local mediation API.
@@ -697,6 +732,34 @@
      route-writer-paths node source! revision-field
      (bounded-parallel-policy! policy) resolver true true)))
 
+(defn issue-unified-plan-bound-isolated-parallel-biff-request-module!
+  "v1593: Opt-in Biff mediator whose actual identity-registered request writer
+   uses one v1590/v1592 plan-bound monotonic acquired-prestate gateway. Require
+   an exact Gesso-issued certified-plan target resolver, not an arbitrary
+   callback or a separately prepared prestate probe. The selected operation,
+   target and physical before-state are checked by the submitting gateway.
+   Prior Biff issuer contracts remain unchanged."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field resolver-issuance]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field nil resolver true true true)))
+
+(defn issue-unified-plan-bound-bounded-isolated-parallel-biff-request-module!
+  "v1593 bounded concurrent request variant of the single-capability
+   plan-bound monotonic Biff mediation path. No global writer registry and no
+   weakening of the request-local, owning-thread, one-shot restriction."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field policy resolver-issuance]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field
+     (bounded-parallel-policy! policy) resolver true true true)))
+
 (defn require-current-isolated-parallel-biff-request-module!
   "Read-only inspection of exact locally installed final Biff handler.
    Does not execute requests, create writers, or claim that HTTP server uses
@@ -743,10 +806,15 @@
      (boolean (:source-backed-target-resolver-required? state))
      :plan-bound-guarded-prestate-required?
      (boolean (:plan-bound-prestate-required? state))
+     :unified-plan-bound-submission-required?
+     (boolean (:unified-plan-bound-submission? state))
      :prestate-submission-correspondence
-     (if (:plan-bound-prestate-required? state)
+     (cond
+       (:unified-plan-bound-submission? state)
+       :one-prepared-acquired-gateway-for-this-submission
+       (:plan-bound-prestate-required? state)
        :independent-preparation-before-monotonic-writer-not-same-capability
-       :not-established)
+       :else :not-established)
      :operation-target-binding-policy
      (if (:target-binding-required? state)
        :required-before-each-request-writer-issuance
@@ -767,7 +835,8 @@
      :operation-refinement :not-established
      :open-obligations
      (cond-> open-obligations
-       (:plan-bound-prestate-required? state)
+       (and (:plan-bound-prestate-required? state)
+            (not (:unified-plan-bound-submission? state)))
        (conj :acquired-prestate-probe-and-real-monotonic-writer-are-distinct-preparations))
      :certificate :not-issued
      :admission :not-admitted
