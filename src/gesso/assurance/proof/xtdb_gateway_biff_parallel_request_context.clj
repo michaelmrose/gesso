@@ -25,10 +25,17 @@
    an independently prepared request-scoped monotonic writer. v1593 adds
    DISTINCT opt-in Biff constructors using v1592's plan-bound monotonic
    writer: one acquired-prestate, complete-CAS, monotonic submission gateway
-   backs the identity-registered request-local callback. Earlier constructors
-   retain their separate-preparation or legacy contracts. No constructor
-   proves application target-table truth, deployed adoption, physical
-   causality, or absence of bypassing writers."
+   backs the identity-registered request-local callback with one underlying
+   XTDB submission capability. v1606 adds DISTINCT opt-in
+   bounded and unbounded mediators using the v1604 identity-registered
+   request writer with ONE two-write domain UPDATE + canonical durable
+   command-record CREATE transaction. The command-incorporation input is
+   supplied separately from the candidate transaction source and checked
+   for selected-operation identity by the underlying gateway. Earlier
+   constructors retain their prior behavior. No constructor proves
+   application target-table truth, principal authorization, command-argument
+   target correspondence, deployed adoption, physical causality, or absence
+   of bypassing writers."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.checked-biff-host-adoption :as adoption]
             [gesso.assurance.proof.xtdb-gateway-writer-coverage :as writers]
@@ -53,6 +60,8 @@
 (def ^:private original-issue writers/issue-request-scoped-monotonic-writer!)
 (def ^:private original-unified-issue
   writers/issue-request-scoped-plan-bound-monotonic-writer!)
+(def ^:private original-atomic-issue
+  writers/issue-request-scoped-plan-bound-atomic-incorporation-writer!)
 (def ^:private original-observe assembly/observe-current-biff-registered-writer-assembly!)
 (def ^:private original-biff-observe writers/observe-checked-biff-host-registered-writer!)
 (def ^:private original-summary application/operation-summary)
@@ -118,6 +127,20 @@
   (when-not (identical? original-unified-issue
                         (var-get #'writers/issue-request-scoped-plan-bound-monotonic-writer!))
     (reject! :substituted-unified-request-writer-issuer)))
+
+(defn- atomic-incorporation-pinned! []
+  ;; The two-write path must use EXACT v1604 request-scoped issuance, not a
+  ;; host-replaced callback. Older issuers do not acquire this new dependency.
+  (unified-pinned!)
+  (when-not (identical?
+             original-atomic-issue
+             (var-get #'writers/issue-request-scoped-plan-bound-atomic-incorporation-writer!))
+    (reject! :substituted-atomic-incorporation-request-writer-issuer)))
+
+(defn- issuer-seams! [unified? atomic?]
+  (cond atomic? (atomic-incorporation-pinned!)
+        unified? (unified-pinned!)
+        :else (pinned!)))
 
 (defn invoke-current-request-writer!
   "Invoke the EXACT current request's Gesso-issued guarded writer, no args.
@@ -425,21 +448,36 @@
    prestate gateway before using the legacy monotonic writer. The v1593
    `unified?` path instead obtains the SAME acquired-prestate and monotonic
    guarantees from v1592's exact registered request-local writer, with only
-   one underlying XTDB submission capability."
+   one underlying XTDB submission capability. With `incorporation-input!`,
+   the v1606 path instead uses the v1604 atomic-incorporation writer: the
+   builder accepts ONLY the Ring request and returns the canonical
+   {:binding :outcome :now} input, independently of the candidate command.
+   Its principal, arguments, outcome and time are application premises."
   ([adoption-handle contract-source operation-writer-source
     route-writer-paths node source! revision-field policy expected-target!
     source-backed? plan-bound-prestate?]
    (issue-parallel-request-module*
     adoption-handle contract-source operation-writer-source
     route-writer-paths node source! revision-field policy expected-target!
-    source-backed? plan-bound-prestate? false))
+    source-backed? plan-bound-prestate? false nil))
   ([adoption-handle contract-source operation-writer-source
     route-writer-paths node source! revision-field policy expected-target!
     source-backed? plan-bound-prestate? unified?]
-  (if unified? (unified-pinned!) (pinned!))
+   (issue-parallel-request-module*
+    adoption-handle contract-source operation-writer-source
+    route-writer-paths node source! revision-field policy expected-target!
+    source-backed? plan-bound-prestate? unified? nil))
+  ([adoption-handle contract-source operation-writer-source
+    route-writer-paths node source! revision-field policy expected-target!
+    source-backed? plan-bound-prestate? unified? incorporation-input!]
+  (let [atomic? (some? incorporation-input!)]
+  (issuer-seams! unified? atomic?)
   (when-not (and (boolean? source-backed?)
                  (boolean? plan-bound-prestate?)
                  (boolean? unified?)
+                 (or (not atomic?)
+                     (and unified? source-backed? plan-bound-prestate?
+                          (fn? incorporation-input!)))
                  (or (not unified?) plan-bound-prestate?)
                  (or (not plan-bound-prestate?) source-backed?)
                  (or (not source-backed?) (fn? expected-target!))
@@ -467,7 +505,7 @@
            {})
          :biff.core/start
          (fn [intermediate-system]
-           (when unified? (unified-pinned!))
+           (issuer-seams! unified? atomic?)
            ;; Poison a first startup attempt before doing any host work.
            (when-not (compare-and-set! started nil :starting)
              (reject! :repeated-parallel-module-start))
@@ -493,7 +531,7 @@
                                    operation-writer-source routes)
                    final-handler
                    (fn [request]
-                     (if unified? (unified-pinned!) (pinned!))
+                     (issuer-seams! unified? atomic?)
                      (when *current-request-writer*
                        (reject! :nested-parallel-request-dispatch))
                      (let [{:keys [operation id path] :as selected}
@@ -523,15 +561,32 @@
                        ;; Unified issuance performs its own strict revision
                        ;; check and SAME-capability acquired prestate/CAS.
                        ;; No discarded second preparation is made here.
-                       (when unified? (unified-pinned!))
-                       (let [issuance (if unified?
+                       (issuer-seams! unified? atomic?)
+                       ;; This input is derived from the original Ring request,
+                       ;; never from the candidate physical UPDATE. Its
+                       ;; application-owned business meaning is NOT proved.
+                       (let [incorporation-input
+                             (when atomic?
+                               (try (incorporation-input! request)
+                                    (catch Throwable _
+                                      (reject! :command-incorporation-input-builder-failed))))
+                             _ (issuer-seams! unified? atomic?)
+                             issuance (cond
+                                        atomic?
+                                        (original-atomic-issue
+                                         path operation node contract-source
+                                         {:expected-target! expected-target!}
+                                         request source revision-field
+                                         incorporation-input)
+                                        unified?
                                         (original-unified-issue
                                          path operation node contract-source
                                          {:expected-target! expected-target!}
                                          request source revision-field)
+                                        :else
                                         (original-issue path operation node
                                                         source revision-field))
-                             _ (when unified? (unified-pinned!))
+                             _ (issuer-seams! unified? atomic?)
                              writer (:writer issuance)
                              registry (atom {path {:kind :issued-operation
                                                    :operation-id operation
@@ -601,13 +656,14 @@
                                 source-backed?
                                 :plan-bound-prestate-required?
                                 plan-bound-prestate?
-                                :unified-plan-bound-submission? unified?})
+                                :unified-plan-bound-submission? unified?
+                                :atomic-command-incorporation? atomic?})
                final-system)))}]
     (locking issued (.put issued handle {:source contract-source
                                        :initialized initialized
                                        :started started
                                        :adoption-handle adoption-handle}))
-    {:module module :handle handle})))
+    {:module module :handle handle}))))
 
 (defn issue-isolated-parallel-biff-request-module!
   "Original v1567/v1569 unbounded parallel request-local mediation API.
@@ -760,6 +816,47 @@
      route-writer-paths node source! revision-field
      (bounded-parallel-policy! policy) resolver true true true)))
 
+(defn issue-plan-bound-atomic-incorporation-isolated-parallel-biff-request-module!
+  "v1606: Opt-in unbounded request-local Biff mediator backed by the exact
+   v1604 identity-registered writer, which owns ONE v1602 guarded, monotonic,
+   atomic domain UPDATE plus canonical durable command-record CREATE gateway.
+
+   `incorporation-input!` receives ONLY the original Ring request and returns
+   {:binding :outcome :now}; it is supplied separately from `source!`. The
+   underlying v1602 gateway binds command-record :operation to the selected
+   certified route. The host remains responsible for principal authorization,
+   command-argument/target binding, outcome and timestamp authenticity.
+   Readback, causality and external writer closure remain unproved."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field resolver-issuance
+   incorporation-input!]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (when-not (fn? incorporation-input!)
+      (reject! :requires-independent-command-incorporation-input-builder))
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field nil resolver true true
+     true incorporation-input!)))
+
+(defn issue-plan-bound-atomic-incorporation-bounded-isolated-parallel-biff-request-module!
+  "v1606 bounded parallel counterpart to the atomic-incorporation mediator.
+   Bounded admission, per-request writer identity, thread ownership, one-shot
+   consumption and actual parallel handler execution are preserved. An
+   admitted transaction is not an observed commit or a certificate."
+  [adoption-handle contract-source operation-writer-source
+   route-writer-paths node source! revision-field policy resolver-issuance
+   incorporation-input!]
+  (let [resolver (require-resolver-issuance!
+                  resolver-issuance contract-source true)]
+    (when-not (fn? incorporation-input!)
+      (reject! :requires-independent-command-incorporation-input-builder))
+    (issue-parallel-request-module*
+     adoption-handle contract-source operation-writer-source
+     route-writer-paths node source! revision-field
+     (bounded-parallel-policy! policy) resolver true true true
+     incorporation-input!)))
+
 (defn require-current-isolated-parallel-biff-request-module!
   "Read-only inspection of exact locally installed final Biff handler.
    Does not execute requests, create writers, or claim that HTTP server uses
@@ -775,6 +872,10 @@
       (reject! :parallel-module-not-initialized))
     (when-not (map? state)
       (reject! :parallel-module-not-started))
+    ;; Inspection cannot attest the opt-in execution path if its original
+    ;; writer issuer has been replaced since startup.
+    (issuer-seams! (:unified-plan-bound-submission? state)
+                   (:atomic-command-incorporation? state))
     (when-not (and (identical? final-system (:final-system state))
                    (identical? (get final-system handler-slot)
                                (:final-handler state))
@@ -808,8 +909,17 @@
      (boolean (:plan-bound-prestate-required? state))
      :unified-plan-bound-submission-required?
      (boolean (:unified-plan-bound-submission? state))
+     :atomic-command-incorporation-required?
+     (boolean (:atomic-command-incorporation? state))
+     :atomic-command-incorporation-envelope
+     (if (:atomic-command-incorporation? state)
+       :one-transaction-guarded-domain-update-and-command-record-create
+       :not-required-by-this-mediator)
+     :atomic-command-commit-claim :not-established
      :prestate-submission-correspondence
      (cond
+       (:atomic-command-incorporation? state)
+       :one-prepared-plan-bound-atomic-gateway-with-pinned-prestate
        (:unified-plan-bound-submission? state)
        :one-prepared-acquired-gateway-for-this-submission
        (:plan-bound-prestate-required? state)
@@ -837,7 +947,12 @@
      (cond-> open-obligations
        (and (:plan-bound-prestate-required? state)
             (not (:unified-plan-bound-submission? state)))
-       (conj :acquired-prestate-probe-and-real-monotonic-writer-are-distinct-preparations))
+       (conj :acquired-prestate-probe-and-real-monotonic-writer-are-distinct-preparations)
+       (:atomic-command-incorporation? state)
+       (into #{:command-arguments-and-target-identity-not-proved
+               :principal-authorization-and-recorded-outcome-not-proved
+               :durable-command-record-readback-and-retention-not-proved
+               :xtdb-atomicity-remains-a-backend-assumption}))
      :certificate :not-issued
      :admission :not-admitted
      :transaction-authority :none
