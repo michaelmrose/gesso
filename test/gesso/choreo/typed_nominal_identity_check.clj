@@ -448,6 +448,84 @@
                              :actor '(nominal/actor :id)})))
     true))
 
+(defn- audit-precise-output-validation! [definition]
+  ;; A precise HMap return cannot prove all present keys survive, nor that
+  ;; untyped input was validated. Insist on the original public admission
+  ;; boundary; exhaustive runtime equivalence checks key preservation.
+  (let [body (last definition)
+        bindings (when (and (seq? body) (= 'let (first body)))
+                   (second body))
+        validation (when (vector? bindings)
+                     (second bindings))]
+    (when-not (= '(tagged/bindings bindings) validation)
+      (throw (ex-info "Precise binding converter bypasses public validation."
+                      {:error/kind :missing-precise-binding-validation})))
+    true))
+
+(defn- check-precise-nominal-output! [checker]
+  ;; The generic reduce-kv bridge checks only a broad value union. This
+  ;; alternate ordinary defn explicitly constructs each optional key using
+  ;; if-let, so the checker can prove the *output* category relationships.
+  (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
+        class-types (mapv #(symbol (str class-prefix %)) categories)
+        hmap (list 'typed.clojure/HMap
+                   :optional (into {:role 'typed.clojure/Kw}
+                                   (map vector
+                                        [:principal :actor :authority :host
+                                         :command-id :execution-id]
+                                        class-types))
+                   :complete? true)
+        tagged-map '(typed.clojure/Map
+                     typed.clojure/Kw
+                     (typed.clojure/U typed.clojure/Kw
+                                      (typed.clojure/Map
+                                       typed.clojure/Any typed.clojure/Any)))
+        sources (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
+        source (source-definition sources 'bindings->nominal-precise)]
+    (eval (list 'typed.clojure/ann
+                (symbol (str bridge-ns) "bindings->nominal-precise")
+                (list 'typed.clojure/IFn [tagged-map '-> hmap])))
+    (binding [*ns* (the-ns bridge-ns)]
+      (check! checker :actual-precise-nominal-output-body source)
+      (audit-precise-output-validation! source)
+      (check! checker :valid-precise-nominal-output-call
+              '(bindings->nominal-precise
+                {:principal (tagged/principal :person)
+                 :actor (tagged/actor :member)
+                 :role :server}))
+      ;; A client may read the type of an optional entry only after checking
+      ;; presence. The value is statically Principal rather than the old union.
+      (check! checker :precise-output-flows-to-stage-one
+              '(let [result (bindings->nominal-precise
+                             {:principal (tagged/principal :person)})]
+                 (if-let [p (:principal result)]
+                   (nominal/step-1 p)
+                   nil)))
+      ;; A deliberately wrong consumer type fails at the *next* function,
+      ;; demonstrating that category precision is propagated downstream.
+      (check-rejection! checker :precise-output-rejects-wrong-consumer
+                        '(let [result (bindings->nominal-precise
+                                       {:actor (tagged/actor :person)})]
+                           (if-let [actor (:actor result)]
+                             (nominal/step-1 actor)
+                             nil)))
+      (expect-audit-rejection!
+       audit-precise-output-validation! :precise-public-validator-removed
+       (walk/postwalk-replace {'tagged/bindings 'identity} source)
+       :missing-precise-binding-validation)
+      (let [modified (walk/postwalk
+                      (fn [node]
+                        (if (= '(assoc out :principal nominal-value) node)
+                          '(assoc out :actor nominal-value)
+                          node))
+                      source)]
+        (when (= modified source)
+          (throw (ex-info "Precise source mutation did not modify its target."
+                          {:error/kind :missing-mutation-target})))
+        (check-rejection! checker :precise-output-slot-swap
+                          modified :typed.clojure/type-mismatch-error)))
+    true))
+
 (defn -main [& _]
   ;; Use the actual classes, not structural maps. Register the six datatypes
   ;; with the Typed Clojure checker, including the fields' real names.
@@ -510,9 +588,12 @@
     (check-bridge! checker)
     (check-bindings! checker)
     (check-heterogeneous-nominal-bindings! checker)
+    (check-precise-nominal-output! checker)
     (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
     (println "7 bridge bodies, 15 valid calls, 58 invalid static calls,")
     (println "13 mutation checks (returns, guards, slots, and categories).")
     (println "Closed sparse nominal HMap: 128 valid subsets, 39 invalid")
     (println "per-slot category/key cases; original adapter body checked.")
+    (println "Precise output HMap: real body checked, seven optional slots;")
+    (println "wrong downstream consumer and slot-swap mutations rejected.")
     :ok))

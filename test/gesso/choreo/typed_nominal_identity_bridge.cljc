@@ -120,6 +120,107 @@
              {}
              (tagged/bindings bindings)))
 
+(defn bindings->nominal-precise
+  "Experimental seven-slot adapter whose *actual output* can be statically
+   checked as a closed optional HMap with category-specific nominal values.
+   The public tagged/bindings validator remains authoritative on input.
+   Unlike the generic reduce-kv converter, each fixed slot is visible to
+   Typed Clojure and if-let narrows present values away from nil."
+  [bindings]
+  (let [validated (tagged/bindings bindings)
+        out (if-let [role (:role validated)]
+              (if (keyword? role)
+                (assoc {} :role role)
+                (throw (ex-info "Invalid binding role."
+                                {:error/kind :invalid-role})))
+              {})
+        out (if-let [value (:principal validated)]
+              (let [nominal-value
+                    (tagged->nominal
+                     (if (map? value)
+                       value
+                       (throw (ex-info "Invalid tagged binding value."
+                                       {:error/kind :invalid-tagged-identity}))))]
+                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Principal
+                               nominal-value)
+                  (assoc out :principal nominal-value)
+                  (throw (ex-info "Binding category mismatch."
+                                  {:error/kind :invalid-binding
+                                   :binding :principal}))))
+              out)
+        out (if-let [value (:actor validated)]
+              (let [nominal-value
+                    (tagged->nominal
+                     (if (map? value)
+                       value
+                       (throw (ex-info "Invalid tagged binding value."
+                                       {:error/kind :invalid-tagged-identity}))))]
+                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Actor
+                               nominal-value)
+                  (assoc out :actor nominal-value)
+                  (throw (ex-info "Binding category mismatch."
+                                  {:error/kind :invalid-binding
+                                   :binding :actor}))))
+              out)
+        out (if-let [value (:authority validated)]
+              (let [nominal-value
+                    (tagged->nominal
+                     (if (map? value)
+                       value
+                       (throw (ex-info "Invalid tagged binding value."
+                                       {:error/kind :invalid-tagged-identity}))))]
+                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Authority
+                               nominal-value)
+                  (assoc out :authority nominal-value)
+                  (throw (ex-info "Binding category mismatch."
+                                  {:error/kind :invalid-binding
+                                   :binding :authority}))))
+              out)
+        out (if-let [value (:host validated)]
+              (let [nominal-value
+                    (tagged->nominal
+                     (if (map? value)
+                       value
+                       (throw (ex-info "Invalid tagged binding value."
+                                       {:error/kind :invalid-tagged-identity}))))]
+                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Host
+                               nominal-value)
+                  (assoc out :host nominal-value)
+                  (throw (ex-info "Binding category mismatch."
+                                  {:error/kind :invalid-binding
+                                   :binding :host}))))
+              out)
+        out (if-let [value (:command-id validated)]
+              (let [nominal-value
+                    (tagged->nominal
+                     (if (map? value)
+                       value
+                       (throw (ex-info "Invalid tagged binding value."
+                                       {:error/kind :invalid-tagged-identity}))))]
+                (if (instance? gesso.choreo.typed_nominal_identity_pilot.CommandId
+                               nominal-value)
+                  (assoc out :command-id nominal-value)
+                  (throw (ex-info "Binding category mismatch."
+                                  {:error/kind :invalid-binding
+                                   :binding :command-id}))))
+              out)
+        out (if-let [value (:execution-id validated)]
+              (let [nominal-value
+                    (tagged->nominal
+                     (if (map? value)
+                       value
+                       (throw (ex-info "Invalid tagged binding value."
+                                       {:error/kind :invalid-tagged-identity}))))]
+                (if (instance? gesso.choreo.typed_nominal_identity_pilot.ExecutionId
+                               nominal-value)
+                  (assoc out :execution-id nominal-value)
+                  (throw (ex-info "Binding category mismatch."
+                                  {:error/kind :invalid-binding
+                                   :binding :execution-id}))))
+              out)
+        ]
+    out))
+
 (defn bindings->tagged
   "Convert a sparse internal binding map back into public tagged data.
 
@@ -316,6 +417,44 @@
         (is (= selected restored) (str "sparse subset " mask))
         (is (= (set (keys selected)) (set (keys internal))))
         (is (= (count selected) (count internal)))))))
+
+(deftest precise-nominal-output-is-equivalent-for-every-sparse-binding-map
+  ;; For all 128 legal presence patterns, the alternative explicit adapter
+  ;; produces exactly the same nominal map as the existing generic adapter.
+  (let [all {:role :server
+             :principal (assoc (tagged/principal :user) :extra {:a 1})
+             :actor (tagged/actor :member)
+             :authority (tagged/authority :requests)
+             :host (tagged/host :node)
+             :command-id (tagged/command-id :intent)
+             :execution-id (assoc (tagged/execution-id :attempt) :extra nil)}
+        slots [:role :principal :actor :authority :host
+               :command-id :execution-id]]
+    (doseq [mask (range 128)]
+      (let [input (into {}
+                        (for [[index slot] (map-indexed vector slots)
+                              :when (bit-test mask index)]
+                          [slot (get all slot)]))
+            precise (bindings->nominal-precise input)]
+        (is (= (bindings->nominal input) precise))
+        (is (= input (bindings->tagged precise)))
+        (is (= (set (keys input)) (set (keys precise))))))))
+
+(deftest precise-nominal-output-rejects-incorrect-binding-categories
+  (let [slots [:principal :actor :authority :host :command-id :execution-id]
+        factories [tagged/principal tagged/actor tagged/authority
+                   tagged/host tagged/command-id tagged/execution-id]]
+    (doseq [[slot expected] (map vector slots factories)
+            [other-slot actual] (map vector slots factories)]
+      (let [input {slot (actual :id)}
+            error (error-kind #(bindings->nominal-precise input))]
+        (if (= slot other-slot)
+          (is (= nil error))
+          (is (= :invalid-binding error)))))
+    (is (= :invalid-role
+           (error-kind #(bindings->nominal-precise {:role 42}))))
+    (is (= :unknown-binding
+           (error-kind #(bindings->nominal-precise {:unknown :value}))))))
 
 (deftest tagged-identity-categories-are-not-interchangeable-in-bindings
   (let [slots [:principal :actor :authority :host :command-id :execution-id]
