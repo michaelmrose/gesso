@@ -89,18 +89,30 @@
     (reject! :induction-ledger-contract-changed {}))
   l)
 
+(defn- revalidate-bound-handles!
+  "Recheck both nominal handles against the SAME current original catalog
+   and dependency graph. The result contains only these returned live handles;
+   it is not proof of discharged assumptions, certified code, or authority."
+  [catalog current-graph certificate-handle dependency-handle]
+  {:dependency-handle
+   (induction-dependency/require-current-induction-dependencies!
+    dependency-handle catalog current-graph)
+   :certificate-handle
+   (certificate/require-current-certificate!
+    certificate-handle catalog current-graph)})
+
 (defn- require-bound-evidence!
   [catalog current-graph certificate-handle dependency-handle l]
   ;; The two live checkers authenticate their own handle registries and
-  ;; re-evaluate ORIGINAL sources. Checking both against the SAME graph joins
-  ;; generic certificate admission to exact induction dependency closure.
-  (induction-dependency/require-current-induction-dependencies!
-   dependency-handle catalog current-graph)
-  (certificate/require-current-certificate!
-   certificate-handle catalog current-graph)
-  (let [d (induction-dependency/describe-induction-dependencies
-           dependency-handle)
-        c (certificate/describe-certificate certificate-handle)
+  ;; re-evaluate ORIGINAL sources. Both returned handles feed the descriptions
+  ;; checked against the current source-derived ledger below.
+  (let [{checked-dependency :dependency-handle
+         checked-certificate :certificate-handle}
+        (revalidate-bound-handles! catalog current-graph
+                                   certificate-handle dependency-handle)
+        d (induction-dependency/describe-induction-dependencies
+           checked-dependency)
+        c (certificate/describe-certificate checked-certificate)
         operations (:declared-operation-ids l)
         invariants (:declared-invariant-ids l)
         inherited (:original-open-obligation-ids-by-operation l)]
