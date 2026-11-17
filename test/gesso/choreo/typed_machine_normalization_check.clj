@@ -270,7 +270,9 @@
                      :history '(typed.clojure/Seqable typed.clojure/Any)}
                     :complete? false)
         output (list 'typed.clojure/HMap :mandatory
-                     {:identity-bindings binding-type
+                     {:gesso.choreo.machine/type
+                      '(typed.clojure/Val :gesso.choreo.machine/execution)
+                      :identity-bindings binding-type
                       :command-id command-opt
                       :execution-id execution-opt
                       :history '(typed.clojure/AVec typed.clojure/Any)}
@@ -295,7 +297,7 @@
     (eval '(typed.clojure/ann clojure.core/to-array
              (typed.clojure/IFn [typed.clojure/Any :-> typed.clojure/Any])))
     (eval '(typed.clojure/ann gesso.choreo.machine/execution-type
-             typed.clojure/Any))
+             (typed.clojure/Val :gesso.choreo.machine/execution)))
     (eval (list 'typed.clojure/ann
                 'gesso.choreo.machine/execution-record
                 (list 'typed.clojure/IFn [input '-> output])))
@@ -309,7 +311,11 @@
         ;; Check the actual function body with only the changed expression.
         (doseq [[label mutated]
                 [[:execution-history-not-vectorized no-vector]
-                 [:execution-history-wrong-type wrong-vector]]]
+                 [:execution-history-wrong-type wrong-vector]
+                 [:execution-record-wrong-marker
+                  (replace-fields definition
+                                  #(assoc % :gesso.choreo.machine/type
+                                            :not-an-execution))]]]
           (let [{:keys [ex type-errors]}
                 (checker mutated :check-config config)
                 kinds (mapv :type-error type-errors)]
@@ -359,6 +365,83 @@
                [:raw-bindings-stored
                 (replace-fields definition #(assoc % :identity-bindings '{}))]]]
         (require-rejected! label changed)))
+    true))
+
+
+(defn- check-machine-execution-accessors! [checker forms]
+  ;; Check original machine API bodies against the SAME discriminated map
+  ;; representation used for the execution-record producer. This proves
+  ;; correct field selection for typed inputs; runtime execution? validation
+  ;; continues to protect the untyped public entry points.
+  (let [command-tag '(typed.clojure/HMap
+                      :mandatory {:gesso.choreo.identity/type
+                                  (typed.clojure/Val :gesso.choreo.identity/ref)
+                                  :gesso.choreo.identity/kind
+                                  (typed.clojure/Val :command)
+                                  :gesso.choreo.identity/value typed.clojure/Any}
+                      :complete? false)
+        execution-tag '(typed.clojure/HMap
+                        :mandatory {:gesso.choreo.identity/type
+                                    (typed.clojure/Val :gesso.choreo.identity/ref)
+                                    :gesso.choreo.identity/kind
+                                    (typed.clojure/Val :execution)
+                                    :gesso.choreo.identity/value typed.clojure/Any}
+                        :complete? false)
+        command-opt (list 'typed.clojure/U nil command-tag)
+        execution-opt (list 'typed.clojure/U nil execution-tag)
+        bindings-tag (list 'typed.clojure/HMap :optional
+                           {:command-id command-opt
+                            :execution-id execution-opt}
+                           :complete? false)
+        record-tag (list 'typed.clojure/HMap :mandatory
+                         {:gesso.choreo.machine/type
+                          '(typed.clojure/Val :gesso.choreo.machine/execution)
+                          :identity-bindings bindings-tag
+                          :command-id command-opt
+                          :execution-id execution-opt}
+                         :complete? false)
+        names '[require-execution! identity-bindings command-id execution-id]
+        originals (into {} (map (fn [n] [n (source-definition forms n)]) names))
+        helper (get originals 'require-execution!)]
+    (eval '(typed.clojure/ann gesso.choreo.machine/execution?
+             (typed.clojure/IFn [typed.clojure/Any :-> typed.clojure/Bool])))
+    (doseq [[name return-type]
+            [['require-execution! record-tag]
+             ['identity-bindings bindings-tag]
+             ['command-id command-opt]
+             ['execution-id execution-opt]]]
+      (eval (list 'typed.clojure/ann
+                  (symbol "gesso.choreo.machine" (str name))
+                  (list 'typed.clojure/IFn [record-tag '-> return-type]))))
+    (binding [*ns* (the-ns 'gesso.choreo.machine)]
+      (doseq [name names]
+        (check-source! checker [:production-machine-accessor name]
+                       (get originals name)))
+      (let [mutations
+            [[:command-returns-execution
+              (get originals 'command-id)
+              (walk/postwalk-replace
+               {:command-id :execution-id}
+               (get originals 'command-id))]
+             [:execution-returns-command
+              (get originals 'execution-id)
+              (walk/postwalk-replace
+               {:execution-id :command-id}
+               (get originals 'execution-id))]
+             [:bindings-return-command
+              (get originals 'identity-bindings)
+              (walk/postwalk-replace
+               {:identity-bindings :command-id}
+               (get originals 'identity-bindings))]
+             [:validator-returns-nil
+              helper
+              (apply list (concat (butlast helper) [nil]))]]]
+        (doseq [[label original mutated] mutations]
+          (when (= original mutated)
+            (throw (ex-info "Machine accessor mutation had no target."
+                            {:label label})))
+          (check-rejection! checker label mutated
+                            :typed.clojure/type-mismatch-error))))
     true))
 
 (defn check! [checker]
@@ -422,6 +505,7 @@
       (audit-machine-binding-normalization! normalize)
       (audit-machine-start-linkage! start)
       (check-machine-execution-record! checker record)
+      (check-machine-execution-accessors! checker forms)
       ;; The original machine/start has a separate obligation: it must use
       ;; the checked normalizer with the correct option-to-argument mapping.
       (let [normalization-call
