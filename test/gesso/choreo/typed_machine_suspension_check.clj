@@ -52,7 +52,7 @@
                         :complete? false)
         environment-state '(typed.clojure/HMap
                             :mandatory {:events
-                                        (typed.clojure/Map typed.clojure/Any
+                                        (typed.clojure/Map typed.clojure/Kw
                                                            typed.clojure/Any)}
                             :optional {:event-contracts
                                        (typed.clojure/Map typed.clojure/Any
@@ -70,7 +70,7 @@
                                  :mandatory {:kind (typed.clojure/Val :environment)
                                              :role typed.clojure/Kw
                                              :events (typed.clojure/Set
-                                                      typed.clojure/Any)}
+                                                      typed.clojure/Kw)}
                                  :complete? false)
         helper (original forms 'non-role-bindings)
         receive (original forms 'receive-awaiting)
@@ -99,5 +99,38 @@
       (check-rejected! checker :environment-labeled-receive environment
                        (walk/postwalk-replace {:environment :receive} environment))
       (check-rejected! checker :helper-returns-nil helper
-                       (apply list (concat (butlast helper) [nil]))))
+                       (apply list (concat (butlast helper) [nil])))
+      ;; The authoring boundary requires keyword event labels. Confirm the
+      ;; strengthened event-map input contract rejects arbitrary string keys
+      ;; rather than silently widening the resulting event set to Any.
+      (check-original! checker :keyword-environment-event-call
+                       '(environment-awaiting
+                         {:role :server} {} {:events {:opened :next}}))
+      (let [{:keys [ex type-errors]}
+            (checker '(environment-awaiting
+                       {:role :server} {}
+                       {:events {"opened" :next}})
+                     :check-config config)
+            kinds (mapv :type-error type-errors)]
+        (when-not (and (nil? ex)
+                       (= [:typed.clojure/app-type-error] kinds))
+          (throw (ex-info "Non-keyword environment event escaped static checking."
+                          {:errors kinds} ex))))
+      ;; The original cond-> expression may add identity data after the
+      ;; descriptor literal. Ensure that subsequent changes cannot erase its
+      ;; discriminator or its mandatory suspension-specific collection.
+      (doseq [[category source wrong-kind required]
+              [[:receive receive :environment :alternatives]
+               [:environment environment :receive :events]]]
+        (let [body (last source)
+              wrong-category
+              (apply list (concat (butlast source)
+                                  [(list 'assoc body :kind wrong-kind)]))
+              missing-required
+              (apply list (concat (butlast source)
+                                  [(list 'dissoc body required)]))]
+          (check-rejected! checker [category :post-construction-kind]
+                           source wrong-category)
+          (check-rejected! checker [category :post-construction-fields]
+                           source missing-required))))
     true))
