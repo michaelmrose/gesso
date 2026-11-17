@@ -31,6 +31,41 @@
               :done (choreo/return :done)}})
    :server))
 
+;; This observation corpus is deliberately independent of test reports. JVM
+;; and CLJS can pass the same assertions while disagreeing on actual outputs.
+;; Export only portable public observations and re-tagged nominal projections;
+;; internal nominal classes must never escape into the comparison.
+(defn portable-identity-corpus []
+  (let [plan (two-local-plan)
+        sample (sample-bindings)]
+    (mapv
+     (fn [mask]
+       (let [bindings (into {}
+                            (for [[n slot] (map-indexed vector identity-slots)
+                                  :when (bit-test mask n)]
+                              [slot (get sample slot)]))
+             first-state (machine/start plan {:identity-bindings bindings})
+             second-state (machine/complete-local first-state)
+             final-state (machine/complete-local second-state)]
+         {:mask mask
+          :states
+          (mapv
+           (fn [execution]
+             {:bindings (machine/identity-bindings execution)
+              :nominal-bindings
+              (nominal-bindings/bindings->tagged
+               (machine-bindings/execution->nominal-bindings execution))
+              :command-id (machine/command-id execution)
+              :execution-id (machine/execution-id execution)
+              :pending (machine/pending-action execution)
+              :completed? (machine/completed? execution)})
+           [first-state second-state final-state])}))
+     (range 128))))
+
+#?(:clj
+   (defn -main [& _]
+     (println "GESSO_CHOREO_IDENTITY_PARITY" (pr-str (portable-identity-corpus)))))
+
 (defn- assert-identity-continuity! [execution expected]
   (is (machine/execution? execution))
   (is (= expected (machine/identity-bindings execution)))

@@ -67,6 +67,8 @@
 
 (defn main []
   (reset! visited-namespaces [])
+  (println "GESSO_CHOREO_IDENTITY_PARITY"
+           (pr-str (gesso.choreo.typed-nominal-transition-boundary-test/portable-identity-corpus)))
   (t/run-tests (t/empty-env ::reporter)
                'gesso.choreo.typed-nominal-transition-boundary-test
                'gesso.choreo.typed-nominal-machine-boundary-test

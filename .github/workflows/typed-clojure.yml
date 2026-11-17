@@ -57,6 +57,13 @@ jobs:
             -n gesso.choreo.typed-nominal-transition-boundary-test \
             -n gesso.script.repo-integrity-metadata-test
 
+      - name: Record JVM sparse identity transition observations
+        run: |
+          mkdir -p target/typed-node
+          clojure -Sdeps '{:aliases {:identity-parity {:extra-paths ["test"]}}}' \
+            -M:identity-parity -m gesso.choreo.typed-nominal-transition-boundary-test \
+            > target/typed-node/jvm-identity-parity.log
+
       - name: Audit portable Choreo Node inventory and negative cases
         run: bb script/check_choreo_node_inventory.clj --self-test
 
@@ -73,4 +80,12 @@ jobs:
             -c gesso.choreo.typed-nominal-transition-node-runner
 
       - name: Run full portable Choreo corpus under Node
-        run: node target/typed-node/choreo-corpus.js
+        run: |
+          node target/typed-node/choreo-corpus.js > target/typed-node/node-corpus.log
+          grep '^GESSO_TYPED_NODE_TRANSITIONS ' target/typed-node/node-corpus.log
+
+      - name: Compare JVM and Node machine identity observations
+        run: |
+          bb script/check_choreo_identity_parity.clj \
+            target/typed-node/jvm-identity-parity.log \
+            target/typed-node/node-corpus.log
