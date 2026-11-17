@@ -64,6 +64,13 @@
    {org.typedclojure/typed.clj.checker
     {:mvn/version "1.4.0"}}}
 
+  ;; Ansatz stays optional while Gesso evaluates source-derived proofs.
+  ;; Its kernel/proof dependencies are not part of normal application builds.
+  :ansatz
+  {:extra-deps
+   {org.replikativ/ansatz
+    {:mvn/version "0.2.617"}}}
+
   :dev
   {:extra-deps
    {org.clojure/clojurescript
