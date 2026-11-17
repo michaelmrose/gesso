@@ -371,8 +371,10 @@
 (defn- check-machine-execution-accessors! [checker forms]
   ;; Check original machine API bodies against the SAME discriminated map
   ;; representation used for the execution-record producer. This proves
-  ;; correct field selection for typed inputs; runtime execution? validation
-  ;; continues to protect the untyped public entry points.
+  ;; correct field selection for typed inputs, including the disjoint
+  ;; action/awaiting :kind families and vector history. Runtime execution?
+  ;; validation continues to protect untyped public entry points and
+  ;; establishes state-to-descriptor consistency that these types cannot.
   (let [command-tag '(typed.clojure/HMap
                       :mandatory {:gesso.choreo.identity/type
                                   (typed.clojure/Val :gesso.choreo.identity/ref)
@@ -393,14 +395,33 @@
                            {:command-id command-opt
                             :execution-id execution-opt}
                            :complete? false)
+        ;; Executable actions and suspended alternatives have disjoint
+        ;; semantic :kind values despite both remaining portable maps.
+        action-tag (apply list 'typed.clojure/U
+                          (for [kind [:local :authoritative :send]]
+                            (list 'typed.clojure/HMap :mandatory
+                                  {:kind (list 'typed.clojure/Val kind)}
+                                  :complete? false)))
+        awaiting-tag (apply list 'typed.clojure/U
+                            (for [kind [:receive :environment]]
+                              (list 'typed.clojure/HMap :mandatory
+                                    {:kind (list 'typed.clojure/Val kind)}
+                                    :complete? false)))
+        action-opt (list 'typed.clojure/U nil action-tag)
+        awaiting-opt (list 'typed.clojure/U nil awaiting-tag)
+        history-tag '(typed.clojure/AVec typed.clojure/Any)
         record-tag (list 'typed.clojure/HMap :mandatory
                          {:gesso.choreo.machine/type
                           '(typed.clojure/Val :gesso.choreo.machine/execution)
                           :identity-bindings bindings-tag
                           :command-id command-opt
-                          :execution-id execution-opt}
+                          :execution-id execution-opt
+                          :history history-tag}
+                         :optional {:action action-opt
+                                    :awaiting awaiting-opt}
                          :complete? false)
-        names '[require-execution! identity-bindings command-id execution-id]
+        names '[require-execution! identity-bindings command-id execution-id
+                pending-action awaiting execution-history]
         originals (into {} (map (fn [n] [n (source-definition forms n)]) names))
         helper (get originals 'require-execution!)]
     (eval '(typed.clojure/ann gesso.choreo.machine/execution?
@@ -409,7 +430,10 @@
             [['require-execution! record-tag]
              ['identity-bindings bindings-tag]
              ['command-id command-opt]
-             ['execution-id execution-opt]]]
+             ['execution-id execution-opt]
+             ['pending-action action-opt]
+             ['awaiting awaiting-opt]
+             ['execution-history history-tag]]]
       (eval (list 'typed.clojure/ann
                   (symbol "gesso.choreo.machine" (str name))
                   (list 'typed.clojure/IFn [record-tag '-> return-type]))))
@@ -435,7 +459,22 @@
                (get originals 'identity-bindings))]
              [:validator-returns-nil
               helper
-              (apply list (concat (butlast helper) [nil]))]]]
+              (apply list (concat (butlast helper) [nil]))]
+             [:action-returns-awaiting
+              (get originals 'pending-action)
+              (walk/postwalk-replace
+               {:action :awaiting}
+               (get originals 'pending-action))]
+             [:awaiting-returns-action
+              (get originals 'awaiting)
+              (walk/postwalk-replace
+               {:awaiting :action}
+               (get originals 'awaiting))]
+             [:history-returns-awaiting
+              (get originals 'execution-history)
+              (walk/postwalk-replace
+               {:history :awaiting}
+               (get originals 'execution-history))]]]
         (doseq [[label original mutated] mutations]
           (when (= original mutated)
             (throw (ex-info "Machine accessor mutation had no target."
