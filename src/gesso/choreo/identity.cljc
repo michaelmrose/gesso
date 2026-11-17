@@ -415,6 +415,22 @@
     :command-id
     :execution-id})
 
+(defn- validate-authority-binding
+  "Validate one authority binding without confusing it with a host.
+
+   Authority designates a semantic source of trusted observations, not a
+   deployment location or runtime instance. Preserve the admitted reference
+   or reject the supplied value with the original invalid-binding error.
+   The optional Typed Clojure gate checks this original production body."
+  [value]
+  (if (authority? value)
+    value
+    (identity-error
+     :invalid-binding
+     "Identity binding :authority must contain an authority identity."
+     {:binding :authority
+      :value value})))
+
 (defn- validate-actor-binding
   "Validate one actor binding without confusing it with a principal.
 
@@ -491,13 +507,7 @@
     (validate-actor-binding value)
 
     :authority
-    (if (authority? value)
-      value
-      (identity-error
-       :invalid-binding
-       "Identity binding :authority must contain an authority identity."
-       {:binding key
-        :value value}))
+    (validate-authority-binding value)
 
     :host
     (if (host? value)

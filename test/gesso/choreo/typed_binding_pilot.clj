@@ -10,11 +10,11 @@
    Valid identity references may retain extra keys. Their HMap types must
    remain OPEN: a closed HMap (:complete? true) is unsound as a refinement
    of identity?/kind?, because production identities accept extra keys.
-   The principal, actor, command-id, and execution-id branches now delegate
-   to separately checked production validation helpers. We check each original
-   function body against its key-specific return type, audit rejection paths,
-   and verify exact production dispatcher wiring. Actor and principal remain
-   distinct semantic categories, not interchangeable identity credentials.
+   The principal, actor, authority, command-id, and execution-id branches
+   now delegate to separately checked production validation helpers. We
+   check each original function body against its key-specific return type,
+   audit rejection paths, and verify exact production dispatcher wiring.
+   Authority and deployment host remain separate semantic categories.
    That contract relies on the independently stated positive predicate
    refinement, not on a dependent proof of admitted identity provenance.
    We test this with the real predicates and Typed Clojure's subtyping.
@@ -150,6 +150,7 @@
 ;; unlike the broad dispatcher whose key/result dependency is not proved.
 (t/ann identity/validate-principal-binding [t/Any -> PrincipalRef])
 (t/ann identity/validate-actor-binding [t/Any -> ActorRef])
+(t/ann identity/validate-authority-binding [t/Any -> AuthorityRef])
 (t/ann identity/validate-command-binding [t/Any -> CommandRef])
 (t/ann identity/validate-execution-binding [t/Any -> ExecutionRef])
 
@@ -346,14 +347,16 @@
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
        (doseq [name ['identity? 'kind 'role? 'require-role 'kind?
                      'validate-principal-binding 'validate-actor-binding
-                     'validate-command-binding 'validate-execution-binding
-                     'validate-binding 'bindings? 'binding-value]]
+                     'validate-authority-binding 'validate-command-binding
+                     'validate-execution-binding 'validate-binding
+                     'bindings? 'binding-value]]
          (check-form name (source-function name)))
        ;; Every extracted helper must remain wired to its exact input key;
        ;; bypassing it invalidates the key-specific source-check evidence.
        (doseq [[key helper-name]
                [[:principal 'validate-principal-binding]
                 [:actor 'validate-actor-binding]
+                [:authority 'validate-authority-binding]
                 [:command-id 'validate-command-binding]
                 [:execution-id 'validate-execution-binding]]]
          (let [actual (get branches key)
@@ -363,6 +366,7 @@
                                          [(case key
                                             :principal :wrong-principal-result
                                             :actor :wrong-actor-result
+                                            :authority :wrong-authority-result
                                             :command-id :wrong-command-result
                                             :execution-id :wrong-execution-result)]))]
            (when-not (= expected actual)
@@ -457,7 +461,7 @@
                                 (= 'identity-error (first error-expr))
                                 (= :invalid-binding (second error-expr))
                                 (string? (nth error-expr 2 nil))
-                                (= {:binding (if (#{:principal :actor
+                                (= {:binding (if (#{:principal :actor :authority
                                                     :command-id :execution-id} key)
                                                 key 'key)
                                     :value 'value}
@@ -520,6 +524,9 @@
                                   :actor
                                   (last (source-function
                                          'validate-actor-binding))
+                                  :authority
+                                  (last (source-function
+                                         'validate-authority-binding))
                                   :command-id
                                   (last (source-function
                                          'validate-command-binding))
@@ -608,6 +615,8 @@
                         (last (source-function 'validate-principal-binding))
                         :actor
                         (last (source-function 'validate-actor-binding))
+                        :authority
+                        (last (source-function 'validate-authority-binding))
                         :command-id
                         (last (source-function 'validate-command-binding))
                         :execution-id
