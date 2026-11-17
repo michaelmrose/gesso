@@ -6,6 +6,7 @@
 
 (def ^:private marker "GESSO_CHOREO_IDENTITY_PARITY ")
 (def ^:private admission-marker "GESSO_CHOREO_ADMISSION_PARITY ")
+(def ^:private suspension-marker "GESSO_CHOREO_SUSPENSION_PARITY ")
 (def ^:private runtime-slots
   [:principal :actor :authority :host :command-id :execution-id])
 (def ^:private slots
@@ -234,6 +235,141 @@
                                 (assoc 1 (nth cases 0)))))
   (println "JVM/Node admission mutations: PASS (6 rejected)"))
 
+;; Observe actual suspension and resumption at two independent machine
+;; boundaries, not just local completion. These checks independently validate
+;; the known contract before comparing JVM and Node serialized outcomes.
+(defn- expected-suspension-bindings [mask observed]
+  (let [expected-keys
+        (conj (into #{}
+                    (for [[n slot] (map-indexed vector slots)
+                          :when (bit-test mask n)] slot)) :role)]
+    (when-not (and (map? observed)
+                   (= expected-keys (set (keys observed)))
+                   (= :server (:role observed)))
+      (fail! "Suspension identity binding mask differs from expected slots."
+             {:mask mask :observed observed}))
+    (doseq [[slot identity] (dissoc observed :role)]
+      (let [expected-kind (expected-identity-kind slot)]
+        (when-not (and (map? identity)
+                       (= :gesso.choreo.identity/ref
+                          (:gesso.choreo.identity/type identity))
+                       (= expected-kind (:gesso.choreo.identity/kind identity))
+                       (= :same-value (:gesso.choreo.identity/value identity))
+                       (= expected-kind (:custom identity)))
+          (fail! "Suspended machine identity is not the original tagged category."
+                 {:mask mask :slot slot :observed identity}))))
+    observed))
+
+(defn- expected-awaiting [kind bindings]
+  (cond-> (case kind
+            :receive {:kind :receive
+                      :role :server
+                      :alternatives [{:from :client :event :sync/arrived}]}
+            :environment {:kind :environment
+                          :role :server
+                          :events #{:sync/ready}})
+    (seq (dissoc bindings :role))
+    (assoc :identity-bindings bindings)))
+
+(defn- expected-completed-history [kind]
+  [(case kind
+     :receive {:kind :receive :state 0 :from :client :to :server
+               :event :sync/arrived :payload {}}
+     :environment {:kind :environment :state 0 :role :server
+                   :event :sync/ready :data nil})
+   {:kind :terminal :state 1 :outcome :gesso.choreo/complete}])
+
+(defn- validate-suspensions! [host cases]
+  (let [ids (vec (for [kind [:receive :environment]
+                       mask (range 128)]
+                   [kind mask]))]
+    (when-not (and (vector? cases)
+                   (= 256 (count cases))
+                   (= ids (mapv (juxt :kind :mask) cases)))
+      (fail! "Suspension corpus must have exactly 256 ordered kind/mask cases."
+             {:host host :observed-count (count cases)}))
+    (doseq [{:keys [kind mask waiting acceptance rejections completed] :as entry} cases]
+      (when-not (= #{:kind :mask :waiting :acceptance :rejections :completed}
+                   (set (keys entry)))
+        (fail! "Suspension observation has unexpected or missing fields."
+               {:host host :kind kind :mask mask}))
+      (let [bindings (expected-suspension-bindings mask (:bindings waiting))
+            expected-errors {:wrong-role (if (= kind :receive)
+                                            :message-not-enabled
+                                            :environment-event-not-enabled)
+                             :wrong-kind (if (= kind :receive)
+                                           :invalid-message
+                                           :invalid-environment-event)}]
+        (when-not (= {:bindings bindings
+                      :nominal-bindings bindings
+                      :status (if (= kind :receive)
+                                :waiting-receive :waiting-environment)
+                      :suspended? true
+                      :awaiting (expected-awaiting kind bindings)
+                      :pending nil
+                      :history []}
+                     waiting)
+          (fail! "Suspended machine observation violates the boundary contract."
+                 {:host host :kind kind :mask mask :waiting waiting}))
+        (when-not (= {:valid true :wrong-role false :wrong-kind false}
+                     acceptance)
+          (fail! "Suspended-machine acceptance predicates are wrong."
+                 {:host host :kind kind :mask mask :acceptance acceptance}))
+        (when-not (= expected-errors rejections)
+          (fail! "Suspended-machine rejection kinds differ from expected errors."
+                 {:host host :kind kind :mask mask :rejections rejections}))
+        (when-not (= {:bindings bindings
+                      :nominal-bindings bindings
+                      :status :completed
+                      :result {:outcome :gesso.choreo/complete}
+                      :awaiting nil
+                      :pending nil
+                      :history (expected-completed-history kind)}
+                     completed)
+          (fail! "Resumed machine lost identity or changed deterministic history."
+                 {:host host :kind kind :mask mask :completed completed})))))
+  cases)
+
+(defn- compare-suspensions! [jvm node]
+  (validate-suspensions! :jvm jvm)
+  (validate-suspensions! :node node)
+  (when-not (= jvm node)
+    (let [first-mismatch
+          (first (keep-indexed (fn [i [a b]] (when (not= a b) i))
+                               (map vector jvm node)))]
+      (fail! "JVM and Node suspended-machine observations disagree."
+             {:first-mismatch first-mismatch
+              :kind-mask (select-keys (get jvm first-mismatch) [:kind :mask])})))
+  true)
+
+(defn- suspension-negative-checks! [cases]
+  (expect-rejected! :missing-suspension
+                    #(compare-suspensions! cases (pop cases)))
+  (expect-rejected! :reordered-suspension
+                    #(compare-suspensions! cases
+                      (-> cases (assoc 0 (nth cases 1))
+                                (assoc 1 (nth cases 0)))))
+  (expect-rejected! :wrong-awaiting-kind
+                    #(compare-suspensions! cases
+                      (assoc-in cases [0 :waiting :awaiting :kind] :environment)))
+  (expect-rejected! :wrong-sender-rejection
+                    #(compare-suspensions! cases
+                      (assoc-in cases [0 :rejections :wrong-role] :invalid-message)))
+  (expect-rejected! :forged-acceptance
+                    #(compare-suspensions! cases
+                      (assoc-in cases [0 :acceptance :wrong-kind] true)))
+  (expect-rejected! :mutated-nominal
+                    #(compare-suspensions! cases
+                      (assoc-in cases [255 :completed :nominal-bindings :role]
+                                :client)))
+  (expect-rejected! :forged-terminal-history
+                    #(compare-suspensions! cases
+                      (assoc-in cases [127 :completed :history 1 :outcome] :failed)))
+  (expect-rejected! :dropped-identity
+                    #(compare-suspensions! cases
+                      (update-in cases [2 :waiting :bindings] dissoc :principal)))
+  (println "JVM/Node suspension mutations: PASS (8 rejected)"))
+
 (defn -main [& args]
   (when-not (= 2 (count args))
     (fail! "Usage: bb script/check_choreo_identity_parity.clj JVM_LOG NODE_LOG"
@@ -242,12 +378,17 @@
         jvm (read-corpus! jvm-file marker)
         node (read-corpus! node-file marker)
         jvm-admissions (read-corpus! jvm-file admission-marker)
-        node-admissions (read-corpus! node-file admission-marker)]
+        node-admissions (read-corpus! node-file admission-marker)
+        jvm-suspensions (read-corpus! jvm-file suspension-marker)
+        node-suspensions (read-corpus! node-file suspension-marker)]
     (compare-corpora! jvm node)
     (negative-checks! jvm)
     (compare-admissions! jvm-admissions node-admissions)
     (admission-negative-checks! jvm-admissions)
+    (compare-suspensions! jvm-suspensions node-suspensions)
+    (suspension-negative-checks! jvm-suspensions)
     (println "JVM/Node identity transition observations: PASS (128 identical cases)")
-    (println "JVM/Node typed identity admissions: PASS (56 identical cases)")))
+    (println "JVM/Node typed identity admissions: PASS (56 identical cases)")
+    (println "JVM/Node receive/await suspension observations: PASS (256 identical cases)")))
 
 (apply -main *command-line-args*)

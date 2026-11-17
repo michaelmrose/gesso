@@ -121,10 +121,114 @@
     (is (= 10 (count (filter #(= :accepted (:status %)) cases))))
     (is (= 46 (count (filter #(= :rejected (:status %)) cases))))))
 
+;; In addition to local completions, verify both suspended-machine kinds:
+;; participant receive and environment await. All public observations are
+;; portable EDN; no internal nominal objects are exposed by either host.
+(defn- suspension-plan [kind]
+  (case kind
+    :receive
+    (project/project
+     (choreo/->choreography
+      {:initial :incoming
+       :states {:incoming (choreo/communicate :client :server :sync/arrived :done)
+                :done (choreo/return :done)}})
+     :server)
+
+    :environment
+    (project/project
+     (choreo/->choreography
+      {:initial :waiting
+       :states {:waiting (choreo/await :server {:sync/ready :done})
+                :done (choreo/return :done)}})
+     :server)))
+
+(defn- nominal-projection [execution]
+  (nominal-bindings/bindings->tagged
+   (machine-bindings/execution->nominal-bindings execution)))
+
+(defn- rejected-resume-kind [execution envelope]
+  (try
+    (machine/resume execution envelope)
+    :unexpected-acceptance
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) error
+      (:error/kind (ex-data error)))))
+
+(defn portable-suspension-corpus []
+  (let [plans {:receive (suspension-plan :receive)
+               :environment (suspension-plan :environment)}
+        sample (sample-bindings)
+        envelopes
+        {:receive
+         [(machine/message :client :server :sync/arrived {})
+          (machine/message :other :server :sync/arrived {})
+          (machine/environment-event :server :sync/arrived)]
+         :environment
+         [(machine/environment-event :server :sync/ready)
+          (machine/environment-event :client :sync/ready)
+          (machine/message :client :server :sync/ready {})]}]
+    (vec
+     (for [kind [:receive :environment]
+           mask (range 128)]
+       (let [sparse (into {}
+                          (for [[n slot] (map-indexed vector identity-slots)
+                                :when (bit-test mask n)]
+                            [slot (get sample slot)]))
+             waiting (machine/start (get plans kind)
+                                    {:identity-bindings sparse})
+             [valid wrong-role wrong-kind] (get envelopes kind)
+             accepted? (machine/accepts? waiting valid)
+             wrong-role-accepted? (machine/accepts? waiting wrong-role)
+             wrong-kind-accepted? (machine/accepts? waiting wrong-kind)
+             wrong-role-error (rejected-resume-kind waiting wrong-role)
+             wrong-kind-error (rejected-resume-kind waiting wrong-kind)
+             completed (machine/resume waiting valid)]
+         {:kind kind
+          :mask mask
+          :waiting {:bindings (machine/identity-bindings waiting)
+                    :nominal-bindings (nominal-projection waiting)
+                    :status (:status waiting)
+                    :suspended? (machine/suspended? waiting)
+                    :awaiting (machine/awaiting waiting)
+                    :pending (machine/pending-action waiting)
+                    :history (machine/execution-history waiting)}
+          :acceptance {:valid accepted?
+                       :wrong-role wrong-role-accepted?
+                       :wrong-kind wrong-kind-accepted?}
+          :rejections {:wrong-role wrong-role-error
+                       :wrong-kind wrong-kind-error}
+          :completed {:bindings (machine/identity-bindings completed)
+                      :nominal-bindings (nominal-projection completed)
+                      :status (:status completed)
+                      :result (machine/result completed)
+                      :awaiting (machine/awaiting completed)
+                      :pending (machine/pending-action completed)
+                      :history (machine/execution-history completed)}})))))
+
+(deftest sparse-identities-survive-receive-and-environment-resumption
+  (let [cases (portable-suspension-corpus)]
+    (is (= 256 (count cases)))
+    (is (= (vec (for [kind [:receive :environment]
+                       mask (range 128)] [kind mask]))
+           (mapv (juxt :kind :mask) cases)))
+    (doseq [{:keys [kind waiting acceptance rejections completed]} cases]
+      (is (= (:bindings waiting) (:bindings completed)))
+      (is (= (:bindings waiting) (:nominal-bindings completed)))
+      (is (= {:valid true :wrong-role false :wrong-kind false}
+             acceptance))
+      (is (= {:wrong-role (if (= kind :receive)
+                             :message-not-enabled
+                             :environment-event-not-enabled)
+              :wrong-kind (if (= kind :receive)
+                            :invalid-message
+                            :invalid-environment-event)}
+             rejections)))))
+
 #?(:clj
    (defn -main [& _]
      (println "GESSO_CHOREO_IDENTITY_PARITY" (pr-str (portable-identity-corpus)))
-     (println "GESSO_CHOREO_ADMISSION_PARITY" (pr-str (portable-admission-corpus)))))
+     (println "GESSO_CHOREO_ADMISSION_PARITY" (pr-str (portable-admission-corpus)))
+     (println "GESSO_CHOREO_SUSPENSION_PARITY" (pr-str (portable-suspension-corpus)))))
 
 (defn- assert-identity-continuity! [execution expected]
   (is (machine/execution? execution))
