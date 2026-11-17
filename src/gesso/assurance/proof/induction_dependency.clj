@@ -75,10 +75,21 @@
 (defn- edge [raw]
   {:id (:id raw) :fingerprint (fingerprint raw)})
 
+(defn- ordered-dependencies [dependencies]
+  ;; Preserve source-id ordering while leaving Typed Clojure's currently
+  ;; restrictive sort-by comparator annotation outside the checked constructor.
+  (sort-by (comp str :id) dependencies))
+
 (defn- make-node [raw dependencies]
   {:id (:id raw)
    :subject raw
-   :depends-on (mapv edge (sort-by (comp str :id) dependencies))})
+   :depends-on (mapv edge (ordered-dependencies dependencies))})
+
+(defn- admit-node [node]
+  ;; This is the only transition from a descriptive source-derived node into
+  ;; a node carrying a live structural admission handle. The handle is not
+  ;; proof or external authority, and graph validation remains mandatory.
+  (assoc node :subject-handle (admission/admit-subject! (:subject node))))
 
 (defn- semantic-graph!
   "Derive all required graph nodes and edges without creating authority.
@@ -165,9 +176,7 @@
   (let [graph (expected-graph! catalog)]
     (update graph :nodes
             (fn [nodes]
-              (mapv #(assoc % :subject-handle
-                            (admission/admit-subject! (:subject %)))
-                    nodes)))))
+              (mapv admit-node nodes)))))
 
 (defn- exact-graph! [expected supplied]
   (when-not (and (map? supplied) (not (record? supplied))

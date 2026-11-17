@@ -74,7 +74,9 @@
      (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-dependency-graph-check")
      (shell "clojure" "-M:typed" "-m"
-            "gesso.assurance.typed-application-dependency-node-check"))}
+            "gesso.assurance.typed-application-dependency-node-check")
+     (shell "clojure" "-M:typed" "-m"
+            "gesso.assurance.typed-induction-dependency-node-check"))}
 
   test:jvm
   {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."
