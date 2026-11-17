@@ -6,12 +6,16 @@
    three-key, string-valued subset of gesso.choreo.identity, not a new identity
    implementation or a certification of its unchecked constructors.
 
-   Consumers are checked, and the current command-id and execution-id
-   implementation forms are read from production source and checked directly.
-   The generic identity constructor and binding validator retain restricted,
-   trusted signatures; source coverage is deliberately limited to two
-   string-valued constructor overloads. This is not a proof of all identity
-   implementations, admission provenance, or arbitrary raw identity values."
+   The gate checks the original shared identity constructor, its relevant
+   private helpers, identity marker/kind constants, and two specialized
+   constructors alongside the typed consumer functions. The contract covers
+   string-valued command and execution references only; other identity kinds
+   and opaque raw values are not statically certified here.
+
+   Checking bodies against handwritten annotations is not a proof that the
+   annotations describe every runtime behavior. The binding validator is
+   still an unchecked foreign assumption. Admission provenance and the
+   broader Gesso/XTDB correctness obligations remain separate."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.choreo.identity :as identity]
@@ -37,16 +41,24 @@
            :execution-id ExecutionRef}
           :complete? true))
 
-;; The generic identity constructor is still assumed here. The two specialized
-;; constructor BODIES below are checked against its restricted overloads using
-;; their actual source forms. This does not establish the generic implementation.
+;; This narrow, explicitly incomplete interpretation of the original Gesso
+;; identity vocabulary covers string-valued command and execution references.
+;; The gate below checks these *original source forms* under these signatures.
+(t/ann identity/identity-type (t/Val :gesso.choreo.identity/ref))
+(t/ann identity/identity-kinds (t/Set t/Kw))
+(t/ann identity/identity-error
+       [t/Kw t/Str (t/Map t/Any t/Any) -> t/Nothing])
+(t/ann identity/identity? [t/Any -> t/Bool])
+(t/ann identity/require-kind
+       (t/IFn [(t/Val :command) -> (t/Val :command)]
+              [(t/Val :execution) -> (t/Val :execution)]))
+(t/ann identity/require-raw-value [t/Str -> t/Str])
 (t/ann identity/identity
        (t/IFn [(t/Val :command) t/Str -> CommandRef]
               [(t/Val :execution) t/Str -> ExecutionRef]))
 
-;; Restricted signatures for the two constructors and binding validator.
-;; The constructors' original source bodies are checked by the opt-in gate,
-;; but the binding validator remains an unchecked foreign assumption.
+;; The binding validator remains an unchecked foreign assumption. Its actual
+;; implementation will need separate source checking and preflight evidence.
 (t/ann identity/command-id [t/Str -> CommandRef])
 (t/ann identity/execution-id [t/Str -> ExecutionRef])
 (t/ann identity/bindings
@@ -70,9 +82,8 @@
 (defn execution-kind [ref]
   (:gesso.choreo.identity/kind ref))
 
-;; This is test-harness code, not a typed semantic function. Restrict the
-;; explicit unchecked region to the gate driver; never use it on the bodies
-;; of the checked consumer functions above.
+;; Only the gate driver is deliberately unchecked. It invokes the checker
+;; on original production source forms; the consumer functions stay checked.
 (t/tc-ignore
  (defn -main [& _]
    (let [check-ns (requiring-resolve 'typed.clj.checker/check-ns)
@@ -90,16 +101,48 @@
                             (if (= ::eof form)
                               acc
                               (recur (conj acc form))))))
-         original-definition
-         (fn [name]
+         source-definition
+         (fn [name tags]
            (let [matches (filter #(and (seq? %)
-                                       (= 'defn (first %))
+                                       (contains? tags (first %))
                                        (= name (second %)))
                                  source-forms)]
              (when-not (= 1 (count matches))
-               (throw (ex-info "Original identity definition missing or ambiguous."
-                               {:name name :matches (count matches)})))
+               (throw (ex-info "Original identity source missing or ambiguous."
+                               {:name name :tags tags
+                                :matches (count matches)})))
              (first matches)))
+         original-function (fn [name]
+                             (source-definition name #{'defn 'defn-}))
+         original-constant (fn [name]
+                             (source-definition name #{'def}))
+         check-form! (fn [name form]
+                       (let [{:keys [ex type-errors ret]}
+                             (check-form-info form :check-config check-config)]
+                         (when (or ex (seq type-errors) (nil? ret))
+                           (throw (ex-info "Original identity source did not type-check."
+                                           {:name name
+                                            :exception (some-> ex ex-message)
+                                            :type-errors (mapv str type-errors)
+                                            :returned? (some? ret)})))
+                         (println "Original identity source:" name "checked")))
+         require-type-mismatch!
+         (fn [name original mutated]
+           (when (= original mutated)
+             (throw (ex-info "Negative mutation did not change source."
+                             {:name name})))
+           (let [{:keys [ex type-errors]}
+                 (check-form-info mutated :check-config check-config)]
+             (when (or ex
+                       (not (seq type-errors))
+                       (not-every? #(= :typed.clojure/type-mismatch-error
+                                       (:type-error %))
+                                   type-errors))
+               (throw (ex-info "Source mutation did not yield static type mismatches."
+                               {:name name
+                                :exception (some-> ex ex-message)
+                                :type-errors (mapv str type-errors)})))
+             (println "Original identity mutation:" name "rejected")))
          command (identity/command-id "same-raw-value")
          execution (identity/execution-id "same-raw-value")
          checked-ns 'gesso.choreo.typed-identity-pilot]
@@ -124,37 +167,49 @@
                     (catch clojure.lang.ExceptionInfo e
                       (:error/kind (ex-data e)))))
        (throw (ex-info "Real identity/bindings accepted swapped identities." {})))
-     ;; Check the actual source forms (not rewritten copies of their bodies).
-     ;; Mutation tests must fail as static type errors, not as exceptions.
+     ;; Check source constants, private helpers, and constructors as they exist
+     ;; in Gesso. A missing defn- must never count as a successful nil check.
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
+       (doseq [name ['identity-type 'identity-kinds]]
+         (check-form! name (original-constant name)))
+       (doseq [name ['identity? 'identity-error 'require-kind
+                     'require-raw-value 'identity 'command-id 'execution-id]]
+         (check-form! name (original-function name)))
+
+       ;; Mutate each relevant source boundary. We require a *static type
+       ;; mismatch*, never a runtime exception or a missing form.
        (doseq [[name wrong-kind]
                [['command-id :execution]
                 ['execution-id :command]]]
-         (let [original (original-definition name)
-               changed (walk/postwalk (fn [x]
+         (let [original (original-function name)
+               mutated (walk/postwalk (fn [x]
                                         (if (= x (if (= name 'command-id)
                                                    :command :execution))
                                           wrong-kind x))
-                                      original)
-               good (check-form-info original :check-config check-config)
-               bad (check-form-info changed :check-config check-config)]
-           (when (or (= original changed)
-                     (:ex good)
-                     (seq (:type-errors good))
-                     (:ex bad)
-                     (not (seq (:type-errors bad)))
-                     (not-every? #(= :typed.clojure/type-mismatch-error
-                                     (:type-error %))
-                                 (:type-errors bad)))
-             (throw (ex-info "Original constructor type check failed."
-                             {:name name
-                              :changed? (not= original changed)
-                              :good-exception (some-> (:ex good) ex-message)
-                              :good-errors (mapv str (:type-errors good))
-                              :bad-exception (some-> (:ex bad) ex-message)
-                              :bad-errors (mapv str (:type-errors bad))})))
-           (println "Original constructor:" name
-                    "checked; wrong-kind mutation rejected"))))
+                                      original)]
+           (require-type-mismatch! name original mutated)))
+       (let [original (original-function 'identity)]
+         (doseq [[description mutated]
+                 [[:wrong-kind-key
+                   (walk/postwalk #(if (= % :gesso.choreo.identity/kind)
+                                     :gesso.choreo.identity/wrong-kind %) original)]
+                  [:wrong-kind-result
+                   (walk/postwalk #(if (= % '(require-kind kind))
+                                     '(require-kind :execution) %) original)]
+                  [:wrong-raw-type
+                   (walk/postwalk #(if (= % '(require-raw-value value))
+                                     42 %) original)]]]
+           (require-type-mismatch! description original mutated)))
+       (doseq [[name replacement]
+               [['require-kind :execution]
+                ['require-raw-value 42]]]
+         (let [original (original-function name)
+               mutated (apply list (concat (butlast original) [replacement]))]
+           (require-type-mismatch! name original mutated)))
+       (let [original (original-constant 'identity-type)]
+         (require-type-mismatch!
+          'identity-type original
+          '(def identity-type :gesso.choreo.identity/incorrect))))
      (binding [*ns* (the-ns checked-ns)]
        (doseq [[description form expect-error?]
                [["command accepted" (list 'command-raw-value command) false]
