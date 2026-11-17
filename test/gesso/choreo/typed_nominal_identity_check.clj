@@ -9,6 +9,7 @@
             [clojure.walk :as walk]
             [gesso.choreo.typed-nominal-identity-pilot :as pilot]
             [gesso.choreo.typed-nominal-identity-bridge :as bridge]
+            [gesso.choreo.typed-nominal-machine-boundary-test :as machine-seam]
             [typed.clojure :as t]))
 
 (def ^:private pilot-namespace 'gesso.choreo.typed-nominal-identity-pilot)
@@ -485,6 +486,70 @@
                           modified :typed.clojure/type-mismatch-error)))
     true))
 
+(defn- audit-machine-boundary! [definition]
+  ;; The actual production accessor must remain the only source of input,
+  ;; and the checked nominal adapter must handle the conversion. A returned
+  ;; HMap annotation alone would not detect fabricated data or bypassing
+  ;; machine execution validation.
+  (when-not (= '(bridge/bindings->nominal
+                 (machine/identity-bindings execution))
+               (last definition))
+    (throw (ex-info "Machine-to-nominal seam bypasses its real boundary."
+                    {:error/kind :wrong-machine-boundary-source})))
+  true)
+
+(defn- check-machine-boundary! [checker]
+  ;; This is the *first real machine seam*, exercised by JVM and Node tests.
+  ;; Annotating machine/identity-bindings models the existing validated
+  ;; public accessor's output; its production body is not yet type-checked.
+  ;; The test-only wrapper body itself IS source checked, and the bridge's
+  ;; actual conversion body has already been verified in the earlier gate.
+  (let [machine-ns 'gesso.choreo.typed-nominal-machine-boundary-test
+        class-types (mapv #(symbol (str class-prefix %)) categories)
+        hmap (list 'typed.clojure/HMap
+                   :optional (into {:role 'typed.clojure/Kw}
+                                   (map vector
+                                        [:principal :actor :authority :host
+                                         :command-id :execution-id]
+                                        class-types))
+                   :complete? true)
+        tagged-map '(typed.clojure/Map
+                     typed.clojure/Kw
+                     (typed.clojure/U typed.clojure/Kw
+                                      (typed.clojure/Map
+                                       typed.clojure/Any typed.clojure/Any)))
+        source (source-definition
+                (source-forms "gesso/choreo/typed_nominal_machine_boundary_test.cljc")
+                'machine->nominal-bindings)]
+    (eval (list 'typed.clojure/ann
+                'gesso.choreo.machine/identity-bindings
+                (list 'typed.clojure/IFn ['typed.clojure/Any '-> tagged-map])))
+    (eval (list 'typed.clojure/ann
+                (symbol (str machine-ns) "machine->nominal-bindings")
+                (list 'typed.clojure/IFn ['typed.clojure/Any '-> hmap])))
+    (binding [*ns* (the-ns machine-ns)]
+      (check! checker :real-machine-to-nominal-wrapper-body source)
+      (audit-machine-boundary! source)
+      (check! checker :real-machine-principal-propagation
+              '(let [bindings (machine->nominal-bindings :machine-execution)]
+                 (if-let [principal (:principal bindings)]
+                   (nominal/step-1 principal)
+                   nil)))
+      (check-rejection! checker :real-machine-actor-as-principal
+                        '(let [bindings (machine->nominal-bindings :machine-execution)]
+                           (if-let [actor (:actor bindings)]
+                             (nominal/step-1 actor)
+                             nil)))
+      (check-rejection! checker :real-machine-wrapper-wrong-return
+                        (apply list (concat (butlast source)
+                                            [:wrong-binding-representation]))
+                        :typed.clojure/type-mismatch-error)
+      (expect-audit-rejection!
+       audit-machine-boundary! :real-machine-accessor-bypassed
+       (walk/postwalk-replace {'machine/identity-bindings 'identity} source)
+       :wrong-machine-boundary-source))
+    true))
+
 (defn -main [& _]
   ;; Use the actual classes, not structural maps. Register the six datatypes
   ;; with the Typed Clojure checker, including the fields' real names.
@@ -548,6 +613,7 @@
     (check-bindings! checker)
     (check-heterogeneous-nominal-bindings! checker)
     (check-canonical-nominal-output! checker)
+    (check-machine-boundary! checker)
     (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
     (println "6 bridge bodies including canonical sparse output,")
     (println "static source, category, return, and mutation checks passed.")
@@ -555,4 +621,6 @@
     (println "per-slot category/key cases; original adapter body checked.")
     (println "Canonical output HMap: real body checked, seven optional slots;")
     (println "wrong downstream consumer and slot-swap mutations rejected.")
+    (println "Real machine/start binding seam: checked wrapper body,")
+    (println "typed seven-slot output; invalid consumer/bypass rejected.")
     :ok))
