@@ -71,6 +71,32 @@ for file in $files
     end
 
     set actual_ns (string trim -- "$actual_ns")
+
+    # nsof treats metadata on an ns symbol as a separate token. For forms
+    # such as (ns ^{:typed.clojure true} my.namespace ...), use a real Clojure
+    # reader so the symbol's metadata is ignored when computing its name.
+    # Only metadata-bearing declarations need this fallback; the ordinary
+    # namespace inventory retains its existing fast path.
+    if string match -qr '^\^' -- "$actual_ns"
+        set -l parsed_ns (command bb -e '
+            (require (quote clojure.java.io))
+            (with-open [r (java.io.PushbackReader.
+                          (clojure.java.io/reader (first *command-line-args*)))]
+              (let [form (binding [*read-eval* false]
+                           (read {:read-cond :allow :features #{:clj}} r))
+                    declared (when (and (seq? form)
+                                        (= (quote ns) (first form)))
+                               (second form))]
+                (when-not (symbol? declared)
+                  (throw (ex-info "Missing namespace symbol" {})))
+                (println declared)))' -- "$file" 2>/dev/null)
+        if test $status -ne 0 -o (count $parsed_ns) -ne 1
+            repo_integrity_fail "cannot read metadata-bearing namespace for $file"
+            continue
+        end
+        set actual_ns (string trim -- "$parsed_ns")
+    end
+
     if test -z "$actual_ns"
         repo_integrity_fail "empty namespace reported for $file"
         continue
