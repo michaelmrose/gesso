@@ -141,6 +141,12 @@
            ;; full for/reduce algorithm is NOT independently checked here.
            ['gesso.assurance.proof.operation-interface-composition/invariant-results!
             ['typed.clojure/Any 'typed.clojure/Any '-> aggregate-results-type]]
+           ['gesso.assurance.proof.operation-interface-composition/consistent-invariant-statuses?
+            [(list 'typed.clojure/Set inference-type)
+             (list 'typed.clojure/Set induction-type)
+             '(typed.clojure/Set typed.clojure/Any)
+             (list 'typed.clojure/Set inference-type)
+             '-> 'typed.clojure/Bool]]
            ['gesso.assurance.proof.operation-interface-composition/empty-preservation-statuses
             ['-> preservation-statuses-type]]
            ['gesso.assurance.proof.operation-interface-composition/preservation-status-row
@@ -265,15 +271,19 @@
     (first induction)
     (first open-reasons)))
 
+(def ^:private expected-status-consistency
+  '(let [all-checked? (and (= initial #{:checked-conditional-inference})
+                           (= steps #{:checked-conditional-inference}))]
+     (and (= 1 (count initial))
+          (= 1 (count induction))
+          (= 1 (count open-reasons))
+          (set/subset? steps #{:checked-conditional-inference :open})
+          (= (first induction)
+             (if all-checked?
+               :checked-conditional-induction :open)))))
 (def ^:private expected-aggregate-guard
-  '(when-not (and (= 1 (count initial))
-                  (= 1 (count induction))
-                  (= 1 (count open-reasons))
-                  (set/subset? steps
-                               #{:checked-conditional-inference :open})
-                  (= (first induction)
-                     (if all-checked?
-                       :checked-conditional-induction :open)))
+  '(when-not (consistent-invariant-statuses?
+               initial induction open-reasons steps)
      (reject! :incompatible-invariant-evidence
               {:invariant-id invariant-id})))
 
@@ -293,9 +303,7 @@
    'initial '(set (map :initial-status values))
    'induction '(set (map :induction-status values))
    'open-reasons '(set (map :open-reason values))
-   'steps '(into #{} (map :preservation-status) values)
-   'all-checked? '(and (= initial #{:checked-conditional-inference})
-                       (= steps #{:checked-conditional-inference}))})
+   'steps '(into #{} (map :preservation-status) values)})
 
 (def ^:private expected-preservation-row
   '(assoc status-map op-id (:preservation-status result)))
@@ -316,6 +324,15 @@
                       {:empty (last empty-source)
                        :row (last row-source)
                        :reduction (last reduction)})))
+    true))
+
+(defn- check-status-consistency-source! [forms]
+  ;; An annotation can type-check a subtly WRONG predicate. Verify the
+  ;; complete original definition of its agreement relation independently.
+  (let [source (original forms 'consistent-invariant-statuses?)]
+    (when-not (= expected-status-consistency (last source))
+      (throw (ex-info "Original invariant status consistency rule changed"
+                      {:source (last source)})))
     true))
 
 (defn- check-aggregate-source! [forms]
@@ -360,7 +377,32 @@
       (check! checker [:original-preservation-extraction name]
               (original forms name)))
     (check-preservation-source! forms)
+    (check-status-consistency-source! forms)
     (check-aggregate-source! forms)
+    (check! checker :original-invariant-status-agreement
+            (original forms 'consistent-invariant-statuses?))
+    (check! checker :valid-consistent-status-call
+            '(consistent-invariant-statuses?
+              #{:checked-conditional-inference}
+              #{:checked-conditional-induction}
+              #{nil} #{:checked-conditional-inference}))
+    (doseq [[label invalid]
+            [[:invented-initial-proof
+              '(consistent-invariant-statuses? #{:proved} #{:open} #{nil} #{:open})]
+             [:induction-status-in-initial-set
+              '(consistent-invariant-statuses?
+                #{:checked-conditional-induction} #{:open} #{nil} #{:open})]
+             [:inference-status-in-induction-set
+              '(consistent-invariant-statuses?
+                #{:open} #{:checked-conditional-inference} #{nil} #{:open})]
+             [:invented-preservation-proof
+              '(consistent-invariant-statuses?
+                #{:open} #{:open} #{nil} #{:proved})]
+             [:unstructured-initials
+              '(consistent-invariant-statuses? [:open] #{:open} #{nil} #{:open})]
+             [:wrong-reason-collection
+              '(consistent-invariant-statuses? #{:open} #{:open} {} #{:open})]]]
+      (reject! checker [:wrong-agreement-status-input label] invalid))
     (check! checker :valid-preservation-assembly
             '(preservation-statuses
               {:operation/a {:initial-status :open
@@ -479,6 +521,61 @@
                      (= (count inputs) (count actual)))
         (throw (ex-info "Original preservation mapping changed at runtime"
                         {:actual actual :expected expected}))))
+    ;; A true/false matrix probes the original, LIVE relation, not the
+    ;; annotated checker form (which is never evaluated by Typed Clojure).
+    ;; A structurally type-correct altered predicate can still be wrong.
+    (let [check-status (var-get
+                        #'gesso.assurance.proof.operation-interface-composition/consistent-invariant-statuses?)
+          checked :checked-conditional-inference
+          open :open
+          cases [[#{checked} #{:checked-conditional-induction} #{nil} #{checked} true]
+                 [#{checked} #{open} #{nil} #{checked} false]
+                 [#{checked} #{open} #{nil} #{checked open} true]
+                 [#{open} #{open} #{nil} #{checked} true]
+                 [#{open} #{:checked-conditional-induction} #{nil} #{checked} false]
+                 [#{open} #{open} #{nil} #{open} true]
+                 [#{checked open} #{open} #{nil} #{open} false]
+                 [#{open} #{open :checked-conditional-induction} #{nil} #{open} false]
+                 [#{open} #{open} #{nil :other} #{open} false]
+                 [#{} #{open} #{nil} #{open} false]
+                 [#{open} #{} #{nil} #{open} false]
+                 [#{open} #{open} #{} #{open} false]
+                 [#{open} #{open} #{nil} #{:proved} false]
+                 [#{checked} #{:checked-conditional-induction} #{nil} #{} false]]]
+      (doseq [[initial induction reasons steps expected] cases]
+        (when-not (= expected (boolean (check-status initial induction reasons steps)))
+          (throw (ex-info "Incorrect live conditional-induction relation"
+                          {:initial initial :induction induction
+                           :reasons reasons :steps steps :expected expected})))))
+    ;; Even though all-checked? and the allowed-step guard are now in a
+    ;; separately type-checked function, source audit must reject same-typed
+    ;; status-family substitutions and the illicit change of the theorem rule.
+    (let [source (original forms 'consistent-invariant-statuses?)]
+      (doseq [[label from to]
+              [[:initial-from-induction
+                '(= initial #{:checked-conditional-inference})
+                '(= induction #{:checked-conditional-induction})]
+               [:step-from-initial
+                '(= steps #{:checked-conditional-inference})
+                '(= initial #{:checked-conditional-inference})]
+               [:induction-always-open
+                '(if all-checked? :checked-conditional-induction :open)
+                :open]
+               [:disabled-cardinality
+                '(= 1 (count initial)) true]
+               [:allowed-step-set-expanded
+                '#{:checked-conditional-inference :open}
+                '#{:checked-conditional-inference :open :proved}]
+               [:accept-contrary-induction
+                '(= (first induction)
+                    (if all-checked? :checked-conditional-induction :open))
+                true]]]
+        (let [mutant (replace-unique-source source from to)
+              substituted (mapv #(if (= source %) mutant %) forms)]
+          (when-not (try (check-status-consistency-source! substituted)
+                         false (catch clojure.lang.ExceptionInfo _ true))
+            (throw (ex-info "Invalid original consistency rule escaped audit"
+                            {:case label}))))))
     ;; Same-typed operation keys can be switched or one operation's status
     ;; substituted for another without static error. The ORIGINAL source
     ;; audit must preserve exactly which status belongs to which operation.
@@ -639,9 +736,10 @@
         forms (source-forms)]
     (checks! checker forms)
     (runtime-guard!)
-    (println "Typed operation composition passed: 6 original checked source")
+    (println "Typed operation composition passed: 7 original checked source")
     (println "bodies; 34 report, 17 aggregate, 9 preservation mutations and")
-    (println "4 nominal closure calls rejected by typing; 11 aggregate/")
+    (println "4 nominal closure calls and 6 malformed agreement inputs rejected")
+    (println "by typing; 14 live agreement cases, 6 predicate mutants, 11 aggregate/")
     (println "preservation source mutants, 2 wrong-typed-but-compatible rows,")
     (println "2 report provenance swaps and runtime forged-closure rejection.")
     :ok))

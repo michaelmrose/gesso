@@ -113,6 +113,21 @@
   [results]
   (reduce-kv preservation-status-row (empty-preservation-statuses) results))
 
+(defn- consistent-invariant-statuses?
+  "Check agreement across ORIGINAL per-operation conditional evidence.
+   This is a consistency predicate over supplied status sets, not a proof
+   that those sets came from authentic source or a valid induction theorem."
+  [initial induction open-reasons steps]
+  (let [all-checked? (and (= initial #{:checked-conditional-inference})
+                          (= steps #{:checked-conditional-inference}))]
+    (and (= 1 (count initial))
+         (= 1 (count induction))
+         (= 1 (count open-reasons))
+         (set/subset? steps #{:checked-conditional-inference :open})
+         (= (first induction)
+            (if all-checked?
+              :checked-conditional-induction :open)))))
+
 (defn- invariant-results! [interfaces invariant-ids]
   (sorted-map*
    (for [invariant-id (sorted-ids invariant-ids)]
@@ -124,16 +139,9 @@
            initial (set (map :initial-status values))
            induction (set (map :induction-status values))
            open-reasons (set (map :open-reason values))
-           steps (into #{} (map :preservation-status) values)
-           all-checked? (and (= initial #{:checked-conditional-inference})
-                             (= steps #{:checked-conditional-inference}))]
-       (when-not (and (= 1 (count initial))
-                      (= 1 (count induction))
-                      (= 1 (count open-reasons))
-                      (set/subset? steps #{:checked-conditional-inference :open})
-                      (= (first induction)
-                         (if all-checked?
-                           :checked-conditional-induction :open)))
+           steps (into #{} (map :preservation-status) values)]
+       (when-not (consistent-invariant-statuses?
+                  initial induction open-reasons steps)
          (reject! :incompatible-invariant-evidence
                   {:invariant-id invariant-id}))
        [invariant-id
