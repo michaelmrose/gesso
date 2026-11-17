@@ -89,3 +89,9 @@ jobs:
           bb script/check_choreo_identity_parity.clj \
             target/typed-node/jvm-identity-parity.log \
             target/typed-node/node-corpus.log
+
+      - name: Compare JVM and Node closed identity wire codec
+        run: |
+          bb script/check_choreo_wire_parity.clj \
+            target/typed-node/jvm-identity-parity.log \
+            target/typed-node/node-corpus.log

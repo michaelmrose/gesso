@@ -5,6 +5,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.choreo.core :as choreo]
             [gesso.choreo.identity :as identity]
+            [gesso.choreo.identity-test :as identity-test]
             [gesso.choreo.internal.machine-nominal-bindings :as machine-bindings]
             [gesso.choreo.internal.nominal-bindings :as nominal-bindings]
             [gesso.choreo.machine :as machine]
@@ -337,7 +338,8 @@
      (println "GESSO_CHOREO_IDENTITY_PARITY" (pr-str (portable-identity-corpus)))
      (println "GESSO_CHOREO_ADMISSION_PARITY" (pr-str (portable-admission-corpus)))
      (println "GESSO_CHOREO_SUSPENSION_PARITY" (pr-str (portable-suspension-corpus)))
-     (println "GESSO_CHOREO_ACTION_PARITY" (pr-str (portable-action-corpus)))))
+     (println "GESSO_CHOREO_ACTION_PARITY" (pr-str (portable-action-corpus)))
+     (println "GESSO_CHOREO_WIRE_PARITY" (pr-str (identity-test/portable-wire-corpus)))))
 
 (defn- assert-identity-continuity! [execution expected]
   (is (machine/execution? execution))

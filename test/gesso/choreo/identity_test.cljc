@@ -851,3 +851,89 @@
      (not=
       actor
       authority))))
+
+;; Public identity wire shape is closed and versioned. Extensions on a runtime
+;; tagged identity remain runtime metadata, not part of the transport format.
+;; Export *observed* JVM/Node codec behavior for independent EDN comparison.
+(def ^:private wire-kinds
+  [:principal :actor :authority :host :command :execution])
+
+(def ^:private wire-raw-samples
+  [[:keyword :same-value]
+   [:string "same-value"]
+   [:record {:tenant :shop/id-17
+             :subject ["user" 42]
+             :basis {:stamp 9}}]
+   [:vector ["user" 42 {:flags #{:open :closed}}]]])
+
+(defn- wire-error-kind [f]
+  (try
+    (f)
+    :unexpected-acceptance
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) e
+      (:error/kind (ex-data e)))))
+
+(defn- invalid-wire-variants [encoded]
+  [[:missing-value
+    (dissoc encoded :gesso.choreo.identity.wire/value)]
+   [:extra-field
+    (assoc encoded :unexpected true)]
+   [:wrong-type
+    (assoc encoded :gesso.choreo.identity.wire/type :other/wire)]
+   [:future-version
+    (assoc encoded :gesso.choreo.identity.wire/version 2)]
+   [:unknown-kind
+    (assoc encoded :gesso.choreo.identity.wire/kind :session)]
+   [:nil-value
+    (assoc encoded :gesso.choreo.identity.wire/value nil)]
+   [:nested-raw
+    (assoc encoded :gesso.choreo.identity.wire/value
+                   (identity/principal :nested))]
+   [:missing-version
+    (dissoc encoded :gesso.choreo.identity.wire/version)]])
+
+(defn portable-wire-corpus []
+  (vec
+   (concat
+    (for [kind wire-kinds
+          [raw-id raw] wire-raw-samples]
+      (let [original (assoc (identity/identity kind raw)
+                            :custom {:source :wire-corpus :kind kind})
+            encoded (identity/encode-wire original)]
+        {:case [:roundtrip kind raw-id]
+         :status :accepted
+         :original original
+         :wire encoded
+         :decoded (identity/decode-wire encoded)
+         :wire-valid? (identity/wire-identity? encoded)}))
+    (for [kind wire-kinds
+          [mutation wire] (invalid-wire-variants
+                            (identity/encode-wire
+                             (identity/identity kind :same-value)))]
+      {:case [:decode kind mutation]
+       :status :rejected
+       :input wire
+       :wire-valid? (identity/wire-identity? wire)
+       :error/kind (wire-error-kind #(identity/decode-wire wire))})
+    (for [[name value] [[:raw-keyword :same-value]
+                        [:nil nil]
+                        [:incomplete-tag
+                         {:gesso.choreo.identity/type
+                          :gesso.choreo.identity/ref
+                          :gesso.choreo.identity/kind :principal}]]]
+      {:case [:encode name]
+       :status :rejected
+       :input value
+       :error/kind (wire-error-kind #(identity/encode-wire value))}))))
+
+(deftest portable-wire-observations-remain-complete
+  (let [cases (portable-wire-corpus)
+        accepted (filter #(= :accepted (:status %)) cases)
+        rejected (filter #(= :rejected (:status %)) cases)]
+    (is (= 75 (count cases)))
+    (is (= 75 (count (distinct (map :case cases)))))
+    (is (= 24 (count accepted)))
+    (is (= 51 (count rejected)))
+    (is (every? true? (map :wire-valid? accepted)))
+    (is (every? false? (keep :wire-valid? rejected)))))
