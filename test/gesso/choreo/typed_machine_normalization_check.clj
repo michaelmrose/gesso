@@ -441,5 +441,7 @@
     (check-discriminated-normalization! checker forms)
     ((requiring-resolve 'gesso.choreo.typed-machine-suspension-check/check!)
      checker forms)
+    ((requiring-resolve 'gesso.choreo.typed-machine-action-check/check!)
+     checker forms)
     true))
 
