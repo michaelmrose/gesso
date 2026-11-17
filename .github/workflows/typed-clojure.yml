@@ -1,0 +1,49 @@
+name: Typed Clojure assurance
+
+on:
+  push:
+    branches:
+      - typed-clojure
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: typed-clojure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  source-and-mutation-checks:
+    name: Production source and mutation gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Clojure CLI and Babashka
+        uses: DeLaGuardo/setup-clojure@13.7
+        with:
+          cli: '1.12.0.1530'
+          bb: '1.12.215'
+
+      - name: Cache Clojure dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            .cpcache
+          key: typed-v1-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            typed-v1-${{ runner.os }}-
+
+      - name: Run full opt-in Typed Clojure gate
+        run: bb test:typed
