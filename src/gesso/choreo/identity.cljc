@@ -541,6 +541,27 @@
      "Unknown identity binding key."
      {:binding key :allowed binding-keys})))
 
+(defn- require-binding-key
+  "Return a recognized identity binding key or reject it.
+
+   Enumerating the seven admitted keys explicitly makes the successful
+   return type checkable as a finite keyword union. The binding map's
+   earlier unknown-key check remains responsible for the public error;
+   this helper preserves the original key before it enters the reducer."
+  [key]
+  (case key
+    :role :role
+    :principal :principal
+    :actor :actor
+    :authority :authority
+    :host :host
+    :command-id :command-id
+    :execution-id :execution-id
+    (identity-error
+     :unknown-binding
+     "Unknown identity binding key."
+     {:binding key :allowed binding-keys})))
+
 (defn bindings
   "Construct/validate an explicit identity-binding map.
 
@@ -574,12 +595,20 @@
   ;; A direct reducer preserves the same validated key/value mapping as
   ;; the former into/map transducer. Local argument annotations are metadata
   ;; only, so ordinary Clojure/CLJS users do not load Typed Clojure. They
-  ;; let the optional checker verify that each output value is either a role
-  ;; keyword or a map, without assuming its identity was admitted or its key
-  ;; belongs to a particular semantic category.
+  ;; let the optional checker verify that each returned key is one of the
+  ;; seven supported binding keys and each value is a keyword or a map.
+  ;; An admitted key is NOT proof that the corresponding value was admitted.
+  ;; The public unknown-key precheck and each category validator stay intact.
   (reduce
    (fn [^{:typed.clojure/- (typed.clojure/Map
-                            typed.clojure/Any
+                            (typed.clojure/U
+                             (typed.clojure/Val :role)
+                             (typed.clojure/Val :principal)
+                             (typed.clojure/Val :actor)
+                             (typed.clojure/Val :authority)
+                             (typed.clojure/Val :host)
+                             (typed.clojure/Val :command-id)
+                             (typed.clojure/Val :execution-id))
                             (typed.clojure/U
                              typed.clojure/Kw
                              (typed.clojure/Map typed.clojure/Any
@@ -587,7 +616,7 @@
         ^{:typed.clojure/- (typed.clojure/MapEntry
                             typed.clojure/Any typed.clojure/Any)} entry]
      (assoc out
-            (key entry)
+            (require-binding-key (key entry))
             (validate-binding (key entry) (val entry))))
    {}
    value))

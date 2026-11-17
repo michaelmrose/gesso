@@ -32,13 +32,12 @@
    that an input has passed admission. The gate checks the original
    `bindings?` and `binding-value` consumers against the broad overload and
    audits that they actually call `bindings`. The original `bindings`
-   implementation is also checked under a deliberately BROAD map-returning
-   contract for untrusted inputs; the stronger command/execution overload
-   remains a separately trusted assumption, not a proved implementation
-   property. Checks of a broad result type do not prove the per-key runtime
-   validation, authorization, or full application admission. In addition,
-   the original validate-binding dispatcher is checked with a finite seven-
-   key input domain and a seven-way union of possible successful results.
+   implementation is source-checked for key and value shapes on normal
+   return; the stronger command/execution-specific overload remains a
+   separately trusted assumption. Checking these shapes does not prove
+   per-key semantic admission, authorization, or application correctness.
+   The original validate-binding dispatcher is checked with an Any-key
+   input and a seven-way union of successful results; unknown keys throw.
    This eliminates the previous Any-return assumption for that function,
    but does not correlate an individual input key with its specific result,
    nor prove any of the trusted predicate refinements. We therefore test
@@ -57,13 +56,16 @@
    fallbacks. These checks do not certify predicate truth or provenance.
    The dispatcher now rejects unsupported keys explicitly, so its original
    body can be checked under an Any-key contract, with unknown keys taking a
-   typed exception path. The original bindings reducer is also checked under
-   a stronger shape-only contract: every returned value is either a role
-   keyword or a map, not arbitrary Any. This DOES NOT prove the map is a
-   valid identity, the returned key is legal, or the key and identity kind
-   correlate; the existing source audits and runtime admission checks cover
-   those properties separately. Bounded sparse-map enumeration tests
-   admission behavior but is not an exhaustive proof for arbitrary raw values."
+   typed exception path. The original bindings reducer is independently checked
+   to return values shaped as a role keyword or a map. A production
+   require-binding-key guard now enumerates the seven legal keys and is checked
+   against the same finite BindingKey type. The assembled reducer is checked
+   against (Map BindingKey BindingResultShape), not (Map Any ...).
+   This DOES NOT prove a map value is a valid identity, or correlate its
+   key with the right category; the source audits and runtime admission
+   checks still address those separate obligations. Bounded sparse-map
+   enumeration tests admission behavior, but does not prove validity for
+   arbitrary opaque raw values."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.choreo.identity :as identity]
@@ -156,8 +158,8 @@
 ;; A conservative shape-only superset of all successful values. This type
 ;; permits invalid maps: identity admission requires runtime checking.
 (t/defalias BindingResultShape (t/U t/Kw (t/Map t/Any t/Any)))
-;; The original command-specific helper has a checked implementation body,
-;; unlike the broad dispatcher whose key/result dependency is not proved.
+;; All six original category helpers have checked implementation bodies.
+;; The complete dispatcher still lacks a checked key-dependent return type.
 (t/ann identity/validate-principal-binding [t/Any -> PrincipalRef])
 (t/ann identity/validate-actor-binding [t/Any -> ActorRef])
 (t/ann identity/validate-authority-binding [t/Any -> AuthorityRef])
@@ -165,18 +167,20 @@
 (t/ann identity/validate-command-binding [t/Any -> CommandRef])
 (t/ann identity/validate-execution-binding [t/Any -> ExecutionRef])
 
-;; `bindings` accepts arbitrary downstream data. The shape-only result
-;; contract below is checked against its source body after widening only
-;; the *key* type to Any, which the checker cannot restrict through the
-;; dynamic key-set check. The more specific key and command/execution
-;; overloads remain trusted and separately source-audited, NOT proven by
-;; the reducer's static map-value check. Rejection still throws.
+;; `bindings` accepts arbitrary downstream data. Its original reducer
+;; checks that the output key belongs to BindingKey and that the value
+;; belongs to BindingResultShape. Key checking is through the original
+;; require-binding-key helper, whose body is checked and whose key-preserving
+;; behavior is source-audited. Only the command/execution-specific overload
+;; remains trusted; the reducer's shape check does not prove that overload
+;; or semantic key/value correlation. Rejection still throws.
 (t/ann identity/binding-keys (t/Set t/Kw))
+(t/ann identity/require-binding-key [t/Any -> BindingKey])
 (t/ann identity/bindings
        (t/IFn
         [gesso.choreo.typed-identity-pilot/CommandExecutionBindings
          -> gesso.choreo.typed-identity-pilot/CommandExecutionBindings]
-        [t/Any -> (t/Map t/Kw BindingResultShape)]))
+        [t/Any -> (t/Map BindingKey BindingResultShape)]))
 (t/ann identity/bindings? [t/Any -> t/Bool])
 (t/ann identity/binding-value
        [t/Any t/Kw -> (t/U nil BindingResultShape)])
@@ -207,12 +211,37 @@
                (throw (ex-info "Missing or ambiguous source function."
                                {:name name :count (count found)})))
              (first found)))
-         ;; The type checker can prove only that `bindings` returns a map.
-         ;; A source mutation could retain the validator in a dead branch,
-         ;; return the original unvalidated value, and still type-check.
-         ;; This narrowly scoped AST audit requires the validated result to
-         ;; flow directly into the output map. Fail closed if this pipeline
-         ;; changes so the audit is revisited rather than silently bypassed.
+         ;; The original reducer now uses a checked seven-key constructor.
+         ;; A source mutation can still replace one valid key with another
+         ;; while preserving the union type. Require the original key to be
+         ;; returned unchanged, and require unknown keys to throw. This
+         ;; deliberately fail-closed audit must be revisited on refactoring.
+         audit-key-refinement!
+         (fn [definition]
+           (let [case-form (last definition)
+                 entries (partition 2 (butlast (drop 2 case-form)))
+                 default-form (last case-form)
+                 permitted #{:role :principal :actor :authority :host
+                             :command-id :execution-id}
+                 expected-default '(identity-error
+                                    :unknown-binding
+                                    "Unknown identity binding key."
+                                    {:binding key :allowed binding-keys})]
+             (when-not (and (= 'defn- (first definition))
+                            (= 'require-binding-key (second definition))
+                            (= '[key] (nth definition 3 nil))
+                            (= 'case (first case-form))
+                            (= 'key (second case-form))
+                            (= 7 (count entries))
+                            (= permitted (set (map first entries)))
+                            (every? (fn [[k result]] (= k result)) entries)
+                            (= expected-default default-form))
+               (throw (ex-info "Binding key refinement no longer preserves keys."
+                               {:error/kind :unsafe-key-refinement
+                                :case case-form})))
+             true))
+         ;; The type checker establishes a key/value shape, but source-flow
+         ;; audit must still ensure we use the checked key and validated value.
          audit-binding-flow!
          (fn [definition]
            (let [args (nth definition 3 nil)
@@ -224,7 +253,9 @@
                  validated (list 'validate-binding
                                  (list 'key entry)
                                  (list 'val entry))
-                 expected (list 'assoc acc (list 'key entry) validated)
+                 expected (list 'assoc acc
+                                (list 'require-binding-key (list 'key entry))
+                                validated)
                  body (when (seq? reducer) (last reducer))
                  key-check-body (when (seq? keys-check)
                                   (nth keys-check 2 nil))]
@@ -264,7 +295,8 @@
                  validated (list 'validate-binding
                                  (list 'key entry) (list 'val entry))
                  bypass (list 'do (list 'when false validated)
-                              (list 'assoc acc (list 'key entry)
+                              (list 'assoc acc
+                                    (list 'require-binding-key (list 'key entry))
                                     (list 'val entry)))
                  reducer' (apply list (concat (butlast reducer) [bypass]))
                  reduction' (list 'reduce reducer' (nth reduction 2)
@@ -373,13 +405,59 @@
                      'require-role 'kind? 'validate-principal-binding 'validate-actor-binding
                      'validate-authority-binding 'validate-host-binding
                      'validate-command-binding 'validate-execution-binding
-                     'validate-binding 'bindings? 'binding-value]]
+                     'validate-binding 'require-binding-key
+                     'bindings? 'binding-value]]
          (check-form name (source-function name)))
        ;; The dispatcher default relies on identity-error never returning.
        ;; Type-check its original body and reject a non-throwing mutation.
        (let [original (source-function 'identity-error)
              wrong (apply list (concat (butlast original) [42]))]
          (check-negative :identity-error-must-throw original wrong))
+       ;; The finite key helper is not just a trusted declaration: type-check
+       ;; the real source above and audit the seven exact key-preserving arms.
+       ;; Remapping one permitted key to another is still type-correct, but
+       ;; must be rejected by the source audit and ordinary runtime behavior.
+       (let [original (source-function 'require-binding-key)
+             case-form (last original)
+             entries (partition 2 (butlast (drop 2 case-form)))
+             fallback (last case-form)
+             altered (list* 'case 'key
+                            (concat (mapcat (fn [[k result]]
+                                              [k (if (= k :actor)
+                                                   :principal result)])
+                                            entries)
+                                    [fallback]))
+             remapped (apply list (concat (butlast original) [altered]))
+             invalid (apply list (concat (butlast original)
+                                         [(list* 'case 'key
+                                                 (concat (mapcat
+                                                          (fn [[k result]]
+                                                            [k (if (= k :actor)
+                                                                 42 result)])
+                                                          entries)
+                                                         [fallback]))]))]
+         (audit-key-refinement! original)
+         (check-form :key-remap-still-typechecks remapped)
+         (check-negative :key-wrong-return original invalid)
+         (let [kind (try (audit-key-refinement! remapped) nil
+                         (catch clojure.lang.ExceptionInfo e
+                           (:error/kind (ex-data e))))]
+           (when-not (= :unsafe-key-refinement kind)
+             (throw (ex-info "Permitted key remap escaped flow audit."
+                             {:actual kind}))))
+         (doseq [k identity/binding-keys]
+           (when-not (= k (#'identity/require-binding-key k))
+             (throw (ex-info "Allowed binding key was rewritten."
+                             {:binding k}))))
+         (doseq [bad [:unknown nil false 42 {}]]
+           (let [kind (try (#'identity/require-binding-key bad)
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             (:error/kind (ex-data e))))]
+             (when-not (= :unknown-binding kind)
+               (throw (ex-info "Unknown binding key passed refinement."
+                               {:binding bad :actual kind})))))
+         (println "Key refinement preserves seven keys and rejects unknown keys."))
        ;; Every extracted helper must remain wired to its exact input key;
        ;; bypassing it invalidates the key-specific source-check evidence.
        (doseq [[key helper-name]
@@ -934,20 +1012,35 @@
                                {:input candidate :actual outcome}))))))
        (println "Validated 2,187 sparse binding combinations."))
 
-     ;; Verify the real reducer with the strengthened role-or-map value
-     ;; guarantee. Only the *key* component is widened to Any: the checker
-     ;; cannot statically derive key-set membership from the source filter.
-     ;; All seven key-specific helper contracts have already been checked;
-     ;; their positive predicate refinements remain trusted.
-     ;; Do this last to preserve earlier checks under the public overload.
+     ;; Verify the original reducer with a checked seven-key union and a
+     ;; role-or-map value shape. The key helper itself is source-checked above;
+     ;; it explicitly returns each literal key or throws on an unknown key.
+     ;; Checking this after public overload checks prevents the narrowed
+     ;; interface from silently replacing those earlier obligations.
      (t/ann identity/bindings
-            [t/Any -> (t/Map t/Any BindingResultShape)])
+            [t/Any -> (t/Map BindingKey BindingResultShape)])
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
        (let [original (source-function 'bindings)
              ;; Reject a concrete wrong return type with a static checker
              ;; mismatch, not an exception or a runtime evaluation failure.
              mutated (apply list (concat (butlast original) [:not-a-map]))]
-         (check-form :bindings-original-broad-contract original)
+         (check-form :bindings-original-finite-key-contract original)
+         ;; Removing the checked key constructor should fail the assembled
+         ;; finite-key result type. This is a static error on the REAL source
+         ;; reducer form, independent of the fail-closed source-flow audit.
+         (let [checked '(require-binding-key (key entry))
+               raw '(key entry)
+               bypass-key (clojure.walk/postwalk
+                           #(if (= checked %) raw %) original)
+               {:keys [ex type-errors]}
+               (check-form-info bypass-key :check-config config)]
+           (when (= original bypass-key)
+             (throw (ex-info "Key-bypass source mutation ineffective." {})))
+           (when (or ex (not (seq type-errors)))
+             (throw (ex-info "Unchecked reducer key bypass not rejected statically."
+                             {:exception (some-> ex ex-message)
+                              :errors (mapv str type-errors)})))
+           (println "Static finite-key contract rejects unchecked key bypass."))
          ;; The unchecked input would flow into the map on a bypass. Even
          ;; if static shape checking permits a future variant, our exact
          ;; source-flow audit above independently rejects validator bypass.
@@ -966,8 +1059,8 @@
                               :errors (mapv str type-errors)})))
            (println "Static output shape rejects unvalidated reducer bypass."))
          (check-negative :bindings-wrong-return original mutated)))
-     (println "Checked original bindings values as keyword-or-map;")
-     (println "key membership and command/execution overload remain trusted.")
+     (println "Checked assembled bindings with finite key union and")
+     (println "keyword-or-map values; key-to-kind correlation remains open.")
      (println "Checked original bindings? and binding-value bodies;")
      (println "validated sparse maps and rejected malformed typed shapes.")
      (println "Checked six original predicate bodies, seven negative return")
