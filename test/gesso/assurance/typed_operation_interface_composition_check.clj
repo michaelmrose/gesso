@@ -44,7 +44,11 @@
    :certificate :not-issued
    :admission :not-admitted
    :authority :none})
-(def ^:private composed-type
+;; Shared precise contract for the ORIGINAL composition producer and its
+;; application-assurance consumer. The upstream source checker validates its
+;; original composition constructor against this exact structural HMap.
+;; This is still a copyable report, NEVER a proof or authority token.
+(def composed-type
   (list 'typed.clojure/HMap
         :mandatory
         (merge

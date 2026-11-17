@@ -8,10 +8,12 @@
    this does NOT prove upstream source agreement, writer completeness,
    kernel soundness, authorization, or the trustworthiness of a copied map.
 
-   Original upstream function bodies remain independently checked/tested.
-   They are annotated as producing opaque descriptive values in this gate,
-   not as carrying proofs. The application graph handle is only a class;
-   authenticity and freshness remain enforced by the runtime registry."
+   Original upstream functions are independently checked and tested.
+   Composition evidence reuses the producer's checked exact HMap; other
+   reports remain opaque and their correspondence is runtime-validated.
+   None of these copyable reports is a proof or authority token. The
+   application closure handle is nominal: live registry authentication
+   and source freshness remain runtime responsibilities."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.assurance.proof.application-assurance-report :as report]
@@ -19,12 +21,18 @@
             [gesso.assurance.proof.application-writer-coverage :as writer]
             [gesso.assurance.proof.operation-interface-composition :as composition]
             [gesso.assurance.proof.operation-interface-provenance :as provenance]
+            [gesso.assurance.typed-operation-interface-composition-check :as comp-check]
             [typed.clojure]))
 
 (def ^:private config {:max-processors 1 :check-form-eval :never})
 (def ^:private report-ns 'gesso.assurance.proof.application-assurance-report)
 (def ^:private app-handle
   'gesso.assurance.proof.application_dependency.ApplicationDependencyHandle)
+(def ^:private composed-evidence-type
+  ;; The SAME exact structural type checked against the original composition
+  ;; constructor in the neighboring source-bound Typed Clojure gate.
+  comp-check/composed-type)
+
 (def ^:private non-authority-fields
   {:checking :source-derived-composition-provenance-and-observed-writer-join
    :scope :declared-abstract-machine-and-supplied-host-observation
@@ -65,16 +73,16 @@
 
 (defn- install-contracts! []
   (eval (list 'typed.clojure/ann-datatype app-handle '[]))
-  ;; These external return types are deliberately opaque. Only the nominal
-  ;; closure input and the actual report's negative status literals are
-  ;; established by this pilot, not the semantic correctness of all reports.
+  ;; Composition uses the EXACT same checked structural return contract as
+  ;; its original producer. Other external reports remain opaque; none of
+  ;; these annotations certifies semantic correctness or live authority.
   (doseq [[name signature]
           [['gesso.assurance.proof.application-dependency/check-application-dependencies!
             ['typed.clojure/Any 'typed.clojure/Any '-> app-handle]]
            ['gesso.assurance.proof.application-dependency/describe-application-dependencies
             [app-handle '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.operation-interface-composition/compose-operation-interfaces!
-            ['typed.clojure/Any 'typed.clojure/Any app-handle '-> 'typed.clojure/Any]]
+            ['typed.clojure/Any 'typed.clojure/Any app-handle '-> composed-evidence-type]]
            ['gesso.assurance.proof.operation-interface-provenance/describe-composition-provenance!
             ['typed.clojure/Any 'typed.clojure/Any 'typed.clojure/Any
              app-handle '-> 'typed.clojure/Any]]
@@ -82,7 +90,7 @@
             ['typed.clojure/Any 'typed.clojure/Any app-handle
              'typed.clojure/Any '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.application-assurance-report/checked-summary!
-            ['typed.clojure/Any 'typed.clojure/Any 'typed.clojure/Any
+            ['typed.clojure/Any composed-evidence-type 'typed.clojure/Any
              'typed.clojure/Any '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.application-assurance-report/ordinary-map?
             ['typed.clojure/Any '-> 'typed.clojure/Bool]]
@@ -204,6 +212,33 @@
                       {:original original-call :found @count*})))
     changed))
 
+(defn- check-composition-evidence! [checker forms]
+  ;; Mutate the ORIGINAL production builder at its real summary invocation.
+  ;; This tests static propagation from compose-operation-interfaces! through
+  ;; the local `composed` binding to checked-summary!, not a copied function.
+  (let [source (original forms 'describe-application-assurance!)
+        genuine '(checked-summary! declared composed manifest observed)]
+    (doseq [[label replacement]
+            [[:raw-composition '{}]
+             [:nil-composition nil]
+             [:vector-composition '[]]
+             [:partial-composition {:type :conditional}]
+             [:wrong-proof-status '(assoc composed :proof-status :proved)]
+             [:fabricated-authority '(assoc composed :authority :granted)]
+             [:missing-operation-ids '(dissoc composed :operation-ids)]
+             [:wrong-operation-ids '(assoc composed :operation-ids [])]
+             [:wrong-invariant-ids '(assoc composed :invariant-ids {})]
+             [:wrong-fingerprint '(assoc composed :fingerprint 42)]]]
+      (reject! checker [:invalid-composition-input label]
+               (mutate-original-call source genuine
+                 (list 'checked-summary! 'declared replacement
+                       'manifest 'observed))))
+    ;; Distinguish what the HMap actually verifies: these upstream report
+    ;; values are still Any, so swapping them is type-compatible and covered
+    ;; ONLY by the source audit already in this checker.
+    (check! checker :composition-evidence-source-bound-builder source)
+    true))
+
 (defn- checks! [checker forms]
   (binding [*ns* (the-ns report-ns)]
     (check! checker :original-application-assurance-builder
@@ -213,6 +248,7 @@
     (source-handoff! forms)
     (require-current-handoff! forms)
     (check-final-flags! checker forms)
+    (check-composition-evidence! checker forms)
     ;; Catalog/graph swaps and map-order swaps are type-compatible because
     ;; the upstream outputs and source arguments are intentionally Any.
     ;; Demonstrate that the SOURCE audit (not Typed Clojure) catches them.
@@ -281,7 +317,8 @@
     (runtime-forgery!)
     (println "Typed application assurance report passed: 2 original complete")
     (println "source bodies, 12 wrong-closure call/producer substitutions,")
-    (println "11 false authority/status mutations, two type-compatible")
-    (println "source substitutions rejected by provenance audit, and")
+    (println "11 false authority/status mutations, 10 malformed composition")
+    (println "handoffs, two type-compatible source substitutions rejected")
+    (println "by provenance audit, and")
     (println "copy/forgery runtime rejection. No theorem or authority claims.")
     :ok))
