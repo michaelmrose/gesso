@@ -7,6 +7,10 @@
    original validator's broader body and the role helpers.
 
    Opaque raw identity values are intentionally not assumed to be strings.
+   Valid identity references may retain extra keys. Their HMap types must
+   remain OPEN: a closed HMap (:complete? true) is unsound as a refinement
+   of identity?/kind?, because production identities accept extra keys.
+   We test this with the real predicates and Typed Clojure's subtyping.
    All six original category-predicate bodies are also checked for Boolean
    results and audited against the original kind dispatcher. Their stronger
    occurrence-typing (Pred) refinements remain trusted; checking a Boolean
@@ -21,42 +25,46 @@
 
 ;; Unlike the string-restricted earlier pilot, these representations preserve
 ;; the deliberately opaque identity raw-value contract of production Gesso.
+;; The tagged maps are OPEN because identity? requires keys but does not reject
+;; extensions. Closed HMaps would make the Pred annotations false for an
+;; identity with an additional property. The type is a safe overapproximation;
+;; it does NOT claim the opaque value is non-nil or non-nested.
 (t/defalias PrincipalRef
   (t/HMap :mandatory
           {:gesso.choreo.identity/type (t/Val :gesso.choreo.identity/ref)
            :gesso.choreo.identity/kind (t/Val :principal)
            :gesso.choreo.identity/value t/Any}
-          :complete? true))
+          :complete? false))
 (t/defalias ActorRef
   (t/HMap :mandatory
           {:gesso.choreo.identity/type (t/Val :gesso.choreo.identity/ref)
            :gesso.choreo.identity/kind (t/Val :actor)
            :gesso.choreo.identity/value t/Any}
-          :complete? true))
+          :complete? false))
 (t/defalias AuthorityRef
   (t/HMap :mandatory
           {:gesso.choreo.identity/type (t/Val :gesso.choreo.identity/ref)
            :gesso.choreo.identity/kind (t/Val :authority)
            :gesso.choreo.identity/value t/Any}
-          :complete? true))
+          :complete? false))
 (t/defalias HostRef
   (t/HMap :mandatory
           {:gesso.choreo.identity/type (t/Val :gesso.choreo.identity/ref)
            :gesso.choreo.identity/kind (t/Val :host)
            :gesso.choreo.identity/value t/Any}
-          :complete? true))
+          :complete? false))
 (t/defalias CommandRef
   (t/HMap :mandatory
           {:gesso.choreo.identity/type (t/Val :gesso.choreo.identity/ref)
            :gesso.choreo.identity/kind (t/Val :command)
            :gesso.choreo.identity/value t/Any}
-          :complete? true))
+          :complete? false))
 (t/defalias ExecutionRef
   (t/HMap :mandatory
           {:gesso.choreo.identity/type (t/Val :gesso.choreo.identity/ref)
            :gesso.choreo.identity/kind (t/Val :execution)
            :gesso.choreo.identity/value t/Any}
-          :complete? true))
+          :complete? false))
 
 ;; Trusted predicate refinement signatures; checked case forms rely on these.
 ;; Runtime cases below exercise each category but do not prove them universally.
@@ -168,7 +176,8 @@
                                :check-config config))
        (throw (ex-info "Binding pilot namespace did not type-check." {})))
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
-       (doseq [name ['role? 'require-role 'kind? 'validate-binding]]
+       (doseq [name ['identity? 'kind 'role? 'require-role 'kind?
+                     'validate-binding]]
          (check-form name (source-function name)))
        ;; The original category predicates merely delegate to kind?. The
        ;; checker proves Boolean results under a truthful broad annotation;
@@ -249,6 +258,52 @@
                         error-kind)
              (throw (ex-info "Wrong runtime identity was not rejected."
                              {:key k :actual error-kind}))))))
+     ;; Open-map refinements are essential to sound category predicates:
+     ;; identity? recognizes maps with additional keys, and bindings preserves
+     ;; them. For every kind, verify the original predicate accepts the
+     ;; extension and the checker accepts the corresponding open HMap. We also
+     ;; require the intentionally CLOSED HMap to reject the same static value.
+     (binding [*ns* (the-ns 'gesso.choreo.identity)]
+       (doseq [[kind name constructor predicate] kind-predicates]
+         (let [expected-type (symbol (str 'gesso.choreo.typed-binding-pilot)
+                                     (case kind
+                                       :principal "PrincipalRef"
+                                       :actor "ActorRef"
+                                       :authority "AuthorityRef"
+                                       :host "HostRef"
+                                       :command "CommandRef"
+                                       :execution "ExecutionRef"))
+               reference (assoc (constructor [17 :opaque]) :extension :present)
+               literal {:gesso.choreo.identity/type :gesso.choreo.identity/ref
+                        :gesso.choreo.identity/kind kind
+                        :gesso.choreo.identity/value [17 :opaque]
+                        :extension :present}
+               open-form (list 'typed.clojure/ann-form literal expected-type)
+               closed-type (list 'typed.clojure/HMap
+                                 :mandatory
+                                 {:gesso.choreo.identity/type
+                                  '(typed.clojure/Val :gesso.choreo.identity/ref)
+                                  :gesso.choreo.identity/kind
+                                  (list 'typed.clojure/Val kind)
+                                  :gesso.choreo.identity/value 'typed.clojure/Any}
+                                 :complete? true)
+               closed-form (list 'typed.clojure/ann-form literal closed-type)]
+           (when-not (and (identity/identity? reference)
+                          (predicate reference)
+                          (= kind (identity/kind reference))
+                          (= {(case kind
+                                   :command :command-id
+                                   :execution :execution-id
+                                   kind) reference}
+                             (identity/bindings {(case kind
+                                                   :command :command-id
+                                                   :execution :execution-id
+                                                   kind)
+                                                 reference})))
+             (throw (ex-info "Gesso did not preserve an extended identity."
+                             {:kind kind :identity name})))
+           (check-form [:open-identity name] open-form)
+           (check-negative [:closed-identity name] open-form closed-form))))
      ;; Check the real runtime predicates against all category combinations,
      ;; using opaque numeric, vector, and map raw identities. This is bounded
      ;; behavioral evidence, not a universal proof of the Pred refinements.
