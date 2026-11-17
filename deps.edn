@@ -57,6 +57,13 @@
    {pfeodrippe/recife
     {:mvn/version "0.22.0"}}}
 
+  ;; Opt-in Typed Clojure feasibility checks. Keep the checker, analyzer,
+  ;; and runtime dependencies off ordinary Gesso JVM/CLJS classpaths.
+  :typed
+  {:extra-deps
+   {org.typedclojure/typed.clj.checker
+    {:mvn/version "1.4.0"}}}
+
   :dev
   {:extra-deps
    {org.clojure/clojurescript
