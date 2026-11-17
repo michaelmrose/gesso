@@ -52,6 +52,16 @@
                      (get-in n [:subject :interface])]))
           nodes)))
 
+(defn- invariant-result-entry
+  "Pure conditional-invariant descriptor, never a theorem or proof token.
+   The caller must FIRST validate the original per-operation preservation
+   status, initial status, induction status, and their joint consistency."
+  [initial-status preservation-status induction-status open-reason]
+  {:initial-status initial-status
+   :preservation-status preservation-status
+   :induction-status induction-status
+   :open-reason open-reason})
+
 (defn- invariant-result! [invariant-id invariant-evidence operation-id]
   (let [{:keys [checked-step]} (get invariant-evidence invariant-id)
         step (get-in checked-step [:preservation-by-operation operation-id])]
@@ -72,10 +82,11 @@
                                           checked-step))))))
       (reject! :invalid-source-derived-invariant-step
                {:operation-id operation-id :invariant-id invariant-id}))
-    {:initial-status (get-in checked-step [:initial :status])
-     :preservation-status (:status step)
-     :induction-status (:induction-status checked-step)
-     :open-reason (:open-reason checked-step)}))
+    (invariant-result-entry
+     (get-in checked-step [:initial :status])
+     (:status step)
+     (:induction-status checked-step)
+     (:open-reason checked-step))))
 
 (defn- operation-contract-entry
   "Pure source-derived conditional operation contract, not a proof or

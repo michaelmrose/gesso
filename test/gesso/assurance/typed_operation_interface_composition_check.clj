@@ -108,8 +108,8 @@
   (doseq [[name signature]
           [['gesso.assurance.proof.operation-interface-composition/interfaces!
             ['typed.clojure/Any '->
-             '(typed.clojure/Map typed.clojure/Any
-                                 (typed.clojure/Map typed.clojure/Any typed.clojure/Any))]]
+             (list 'typed.clojure/Map 'typed.clojure/Kw
+                   iface-check/operation-contract-type)]]
            ['gesso.assurance.proof.operation-interface-composition/common-state-types!
             ['typed.clojure/Any '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.operation-interface-composition/invariant-results!

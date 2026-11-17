@@ -1,8 +1,8 @@
 (ns gesso.assurance.typed-operation-interface-derivation-check
   "Opt-in source-backed type check of the original operation-interface report.
 
-   Checks the complete ORIGINAL pure report constructor and original public
-   freshness consumer. The public issuer's original live closure validation,
+   Checks the complete ORIGINAL pure report, per-operation, and conditional
+   invariant-result constructors and original public freshness consumer. The public issuer's original live closure validation,
    source-graph role coverage, and original premise checks are source-audited
    rather than claimed as Typed Clojure proofs. A report stays copyable data:
    no verified constructor makes a certificate or deployed authority."
@@ -36,6 +36,23 @@
 ;; Original conditional operation contract, checked against the complete
 ;; original operation-contract-entry body. All subject and semantic source
 ;; correctness is still enforced by original-operation-interface! at runtime.
+;; Preserve the distinct status alphabets for individual initial/step
+;; inferences versus overall conditional induction. These are diagnostic
+;; statuses, not a kernel certificate or independently proved theorem.
+(def inference-status-type
+  '(typed.clojure/U (typed.clojure/Val :checked-conditional-inference)
+                    (typed.clojure/Val :open)))
+(def induction-status-type
+  '(typed.clojure/U (typed.clojure/Val :checked-conditional-induction)
+                    (typed.clojure/Val :open)))
+(def invariant-result-type
+  (list 'typed.clojure/HMap
+        :mandatory {:initial-status inference-status-type
+                    :preservation-status inference-status-type
+                    :induction-status induction-status-type
+                    :open-reason 'typed.clojure/Any}
+        :complete? true))
+
 (def operation-contract-type
   (list 'typed.clojure/HMap
         :mandatory
@@ -53,7 +70,7 @@
                 :frame '(typed.clojure/Set typed.clojure/Kw)
                 :assignments 'typed.clojure/Any
                 :conditional-invariant-results
-                '(typed.clojure/Map typed.clojure/Kw typed.clojure/Any)
+                (list 'typed.clojure/Map 'typed.clojure/Kw invariant-result-type)
                 :original-open-obligation-ids
                 '(typed.clojure/Set (typed.clojure/Vec typed.clojure/Any))
                 :open-meta-obligations dep-check/obligation-id-set}
@@ -141,10 +158,13 @@
            gesso.assurance.proof.operation-interface/interface-version
            (typed.clojure/Val 1)))
   (doseq [[name signature]
-          [['gesso.assurance.proof.operation-interface/operation-contract-entry
+          [['gesso.assurance.proof.operation-interface/invariant-result-entry
+            [inference-status-type inference-status-type induction-status-type
+             'typed.clojure/Any '-> invariant-result-type]]
+           ['gesso.assurance.proof.operation-interface/operation-contract-entry
             ['typed.clojure/Any 'typed.clojure/Any 'typed.clojure/Kw
              'typed.clojure/Any transition-description-type semantic-type
-             '(typed.clojure/Map typed.clojure/Kw typed.clojure/Any)
+             (list 'typed.clojure/Map 'typed.clojure/Kw invariant-result-type)
              '(typed.clojure/Set (typed.clojure/Vec typed.clojure/Any))
              dep-check/obligation-id-set '-> operation-contract-type]]
            ['gesso.assurance.proof.operation-interface/raw-fingerprint
@@ -457,6 +477,193 @@
                           {:label label})))))
     true))
 
+(def ^:private invariant-result-origins
+  {:initial-status 'initial-status
+   :preservation-status 'preservation-status
+   :induction-status 'induction-status
+   :open-reason 'open-reason})
+
+(defn- assert-invariant-result-origins! [source]
+  (let [result (contract-result source)]
+    (when-not (and (= (set (keys result))
+                      (set (keys invariant-result-origins)))
+                   (every? (fn [[field expected]]
+                             (= expected (get result field ::missing)))
+                           invariant-result-origins))
+      (throw (ex-info "Original invariant-result source provenance changed"
+                      {:result result})))
+    true))
+
+(defn- canonical-reader-anon [form]
+  ;; Reading the ORIGINAL source and the expected literal expands #() into
+  ;; different generated p1__N# symbols. Alpha-normalize only those symbols;
+  ;; leave the full fn* body and all other source structure under comparison.
+  (walk/postwalk
+   (fn [x]
+     (if (and (symbol? x)
+              (re-matches #"p[0-9]+__[0-9]+#" (name x)))
+       'checked-step-row
+       x)) form))
+
+(defn- invariant-issuer-guard! [forms]
+  ;; Validate the ORIGINAL function, not a test-only rendition of the
+  ;; algorithm. Its exhaustive guard ties individual steps and the initial
+  ;; status to conditional induction, then calls our typed constructor.
+  (let [source (original forms 'invariant-result!)
+        body (last source)
+        bindings (when (and (seq? body) (= 'let (first body))) (second body))
+        by-name (when (vector? bindings)
+                  (into {} (map vec (partition 2 bindings))))
+        expected-guard
+        '(when-not (and (= invariant-id (:invariant-id checked-step))
+                        (= #{:obligation-id :status} (set (keys step)))
+                        (#{:checked-conditional-inference :open} (:status step))
+                        (#{:checked-conditional-inference :open}
+                         (get-in checked-step [:initial :status]))
+                        (#{:checked-conditional-induction :open}
+                         (:induction-status checked-step))
+                        (= (= :checked-conditional-induction
+                              (:induction-status checked-step))
+                           (and (= :checked-conditional-inference
+                                   (get-in checked-step [:initial :status]))
+                                (every? #(= :checked-conditional-inference
+                                            (:status %))
+                                        (vals (:preservation-by-operation
+                                               checked-step))))))
+           (reject! :invalid-source-derived-invariant-step
+                    {:operation-id operation-id :invariant-id invariant-id}))
+        expected-result
+        '(invariant-result-entry
+          (get-in checked-step [:initial :status])
+          (:status step)
+          (:induction-status checked-step)
+          (:open-reason checked-step))]
+    (when-not (and (= '(get invariant-evidence invariant-id)
+                      (second bindings))
+                   (= '(get-in checked-step [:preservation-by-operation operation-id])
+                      (get by-name 'step))
+                   (= (canonical-reader-anon expected-guard)
+                      (canonical-reader-anon (nth body 2)))
+                   (= expected-result (last body)))
+      (throw (ex-info "Original invariant validation-to-descriptor path changed"
+                      {:bindings bindings :guard (nth body 2)
+                       :result (last body)})))
+    (let [operation (original forms 'original-operation-interface!)
+          occurrences (atom 0)]
+      (walk/postwalk
+       (fn [x]
+         (when (= '(invariant-result! id invariant-evidence operation-id) x)
+           (swap! occurrences inc))
+         x) operation)
+      (when-not (= 1 @occurrences)
+        (throw (ex-info "Original operation no longer validates each invariant"
+                        {:occurrences @occurrences}))))
+    true))
+
+(defn- invariant-issuer-mutation-check! [forms]
+  (let [source (original forms 'invariant-result!)
+        mutations
+        [[:remove-preservation-check
+          '(#{:checked-conditional-inference :open} (:status step))
+          '(some? step)]
+         [:invented-induction-status
+          '(#{:checked-conditional-induction :open}
+            (:induction-status checked-step))
+          '(#{:proved :open} (:induction-status checked-step))]
+         [:bypass-induction-consistency
+          '(= (= :checked-conditional-induction
+                (:induction-status checked-step))
+             (and (= :checked-conditional-inference
+                     (get-in checked-step [:initial :status]))
+                  (every? #(= :checked-conditional-inference (:status %))
+                          (vals (:preservation-by-operation checked-step)))))
+          'true]
+         [:swap-initial-and-preservation
+          '(invariant-result-entry
+            (get-in checked-step [:initial :status])
+            (:status step)
+            (:induction-status checked-step)
+            (:open-reason checked-step))
+          '(invariant-result-entry
+            (:status step)
+            (get-in checked-step [:initial :status])
+            (:induction-status checked-step)
+            (:open-reason checked-step))]]]
+    (doseq [[label before after] mutations]
+      (let [hits (atom 0)
+            modified (walk/postwalk
+                      (fn [form]
+                        (if (= (canonical-reader-anon form)
+                               (canonical-reader-anon before))
+                          (do (swap! hits inc) after)
+                          form)) source)]
+        (when-not (= 1 @hits)
+          (throw (ex-info "Invariant source mutation target changed"
+                          {:label label :hits @hits})))
+        (when-not (try
+                    (invariant-issuer-guard!
+                     (mapv #(if (= source %) modified %) forms))
+                    false
+                    (catch clojure.lang.ExceptionInfo _ true))
+          (throw (ex-info "Invalid invariant issuer escaped original audit"
+                          {:label label})))))
+    true))
+
+(defn- check-invariant-result! [checker forms]
+  (let [source (original forms 'invariant-result-entry)]
+    (check! checker :original-conditional-invariant-result-entry source)
+    (invariant-issuer-guard! forms)
+    (invariant-issuer-mutation-check! forms)
+    (doseq [[label edit]
+            [[:initial-proved #(assoc % :initial-status :proved)]
+             [:step-proved #(assoc % :preservation-status :proved)]
+             [:induction-proved #(assoc % :induction-status :proved)]
+             [:initial-induction-status
+              #(assoc % :initial-status :checked-conditional-induction)]
+             [:preservation-induction-status
+              #(assoc % :preservation-status :checked-conditional-induction)]
+             [:induction-inference-status
+              #(assoc % :induction-status :checked-conditional-inference)]
+             [:missing-initial #(dissoc % :initial-status)]
+             [:missing-step #(dissoc % :preservation-status)]
+             [:missing-induction #(dissoc % :induction-status)]
+             [:missing-reason #(dissoc % :open-reason)]
+             [:fake-proof #(assoc % :theorem :proved)]]]
+      (reject! checker [:invalid-invariant-descriptor label]
+               (mutate-contract source edit)))
+    (doseq [[label call]
+            [[:invalid-initial
+              '(invariant-result-entry :proved :open :open nil)]
+             [:invalid-step
+              '(invariant-result-entry :open :proved :open nil)]
+             [:invalid-induction
+              '(invariant-result-entry :open :open :proved nil)]
+             [:inference-in-induction-slot
+              '(invariant-result-entry :open :open
+                                       :checked-conditional-inference nil)]]]
+      (reject! checker [:invalid-invariant-call label] call))
+    (check! checker :valid-open-invariant-call
+            '(invariant-result-entry :open :open :open nil))
+    (check! checker :valid-checked-invariant-call
+            '(invariant-result-entry
+              :checked-conditional-inference
+              :checked-conditional-inference
+              :checked-conditional-induction nil))
+    ;; The initial/preservation statuses share the same union type. Their
+    ;; SOURCE mapping is inspected separately; swapping them is not a type
+    ;; error, and never becomes one merely by checking a narrower HMap.
+    (let [mutant (mutate-contract source
+                   #(assoc % :initial-status 'preservation-status))]
+      ;; This mutant is semantically misleading but TYPE-COMPATIBLE.
+      ;; preserve an explicit source-audit expectation instead of assuming
+      ;; that typing has established source identity.
+      (check! checker :same-typed-invariant-source-substitution mutant)
+      (when-not (try (assert-invariant-result-origins! mutant)
+                     false
+                     (catch clojure.lang.ExceptionInfo _ true))
+        (throw (ex-info "Swapped invariant source escaped audit" {}))))
+    true))
+
 (defn- check-operation-contract! [checker forms]
   (let [source (original forms 'operation-contract-entry)]
     (check! checker :original-operation-contract-entry source)
@@ -467,6 +674,29 @@
             [[:wrong-operation-id #(assoc % :operation-id "request/claim")]
              [:missing-conditional-results #(dissoc % :conditional-invariant-results)]
              [:wrong-conditional-results #(assoc % :conditional-invariant-results [])]
+             [:conditional-false-initial
+              #(assoc % :conditional-invariant-results
+                      '{:invariant/test
+                        {:initial-status :proved
+                         :preservation-status :open
+                         :induction-status :open :open-reason nil}})]
+             [:conditional-false-preservation
+              #(assoc % :conditional-invariant-results
+                      '{:invariant/test
+                        {:initial-status :open
+                         :preservation-status :proved
+                         :induction-status :open :open-reason nil}})]
+             [:conditional-false-induction
+              #(assoc % :conditional-invariant-results
+                      '{:invariant/test
+                        {:initial-status :open
+                         :preservation-status :open
+                         :induction-status :proved :open-reason nil}})]
+             [:conditional-missing-reason
+              #(assoc % :conditional-invariant-results
+                      '{:invariant/test
+                        {:initial-status :open :preservation-status :open
+                         :induction-status :open}})]
              [:wrong-reads #(assoc % :reads {})]
              [:wrong-writes #(assoc % :writes [])]
              [:wrong-frame #(assoc % :frame nil)]
@@ -499,6 +729,7 @@
 (defn- checks! [checker forms]
   (binding [*ns* (the-ns source-ns)]
     (let [entry (original forms 'interface-report-entry)]
+      (check-invariant-result! checker forms)
       (check-operation-contract! checker forms)
       (check! checker :original-interface-entry entry)
       (check! checker :original-freshness-consumer
@@ -564,9 +795,9 @@
     (checks! checker forms)
     (runtime-forgery!)
     (println "Typed operation interface derivation passed: original report")
-    (println "constructor, per-operation contract and freshness consumer; 43")
-    (println "negative type cases and a read/write provenance swap caught")
-    (println "by source audit, six issuer source mutations, and forgery rejection.")
+    (println "constructor, per-operation contract, invariant statuses, and")
+    (println "freshness consumer; 62 negative type cases; 4 new invariant")
+    (println "issuer mutations caught by source audit, plus existing checks.")
     (println "The complete derivation algorithm and live registry remain")
     (println "runtime assurance obligations, not statically established proof.")
     :ok))
