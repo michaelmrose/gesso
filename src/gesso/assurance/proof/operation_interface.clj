@@ -77,6 +77,36 @@
      :induction-status (:induction-status checked-step)
      :open-reason (:open-reason checked-step)}))
 
+(defn- operation-contract-entry
+  "Pure source-derived conditional operation contract, not a proof or
+   executable authority. Its caller validates original construction,
+   transition/evidence correspondence, and all invariant result coverage."
+  [catalog-id catalog-fingerprint operation-id source description semantics
+   conditional obligations open-meta]
+  {:operation-id operation-id
+   :catalog-id catalog-id
+   :catalog-fingerprint catalog-fingerprint
+   :source-fingerprint (raw-fingerprint operation-id source)
+   :subject-fingerprint (:subject-fingerprint description)
+   :transition-fingerprint (:fingerprint description)
+   :state-types (:state-types semantics)
+   :input-types (:input-types semantics)
+   :guard (:guard semantics)
+   :reads (:reads semantics)
+   :writes (:writes semantics)
+   :frame (:frame-fields semantics)
+   :assignments (:assignments semantics)
+   :conditional-invariant-results conditional
+   :original-open-obligation-ids obligations
+   :open-meta-obligations open-meta
+   :contract-scope :declared-abstract-guarded-transition-only
+   :guarantee-status :conditional-inference-or-open
+   :physical-writer-coverage :not-established
+   :implementation-correspondence :not-established
+   :certificate :not-issued
+   :admission :not-admitted
+   :authority :none})
+
 (defn- original-operation-interface!
   [catalog-id catalog-fingerprint invariant-ids original-op
    operation-evidence invariant-evidence open-meta operation-id]
@@ -103,29 +133,9 @@
                    (= invariant-ids (set (keys conditional))))
       (reject! :operation-evidence-correspondence-mismatch
                {:operation-id operation-id}))
-    {:operation-id operation-id
-     :catalog-id catalog-id
-     :catalog-fingerprint catalog-fingerprint
-     :source-fingerprint (raw-fingerprint operation-id source)
-     :subject-fingerprint (:subject-fingerprint description)
-     :transition-fingerprint (:fingerprint description)
-     :state-types (:state-types semantics)
-     :input-types (:input-types semantics)
-     :guard (:guard semantics)
-     :reads (:reads semantics)
-     :writes (:writes semantics)
-     :frame (:frame-fields semantics)
-     :assignments (:assignments semantics)
-     :conditional-invariant-results conditional
-     :original-open-obligation-ids obligations
-     :open-meta-obligations open-meta
-     :contract-scope :declared-abstract-guarded-transition-only
-     :guarantee-status :conditional-inference-or-open
-     :physical-writer-coverage :not-established
-     :implementation-correspondence :not-established
-     :certificate :not-issued
-     :admission :not-admitted
-     :authority :none}))
+    (operation-contract-entry
+     catalog-id catalog-fingerprint operation-id source description semantics
+     conditional obligations open-meta)))
 
 (defn- interface-report-entry
   "Pure source-derived operation-interface descriptor, not a proof token.
