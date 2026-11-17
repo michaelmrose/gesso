@@ -13,7 +13,14 @@
    This is a NOMINAL static handoff check, not independent proof of live
    registry entries, external assumptions, graph completeness, installed
    application writers, or physical/runtime authorization. Raw source,
-   registry contents, and the entire checking algorithm remain runtime-bound."
+   registry contents, and the entire checking algorithm remain runtime-bound.
+
+   The original public description now has an exact typed HMap contract:
+   its proof/admission/authority fields cannot silently become affirmative.
+   The entry! registry result remains opaque, so this assumes the descriptor
+   shape produced by our separately checked issuer rather than proving the
+   registry populated it. Provenance of Any-typed ledger fields is audited
+   against the original source, not misrepresented as static type safety."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.assurance.dependency :as dependency]
@@ -42,6 +49,35 @@
                 :edge-count typed.clojure/Int}
     :complete? true))
 
+(def ^:private closure-description
+  '(typed.clojure/HMap
+    :mandatory {:type typed.clojure/Kw
+                :version typed.clojure/Int
+                :catalog-id typed.clojure/Any
+                :catalog-fingerprint typed.clojure/Any
+                :induction-fingerprint typed.clojure/Any
+                :ledger-fingerprint typed.clojure/Any
+                :operation-ids (typed.clojure/Set typed.clojure/Kw)
+                :invariant-ids (typed.clojure/Set typed.clojure/Kw)
+                :node-count typed.clojure/Int
+                :edge-count typed.clojure/Int
+                :open-meta-obligations typed.clojure/Any
+                :open-assumptions typed.clojure/Any
+                :original-open-obligation-ids-by-operation typed.clojure/Any
+                :checking (typed.clojure/Val
+                           :original-source-and-exact-application-dependency-graph)
+                :scope (typed.clojure/Val
+                        :closed-declared-abstract-machine-only)
+                :proof-status (typed.clojure/Val
+                               :structural-source-dependency-closure-only)
+                :assumption-discharge (typed.clojure/Val :not-performed)
+                :installed-writer-coverage (typed.clojure/Val :not-established)
+                :implementation-correspondence (typed.clojure/Val :not-established)
+                :certificate (typed.clojure/Val :not-issued)
+                :admission (typed.clojure/Val :not-admitted)
+                :authority (typed.clojure/Val :none)}
+    :complete? true))
+
 (defn- definitions []
   (let [file (or (io/resource "gesso/assurance/proof/application_dependency.clj")
                  (throw (ex-info "Application dependency source not found" {})))]
@@ -66,6 +102,10 @@
 (defn- install-contracts! []
   (doseq [handle [graph-handle induction-handle application-handle]]
     (eval (list 'typed.clojure/ann-datatype handle '[])))
+  (eval '(typed.clojure/ann
+           gesso.assurance.proof.application-dependency/closure-type typed.clojure/Kw))
+  (eval '(typed.clojure/ann
+           gesso.assurance.proof.application-dependency/closure-version typed.clojure/Int))
   (doseq [[name signature]
           [['gesso.assurance.proof.induction-dependency/require-current-induction-dependencies!
             [induction-handle 'typed.clojure/Any 'typed.clojure/Any
@@ -89,7 +129,13 @@
              '(typed.clojure/Set typed.clojure/Kw)
              '(typed.clojure/Set typed.clojure/Kw)
              'typed.clojure/Int 'typed.clojure/Int
-             '-> registered-entry]]]]
+             '-> registered-entry]]
+           ;; The registry's actual contents are checked by runtime entry!;
+           ;; the checker assumes the shape guaranteed by our original issuer.
+           ['gesso.assurance.proof.application-dependency/entry!
+            [application-handle '-> registered-entry]]
+           ['gesso.assurance.proof.application-dependency/describe-application-dependencies
+            [application-handle '-> closure-description]]]]
     (fn-ann! name signature)))
 
 (defn- check! [checker label source]
@@ -222,6 +268,119 @@
       (reject! checker [:descriptor-call label] invalid))
     true))
 
+(def ^:private description-provenance
+  {:type 'closure-type
+   :version 'closure-version
+   :catalog-id 'catalog-id
+   :operation-ids 'operation-ids
+   :invariant-ids 'invariant-ids
+   :node-count 'node-count
+   :edge-count 'edge-count
+   :catalog-fingerprint '(:catalog-fingerprint ledger)
+   :induction-fingerprint '(:induction-fingerprint ledger)
+   :ledger-fingerprint '(:fingerprint ledger)
+   :open-meta-obligations '(:open-meta-obligations ledger)
+   :open-assumptions '(:open-assumptions ledger)
+   :original-open-obligation-ids-by-operation
+   '(:original-open-obligation-ids-by-operation ledger)})
+
+(defn- description-result [source]
+  (let [body (last source)]
+    (when-not (and (seq? body) (= 'let (first body)))
+      (throw (ex-info "Original application description no longer uses let"
+                      {:form body})))
+    (let [bindings (second body)
+          result (last body)]
+      (when-not (and (= '[{:keys [ledger catalog-id operation-ids invariant-ids
+                                   node-count edge-count]} (entry! handle)] bindings)
+                     (map? result))
+        (throw (ex-info "Original description no longer reads live registry"
+                        {:bindings bindings :result result})))
+      result)))
+
+(defn- assert-description-provenance! [source]
+  ;; These are same-typed values (mostly Any), so Typed Clojure itself
+  ;; cannot prove their origins. Explicitly retain the source relationship
+  ;; between the live registered entry and each public report field.
+  (let [result (description-result source)]
+    (doseq [[field expression] description-provenance]
+      (when-not (= expression (get result field ::missing))
+        (throw (ex-info "Copyable description changed its source field"
+                        {:field field :expected expression
+                         :actual (get result field ::missing)}))))
+    true))
+
+(defn- mutate-description [source alter]
+  ;; Modify the *actual original* description map, not a test-only facade.
+  (let [body (last source)
+        prior (description-result source)
+        changed (alter prior)]
+    (when (= prior changed)
+      (throw (ex-info "No-op closure description mutation" {})))
+    (apply list (concat (butlast source)
+                        [(apply list (concat (butlast body) [changed]))]))))
+
+(defn- check-description! [checker forms]
+  (let [original-source (original forms 'describe-application-dependencies)]
+    (check! checker :original-application-closure-description original-source)
+    (assert-description-provenance! original-source)
+    (check! checker :correct-description-handle
+            '(describe-application-dependencies
+              (check-application-dependencies! {} {})))
+    (doseq [[label altered]
+            [[:false-proof #(assoc % :proof-status :proved)]
+             [:false-certificate #(assoc % :certificate :issued)]
+             [:false-authority #(assoc % :authority :granted)]
+             [:false-admission #(assoc % :admission :admitted)]
+             [:false-assumption-discharge #(assoc % :assumption-discharge :complete)]
+             [:false-writer-coverage #(assoc % :installed-writer-coverage :complete)]
+             [:false-correspondence #(assoc % :implementation-correspondence :proved)]
+             [:false-scope #(assoc % :scope :installed-application)]
+             [:false-checking #(assoc % :checking :independent-proof)]
+             [:missing-open-premises #(dissoc % :open-assumptions)]
+             [:missing-original-obligations
+              #(dissoc % :original-open-obligation-ids-by-operation)]
+             [:incorrect-node-count #(assoc % :node-count "two")]
+             [:incorrect-edge-count #(assoc % :edge-count false)]
+             [:invented-proof-field #(assoc % :proof-evidence :valid)]]]
+      (reject! checker [:description label]
+               (mutate-description original-source altered)))
+    ;; A copied report, a raw map, or even another registered handle class
+    ;; must not be a substitute for this application's live closure handle.
+    (doseq [[label expression]
+            [[:description-raw '(describe-application-dependencies {})]
+             [:description-nil '(describe-application-dependencies nil)]
+             [:description-graph-handle
+              '(describe-application-dependencies (dependency/check-graph! {}))]
+             [:description-induction-handle
+              '(describe-application-dependencies
+                (induction-dependency/check-induction-dependencies! {} {}))]
+             [:description-copy
+              '(describe-application-dependencies
+                (describe-application-dependencies
+                 (check-application-dependencies! {} {})))]]]
+      (reject! checker [:description-call label] expression))
+    ;; Prove these mutations are NOT rejected by the type system and MUST
+    ;; instead be rejected by the source-provenance audit. Their values share
+    ;; the same broad Any type but represent different original facts.
+    (doseq [[label altered]
+            [[:swapped-catalog-fingerprint
+              #(assoc % :catalog-fingerprint '(:induction-fingerprint ledger))]
+             [:swapped-open-assumptions
+              #(assoc % :open-assumptions '(:open-meta-obligations ledger))]
+             [:swapped-original-obligations
+              #(assoc % :original-open-obligation-ids-by-operation
+                      '(:open-assumptions ledger))]]]
+      (let [changed (mutate-description original-source altered)
+            caught? (try (assert-description-provenance! changed)
+                         false
+                         (catch clojure.lang.ExceptionInfo _ true))]
+        (when-not caught?
+          (throw (ex-info "Incorrect description provenance escaped source audit"
+                          {:case label})))
+        (check! checker [:type-compatible-but-invalid-source label] changed)))
+    true))
+
 (defn- swap-original-call [source op new-call]
   (let [seen (atom 0)
         altered (walk/postwalk
@@ -240,6 +399,7 @@
       (check! checker :original-two-handle-revalidation source)
       (assert-source-link! forms)
       (check-descriptor! checker forms)
+      (check-description! checker forms)
       ;; Call the original source-backed helper with the right nominal
       ;; categories and test incorrect substitutions in both original calls.
       (doseq [[label op bad]
@@ -299,11 +459,27 @@
                      forged {} {})
                     nil
                     (catch clojure.lang.ExceptionInfo e
-                      (:reason (ex-data e))))]
+                      (:reason (ex-data e))))
+        description-reason
+        (try (application/describe-application-dependencies forged)
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               (:reason (ex-data e))))
+        copy-reason
+        (try (application/describe-application-dependencies
+              {:proof-status :structural-source-dependency-closure-only
+               :authority :none})
+             nil
+             (catch clojure.lang.ExceptionInfo e
+               (:reason (ex-data e))))]
     (when-not (and (not (application/checked-application-dependencies? forged))
-                   (= :unrecognized-closure-handle reason))
-      (throw (ex-info "Forged application closure bypassed registry"
-                      {:reason reason}))))
+                   (= :unrecognized-closure-handle reason)
+                   (= :unrecognized-closure-handle description-reason)
+                   (= :unrecognized-closure-handle copy-reason))
+      (throw (ex-info "Forged or copyable application closure bypassed registry"
+                      {:reason reason
+                       :description-reason description-reason
+                       :copy-reason copy-reason}))))
   ;; A pure descriptor containing nominally correct but unregistered handles
   ;; is still just copyable data. It is not an issued application closure.
   (let [ctor (or (ns-resolve source-ns 'closure-entry)
@@ -330,6 +506,7 @@
     (check-forgery!)
     (println "Typed application closure passed: original graph revalidation")
     (println "and exact issuance descriptor source; source-bound handoffs;")
-    (println "34 negative type cases, forged closure and pure-data checks.")
-    (println "Original graph correctness, proof and authority remain open.")
+    (println "53 negative type cases, three Any-typed provenance mutations")
+    (println "caught by source audit, forged handle and pure-data checks.")
+    (println "Original registry validity, proof and authority remain open.")
     :ok))
