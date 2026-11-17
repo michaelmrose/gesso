@@ -20,8 +20,8 @@
             [gesso.choreo.reference-chat-test]
             [gesso.choreo.reference-checkout-test]))
 
-(def ^:private minimum-assertions 10663)
-(def ^:private minimum-tests 577)
+(def ^:private minimum-assertions 10667)
+(def ^:private minimum-tests 578)
 
 (def ^:private required-namespaces
   #{"gesso.choreo.typed-nominal-transition-boundary-test"
@@ -69,6 +69,8 @@
   (reset! visited-namespaces [])
   (println "GESSO_CHOREO_IDENTITY_PARITY"
            (pr-str (gesso.choreo.typed-nominal-transition-boundary-test/portable-identity-corpus)))
+  (println "GESSO_CHOREO_ADMISSION_PARITY"
+           (pr-str (gesso.choreo.typed-nominal-transition-boundary-test/portable-admission-corpus)))
   (t/run-tests (t/empty-env ::reporter)
                'gesso.choreo.typed-nominal-transition-boundary-test
                'gesso.choreo.typed-nominal-machine-boundary-test

@@ -62,9 +62,69 @@
            [first-state second-state final-state])}))
      (range 128))))
 
+;; Cross-runtime admission/rejection is also observable behavior: two hosts
+;; must reject the same category swaps, not merely preserve valid identities.
+(def ^:private runtime-slots
+  [:principal :actor :authority :host :command-id :execution-id])
+
+(defn- observed-start [plan case-id options]
+  (try
+    (let [execution (machine/start plan options)]
+      {:case case-id
+       :status :accepted
+       :bindings (machine/identity-bindings execution)
+       :pending (machine/pending-action execution)})
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) error
+      (let [data (ex-data error)]
+        {:case case-id
+         :status :rejected
+         :error/kind (:error/kind data)
+         :cause/kind (get-in data [:cause :error/kind])}))))
+
+(defn portable-admission-corpus []
+  (let [plan (two-local-plan)
+        sample (sample-bindings)]
+    (vec
+     (concat
+      ;; Each runtime category must be accepted only in its matching slot;
+      ;; all 36 pairs use the same raw identity value, by design.
+      (for [slot runtime-slots
+            category runtime-slots]
+        (observed-start plan [:binding slot category]
+                        {:identity-bindings {slot (get sample category)}}))
+      ;; Convenience options cannot silently interchange semantic commands
+      ;; and concrete executions, even if their raw identifiers are equal.
+      (for [slot [:command-id :execution-id]
+            category runtime-slots]
+        (observed-start plan [:explicit slot category]
+                        {slot (get sample category)}))
+      (for [slot [:command-id :execution-id]]
+        (observed-start plan [:agreement slot]
+                        {:identity-bindings {slot (get sample slot)}
+                         slot (get sample slot)}))
+      (for [slot [:command-id :execution-id]]
+        (observed-start plan [:conflict slot]
+                        {:identity-bindings {slot (get sample slot)}
+                         slot (assoc (get sample slot) :conflicting-extension true)}))
+      [(observed-start plan [:role-mismatch]
+                       {:identity-bindings {:role :browser}})
+       (observed-start plan [:unknown-option]
+                       {:misspelled-identity-binding :server})]
+      (for [slot [:command-id :execution-id]]
+        (observed-start plan [:raw-option slot] {slot :same-value}))))))
+
+(deftest identity-category-admission-corpus-is-complete
+  (let [cases (portable-admission-corpus)]
+    (is (= 56 (count cases)))
+    (is (= 56 (count (distinct (map :case cases)))))
+    (is (= 10 (count (filter #(= :accepted (:status %)) cases))))
+    (is (= 46 (count (filter #(= :rejected (:status %)) cases))))))
+
 #?(:clj
    (defn -main [& _]
-     (println "GESSO_CHOREO_IDENTITY_PARITY" (pr-str (portable-identity-corpus)))))
+     (println "GESSO_CHOREO_IDENTITY_PARITY" (pr-str (portable-identity-corpus)))
+     (println "GESSO_CHOREO_ADMISSION_PARITY" (pr-str (portable-admission-corpus)))))
 
 (defn- assert-identity-continuity! [execution expected]
   (is (machine/execution? execution))
