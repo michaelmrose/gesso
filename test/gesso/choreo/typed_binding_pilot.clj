@@ -43,7 +43,12 @@
    caller's key validation is still separately flow-audited. This gate now
    also audits the exact flow from each reducer entry through validate-binding
    into the output map, and rejects a bypass mutation that is still well-typed
-   and still mentions validate-binding. Bounded sparse-map enumeration tests
+   and still mentions validate-binding. A separate failure-path audit requires
+   every original per-kind guard to throw when validation fails: otherwise
+   fabricated, correctly tagged identities pass the category type checker.
+   The source-derived checks must also reject deliberate, well-typed forged
+   fallbacks. These checks do not certify predicate truth or provenance.
+   Bounded sparse-map enumeration tests
    admission behavior but is not an exhaustive proof for arbitrary raw values."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
@@ -396,6 +401,94 @@
                            original-typed mutant-typed)))
        (println "Seven whole-case wrong-category mutations accepted by union")
        (println "and rejected by source-derived key-specific typing.")
+
+       ;; Typed output categories are NOT sufficient to establish admission.
+       ;; An invalid value could be replaced with a newly fabricated identity
+       ;; of the correct kind. Its source type checks under both the broad
+       ;; union and the key-specific HMap, yet it violates the obligation to
+       ;; reject invalid downstream input. Audit the ORIGINAL failure path,
+       ;; then require the audit to reject these well-typed mutations.
+       (let [audit-identity-guard!
+             (fn [key expected-predicate branch]
+               (let [error-expr (nth branch 3 nil)]
+                 (when-not (and (seq? branch)
+                                (= 4 (count branch))
+                                (= 'if (first branch))
+                                (= (list expected-predicate 'value)
+                                   (second branch))
+                                (= 'value (nth branch 2 nil))
+                                (seq? error-expr)
+                                (= 4 (count error-expr))
+                                (= 'identity-error (first error-expr))
+                                (= :invalid-binding (second error-expr))
+                                (string? (nth error-expr 2 nil))
+                                (= {:binding 'key :value 'value}
+                                   (nth error-expr 3 nil)))
+                   (throw (ex-info "Identity validation failure path changed."
+                                   {:error/kind :unsafe-binding-failure-path
+                                    :binding key :form branch})))
+                 true))
+             audit-role-guard!
+             (fn [definition]
+               (let [args (nth definition 3 nil)
+                     guard (nth definition 4 nil)
+                     error-form (nth guard 2 nil)]
+                 (when-not (and (= '[role] args)
+                                (= 6 (count definition))
+                                (= 'role (last definition))
+                                (= 'when-not (first guard))
+                                (= '(role? role) (second guard))
+                                (= 'identity-error (first error-form))
+                                (= 4 (count error-form))
+                                (= :invalid-role (second error-form))
+                                (string? (nth error-form 2 nil))
+                                (= {:role 'role} (nth error-form 3 nil)))
+                   (throw (ex-info "Role validator's rejection path changed."
+                                   {:error/kind :unsafe-binding-failure-path
+                                    :form definition})))
+                 true))
+             original-role (source-function 'require-role)
+             ;; Replace rejection with a fabricated keyword. The altered
+             ;; function still returns Kw for EVERY input, including invalid
+             ;; input that the real function would reject.
+             forged-role (apply list (concat (take 4 original-role)
+                                             ['(if (role? role)
+                                                 role :forged-role)]))]
+         (audit-role-guard! original-role)
+         (check-form :forged-role-validator-still-typed forged-role)
+         (let [error-kind (try (audit-role-guard! forged-role) nil
+                               (catch clojure.lang.ExceptionInfo e
+                                 (:error/kind (ex-data e))))]
+           (when-not (= :unsafe-binding-failure-path error-kind)
+             (throw (ex-info "Role guard audit accepted forged role."
+                             {:actual error-kind}))))
+         (doseq [{:keys [key predicate type]} identity-cases]
+           (let [original-arm (get branches key)
+                 actual-kind (case key :command-id :command
+                                       :execution-id :execution
+                                       key)
+                 forged {:gesso.choreo.identity/type :gesso.choreo.identity/ref
+                         :gesso.choreo.identity/kind actual-kind
+                         :gesso.choreo.identity/value :fabricated}
+                 mutant-arm (list 'if (list predicate 'value)
+                                  'value forged)
+                 mutant (substitute-case-arm binding-definition key mutant-arm)
+                 mutant-typed (typed-branch mutant-arm type)
+                 original-typed (typed-branch original-arm type)]
+             (audit-identity-guard! key predicate original-arm)
+             (check-form [:valid-guarded-arm key] original-typed)
+             (check-form [:forged-arm-still-specific-type key] mutant-typed)
+             (check-form [:forged-dispatch-still-union-typed key] mutant)
+             (let [error-kind
+                   (try (audit-identity-guard! key predicate mutant-arm)
+                        nil
+                        (catch clojure.lang.ExceptionInfo e
+                          (:error/kind (ex-data e))))]
+               (when-not (= :unsafe-binding-failure-path error-kind)
+                 (throw (ex-info "Guard audit accepted a forged identity."
+                                 {:binding key :actual error-kind}))))))
+         (println "Rejected six well-typed forged identity failure paths")
+         (println "and a well-typed role fallback through source-flow audits."))
        ;; The original category predicates merely delegate to kind?. The
        ;; checker proves Boolean results under a truthful broad annotation;
        ;; their stronger Pred refinements remain separately trusted.
