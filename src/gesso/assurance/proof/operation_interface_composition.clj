@@ -149,14 +149,36 @@
   [entries operation-id invariant-result]
   (assoc entries operation-id invariant-result))
 
+(defn- operation-invariant-evidence!
+  "Retrieve an operation's original result for this invariant. The checked
+   operation contract contains a keyword-indexed invariant-result map, not an
+   arbitrary nested value. Missing evidence rejects instead of manufacturing
+   a nil row; the upstream interfaces! coverage guard remains authoritative."
+  [operation invariant-id]
+  (if-let [result (get (:conditional-invariant-results operation) invariant-id)]
+    result
+    (reject! :missing-operation-invariant-evidence
+             {:operation-id (:operation-id operation)
+              :invariant-id invariant-id})))
+
+(defn- operation-invariant-result-row
+  "Retain the original operation key and its source-selected invariant result."
+  [entries invariant-id operation-id operation]
+  (operation-invariant-row
+   entries operation-id (operation-invariant-evidence! operation invariant-id)))
+
+(defn- empty-operation-invariant-results
+  "Keep the original deterministic comparator for the operation-indexed map."
+  []
+  (sorted-map* []))
+
 (defn- operation-invariant-results
   "Retain all original operation/invariant evidence in deterministic order."
   [interfaces invariant-id]
   (reduce-kv (fn [entries operation-id operation]
-               (operation-invariant-row
-                entries operation-id
-                (get-in operation [:conditional-invariant-results invariant-id])))
-             (sorted-map* []) interfaces))
+               (operation-invariant-result-row
+                entries invariant-id operation-id operation))
+             (empty-operation-invariant-results) interfaces))
 
 (defn- open-reason-row
   "Collect the original invariant's reason from each operation's evidence."
@@ -186,8 +208,7 @@
 (defn- invariant-results! [interfaces invariant-ids]
   (sorted-map*
    (for [invariant-id (sorted-ids invariant-ids)]
-     (let [           results (operation-invariant-results interfaces invariant-id)
-           values (vals results)
+     (let [results (operation-invariant-results interfaces invariant-id)
            initial (initial-statuses results)
            induction (induction-statuses results)
            open-reasons (open-reasons results)
