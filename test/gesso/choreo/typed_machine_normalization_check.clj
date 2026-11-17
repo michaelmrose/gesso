@@ -139,6 +139,70 @@
                       {:error/kind :wrong-machine-binding-normalization})))
     true))
 
+
+(defn- audit-machine-start-linkage! [definition]
+  ;; The normalizer is statically checked, but public tagged maps have no
+  ;; nominal type distinction at the start/options boundary. Verify that the
+  ;; ORIGINAL production start function actually passes each public option to
+  ;; the correct normalizer slot, then installs its validated result. This is
+  ;; a source-correspondence check, not a new Typed Clojure proof of map kind.
+  (let [arities (filter #(and (seq? %) (vector? (first %)))
+                        (drop 2 definition))
+        [one two] arities
+        body (last two)
+        pairs (when (and (seq? body) (= 'let (first body))
+                         (vector? (second body)))
+                (partition 2 (second body)))
+        locals (into {} (map vec (filter (comp symbol? first) pairs)))
+        options-binding (some (fn [[k v]]
+                                (when (and (map? k) (contains? k :keys))
+                                  [k v]))
+                              pairs)
+        [destructured source] options-binding
+        enter (last body)]
+    (when-not (and (= 2 (count arities))
+                   (= '[plan] (first one))
+                   (= '(start plan nil) (second one))
+                   (= '[plan opts] (first two))
+                   (= '(or opts {}) (get locals 'opts'))
+                   (= '(require-map! "Machine start options" opts')
+                      (some (fn [[k v]] (when (= k '_) v)) pairs))
+                   (= #{:identity-bindings :command-id :execution-id
+                        :values :max-immediate-steps}
+                      (get locals 'allowed-option-keys))
+                   (= '(set/difference (set (keys opts'))
+                                      allowed-option-keys)
+                      (get locals 'unknown-option-keys))
+                   (= '(when (seq unknown-option-keys)
+                         (machine-error
+                          :unknown-start-option-keys
+                          "Machine start options contain unknown keys."
+                          {:unknown-option-keys unknown-option-keys
+                           :allowed-option-keys allowed-option-keys}))
+                      (some (fn [[k v]]
+                              (when (and (= k '_) (seq? v)
+                                         (= 'when (first v))) v))
+                            pairs))
+                   (= {:keys '[identity-bindings command-id execution-id
+                                values max-immediate-steps]
+                       :or '{values {}}}
+                      destructured)
+                   (= 'opts' source)
+                   (= '(require-executable-plan! plan) (get locals 'plan'))
+                   (= '(normalize-machine-bindings
+                         plan' identity-bindings command-id execution-id)
+                      (get locals 'bindings'))
+                   (= '(enter plan'
+                             {:identity-bindings bindings'
+                              :state (:initial plan')
+                              :knowledge initial-knowledge
+                              :history []
+                              :max-immediate-steps max-immediate-steps'})
+                      enter))
+      (throw (ex-info "Machine start lost identity normalization linkage."
+                      {:error/kind :wrong-machine-start-linkage})))
+    true))
+
 (defn check! [checker]
   ;; A verified Map argument/return discipline for the original production
   ;; normalizer. Valid tagged identity *kinds* remain runtime schema checks:
@@ -157,7 +221,8 @@
         command (source-definition forms 'require-command-id!)
         execution (source-definition forms 'require-execution-id!)
         merge-fn (source-definition forms 'merge-explicit-binding)
-        normalize (source-definition forms 'normalize-machine-bindings)]
+        normalize (source-definition forms 'normalize-machine-bindings)
+        start (source-definition forms 'start)]
     ;; Gesso's existing schema validation wrappers are trusted here, backed
     ;; by the production type and machine tests; this does not checker-verify
     ;; the entire schema implementation or the whole machine/start function.
@@ -196,6 +261,36 @@
                                        :invalid-execution-id)
       (audit-machine-explicit-merge! merge-fn)
       (audit-machine-binding-normalization! normalize)
+      (audit-machine-start-linkage! start)
+      ;; The original machine/start has a separate obligation: it must use
+      ;; the checked normalizer with the correct option-to-argument mapping.
+      (let [normalization-call
+            '(normalize-machine-bindings
+              plan' identity-bindings command-id execution-id)
+            replace-call
+            (fn [replacement]
+              (walk/postwalk
+               (fn [node] (if (= normalization-call node) replacement node))
+               start))]
+        (doseq [[label mutation]
+                [[:start-command-execution-swapped
+                  (replace-call
+                   '(normalize-machine-bindings
+                     plan' identity-bindings execution-id command-id))]
+                 [:start-normalization-bypassed
+                  (replace-call '(identity/bindings identity-bindings))]
+                 [:start-options-validation-removed
+                  (walk/postwalk-replace
+                   {:unknown-start-option-keys :not-an-error} start)]
+                 [:start-stores-raw-bindings
+                  (walk/postwalk-replace
+                   {'bindings' 'identity-bindings} start)]]]
+          (when (= mutation start)
+            (throw (ex-info "Machine start mutation had no target."
+                            {:label label})))
+          (expect-audit-rejection!
+           audit-machine-start-linkage! label mutation
+           :wrong-machine-start-linkage)))
       (check-source! checker :machine-normalization-valid-tagged-options
               '(normalize-machine-bindings
                 {:role :server} {:role :server}
