@@ -333,13 +333,94 @@
                           :not-waiting-authoritative)}
              rejections)))))
 
+;; A complete sparse binding map is more than six independent identities:
+;; role presence, missing slots, per-kind wire decoding, and machine admission
+;; must remain coherent together without inventing identities or leaking
+;; extension-only runtime metadata into transport representations.
+(defn- wire-binding-map [bindings]
+  (into {}
+        (for [[slot value] bindings]
+          [slot (if (= :role slot) value (identity/encode-wire value))])))
+
+(defn- decoded-binding-map [bindings]
+  (into {}
+        (for [[slot value] bindings]
+          [slot (if (= :role slot) value (identity/decode-wire value))])))
+
+(defn- binding-admission-result [f]
+  (try
+    {:status :accepted :bindings (f)}
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) error
+      {:status :rejected
+       :error/kind (:error/kind (ex-data error))
+       :cause/kind (get-in (ex-data error) [:cause :error/kind])})))
+
+(defn portable-binding-wire-corpus []
+  (let [plan (two-local-plan)
+        sample (sample-bindings)]
+    {:roundtrips
+     (vec
+      (for [mask (range 128)]
+        (let [original (into {}
+                             (for [[index slot] (map-indexed vector identity-slots)
+                                   :when (bit-test mask index)]
+                               [slot (get sample slot)]))
+              wire (wire-binding-map original)
+              decoded (decoded-binding-map wire)
+              admitted (identity/bindings decoded)
+              execution (machine/start plan {:identity-bindings admitted})]
+          {:mask mask
+           :original original
+           :wire wire
+           :decoded decoded
+           :admitted admitted
+           :machine {:bindings (machine/identity-bindings execution)
+                     :nominal-bindings (nominal-projection execution)
+                     :pending (machine/pending-action execution)}})))
+     :categories
+     (vec
+      (for [slot runtime-slots
+            category runtime-slots]
+        (let [wire (identity/encode-wire (get sample category))
+              decoded (identity/decode-wire wire)
+              input {slot decoded}]
+          {:case [slot category]
+           :wire wire
+           :decoded decoded
+           :binding-admission
+           (binding-admission-result #(identity/bindings input))
+           :machine-admission
+           (binding-admission-result
+            #(machine/identity-bindings
+              (machine/start plan {:identity-bindings input})))})))}))
+
+(deftest sparse-binding-wire-admission-preserves-categories
+  (let [{:keys [roundtrips categories]} (portable-binding-wire-corpus)]
+    (is (= 128 (count roundtrips)))
+    (is (= (vec (range 128)) (mapv :mask roundtrips)))
+    (is (= 36 (count categories)))
+    (is (= 6 (count (filter #(= :accepted
+                               (get-in % [:binding-admission :status]))
+                            categories))))
+    (is (= 30 (count (filter #(= :rejected
+                                (get-in % [:binding-admission :status]))
+                             categories))))
+    (doseq [{:keys [original wire decoded admitted machine]} roundtrips]
+      (is (= (set (keys original)) (set (keys wire))))
+      (is (= (set (keys original)) (set (keys decoded))))
+      (is (= decoded admitted))
+      (is (= (assoc admitted :role :server) (:bindings machine)))
+      (is (= (:bindings machine) (:nominal-bindings machine))))))
+
 #?(:clj
    (defn -main [& _]
      (println "GESSO_CHOREO_IDENTITY_PARITY" (pr-str (portable-identity-corpus)))
      (println "GESSO_CHOREO_ADMISSION_PARITY" (pr-str (portable-admission-corpus)))
      (println "GESSO_CHOREO_SUSPENSION_PARITY" (pr-str (portable-suspension-corpus)))
      (println "GESSO_CHOREO_ACTION_PARITY" (pr-str (portable-action-corpus)))
-     (println "GESSO_CHOREO_WIRE_PARITY" (pr-str (identity-test/portable-wire-corpus)))))
+     (println "GESSO_CHOREO_WIRE_PARITY" (pr-str (identity-test/portable-wire-corpus)))
+     (println "GESSO_CHOREO_BINDING_WIRE_PARITY" (pr-str (portable-binding-wire-corpus)))))
 
 (defn- assert-identity-continuity! [execution expected]
   (is (machine/execution? execution))

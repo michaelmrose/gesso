@@ -95,3 +95,9 @@ jobs:
           bb script/check_choreo_wire_parity.clj \
             target/typed-node/jvm-identity-parity.log \
             target/typed-node/node-corpus.log
+
+      - name: Compare JVM and Node sparse binding wire admission
+        run: |
+          bb script/check_choreo_binding_wire_parity.clj \
+            target/typed-node/jvm-identity-parity.log \
+            target/typed-node/node-corpus.log
