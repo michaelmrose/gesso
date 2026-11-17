@@ -439,5 +439,7 @@
         {'identity/bindings 'identity} normalize)
        :wrong-machine-binding-normalization))
     (check-discriminated-normalization! checker forms)
+    ((requiring-resolve 'gesso.choreo.typed-machine-suspension-check/check!)
+     checker forms)
     true))
 
