@@ -286,6 +286,12 @@
                :runtime-enforcement :not-established
                :authority :none))))
 
+(defn- revalidate-closure-graph! [prior current-graph]
+  ;; The registered closure entry contains a nominal CheckedGraph, not an
+  ;; AdmissionHandle or a descriptive graph map. The generic graph checker
+  ;; still authenticates this handle against CURRENT graph data at runtime.
+  (dependency/require-current-graph! (:graph-handle prior) current-graph))
+
 (defn require-current-induction-dependencies!
   "Require a live source-closure handle to remain current against ORIGINAL
    current catalog source and a FRESH current dependency graph declaration.
@@ -305,5 +311,5 @@
         (fail! :stale-source-dependency-closure [:catalog] {}))
       (when-not (= now (graph-identity current-graph))
         (fail! :source-dependency-content-mismatch [:graph] {}))
-      (dependency/require-current-graph! (:graph-handle prior) current-graph))
+      (revalidate-closure-graph! prior current-graph))
     handle))

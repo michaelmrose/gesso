@@ -8,7 +8,12 @@
 
    Types do NOT prove the CheckedGraph is live, the catalog is faithful, or
    external obligations are discharged. Source audits below bind our checks
-   to the actual validation-to-registration path, which remains runtime."
+   to the actual validation-to-registration path, which remains runtime.
+
+   The registered closure consumer is checked only at its final graph
+   handoff: the original registry lookup remains opaque, so this checker
+   assumes the issued closure-entry HMap at that narrowed helper boundary.
+   The full source-relative freshness algorithm is runtime-tested, not typed."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.assurance.admission :as admission]
@@ -95,7 +100,11 @@
            ['gesso.assurance.proof.induction-dependency/closure-entry
             [checked-graph 'typed.clojure/Any 'typed.clojure/Str
              'typed.clojure/Any 'typed.clojure/Str graph-argument
-             '-> closure-entry]]]]
+             '-> closure-entry]]
+           ['gesso.assurance.dependency/require-current-graph!
+            [checked-graph 'typed.clojure/Any '-> checked-graph]]
+           ['gesso.assurance.proof.induction-dependency/revalidate-closure-graph!
+            [closure-entry 'typed.clojure/Any '-> checked-graph]]]]
     (eval (list 'typed.clojure/ann name
                 (list 'typed.clojure/IFn inputs)))))
 
@@ -134,6 +143,109 @@
                          :entry-source (get by-name 'entry)}))))
     true))
 
+(defn- source-linked-revalidation! [forms]
+  ;; A check of an unused private helper would be vacuous. Require the
+  ;; production consumer to retrieve by its incoming handle, rederive
+  ;; current source, check both source and graph freshness, and THEN invoke
+  ;; the typed helper before returning the original closure handle.
+  (let [definition (original forms 'require-current-induction-dependencies!)
+        outer (last definition)
+        outer-bindings (when (and (seq? outer) (= 'let (first outer)))
+                         (second outer))
+        inner (when (and (seq? outer) (= 'handle (last outer)))
+                (nth outer (- (count outer) 2)))
+        inner-bindings (when (and (seq? inner) (= 'let (first inner)))
+                         (second inner))
+        outer-map (when (vector? outer-bindings)
+                    (into {} (map vec (partition 2 outer-bindings))))
+        inner-map (when (vector? inner-bindings)
+                    (into {} (map vec (partition 2 inner-bindings))))]
+    (when-not (and (= '[handle current-catalog current-graph]
+                      (some #(when (vector? %) %) definition))
+                   (= '(registered handle) (get outer-map 'prior))
+                   (= '(when-not prior
+                         (fail! :unrecognized-dependency-handle [:handle] {}))
+                      (nth outer 2))
+                   (= '(semantic-graph! current-catalog)
+                      (get inner-map '{:keys [graph report source-fingerprint]}))
+                   (= '(graph-identity graph) (get inner-map 'now))
+                   (= '(revalidate-closure-graph! prior current-graph)
+                      (last inner))
+                   (= 'handle (last outer)))
+      (throw (ex-info "Induction closure consumer lost source-bound revalidation"
+                      {:outer-bindings outer-bindings
+                       :inner-bindings inner-bindings
+                       :inner-final (some-> inner last)})))
+    (let [guards (filter #(and (seq? %) (= 'when-not (first %)))
+                         (drop 2 inner))]
+      (when-not (= ['(when-not (and (= (:graph-snapshot prior) now)
+                                   (= (:source-fingerprint prior) source-fingerprint)
+                                   (= (:induction-fingerprint prior)
+                                      (:fingerprint report))
+                                   (= (:catalog-fingerprint prior)
+                                      (:catalog-fingerprint report)))
+                        (fail! :stale-source-dependency-closure [:catalog] {}))
+                    '(when-not (= now (graph-identity current-graph))
+                       (fail! :source-dependency-content-mismatch [:graph] {}))]
+                   (vec guards))
+        (throw (ex-info "Induction source/graph freshness guards changed"
+                        {:guards guards}))))
+    true))
+
+(defn- mutate-graph-handoff [source replacement]
+  ;; Change ONLY the original handle expression consumed by the original
+  ;; generic graph revalidator. Any other structural changes fail closed.
+  (let [target '(:graph-handle prior)
+        count* (atom 0)
+        modified (walk/postwalk
+                  (fn [x]
+                    (if (= target x)
+                      (do (swap! count* inc) replacement)
+                      x))
+                  source)]
+    (when-not (= 1 @count*)
+      (throw (ex-info "Original closure graph-handle field moved"
+                      {:matches @count*})))
+    modified))
+
+(defn- check-revalidation! [checker forms]
+  (let [source (original forms 'revalidate-closure-graph!)]
+    (check! checker :original-live-graph-revalidator source)
+    (source-linked-revalidation! forms)
+    (doseq [[label substituted]
+            [[:raw-entry 'prior]
+             [:raw-map {}]
+             [:wrong-handle '(admission/admit-subject! {})]
+             [:source-fingerprint '(:source-fingerprint prior)]
+             [:graph-snapshot '(:graph-snapshot prior)]
+             [:missing-graph-slot '(:unknown prior)]
+             [:wrong-count '(:node-count prior)]
+             [:nil-handle nil]
+             [:string-handle "graph"]]]
+      (reject! checker [:revalidation label]
+               (mutate-graph-handoff source substituted)))
+    (doseq [[label invalid-return]
+            [[:returned-raw-entry 'prior]
+             [:returned-source '(:source-fingerprint prior)]
+             [:returned-nil nil]]]
+      (reject! checker [:revalidation label]
+               (apply list (concat (butlast source) [invalid-return]))))
+    ;; This composition is only a nominal category check. It never executes
+    ;; check-graph!, closure-entry, or require-current-graph! under the checker.
+    (check! checker :legitimate-checked-closure-call
+            '(revalidate-closure-graph!
+              (closure-entry (exact-graph! {} {}) {} "src" {} "id"
+                             {:nodes []}) {}))
+    (doseq [[label expr]
+            [[:raw-closure-map '(revalidate-closure-graph! {} {})]
+             [:subject-admission-instead-of-closure-entry
+              '(revalidate-closure-graph! (admission/admit-subject! {}) {})]
+             [:checked-graph-instead-of-closure-entry
+              '(revalidate-closure-graph! (exact-graph! {} {}) {})]
+             [:nil-closure-entry '(revalidate-closure-graph! nil {})]]]
+      (reject! checker [:revalidation-call label] expr))
+    true))
+
 (defn- change-return [source alter]
   (let [old (last source)]
     (when-not (map? old)
@@ -165,6 +277,7 @@
                                      gesso.assurance.dependency.CheckedGraph]))))
     (check! checker :original-closure-entry (original forms 'closure-entry))
     (source-linked-handoff! forms)
+    (check-revalidation! checker forms)
     (doseq [[label alter]
             [[:raw-graph-handle #(assoc % :graph-handle {})]
              [:wrong-handle-class #(assoc % :graph-handle
@@ -211,6 +324,15 @@
               (not= :unrecognized-dependency-handle reason))
       (throw (ex-info "Forged induction closure bypassed live registry"
                       {:reason reason})))
+    (let [revalidation-error
+          (try (induction/require-current-induction-dependencies!
+                forged {} {})
+               nil
+               (catch clojure.lang.ExceptionInfo e
+                 (:reason (ex-data e))))]
+      (when-not (= :unrecognized-dependency-handle revalidation-error)
+        (throw (ex-info "Forged closure passed revalidation registry"
+                        {:reason revalidation-error}))))
     true))
 
 (defn -main [& _]
@@ -221,8 +343,9 @@
     (check-runtime!)
     (println "Typed source-relative induction closure passed: original")
     (println "exact-graph return and complete closure-entry source checked;")
-    (println "original handoff/registration audited; 16 incorrect type cases")
-    (println "rejected and forged closure handle rejected at runtime.")
-    (println "Source-closure validity remains a runtime obligation, not a")
-    (println "theorem or installed authorization claim.")
+    (println "original handoff/registration and current-source guards audited;")
+    (println "32 wrong-field, wrong-return and wrong-call cases rejected;")
+    (println "forged closure handles rejected by description and revalidation.")
+    (println "Registry contents are opaque; semantic source freshness and")
+    (println "proof/runtime authority remain separate runtime obligations.")
     :ok))
