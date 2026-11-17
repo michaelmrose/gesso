@@ -29,7 +29,11 @@
    contract for untrusted inputs; the stronger command/execution overload
    remains a separately trusted assumption, not a proved implementation
    property. Checks of a broad result type do not prove the per-key runtime
-   validation, authorization, or full application admission."
+   validation, authorization, or full application admission. This gate now
+   also audits the exact flow from each reducer entry through validate-binding
+   into the output map, and rejects a bypass mutation that is still well-typed
+   and still mentions validate-binding. Bounded sparse-map enumeration tests
+   admission behavior but is not an exhaustive proof for arbitrary raw values."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.choreo.identity :as identity]
@@ -148,6 +152,69 @@
                (throw (ex-info "Missing or ambiguous source function."
                                {:name name :count (count found)})))
              (first found)))
+         ;; The type checker can prove only that `bindings` returns a map.
+         ;; A source mutation could retain the validator in a dead branch,
+         ;; return the original unvalidated value, and still type-check.
+         ;; This narrowly scoped AST audit requires the validated result to
+         ;; flow directly into the output map. Fail closed if this pipeline
+         ;; changes so the audit is revisited rather than silently bypassed.
+         audit-binding-flow!
+         (fn [definition]
+           (let [args (nth definition 3 nil)
+                 forms (vec (drop 4 definition))
+                 [shape-check keys-check reduction] forms
+                 [_ reducer init input] (if (seq? reduction) reduction [])
+                 parameters (when (seq? reducer) (second reducer))
+                 [acc entry] parameters
+                 validated (list 'validate-binding
+                                 (list 'key entry)
+                                 (list 'val entry))
+                 expected (list 'assoc acc (list 'key entry) validated)
+                 body (when (seq? reducer) (last reducer))
+                 key-check-body (when (seq? keys-check)
+                                  (nth keys-check 2 nil))]
+             (when-not (and (= '[value] args)
+                            (= 3 (count forms))
+                            (= 'when-not (first shape-check))
+                            (= '(map? value) (second shape-check))
+                            (= 'identity-error (first (nth shape-check 2 nil)))
+                            (= 'let (first keys-check))
+                            (= '[unknown (remove binding-keys (keys value))]
+                               (second keys-check))
+                            (= 'when (first key-check-body))
+                            (= '(seq unknown) (second key-check-body))
+                            (= 'identity-error
+                               (first (nth key-check-body 2 nil)))
+                            (= 4 (count reduction))
+                            (= 'reduce (first reduction))
+                            (= 'fn (first reducer))
+                            (= 3 (count reducer))
+                            (vector? parameters)
+                            (= 2 (count parameters))
+                            (every? symbol? parameters)
+                            (not= acc entry)
+                            (= {} init)
+                            (= 'value input)
+                            (= expected body))
+               (throw (ex-info "Unchecked binding validation flow changed."
+                               {:error/kind :unsafe-validation-flow
+                                :reducer-body body
+                                :expected-output expected})))
+             true))
+         bypass-binding-validation
+         (fn [definition]
+           (let [reduction (last definition)
+                 reducer (second reduction)
+                 [acc entry] (second reducer)
+                 validated (list 'validate-binding
+                                 (list 'key entry) (list 'val entry))
+                 bypass (list 'do (list 'when false validated)
+                              (list 'assoc acc (list 'key entry)
+                                    (list 'val entry)))
+                 reducer' (apply list (concat (butlast reducer) [bypass]))
+                 reduction' (list 'reduce reducer' (nth reduction 2)
+                                  (nth reduction 3))]
+             (apply list (concat (butlast definition) [reduction']))))
          check-form (fn [name form]
                       (let [{:keys [ex type-errors ret]}
                             (check-form-info form :check-config config)]
@@ -477,6 +544,67 @@
        (when (predicate invalid)
          (throw (ex-info "Predicate accepted malformed/non-identity data."
                          {:predicate pred-name :value invalid}))))
+     ;; Verify the validated input-to-output flow independently from map
+     ;; return typing. A validation call merely appearing somewhere in the
+     ;; AST is insufficient: the checked output must use its result.
+     (let [original (source-function 'bindings)
+           bypass (bypass-binding-validation original)
+           calls (fn [form]
+                   (count (filter #(and (seq? %)
+                                        (= 'validate-binding (first %)))
+                                  (tree-seq coll? seq form))))]
+       (audit-binding-flow! original)
+       (when-not (and (not= original bypass)
+                      (= (calls original) (calls bypass)))
+         (throw (ex-info "Validation bypass mutation was ineffective."
+                         {:original-calls (calls original)
+                          :mutated-calls (calls bypass)})))
+       (let [kind (try (audit-binding-flow! bypass) nil
+                       (catch clojure.lang.ExceptionInfo e
+                         (:error/kind (ex-data e))))]
+         (when-not (= :unsafe-validation-flow kind)
+           (throw (ex-info "Bypass mutation defeated binding-flow audit."
+                           {:actual kind}))))
+       (println "Binding flow audit rejects validator-preserving bypass."))
+
+     ;; A finite model of the seven sparse binding keys. Each key is absent,
+     ;; present with a valid value, or present with a wrong-category value.
+     ;; Reject every map with any invalid member; otherwise require exact
+     ;; preservation. This is bounded behavioral evidence, not an invariant
+     ;; proof over all possible opaque values or execution environments.
+     (let [columns
+           [[:role :browser (identity/principal :not-a-role)]
+            [:principal (identity/principal :p) (identity/actor :p)]
+            [:actor (identity/actor :a) (identity/authority :a)]
+            [:authority (identity/authority :u) (identity/host :u)]
+            [:host (identity/host :h) (identity/command-id :h)]
+            [:command-id (identity/command-id :c) (identity/execution-id :c)]
+            [:execution-id (identity/execution-id :e) (identity/principal :e)]]
+           combinations (reduce (fn [states [k valid invalid]]
+                                  (for [[m bad?] states
+                                        variant [0 1 2]]
+                                    (case variant
+                                      0 [m bad?]
+                                      1 [(assoc m k valid) bad?]
+                                      2 [(assoc m k invalid) true])))
+                                [[{} false]]
+                                columns)]
+       (when-not (= 2187 (count combinations))
+         (throw (ex-info "Sparse binding universe changed." {})))
+       (doseq [[candidate bad?] combinations]
+         (let [outcome (try {:accepted (identity/bindings candidate)}
+                            (catch clojure.lang.ExceptionInfo e
+                              {:error-kind (:error/kind (ex-data e))}))]
+           (if bad?
+             (when-not (#{:invalid-role :invalid-binding}
+                        (:error-kind outcome))
+               (throw (ex-info "Invalid sparse bindings admitted."
+                               {:input candidate :actual outcome})))
+             (when-not (= {:accepted candidate} outcome)
+               (throw (ex-info "Valid sparse bindings not preserved."
+                               {:input candidate :actual outcome}))))))
+       (println "Validated 2,187 sparse binding combinations."))
+
      ;; Verify the exact current production source body for bindings. The
      ;; earlier into/map transducer could not be checked by Typed Clojure;
      ;; the current source uses a locally annotated direct reducer. Here we
@@ -493,6 +621,10 @@
              ;; mismatch, not an exception or a runtime evaluation failure.
              mutated (apply list (concat (butlast original) [:not-a-map]))]
          (check-form :bindings-original-broad-contract original)
+         ;; The bypass remains fully type-correct at the broad boundary;
+         ;; source-flow assurance must catch it, not the map-return checker.
+         (check-form :bindings-bypass-still-broadly-typed
+                     (bypass-binding-validation original))
          (check-negative :bindings-wrong-return original mutated)))
      (println "Checked original bindings body under broad map contract;")
      (println "the command/execution overload is still trusted.")
