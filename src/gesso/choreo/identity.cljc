@@ -415,6 +415,22 @@
     :command-id
     :execution-id})
 
+(defn- validate-principal-binding
+  "Validate a principal binding, preserving the authenticated identity.
+
+   A principal is not a role, actor, authority, or host. This function
+   rejects incorrect values at the admission boundary instead of coercing
+   them into a principal-shaped identity. Its body is checked by the opt-in
+   Typed Clojure gate, which explicitly trusts the principal? refinement."
+  [value]
+  (if (principal? value)
+    value
+    (identity-error
+     :invalid-binding
+     "Identity binding :principal must contain a principal identity."
+     {:binding :principal
+      :value value})))
+
 (defn- validate-command-binding
   "Validate one command binding, preserving the supplied tagged reference.
 
@@ -453,13 +469,7 @@
     (require-role value)
 
     :principal
-    (if (principal? value)
-      value
-      (identity-error
-       :invalid-binding
-       "Identity binding :principal must contain a principal identity."
-       {:binding key
-        :value value}))
+    (validate-principal-binding value)
 
     :actor
     (if (actor? value)

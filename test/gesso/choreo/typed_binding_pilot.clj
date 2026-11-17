@@ -10,11 +10,10 @@
    Valid identity references may retain extra keys. Their HMap types must
    remain OPEN: a closed HMap (:complete? true) is unsound as a refinement
    of identity?/kind?, because production identities accept extra keys.
-   The original :command-id branch is now a call to the private, source-
-   checked validate-command-binding helper. The :execution-id branch now
-   calls an independently checked validate-execution-binding helper as well.
-   We check both original bodies against their respective key-specific return
-   types, their rejection paths, and the exact production dispatch wiring.
+   The principal, command-id, and execution-id branches now delegate to
+   separately checked production validation helpers. We check all three
+   original function bodies against their key-specific return types, audit
+   their rejection paths, and verify exact production dispatcher wiring.
    That contract relies on the independently stated positive predicate
    refinement, not on a dependent proof of admitted identity provenance.
    We test this with the real predicates and Typed Clojure's subtyping.
@@ -148,6 +147,7 @@
        [BindingKey t/Any -> ValidatedBindingValue])
 ;; The original command-specific helper has a checked implementation body,
 ;; unlike the broad dispatcher whose key/result dependency is not proved.
+(t/ann identity/validate-principal-binding [t/Any -> PrincipalRef])
 (t/ann identity/validate-command-binding [t/Any -> CommandRef])
 (t/ann identity/validate-execution-binding [t/Any -> ExecutionRef])
 
@@ -343,22 +343,24 @@
        (throw (ex-info "Binding pilot namespace did not type-check." {})))
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
        (doseq [name ['identity? 'kind 'role? 'require-role 'kind?
-                     'validate-command-binding 'validate-execution-binding
-                     'validate-binding 'bindings? 'binding-value]]
+                     'validate-principal-binding 'validate-command-binding
+                     'validate-execution-binding 'validate-binding
+                     'bindings? 'binding-value]]
          (check-form name (source-function name)))
-       ;; Both identity IDs now delegate to checked production helpers. A
-       ;; dispatcher that bypasses either helper must fail before relying on
-       ;; its key-specific evidence.
+       ;; The three checked production helpers must remain wired to their
+       ;; exact input keys. A dispatcher that bypasses a helper must fail.
        (doseq [[key helper-name]
-               [[:command-id 'validate-command-binding]
+               [[:principal 'validate-principal-binding]
+                [:command-id 'validate-command-binding]
                 [:execution-id 'validate-execution-binding]]]
          (let [actual (get branches key)
                expected (list helper-name 'value)
                helper (source-function helper-name)
                wrong (apply list (concat (butlast helper)
-                                         [(if (= key :command-id)
-                                            :wrong-command-result
-                                            :wrong-execution-result)]))]
+                                         [(case key
+                                            :principal :wrong-principal-result
+                                            :command-id :wrong-command-result
+                                            :execution-id :wrong-execution-result)]))]
            (when-not (= expected actual)
              (throw (ex-info "Identity binding no longer uses checked helper."
                              {:key key :expected expected :actual actual})))
@@ -451,7 +453,8 @@
                                 (= 'identity-error (first error-expr))
                                 (= :invalid-binding (second error-expr))
                                 (string? (nth error-expr 2 nil))
-                                (= {:binding (if (#{:command-id :execution-id} key)
+                                (= {:binding (if (#{:principal :command-id
+                                                    :execution-id} key)
                                                 key 'key)
                                     :value 'value}
                                    (nth error-expr 3 nil)))
@@ -507,6 +510,9 @@
                  mutant-typed (typed-branch mutant-arm type)
                  original-typed (typed-branch original-arm type)
                  original-guard (case key
+                                  :principal
+                                  (last (source-function
+                                         'validate-principal-binding))
                                   :command-id
                                   (last (source-function
                                          'validate-command-binding))
@@ -591,6 +597,8 @@
            (check-negative :role original mutated)))
        (doseq [{:keys [key predicate wrong type]} identity-cases]
          (let [branch (case key
+                        :principal
+                        (last (source-function 'validate-principal-binding))
                         :command-id
                         (last (source-function 'validate-command-binding))
                         :execution-id
