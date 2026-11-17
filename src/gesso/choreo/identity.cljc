@@ -505,14 +505,20 @@
         :allowed
         binding-keys})))
 
-  (into
+  ;; A direct reducer preserves the same validated key/value mapping as
+  ;; the former into/map transducer. Local argument annotations are metadata
+  ;; only, so ordinary Clojure/CLJS users do not load Typed Clojure. They
+  ;; allow the optional checker to verify this implementation against the
+  ;; broad map contract without assuming input identities were admitted.
+  (reduce
+   (fn [^{:typed.clojure/- (typed.clojure/Map
+                            typed.clojure/Any typed.clojure/Any)} out
+        ^{:typed.clojure/- (typed.clojure/MapEntry
+                            typed.clojure/Any typed.clojure/Any)} entry]
+     (assoc out
+            (key entry)
+            (validate-binding (key entry) (val entry))))
    {}
-   (map
-    (fn [[key value]]
-      [key
-       (validate-binding
-        key
-        value)]))
    value))
 
 (defn bindings?
