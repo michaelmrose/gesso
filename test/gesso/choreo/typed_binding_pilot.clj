@@ -7,10 +7,12 @@
    original validator's broader body and the role helpers.
 
    Opaque raw identity values are intentionally not assumed to be strings.
-   Predicate annotations remain trusted until their implementation/refinement
-   semantics are established; the checked case branches are conditional on
-   those declarations. In particular this does not type-check `bindings`,
-   establish authorization, or certify the entire admission pipeline."
+   All six original category-predicate bodies are also checked for Boolean
+   results and audited against the original kind dispatcher. Their stronger
+   occurrence-typing (Pred) refinements remain trusted; checking a Boolean
+   result does NOT establish that a truthy predicate identifies the specified
+   tagged HMap. The checked binding branches still depend on those refinements.
+   This does not certify `bindings`, authorization, or full admission."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.choreo.identity :as identity]
@@ -60,6 +62,8 @@
 ;; Runtime cases below exercise each category but do not prove them universally.
 (t/ann identity/role? (t/Pred t/Kw))
 (t/ann identity/require-role [t/Any -> t/Kw])
+(t/ann identity/kind [t/Any -> t/Any])
+(t/ann identity/kind? [t/Kw t/Any -> t/Bool])
 (t/ann identity/principal? (t/Pred PrincipalRef))
 (t/ann identity/actor? (t/Pred ActorRef))
 (t/ann identity/authority? (t/Pred AuthorityRef))
@@ -121,7 +125,7 @@
                                {:case name
                                 :exception (some-> ex ex-message)
                                 :errors (mapv str type-errors)})))
-             (println "Rejected wrong-category source mutation:" name)))
+             (println "Rejected static type-invalid source mutation:" name)))
          identity-cases
          [{:key :principal :predicate 'principal? :wrong 'actor?
            :type 'gesso.choreo.typed-binding-pilot/PrincipalRef}
@@ -152,13 +156,46 @@
            (list 'typed.clojure/ann-form
                  (list 'fn ['value] expr)
                  (list 'typed.clojure/IFn
-                       ['typed.clojure/Any '-> output-type])))]
+                       ['typed.clojure/Any '-> output-type])))
+         kind-predicates
+         [[:principal 'principal? identity/principal identity/principal?]
+          [:actor 'actor? identity/actor identity/actor?]
+          [:authority 'authority? identity/authority identity/authority?]
+          [:host 'host? identity/host identity/host?]
+          [:command 'command-id? identity/command-id identity/command-id?]
+          [:execution 'execution-id? identity/execution-id identity/execution-id?]]]
      (when-not (= :ok (check-ns 'gesso.choreo.typed-binding-pilot
                                :check-config config))
        (throw (ex-info "Binding pilot namespace did not type-check." {})))
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
-       (doseq [name ['role? 'require-role 'validate-binding]]
+       (doseq [name ['role? 'require-role 'kind? 'validate-binding]]
          (check-form name (source-function name)))
+       ;; The original category predicates merely delegate to kind?. The
+       ;; checker proves Boolean results under a truthful broad annotation;
+       ;; their stronger Pred refinements remain separately trusted.
+       (doseq [[expected-kind predicate-name] kind-predicates]
+         (let [original (source-function predicate-name)
+               _ (when-not (and (= 'defn (first original))
+                                (= '[value] (nth original 2 nil))
+                                (= 4 (count original)))
+                   (throw (ex-info "Identity predicate source shape changed."
+                                   {:predicate predicate-name :form original})))
+               body (last original)
+               expected (list 'kind? expected-kind 'value)
+               checked (typed-branch body 'typed.clojure/Bool)
+               bad (typed-branch 42 'typed.clojure/Bool)]
+           ;; A swapped category literal is still a well-typed Boolean
+           ;; expression. Audit this source-level semantic relationship
+           ;; separately; do not pass it off as static type discrimination.
+           (when-not (= expected body)
+             (throw (ex-info "Identity predicate's original category mapping changed."
+                             {:predicate predicate-name
+                              :expected expected :actual body})))
+           (check-form predicate-name checked)
+           (check-negative predicate-name checked bad)))
+       (let [original (source-function 'kind?)
+             mutated (apply list (concat (butlast original) [42]))]
+         (check-negative 'kind?-wrong-return original mutated))
        (let [role-branch (:role branches)]
          (when-not (= '(require-role value) role-branch)
            (throw (ex-info "Role branch no longer delegates to require-role." {})))
@@ -212,5 +249,27 @@
                         error-kind)
              (throw (ex-info "Wrong runtime identity was not rejected."
                              {:key k :actual error-kind}))))))
+     ;; Check the real runtime predicates against all category combinations,
+     ;; using opaque numeric, vector, and map raw identities. This is bounded
+     ;; behavioral evidence, not a universal proof of the Pred refinements.
+     (doseq [[kind _ constructor _] kind-predicates
+             [checked-kind checked-name _ predicate] kind-predicates]
+       (let [ref (constructor [17 {:opaque :value}])
+             actual (boolean (predicate ref))
+             expected (= kind checked-kind)]
+         (when-not (= expected actual)
+           (throw (ex-info "Original predicate category matrix mismatch."
+                           {:identity kind :predicate checked-name
+                            :expected expected :actual actual})))))
+     (doseq [invalid [nil 42 :principal {} {:gesso.choreo.identity/kind :principal}
+                      {:gesso.choreo.identity/type :gesso.choreo.identity/ref
+                       :gesso.choreo.identity/kind :principal
+                       :gesso.choreo.identity/value nil}]
+             [_ pred-name _ predicate] kind-predicates]
+       (when (predicate invalid)
+         (throw (ex-info "Predicate accepted malformed/non-identity data."
+                         {:predicate pred-name :value invalid}))))
+     (println "Checked six original predicate bodies, seven negative return")
+     (println "mutations, 36 kind comparisons and malformed-data matrix.")
      (println "Typed Choreo binding source gate passed (7 branches).")
      :ok)))
