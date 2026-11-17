@@ -5,13 +5,15 @@
    with a structured lineage. The ORIGINAL freshness consumer is also
    checked; the large original producer's graph/source validation remains
    runtime code, but its validation-to-manifest path is source-audited.
-   The manifest is copyable diagnostic data, not a proof or authority token."
+   The three original premise families retain distinct typed shapes in the
+   manifest's lineage. Its copyable data is not proof or authority."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.assurance.proof.operation-interface-provenance :as provenance]
             [gesso.assurance.proof.application-dependency :as app]
             [gesso.assurance.proof.operation-interface-composition :as composition]
             [gesso.assurance.typed-operation-interface-composition-check :as comp-check]
+            [gesso.assurance.typed-application-dependency-closure-check :as dep-check]
             [typed.clojure]))
 
 (def ^:private config {:max-processors 1 :check-form-eval :never})
@@ -19,8 +21,11 @@
 (def ^:private app-handle
   'gesso.assurance.proof.application_dependency.ApplicationDependencyHandle)
 (def ^:private composed-type comp-check/composed-type)
+;; The manifest lineage preserves all three distinct ORIGINAL open-premise
+;; families from composition. Manifest-entry is a pure descriptor: its
+;; caller must still derive the lineage from the authenticated source graph.
 (def ^:private lineage-type
-  '(typed.clojure/HMap
+  `(typed.clojure/HMap
     :mandatory {:versions typed.clojure/Any
                 :catalog-id typed.clojure/Any
                 :catalog-fingerprint typed.clojure/Any
@@ -32,9 +37,10 @@
                 :source-roots typed.clojure/Any
                 :operations typed.clojure/Any
                 :invariants typed.clojure/Any
-                :original-open-obligation-ids-by-operation typed.clojure/Any
-                :open-meta-obligations typed.clojure/Any
-                :open-assumptions typed.clojure/Any}
+                :original-open-obligation-ids-by-operation
+                ~dep-check/original-obligations-type
+                :open-meta-obligations ~dep-check/obligation-id-set
+                :open-assumptions ~dep-check/open-assumptions-type}
     :complete? true))
 (def ^:private identity-type
   '(typed.clojure/HMap
@@ -185,6 +191,18 @@
                    (= '(manifest-entry lineage identity) (last body)))
       (throw (ex-info "Original provenance source/graph handoff changed"
                       {:root-guard (nth body 2) :result (last body)})))
+    (let [lineage (get by-var 'lineage)
+          expected-premises
+          {:original-open-obligation-ids-by-operation
+           '(:original-open-obligation-ids-by-operation current)
+           :open-meta-obligations '(:open-meta-obligations current)
+           :open-assumptions '(:open-assumptions current)}]
+      (when-not (and (map? lineage)
+                     (every? (fn [[field expression]]
+                               (= expression (get lineage field ::missing)))
+                             expected-premises))
+        (throw (ex-info "Original provenance lineage lost premise sources"
+                        {:actual (select-keys lineage (keys expected-premises))}))))
     ;; The original closure-composition equivalence checks must still run
     ;; between authentication and graph materialization; full semantic
     ;; completeness belongs to the runtime tests, not this source audit.
@@ -228,7 +246,27 @@
                [:missing-fingerprint #(dissoc % :fingerprint)]
                [:wrong-fingerprint #(assoc % :fingerprint 12)]
                [:raw-lineage #(assoc % :lineage {})]
-               [:invented-certificate #(assoc % :issued-proof :approved)]]]
+               [:invented-certificate #(assoc % :issued-proof :approved)]
+               [:lineage-meta-as-map
+                #(assoc % :lineage '(assoc lineage :open-meta-obligations {}))]
+               [:lineage-assumptions-as-set
+                #(assoc % :lineage '(assoc lineage :open-assumptions #{:open}))]
+               [:lineage-original-as-set
+                #(assoc % :lineage
+                        '(assoc lineage :original-open-obligation-ids-by-operation
+                                #{:operation/x}))]
+               [:lineage-swapped-meta
+                #(assoc % :lineage
+                        '(assoc lineage :open-meta-obligations
+                                (:open-assumptions lineage)))]
+               [:lineage-swapped-assumptions
+                #(assoc % :lineage
+                        '(assoc lineage :open-assumptions
+                                (:open-meta-obligations lineage)))]
+               [:lineage-swapped-original
+                #(assoc % :lineage
+                        '(assoc lineage :original-open-obligation-ids-by-operation
+                                (:open-assumptions lineage)))]]]
         (reject! checker label (mutate-result source change)))
       ;; Both fingerprints are Str; static shape alone cannot prove which
       ;; one is a fingerprint of THIS manifestation. Source audit must catch.
@@ -283,7 +321,7 @@
     (checked-cases! checker forms)
     (runtime-forgery!)
     (println "Typed provenance passed: original descriptor/freshness source,")
-    (println "16 malformed descriptor forms, 4 wrong composition/closure")
+    (println "22 malformed descriptor forms, 4 wrong composition/closure")
     (println "calls, runtime forged-closure rejection, and a type-compatible")
     (println "fingerprint mixup caught by source audit; no authority claim.")
     :ok))

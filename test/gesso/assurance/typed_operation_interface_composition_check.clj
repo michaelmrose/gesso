@@ -13,23 +13,30 @@
             [gesso.assurance.proof.operation-interface]
             [gesso.assurance.proof.operation-interface-composition]
             [gesso.assurance.subject]
+            [gesso.assurance.typed-application-dependency-closure-check :as dep-check]
             [typed.clojure]))
 
 (def ^:private config {:max-processors 1 :check-form-eval :never})
 (def ^:private source-ns 'gesso.assurance.proof.operation-interface-composition)
 (def ^:private app-handle
   'gesso.assurance.proof.application_dependency.ApplicationDependencyHandle)
+;; Reuse the three distinct premise families already source-checked in the
+;; application-closure description. Interfaces! checks them at runtime, but
+;; its whole implementation is NOT type-checked by this gate.
+(def ^:private meta-ids-type dep-check/obligation-id-set)
+(def ^:private classified-assumptions-type dep-check/open-assumptions-type)
+(def ^:private original-operations-type dep-check/original-obligations-type)
 (def ^:private source-type
-  '(typed.clojure/HMap
+  `(typed.clojure/HMap
     :mandatory {:catalog-id typed.clojure/Any
                 :catalog-fingerprint typed.clojure/Any
                 :induction-fingerprint typed.clojure/Any
                 :fingerprint typed.clojure/Str
                 :operation-ids (typed.clojure/Set typed.clojure/Kw)
                 :invariant-ids (typed.clojure/Set typed.clojure/Kw)
-                :original-open-obligation-ids-by-operation typed.clojure/Any
-                :open-meta-obligations typed.clojure/Any
-                :open-assumptions typed.clojure/Any}
+                :original-open-obligation-ids-by-operation ~original-operations-type
+                :open-meta-obligations ~meta-ids-type
+                :open-assumptions ~classified-assumptions-type}
     :complete? false))
 (def ^:private report-statuses
   {:type :gesso.assurance.proof.operation-interface-composition/conditional-abstract-catalog
@@ -63,9 +70,9 @@
           :operation-contracts 'typed.clojure/Any
           :invariant-results 'typed.clojure/Any
           :interactions 'typed.clojure/Any
-          :original-open-obligation-ids-by-operation 'typed.clojure/Any
-          :open-meta-obligations 'typed.clojure/Any
-          :open-assumptions 'typed.clojure/Any}
+          :original-open-obligation-ids-by-operation original-operations-type
+          :open-meta-obligations meta-ids-type
+          :open-assumptions classified-assumptions-type}
          (into {} (map (fn [[field value]]
                          [field (list 'typed.clojure/Val value)])
                        report-statuses)))
@@ -229,7 +236,21 @@
                [:wrong-report-fingerprint #(assoc % :fingerprint 17)]
                [:wrong-operation-ids #(assoc % :operation-ids [])]
                [:wrong-invariant-ids #(assoc % :invariant-ids {})]
-               [:invented-authorization #(assoc % :transaction-authority :granted)]]]
+               [:invented-authorization #(assoc % :transaction-authority :granted)]
+               [:meta-as-map #(assoc % :open-meta-obligations {})]
+               [:assumptions-as-set #(assoc % :open-assumptions #{:open})]
+               [:original-obligations-as-set
+                #(assoc % :original-open-obligation-ids-by-operation #{:op})]
+               [:meta-from-assumptions
+                #(assoc % :open-meta-obligations '(:open-assumptions derived))]
+               [:assumptions-from-meta
+                #(assoc % :open-assumptions '(:open-meta-obligations derived))]
+               [:original-from-assumptions
+                #(assoc % :original-open-obligation-ids-by-operation
+                        '(:open-assumptions derived))]
+               [:wrong-original-id-shape
+                #(assoc % :original-open-obligation-ids-by-operation
+                        '{:operation/x #{:not-a-vector}})]]]
         (reject! checker label (modify-result source update-map)))
       ;; Same-typed values can be improperly wired without violating their
       ;; current types. Treat this as a source-provenance audit, NOT typing.
@@ -245,6 +266,19 @@
                          (catch clojure.lang.ExceptionInfo _ true))
             (throw (ex-info "Provenance mutation escaped source check"
                             {:label label}))))))
+    ;; This source-backed constructor receives a structural derived-interface
+    ;; HMap. Wrong premise family inputs to that ORIGINAL function must fail
+    ;; even if all other interface fields are legitimate.
+    (doseq [[label alteration]
+            [[:meta-as-classified
+              #(assoc % :open-meta-obligations '(:open-assumptions derived))]
+             [:classified-as-meta
+              #(assoc % :open-assumptions '(:open-meta-obligations derived))]
+             [:operation-premises-as-classified
+              #(assoc % :original-open-obligation-ids-by-operation
+                      '(:open-assumptions derived))]]]
+      (reject! checker [:wrong-composed-premise-family label]
+               (modify-result (original forms 'compose-derived!) alteration)))
     (reject! checker :raw-closure-public
              '(compose-operation-interfaces! {} {} {}))
     (reject! checker :nil-closure-public
@@ -276,7 +310,7 @@
     (checks! checker forms)
     (runtime-guard!)
     (println "Typed operation composition passed: 3 original source bodies,")
-    (println "19 invalid composition-map mutations, 4 nominal closure calls,")
+    (println "29 invalid composition-map mutations, 4 nominal closure calls,")
     (println "2 type-compatible provenance swaps caught by source audit,")
     (println "and runtime forged-closure rejection; no proof/authority claim.")
     :ok))
