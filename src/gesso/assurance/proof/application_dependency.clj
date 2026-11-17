@@ -298,6 +298,15 @@
      :certificate :not-issued :admission :not-admitted
      :authority :none}))
 
+(defn- revalidate-application-graphs!
+  "Revalidate BOTH original-source induction closure and complete application
+   graph. Inputs are distinct nominal handle categories. The returned
+   CheckedGraph remains structural and confers no proof or installed authority."
+  [inner-handle graph-handle current-catalog current-graph base]
+  (induction-dependency/require-current-induction-dependencies!
+   inner-handle current-catalog (inner-graph base current-graph))
+  (dependency/require-current-graph! graph-handle current-graph))
+
 (defn require-current-application-dependencies!
   "Require the live handle, fresh trusted ORIGINAL catalog, and a fresh graph.
    Source differences and stale, missing or rewritten evidence fail closed."
@@ -307,7 +316,6 @@
     (when-not (= graph-content (content graph))
       (reject! :stale-application-source {}))
     (exact! graph current-graph)
-    (induction-dependency/require-current-induction-dependencies!
-     inner-handle current-catalog (inner-graph base current-graph))
-    (dependency/require-current-graph! graph-handle current-graph)
+    (revalidate-application-graphs! inner-handle graph-handle
+                                    current-catalog current-graph base)
     handle))

@@ -80,7 +80,9 @@
      (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-induction-dependency-closure-check")
      (shell "clojure" "-M:typed" "-m"
-            "gesso.assurance.typed-inductive-report-bound-handles-check"))}
+            "gesso.assurance.typed-inductive-report-bound-handles-check")
+     (shell "clojure" "-M:typed" "-m"
+            "gesso.assurance.typed-application-dependency-closure-check"))}
 
   test:jvm
   {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."
