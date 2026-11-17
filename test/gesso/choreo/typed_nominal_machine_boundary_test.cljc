@@ -219,6 +219,72 @@
         (when (seq expected-non-role)
           (is (= public (:identity-bindings descriptor))))))))
 
+(deftest machine-option-normalization-preserves-both-identity-categories
+  (let [plan (machine-plan)
+        command (assoc (tagged/command-id :shared-raw) :extra {:purpose :claim})
+        execution (assoc (tagged/execution-id :shared-raw) :extra {:attempt 7})
+        original {:command-id command :execution-id execution}
+        variants [{:command-id command :execution-id execution}
+                  {:identity-bindings original}
+                  {:identity-bindings original
+                   :command-id command :execution-id execution}
+                  {:identity-bindings {:role :server :principal (tagged/principal :p)}
+                   :command-id command :execution-id execution}]]
+    (doseq [options variants]
+      (let [started (machine/start plan options)
+            bound (machine/identity-bindings started)
+            action (machine/pending-action started)
+            internal (machine-bindings/execution->nominal-bindings started)]
+        (is (machine/execution? started))
+        (is (= :server (:role bound)))
+        (is (= command (:command-id bound)))
+        (is (= execution (:execution-id bound)))
+        (is (= command (:command-id action)))
+        (is (= execution (:execution-id action)))
+        (is (= bound (internal-bindings/bindings->tagged internal)))
+        (is (instance? gesso.choreo.internal.nominal_identity.CommandId
+                       (:command-id internal)))
+        (is (instance? gesso.choreo.internal.nominal_identity.ExecutionId
+                       (:execution-id internal)))
+        (is (not= (:command-id internal) (:execution-id internal)))))))
+
+(deftest machine-option-normalization-rejects-every-wrong-category
+  (let [plan (machine-plan)
+        identities [(tagged/principal :same-raw)
+                    (tagged/actor :same-raw)
+                    (tagged/authority :same-raw)
+                    (tagged/host :same-raw)
+                    (tagged/command-id :same-raw)
+                    (tagged/execution-id :same-raw)]]
+    (doseq [identity identities]
+      (if (tagged/command-id? identity)
+        (is (machine/execution?
+             (machine/start plan {:command-id identity})))
+        (is (= :invalid-command-id
+               (error-kind #(machine/start plan {:command-id identity})))))
+      (if (tagged/execution-id? identity)
+        (is (machine/execution?
+             (machine/start plan {:execution-id identity})))
+        (is (= :invalid-execution-id
+               (error-kind #(machine/start plan {:execution-id identity}))))))
+    ;; Similar raw values do not imply equal semantic command identities:
+    ;; extensions are preserved in the public tagged map and conflicts count.
+    (is (= :identity-binding-conflict
+           (error-kind #(machine/start
+                          plan {:identity-bindings
+                                {:command-id (tagged/command-id :same)}
+                                :command-id (assoc (tagged/command-id :same)
+                                                   :extension :different)}))))
+    (is (= :identity-binding-conflict
+           (error-kind #(machine/start
+                          plan {:identity-bindings
+                                {:execution-id (tagged/execution-id :same)}
+                                :execution-id (assoc (tagged/execution-id :same)
+                                                     :extension :different)}))))
+    (is (= :identity-role-mismatch
+           (error-kind #(machine/start plan
+                                       {:identity-bindings {:role :browser}}))))))
+
 #?(:clj
    (defn -main [& _]
      (let [result (clojure.test/run-tests
