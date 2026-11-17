@@ -415,6 +415,22 @@
     :command-id
     :execution-id})
 
+(defn- validate-actor-binding
+  "Validate one actor binding without confusing it with a principal.
+
+   An actor is a semantic participant, not evidence of authentication.
+   Preserve the validated caller value or reject it with the same typed
+   error as the former inline :actor branch. This private production body
+   is checked under the opt-in Typed Clojure actor-specific contract."
+  [value]
+  (if (actor? value)
+    value
+    (identity-error
+     :invalid-binding
+     "Identity binding :actor must contain an actor identity."
+     {:binding :actor
+      :value value})))
+
 (defn- validate-principal-binding
   "Validate a principal binding, preserving the authenticated identity.
 
@@ -472,13 +488,7 @@
     (validate-principal-binding value)
 
     :actor
-    (if (actor? value)
-      value
-      (identity-error
-       :invalid-binding
-       "Identity binding :actor must contain an actor identity."
-       {:binding key
-        :value value}))
+    (validate-actor-binding value)
 
     :authority
     (if (authority? value)
