@@ -95,6 +95,24 @@
    :induction-status induction-status
    :open-reason open-reason})
 
+(defn- empty-preservation-statuses
+  "Preserve the same deterministic sorted-map comparator as the source
+   aggregator. The Typed Clojure checker audits this initial map source."
+  []
+  (sorted-map* []))
+
+(defn- preservation-status-row
+  "Insert the ORIGINAL operation's own conditional preservation status.
+   This is descriptive source evidence, not an admitted proof."
+  [status-map op-id result]
+  (assoc status-map op-id (:preservation-status result)))
+
+(defn- preservation-statuses
+  "Account for every original operation in the invariant's status map.
+   The caller separately validates compatible conditional induction."
+  [results]
+  (reduce-kv preservation-status-row (empty-preservation-statuses) results))
+
 (defn- invariant-results! [interfaces invariant-ids]
   (sorted-map*
    (for [invariant-id (sorted-ids invariant-ids)]
@@ -121,9 +139,7 @@
        [invariant-id
         (aggregate-invariant-entry
          (first initial)
-         (sorted-map*
-          (for [[op-id result] results]
-            [op-id (:preservation-status result)]))
+         (preservation-statuses results)
          (first induction)
          (first open-reasons))]))))
 

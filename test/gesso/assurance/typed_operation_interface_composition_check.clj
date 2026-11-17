@@ -47,6 +47,14 @@
         :complete? true))
 (def ^:private aggregate-results-type
   (list 'typed.clojure/Map 'typed.clojure/Kw aggregate-invariant-type))
+;; The complete ORIGINAL per-operation reduction now uses this source-checked
+;; collection shape instead of an assumed output from a nested for expression.
+;; The empty sorted-map constructor's result type is assumed and its original
+;; zero-element body is audited; the checker does not prove its implementation.
+(def ^:private individual-results-type
+  (list 'typed.clojure/Map 'typed.clojure/Kw iface-check/invariant-result-type))
+(def ^:private preservation-statuses-type
+  (list 'typed.clojure/Map 'typed.clojure/Kw inference-type))
 (def ^:private report-statuses
   {:type :gesso.assurance.proof.operation-interface-composition/conditional-abstract-catalog
    :version 1
@@ -133,6 +141,13 @@
            ;; full for/reduce algorithm is NOT independently checked here.
            ['gesso.assurance.proof.operation-interface-composition/invariant-results!
             ['typed.clojure/Any 'typed.clojure/Any '-> aggregate-results-type]]
+           ['gesso.assurance.proof.operation-interface-composition/empty-preservation-statuses
+            ['-> preservation-statuses-type]]
+           ['gesso.assurance.proof.operation-interface-composition/preservation-status-row
+            [preservation-statuses-type 'typed.clojure/Kw
+             iface-check/invariant-result-type '-> preservation-statuses-type]]
+           ['gesso.assurance.proof.operation-interface-composition/preservation-statuses
+            [individual-results-type '-> preservation-statuses-type]]
            ['gesso.assurance.proof.operation-interface-composition/aggregate-invariant-entry
             [inference-type
              (list 'typed.clojure/Map 'typed.clojure/Kw inference-type)
@@ -246,9 +261,7 @@
 (def ^:private expected-aggregate-call
   '(aggregate-invariant-entry
     (first initial)
-    (sorted-map*
-     (for [[op-id result] results]
-       [op-id (:preservation-status result)]))
+    (preservation-statuses results)
     (first induction)
     (first open-reasons)))
 
@@ -283,6 +296,27 @@
    'steps '(into #{} (map :preservation-status) values)
    'all-checked? '(and (= initial #{:checked-conditional-inference})
                        (= steps #{:checked-conditional-inference}))})
+
+(def ^:private expected-preservation-row
+  '(assoc status-map op-id (:preservation-status result)))
+(def ^:private expected-preservation-reduction
+  '(reduce-kv preservation-status-row (empty-preservation-statuses) results))
+
+(defn- check-preservation-source! [forms]
+  ;; Type-check the complete ORIGINAL pair insertion AND reduction functions.
+  ;; An annotated empty-map constructor is a trusted helper contract here;
+  ;; audit its actual body so a differently sorted or prefilled map rejects.
+  (let [empty-source (original forms 'empty-preservation-statuses)
+        row-source (original forms 'preservation-status-row)
+        reduction (original forms 'preservation-statuses)]
+    (when-not (and (= '(sorted-map* []) (last empty-source))
+                   (= expected-preservation-row (last row-source))
+                   (= expected-preservation-reduction (last reduction)))
+      (throw (ex-info "Original operation preservation extraction changed"
+                      {:empty (last empty-source)
+                       :row (last row-source)
+                       :reduction (last reduction)})))
+    true))
 
 (defn- check-aggregate-source! [forms]
   (let [source (original forms 'invariant-results!)
@@ -322,7 +356,35 @@
   (let [source (aggregate-form! forms)
         aggregate-source (original forms 'invariant-results!)]
     (check! checker :original-aggregate-invariant-entry source)
+    (doseq [name '[preservation-status-row preservation-statuses]]
+      (check! checker [:original-preservation-extraction name]
+              (original forms name)))
+    (check-preservation-source! forms)
     (check-aggregate-source! forms)
+    (check! checker :valid-preservation-assembly
+            '(preservation-statuses
+              {:operation/a {:initial-status :open
+                             :preservation-status :checked-conditional-inference
+                             :induction-status :open :open-reason nil}
+               :operation/b {:initial-status :open
+                             :preservation-status :open
+                             :induction-status :open :open-reason nil}}))
+    (doseq [[label expression]
+            [[:incorrect-nested-preservation
+              '(preservation-statuses
+                {:operation/a {:initial-status :open :preservation-status :proved
+                               :induction-status :open :open-reason nil}})]
+             [:incorrect-nested-induction
+              '(preservation-statuses
+                {:operation/a {:initial-status :open :preservation-status :open
+                               :induction-status :checked-conditional-inference
+                               :open-reason nil}})]
+             [:non-keyword-operation-id
+              '(preservation-statuses
+                {"operation/a" {:initial-status :open :preservation-status :open
+                                :induction-status :open :open-reason nil}})]
+             [:not-operation-map '(preservation-statuses [:open])]]]
+      (reject! checker [:malformed-preservation-input label] expression))
     (check! checker :valid-aggregate-invariant-call
             '(aggregate-invariant-entry
               :checked-conditional-inference
@@ -360,14 +422,68 @@
              [:wrong-preservation-call
               '(aggregate-invariant-entry :open {:operation/a :proved} :open nil)]]]
       (reject! checker [:aggregate-argument name] expression))
+    ;; The key/value insertion is now checked against the ORIGINAL individual
+    ;; conditional-invariant HMap, rather than being hidden inside the for.
+    (let [row (original forms 'preservation-status-row)]
+      (doseq [[name bad-expression]
+              [[:wrong-induction-status
+                '(assoc status-map op-id (:induction-status result))]
+               [:invented-proof-status '(assoc status-map op-id :proved)]
+               [:wrong-map-key '(assoc status-map "operation" (:preservation-status result))]
+               [:nil-status '(assoc status-map op-id nil)]
+               [:raw-map '(assoc {} op-id :proved)]]]
+        (reject! checker [:malformed-preservation-row name]
+                 (apply list (concat (butlast row) [bad-expression]))))
+      ;; Initial and preservation statuses share the same allowed literals.
+      ;; The source audit, NOT static types, must catch substituting one.
+      (doseq [[name altered]
+              [[:initial-instead-of-preservation
+                '(assoc status-map op-id (:initial-status result))]
+               [:constant-operation-key
+                '(assoc status-map :operation/other (:preservation-status result))]]]
+        (let [mutant (apply list (concat (butlast row) [altered]))
+              substituted (mapv #(if (= row %) mutant %) forms)]
+          (check! checker [:same-type-wrong-preservation-source name] mutant)
+          (when-not (try (check-preservation-source! substituted)
+                         false
+                         (catch clojure.lang.ExceptionInfo _ true))
+            (throw (ex-info "Invalid preservation row escaped source audit"
+                            {:name name}))))))
+    (let [reduction (original forms 'preservation-statuses)]
+      (doseq [[name replacement]
+              [[:omit-operation-set
+                '(reduce-kv preservation-status-row (empty-preservation-statuses) {})]
+               [:wrong-reduce-source
+                '(reduce-kv preservation-status-row {} results)]
+               [:ignore-operation-statuses
+                '(reduce-kv (fn [m _ _] m) (empty-preservation-statuses) results)]]]
+        (let [mutant (apply list (concat (butlast reduction) [replacement]))
+              substituted (mapv #(if (= reduction %) mutant %) forms)]
+          (when-not (try (check-preservation-source! substituted)
+                         false
+                         (catch clojure.lang.ExceptionInfo _ true))
+            (throw (ex-info "Invalid preservation reduction escaped audit"
+                            {:name name}))))))
+    ;; The live helper must reproduce the old source expression's full sorted
+    ;; operation->status mapping, including open and conditionally checked rows.
+    (let [inputs (sorted-map :operation/a {:preservation-status :open}
+                             :operation/z {:preservation-status
+                                           :checked-conditional-inference})
+          actual ((var-get #'gesso.assurance.proof.operation-interface-composition/preservation-statuses)
+                  inputs)
+          expected ((var-get #'gesso.assurance.proof.operation-interface-composition/sorted-map*)
+                    (for [[op-id result] inputs]
+                      [op-id (:preservation-status result)]))]
+      (when-not (and (= expected actual)
+                     (= (vec (keys expected)) (vec (keys actual)))
+                     (= (count inputs) (count actual)))
+        (throw (ex-info "Original preservation mapping changed at runtime"
+                        {:actual actual :expected expected}))))
     ;; Same-typed operation keys can be switched or one operation's status
     ;; substituted for another without static error. The ORIGINAL source
     ;; audit must preserve exactly which status belongs to which operation.
     (doseq [[name old new]
-            [[:wrong-preservation-value
-              '(:preservation-status result) '(:initial-status result)]
-             [:wrong-operation-key 'op-id 'invariant-id]
-             [:wrong-overall-induction '(first induction) '(first initial)]
+            [[:wrong-overall-induction '(first induction) '(first initial)]
              [:disabled-consistency-guard expected-aggregate-guard true]
              [:initial-from-step-set
               '(set (map :initial-status values))
@@ -523,8 +639,9 @@
         forms (source-forms)]
     (checks! checker forms)
     (runtime-guard!)
-    (println "Typed operation composition passed: 4 original source bodies,")
-    (println "34 invalid composition-map mutations, 17 aggregate mutations,")
-    (println "8 original aggregate-source mutants and 4 nominal closure calls;")
+    (println "Typed operation composition passed: 6 original checked source")
+    (println "bodies; 34 report, 17 aggregate, 9 preservation mutations and")
+    (println "4 nominal closure calls rejected by typing; 11 aggregate/")
+    (println "preservation source mutants, 2 wrong-typed-but-compatible rows,")
     (println "2 report provenance swaps and runtime forged-closure rejection.")
     :ok))
