@@ -10,6 +10,7 @@
             [gesso.choreo.typed-nominal-identity-pilot :as pilot]
             [gesso.choreo.internal.nominal-identity :as internal]
             [gesso.choreo.typed-nominal-identity-bridge :as bridge]
+            [gesso.choreo.internal.nominal-bindings :as internal-bindings]
             [gesso.choreo.typed-nominal-machine-boundary-test :as machine-seam]
             [typed.clojure :as t]))
 
@@ -157,11 +158,11 @@
     true))
 
 (defn- check-bridge! [checker]
-  (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
+  (let [bridge-ns 'gesso.choreo.internal.nominal-bindings
         class-types (mapv #(symbol (str class-prefix %)) categories)
         map-type '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
         bridge-sources (source-forms
-                        "gesso/choreo/typed_nominal_identity_bridge.cljc")
+                        "gesso/choreo/internal/nominal_bindings.cljc")
         forward (source-definition bridge-sources 'tagged->nominal)
         restore (source-definition bridge-sources 'restore-tagged)
         reverse (source-definition bridge-sources 'nominal->tagged)]
@@ -206,7 +207,7 @@
       (audit-reverse-correspondence! reverse)
       (doseq [constructor '[principal actor authority host command-id execution-id]]
         (check! checker [:valid-reverse-call constructor]
-                (list 'nominal->tagged (list (symbol "nominal" (str constructor)) :id))))
+                (list 'nominal->tagged (list (symbol "internal" (str constructor)) :id))))
       (doseq [bad [nil {:raw :id} :role]]
         (check-rejection! checker [:invalid-reverse-call bad]
                           (list 'nominal->tagged bad)))
@@ -284,7 +285,7 @@
 (defn- check-bindings! [checker]
   ;; The forward conversion is verified separately against its precise HMap
   ;; return type; avoid a second broad annotation that would erase precision.
-  (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
+  (let [bridge-ns 'gesso.choreo.internal.nominal-bindings
         class-types (mapv #(symbol (str class-prefix %)) categories)
         tagged-reference '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
         nominal-union (cons 'typed.clojure/U class-types)
@@ -292,7 +293,7 @@
         tagged-value (list 'typed.clojure/U 'typed.clojure/Kw tagged-reference)
         tagged-map (list 'typed.clojure/Map 'typed.clojure/Kw tagged-value)
         nominal-map (list 'typed.clojure/Map 'typed.clojure/Kw nominal-value)
-        sources (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
+        sources (source-forms "gesso/choreo/internal/nominal_bindings.cljc")
         reverse-helper (source-definition sources 'tagged-binding-entry)
         reverse (source-definition sources 'bindings->tagged)]
     ;; This existing runtime function validates the sparse map; its annotation
@@ -314,7 +315,7 @@
                              '(keyword? value))
       (audit-reverse-binding-assembly! reverse)
       (check! checker :valid-sparse-nominal-binding-map
-              '(bindings->tagged {:principal (nominal/principal :person)
+              '(bindings->tagged {:principal (internal/principal :person)
                                   :role :browser}))
       (doseq [[label form]
               [[:reverse-tagged-in-map
@@ -345,7 +346,7 @@
   ;; The output is intentionally still a general tagged map. The existing
   ;; reduce-kv implementation does not statically derive a per-key HMap
   ;; result, and simply annotating it as such would invent a guarantee.
-  (let [ns-sym 'gesso.choreo.typed-nominal-identity-bridge
+  (let [ns-sym 'gesso.choreo.internal.nominal-bindings
         class-types (mapv #(symbol (str class-prefix %)) categories)
         field-types (into {:role 'typed.clojure/Kw}
                           (map vector
@@ -358,12 +359,12 @@
                      (typed.clojure/U typed.clojure/Kw
                                       (typed.clojure/Map
                                        typed.clojure/Any typed.clojure/Any)))
-        forms (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
+        forms (source-forms "gesso/choreo/internal/nominal_bindings.cljc")
         original (source-definition forms 'bindings->tagged)
         slots [:role :principal :actor :authority :host :command-id
                :execution-id]
-        constructors ['nominal/principal 'nominal/actor 'nominal/authority
-                      'nominal/host 'nominal/command-id 'nominal/execution-id]
+        constructors ['internal/principal 'internal/actor 'internal/authority
+                      'internal/host 'internal/command-id 'internal/execution-id]
         values (into {:role :server}
                      (map vector (rest slots)
                           (map #(list % :same-raw-id) constructors)))
@@ -399,7 +400,7 @@
         (check-rejection! checker [:nil-nominal-slot slot]
                           (checked-form {slot nil})))
       (check-rejection! checker :nominal-in-role
-                        (checked-form {:role '(nominal/principal :id)}))
+                        (checked-form {:role '(internal/principal :id)}))
       (check-rejection! checker :unknown-binding-key
                         (checked-form {:unsupported :value}))
       (check-rejection! checker :nominal-from-unchecked-map
@@ -407,8 +408,8 @@
       ;; A signature swapped in the wrong direction would reject this real
       ;; valid program; the positive suite detects that regression.
       (check! checker :principal-and-actor-distinct
-              (checked-form {:principal '(nominal/principal :id)
-                             :actor '(nominal/actor :id)})))
+              (checked-form {:principal '(internal/principal :id)
+                             :actor '(internal/actor :id)})))
     true))
 
 (defn- audit-canonical-output-validation! [definition]
@@ -428,7 +429,7 @@
 (defn- check-canonical-nominal-output! [checker]
   ;; The single canonical conversion uses fixed-key if-let construction,
   ;; allowing the checker to prove category-specific optional output slots.
-  (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
+  (let [bridge-ns 'gesso.choreo.internal.nominal-bindings
         class-types (mapv #(symbol (str class-prefix %)) categories)
         hmap (list 'typed.clojure/HMap
                    :optional (into {:role 'typed.clojure/Kw}
@@ -442,7 +443,7 @@
                      (typed.clojure/U typed.clojure/Kw
                                       (typed.clojure/Map
                                        typed.clojure/Any typed.clojure/Any)))
-        sources (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
+        sources (source-forms "gesso/choreo/internal/nominal_bindings.cljc")
         source (source-definition sources 'bindings->nominal)]
     (eval (list 'typed.clojure/ann
                 (symbol (str bridge-ns) "bindings->nominal")
@@ -461,7 +462,7 @@
               '(let [result (bindings->nominal
                              {:principal (tagged/principal :person)})]
                  (if-let [p (:principal result)]
-                   (nominal/step-1 p)
+                   (gesso.choreo.typed-nominal-identity-pilot/step-1 p)
                    nil)))
       ;; A deliberately wrong consumer type fails at the *next* function,
       ;; demonstrating that category precision is propagated downstream.
@@ -469,7 +470,7 @@
                         '(let [result (bindings->nominal
                                        {:actor (tagged/actor :person)})]
                            (if-let [actor (:actor result)]
-                             (nominal/step-1 actor)
+                             (gesso.choreo.typed-nominal-identity-pilot/step-1 actor)
                              nil)))
       (expect-audit-rejection!
        audit-canonical-output-validation! :canonical-public-validator-removed
@@ -493,7 +494,7 @@
   ;; and the checked nominal adapter must handle the conversion. A returned
   ;; HMap annotation alone would not detect fabricated data or bypassing
   ;; machine execution validation.
-  (when-not (= '(bridge/bindings->nominal
+  (when-not (= '(bindings->nominal
                  (machine/identity-bindings execution))
                (last definition))
     (throw (ex-info "Machine-to-nominal seam bypasses its real boundary."
@@ -501,12 +502,11 @@
   true)
 
 (defn- check-machine-boundary! [checker]
-  ;; This is the *first real machine seam*, exercised by JVM and Node tests.
-  ;; Annotating machine/identity-bindings models the existing validated
-  ;; public accessor's output; its production body is not yet type-checked.
-  ;; The test-only wrapper body itself IS source checked, and the bridge's
-  ;; actual conversion body has already been verified in the earlier gate.
-  (let [machine-ns 'gesso.choreo.typed-nominal-machine-boundary-test
+  ;; The seam and conversion are now actual production-internal functions.
+  ;; Annotating machine/identity-bindings models the existing validated public
+  ;; accessor's output; its production body is not yet statically checked.
+  ;; This gate source-checks the REAL internal machine seam and both adapters.
+  (let [machine-ns 'gesso.choreo.internal.nominal-bindings
         class-types (mapv #(symbol (str class-prefix %)) categories)
         hmap (list 'typed.clojure/HMap
                    :optional (into {:role 'typed.clojure/Kw}
@@ -521,27 +521,17 @@
                                       (typed.clojure/Map
                                        typed.clojure/Any typed.clojure/Any)))
         source (source-definition
-                (source-forms "gesso/choreo/typed_nominal_machine_boundary_test.cljc")
-                'machine->nominal-bindings)]
+                (source-forms "gesso/choreo/internal/nominal_bindings.cljc")
+                'execution->nominal-bindings)]
     (eval (list 'typed.clojure/ann
                 'gesso.choreo.machine/identity-bindings
                 (list 'typed.clojure/IFn ['typed.clojure/Any '-> tagged-map])))
     (eval (list 'typed.clojure/ann
-                (symbol (str machine-ns) "machine->nominal-bindings")
+                (symbol (str machine-ns) "execution->nominal-bindings")
                 (list 'typed.clojure/IFn ['typed.clojure/Any '-> hmap])))
     (binding [*ns* (the-ns machine-ns)]
-      (check! checker :real-machine-to-nominal-wrapper-body source)
+      (check! checker :real-production-machine-to-nominal-body source)
       (audit-machine-boundary! source)
-      (check! checker :real-machine-principal-propagation
-              '(let [bindings (machine->nominal-bindings :machine-execution)]
-                 (if-let [principal (:principal bindings)]
-                   (nominal/step-1 principal)
-                   nil)))
-      (check-rejection! checker :real-machine-actor-as-principal
-                        '(let [bindings (machine->nominal-bindings :machine-execution)]
-                           (if-let [actor (:actor bindings)]
-                             (nominal/step-1 actor)
-                             nil)))
       (check-rejection! checker :real-machine-wrapper-wrong-return
                         (apply list (concat (butlast source)
                                             [:wrong-binding-representation]))
@@ -550,6 +540,19 @@
        audit-machine-boundary! :real-machine-accessor-bypassed
        (walk/postwalk-replace {'machine/identity-bindings 'identity} source)
        :wrong-machine-boundary-source))
+    (binding [*ns* (the-ns 'gesso.choreo.typed-nominal-machine-boundary-test)]
+      (check! checker :real-machine-principal-propagation
+              '(let [bindings (internal-bindings/execution->nominal-bindings
+                               :machine-execution)]
+                 (if-let [principal (:principal bindings)]
+                   (gesso.choreo.typed-nominal-identity-pilot/step-1 principal)
+                   nil)))
+      (check-rejection! checker :real-machine-actor-as-principal
+                        '(let [bindings (internal-bindings/execution->nominal-bindings
+                                         :machine-execution)]
+                           (if-let [actor (:actor bindings)]
+                             (gesso.choreo.typed-nominal-identity-pilot/step-1 actor)
+                             nil))))
     true))
 
 (defn -main [& _]
@@ -650,6 +653,6 @@
     (println "per-slot category/key cases; original adapter body checked.")
     (println "Canonical output HMap: real body checked, seven optional slots;")
     (println "wrong downstream consumer and slot-swap mutations rejected.")
-    (println "Real machine/start binding seam: checked wrapper body,")
+    (println "Real production machine/start conversion seam: body checked,")
     (println "typed seven-slot output; invalid consumer/bypass rejected.")
     :ok))

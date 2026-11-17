@@ -1,13 +1,12 @@
 (ns gesso.choreo.typed-nominal-machine-boundary-test
-  "First production-boundary integration pilot: normalize real Choreo machine
-   executions through the isolated nominal identity adapter. No production
-   machine runtime, wire format, or public map representation is changed."
+  "Verify the production-internal nominal conversion boundary against real
+   Choreo machine executions, without changing their portable map format."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.choreo.core :as choreo]
             [gesso.choreo.identity :as tagged]
             [gesso.choreo.machine :as machine]
             [gesso.choreo.project :as project]
-            [gesso.choreo.typed-nominal-identity-bridge :as bridge]
+            [gesso.choreo.internal.nominal-bindings :as internal-bindings]
             [gesso.choreo.typed-nominal-identity-pilot :as nominal]))
 
 (defn- machine-plan []
@@ -17,12 +16,6 @@
      :states {:prepare (choreo/local :server :prepare :done)
               :done (choreo/return :done)}})
    :server))
-
-(defn machine->nominal-bindings
-  "Pilot internal-only consumer of a *real* machine execution's validated
-   bindings. Its original defn body is checked by the opt-in Typed gate."
-  [execution]
-  (bridge/bindings->nominal (machine/identity-bindings execution)))
 
 (defn- error-kind [thunk]
   (try
@@ -54,12 +47,12 @@
                           [slot (get all slot)]))
             execution (machine/start plan {:identity-bindings input})
             public (machine/identity-bindings execution)
-            internals (machine->nominal-bindings execution)
+            internals (internal-bindings/execution->nominal-bindings execution)
             action (machine/pending-action execution)]
         (testing (str "real machine boundary, sparse subset " mask)
           (is (machine/execution? execution))
           (is (= (assoc input :role :server) public))
-          (is (= public (bridge/bindings->tagged internals)))
+          (is (= public (internal-bindings/bindings->tagged internals)))
           (is (= (set (keys public)) (set (keys internals))))
           (is (= (:command-id public) (machine/command-id execution)))
           (is (= (:execution-id public) (machine/execution-id execution)))
@@ -76,7 +69,7 @@
   (let [plan (machine-plan)
         all (reference-bindings)
         execution (machine/start plan {:identity-bindings all})
-        internal (machine->nominal-bindings execution)]
+        internal (internal-bindings/execution->nominal-bindings execution)]
     (is (instance? gesso.choreo.internal.nominal_identity.Principal
                    (:principal internal)))
     (is (instance? gesso.choreo.internal.nominal_identity.Actor
@@ -91,7 +84,7 @@
                    (:execution-id internal)))
     (is (identical? (:principal internal)
                     (nominal/step-1 (:principal internal))))
-    (is (= all (bridge/bindings->tagged internal)))
+    (is (= all (internal-bindings/bindings->tagged internal)))
     (is (not= (:principal internal) (:actor internal)))
     (is (not= (:command-id internal) (:execution-id internal)))))
 
@@ -101,11 +94,11 @@
         completed (machine/complete-local started)
         tagged-before (machine/identity-bindings started)
         tagged-after (machine/identity-bindings completed)
-        nominal-after (machine->nominal-bindings completed)]
+        nominal-after (internal-bindings/execution->nominal-bindings completed)]
     (is (machine/execution? completed))
     (is (machine/completed? completed))
     (is (= tagged-before tagged-after))
-    (is (= tagged-after (bridge/bindings->tagged nominal-after)))
+    (is (= tagged-after (internal-bindings/bindings->tagged nominal-after)))
     (is (every? tagged/identity? (vals (dissoc tagged-after :role))))
     (is (instance? gesso.choreo.internal.nominal_identity.Principal
                    (:principal nominal-after)))
@@ -156,6 +149,23 @@
                           plan {:command-id (tagged/command-id "other")
                                 :identity-bindings
                                 {:command-id (:command-id all)}}))))))
+
+(deftest internal-machine-seam-rejects-invalid-executions-independently
+  (let [plan (machine-plan)
+        started (machine/start plan {:identity-bindings (reference-bindings)})
+        forged (assoc started :identity-bindings
+                      {:principal (tagged/actor :wrong)})]
+    ;; Even when the internal adapter is called directly, it cannot interpret
+    ;; arbitrary maps or a malformed machine execution as validated bindings.
+    (doseq [invalid [nil {} :execution "execution"
+                     {:identity-bindings {:role :server}}
+                     (tagged/principal :user)
+                     forged
+                     (dissoc started :state)
+                     (assoc started :role :browser)]]
+      (is (= :invalid-execution
+             (error-kind #(internal-bindings/execution->nominal-bindings
+                           invalid)))))))
 
 #?(:clj
    (defn -main [& _]
