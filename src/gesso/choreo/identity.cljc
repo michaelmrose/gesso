@@ -431,6 +431,21 @@
      {:binding :command-id
       :value value})))
 
+(defn- validate-execution-binding
+  "Validate one execution binding, preserving the supplied tagged reference.
+
+   Execution identity is distinct from command identity, even when they share
+   a raw value. This checked private helper rejects invalid values rather
+   than manufacturing a tagged execution identity during admission."
+  [value]
+  (if (execution-id? value)
+    value
+    (identity-error
+     :invalid-binding
+     "Identity binding :execution-id must contain an execution identity."
+     {:binding :execution-id
+      :value value})))
+
 (defn- validate-binding
   [key value]
   (case key
@@ -477,13 +492,7 @@
     (validate-command-binding value)
 
     :execution-id
-    (if (execution-id? value)
-      value
-      (identity-error
-       :invalid-binding
-       "Identity binding :execution-id must contain an execution identity."
-       {:binding key
-        :value value}))))
+    (validate-execution-binding value)))
 
 (defn bindings
   "Construct/validate an explicit identity-binding map.
