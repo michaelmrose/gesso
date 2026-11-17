@@ -6,6 +6,10 @@
    must obtain those handles from its own live entry, recheck the original
    source and exact graph, then invoke the checked revalidation helper.
 
+   The original closure-entry constructor must retain both handles in distinct
+   slots in its exact structural descriptor. Its source call is audited back
+   to the original issuer, which remains the only live handle registration.
+
    This is a NOMINAL static handoff check, not independent proof of live
    registry entries, external assumptions, graph completeness, installed
    application writers, or physical/runtime authorization. Raw source,
@@ -24,6 +28,19 @@
   'gesso.assurance.proof.induction_dependency.InductionDependencyHandle)
 (def ^:private application-handle
   'gesso.assurance.proof.application_dependency.ApplicationDependencyHandle)
+(def ^:private registered-entry
+  '(typed.clojure/HMap
+    :mandatory {:graph-handle gesso.assurance.dependency.CheckedGraph
+                :inner-handle
+                gesso.assurance.proof.induction_dependency.InductionDependencyHandle
+                :graph-content typed.clojure/Any
+                :ledger typed.clojure/Any
+                :catalog-id typed.clojure/Any
+                :operation-ids (typed.clojure/Set typed.clojure/Kw)
+                :invariant-ids (typed.clojure/Set typed.clojure/Kw)
+                :node-count typed.clojure/Int
+                :edge-count typed.clojure/Int}
+    :complete? true))
 
 (defn- definitions []
   (let [file (or (io/resource "gesso/assurance/proof/application_dependency.clj")
@@ -65,7 +82,14 @@
            ['gesso.assurance.proof.induction-dependency/check-induction-dependencies!
             ['typed.clojure/Any 'typed.clojure/Any '-> induction-handle]]
            ['gesso.assurance.dependency/check-graph!
-            ['typed.clojure/Any '-> graph-handle]]]]
+            ['typed.clojure/Any '-> graph-handle]]
+           ['gesso.assurance.proof.application-dependency/closure-entry
+            [graph-handle induction-handle 'typed.clojure/Any
+             'typed.clojure/Any 'typed.clojure/Any
+             '(typed.clojure/Set typed.clojure/Kw)
+             '(typed.clojure/Set typed.clojure/Kw)
+             'typed.clojure/Int 'typed.clojure/Int
+             '-> registered-entry]]]]
     (fn-ann! name signature)))
 
 (defn- check! [checker label source]
@@ -100,6 +124,12 @@
         issuer-map (into {} (map vec (partition 2 issuer-bindings)))
         consumer-map (into {} (map vec (partition 2 consumer-bindings)))
         issuer-entry (get issuer-map 'entry)
+        expected-entry
+        '(closure-entry graph-handle inner-handle (content graph) ledger
+                        catalog-id operation-ids invariant-ids
+                        (count (:nodes graph))
+                        (reduce + (map (fn [n] (count (:depends-on n)))
+                                       (:nodes graph))))
         required-call '(revalidate-application-graphs!
                         inner-handle graph-handle
                         current-catalog current-graph base)
@@ -108,9 +138,8 @@
                         catalog inner) (get issuer-map 'inner-handle))
                    (= '(dependency/check-graph! current-graph)
                       (get issuer-map 'graph-handle))
-                   (map? issuer-entry)
-                   (= 'inner-handle (:inner-handle issuer-entry))
-                   (= 'graph-handle (:graph-handle issuer-entry))
+                   (= expected-entry issuer-entry)
+                   (= '(exact! graph current-graph) (get issuer-map '_))
                    (= '(ApplicationDependencyHandle.) (get issuer-map 'handle))
                    (= '(locking live-handles (.put live-handles handle entry))
                       (first (drop 2 issuer-let)))
@@ -132,6 +161,67 @@
                        :consumer-steps consumer-steps})))
     true))
 
+(defn- change-descriptor [definition alter]
+  (let [value (last definition)]
+    (when-not (map? value)
+      (throw (ex-info "Original application closure descriptor is not a map" {})))
+    (let [changed (alter value)]
+      (when (= changed value)
+        (throw (ex-info "Application descriptor mutation did not change source" {})))
+      (apply list (concat (butlast definition) [changed])))))
+
+(defn- check-descriptor! [checker forms]
+  (let [source (original forms 'closure-entry)]
+    (check! checker :original-closure-entry-constructor source)
+    ;; These mutate the ACTUAL original constructor, rather than a copied
+    ;; parallel implementation. Exact HMap rejects invented proof fields.
+    (doseq [[label alter]
+            [[:graph-from-induction #(assoc % :graph-handle 'inner-handle)]
+             [:induction-from-graph #(assoc % :inner-handle 'graph-handle)]
+             [:graph-from-raw-map #(assoc % :graph-handle {})]
+             [:induction-from-raw-map #(assoc % :inner-handle {})]
+             [:graph-from-node-count #(assoc % :graph-handle 'node-count)]
+             [:induction-from-ledger #(assoc % :inner-handle 'ledger)]
+             [:missing-graph #(dissoc % :graph-handle)]
+             [:missing-induction #(dissoc % :inner-handle)]
+             [:wrong-node-count #(assoc % :node-count "five")]
+             [:wrong-edge-count #(assoc % :edge-count false)]
+             [:raw-operations #(assoc % :operation-ids {})]
+             [:raw-invariants #(assoc % :invariant-ids [])]
+             [:invented-proof #(assoc % :proof-status :proved)]
+             [:invented-authority #(assoc % :authority :granted)]]]
+      (reject! checker [:descriptor label] (change-descriptor source alter)))
+    (check! checker :valid-descriptor-call
+            '(closure-entry (dependency/check-graph! {})
+                            (induction-dependency/check-induction-dependencies!
+                             {} {})
+                            {} {} :catalog #{:op} #{:inv} 2 1))
+    (doseq [[label invalid]
+            [[:raw-graph-argument
+              '(closure-entry {} (induction-dependency/check-induction-dependencies!
+                                  {} {}) {} {} :catalog #{} #{} 2 1)]
+             [:raw-induction-argument
+              '(closure-entry (dependency/check-graph! {}) {} {} {}
+                              :catalog #{} #{} 2 1)]
+             [:swapped-handles
+              '(closure-entry
+                (induction-dependency/check-induction-dependencies! {} {})
+                (dependency/check-graph! {}) {} {} :catalog #{} #{} 2 1)]
+             [:application-handle-instead-of-graph
+              '(closure-entry (check-application-dependencies! {} {})
+                              (induction-dependency/check-induction-dependencies!
+                               {} {}) {} {} :catalog #{} #{} 2 1)]
+             [:non-set-operation-ids
+              '(closure-entry (dependency/check-graph! {})
+                              (induction-dependency/check-induction-dependencies!
+                               {} {}) {} {} :catalog [] #{} 2 1)]
+             [:non-integer-edge-count
+              '(closure-entry (dependency/check-graph! {})
+                              (induction-dependency/check-induction-dependencies!
+                               {} {}) {} {} :catalog #{} #{} 2 "one")]]]
+      (reject! checker [:descriptor-call label] invalid))
+    true))
+
 (defn- swap-original-call [source op new-call]
   (let [seen (atom 0)
         altered (walk/postwalk
@@ -149,6 +239,7 @@
     (let [source (original forms 'revalidate-application-graphs!)]
       (check! checker :original-two-handle-revalidation source)
       (assert-source-link! forms)
+      (check-descriptor! checker forms)
       ;; Call the original source-backed helper with the right nominal
       ;; categories and test incorrect substitutions in both original calls.
       (doseq [[label op bad]
@@ -213,6 +304,22 @@
                    (= :unrecognized-closure-handle reason))
       (throw (ex-info "Forged application closure bypassed registry"
                       {:reason reason}))))
+  ;; A pure descriptor containing nominally correct but unregistered handles
+  ;; is still just copyable data. It is not an issued application closure.
+  (let [ctor (or (ns-resolve source-ns 'closure-entry)
+                 (throw (ex-info "Application closure-entry source missing" {})))
+        graph (gesso.assurance.dependency.CheckedGraph.)
+        induction
+        (gesso.assurance.proof.induction_dependency.InductionDependencyHandle.)
+        descriptor (ctor graph induction {:roots #{} :nodes {}} {}
+                         :catalog #{:op} #{:inv} 2 1)]
+    (when-not (and (= #{:graph-handle :inner-handle :graph-content
+                        :ledger :catalog-id :operation-ids :invariant-ids
+                        :node-count :edge-count} (set (keys descriptor)))
+                   (identical? graph (:graph-handle descriptor))
+                   (identical? induction (:inner-handle descriptor))
+                   (not (application/checked-application-dependencies? descriptor)))
+      (throw (ex-info "Pure application descriptor acquired authority" {}))))
   true)
 
 (defn -main [& _]
@@ -222,7 +329,7 @@
     (check-production! checker forms)
     (check-forgery!)
     (println "Typed application closure passed: original graph revalidation")
-    (println "body, source-bound issuer/consumer audit, 14 negative type")
-    (println "substitutions, and forged closure runtime rejection.")
+    (println "and exact issuance descriptor source; source-bound handoffs;")
+    (println "34 negative type cases, forged closure and pure-data checks.")
     (println "Original graph correctness, proof and authority remain open.")
     :ok))

@@ -237,6 +237,22 @@
   [catalog]
   (:graph (source-graph! catalog)))
 
+(defn- closure-entry
+  "Pure descriptor of the original, source-recomputed application graph.
+   Both handles are distinct structural capabilities registered elsewhere.
+   This map neither issues a closure handle nor certifies application truth."
+  [graph-handle inner-handle graph-content ledger catalog-id
+   operation-ids invariant-ids node-count edge-count]
+  {:graph-handle graph-handle
+   :inner-handle inner-handle
+   :graph-content graph-content
+   :ledger ledger
+   :catalog-id catalog-id
+   :operation-ids operation-ids
+   :invariant-ids invariant-ids
+   :node-count node-count
+   :edge-count edge-count})
+
 (defn check-application-dependencies!
   "Recompute all nodes from ORIGINAL catalog source, insist on exact graph
    coverage, and check both the existing induction closure and the complete
@@ -249,13 +265,12 @@
         inner-handle (induction-dependency/check-induction-dependencies!
                       catalog inner)
         graph-handle (dependency/check-graph! current-graph)
-        entry {:graph-handle graph-handle :inner-handle inner-handle
-               :graph-content (content graph) :ledger ledger
-               :catalog-id catalog-id :operation-ids operation-ids
-               :invariant-ids invariant-ids
-               :node-count (count (:nodes graph))
-               :edge-count (reduce + (map #(count (:depends-on %))
-                                          (:nodes graph)))}
+        entry (closure-entry
+               graph-handle inner-handle (content graph) ledger
+               catalog-id operation-ids invariant-ids
+               (count (:nodes graph))
+               (reduce + (map (fn [n] (count (:depends-on n)))
+                              (:nodes graph))))
         handle (ApplicationDependencyHandle.)]
     (locking live-handles (.put live-handles handle entry))
     handle))
