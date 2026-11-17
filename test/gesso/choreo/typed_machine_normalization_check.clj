@@ -240,16 +240,41 @@
     true))
 
 (defn- check-machine-execution-record! [checker definition]
-  ;; The original function's return type requires vector history; a general
-  ;; Map result would not catch an accidental removal of (vec history).
-  ;; External/public identity categories remain protected separately by
-  ;; runtime schema validation and the source-backed projection audit.
-  (let [input '(typed.clojure/HMap
-                :mandatory {:history (typed.clojure/Seqable typed.clojure/Any)}
-                :complete? false)
-        output '(typed.clojure/HMap
-                 :mandatory {:history (typed.clojure/AVec typed.clojure/Any)}
-                 :complete? false)
+  ;; Public identity maps retain a literal :kind discriminator. Typed
+  ;; Clojure HMaps can distinguish the command and execution categories
+  ;; without changing the CLJ/CLJS wire representation. Bindings are sparse:
+  ;; an absent identity is valid, while execution records always store both
+  ;; keys (possibly nil).
+  (let [command-tag '(typed.clojure/HMap
+                      :mandatory {:gesso.choreo.identity/type
+                                  (typed.clojure/Val :gesso.choreo.identity/ref)
+                                  :gesso.choreo.identity/kind
+                                  (typed.clojure/Val :command)
+                                  :gesso.choreo.identity/value typed.clojure/Any}
+                      :complete? false)
+        execution-tag '(typed.clojure/HMap
+                        :mandatory {:gesso.choreo.identity/type
+                                    (typed.clojure/Val :gesso.choreo.identity/ref)
+                                    :gesso.choreo.identity/kind
+                                    (typed.clojure/Val :execution)
+                                    :gesso.choreo.identity/value typed.clojure/Any}
+                        :complete? false)
+        command-opt (list 'typed.clojure/U nil command-tag)
+        execution-opt (list 'typed.clojure/U nil execution-tag)
+        binding-type (list 'typed.clojure/HMap :optional
+                           {:command-id command-opt
+                            :execution-id execution-opt}
+                           :complete? false)
+        input (list 'typed.clojure/HMap :mandatory
+                    {:identity-bindings binding-type
+                     :history '(typed.clojure/Seqable typed.clojure/Any)}
+                    :complete? false)
+        output (list 'typed.clojure/HMap :mandatory
+                     {:identity-bindings binding-type
+                      :command-id command-opt
+                      :execution-id execution-opt
+                      :history '(typed.clojure/AVec typed.clojure/Any)}
+                     :complete? false)
         replace-fields (fn [f transform]
                          (let [body (last f)
                                record (last body)
@@ -293,6 +318,31 @@
                            (every? #{:typed.clojure/type-mismatch-error} kinds))
               (throw (ex-info "History mutation escaped Typed Clojure."
                               {:label label :errors kinds} ex))))))
+      ;; These are STATIC type failures in the original production defn,
+      ;; not merely failures of the source-shape audit below.
+      (doseq [[label mutation]
+              [[:typed-command-reader-swapped
+                (walk/postwalk-replace
+                 {'(:command-id identity-bindings)
+                  '(:execution-id identity-bindings)} definition)]
+               [:typed-execution-reader-swapped
+                (walk/postwalk-replace
+                 {'(:execution-id identity-bindings)
+                  '(:command-id identity-bindings)} definition)]
+               [:typed-command-field-swapped
+                (replace-fields definition #(assoc % :command-id 'execution-id))]
+               [:typed-execution-field-swapped
+                (replace-fields definition #(assoc % :execution-id 'command-id))]]]
+        (when (= mutation definition)
+          (throw (ex-info "Typed category mutation had no target."
+                          {:label label})))
+        (let [{:keys [ex type-errors]}
+              (checker mutation :check-config config)
+              kinds (mapv :type-error type-errors)]
+          (when-not (and (nil? ex) (seq kinds)
+                         (every? #{:typed.clojure/type-mismatch-error} kinds))
+            (throw (ex-info "Category swap escaped Typed Clojure."
+                            {:label label :errors kinds} ex)))))
       (doseq [[label changed]
               [[:command-reader-swapped
                 (walk/postwalk-replace
