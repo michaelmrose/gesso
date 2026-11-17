@@ -5,7 +5,9 @@
    authenticates it. Graph checking is structural and snapshot-relative; it
    does not prove semantics, discharge premises, or grant installed authority.
    This check does not certify the entire raw graph validator or downstream
-   consumers: those still need runtime checks and future source-bound typing."
+   consumers: those still need runtime checks and future source-bound typing.
+   The node handoff check isolates one exact expression from validate-node!;
+   it does NOT claim the whole validator or untrusted node map is typed."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.assurance.admission :as admission]
@@ -17,6 +19,15 @@
 (def ^:private admission-handle 'gesso.assurance.admission.AdmissionHandle)
 (def ^:private general-map
   '(typed.clojure/Map typed.clojure/Any typed.clojure/Any))
+(def ^:private typed-node
+  ;; A CHECKER ASSUMPTION on the node handoff, not a claim that raw graph
+  ;; input has been statically validated before validate-node! is invoked.
+  `(typed.clojure/HMap
+    :mandatory {:id typed.clojure/Kw
+                :subject ~general-map
+                :subject-handle ~admission-handle
+                :depends-on (typed.clojure/Vec ~general-map)}
+    :complete? true))
 (def ^:private graph-description
   '(typed.clojure/HMap
     :mandatory {:type typed.clojure/Kw
@@ -87,6 +98,58 @@
       (throw (ex-info "Graph mutation had no effect" {})))
     altered))
 
+(defn- original-node-handoff [forms]
+  ;; Read the actual call from the production validator. If the validator
+  ;; stops making this call, changes arguments, or duplicates it, this
+  ;; source-linked assurance gate fails rather than checking a stale example.
+  (let [found (atom [])
+        definition (original forms 'validate-node!)]
+    (walk/postwalk
+     (fn [form]
+       (when (and (seq? form)
+                  (= 'admission/require-admitted-subject! (first form)))
+         (swap! found conj form))
+       form)
+     definition)
+    (let [expected '(admission/require-admitted-subject!
+                     (:subject-handle node) raw-subject)]
+      (when-not (= [expected] @found)
+        (throw (ex-info "Production dependency node admission handoff changed"
+                        {:expected expected :found @found})))
+      expected)))
+
+(defn- typed-node-handoff [expression]
+  ;; Context is the stated HMap shape, not an invented proof that arbitrary
+  ;; caller-supplied EDN has this shape. The runtime validator remains the
+  ;; authority for exact node keys, live handles, and matching raw subjects.
+  (list 'typed.clojure/ann-form
+        (list 'fn '[node raw-subject] expression)
+        (list 'typed.clojure/IFn
+              [typed-node general-map '-> admission-handle])))
+
+(defn- check-node-handoff! [checker forms]
+  (let [original-call (original-node-handoff forms)]
+    (check! checker :original-node-subject-admission-handoff
+            (typed-node-handoff original-call))
+    (doseq [[label substituted-handle]
+            [[:raw-subject '(:subject node)]
+             [:raw-subject-argument 'raw-subject]
+             [:edge-vector '(:depends-on node)]
+             [:node-identity '(:id node)]
+             [:missing-node-slot '(:missing node)]
+             [:invented-handle-map '{}]]]
+      ;; Only replace the handle expression from the actual production call.
+      ;; Every mutation preserves the original second, raw-subject argument.
+      (let [modified (list (first original-call)
+                           substituted-handle (nth original-call 2))]
+        (when (= original-call modified)
+          (throw (ex-info "Node handoff mutation has no effect"
+                          {:label label})))
+        (reject! checker [:node-handoff label]
+                 (typed-node-handoff modified)
+                 :typed.clojure/app-type-error))))
+  true)
+
 (defn- install-contracts! []
   (eval (list 'typed.clojure/ann-datatype admission-handle '[]))
   (eval (list 'typed.clojure/ann-datatype graph-handle '[]))
@@ -118,6 +181,7 @@
   (binding [*ns* (the-ns 'gesso.assurance.dependency)]
     (doseq [name '[check-graph! live-entry! describe-graph]]
       (check! checker [:original name] (original forms name)))
+    (check-node-handoff! checker forms)
     (check! checker :valid-issuer-to-consumer
             '(describe-graph (check-graph! {})))
     (doseq [[label expr]
@@ -205,7 +269,9 @@
     (check-production! checker (original-forms))
     (check-runtime!)
     (println "Typed dependency graph passed: 3 original graph source bodies,")
-    (println "6 wrong-handle call rejections, 7 source-map/return mutations,")
-    (println "and forged/copied-handle and stale-graph runtime rejection.")
-    (println "Structural graph checking only; not a proof or installation.")
+    (println "6 wrong-handle calls, 6 source-derived node-handoff mutations,")
+    (println "7 source-map/return mutations, and runtime forged, copied,")
+    (println "and stale-graph rejection. Node shape is assumed at the typed")
+    (println "handoff; raw validation, subject matching, proof and installation")
+    (println "remain runtime/assurance obligations.")
     :ok))
