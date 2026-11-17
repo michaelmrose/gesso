@@ -141,6 +141,24 @@
            ;; full for/reduce algorithm is NOT independently checked here.
            ['gesso.assurance.proof.operation-interface-composition/invariant-results!
             ['typed.clojure/Any 'typed.clojure/Any '-> aggregate-results-type]]
+           ['gesso.assurance.proof.operation-interface-composition/initial-status-row
+            [(list 'typed.clojure/Set inference-type) 'typed.clojure/Kw
+             iface-check/invariant-result-type '->
+             (list 'typed.clojure/Set inference-type)]]
+           ['gesso.assurance.proof.operation-interface-composition/initial-statuses
+            [individual-results-type '-> (list 'typed.clojure/Set inference-type)]]
+           ['gesso.assurance.proof.operation-interface-composition/induction-status-row
+            [(list 'typed.clojure/Set induction-type) 'typed.clojure/Kw
+             iface-check/invariant-result-type '->
+             (list 'typed.clojure/Set induction-type)]]
+           ['gesso.assurance.proof.operation-interface-composition/induction-statuses
+            [individual-results-type '-> (list 'typed.clojure/Set induction-type)]]
+           ['gesso.assurance.proof.operation-interface-composition/preservation-step-row
+            [(list 'typed.clojure/Set inference-type) 'typed.clojure/Kw
+             iface-check/invariant-result-type '->
+             (list 'typed.clojure/Set inference-type)]]
+           ['gesso.assurance.proof.operation-interface-composition/preservation-step-statuses
+            [individual-results-type '-> (list 'typed.clojure/Set inference-type)]]
            ['gesso.assurance.proof.operation-interface-composition/consistent-invariant-statuses?
             [(list 'typed.clojure/Set inference-type)
              (list 'typed.clojure/Set induction-type)
@@ -300,10 +318,10 @@
      (for [[op-id op] interfaces]
        [op-id (get-in op [:conditional-invariant-results invariant-id])]))
    'values '(vals results)
-   'initial '(set (map :initial-status values))
-   'induction '(set (map :induction-status values))
+   'initial '(initial-statuses results)
+   'induction '(induction-statuses results)
    'open-reasons '(set (map :open-reason values))
-   'steps '(into #{} (map :preservation-status) values)})
+   'steps '(preservation-step-statuses results)})
 
 (def ^:private expected-preservation-row
   '(assoc status-map op-id (:preservation-status result)))
@@ -325,6 +343,25 @@
                        :row (last row-source)
                        :reduction (last reduction)})))
     true))
+
+(def ^:private expected-status-extractors
+  {'initial-status-row '(conj statuses (:initial-status result))
+   'initial-statuses '(reduce-kv initial-status-row #{} results)
+   'induction-status-row '(conj statuses (:induction-status result))
+   'induction-statuses '(reduce-kv induction-status-row #{} results)
+   'preservation-step-row '(conj statuses (:preservation-status result))
+   'preservation-step-statuses '(reduce-kv preservation-step-row #{} results)})
+
+(defn- check-status-extraction-source! [forms]
+  ;; The actual ORIGINAL per-operation reducers must extract their own
+  ;; status families. Literal-union typing alone cannot distinguish initial
+  ;; and preservation, which share the same status alphabet.
+  (doseq [[name expected] expected-status-extractors]
+    (let [actual (last (original forms name))]
+      (when-not (= expected actual)
+        (throw (ex-info "Original operation-status extraction changed"
+                        {:name name :expected expected :actual actual})))))
+  true)
 
 (defn- check-status-consistency-source! [forms]
   ;; An annotation can type-check a subtly WRONG predicate. Verify the
@@ -377,8 +414,11 @@
       (check! checker [:original-preservation-extraction name]
               (original forms name)))
     (check-preservation-source! forms)
+    (check-status-extraction-source! forms)
     (check-status-consistency-source! forms)
     (check-aggregate-source! forms)
+    (doseq [name (keys expected-status-extractors)]
+      (check! checker [:original-status-extraction name] (original forms name)))
     (check! checker :original-invariant-status-agreement
             (original forms 'consistent-invariant-statuses?))
     (check! checker :valid-consistent-status-call
@@ -386,6 +426,75 @@
               #{:checked-conditional-inference}
               #{:checked-conditional-induction}
               #{nil} #{:checked-conditional-inference}))
+    (let [live (the-ns source-ns)
+          inputs (sorted-map
+                  :operation/a {:initial-status :open
+                                :induction-status :open
+                                :preservation-status :checked-conditional-inference}
+                  :operation/z {:initial-status :checked-conditional-inference
+                                :induction-status :checked-conditional-induction
+                                :preservation-status :open})]
+      ;; Compare all three LIVE reducers to the original map/vals semantics.
+      (doseq [[extractor status]
+              [['initial-statuses :initial-status]
+               ['induction-statuses :induction-status]
+               ['preservation-step-statuses :preservation-status]]]
+        (let [actual ((var-get (ns-resolve live extractor)) inputs)
+              expected (set (map status (vals inputs)))]
+          (when-not (= actual expected)
+            (throw (ex-info "Status extraction changed at runtime"
+                            {:extractor extractor :actual actual
+                             :expected expected}))))))
+    ;; Deliberately invalid statuses fail against the source-backed
+    ;; per-operation contract before they reach agreement checking.
+    (doseq [[label invalid]
+            [[:initial-instead-of-induction
+              '(induction-status-row #{} :operation/a
+                {:initial-status :open :induction-status :checked-conditional-inference
+                 :preservation-status :open :open-reason nil})]
+             [:proof-initial '(initial-statuses
+                               {:operation/a {:initial-status :proved
+                                              :induction-status :open
+                                              :preservation-status :open
+                                              :open-reason nil}})]
+             [:proof-step '(preservation-step-statuses
+                             {:operation/a {:initial-status :open
+                                            :induction-status :open
+                                            :preservation-status :proved
+                                            :open-reason nil}})]
+             [:wrong-key '(induction-statuses
+                            {"operation/a" {:initial-status :open
+                                             :induction-status :open
+                                             :preservation-status :open
+                                             :open-reason nil}})]
+             [:raw-vector '(initial-statuses [:open])]]]
+      (reject! checker [:malformed-source-status-family label] invalid))
+    ;; For both rows and reductions, audit their ORIGINAL status source and
+    ;; map domain. Inference and preservation share the same literal types,
+    ;; so those source swaps remain type-compatible and require source audit.
+    (doseq [[label name alternate]
+            [[:initial-uses-preservation 'initial-status-row
+              '(conj statuses (:preservation-status result))]
+             [:induction-uses-initial 'induction-status-row
+              '(conj statuses (:initial-status result))]
+             [:preservation-uses-initial 'preservation-step-row
+              '(conj statuses (:initial-status result))]
+             [:initial-drops-all-operations 'initial-statuses
+              '(reduce-kv initial-status-row #{} {})]
+             [:induction-uses-wrong-reducer 'induction-statuses
+              '(reduce-kv initial-status-row #{} results)]
+             [:preservation-drops-all-operations 'preservation-step-statuses
+              '(reduce-kv preservation-step-row #{} {})]]]
+      (let [source (original forms name)
+            mutant (apply list (concat (butlast source) [alternate]))
+            changed (mapv #(if (= source %) mutant %) forms)]
+        (when (#{:initial-uses-preservation :preservation-uses-initial} label)
+          (check! checker [:type-compatible-status-source label] mutant))
+        (when-not (try (check-status-extraction-source! changed)
+                       false
+                       (catch clojure.lang.ExceptionInfo _ true))
+          (throw (ex-info "Wrong original status extraction escaped audit"
+                          {:label label})))))
     (doseq [[label invalid]
             [[:invented-initial-proof
               '(consistent-invariant-statuses? #{:proved} #{:open} #{nil} #{:open})]
@@ -583,14 +692,14 @@
             [[:wrong-overall-induction '(first induction) '(first initial)]
              [:disabled-consistency-guard expected-aggregate-guard true]
              [:initial-from-step-set
-              '(set (map :initial-status values))
-              '(set (map :preservation-status values))]
+              '(initial-statuses results)
+              '(preservation-step-statuses results)]
              [:preservation-from-initial-set
-              '(into #{} (map :preservation-status) values)
-              '(into #{} (map :initial-status) values)]
+              '(preservation-step-statuses results)
+              '(initial-statuses results)]
              [:induction-from-initial-set
-              '(set (map :induction-status values))
-              '(set (map :initial-status values))]
+              '(induction-statuses results)
+              '(initial-statuses results)]
              [:wrong-source-invariant
               '(get-in op [:conditional-invariant-results invariant-id])
               '(get-in op [:conditional-invariant-results :unrelated-id])]]]
@@ -736,10 +845,11 @@
         forms (source-forms)]
     (checks! checker forms)
     (runtime-guard!)
-    (println "Typed operation composition passed: 7 original checked source")
-    (println "bodies; 34 report, 17 aggregate, 9 preservation mutations and")
-    (println "4 nominal closure calls and 6 malformed agreement inputs rejected")
-    (println "by typing; 14 live agreement cases, 6 predicate mutants, 11 aggregate/")
-    (println "preservation source mutants, 2 wrong-typed-but-compatible rows,")
+    (println "Typed operation composition passed: 13 original checked source")
+    (println "bodies; 34 report, 17 aggregate, 9 preservation, 5 status-input")
+    (println "and 4 nominal closure calls plus 6 malformed agreement inputs")
+    (println "rejected by typing; 14 live agreement cases, 6 predicate mutants,")
+    (println "6 status-extraction and 11 aggregate/preservation source mutants,")
+    (println "same-type source swaps, sorted-map equivalence tests, and")
     (println "2 report provenance swaps and runtime forged-closure rejection.")
     :ok))

@@ -113,6 +113,36 @@
   [results]
   (reduce-kv preservation-status-row (empty-preservation-statuses) results))
 
+(defn- initial-status-row
+  "Accumulate only an operation's original conditional INITIAL status."
+  [statuses _operation-id result]
+  (conj statuses (:initial-status result)))
+
+(defn- initial-statuses
+  "Extract distinct initial statuses from original operation-indexed results."
+  [results]
+  (reduce-kv initial-status-row #{} results))
+
+(defn- induction-status-row
+  "Accumulate only an operation's original conditional INDUCTION status."
+  [statuses _operation-id result]
+  (conj statuses (:induction-status result)))
+
+(defn- induction-statuses
+  "Extract distinct induction statuses from original operation results."
+  [results]
+  (reduce-kv induction-status-row #{} results))
+
+(defn- preservation-step-row
+  "Accumulate only an operation's original conditional PRESERVATION status."
+  [statuses _operation-id result]
+  (conj statuses (:preservation-status result)))
+
+(defn- preservation-step-statuses
+  "Extract distinct preservation statuses without losing operation evidence."
+  [results]
+  (reduce-kv preservation-step-row #{} results))
+
 (defn- consistent-invariant-statuses?
   "Check agreement across ORIGINAL per-operation conditional evidence.
    This is a consistency predicate over supplied status sets, not a proof
@@ -136,10 +166,10 @@
                       [op-id (get-in op [:conditional-invariant-results
                                          invariant-id])]))
            values (vals results)
-           initial (set (map :initial-status values))
-           induction (set (map :induction-status values))
+           initial (initial-statuses results)
+           induction (induction-statuses results)
            open-reasons (set (map :open-reason values))
-           steps (into #{} (map :preservation-status) values)]
+           steps (preservation-step-statuses results)]
        (when-not (consistent-invariant-statuses?
                   initial induction open-reasons steps)
          (reject! :incompatible-invariant-evidence
