@@ -29,7 +29,13 @@
    contract for untrusted inputs; the stronger command/execution overload
    remains a separately trusted assumption, not a proved implementation
    property. Checks of a broad result type do not prove the per-key runtime
-   validation, authorization, or full application admission. This gate now
+   validation, authorization, or full application admission. In addition,
+   the original validate-binding dispatcher is checked with a finite seven-
+   key input domain and a seven-way union of possible successful results.
+   This eliminates the previous Any-return assumption for that function,
+   but does not correlate an individual input key with its specific result,
+   nor prove any of the trusted predicate refinements. The public bindings
+   caller's key validation is still separately flow-audited. This gate now
    also audits the exact flow from each reducer entry through validate-binding
    into the output map, and rejects a bypass mutation that is still well-typed
    and still mentions validate-binding. Bounded sparse-map enumeration tests
@@ -105,9 +111,24 @@
 (t/ann identity/execution-id?
        [t/Any -> t/Bool :filters {:then (is ExecutionRef 0) :else tt}])
 
-;; The original multi-key dispatcher has a broad, honest whole-form type.
-;; Its key-specific value/result relations are checked per original case arm.
-(t/ann identity/validate-binding [t/Kw t/Any -> t/Any])
+;; Restrict the *private* dispatcher to the keys that its public caller
+;; admits. With any other key, the source `case` would return nil. That is
+;; precisely why annotating it [Kw Any -> ValidatedBindingValue] would be
+;; unsound. This finite input domain is part of the contract, not a claim
+;; that arbitrary caller data already passed validation.
+(t/defalias BindingKey
+  (t/U (t/Val :role) (t/Val :principal) (t/Val :actor)
+       (t/Val :authority) (t/Val :host)
+       (t/Val :command-id) (t/Val :execution-id)))
+(t/defalias ValidatedBindingValue
+  (t/U t/Kw PrincipalRef ActorRef AuthorityRef HostRef
+       CommandRef ExecutionRef))
+;; If the original dispatcher returns normally, its value belongs to this
+;; union, conditional on the explicit positive-only predicate assumptions.
+;; The original body is checked below; case-specific correlation is still
+;; checked separately for each exact source arm.
+(t/ann identity/validate-binding
+       [BindingKey t/Any -> ValidatedBindingValue])
 
 ;; `bindings` accepts arbitrary downstream data, but normal return means
 ;; a sparse map of supported keys. Rejection occurs by exception, not by a
@@ -285,6 +306,31 @@
        (doseq [name ['identity? 'kind 'role? 'require-role 'kind?
                      'validate-binding 'bindings? 'binding-value]]
          (check-form name (source-function name)))
+       ;; Under the seven-key input domain, the original whole dispatcher
+       ;; must return only a role keyword or one of the six category shapes.
+       ;; Mutate an ACTUAL case arm, rather than a typed synthetic branch:
+       ;; this must produce a genuine static type mismatch.
+       (let [original binding-definition
+             command-branch (:command-id branches)
+             poisoned (walk/postwalk #(if (= % command-branch) 42 %) original)]
+         (check-negative :validate-binding-wrong-original-arm
+                         original poisoned))
+       ;; An arbitrary keyword is not an admitted binding key. Confirm the
+       ;; checker rejects the call specifically as a static application type
+       ;; error, not as an exception. Nil is still an allowed *input value*
+       ;; at the type boundary, since runtime validation rejects it.
+       (check-form :validate-binding-supported-key
+                   '(validate-binding :principal nil))
+       (let [{:keys [ex type-errors]}
+             (check-form-info '(validate-binding :unsupported nil)
+                              :check-config config)]
+         (when (or ex
+                   (not= [:typed.clojure/app-type-error]
+                         (mapv :type-error type-errors)))
+           (throw (ex-info "Unsupported key not rejected statically."
+                           {:exception (some-> ex ex-message)
+                            :errors (mapv str type-errors)})))
+         (println "Rejected unsupported validate-binding key statically."))
        ;; The original category predicates merely delegate to kind?. The
        ;; checker proves Boolean results under a truthful broad annotation;
        ;; their stronger Pred refinements remain separately trusted.
