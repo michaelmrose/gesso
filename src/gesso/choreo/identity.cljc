@@ -415,6 +415,22 @@
     :command-id
     :execution-id})
 
+(defn- validate-host-binding
+  "Validate one host binding without confusing it with authority.
+
+   A host identifies a concrete runtime participant, not a source of
+   semantic authority. Preserve the caller's admitted host reference or
+   reject it with the original typed invalid-binding error. This private
+   production body is independently checked by the opt-in Typed Clojure gate."
+  [value]
+  (if (host? value)
+    value
+    (identity-error
+     :invalid-binding
+     "Identity binding :host must contain a host identity."
+     {:binding :host
+      :value value})))
+
 (defn- validate-authority-binding
   "Validate one authority binding without confusing it with a host.
 
@@ -510,13 +526,7 @@
     (validate-authority-binding value)
 
     :host
-    (if (host? value)
-      value
-      (identity-error
-       :invalid-binding
-       "Identity binding :host must contain a host identity."
-       {:binding key
-        :value value}))
+    (validate-host-binding value)
 
     :command-id
     (validate-command-binding value)
