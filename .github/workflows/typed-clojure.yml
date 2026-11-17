@@ -56,3 +56,18 @@ jobs:
             -n gesso.choreo.typed-nominal-machine-boundary-test \
             -n gesso.choreo.typed-nominal-transition-boundary-test \
             -n gesso.script.repo-integrity-metadata-test
+
+      - name: Set up Node 22 for portable Choreo checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Compile sparse identity transition test for Node
+        run: |
+          clojure -Sdeps '{:aliases {:typed-node {:extra-paths ["test"]}}}' \
+            -M:dev:typed-node -m cljs.main \
+            -co '{:target :nodejs :optimizations :none :output-dir "target/typed-node/out" :output-to "target/typed-node/identity-transitions.js"}' \
+            -c gesso.choreo.typed-nominal-transition-node-runner
+
+      - name: Run sparse identity transition test under Node
+        run: node target/typed-node/identity-transitions.js
