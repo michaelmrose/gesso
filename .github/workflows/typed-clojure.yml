@@ -54,4 +54,5 @@ jobs:
             -n gesso.choreo.identity-test \
             -n gesso.choreo.machine-test \
             -n gesso.choreo.typed-nominal-machine-boundary-test \
+            -n gesso.choreo.typed-nominal-transition-boundary-test \
             -n gesso.script.repo-integrity-metadata-test
