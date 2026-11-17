@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   source-and-mutation-checks:
-    name: Production source and mutation gate
+    name: Typed source, mutation and JVM regression gates
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -47,3 +47,11 @@ jobs:
 
       - name: Run full opt-in Typed Clojure gate
         run: bb test:typed
+
+      - name: Run adjacent machine, identity and integrity JVM regression tests
+        run: |
+          clojure -M:test \
+            -n gesso.choreo.identity-test \
+            -n gesso.choreo.machine-test \
+            -n gesso.choreo.typed-nominal-machine-boundary-test \
+            -n gesso.script.repo-integrity-metadata-test
