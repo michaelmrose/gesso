@@ -84,7 +84,7 @@ jobs:
           node target/typed-node/choreo-corpus.js > target/typed-node/node-corpus.log
           grep '^GESSO_TYPED_NODE_TRANSITIONS ' target/typed-node/node-corpus.log
 
-      - name: Compare JVM and Node identity admission, suspension and resumption
+      - name: Compare JVM and Node identity, suspension and action boundaries
         run: |
           bb script/check_choreo_identity_parity.clj \
             target/typed-node/jvm-identity-parity.log \

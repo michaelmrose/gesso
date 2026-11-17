@@ -8,7 +8,8 @@
             [gesso.choreo.internal.machine-nominal-bindings :as machine-bindings]
             [gesso.choreo.internal.nominal-bindings :as nominal-bindings]
             [gesso.choreo.machine :as machine]
-            [gesso.choreo.project :as project]))
+            [gesso.choreo.project :as project]
+            [gesso.choreo.verify :as verify]))
 
 (def ^:private identity-slots
   [:role :principal :actor :authority :host :command-id :execution-id])
@@ -224,11 +225,119 @@
                             :invalid-environment-event)}
              rejections)))))
 
+;; Production action boundaries: send constructs a transport message from
+;; established knowledge; authoritative completion establishes authoritative
+;; knowledge. Their rejection classifications must agree on JVM and Node.
+(defn- action-boundary-plan [kind]
+  (case kind
+    :send
+    (project/project
+     (verify/verify!
+      (choreo/->choreography
+       {:initial :send
+        :states {:send (choreo/communicate
+                         :server :client :request/result :done
+                         {:via :http :required #{:outcome}})
+                 :done (choreo/return :done)}})
+      {:entry-value-keys #{:outcome}})
+     :server)
+
+    :authoritative
+    (project/project
+     (choreo/->choreography
+      {:initial :claim
+       :states {:claim (choreo/authoritative
+                         :server :request/claim :done
+                         {:outputs #{:outcome}})
+                :done (choreo/return :done)}})
+     :server)))
+
+(defn- rejected-action-kind [f]
+  (try
+    (f)
+    :unexpected-acceptance
+    (catch #?(:clj clojure.lang.ExceptionInfo
+              :cljs cljs.core.ExceptionInfo) error
+      (:error/kind (ex-data error)))))
+
+(defn portable-action-corpus []
+  (let [plans {:send (action-boundary-plan :send)
+               :authoritative (action-boundary-plan :authoritative)}
+        sample (sample-bindings)
+        valid {:outcome :confirmed}
+        extra {:outcome :confirmed :unexpected true}]
+    (vec
+     (for [kind [:send :authoritative]
+           mask (range 128)]
+       (let [sparse (into {}
+                          (for [[n slot] (map-indexed vector identity-slots)
+                                :when (bit-test mask n)]
+                            [slot (get sample slot)]))
+             waiting (machine/start
+                      (get plans kind)
+                      (cond-> {:identity-bindings sparse}
+                        (= kind :send) (assoc :values valid)))
+             complete! (if (= kind :send) machine/complete-send
+                           machine/complete-authoritative)
+             rejected-missing (rejected-action-kind #(complete! waiting {}))
+             rejected-extra (rejected-action-kind #(complete! waiting extra))
+             rejected-wrong-value
+             (when (= kind :send)
+               (rejected-action-kind
+                #(complete! waiting {:outcome :different})))
+             envelope (when (= kind :send)
+                        (machine/pending-message waiting valid))
+             outcome (complete! waiting valid)
+             completed (if (= kind :send) (:execution outcome) outcome)
+             rejected-replay (rejected-action-kind #(complete! completed valid))]
+         {:kind kind
+          :mask mask
+          :waiting {:bindings (machine/identity-bindings waiting)
+                    :nominal-bindings (nominal-projection waiting)
+                    :status (:status waiting)
+                    :pending (machine/pending-action waiting)
+                    :history (machine/execution-history waiting)
+                    :values (machine/execution-values waiting)}
+          :rejections {:missing rejected-missing
+                       :extra rejected-extra
+                       :wrong-value rejected-wrong-value
+                       :replay rejected-replay}
+          :message envelope
+          :sent-envelope (when (= kind :send) (:message outcome))
+          :completed {:bindings (machine/identity-bindings completed)
+                      :nominal-bindings (nominal-projection completed)
+                      :status (:status completed)
+                      :result (machine/result completed)
+                      :pending (machine/pending-action completed)
+                      :history (machine/execution-history completed)
+                      :values (machine/execution-values completed)
+                      :provenance-kinds (machine/execution-provenance-kinds completed :outcome)}})))))
+
+(deftest sparse-identities-survive-send-and-authoritative-completion
+  (let [cases (portable-action-corpus)]
+    (is (= 256 (count cases)))
+    (is (= (vec (for [kind [:send :authoritative] mask (range 128)]
+                  [kind mask]))
+           (mapv (juxt :kind :mask) cases)))
+    (doseq [{:keys [kind waiting rejections completed]} cases]
+      (is (= (:bindings waiting) (:bindings completed)))
+      (is (= (:bindings waiting) (:nominal-bindings completed)))
+      (is (= :completed (:status completed)))
+      (is (= {:missing (if (= kind :send) :invalid-message-payload
+                           :authoritative-output-mismatch)
+              :extra (if (= kind :send) :invalid-message-payload
+                         :authoritative-output-mismatch)
+              :wrong-value (when (= kind :send) :invalid-message-knowledge)
+              :replay (if (= kind :send) :not-waiting-send
+                          :not-waiting-authoritative)}
+             rejections)))))
+
 #?(:clj
    (defn -main [& _]
      (println "GESSO_CHOREO_IDENTITY_PARITY" (pr-str (portable-identity-corpus)))
      (println "GESSO_CHOREO_ADMISSION_PARITY" (pr-str (portable-admission-corpus)))
-     (println "GESSO_CHOREO_SUSPENSION_PARITY" (pr-str (portable-suspension-corpus)))))
+     (println "GESSO_CHOREO_SUSPENSION_PARITY" (pr-str (portable-suspension-corpus)))
+     (println "GESSO_CHOREO_ACTION_PARITY" (pr-str (portable-action-corpus)))))
 
 (defn- assert-identity-continuity! [execution expected]
   (is (machine/execution? execution))

@@ -7,6 +7,7 @@
 (def ^:private marker "GESSO_CHOREO_IDENTITY_PARITY ")
 (def ^:private admission-marker "GESSO_CHOREO_ADMISSION_PARITY ")
 (def ^:private suspension-marker "GESSO_CHOREO_SUSPENSION_PARITY ")
+(def ^:private action-marker "GESSO_CHOREO_ACTION_PARITY ")
 (def ^:private runtime-slots
   [:principal :actor :authority :host :command-id :execution-id])
 (def ^:private slots
@@ -370,6 +371,138 @@
                       (update-in cases [2 :waiting :bindings] dissoc :principal)))
   (println "JVM/Node suspension mutations: PASS (8 rejected)"))
 
+;; A separate oracle for the remaining endpoint-actuated boundaries. Both
+;; hosts must produce the specified portable action/message/knowledge history,
+;; not merely agree with each other on an incorrect serialization.
+(defn- expected-action-descriptor [kind bindings]
+  (cond->
+   (merge
+    (case kind
+      :send {:kind :send :state 0 :from :server :to :client
+             :event :request/result :via :http :required #{:outcome}}
+      :authoritative {:kind :authoritative :state 0 :role :server
+                      :operation :request/claim :outputs #{:outcome}})
+    {:execution-id (:execution-id bindings)})
+    (contains? bindings :command-id)
+    (assoc :command-id (:command-id bindings))
+    (seq (dissoc bindings :role))
+    (assoc :identity-bindings bindings)))
+
+(defn- expected-action-history [kind]
+  [(case kind
+     :send {:kind :send :state 0 :from :server :to :client
+            :event :request/result :payload {:outcome :confirmed} :via :http}
+     :authoritative {:kind :authoritative :state 0 :role :server
+                     :operation :request/claim :outputs {:outcome :confirmed}})
+   {:kind :terminal :state 1 :outcome :gesso.choreo/complete}])
+
+(defn- validate-actions! [host cases]
+  (let [ids (vec (for [kind [:send :authoritative] mask (range 128)]
+                   [kind mask]))]
+    (when-not (and (vector? cases)
+                   (= 256 (count cases))
+                   (= ids (mapv (juxt :kind :mask) cases)))
+      (fail! "Action-boundary corpus must contain 256 ordered kind/mask cases."
+             {:host host :observed-count (count cases)}))
+    (doseq [{:keys [kind mask waiting completed message sent-envelope rejections] :as entry} cases]
+      (when-not (= #{:kind :mask :waiting :rejections :message :sent-envelope :completed}
+                   (set (keys entry)))
+        (fail! "Action-boundary observation has missing or unknown fields."
+               {:host host :kind kind :mask mask}))
+      (let [bindings (expected-suspension-bindings mask (:bindings waiting))
+            input-values (if (= kind :send) {:outcome :confirmed} {})
+            expected-rejections
+            {:missing (if (= kind :send) :invalid-message-payload
+                          :authoritative-output-mismatch)
+             :extra (if (= kind :send) :invalid-message-payload
+                        :authoritative-output-mismatch)
+             :wrong-value (when (= kind :send) :invalid-message-knowledge)
+             :replay (if (= kind :send) :not-waiting-send
+                         :not-waiting-authoritative)}
+            expected-message
+            (when (= kind :send)
+              {:kind :message :from :server :to :client :event :request/result
+               :payload {:outcome :confirmed} :via :http})]
+        (when-not (= {:bindings bindings
+                      :nominal-bindings bindings
+                      :status (if (= kind :send)
+                                :waiting-send :waiting-authoritative)
+                      :pending (expected-action-descriptor kind bindings)
+                      :history []
+                      :values input-values}
+                     waiting)
+          (fail! "Pending send/authoritative descriptor is inconsistent."
+                 {:host host :kind kind :mask mask :waiting waiting}))
+        (when-not (= expected-rejections rejections)
+          (fail! "Send/authoritative typed rejection differs from the contract."
+                 {:host host :kind kind :mask mask :rejections rejections}))
+        (when-not (and (= expected-message message)
+                       (= expected-message sent-envelope))
+          (fail! "Send completion envelope differs from the pending message."
+                 {:host host :kind kind :mask mask
+                  :message message :sent-envelope sent-envelope}))
+        (when-not (= {:bindings bindings
+                      :nominal-bindings bindings
+                      :status :completed
+                      :result {:outcome :gesso.choreo/complete}
+                      :pending nil
+                      :history (expected-action-history kind)
+                      :values {:outcome :confirmed}
+                      :provenance-kinds (if (= kind :send) #{:input}
+                                            #{:authoritative})}
+                     completed)
+          (fail! "Completed action lost identity, values or semantic history."
+                 {:host host :kind kind :mask mask :completed completed})))))
+  cases)
+
+(defn- compare-actions! [jvm node]
+  (validate-actions! :jvm jvm)
+  (validate-actions! :node node)
+  (when-not (= jvm node)
+    (let [index (first (keep-indexed
+                       (fn [i [a b]] (when (not= a b) i))
+                       (map vector jvm node)))]
+      (fail! "JVM and Node action-boundary observations disagree."
+             {:first-mismatch index
+              :kind-mask (select-keys (get jvm index) [:kind :mask])})))
+  true)
+
+(defn- action-negative-checks! [cases]
+  (expect-rejected! :missing-action
+                    #(compare-actions! cases (pop cases)))
+  (expect-rejected! :reordered-action
+                    #(compare-actions! cases
+                      (-> cases (assoc 0 (nth cases 1))
+                                (assoc 1 (nth cases 0)))))
+  (expect-rejected! :wrong-send-kind
+                    #(compare-actions! cases
+                      (assoc-in cases [0 :waiting :pending :kind] :authoritative)))
+  (expect-rejected! :wrong-message-payload
+                    #(compare-actions! cases
+                      (assoc-in cases [0 :message :payload :outcome] :rejected)))
+  (expect-rejected! :forged-sender-knowledge
+                    #(compare-actions! cases
+                      (assoc-in cases [0 :rejections :wrong-value] nil)))
+  (expect-rejected! :missing-descriptor-command
+                    #(compare-actions! cases
+                      (update-in cases [32 :waiting :pending] dissoc :command-id)))
+  (expect-rejected! :changed-nominal-binding
+                    #(compare-actions! cases
+                      (assoc-in cases [255 :completed :nominal-bindings :role] :client)))
+  (expect-rejected! :wrong-authoritative-history
+                    #(compare-actions! cases
+                      (assoc-in cases [128 :completed :history 0 :operation] :forged)))
+  (expect-rejected! :wrong-replay-error
+                    #(compare-actions! cases
+                      (assoc-in cases [128 :rejections :replay] :not-waiting-send)))
+  (expect-rejected! :forged-sent-envelope
+                    #(compare-actions! cases
+                      (assoc-in cases [0 :sent-envelope :to] :attacker)))
+  (expect-rejected! :false-authority-provenance
+                    #(compare-actions! cases
+                      (assoc-in cases [128 :completed :provenance-kinds] #{:input})))
+  (println "JVM/Node action boundary mutations: PASS (11 rejected)"))
+
 (defn -main [& args]
   (when-not (= 2 (count args))
     (fail! "Usage: bb script/check_choreo_identity_parity.clj JVM_LOG NODE_LOG"
@@ -380,15 +513,20 @@
         jvm-admissions (read-corpus! jvm-file admission-marker)
         node-admissions (read-corpus! node-file admission-marker)
         jvm-suspensions (read-corpus! jvm-file suspension-marker)
-        node-suspensions (read-corpus! node-file suspension-marker)]
+        node-suspensions (read-corpus! node-file suspension-marker)
+        jvm-actions (read-corpus! jvm-file action-marker)
+        node-actions (read-corpus! node-file action-marker)]
     (compare-corpora! jvm node)
     (negative-checks! jvm)
     (compare-admissions! jvm-admissions node-admissions)
     (admission-negative-checks! jvm-admissions)
     (compare-suspensions! jvm-suspensions node-suspensions)
     (suspension-negative-checks! jvm-suspensions)
+    (compare-actions! jvm-actions node-actions)
+    (action-negative-checks! jvm-actions)
     (println "JVM/Node identity transition observations: PASS (128 identical cases)")
     (println "JVM/Node typed identity admissions: PASS (56 identical cases)")
-    (println "JVM/Node receive/await suspension observations: PASS (256 identical cases)")))
+    (println "JVM/Node receive/await suspension observations: PASS (256 identical cases)")
+    (println "JVM/Node send/authoritative action observations: PASS (256 identical cases)")))
 
 (apply -main *command-line-args*)
