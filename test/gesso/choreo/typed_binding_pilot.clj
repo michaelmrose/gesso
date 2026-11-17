@@ -34,7 +34,12 @@
    key input domain and a seven-way union of possible successful results.
    This eliminates the previous Any-return assumption for that function,
    but does not correlate an individual input key with its specific result,
-   nor prove any of the trusted predicate refinements. The public bindings
+   nor prove any of the trusted predicate refinements. We therefore test
+   that the WHOLE dispatcher still type-checks after each of seven unsafe
+   cross-category branch swaps, while source-derived key-specific checks
+   correctly reject those exact mutations as static type errors. An overloaded
+   dispatcher signature has NOT been claimed: Typed Clojure cannot verify the
+   original case body against seven correlated overloads. The public bindings
    caller's key validation is still separately flow-audited. This gate now
    also audits the exact flow from each reducer entry through validate-binding
    into the output map, and rejects a bypass mutation that is still well-typed
@@ -292,6 +297,24 @@
                  (list 'fn ['value] expr)
                  (list 'typed.clojure/IFn
                        ['typed.clojure/Any '-> output-type])))
+         substitute-case-arm
+         (fn [definition target replacement]
+           (let [original-case (last definition)
+                 entries (partition 2 (drop 2 original-case))
+                 hits (count (filter #(= target (first %)) entries))]
+             ;; Never silently mutate an unrecognized or missing case arm.
+             (when-not (and (= 'case (first original-case))
+                            (= 'key (second original-case))
+                            (= 7 (count entries))
+                            (= 1 hits))
+               (throw (ex-info "Cannot substitute original binding arm."
+                               {:target target :hits hits})))
+             (let [new-case (list* 'case 'key
+                                   (mapcat (fn [[k body]]
+                                             [k (if (= k target)
+                                                  replacement body)])
+                                           entries))]
+               (apply list (concat (butlast definition) [new-case])))))
          kind-predicates
          [[:principal 'principal? identity/principal identity/principal?]
           [:actor 'actor? identity/actor identity/actor?]
@@ -331,6 +354,48 @@
                            {:exception (some-> ex ex-message)
                             :errors (mapv str type-errors)})))
          (println "Rejected unsupported validate-binding key statically."))
+       ;; Whole-body union checking cannot preserve the correlation between
+       ;; a particular key and its result kind. For each of the seven real
+       ;; case arms, transplant a *different* existing source arm. The
+       ;; original seven-way union still passes; the exact original arm,
+       ;; checked at its expected type, must reject the transplant.
+       ;;
+       ;; This is a demonstration of the gap and a permanent guard on the
+       ;; source-derived per-arm evidence. It relies on the declared one-way
+       ;; predicate refinements; it is not a dependent-type proof of the
+       ;; original dispatcher or an independent proof of these refinements.
+       (doseq [[key wrong-key expected-type]
+               [[:role :principal 'typed.clojure/Kw]
+                [:principal :actor
+                 'gesso.choreo.typed-binding-pilot/PrincipalRef]
+                [:actor :authority
+                 'gesso.choreo.typed-binding-pilot/ActorRef]
+                [:authority :host
+                 'gesso.choreo.typed-binding-pilot/AuthorityRef]
+                [:host :command-id
+                 'gesso.choreo.typed-binding-pilot/HostRef]
+                [:command-id :execution-id
+                 'gesso.choreo.typed-binding-pilot/CommandRef]
+                [:execution-id :principal
+                 'gesso.choreo.typed-binding-pilot/ExecutionRef]]]
+         (let [original-arm (get branches key)
+               wrong-arm (get branches wrong-key)
+               mutant (substitute-case-arm binding-definition key wrong-arm)
+               mutant-case (last mutant)
+               mutant-arm (get (apply hash-map (drop 2 mutant-case)) key)
+               original-typed (typed-branch original-arm expected-type)
+               mutant-typed (typed-branch mutant-arm expected-type)]
+           (when-not (and (not= original-arm wrong-arm)
+                          (not= binding-definition mutant)
+                          (= wrong-arm mutant-arm))
+             (throw (ex-info "Cross-kind dispatcher mutation ineffective."
+                             {:binding key :replacement wrong-key})))
+           (check-form [:specific-original key] original-typed)
+           (check-form [:union-accepts-wrong-kind key] mutant)
+           (check-negative [:specific-rejects-wrong-kind key]
+                           original-typed mutant-typed)))
+       (println "Seven whole-case wrong-category mutations accepted by union")
+       (println "and rejected by source-derived key-specific typing.")
        ;; The original category predicates merely delegate to kind?. The
        ;; checker proves Boolean results under a truthful broad annotation;
        ;; their stronger Pred refinements remain separately trusted.
