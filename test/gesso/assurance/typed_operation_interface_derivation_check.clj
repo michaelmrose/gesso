@@ -45,12 +45,19 @@
 (def induction-status-type
   '(typed.clojure/U (typed.clojure/Val :checked-conditional-induction)
                     (typed.clojure/Val :open)))
+(def open-reason-type
+  ;; Checked induction-ledger rows supply only these source-relative reasons.
+  ;; nil means the checked conditional step has no recorded open reason.
+  ;; This is a classification, not discharge of original premises.
+  '(typed.clojure/U (typed.clojure/Val nil)
+                    (typed.clojure/Val :initial-consequence-open)
+                    (typed.clojure/Val :some-preservation-open)))
 (def invariant-result-type
   (list 'typed.clojure/HMap
         :mandatory {:initial-status inference-status-type
                     :preservation-status inference-status-type
                     :induction-status induction-status-type
-                    :open-reason 'typed.clojure/Any}
+                    :open-reason open-reason-type}
         :complete? true))
 
 (def operation-contract-type
@@ -160,7 +167,7 @@
   (doseq [[name signature]
           [['gesso.assurance.proof.operation-interface/invariant-result-entry
             [inference-status-type inference-status-type induction-status-type
-             'typed.clojure/Any '-> invariant-result-type]]
+             open-reason-type '-> invariant-result-type]]
            ['gesso.assurance.proof.operation-interface/operation-contract-entry
             ['typed.clojure/Any 'typed.clojure/Any 'typed.clojure/Kw
              'typed.clojure/Any transition-description-type semantic-type
@@ -628,6 +635,8 @@
              [:missing-step #(dissoc % :preservation-status)]
              [:missing-induction #(dissoc % :induction-status)]
              [:missing-reason #(dissoc % :open-reason)]
+             [:invalid-reason-number #(assoc % :open-reason 42)]
+             [:invalid-reason-category #(assoc % :open-reason :proved)]
              [:fake-proof #(assoc % :theorem :proved)]]]
       (reject! checker [:invalid-invariant-descriptor label]
                (mutate-contract source edit)))
@@ -640,8 +649,14 @@
               '(invariant-result-entry :open :open :proved nil)]
              [:inference-in-induction-slot
               '(invariant-result-entry :open :open
-                                       :checked-conditional-inference nil)]]]
+                                       :checked-conditional-inference nil)]
+             [:invented-reason
+              '(invariant-result-entry :open :open :open :not-a-ledger-reason)]]]
       (reject! checker [:invalid-invariant-call label] call))
+    (check! checker :valid-open-reason-call
+            '(invariant-result-entry :open :open :open :some-preservation-open))
+    (check! checker :valid-initial-reason-call
+            '(invariant-result-entry :open :open :open :initial-consequence-open))
     (check! checker :valid-open-invariant-call
             '(invariant-result-entry :open :open :open nil))
     (check! checker :valid-checked-invariant-call

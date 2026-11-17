@@ -37,13 +37,14 @@
 ;; The aggregate uses the same initial/step and induction status families.
 (def ^:private inference-type iface-check/inference-status-type)
 (def ^:private induction-type iface-check/induction-status-type)
+(def ^:private open-reason-type iface-check/open-reason-type)
 (def aggregate-invariant-type
   (list 'typed.clojure/HMap
         :mandatory {:initial-status inference-type
                     :preservation-by-operation
                     (list 'typed.clojure/Map 'typed.clojure/Kw inference-type)
                     :induction-status induction-type
-                    :open-reason 'typed.clojure/Any}
+                    :open-reason open-reason-type}
         :complete? true))
 (def ^:private aggregate-results-type
   (list 'typed.clojure/Map 'typed.clojure/Kw aggregate-invariant-type))
@@ -159,10 +160,23 @@
              (list 'typed.clojure/Set inference-type)]]
            ['gesso.assurance.proof.operation-interface-composition/preservation-step-statuses
             [individual-results-type '-> (list 'typed.clojure/Set inference-type)]]
+           ['gesso.assurance.proof.operation-interface-composition/operation-invariant-row
+            [individual-results-type 'typed.clojure/Kw
+             iface-check/invariant-result-type '-> individual-results-type]]
+           ['gesso.assurance.proof.operation-interface-composition/operation-invariant-results
+            [(list 'typed.clojure/Map 'typed.clojure/Kw
+                   iface-check/operation-contract-type)
+             'typed.clojure/Kw '-> individual-results-type]]
+           ['gesso.assurance.proof.operation-interface-composition/open-reason-row
+            [(list 'typed.clojure/Set open-reason-type)
+             'typed.clojure/Kw iface-check/invariant-result-type
+             '-> (list 'typed.clojure/Set open-reason-type)]]
+           ['gesso.assurance.proof.operation-interface-composition/open-reasons
+            [individual-results-type '-> (list 'typed.clojure/Set open-reason-type)]]
            ['gesso.assurance.proof.operation-interface-composition/consistent-invariant-statuses?
             [(list 'typed.clojure/Set inference-type)
              (list 'typed.clojure/Set induction-type)
-             '(typed.clojure/Set typed.clojure/Any)
+             (list 'typed.clojure/Set open-reason-type)
              (list 'typed.clojure/Set inference-type)
              '-> 'typed.clojure/Bool]]
            ['gesso.assurance.proof.operation-interface-composition/empty-preservation-statuses
@@ -175,7 +189,7 @@
            ['gesso.assurance.proof.operation-interface-composition/aggregate-invariant-entry
             [inference-type
              (list 'typed.clojure/Map 'typed.clojure/Kw inference-type)
-             induction-type 'typed.clojure/Any '-> aggregate-invariant-type]]
+             induction-type open-reason-type '-> aggregate-invariant-type]]
            ['gesso.assurance.proof.operation-interface-composition/sorted-map*
             ['typed.clojure/Any '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.operation-interface-composition/interactions
@@ -313,14 +327,11 @@
     @found))
 
 (def ^:private expected-status-acquisition
-  {'results
-   '(sorted-map*
-     (for [[op-id op] interfaces]
-       [op-id (get-in op [:conditional-invariant-results invariant-id])]))
+  {'results '(operation-invariant-results interfaces invariant-id)
    'values '(vals results)
    'initial '(initial-statuses results)
    'induction '(induction-statuses results)
-   'open-reasons '(set (map :open-reason values))
+   'open-reasons '(open-reasons results)
    'steps '(preservation-step-statuses results)})
 
 (def ^:private expected-preservation-row
@@ -361,6 +372,26 @@
       (when-not (= expected actual)
         (throw (ex-info "Original operation-status extraction changed"
                         {:name name :expected expected :actual actual})))))
+  true)
+
+(def ^:private expected-evidence-extractors
+  {'operation-invariant-row
+   '(assoc entries operation-id invariant-result)
+   'operation-invariant-results
+   '(reduce-kv (fn [entries operation-id operation]
+                 (operation-invariant-row
+                  entries operation-id
+                  (get-in operation [:conditional-invariant-results invariant-id])))
+               (sorted-map* []) interfaces)
+   'open-reason-row '(conj reasons (:open-reason result))
+   'open-reasons '(reduce-kv open-reason-row #{} results)})
+
+(defn- check-evidence-extraction-source! [forms]
+  (doseq [[name expected] expected-evidence-extractors]
+    (when-not (= expected (last (original forms name)))
+      (throw (ex-info "Original operation/invariant evidence source changed"
+                      {:name name :expected expected
+                       :actual (last (original forms name))}))))
   true)
 
 (defn- check-status-consistency-source! [forms]
@@ -415,12 +446,114 @@
               (original forms name)))
     (check-preservation-source! forms)
     (check-status-extraction-source! forms)
+    (check-evidence-extraction-source! forms)
     (check-status-consistency-source! forms)
     (check-aggregate-source! forms)
     (doseq [name (keys expected-status-extractors)]
       (check! checker [:original-status-extraction name] (original forms name)))
+    ;; The nested operation/invariant lookup is Any to Typed Clojure.
+    ;; Its reduction remains source-audited and runtime-tested; only the
+    ;; original pure row insertion and open-reason reduction are checked.
+    (doseq [name '[operation-invariant-row open-reason-row open-reasons]]
+      (check! checker [:original-evidence-extraction name] (original forms name)))
+    ;; These are ORIGINAL production helpers. The operation-key insertion and
+    ;; reason-set reduction are statically checked. The nested get-in remains
+    ;; source-audited because Typed Clojure infers Any for its lookup.
+    (doseq [[label malformed]
+            [[:invented-operation-reason
+              '(open-reason-row #{} :operation/a
+                {:initial-status :open :preservation-status :open
+                 :induction-status :open :open-reason :proved})]
+             [:nonkeyword-operation-key
+              '(operation-invariant-row {} "operation/a"
+                {:initial-status :open :preservation-status :open
+                 :induction-status :open :open-reason nil})]
+             [:invented-result-reason
+              '(operation-invariant-row {} :operation/a
+                {:initial-status :open :preservation-status :open
+                 :induction-status :open :open-reason :unrecognized})]
+             [:invalid-reason-input
+              '(open-reasons
+                {:operation/a {:initial-status :open :preservation-status :open
+                               :induction-status :open :open-reason []}})]]]
+      (reject! checker [:wrong-evidence-source-input label] malformed))
+    (let [example {:initial-status :open
+                   :preservation-status :checked-conditional-inference
+                   :induction-status :open
+                   :open-reason :some-preservation-open}
+          other {:initial-status :open
+                 :preservation-status :open
+                 :induction-status :open
+                 :open-reason :some-preservation-open}
+          peer {:initial-status :open
+                :preservation-status :open
+                :induction-status :open
+                :open-reason nil}
+          interfaces (sorted-map
+                      :operation/a {:conditional-invariant-results
+                                    {:invariant/a example :invariant/b peer}}
+                      :operation/z {:conditional-invariant-results
+                                    {:invariant/a other :invariant/b peer}})
+          mapped (var-get
+                  #'gesso.assurance.proof.operation-interface-composition/operation-invariant-results)
+          reasons (var-get
+                   #'gesso.assurance.proof.operation-interface-composition/open-reasons)
+          sorted* (var-get
+                   #'gesso.assurance.proof.operation-interface-composition/sorted-map*)]
+      ;; Compare LIVE extraction against the original nested for, for two
+      ;; invariants, preserving all original operation keys and sorted order.
+      (doseq [id [:invariant/a :invariant/b]]
+        (let [expected (sorted*
+                        (for [[op-id op] interfaces]
+                          [op-id (get-in op [:conditional-invariant-results id])]))
+              actual (mapped interfaces id)]
+          (when-not (and (= expected actual)
+                         (= (vec (keys expected)) (vec (keys actual)))
+                         (= (set (map :open-reason (vals actual)))
+                            (reasons actual)))
+            (throw (ex-info "Original invariant evidence extraction changed"
+                            {:invariant-id id :expected expected :actual actual}))))))
+    ;; Same-typed operation and invariant IDs can be incorrectly associated.
+    ;; These SOURCE mutations must be caught even when static typing accepts.
+    (doseq [[label name replacement]
+            [[:wrong-operation-key 'operation-invariant-row
+              '(assoc entries :operation/other invariant-result)]
+             [:wrong-invariant-key 'operation-invariant-results
+              '(reduce-kv
+                (fn [entries operation-id operation]
+                  (operation-invariant-row
+                   entries operation-id
+                   (get-in operation [:conditional-invariant-results :invariant/other])))
+                (sorted-map* []) interfaces)]
+             [:missing-operation-rows 'operation-invariant-results
+              '(reduce-kv
+                (fn [entries operation-id operation]
+                  (operation-invariant-row
+                   entries operation-id
+                   (get-in operation [:conditional-invariant-results invariant-id])))
+                (sorted-map* []) {})]
+             [:wrong-reason-field 'open-reason-row
+              '(conj reasons (:initial-status result))]
+             [:omitted-reasons 'open-reasons
+              '(reduce-kv open-reason-row #{} {})]]]
+      (let [original-source (original forms name)
+            altered (apply list (concat (butlast original-source) [replacement]))
+            mutated-forms (mapv #(if (= % original-source) altered %) forms)]
+        (when (= name 'operation-invariant-row)
+          (check! checker [:type-compatible-wrong-operation label] altered))
+        (when-not (try (check-evidence-extraction-source! mutated-forms)
+                       false
+                       (catch clojure.lang.ExceptionInfo _ true))
+          (throw (ex-info "Incorrect evidence extraction escaped source audit"
+                          {:label label})))))
     (check! checker :original-invariant-status-agreement
             (original forms 'consistent-invariant-statuses?))
+    (check! checker :valid-open-reason-call
+            '(open-reasons {:operation/a
+                            {:initial-status :open
+                             :preservation-status :open
+                             :induction-status :open
+                             :open-reason :some-preservation-open}}))
     (check! checker :valid-consistent-status-call
             '(consistent-invariant-statuses?
               #{:checked-conditional-inference}
@@ -540,7 +673,7 @@
             '(aggregate-invariant-entry
               :checked-conditional-inference
               {:operation/a :checked-conditional-inference :operation/b :open}
-              :open :source-has-an-open-step))
+              :open :some-preservation-open))
     (doseq [[name transform]
             [[:wrong-initial-status #(assoc % :initial-status :proved)]
              [:wrong-step-status #(assoc % :preservation-by-operation
@@ -699,14 +832,9 @@
               '(initial-statuses results)]
              [:induction-from-initial-set
               '(induction-statuses results)
-              '(initial-statuses results)]
-             [:wrong-source-invariant
-              '(get-in op [:conditional-invariant-results invariant-id])
-              '(get-in op [:conditional-invariant-results :unrelated-id])]]]
+              '(initial-statuses results)]]]
       (let [changed (if (or (= old expected-aggregate-guard)
-                            (contains? (set (vals expected-status-acquisition)) old)
-                            (= old '(get-in op [:conditional-invariant-results
-                                                    invariant-id])))
+                            (contains? (set (vals expected-status-acquisition)) old))
                       (replace-unique-source aggregate-source old new)
                       (replace-unique-source aggregate-source
                        expected-aggregate-call
@@ -845,11 +973,13 @@
         forms (source-forms)]
     (checks! checker forms)
     (runtime-guard!)
-    (println "Typed operation composition passed: 13 original checked source")
+    (println "Typed operation composition passed: 16 original checked source")
     (println "bodies; 34 report, 17 aggregate, 9 preservation, 5 status-input")
     (println "and 4 nominal closure calls plus 6 malformed agreement inputs")
     (println "rejected by typing; 14 live agreement cases, 6 predicate mutants,")
     (println "6 status-extraction and 11 aggregate/preservation source mutants,")
+    (println "4 malformed evidence calls, 5 evidence source mutants, live")
+    (println "operation/invariant and reason-set equivalence checks;")
     (println "same-type source swaps, sorted-map equivalence tests, and")
     (println "2 report provenance swaps and runtime forged-closure rejection.")
     :ok))

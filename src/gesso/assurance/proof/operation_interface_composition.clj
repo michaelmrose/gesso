@@ -143,6 +143,31 @@
   [results]
   (reduce-kv preservation-step-row #{} results))
 
+(defn- operation-invariant-row
+  "Preserve the original operation ID and its selected invariant evidence.
+   interfaces! has already validated complete operation/invariant coverage."
+  [entries operation-id invariant-result]
+  (assoc entries operation-id invariant-result))
+
+(defn- operation-invariant-results
+  "Retain all original operation/invariant evidence in deterministic order."
+  [interfaces invariant-id]
+  (reduce-kv (fn [entries operation-id operation]
+               (operation-invariant-row
+                entries operation-id
+                (get-in operation [:conditional-invariant-results invariant-id])))
+             (sorted-map* []) interfaces))
+
+(defn- open-reason-row
+  "Collect the original invariant's reason from each operation's evidence."
+  [reasons _operation-id result]
+  (conj reasons (:open-reason result)))
+
+(defn- open-reasons
+  "Keep distinct open-reason classifications across the original operations."
+  [results]
+  (reduce-kv open-reason-row #{} results))
+
 (defn- consistent-invariant-statuses?
   "Check agreement across ORIGINAL per-operation conditional evidence.
    This is a consistency predicate over supplied status sets, not a proof
@@ -161,14 +186,11 @@
 (defn- invariant-results! [interfaces invariant-ids]
   (sorted-map*
    (for [invariant-id (sorted-ids invariant-ids)]
-     (let [results (sorted-map*
-                    (for [[op-id op] interfaces]
-                      [op-id (get-in op [:conditional-invariant-results
-                                         invariant-id])]))
+     (let [           results (operation-invariant-results interfaces invariant-id)
            values (vals results)
            initial (initial-statuses results)
            induction (induction-statuses results)
-           open-reasons (set (map :open-reason values))
+           open-reasons (open-reasons results)
            steps (preservation-step-statuses results)]
        (when-not (consistent-invariant-statuses?
                   initial induction open-reasons steps)
