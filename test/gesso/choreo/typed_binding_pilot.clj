@@ -24,10 +24,12 @@
    shape for already well-typed input; neither overload by itself proves
    that an input has passed admission. The gate checks the original
    `bindings?` and `binding-value` consumers against the broad overload and
-   audits that they actually call `bindings`. The `bindings` implementation
-   itself remains unchecked due to a Typed Clojure inference limitation;
-   source audits and bounded runtime checks are not universal proofs.
-   This does not establish authorization or full application admission."
+   audits that they actually call `bindings`. The original `bindings`
+   implementation is also checked under a deliberately BROAD map-returning
+   contract for untrusted inputs; the stronger command/execution overload
+   remains a separately trusted assumption, not a proved implementation
+   property. Checks of a broad result type do not prove the per-key runtime
+   validation, authorization, or full application admission."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.choreo.identity :as identity]
@@ -107,8 +109,10 @@
 ;; a sparse map of supported keys. Rejection occurs by exception, not by a
 ;; value-level type. The narrow overload is only useful for typed callers;
 ;; it does NOT turn a structural HMap into evidence of runtime admission.
-;; Its implementation is source-audited and runtime-tested below, not checked
-;; in full (the checker currently encounters an inference error in `into`).
+;; The original implementation is independently checked under a broad
+;; [Any -> Map Any Any] contract at the end of this gate. The stronger
+;; command/execution overload remains trusted and is NOT verified by that
+;; source-body check.
 (t/ann identity/binding-keys (t/Set t/Kw))
 (t/ann identity/bindings
        (t/IFn
@@ -473,6 +477,25 @@
        (when (predicate invalid)
          (throw (ex-info "Predicate accepted malformed/non-identity data."
                          {:predicate pred-name :value invalid}))))
+     ;; Verify the exact current production source body for bindings. The
+     ;; earlier into/map transducer could not be checked by Typed Clojure;
+     ;; the current source uses a locally annotated direct reducer. Here we
+     ;; temporarily install BROAD interfaces in the checker environment to
+     ;; avoid claiming that the reducer proves the stronger command/execution
+     ;; HMap overload. Do this LAST: previous checks used the original public
+     ;; signatures. The override affects only this opt-in checker process and
+     ;; does not alter any production Var or runtime behavior.
+     (t/ann identity/bindings [t/Any -> (t/Map t/Any t/Any)])
+     (t/ann identity/validate-binding [t/Any t/Any -> t/Any])
+     (binding [*ns* (the-ns 'gesso.choreo.identity)]
+       (let [original (source-function 'bindings)
+             ;; Reject a concrete wrong return type with a static checker
+             ;; mismatch, not an exception or a runtime evaluation failure.
+             mutated (apply list (concat (butlast original) [:not-a-map]))]
+         (check-form :bindings-original-broad-contract original)
+         (check-negative :bindings-wrong-return original mutated)))
+     (println "Checked original bindings body under broad map contract;")
+     (println "the command/execution overload is still trusted.")
      (println "Checked original bindings? and binding-value bodies;")
      (println "validated sparse maps and rejected malformed typed shapes.")
      (println "Checked six original predicate bodies, seven negative return")
