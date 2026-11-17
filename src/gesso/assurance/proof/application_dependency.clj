@@ -59,11 +59,16 @@
 (defn- edge [raw]
   {:id (:id raw) :fingerprint (fingerprint raw)})
 
+(defn- ordered-sources [sources]
+  ;; A small runtime order boundary. Typed Clojure's current sort-by
+  ;; annotation only accepts numeric keys, while these IDs sort by string.
+  (sort-by (comp str :id) sources))
+
 (defn- node [raw sources]
   {:id (:id raw)
    :subject raw
    :subject-handle (admission/admit-subject! raw)
-   :depends-on (mapv edge (sort-by (comp str :id) sources))})
+   :depends-on (mapv edge (ordered-sources sources))})
 
 (defn- source-node! [base role id]
   (let [matches (filter (fn [n]
