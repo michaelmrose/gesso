@@ -86,7 +86,9 @@
      (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-application-assurance-report-check")
      (shell "clojure" "-M:typed" "-m"
-            "gesso.assurance.typed-operation-interface-composition-check"))}
+            "gesso.assurance.typed-operation-interface-composition-check")
+     (shell "clojure" "-M:typed" "-m"
+            "gesso.assurance.typed-operation-interface-provenance-check"))}
 
   test:jvm
   {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."

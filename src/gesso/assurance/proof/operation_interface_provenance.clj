@@ -140,6 +140,26 @@
             :induction-status (get-in composition
                                       [:invariant-results id :induction-status])}]))))
 
+(defn- manifest-entry
+  "Pure, copyable source-relative descriptor, never an authoritative token.
+   The caller must FIRST revalidate the original composition, compare the
+   source-closure identity, and verify its graph root. Those runtime checks
+   cannot be replaced by the structural type of this result."
+  [lineage identity]
+  {:type provenance-type
+   :version provenance-version
+   :fingerprint (:fingerprint identity)
+   :lineage lineage
+   :scope :closed-declared-abstract-machine-only
+   :checking :source-relative-graph-and-composition-provenance
+   :proof-status :conditional-structural-evidence
+   :assumption-discharge :not-performed
+   :installed-writer-coverage :not-established
+   :implementation-correspondence :not-established
+   :certificate :not-issued
+   :admission :not-admitted
+   :authority :none})
+
 (defn describe-composition-provenance!
   "Revalidate untrusted v1443 composition against current original source,
    then build a complete versioned graph/source/assumption lineage report.
@@ -203,19 +223,7 @@
     (when-not (= (get-in lineage [:source-roots :application :id])
                  (first (get-in lineage [:graph :roots])))
       (reject! :application-root-mismatch {}))
-    {:type provenance-type
-     :version provenance-version
-     :fingerprint (:fingerprint identity)
-     :lineage lineage
-     :scope :closed-declared-abstract-machine-only
-     :checking :source-relative-graph-and-composition-provenance
-     :proof-status :conditional-structural-evidence
-     :assumption-discharge :not-performed
-     :installed-writer-coverage :not-established
-     :implementation-correspondence :not-established
-     :certificate :not-issued
-     :admission :not-admitted
-     :authority :none}))
+    (manifest-entry lineage identity)))
 
 (defn require-current-composition-provenance!
   "Rebuild and compare the *entire* copyable manifest with current source.
