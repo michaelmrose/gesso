@@ -99,6 +99,10 @@
   (let [plan '(typed.clojure/HMap
                :mandatory {:role typed.clojure/Kw} :complete? false)
         values '(typed.clojure/Map typed.clojure/Kw typed.clojure/Any)
+        tagged-map '(typed.clojure/Map
+                     typed.clojure/Kw
+                     (typed.clojure/U typed.clojure/Kw
+                       (typed.clojure/Map typed.clojure/Any typed.clojure/Any)))
         nullable-keys '(typed.clojure/U
                         nil (typed.clojure/Set typed.clojure/Kw))
         local-state (list 'typed.clojure/HMap
@@ -122,20 +126,18 @@
                      :complete? false)
         kw-set '(typed.clojure/Set typed.clojure/Kw)
         signatures [['local-action :local
-                     [plan map-type 'typed.clojure/Any local-state values]]
+                     [plan tagged-map 'typed.clojure/Any local-state values]]
                     ['authoritative-action :authoritative
-                     [plan map-type 'typed.clojure/Any authoritative-state values]]
+                     [plan tagged-map 'typed.clojure/Any authoritative-state values]]
                     ['send-action :send
-                     [plan map-type 'typed.clojure/Any send-state]]]
+                     [plan tagged-map 'typed.clojure/Any send-state]]]
         sources (into {} (map (fn [[name _ _]]
                                 [name (source-definition forms name)])
-                              signatures))]
-    ;; This general mapping matches the existing source-backed identity gate.
-    ;; It is NOT assumed to preserve the action category. Instead we check
-    ;; the actual source literal before it crosses that general map boundary.
-    (eval (list 'typed.clojure/ann
-                'gesso.choreo.machine/descriptor-identities
-                (list 'typed.clojure/IFn [map-type map-type '-> map-type])))
+                              signatures))
+        projection (source-definition forms 'descriptor-identities)]
+    ;; Check the ORIGINAL projection with a specialized tagged-descriptor
+    ;; contract per action kind. Do not assume a Map->Map return retains
+    ;; the :kind or its mandatory fields.
     (doseq [[name return]
             [['contract-required kw-set]
              ['contract-optional kw-set]
@@ -145,24 +147,49 @@
                   (symbol "gesso.choreo.machine" (str name))
                   (list 'typed.clojure/IFn [send-state '-> return]))))
     (doseq [[name category params] signatures]
-      (eval (list 'typed.clojure/ann
-                  (symbol "gesso.choreo.machine" (str name))
-                  (list 'typed.clojure/IFn
-                        (vec (concat params ['-> map-type])))))
-      (let [original (get sources name)
-            instrumented (annotate-descriptor-literal original category)]
+      (let [descriptor-type
+            (list 'typed.clojure/HMap :mandatory
+                  (get descriptor-contracts category) :complete? false)
+            original (get sources name)
+            instrumented (annotate-descriptor-literal original category)
+            wrong-kind (case category
+                         :local :send
+                         :authoritative :receive
+                         :send :authoritative)]
+        (eval (list 'typed.clojure/ann
+                    'gesso.choreo.machine/descriptor-identities
+                    (list 'typed.clojure/IFn
+                          [descriptor-type tagged-map '-> descriptor-type])))
+        (check-source! checker [name :original-identity-projection] projection)
+        (eval (list 'typed.clojure/ann
+                    (symbol "gesso.choreo.machine" (str name))
+                    (list 'typed.clojure/IFn
+                          (vec (concat params ['-> descriptor-type])))))
         ;; First check the untouched function body; then check the same
         ;; function with a type assertion around its ORIGINAL map literal.
         (check-source! checker [name :original-body] original)
         (check-source! checker [name :descriptor-fields] instrumented)
-        (let [wrong-kind (case category
-                           :local :send
-                           :authoritative :receive
-                           :send :authoritative)
-              required (case category
+        (let [required (case category
                          :local :action
                          :authoritative :operation
                          :send :to)]
+          ;; These mutations attack the original code AFTER the action
+          ;; literal was constructed, so the literal-only contract is not
+          ;; enough to reject them. The typed return must preserve :kind.
+          (let [corrupted-projection
+                (apply list (concat (butlast projection)
+                                    [(list 'assoc (last projection)
+                                           :kind wrong-kind)]))
+                corrupted-action
+                (apply list (concat (butlast original)
+                                    [(list 'assoc (last original)
+                                           :kind wrong-kind)]))]
+            (check-mutation! checker
+                             [name :projection-overwrites-kind]
+                             projection corrupted-projection)
+            (check-mutation! checker
+                             [name :action-overwrites-kind]
+                             original corrupted-action))
           (check-mutation!
            checker [name :wrong-kind] original
            (annotate-descriptor-literal
