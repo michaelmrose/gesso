@@ -532,7 +532,14 @@
     (validate-command-binding value)
 
     :execution-id
-    (validate-execution-binding value)))
+    (validate-execution-binding value)
+
+    ;; The public bindings function rejects unsupported keys before
+    ;; reaching this dispatcher; its direct contract is now fail-closed too.
+    (identity-error
+     :unknown-binding
+     "Unknown identity binding key."
+     {:binding key :allowed binding-keys})))
 
 (defn bindings
   "Construct/validate an explicit identity-binding map.
@@ -567,11 +574,16 @@
   ;; A direct reducer preserves the same validated key/value mapping as
   ;; the former into/map transducer. Local argument annotations are metadata
   ;; only, so ordinary Clojure/CLJS users do not load Typed Clojure. They
-  ;; allow the optional checker to verify this implementation against the
-  ;; broad map contract without assuming input identities were admitted.
+  ;; let the optional checker verify that each output value is either a role
+  ;; keyword or a map, without assuming its identity was admitted or its key
+  ;; belongs to a particular semantic category.
   (reduce
    (fn [^{:typed.clojure/- (typed.clojure/Map
-                            typed.clojure/Any typed.clojure/Any)} out
+                            typed.clojure/Any
+                            (typed.clojure/U
+                             typed.clojure/Kw
+                             (typed.clojure/Map typed.clojure/Any
+                                                typed.clojure/Any)))} out
         ^{:typed.clojure/- (typed.clojure/MapEntry
                             typed.clojure/Any typed.clojure/Any)} entry]
      (assoc out

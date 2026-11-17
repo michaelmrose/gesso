@@ -55,7 +55,14 @@
    fabricated, correctly tagged identities pass the category type checker.
    The source-derived checks must also reject deliberate, well-typed forged
    fallbacks. These checks do not certify predicate truth or provenance.
-   Bounded sparse-map enumeration tests
+   The dispatcher now rejects unsupported keys explicitly, so its original
+   body can be checked under an Any-key contract, with unknown keys taking a
+   typed exception path. The original bindings reducer is also checked under
+   a stronger shape-only contract: every returned value is either a role
+   keyword or a map, not arbitrary Any. This DOES NOT prove the map is a
+   valid identity, the returned key is legal, or the key and identity kind
+   correlate; the existing source audits and runtime admission checks cover
+   those properties separately. Bounded sparse-map enumeration tests
    admission behavior but is not an exhaustive proof for arbitrary raw values."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
@@ -128,11 +135,10 @@
 (t/ann identity/execution-id?
        [t/Any -> t/Bool :filters {:then (is ExecutionRef 0) :else tt}])
 
-;; Restrict the *private* dispatcher to the keys that its public caller
-;; admits. With any other key, the source `case` would return nil. That is
-;; precisely why annotating it [Kw Any -> ValidatedBindingValue] would be
-;; unsound. This finite input domain is part of the contract, not a claim
-;; that arbitrary caller data already passed validation.
+;; The private dispatcher is total as an admission *decision*: every key
+;; either returns a validated role/ref or throws. The original `case` now
+;; explicitly rejects unsupported keys, allowing a broad Any-key annotation.
+;; This still does not correlate a particular key with its result category.
 (t/defalias BindingKey
   (t/U (t/Val :role) (t/Val :principal) (t/Val :actor)
        (t/Val :authority) (t/Val :host)
@@ -144,8 +150,12 @@
 ;; union, conditional on the explicit positive-only predicate assumptions.
 ;; The original body is checked below; case-specific correlation is still
 ;; checked separately for each exact source arm.
+(t/ann identity/identity-error [t/Kw t/Str (t/Map t/Any t/Any) -> t/Nothing])
 (t/ann identity/validate-binding
-       [BindingKey t/Any -> ValidatedBindingValue])
+       [t/Any t/Any -> ValidatedBindingValue])
+;; A conservative shape-only superset of all successful values. This type
+;; permits invalid maps: identity admission requires runtime checking.
+(t/defalias BindingResultShape (t/U t/Kw (t/Map t/Any t/Any)))
 ;; The original command-specific helper has a checked implementation body,
 ;; unlike the broad dispatcher whose key/result dependency is not proved.
 (t/ann identity/validate-principal-binding [t/Any -> PrincipalRef])
@@ -155,22 +165,21 @@
 (t/ann identity/validate-command-binding [t/Any -> CommandRef])
 (t/ann identity/validate-execution-binding [t/Any -> ExecutionRef])
 
-;; `bindings` accepts arbitrary downstream data, but normal return means
-;; a sparse map of supported keys. Rejection occurs by exception, not by a
-;; value-level type. The narrow overload is only useful for typed callers;
-;; it does NOT turn a structural HMap into evidence of runtime admission.
-;; The original implementation is independently checked under a broad
-;; [Any -> Map Any Any] contract at the end of this gate. The stronger
-;; command/execution overload remains trusted and is NOT verified by that
-;; source-body check.
+;; `bindings` accepts arbitrary downstream data. The shape-only result
+;; contract below is checked against its source body after widening only
+;; the *key* type to Any, which the checker cannot restrict through the
+;; dynamic key-set check. The more specific key and command/execution
+;; overloads remain trusted and separately source-audited, NOT proven by
+;; the reducer's static map-value check. Rejection still throws.
 (t/ann identity/binding-keys (t/Set t/Kw))
 (t/ann identity/bindings
        (t/IFn
         [gesso.choreo.typed-identity-pilot/CommandExecutionBindings
          -> gesso.choreo.typed-identity-pilot/CommandExecutionBindings]
-        [t/Any -> (t/Map t/Kw t/Any)]))
+        [t/Any -> (t/Map t/Kw BindingResultShape)]))
 (t/ann identity/bindings? [t/Any -> t/Bool])
-(t/ann identity/binding-value [t/Any t/Kw -> t/Any])
+(t/ann identity/binding-value
+       [t/Any t/Kw -> (t/U nil BindingResultShape)])
 
 (t/tc-ignore
  (defn -main [& _]
@@ -303,9 +312,21 @@
          case-form (last binding-definition)
          _ (when-not (and (= 'case (first case-form))
                           (= 'key (second case-form))
-                          (= 14 (count (drop 2 case-form))))
+                          (= 15 (count (drop 2 case-form))))
              (throw (ex-info "Binding dispatcher shape has changed." {})))
-         branches (apply hash-map (drop 2 case-form))
+         branches (apply hash-map (butlast (drop 2 case-form)))
+         default-expr (last case-form)
+         audit-dispatch-default!
+         (fn [expr]
+           (let [expected '(identity-error
+                            :unknown-binding
+                            "Unknown identity binding key."
+                            {:binding key :allowed binding-keys})]
+             (when-not (= expected expr)
+               (throw (ex-info "Unsafe unknown binding-key dispatch."
+                               {:error/kind :unsafe-binding-dispatch
+                                :expected expected :actual expr})))
+             true))
          expected-keys #{:role :principal :actor :authority :host
                          :command-id :execution-id}
          _ (when-not (= expected-keys (set (keys branches))
@@ -320,7 +341,8 @@
          substitute-case-arm
          (fn [definition target replacement]
            (let [original-case (last definition)
-                 entries (partition 2 (drop 2 original-case))
+                 entries (partition 2 (butlast (drop 2 original-case)))
+                 fallback (last original-case)
                  hits (count (filter #(= target (first %)) entries))]
              ;; Never silently mutate an unrecognized or missing case arm.
              (when-not (and (= 'case (first original-case))
@@ -330,10 +352,11 @@
                (throw (ex-info "Cannot substitute original binding arm."
                                {:target target :hits hits})))
              (let [new-case (list* 'case 'key
-                                   (mapcat (fn [[k body]]
-                                             [k (if (= k target)
-                                                  replacement body)])
-                                           entries))]
+                                   (concat (mapcat (fn [[k body]]
+                                                     [k (if (= k target)
+                                                          replacement body)])
+                                                   entries)
+                                           [fallback]))]
                (apply list (concat (butlast definition) [new-case])))))
          kind-predicates
          [[:principal 'principal? identity/principal identity/principal?]
@@ -346,12 +369,17 @@
                                :check-config config))
        (throw (ex-info "Binding pilot namespace did not type-check." {})))
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
-       (doseq [name ['identity? 'kind 'role? 'require-role 'kind?
-                     'validate-principal-binding 'validate-actor-binding
+       (doseq [name ['identity-error 'identity? 'kind 'role?
+                     'require-role 'kind? 'validate-principal-binding 'validate-actor-binding
                      'validate-authority-binding 'validate-host-binding
                      'validate-command-binding 'validate-execution-binding
                      'validate-binding 'bindings? 'binding-value]]
          (check-form name (source-function name)))
+       ;; The dispatcher default relies on identity-error never returning.
+       ;; Type-check its original body and reject a non-throwing mutation.
+       (let [original (source-function 'identity-error)
+             wrong (apply list (concat (butlast original) [42]))]
+         (check-negative :identity-error-must-throw original wrong))
        ;; Every extracted helper must remain wired to its exact input key;
        ;; bypassing it invalidates the key-specific source-check evidence.
        (doseq [[key helper-name]
@@ -376,8 +404,8 @@
              (throw (ex-info "Identity binding no longer uses checked helper."
                              {:key key :expected expected :actual actual})))
            (check-negative [:helper-wrong-return key] helper wrong)))
-       ;; Under the seven-key input domain, the original whole dispatcher
-       ;; must return only a role keyword or one of the six category shapes.
+       ;; The complete dispatcher now rejects unknown keys rather than
+       ;; silently producing nil. Every normal return belongs to the union.
        ;; Mutate an ACTUAL case arm, rather than a typed synthetic branch:
        ;; this must produce a genuine static type mismatch.
        (let [original binding-definition
@@ -385,22 +413,41 @@
              poisoned (walk/postwalk #(if (= % command-branch) 42 %) original)]
          (check-negative :validate-binding-wrong-original-arm
                          original poisoned))
-       ;; An arbitrary keyword is not an admitted binding key. Confirm the
-       ;; checker rejects the call specifically as a static application type
-       ;; error, not as an exception. Nil is still an allowed *input value*
-       ;; at the type boundary, since runtime validation rejects it.
+       ;; Unlike the prior finite-key interface, arbitrary keys are typed
+       ;; but must reject at runtime. The original source default is exact;
+       ;; a forged *typed* role fallback passes the union checker but fails
+       ;; this fail-closed audit. A numeric fallback fails static checking.
+       (audit-dispatch-default! default-expr)
        (check-form :validate-binding-supported-key
                    '(validate-binding :principal nil))
-       (let [{:keys [ex type-errors]}
-             (check-form-info '(validate-binding :unsupported nil)
-                              :check-config config)]
-         (when (or ex
-                   (not= [:typed.clojure/app-type-error]
-                         (mapv :type-error type-errors)))
-           (throw (ex-info "Unsupported key not rejected statically."
-                           {:exception (some-> ex ex-message)
-                            :errors (mapv str type-errors)})))
-         (println "Rejected unsupported validate-binding key statically."))
+       (check-form :validate-binding-unsupported-key-is-typed
+                   '(validate-binding :unsupported nil))
+       (let [original binding-definition
+             forged-default (apply list (concat (butlast case-form)
+                                                [:forged-role]))
+             numeric-default (apply list (concat (butlast case-form)
+                                                 [42]))
+             forged (apply list (concat (butlast original)
+                                        [forged-default]))
+             numeric (apply list (concat (butlast original)
+                                         [numeric-default]))]
+         (check-form :typed-but-forged-unknown-key-fallback forged)
+         (check-negative :numeric-unknown-key-fallback original numeric)
+         (let [error-kind
+               (try (audit-dispatch-default! (last forged-default)) nil
+                    (catch clojure.lang.ExceptionInfo e
+                      (:error/kind (ex-data e))))]
+           (when-not (= :unsafe-binding-dispatch error-kind)
+             (throw (ex-info "Source audit accepted a forged default."
+                             {:actual error-kind}))))
+         (let [kind (try (#'identity/validate-binding :unsupported nil)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e
+                           (:error/kind (ex-data e))))]
+           (when-not (= :unknown-binding kind)
+             (throw (ex-info "Unknown private binding key was not rejected."
+                             {:actual kind})))))
+       (println "Checked total dispatcher and unknown-key rejection path.")
        ;; Whole-body union checking cannot preserve the correlation between
        ;; a particular key and its result kind. For each of the seven real
        ;; case arms, transplant a *different* existing source arm. The
@@ -429,7 +476,7 @@
                wrong-arm (get branches wrong-key)
                mutant (substitute-case-arm binding-definition key wrong-arm)
                mutant-case (last mutant)
-               mutant-arm (get (apply hash-map (drop 2 mutant-case)) key)
+               mutant-arm (get (apply hash-map (butlast (drop 2 mutant-case))) key)
                original-typed (typed-branch original-arm expected-type)
                mutant-typed (typed-branch mutant-arm expected-type)]
            (when-not (and (not= original-arm wrong-arm)
@@ -580,7 +627,7 @@
        (let [original (source-function 'kind?)
              mutated (apply list (concat (butlast original) [42]))]
          (check-negative 'kind?-wrong-return original mutated))
-       ;; The broad signature does not certify the body of `bindings`.
+       ;; A shape-only signature cannot prove key/value correlation.
        ;; Demand that the original functions still route untrusted data
        ;; through it, and that it still invokes per-key validation.
        ;; This source check is intentionally fail-closed on refactoring.
@@ -887,29 +934,40 @@
                                {:input candidate :actual outcome}))))))
        (println "Validated 2,187 sparse binding combinations."))
 
-     ;; Verify the exact current production source body for bindings. The
-     ;; earlier into/map transducer could not be checked by Typed Clojure;
-     ;; the current source uses a locally annotated direct reducer. Here we
-     ;; temporarily install BROAD interfaces in the checker environment to
-     ;; avoid claiming that the reducer proves the stronger command/execution
-     ;; HMap overload. Do this LAST: previous checks used the original public
-     ;; signatures. The override affects only this opt-in checker process and
-     ;; does not alter any production Var or runtime behavior.
-     (t/ann identity/bindings [t/Any -> (t/Map t/Any t/Any)])
-     (t/ann identity/validate-binding [t/Any t/Any -> t/Any])
+     ;; Verify the real reducer with the strengthened role-or-map value
+     ;; guarantee. Only the *key* component is widened to Any: the checker
+     ;; cannot statically derive key-set membership from the source filter.
+     ;; All seven key-specific helper contracts have already been checked;
+     ;; their positive predicate refinements remain trusted.
+     ;; Do this last to preserve earlier checks under the public overload.
+     (t/ann identity/bindings
+            [t/Any -> (t/Map t/Any BindingResultShape)])
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
        (let [original (source-function 'bindings)
              ;; Reject a concrete wrong return type with a static checker
              ;; mismatch, not an exception or a runtime evaluation failure.
              mutated (apply list (concat (butlast original) [:not-a-map]))]
          (check-form :bindings-original-broad-contract original)
-         ;; The bypass remains fully type-correct at the broad boundary;
-         ;; source-flow assurance must catch it, not the map-return checker.
-         (check-form :bindings-bypass-still-broadly-typed
-                     (bypass-binding-validation original))
+         ;; The unchecked input would flow into the map on a bypass. Even
+         ;; if static shape checking permits a future variant, our exact
+         ;; source-flow audit above independently rejects validator bypass.
+         (let [bypass (bypass-binding-validation original)
+               {:keys [ex type-errors]}
+               (check-form-info bypass :check-config config)]
+           ;; The old Any-valued output type admitted arbitrary values.
+           ;; The new union must reject a reducer that inserts unchecked
+           ;; caller values into the map. The separate source audit is still
+           ;; needed for wrong-kind maps, which remain well-typed shapes.
+           (when (or ex
+                     (not= [:typed.clojure/app-type-error]
+                           (mapv :type-error type-errors)))
+             (throw (ex-info "Unvalidated reducer bypass was not rejected statically."
+                             {:exception (some-> ex ex-message)
+                              :errors (mapv str type-errors)})))
+           (println "Static output shape rejects unvalidated reducer bypass."))
          (check-negative :bindings-wrong-return original mutated)))
-     (println "Checked original bindings body under broad map contract;")
-     (println "the command/execution overload is still trusted.")
+     (println "Checked original bindings values as keyword-or-map;")
+     (println "key membership and command/execution overload remain trusted.")
      (println "Checked original bindings? and binding-value bodies;")
      (println "validated sparse maps and rejected malformed typed shapes.")
      (println "Checked six original predicate bodies, seven negative return")
