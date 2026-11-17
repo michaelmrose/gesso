@@ -14,19 +14,19 @@
   {:local
    {:kind '(typed.clojure/Val :local)
     :state 'typed.clojure/Any
-    :role 'typed.clojure/Any
+    :role 'typed.clojure/Kw
     :action 'typed.clojure/Any}
    :authoritative
    {:kind '(typed.clojure/Val :authoritative)
     :state 'typed.clojure/Any
-    :role 'typed.clojure/Any
+    :role 'typed.clojure/Kw
     :operation 'typed.clojure/Any}
    :send
    {:kind '(typed.clojure/Val :send)
     :state 'typed.clojure/Any
-    :from 'typed.clojure/Any
-    :to 'typed.clojure/Any
-    :event 'typed.clojure/Any}})
+    :from 'typed.clojure/Kw
+    :to 'typed.clojure/Kw
+    :event 'typed.clojure/Kw}})
 
 (defn- source-definition [forms name]
   (let [found (filter #(and (seq? %)
@@ -172,5 +172,17 @@
            checker [name :missing-required-field] original
            (annotate-descriptor-literal
             (mutate-literal original #(dissoc % required))
-            category)))))
+            category))
+          ;; Static contracts must reject invalid role and message labels,
+          ;; rather than accepting every value as Any. State identifiers stay
+          ;; opaque EDN values, as prescribed by Choreo's semantic model.
+          (doseq [field (case category
+                         :local [:role]
+                         :authoritative [:role]
+                         :send [:from :to :event])]
+            (check-mutation!
+             checker [name :non-keyword-descriptor-field field] original
+             (annotate-descriptor-literal
+              (mutate-literal original #(assoc % field "not-a-keyword"))
+              category))))))
     true))
