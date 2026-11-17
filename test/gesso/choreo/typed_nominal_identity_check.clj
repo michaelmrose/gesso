@@ -7,6 +7,7 @@
    values. No production identity representation is changed by this pilot."
   (:require [clojure.java.io :as io]
             [gesso.choreo.typed-nominal-identity-pilot :as pilot]
+            [gesso.choreo.typed-nominal-identity-bridge :as bridge]
             [typed.clojure :as t]))
 
 (def ^:private pilot-namespace 'gesso.choreo.typed-nominal-identity-pilot)
@@ -16,9 +17,10 @@
 (def ^:private stages '[step-1 step-2 step-3 step-4 step-5 step-6 step-7])
 (def ^:private config {:max-processors 1 :check-form-eval :never})
 
-(defn- source-forms []
-  (let [source (or (io/resource "gesso/choreo/typed_nominal_identity_pilot.cljc")
-                   (throw (ex-info "Nominal pilot source not found." {})))]
+(defn- source-forms [resource-path]
+  (let [source (or (io/resource resource-path)
+                   (throw (ex-info "Nominal pilot source not found."
+                                   {:resource resource-path})))]
     (with-open [reader (java.io.PushbackReader. (io/reader source))]
       (loop [acc []]
         (let [form (read {:read-cond :allow :features #{:clj} :eof ::done} reader)]
@@ -75,13 +77,50 @@
                         :kinds kinds :exception (some-> ex ex-message)})))
      true)))
 
+(defn- check-tagged-to-nominal-bridge! [checker]
+  ;; These annotations are local to the opt-in checker. The public tagged
+  ;; identity API and ordinary Gesso runtime do not load Typed Clojure.
+  ;; Their runtime behavior remains covered by the production identity suite.
+  (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
+        class-types (mapv #(symbol (str class-prefix %)) categories)
+        bridge-sources (source-forms
+                        "gesso/choreo/typed_nominal_identity_bridge.cljc")
+        original (source-definition bridge-sources 'tagged->nominal)]
+    (eval (list 'typed.clojure/ann
+                (symbol (str bridge-ns) "canonical-keys")
+                '(typed.clojure/Set typed.clojure/Any)))
+    (doseq [[function signature]
+            [['gesso.choreo.identity/identity?
+              '[typed.clojure/Any -> typed.clojure/Bool]]
+             ['gesso.choreo.identity/raw-value
+              '[typed.clojure/Any -> typed.clojure/Any]]
+             ['gesso.choreo.identity/kind
+              '[typed.clojure/Any -> typed.clojure/Any]]]]
+      (eval (list 'typed.clojure/ann function
+                  (list 'typed.clojure/IFn signature))))
+    (eval (list 'typed.clojure/ann
+                (symbol (str bridge-ns) "tagged->nominal")
+                (list 'typed.clojure/IFn
+                      [(list 'typed.clojure/Map
+                             'typed.clojure/Any 'typed.clojure/Any)
+                       '-> (cons 'typed.clojure/U class-types)])))
+    (binding [*ns* (the-ns bridge-ns)]
+      (check! checker :actual-tagged-to-nominal-body original)
+      ;; A generic tagged map is not itself a nominal identity. The return
+      ;; type must not silently widen to Any if the implementation regresses.
+      (let [broken (apply list (concat (butlast original)
+                                       [:not-a-nominal]))]
+        (check-rejection! checker :wrong-tagged-to-nominal-return
+                          broken :typed.clojure/type-mismatch-error)))
+    true))
+
 (defn -main [& _]
   ;; Use the actual classes, not structural maps. Register the six datatypes
   ;; with the Typed Clojure checker, including the fields' real names.
   (doseq [category categories]
     (eval (list 'typed.clojure/ann-datatype
                 (symbol (str class-prefix category))
-                '[raw :- typed.clojure/Any])))
+                '[raw :- typed.clojure/Any extensions :- typed.clojure/Any])))
   ;; The annotations are optional and only occur in this checker harness.
   ;; Production and downstream Clojure never need a Typed Clojure runtime.
   (doseq [[category factory] (map vector categories factories)]
@@ -97,7 +136,7 @@
                        '->
                        (symbol (str class-prefix 'Principal))]))))
   (let [checker (requiring-resolve 'typed.clj.checker/check-form-info)
-        forms (source-forms)
+        forms (source-forms "gesso/choreo/typed_nominal_identity_pilot.cljc")
         source-ns (the-ns pilot-namespace)]
     (binding [*ns* source-ns]
       (doseq [name (concat factories stages)]
@@ -134,6 +173,8 @@
         (when-not (= :missing-runtime-contract kind)
           (throw (ex-info "Missing runtime guard was not detected."
                           {:error/kind kind})))))
+    (check-tagged-to-nominal-bridge! checker)
     (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
-    (println "7 valid calls, 49 invalid calls, 2 mutation checks.")
+    (println "1 tagged-to-nominal bridge body, 7 valid calls, 49 invalid")
+    (println "calls, 3 mutation checks (including bridge return type).")
     :ok))
