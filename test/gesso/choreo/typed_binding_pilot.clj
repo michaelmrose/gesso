@@ -11,11 +11,13 @@
    remain OPEN: a closed HMap (:complete? true) is unsound as a refinement
    of identity?/kind?, because production identities accept extra keys.
    We test this with the real predicates and Typed Clojure's subtyping.
-   All six original category-predicate bodies are also checked for Boolean
-   results and audited against the original kind dispatcher. Their stronger
-   occurrence-typing (Pred) refinements remain trusted; checking a Boolean
-   result does NOT establish that a truthy predicate identifies the specified
-   tagged HMap. The checked binding branches still depend on those refinements.
+   All six original category-predicate bodies are checked for Boolean results
+   and audited against the original kind dispatcher. Their occurrence-typing
+   contracts are POSITIVE-ONLY: a true result can refine to the tagged HMap,
+   but a false result must NOT exclude the shape, since nil or nested raw
+   values can have that shape and still fail identity?. Prior (Pred HMap)
+   annotations incorrectly declared both directions. Positive refinement
+   claims remain trusted until source-backed semantic proofs establish them.
    This does not certify `bindings`, authorization, or full admission."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
@@ -26,9 +28,9 @@
 ;; Unlike the string-restricted earlier pilot, these representations preserve
 ;; the deliberately opaque identity raw-value contract of production Gesso.
 ;; The tagged maps are OPEN because identity? requires keys but does not reject
-;; extensions. Closed HMaps would make the Pred annotations false for an
-;; identity with an additional property. The type is a safe overapproximation;
-;; it does NOT claim the opaque value is non-nil or non-nested.
+;; extensions. The HMap is a safe overapproximation of admitted identities;
+;; it DOES include malformed maps with nil or nested identity raw values.
+;; A two-way Pred HMap would therefore be UNSOUND in its negative branch.
 (t/defalias PrincipalRef
   (t/HMap :mandatory
           {:gesso.choreo.identity/type (t/Val :gesso.choreo.identity/ref)
@@ -66,18 +68,27 @@
            :gesso.choreo.identity/value t/Any}
           :complete? false))
 
-;; Trusted predicate refinement signatures; checked case forms rely on these.
-;; Runtime cases below exercise each category but do not prove them universally.
+;; Trusted one-way predicate refinements: success narrows to the open HMap,
+;; while failure cannot exclude it. The original predicates can reject maps
+;; that fit the HMap shape (nil or nested raw values). Unlike (Pred HMap), the
+;; :else tt filter makes no unsound negative refinement. We check this with
+;; real checker counterexamples below; positive implication remains trusted.
 (t/ann identity/role? (t/Pred t/Kw))
 (t/ann identity/require-role [t/Any -> t/Kw])
 (t/ann identity/kind [t/Any -> t/Any])
 (t/ann identity/kind? [t/Kw t/Any -> t/Bool])
-(t/ann identity/principal? (t/Pred PrincipalRef))
-(t/ann identity/actor? (t/Pred ActorRef))
-(t/ann identity/authority? (t/Pred AuthorityRef))
-(t/ann identity/host? (t/Pred HostRef))
-(t/ann identity/command-id? (t/Pred CommandRef))
-(t/ann identity/execution-id? (t/Pred ExecutionRef))
+(t/ann identity/principal?
+       [t/Any -> t/Bool :filters {:then (is PrincipalRef 0) :else tt}])
+(t/ann identity/actor?
+       [t/Any -> t/Bool :filters {:then (is ActorRef 0) :else tt}])
+(t/ann identity/authority?
+       [t/Any -> t/Bool :filters {:then (is AuthorityRef 0) :else tt}])
+(t/ann identity/host?
+       [t/Any -> t/Bool :filters {:then (is HostRef 0) :else tt}])
+(t/ann identity/command-id?
+       [t/Any -> t/Bool :filters {:then (is CommandRef 0) :else tt}])
+(t/ann identity/execution-id?
+       [t/Any -> t/Bool :filters {:then (is ExecutionRef 0) :else tt}])
 
 ;; The original multi-key dispatcher has a broad, honest whole-form type.
 ;; Its key-specific value/result relations are checked per original case arm.
@@ -304,6 +315,56 @@
                              {:kind kind :identity name})))
            (check-form [:open-identity name] open-form)
            (check-negative [:closed-identity name] open-form closed-form))))
+     ;; A tagged HMap shape is not sufficient evidence of admission. All
+     ;; six aliases allow nil or nested raw values even though the *runtime*
+     ;; predicates reject them. The prior two-way (Pred HMap) annotations
+     ;; incorrectly made their false branches unreachable for HMap inputs.
+     ;; These checks fail if our one-way :else tt refinements regress to Pred.
+     (binding [*ns* (the-ns 'gesso.choreo.identity)]
+       (doseq [[kind name _ predicate] kind-predicates]
+         (let [type-name (symbol (str 'gesso.choreo.typed-binding-pilot)
+                                 (case kind
+                                   :principal "PrincipalRef"
+                                   :actor "ActorRef"
+                                   :authority "AuthorityRef"
+                                   :host "HostRef"
+                                   :command "CommandRef"
+                                   :execution "ExecutionRef"))
+               key (case kind :command :command-id
+                              :execution :execution-id kind)
+               raw-nil {:gesso.choreo.identity/type :gesso.choreo.identity/ref
+                        :gesso.choreo.identity/kind kind
+                        :gesso.choreo.identity/value nil}
+               raw-nested (assoc raw-nil :gesso.choreo.identity/value
+                                       (identity/principal :nested))
+               branch-test
+               (fn [false-result]
+                 (list 'typed.clojure/ann-form
+                       (list 'fn ['value]
+                             (list 'if (list name 'value)
+                                   :accepted false-result))
+                       [type-name '-> '(typed.clojure/Val :accepted)]))
+               safe (branch-test :accepted)
+               unsafe (branch-test :rejected)]
+           ;; The shape includes malformed maps, which the checker permits
+           ;; under the honest open-HMap alias.
+           (check-form [:shape-with-nil name]
+                       (list 'typed.clojure/ann-form raw-nil type-name))
+           (doseq [bad [raw-nil raw-nested]]
+             (when (or (identity/identity? bad)
+                       (predicate bad)
+                       (not= :invalid-binding
+                             (try (identity/bindings {key bad})
+                                  nil
+                                  (catch clojure.lang.ExceptionInfo e
+                                    (:error/kind (ex-data e))))))
+               (throw (ex-info "Invalid identity shape was admitted."
+                               {:kind kind :identity name :bad bad}))))
+           ;; Unlike (Pred HMap), one-way refinements must not erase a
+           ;; false branch merely because the input has the tagged shape.
+           (check-form [:one-way-false-is-reachable name] safe)
+           (check-negative [:one-way-excludes-unsound-bottom name]
+                           safe unsafe))))
      ;; Check the real runtime predicates against all category combinations,
      ;; using opaque numeric, vector, and map raw identities. This is bounded
      ;; behavioral evidence, not a universal proof of the Pred refinements.
