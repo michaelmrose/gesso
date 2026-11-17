@@ -60,7 +60,9 @@
   ;; Opt-in Typed Clojure feasibility checks. Keep the checker, analyzer,
   ;; and runtime dependencies off ordinary Gesso JVM/CLJS classpaths.
   :typed
-  {:extra-deps
+  {:extra-paths ["test"]
+
+   :extra-deps
    {org.typedclojure/typed.clj.checker
     {:mvn/version "1.4.0"}}}
 

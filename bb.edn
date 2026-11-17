@@ -63,6 +63,12 @@
   {:doc "Run the fixed high-value JVM smoke gate; use -n N to execute it with N Shard workers."
    :task (dispatch-gesso-test! "quick" *command-line-args*)}
 
+  test:typed
+  {:doc "Run opt-in Typed Clojure production-source and mutation checks (JVM)."
+   :task
+   (shell "clojure" "-M:typed" "-m"
+          "gesso.choreo.typed-nominal-identity-check")}
+
   test:jvm
   {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."
    :task
