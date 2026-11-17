@@ -9,9 +9,9 @@
    kernel soundness, authorization, or the trustworthiness of a copied map.
 
    Original upstream functions are independently checked and tested.
-   Composition, provenance, and observed writer coverage now reuse the
-   respective producer's independently checked exact HMap. All cross-source
-   semantic correspondence is still runtime-validated.
+   Declared application closure, composition, provenance, and observed
+   writer coverage now reuse the producer's independently checked exact HMap.
+   All cross-source semantic correspondence is still runtime-validated.
    None of these copyable reports is a proof or authority token. The
    application closure handle is nominal: live registry authentication
    and source freshness remain runtime responsibilities."
@@ -22,6 +22,7 @@
             [gesso.assurance.proof.application-writer-coverage :as writer]
             [gesso.assurance.proof.operation-interface-composition :as composition]
             [gesso.assurance.proof.operation-interface-provenance :as provenance]
+            [gesso.assurance.typed-application-dependency-closure-check :as dep-check]
             [gesso.assurance.typed-operation-interface-composition-check :as comp-check]
             [gesso.assurance.typed-operation-interface-provenance-check :as prov-check]
             [gesso.assurance.typed-application-writer-coverage-check :as writer-check]
@@ -31,6 +32,10 @@
 (def ^:private report-ns 'gesso.assurance.proof.application-assurance-report)
 (def ^:private app-handle
   'gesso.assurance.proof.application_dependency.ApplicationDependencyHandle)
+(def ^:private declared-evidence-type
+  ;; The original public closure-description function is independently checked
+  ;; against this EXACT complete HMap. It is not proof or live authority.
+  dep-check/description-type)
 (def ^:private composed-evidence-type
   ;; The SAME exact structural type checked against the original composition
   ;; constructor in the neighboring source-bound Typed Clojure gate.
@@ -84,13 +89,13 @@
 
 (defn- install-contracts! []
   (eval (list 'typed.clojure/ann-datatype app-handle '[]))
-  ;; All three derived reports share their own source-backed exact HMaps.
-  ;; This checks structural categories, not source truth or runtime authority.
+  ;; All four derived inputs share separately checked exact structural HMaps.
+  ;; The source registry remains opaque and these types grant no authority.
   (doseq [[name signature]
           [['gesso.assurance.proof.application-dependency/check-application-dependencies!
             ['typed.clojure/Any 'typed.clojure/Any '-> app-handle]]
            ['gesso.assurance.proof.application-dependency/describe-application-dependencies
-            [app-handle '-> 'typed.clojure/Any]]
+            [app-handle '-> declared-evidence-type]]
            ['gesso.assurance.proof.operation-interface-composition/compose-operation-interfaces!
             ['typed.clojure/Any 'typed.clojure/Any app-handle '-> composed-evidence-type]]
            ['gesso.assurance.proof.operation-interface-provenance/describe-composition-provenance!
@@ -100,7 +105,7 @@
             ['typed.clojure/Any 'typed.clojure/Any app-handle
              'typed.clojure/Any '-> writer-evidence-type]]
            ['gesso.assurance.proof.application-assurance-report/checked-summary!
-            ['typed.clojure/Any composed-evidence-type provenance-evidence-type
+            [declared-evidence-type composed-evidence-type provenance-evidence-type
              writer-evidence-type '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.application-assurance-report/ordinary-map?
             ['typed.clojure/Any '-> 'typed.clojure/Bool]]
@@ -222,6 +227,50 @@
                       {:original original-call :found @count*})))
     changed))
 
+(defn- check-declared-closure-evidence! [checker forms]
+  ;; Mutate the ORIGINAL source-bound public builder at its actual join call.
+  ;; The exact descriptor type is checked at the original producer, and now
+  ;; the downstream consumer refuses raw or inflated closure descriptions.
+  (let [source (original forms 'describe-application-assurance!)
+        genuine '(checked-summary! declared composed manifest observed)]
+    (doseq [[label replacement]
+            [[:raw-description '{}]
+             [:nil-description nil]
+             [:vector-description '[]]
+             [:missing-operation-ids '(dissoc declared :operation-ids)]
+             [:invalid-operation-ids '(assoc declared :operation-ids [])]
+             [:invalid-invariant-ids '(assoc declared :invariant-ids {})]
+             [:wrong-node-count '(assoc declared :node-count "five")]
+             [:wrong-edge-count '(assoc declared :edge-count false)]
+             [:false-proof-status '(assoc declared :proof-status :proved)]
+             [:false-certificate '(assoc declared :certificate :issued)]
+             [:false-authority '(assoc declared :authority :granted)]
+             [:false-writer-coverage
+              '(assoc declared :installed-writer-coverage :complete)]
+             [:swapped-composition 'composed]
+             [:swapped-writer 'observed]]]
+      (reject! checker [:invalid-declared-closure label]
+               (mutate-original-call source genuine
+                 (list 'checked-summary! replacement 'composed
+                       'manifest 'observed))))
+    ;; The catalog fingerprint and induction fingerprint are BOTH Any at
+    ;; this contract boundary; swapping them remains type-compatible and
+    ;; must instead be rejected by the original-source acquisition audit.
+    (let [wrong-source (mutate-original-call
+                        source genuine
+                        '(checked-summary!
+                          (assoc declared :catalog-fingerprint
+                                 (:induction-fingerprint declared))
+                          composed manifest observed))]
+      (check! checker :type-compatible-wrong-declared-fingerprint wrong-source)
+      (when-not (try (source-handoff!
+                      (mapv #(if (= source %) wrong-source %) forms))
+                     false
+                     (catch clojure.lang.ExceptionInfo _ true))
+        (throw (ex-info "Wrong closure-source fingerprint escaped audit" {}))))
+    (check! checker :original-typed-declared-closure-handoff source)
+    true))
+
 (defn- check-composition-evidence! [checker forms]
   ;; Mutate the ORIGINAL production builder at its real summary invocation.
   ;; This tests static propagation from compose-operation-interfaces! through
@@ -312,6 +361,7 @@
     (source-handoff! forms)
     (require-current-handoff! forms)
     (check-final-flags! checker forms)
+    (check-declared-closure-evidence! checker forms)
     (check-composition-evidence! checker forms)
     (check-provenance-evidence! checker forms)
     (check-writer-evidence! checker forms)
@@ -380,9 +430,9 @@
     (runtime-forgery!)
     (println "Typed application assurance report passed: 2 original complete")
     (println "source bodies, 12 wrong-closure call/producer substitutions,")
-    (println "11 false authority/status mutations; 10 composition, 10")
-    (println "provenance and 12 writer malformed handoffs; one Any-typed")
-    (println "catalog/graph swap rejected by source audit; the provenance/")
-    (println "writer swap now rejected statically, plus")
+    (println "11 false status mutations; 14 declared-closure, 10 composition,")
+    (println "10 provenance, and 12 writer malformed handoffs rejected;")
+    (println "two Any-typed original-source mistakes caught by audit;")
+    (println "the provenance/writer swap rejected statically, plus")
     (println "copy/forgery runtime rejection. No theorem or authority claims.")
     :ok))

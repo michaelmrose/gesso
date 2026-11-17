@@ -49,7 +49,10 @@
                 :edge-count typed.clojure/Int}
     :complete? true))
 
-(def ^:private closure-description
+;; Share the exact return HMap already checked against the original
+;; describe-application-dependencies function with downstream report checks.
+;; This copyable structure is NOT a proof or authenticated registry handle.
+(def description-type
   '(typed.clojure/HMap
     :mandatory {:type typed.clojure/Kw
                 :version typed.clojure/Int
@@ -135,7 +138,7 @@
            ['gesso.assurance.proof.application-dependency/entry!
             [application-handle '-> registered-entry]]
            ['gesso.assurance.proof.application-dependency/describe-application-dependencies
-            [application-handle '-> closure-description]]]]
+            [application-handle '-> description-type]]]]
     (fn-ann! name signature)))
 
 (defn- check! [checker label source]
