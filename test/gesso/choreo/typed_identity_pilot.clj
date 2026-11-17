@@ -6,12 +6,15 @@
    three-key, string-valued subset of gesso.choreo.identity, not a new identity
    implementation or a certification of its unchecked constructors.
 
-   The consumer function bodies are checked. The restricted signatures for
-   three production vars (two constructors and the binding validator) are
-   foreign assumptions, not proofs of those unchecked implementations.
-   Source-derived annotations, runtime provenance, and non-string raw values
-   remain open obligations."
-  (:require [gesso.choreo.identity :as identity]
+   Consumers are checked, and the current command-id and execution-id
+   implementation forms are read from production source and checked directly.
+   The generic identity constructor and binding validator retain restricted,
+   trusted signatures; source coverage is deliberately limited to two
+   string-valued constructor overloads. This is not a proof of all identity
+   implementations, admission provenance, or arbitrary raw identity values."
+  (:require [clojure.java.io :as io]
+            [clojure.walk :as walk]
+            [gesso.choreo.identity :as identity]
             [typed.clojure :as t]))
 
 (t/defalias CommandRef
@@ -34,9 +37,16 @@
            :execution-id ExecutionRef}
           :complete? true))
 
-;; These restricted foreign signatures are ASSUMPTIONS about unchecked
-;; production vars. Typed Clojure checks their callers but does not check
-;; the constructor or validator bodies. Runtime checks below test examples.
+;; The generic identity constructor is still assumed here. The two specialized
+;; constructor BODIES below are checked against its restricted overloads using
+;; their actual source forms. This does not establish the generic implementation.
+(t/ann identity/identity
+       (t/IFn [(t/Val :command) t/Str -> CommandRef]
+              [(t/Val :execution) t/Str -> ExecutionRef]))
+
+;; Restricted signatures for the two constructors and binding validator.
+;; The constructors' original source bodies are checked by the opt-in gate,
+;; but the binding validator remains an unchecked foreign assumption.
 (t/ann identity/command-id [t/Str -> CommandRef])
 (t/ann identity/execution-id [t/Str -> ExecutionRef])
 (t/ann identity/bindings
@@ -68,6 +78,28 @@
    (let [check-ns (requiring-resolve 'typed.clj.checker/check-ns)
          check-form-info (requiring-resolve
                           'typed.clj.checker/check-form-info)
+         check-config {:max-processors 1 :check-form-eval :never}
+         source (io/resource "gesso/choreo/identity.cljc")
+         _ (when-not source
+             (throw (ex-info "Original identity source was not found." {})))
+         source-forms (with-open [r (java.io.PushbackReader. (io/reader source))]
+                        (loop [acc []]
+                          (let [form (read {:read-cond :allow
+                                            :features #{:clj}
+                                            :eof ::eof} r)]
+                            (if (= ::eof form)
+                              acc
+                              (recur (conj acc form))))))
+         original-definition
+         (fn [name]
+           (let [matches (filter #(and (seq? %)
+                                       (= 'defn (first %))
+                                       (= name (second %)))
+                                 source-forms)]
+             (when-not (= 1 (count matches))
+               (throw (ex-info "Original identity definition missing or ambiguous."
+                               {:name name :matches (count matches)})))
+             (first matches)))
          command (identity/command-id "same-raw-value")
          execution (identity/execution-id "same-raw-value")
          checked-ns 'gesso.choreo.typed-identity-pilot]
@@ -77,7 +109,7 @@
                     (not (identity/command-id? execution))
                     (not (identity/execution-id? command)))
        (throw (ex-info "Identity pilot's runtime preconditions failed." {})))
-     (when-not (= :ok (check-ns checked-ns :check-config {:max-processors 1}))
+     (when-not (= :ok (check-ns checked-ns :check-config check-config))
        (throw (ex-info "Typed namespace did not pass actual checking." {})))
      (when-not (= (identity/bindings {:command-id command
                                      :execution-id execution})
@@ -92,6 +124,37 @@
                     (catch clojure.lang.ExceptionInfo e
                       (:error/kind (ex-data e)))))
        (throw (ex-info "Real identity/bindings accepted swapped identities." {})))
+     ;; Check the actual source forms (not rewritten copies of their bodies).
+     ;; Mutation tests must fail as static type errors, not as exceptions.
+     (binding [*ns* (the-ns 'gesso.choreo.identity)]
+       (doseq [[name wrong-kind]
+               [['command-id :execution]
+                ['execution-id :command]]]
+         (let [original (original-definition name)
+               changed (walk/postwalk (fn [x]
+                                        (if (= x (if (= name 'command-id)
+                                                   :command :execution))
+                                          wrong-kind x))
+                                      original)
+               good (check-form-info original :check-config check-config)
+               bad (check-form-info changed :check-config check-config)]
+           (when (or (= original changed)
+                     (:ex good)
+                     (seq (:type-errors good))
+                     (:ex bad)
+                     (not (seq (:type-errors bad)))
+                     (not-every? #(= :typed.clojure/type-mismatch-error
+                                     (:type-error %))
+                                 (:type-errors bad)))
+             (throw (ex-info "Original constructor type check failed."
+                             {:name name
+                              :changed? (not= original changed)
+                              :good-exception (some-> (:ex good) ex-message)
+                              :good-errors (mapv str (:type-errors good))
+                              :bad-exception (some-> (:ex bad) ex-message)
+                              :bad-errors (mapv str (:type-errors bad))})))
+           (println "Original constructor:" name
+                    "checked; wrong-kind mutation rejected"))))
      (binding [*ns* (the-ns checked-ns)]
        (doseq [[description form expect-error?]
                [["command accepted" (list 'command-raw-value command) false]
@@ -120,14 +183,14 @@
                  '(identity/bindings
                    {:command-id (identity/execution-id "command")
                     :execution-id (identity/command-id "execution")}) true]]]
-         (let [{:keys [ex type-errors]} (check-form-info
-                                         form :check-config {:max-processors 1})
-               rejected? (or (some? ex) (seq type-errors))]
-           (when-not (= (boolean expect-error?) (boolean rejected?))
+         (let [{:keys [ex type-errors]}
+               (check-form-info form :check-config check-config)
+               rejected? (boolean (seq type-errors))]
+           (when (or ex (not= expect-error? rejected?))
              (throw (ex-info "Typed identity gate disagreed with expectation."
                              {:case description
                               :expected-rejection? expect-error?
-                              :exception (some-> ex .getMessage)
+                              :exception (some-> ex ex-message)
                               :type-errors (mapv str type-errors)})))
            (println "Typed identity:" description
                     (if rejected? "rejected" "accepted")))))
