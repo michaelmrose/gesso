@@ -14,6 +14,7 @@
             [gesso.assurance.proof.operation-interface-composition]
             [gesso.assurance.subject]
             [gesso.assurance.typed-application-dependency-closure-check :as dep-check]
+            [gesso.assurance.typed-operation-interface-derivation-check :as iface-check]
             [typed.clojure]))
 
 (def ^:private config {:max-processors 1 :check-form-eval :never})
@@ -26,18 +27,10 @@
 (def ^:private meta-ids-type dep-check/obligation-id-set)
 (def ^:private classified-assumptions-type dep-check/open-assumptions-type)
 (def ^:private original-operations-type dep-check/original-obligations-type)
-(def ^:private source-type
-  `(typed.clojure/HMap
-    :mandatory {:catalog-id typed.clojure/Any
-                :catalog-fingerprint typed.clojure/Any
-                :induction-fingerprint typed.clojure/Any
-                :fingerprint typed.clojure/Str
-                :operation-ids (typed.clojure/Set typed.clojure/Kw)
-                :invariant-ids (typed.clojure/Set typed.clojure/Kw)
-                :original-open-obligation-ids-by-operation ~original-operations-type
-                :open-meta-obligations ~meta-ids-type
-                :open-assumptions ~classified-assumptions-type}
-    :complete? false))
+;; The upstream original interface-report-entry body is now checked against
+;; this exact derived report type. The full source-derivation algorithm and
+;; live source registry remain runtime obligations, not inferred credentials.
+(def ^:private source-type iface-check/derived-type)
 (def ^:private report-statuses
   {:type :gesso.assurance.proof.operation-interface-composition/conditional-abstract-catalog
    :version 1

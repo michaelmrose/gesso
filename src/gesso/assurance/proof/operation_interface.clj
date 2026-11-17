@@ -127,6 +127,33 @@
      :admission :not-admitted
      :authority :none}))
 
+(defn- interface-report-entry
+  "Pure source-derived operation-interface descriptor, not a proof token.
+   The public issuer validates the original closure, operation and invariant
+   evidence, and premises BEFORE this copyable map is assembled."
+  [summary interfaces identity]
+  {:type interface-type
+   :version interface-version
+   :fingerprint (:fingerprint identity)
+   :catalog-id (:catalog-id summary)
+   :catalog-fingerprint (:catalog-fingerprint summary)
+   :induction-fingerprint (:induction-fingerprint summary)
+   :operation-ids (:operation-ids summary)
+   :invariant-ids (:invariant-ids summary)
+   :interfaces interfaces
+   :original-open-obligation-ids-by-operation
+   (:original-open-obligation-ids-by-operation summary)
+   :open-meta-obligations (:open-meta-obligations summary)
+   :open-assumptions (:open-assumptions summary)
+   :scope :closed-declared-abstract-machine-only
+   :proof-status :source-bound-conditional-operation-interfaces
+   :assumption-discharge :not-performed
+   :physical-writer-coverage :not-established
+   :implementation-correspondence :not-established
+   :certificate :not-issued
+   :admission :not-admitted
+   :authority :none})
+
 (defn derive-operation-interfaces!
   "Derive ALL operation interfaces from fresh ORIGINAL catalog, current graph,
    and its authentic v1440 source-closure handle. Returned data are untrusted
@@ -177,26 +204,7 @@
                                  :interfaces interfaces
                                  :open-meta-obligations meta-obligations
                                  :open-assumptions (:open-assumptions summary)}})]
-      {:type interface-type
-       :version interface-version
-       :fingerprint (:fingerprint identity)
-       :catalog-id (:catalog-id summary)
-       :catalog-fingerprint fingerprint
-       :induction-fingerprint (:induction-fingerprint summary)
-       :operation-ids operation-ids
-       :invariant-ids invariant-ids
-       :interfaces interfaces
-       :original-open-obligation-ids-by-operation originals
-       :open-meta-obligations meta-obligations
-       :open-assumptions (:open-assumptions summary)
-       :scope :closed-declared-abstract-machine-only
-       :proof-status :source-bound-conditional-operation-interfaces
-       :assumption-discharge :not-performed
-       :physical-writer-coverage :not-established
-       :implementation-correspondence :not-established
-       :certificate :not-issued
-       :admission :not-admitted
-       :authority :none})))
+      (interface-report-entry summary interfaces identity))))
 
 (defn require-current-operation-interfaces!
   "Reject copied/altered/stale interface reports by requiring fresh exact

@@ -84,6 +84,8 @@
      (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-application-dependency-closure-check")
      (shell "clojure" "-M:typed" "-m"
+            "gesso.assurance.typed-operation-interface-derivation-check")
+     (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-operation-interface-composition-check")
      (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-operation-interface-provenance-check")
