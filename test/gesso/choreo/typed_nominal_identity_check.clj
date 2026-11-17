@@ -659,6 +659,67 @@
        :wrong-descriptor-identity-consumer))
     true))
 
+(defn- check-production-machine-descriptor-bodies! [checker]
+  ;; Unlike the source-shape audit, these checks verify the ORIGINAL
+  ;; production defn bodies against real function signatures. The descriptor
+  ;; keeps portable tagged maps at its boundary, while nominal types protect
+  ;; the CommandId/ExecutionId consumers within its implementation.
+  (let [machine-ns 'gesso.choreo.machine
+        map-type '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
+        tagged-map '(typed.clojure/Map
+                     typed.clojure/Kw
+                     (typed.clojure/U typed.clojure/Kw
+                                      (typed.clojure/Map
+                                       typed.clojure/Any typed.clojure/Any)))
+        forms (binding [*ns* (the-ns machine-ns)]
+                (source-forms "gesso/choreo/machine.cljc"))
+        non-role (source-definition forms 'non-role-bindings)
+        descriptor (source-definition forms 'descriptor-identities)]
+    (eval (list 'typed.clojure/ann
+                'gesso.choreo.machine/non-role-bindings
+                (list 'typed.clojure/IFn [tagged-map '-> tagged-map])))
+    (eval (list 'typed.clojure/ann
+                'gesso.choreo.machine/descriptor-identities
+                (list 'typed.clojure/IFn
+                      [map-type tagged-map '-> map-type])))
+    (binding [*ns* (the-ns machine-ns)]
+      (check! checker :real-non-role-bindings-body non-role)
+      (check! checker :real-descriptor-identities-body descriptor)
+      ;; A positive use of the production descriptor through its validated
+      ;; binding input remains statically checked without custom defn syntax.
+      (check! checker :real-descriptor-valid-input
+              '(descriptor-identities {} (identity/bindings {})))
+      (doseq [[label converted]
+              [[:command-consumer-swapped
+                (walk/postwalk-replace
+                 {'nominal-bindings/command-id->tagged
+                  'nominal-bindings/execution-id->tagged}
+                 descriptor)]
+               [:execution-consumer-swapped
+                (walk/postwalk-replace
+                 {'nominal-bindings/execution-id->tagged
+                  'nominal-bindings/command-id->tagged}
+                 descriptor)]]]
+        (when (= converted descriptor)
+          (throw (ex-info "Descriptor mutation had no effect."
+                          {:error/kind :missing-descriptor-mutation
+                           :mutation label})))
+        ;; These errors come from the Typed checker examining the entire
+        ;; production descriptor body, not merely our correspondence audit.
+        (check-rejection! checker label converted
+                          :typed.clojure/app-type-error))
+      (check-rejection! checker :descriptor-wrong-return
+                        (apply list (concat (butlast descriptor)
+                                            [:not-a-portable-descriptor]))
+                        :typed.clojure/type-mismatch-error)
+      ;; An arbitrary unvalidated nominal binding map is not an acceptable
+      ;; argument at the tagged descriptor boundary.
+      (check-rejection! checker :descriptor-nominal-input
+                        '(descriptor-identities
+                          {} (nominal-bindings/bindings->nominal
+                              (identity/bindings {:command-id (identity/command-id :bad)})))))
+    true))
+
 (defn -main [& _]
   ;; Use the actual classes, not structural maps. Register the six datatypes
   ;; with the Typed Clojure checker, including the fields' real names.
@@ -750,6 +811,7 @@
     (check-canonical-nominal-output! checker)
     (check-machine-boundary! checker)
     (check-production-descriptor-consumers! checker)
+    (check-production-machine-descriptor-bodies! checker)
     (println "Nominal static gate passed: 6 production constructors, 6 test")
     (println "facades, 7 stage bodies, and source-backed bridge checks;")
     (println "6 bridge bodies including canonical sparse output,")
@@ -762,4 +824,6 @@
     (println "typed seven-slot output; invalid consumer/bypass rejected.")
     (println "Production machine descriptors: nominal command/execution")
     (println "consumers source-checked; wrong-category swaps rejected.")
+    (println "Production machine descriptor and non-role original bodies")
+    (println "type-checked; both nominal swap mutations rejected statically.")
     :ok))
