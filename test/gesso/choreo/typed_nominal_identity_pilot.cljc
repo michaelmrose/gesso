@@ -1,157 +1,63 @@
 (ns gesso.choreo.typed-nominal-identity-pilot
-  "Opt-in proof of concept: ordinary defn, six distinct internal nominal
+  "Opt-in proof of concept: ordinary defn, six distinct *production* nominal
    identities, and seven independently checked runtime handoffs.
 
-   Deliberately separate from production gesso.choreo.identity: this pilot
+   Deliberately separate from public gesso.choreo.identity: this pilot
    must not change the public tagged-map format, wire format, or app contract.
    Preconditions target accidental misuse, not adversarial callers."
-  (:require [clojure.test :refer [deftest is testing]]))
+  (:require [clojure.test :refer [deftest is testing]]
+            [gesso.choreo.internal.nominal-identity :as internal]))
 
-;; Values are opaque to application code. Runtime equality is category-aware,
-;; matching the existing tagged-map identities without conflating raw IDs.
-;; Extension fields allow lossless conversion of *open* legacy tagged maps;
-;; equality and hashing include extensions because ordinary map equality does.
-;; Use ordinary deftype, not defrecord, to avoid map-associative mutation.
-(deftype Principal [raw extensions]
-  #?(:clj Object :cljs IEquiv)
-  #?(:clj (equals [_ other]
-            (and (instance? Principal other)
-                 (= raw (.-raw ^Principal other))
-                 (= extensions (.-extensions ^Principal other))))
-     :cljs (-equiv [_ other]
-             (and (instance? Principal other)
-                  (= raw (.-raw other))
-                  (= extensions (.-extensions other)))))
-  #?(:clj (hashCode [_] (hash [:principal raw extensions]))
-     :cljs IHash)
-  #?(:cljs (-hash [_] (hash [:principal raw extensions])))
-  #?(:clj clojure.lang.IHashEq)
-  #?(:clj (hasheq [_] (hash [:principal raw extensions]))))
-
-(deftype Actor [raw extensions]
-  #?(:clj Object :cljs IEquiv)
-  #?(:clj (equals [_ other]
-            (and (instance? Actor other)
-                 (= raw (.-raw ^Actor other))
-                 (= extensions (.-extensions ^Actor other))))
-     :cljs (-equiv [_ other]
-             (and (instance? Actor other)
-                  (= raw (.-raw other))
-                  (= extensions (.-extensions other)))))
-  #?(:clj (hashCode [_] (hash [:actor raw extensions]))
-     :cljs IHash)
-  #?(:cljs (-hash [_] (hash [:actor raw extensions])))
-  #?(:clj clojure.lang.IHashEq)
-  #?(:clj (hasheq [_] (hash [:actor raw extensions]))))
-
-(deftype Authority [raw extensions]
-  #?(:clj Object :cljs IEquiv)
-  #?(:clj (equals [_ other]
-            (and (instance? Authority other)
-                 (= raw (.-raw ^Authority other))
-                 (= extensions (.-extensions ^Authority other))))
-     :cljs (-equiv [_ other]
-             (and (instance? Authority other)
-                  (= raw (.-raw other))
-                  (= extensions (.-extensions other)))))
-  #?(:clj (hashCode [_] (hash [:authority raw extensions]))
-     :cljs IHash)
-  #?(:cljs (-hash [_] (hash [:authority raw extensions])))
-  #?(:clj clojure.lang.IHashEq)
-  #?(:clj (hasheq [_] (hash [:authority raw extensions]))))
-(deftype Host [raw extensions]
-  #?(:clj Object :cljs IEquiv)
-  #?(:clj (equals [_ other]
-            (and (instance? Host other)
-                 (= raw (.-raw ^Host other))
-                 (= extensions (.-extensions ^Host other))))
-     :cljs (-equiv [_ other]
-             (and (instance? Host other)
-                  (= raw (.-raw other))
-                  (= extensions (.-extensions other)))))
-  #?(:clj (hashCode [_] (hash [:host raw extensions]))
-     :cljs IHash)
-  #?(:cljs (-hash [_] (hash [:host raw extensions])))
-  #?(:clj clojure.lang.IHashEq)
-  #?(:clj (hasheq [_] (hash [:host raw extensions]))))
-(deftype CommandId [raw extensions]
-  #?(:clj Object :cljs IEquiv)
-  #?(:clj (equals [_ other]
-            (and (instance? CommandId other)
-                 (= raw (.-raw ^CommandId other))
-                 (= extensions (.-extensions ^CommandId other))))
-     :cljs (-equiv [_ other]
-             (and (instance? CommandId other)
-                  (= raw (.-raw other))
-                  (= extensions (.-extensions other)))))
-  #?(:clj (hashCode [_] (hash [:command raw extensions]))
-     :cljs IHash)
-  #?(:cljs (-hash [_] (hash [:command raw extensions])))
-  #?(:clj clojure.lang.IHashEq)
-  #?(:clj (hasheq [_] (hash [:command raw extensions]))))
-(deftype ExecutionId [raw extensions]
-  #?(:clj Object :cljs IEquiv)
-  #?(:clj (equals [_ other]
-            (and (instance? ExecutionId other)
-                 (= raw (.-raw ^ExecutionId other))
-                 (= extensions (.-extensions ^ExecutionId other))))
-     :cljs (-equiv [_ other]
-             (and (instance? ExecutionId other)
-                  (= raw (.-raw other))
-                  (= extensions (.-extensions other)))))
-  #?(:clj (hashCode [_] (hash [:execution raw extensions]))
-     :cljs IHash)
-  #?(:cljs (-hash [_] (hash [:execution raw extensions])))
-  #?(:clj clojure.lang.IHashEq)
-  #?(:clj (hasheq [_] (hash [:execution raw extensions]))))
-
+;; The six runtime types and validated constructors are now production
+;; internals. These ordinary test-only facades retain the existing pilot call
+;; API; they do not define alternative classes or replace defn.
 (defn principal [raw]
   {:pre [(some? raw)]}
-  (Principal. raw {}))
+  (internal/principal raw))
 
 (defn actor [raw]
   {:pre [(some? raw)]}
-  (Actor. raw {}))
+  (internal/actor raw))
 
 (defn authority [raw]
   {:pre [(some? raw)]}
-  (Authority. raw {}))
+  (internal/authority raw))
 
 (defn host [raw]
   {:pre [(some? raw)]}
-  (Host. raw {}))
+  (internal/host raw))
 
 (defn command-id [raw]
   {:pre [(some? raw)]}
-  (CommandId. raw {}))
+  (internal/command-id raw))
 
 (defn execution-id [raw]
   {:pre [(some? raw)]}
-  (ExecutionId. raw {}))
+  (internal/execution-id raw))
 
 ;; A seven-stage example uses seven actual ordinary defns. All seven must
 ;; reject a wrong category when called *directly*. The type hint is useful
 ;; for interop but does NOT perform the runtime check; the :pre does.
-(defn step-7 [^Principal p]
-  {:pre [(instance? Principal p)]}
+(defn step-7 [^gesso.choreo.internal.nominal_identity.Principal p]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.Principal p)]}
   p)
-(defn step-6 [^Principal p]
-  {:pre [(instance? Principal p)]}
+(defn step-6 [^gesso.choreo.internal.nominal_identity.Principal p]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.Principal p)]}
   (step-7 p))
-(defn step-5 [^Principal p]
-  {:pre [(instance? Principal p)]}
+(defn step-5 [^gesso.choreo.internal.nominal_identity.Principal p]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.Principal p)]}
   (step-6 p))
-(defn step-4 [^Principal p]
-  {:pre [(instance? Principal p)]}
+(defn step-4 [^gesso.choreo.internal.nominal_identity.Principal p]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.Principal p)]}
   (step-5 p))
-(defn step-3 [^Principal p]
-  {:pre [(instance? Principal p)]}
+(defn step-3 [^gesso.choreo.internal.nominal_identity.Principal p]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.Principal p)]}
   (step-4 p))
-(defn step-2 [^Principal p]
-  {:pre [(instance? Principal p)]}
+(defn step-2 [^gesso.choreo.internal.nominal_identity.Principal p]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.Principal p)]}
   (step-3 p))
-(defn step-1 [^Principal p]
-  {:pre [(instance? Principal p)]}
+(defn step-1 [^gesso.choreo.internal.nominal_identity.Principal p]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.Principal p)]}
   (step-2 p))
 
 (def stages [step-1 step-2 step-3 step-4 step-5 step-6 step-7])

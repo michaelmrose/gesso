@@ -77,17 +77,17 @@
         all (reference-bindings)
         execution (machine/start plan {:identity-bindings all})
         internal (machine->nominal-bindings execution)]
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.Principal
+    (is (instance? gesso.choreo.internal.nominal_identity.Principal
                    (:principal internal)))
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.Actor
+    (is (instance? gesso.choreo.internal.nominal_identity.Actor
                    (:actor internal)))
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.Authority
+    (is (instance? gesso.choreo.internal.nominal_identity.Authority
                    (:authority internal)))
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.Host
+    (is (instance? gesso.choreo.internal.nominal_identity.Host
                    (:host internal)))
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.CommandId
+    (is (instance? gesso.choreo.internal.nominal_identity.CommandId
                    (:command-id internal)))
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.ExecutionId
+    (is (instance? gesso.choreo.internal.nominal_identity.ExecutionId
                    (:execution-id internal)))
     (is (identical? (:principal internal)
                     (nominal/step-1 (:principal internal))))
@@ -107,9 +107,9 @@
     (is (= tagged-before tagged-after))
     (is (= tagged-after (bridge/bindings->tagged nominal-after)))
     (is (every? tagged/identity? (vals (dissoc tagged-after :role))))
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.Principal
+    (is (instance? gesso.choreo.internal.nominal_identity.Principal
                    (:principal nominal-after)))
-    (is (instance? gesso.choreo.typed_nominal_identity_pilot.ExecutionId
+    (is (instance? gesso.choreo.internal.nominal_identity.ExecutionId
                    (:execution-id nominal-after)))
     (is (= (machine/command-id started) (machine/command-id completed)))
     (is (= (machine/execution-id started) (machine/execution-id completed)))))

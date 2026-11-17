@@ -8,12 +8,14 @@
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.choreo.typed-nominal-identity-pilot :as pilot]
+            [gesso.choreo.internal.nominal-identity :as internal]
             [gesso.choreo.typed-nominal-identity-bridge :as bridge]
             [gesso.choreo.typed-nominal-machine-boundary-test :as machine-seam]
             [typed.clojure :as t]))
 
 (def ^:private pilot-namespace 'gesso.choreo.typed-nominal-identity-pilot)
-(def ^:private class-prefix "gesso.choreo.typed_nominal_identity_pilot.")
+(def ^:private production-namespace 'gesso.choreo.internal.nominal-identity)
+(def ^:private class-prefix "gesso.choreo.internal.nominal_identity.")
 (def ^:private categories '[Principal Actor Authority Host CommandId ExecutionId])
 (def ^:private factories '[principal actor authority host command-id execution-id])
 (def ^:private stages '[step-1 step-2 step-3 step-4 step-5 step-6 step-7])
@@ -50,8 +52,8 @@
     (when-not (and (vector? args)
                    (= 1 (count args))
                    (symbol? param)
-                   (= 'Principal hint)
-                   (= {:pre [(list 'instance? 'Principal param)]} first-body))
+                   (= 'gesso.choreo.internal.nominal_identity.Principal hint)
+                   (= {:pre [(list 'instance? 'gesso.choreo.internal.nominal_identity.Principal param)]} first-body))
       (throw (ex-info "Nominal function lost its runtime entry contract."
                       {:error/kind :missing-runtime-contract
                        :function (second definition)
@@ -82,18 +84,18 @@
 (def ^:private correspondence
   ;; This is the intended *semantic* correspondence; static map types alone
   ;; cannot distinguish which tagged constructor corresponds to each class.
-  [{:kind :principal :class 'gesso.choreo.typed_nominal_identity_pilot.Principal
-    :nominal 'nominal/->Principal :tagged 'tagged/principal}
-   {:kind :actor :class 'gesso.choreo.typed_nominal_identity_pilot.Actor
-    :nominal 'nominal/->Actor :tagged 'tagged/actor}
-   {:kind :authority :class 'gesso.choreo.typed_nominal_identity_pilot.Authority
-    :nominal 'nominal/->Authority :tagged 'tagged/authority}
-   {:kind :host :class 'gesso.choreo.typed_nominal_identity_pilot.Host
-    :nominal 'nominal/->Host :tagged 'tagged/host}
-   {:kind :command :class 'gesso.choreo.typed_nominal_identity_pilot.CommandId
-    :nominal 'nominal/->CommandId :tagged 'tagged/command-id}
-   {:kind :execution :class 'gesso.choreo.typed_nominal_identity_pilot.ExecutionId
-    :nominal 'nominal/->ExecutionId :tagged 'tagged/execution-id}])
+  [{:kind :principal :class 'gesso.choreo.internal.nominal_identity.Principal
+    :nominal 'internal/->Principal :tagged 'tagged/principal}
+   {:kind :actor :class 'gesso.choreo.internal.nominal_identity.Actor
+    :nominal 'internal/->Actor :tagged 'tagged/actor}
+   {:kind :authority :class 'gesso.choreo.internal.nominal_identity.Authority
+    :nominal 'internal/->Authority :tagged 'tagged/authority}
+   {:kind :host :class 'gesso.choreo.internal.nominal_identity.Host
+    :nominal 'internal/->Host :tagged 'tagged/host}
+   {:kind :command :class 'gesso.choreo.internal.nominal_identity.CommandId
+    :nominal 'internal/->CommandId :tagged 'tagged/command-id}
+   {:kind :execution :class 'gesso.choreo.internal.nominal_identity.ExecutionId
+    :nominal 'internal/->ExecutionId :tagged 'tagged/execution-id}])
 
 (defn- audit-forward-correspondence! [definition]
   ;; Audit the *actual original case expression*, not a separately authored
@@ -220,7 +222,7 @@
       ;; neither the union nor the Map return can recognize these swaps.
       (expect-audit-rejection!
        audit-forward-correspondence! :forward-category-swap
-       (walk/postwalk-replace {'nominal/->Principal 'nominal/->Actor} forward)
+       (walk/postwalk-replace {'internal/->Principal 'internal/->Actor} forward)
        :wrong-forward-correspondence)
       (expect-audit-rejection!
        audit-reverse-correspondence! :reverse-category-swap
@@ -557,8 +559,34 @@
     (eval (list 'typed.clojure/ann-datatype
                 (symbol (str class-prefix category))
                 '[raw :- typed.clojure/Any extensions :- (typed.clojure/Map typed.clojure/Any typed.clojure/Any)])))
-  ;; The annotations are optional and only occur in this checker harness.
-  ;; Production and downstream Clojure never need a Typed Clojure runtime.
+  ;; The checker is optional. Normal Gesso dependency resolution does not
+  ;; include Typed Clojure, but this gate checks the real production bodies.
+  (doseq [[category factory] (map vector categories factories)]
+    (eval (list 'typed.clojure/ann
+                (symbol (str production-namespace) (str factory))
+                (list 'typed.clojure/IFn
+                      ['typed.clojure/Any '-> (symbol (str class-prefix category))]))))
+  (let [production-source
+        (source-forms "gesso/choreo/internal/nominal_identity.cljc")]
+    (binding [*ns* (the-ns production-namespace)]
+      (doseq [factory factories]
+        (let [source (source-definition production-source factory)]
+          (when-not (= {:pre ['(some? raw)]} (nth source 3 nil))
+            (throw (ex-info "Production constructor lost its native precondition."
+                            {:error/kind :missing-constructor-guard
+                             :factory factory})))
+          (check! (requiring-resolve 'typed.clj.checker/check-form-info)
+                  [:production-constructor-body factory]
+                  source)))
+      ;; A nominal class swap in REAL production source must fail statically.
+      (let [source (source-definition production-source 'principal)
+            swapped (walk/postwalk-replace {'Principal. 'Actor.} source)]
+        (when (= source swapped)
+          (throw (ex-info "Production class mutation has no target." {})))
+        (check-rejection! (requiring-resolve 'typed.clj.checker/check-form-info)
+                          :production-principal-actor-swap
+                          swapped :typed.clojure/type-mismatch-error))))
+  ;; Preserve the seven-deep pilot's test-only constructor facades.
   (doseq [[category factory] (map vector categories factories)]
     (eval (list 'typed.clojure/ann
                 (symbol (str pilot-namespace) (str factory))
@@ -614,7 +642,8 @@
     (check-heterogeneous-nominal-bindings! checker)
     (check-canonical-nominal-output! checker)
     (check-machine-boundary! checker)
-    (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
+    (println "Nominal static gate passed: 6 production constructors, 6 test")
+    (println "facades, 7 stage bodies, and source-backed bridge checks;")
     (println "6 bridge bodies including canonical sparse output,")
     (println "static source, category, return, and mutation checks passed.")
     (println "Closed sparse nominal HMap: 128 valid subsets, 39 invalid")

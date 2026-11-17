@@ -10,6 +10,7 @@
    serialize identity extension fields."
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.choreo.identity :as tagged]
+            [gesso.choreo.internal.nominal-identity :as internal]
             [gesso.choreo.typed-nominal-identity-pilot :as nominal]))
 
 (def ^:private canonical-keys
@@ -30,12 +31,12 @@
   (let [raw (tagged/raw-value reference)
         extensions (reduce dissoc reference canonical-keys)]
     (case (tagged/kind reference)
-      :principal (nominal/->Principal raw extensions)
-      :actor (nominal/->Actor raw extensions)
-      :authority (nominal/->Authority raw extensions)
-      :host (nominal/->Host raw extensions)
-      :command (nominal/->CommandId raw extensions)
-      :execution (nominal/->ExecutionId raw extensions))))
+      :principal (internal/->Principal raw extensions)
+      :actor (internal/->Actor raw extensions)
+      :authority (internal/->Authority raw extensions)
+      :host (internal/->Host raw extensions)
+      :command (internal/->CommandId raw extensions)
+      :execution (internal/->ExecutionId raw extensions))))
 
 (defn- restore-tagged
   "Reject an invalid nominal extension payload instead of overwriting kind."
@@ -56,23 +57,23 @@
    overwrite the identity category or bypass the original raw validation."
   [reference]
   (cond
-    (instance? gesso.choreo.typed_nominal_identity_pilot.Principal reference)
-    (restore-tagged tagged/principal (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Principal reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Principal reference))
+    (instance? gesso.choreo.internal.nominal_identity.Principal reference)
+    (restore-tagged tagged/principal (.-raw ^gesso.choreo.internal.nominal_identity.Principal reference) (.-extensions ^gesso.choreo.internal.nominal_identity.Principal reference))
 
-    (instance? gesso.choreo.typed_nominal_identity_pilot.Actor reference)
-    (restore-tagged tagged/actor (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Actor reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Actor reference))
+    (instance? gesso.choreo.internal.nominal_identity.Actor reference)
+    (restore-tagged tagged/actor (.-raw ^gesso.choreo.internal.nominal_identity.Actor reference) (.-extensions ^gesso.choreo.internal.nominal_identity.Actor reference))
 
-    (instance? gesso.choreo.typed_nominal_identity_pilot.Authority reference)
-    (restore-tagged tagged/authority (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Authority reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Authority reference))
+    (instance? gesso.choreo.internal.nominal_identity.Authority reference)
+    (restore-tagged tagged/authority (.-raw ^gesso.choreo.internal.nominal_identity.Authority reference) (.-extensions ^gesso.choreo.internal.nominal_identity.Authority reference))
 
-    (instance? gesso.choreo.typed_nominal_identity_pilot.Host reference)
-    (restore-tagged tagged/host (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Host reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Host reference))
+    (instance? gesso.choreo.internal.nominal_identity.Host reference)
+    (restore-tagged tagged/host (.-raw ^gesso.choreo.internal.nominal_identity.Host reference) (.-extensions ^gesso.choreo.internal.nominal_identity.Host reference))
 
-    (instance? gesso.choreo.typed_nominal_identity_pilot.CommandId reference)
-    (restore-tagged tagged/command-id (.-raw ^gesso.choreo.typed_nominal_identity_pilot.CommandId reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.CommandId reference))
+    (instance? gesso.choreo.internal.nominal_identity.CommandId reference)
+    (restore-tagged tagged/command-id (.-raw ^gesso.choreo.internal.nominal_identity.CommandId reference) (.-extensions ^gesso.choreo.internal.nominal_identity.CommandId reference))
 
-    (instance? gesso.choreo.typed_nominal_identity_pilot.ExecutionId reference)
-    (restore-tagged tagged/execution-id (.-raw ^gesso.choreo.typed_nominal_identity_pilot.ExecutionId reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.ExecutionId reference))
+    (instance? gesso.choreo.internal.nominal_identity.ExecutionId reference)
+    (restore-tagged tagged/execution-id (.-raw ^gesso.choreo.internal.nominal_identity.ExecutionId reference) (.-extensions ^gesso.choreo.internal.nominal_identity.ExecutionId reference))
 
     :else
     (throw (ex-info "Expected one of the six nominal identity categories."
@@ -114,7 +115,7 @@
                        value
                        (throw (ex-info "Invalid tagged binding value."
                                        {:error/kind :invalid-tagged-identity}))))]
-                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Principal
+                (if (instance? gesso.choreo.internal.nominal_identity.Principal
                                nominal-value)
                   (assoc out :principal nominal-value)
                   (throw (ex-info "Binding category mismatch."
@@ -128,7 +129,7 @@
                        value
                        (throw (ex-info "Invalid tagged binding value."
                                        {:error/kind :invalid-tagged-identity}))))]
-                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Actor
+                (if (instance? gesso.choreo.internal.nominal_identity.Actor
                                nominal-value)
                   (assoc out :actor nominal-value)
                   (throw (ex-info "Binding category mismatch."
@@ -142,7 +143,7 @@
                        value
                        (throw (ex-info "Invalid tagged binding value."
                                        {:error/kind :invalid-tagged-identity}))))]
-                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Authority
+                (if (instance? gesso.choreo.internal.nominal_identity.Authority
                                nominal-value)
                   (assoc out :authority nominal-value)
                   (throw (ex-info "Binding category mismatch."
@@ -156,7 +157,7 @@
                        value
                        (throw (ex-info "Invalid tagged binding value."
                                        {:error/kind :invalid-tagged-identity}))))]
-                (if (instance? gesso.choreo.typed_nominal_identity_pilot.Host
+                (if (instance? gesso.choreo.internal.nominal_identity.Host
                                nominal-value)
                   (assoc out :host nominal-value)
                   (throw (ex-info "Binding category mismatch."
@@ -170,7 +171,7 @@
                        value
                        (throw (ex-info "Invalid tagged binding value."
                                        {:error/kind :invalid-tagged-identity}))))]
-                (if (instance? gesso.choreo.typed_nominal_identity_pilot.CommandId
+                (if (instance? gesso.choreo.internal.nominal_identity.CommandId
                                nominal-value)
                   (assoc out :command-id nominal-value)
                   (throw (ex-info "Binding category mismatch."
@@ -184,7 +185,7 @@
                        value
                        (throw (ex-info "Invalid tagged binding value."
                                        {:error/kind :invalid-tagged-identity}))))]
-                (if (instance? gesso.choreo.typed_nominal_identity_pilot.ExecutionId
+                (if (instance? gesso.choreo.internal.nominal_identity.ExecutionId
                                nominal-value)
                   (assoc out :execution-id nominal-value)
                   (throw (ex-info "Binding category mismatch."
@@ -307,12 +308,12 @@
                         {:gesso.choreo.identity/type :wrong}]]
       (is (= :invalid-nominal-extensions
              (error-kind #(nominal->tagged
-                           (nominal/->Principal raw extensions))))))
+                           (internal/->Principal raw extensions))))))
     ;; Empty or arbitrary extension maps are allowed, including nil values.
     (is (= (tagged/principal raw)
-           (nominal->tagged (nominal/->Principal raw {}))))
+           (nominal->tagged (internal/->Principal raw {}))))
     (is (= (assoc (tagged/principal raw) :extra nil)
-           (nominal->tagged (nominal/->Principal raw {:extra nil}))))))
+           (nominal->tagged (internal/->Principal raw {:extra nil}))))))
 
 (deftest sparse-binding-maps-convert-without-confusing-roles-or-identities
   (let [all {:role :server
