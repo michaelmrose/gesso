@@ -203,6 +203,114 @@
                       {:error/kind :wrong-machine-start-linkage})))
     true))
 
+
+(defn- audit-machine-execution-record! [definition]
+  ;; A structural map type does not enforce command/execution category.
+  ;; Audit the original production projection into persisted machine fields.
+  (let [arguments (nth definition 2 nil)
+        body (last definition)
+        bindings (when (and (seq? body) (= 'let (first body)))
+                   (second body))
+        locals (when (vector? bindings)
+                 (into {} (map vec (partition 2 bindings))))
+        assembly (when (seq? body) (last body))
+        fields (when (and (seq? assembly) (= 'cond-> (first assembly)))
+                 (second assembly))]
+    (when-not (and (= '[{:keys [plan identity-bindings status state action
+                                  awaiting knowledge history max-immediate-steps
+                                  result]}]
+                      arguments)
+                   (= '(:command-id identity-bindings)
+                      (get locals 'command-id))
+                   (= '(:execution-id identity-bindings)
+                      (get locals 'execution-id))
+                   (map? fields)
+                   (= 'identity-bindings (:identity-bindings fields))
+                   (= '(:role plan) (:role fields))
+                   (= 'command-id (:command-id fields))
+                   (= 'execution-id (:execution-id fields))
+                   (= '(vec history) (:history fields))
+                   (= 'execution-type (:gesso.choreo.machine/type fields))
+                   (= '(action (assoc :action action)
+                         awaiting (assoc :awaiting awaiting)
+                         (= :completed status) (assoc :result result))
+                      (drop 2 assembly)))
+      (throw (ex-info "Machine execution record identity projection changed."
+                      {:error/kind :wrong-execution-record-projection})))
+    true))
+
+(defn- check-machine-execution-record! [checker definition]
+  ;; The original function's return type requires vector history; a general
+  ;; Map result would not catch an accidental removal of (vec history).
+  ;; External/public identity categories remain protected separately by
+  ;; runtime schema validation and the source-backed projection audit.
+  (let [input '(typed.clojure/HMap
+                :mandatory {:history (typed.clojure/Seqable typed.clojure/Any)}
+                :complete? false)
+        output '(typed.clojure/HMap
+                 :mandatory {:history (typed.clojure/AVec typed.clojure/Any)}
+                 :complete? false)
+        replace-fields (fn [f transform]
+                         (let [body (last f)
+                               record (last body)
+                               changed (list* 'cond-> (transform (second record))
+                                              (drop 2 record))
+                               new-body (apply list
+                                               (concat (butlast body) [changed]))]
+                           (apply list (concat (butlast f) [new-body]))))
+        require-rejected! (fn [label mutated]
+                            (when (= mutated definition)
+                              (throw (ex-info "Mutation had no target." {:label label})))
+                            (expect-audit-rejection!
+                             audit-machine-execution-record! label mutated
+                             :wrong-execution-record-projection))]
+    ;; Typed Clojure's default core annotations omit compiler-desugared
+    ;; to-array in Clojure map destructuring. This deliberately broad type
+    ;; is an interop assumption, not an assurance claim about that function.
+    (eval '(typed.clojure/ann clojure.core/to-array
+             (typed.clojure/IFn [typed.clojure/Any :-> typed.clojure/Any])))
+    (eval '(typed.clojure/ann gesso.choreo.machine/execution-type
+             typed.clojure/Any))
+    (eval (list 'typed.clojure/ann
+                'gesso.choreo.machine/execution-record
+                (list 'typed.clojure/IFn [input '-> output])))
+    (binding [*ns* (the-ns 'gesso.choreo.machine)]
+      (check-source! checker :production-execution-record-body definition)
+      (audit-machine-execution-record! definition)
+      (let [no-vector
+            (replace-fields definition #(assoc % :history 'history))
+            wrong-vector
+            (replace-fields definition #(assoc % :history ':not-a-vector))]
+        ;; Check the actual function body with only the changed expression.
+        (doseq [[label mutated]
+                [[:execution-history-not-vectorized no-vector]
+                 [:execution-history-wrong-type wrong-vector]]]
+          (let [{:keys [ex type-errors]}
+                (checker mutated :check-config config)
+                kinds (mapv :type-error type-errors)]
+            (when-not (and (nil? ex)
+                           (seq kinds)
+                           (every? #{:typed.clojure/type-mismatch-error} kinds))
+              (throw (ex-info "History mutation escaped Typed Clojure."
+                              {:label label :errors kinds} ex))))))
+      (doseq [[label changed]
+              [[:command-reader-swapped
+                (walk/postwalk-replace
+                 {'(:command-id identity-bindings)
+                  '(:execution-id identity-bindings)} definition)]
+               [:execution-reader-swapped
+                (walk/postwalk-replace
+                 {'(:execution-id identity-bindings)
+                  '(:command-id identity-bindings)} definition)]
+               [:command-slot-swapped
+                (replace-fields definition #(assoc % :command-id 'execution-id))]
+               [:execution-slot-swapped
+                (replace-fields definition #(assoc % :execution-id 'command-id))]
+               [:raw-bindings-stored
+                (replace-fields definition #(assoc % :identity-bindings '{}))]]]
+        (require-rejected! label changed)))
+    true))
+
 (defn check! [checker]
   ;; A verified Map argument/return discipline for the original production
   ;; normalizer. Valid tagged identity *kinds* remain runtime schema checks:
@@ -222,7 +330,8 @@
         execution (source-definition forms 'require-execution-id!)
         merge-fn (source-definition forms 'merge-explicit-binding)
         normalize (source-definition forms 'normalize-machine-bindings)
-        start (source-definition forms 'start)]
+        start (source-definition forms 'start)
+        record (source-definition forms 'execution-record)]
     ;; Gesso's existing schema validation wrappers are trusted here, backed
     ;; by the production type and machine tests; this does not checker-verify
     ;; the entire schema implementation or the whole machine/start function.
@@ -262,6 +371,7 @@
       (audit-machine-explicit-merge! merge-fn)
       (audit-machine-binding-normalization! normalize)
       (audit-machine-start-linkage! start)
+      (check-machine-execution-record! checker record)
       ;; The original machine/start has a separate obligation: it must use
       ;; the checked normalizer with the correct option-to-argument mapping.
       (let [normalization-call
