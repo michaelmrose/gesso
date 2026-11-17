@@ -84,6 +84,17 @@
                  {:left first-id :right id})))
     expected))
 
+(defn- aggregate-invariant-entry
+  "Pure per-invariant aggregation descriptor, not a proved induction step.
+   The caller must FIRST establish common initial, induction, and open-reason
+   statuses across the original per-operation results and verify that overall
+   conditional induction agrees with all of their preservation steps."
+  [initial-status preservation-by-operation induction-status open-reason]
+  {:initial-status initial-status
+   :preservation-by-operation preservation-by-operation
+   :induction-status induction-status
+   :open-reason open-reason})
+
 (defn- invariant-results! [interfaces invariant-ids]
   (sorted-map*
    (for [invariant-id (sorted-ids invariant-ids)]
@@ -108,13 +119,13 @@
          (reject! :incompatible-invariant-evidence
                   {:invariant-id invariant-id}))
        [invariant-id
-        {:initial-status (first initial)
-         :preservation-by-operation
+        (aggregate-invariant-entry
+         (first initial)
          (sorted-map*
           (for [[op-id result] results]
             [op-id (:preservation-status result)]))
-         :induction-status (first induction)
-         :open-reason (first open-reasons)}]))))
+         (first induction)
+         (first open-reasons))]))))
 
 (defn- interactions [interfaces]
   (sorted-map*

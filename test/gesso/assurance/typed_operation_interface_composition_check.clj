@@ -9,6 +9,7 @@
    assumption discharge, and installed correspondence remain runtime or
    separate assurance obligations, not static consequences of this checker."
   (:require [clojure.java.io :as io]
+            [clojure.walk :as walk]
             [gesso.assurance.proof.application-dependency]
             [gesso.assurance.proof.operation-interface]
             [gesso.assurance.proof.operation-interface-composition]
@@ -31,6 +32,21 @@
 ;; this exact derived report type. The full source-derivation algorithm and
 ;; live source registry remain runtime obligations, not inferred credentials.
 (def ^:private source-type iface-check/derived-type)
+;; These literal-union alphabets were checked against the ORIGINAL per-
+;; operation invariant-result-entry constructor in the upstream derivation gate.
+;; The aggregate uses the same initial/step and induction status families.
+(def ^:private inference-type iface-check/inference-status-type)
+(def ^:private induction-type iface-check/induction-status-type)
+(def aggregate-invariant-type
+  (list 'typed.clojure/HMap
+        :mandatory {:initial-status inference-type
+                    :preservation-by-operation
+                    (list 'typed.clojure/Map 'typed.clojure/Kw inference-type)
+                    :induction-status induction-type
+                    :open-reason 'typed.clojure/Any}
+        :complete? true))
+(def ^:private aggregate-results-type
+  (list 'typed.clojure/Map 'typed.clojure/Kw aggregate-invariant-type))
 (def ^:private report-statuses
   {:type :gesso.assurance.proof.operation-interface-composition/conditional-abstract-catalog
    :version 1
@@ -61,7 +77,7 @@
           :invariant-ids '(typed.clojure/Set typed.clojure/Kw)
           :shared-state-types 'typed.clojure/Any
           :operation-contracts 'typed.clojure/Any
-          :invariant-results 'typed.clojure/Any
+          :invariant-results aggregate-results-type
           :interactions 'typed.clojure/Any
           :original-open-obligation-ids-by-operation original-operations-type
           :open-meta-obligations meta-ids-type
@@ -112,8 +128,15 @@
                    iface-check/operation-contract-type)]]
            ['gesso.assurance.proof.operation-interface-composition/common-state-types!
             ['typed.clojure/Any '-> 'typed.clojure/Any]]
+           ;; The runtime aggregator validates source status agreement; its
+           ;; output category is audited against the ORIGINAL function. The
+           ;; full for/reduce algorithm is NOT independently checked here.
            ['gesso.assurance.proof.operation-interface-composition/invariant-results!
-            ['typed.clojure/Any 'typed.clojure/Any '-> 'typed.clojure/Any]]
+            ['typed.clojure/Any 'typed.clojure/Any '-> aggregate-results-type]]
+           ['gesso.assurance.proof.operation-interface-composition/aggregate-invariant-entry
+            [inference-type
+             (list 'typed.clojure/Map 'typed.clojure/Kw inference-type)
+             induction-type 'typed.clojure/Any '-> aggregate-invariant-type]]
            ['gesso.assurance.proof.operation-interface-composition/sorted-map*
             ['typed.clojure/Any '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.operation-interface-composition/interactions
@@ -209,12 +232,179 @@
                       {:source body})))
     true))
 
+(defn- aggregate-form! [forms]
+  ;; Check the exact ORIGINAL pure descriptor body, not a copied surrogate.
+  (let [source (original forms 'aggregate-invariant-entry)]
+    (when-not (= {:initial-status 'initial-status
+                  :preservation-by-operation 'preservation-by-operation
+                  :induction-status 'induction-status
+                  :open-reason 'open-reason}
+                 (last source))
+      (throw (ex-info "Original aggregated invariant descriptor changed" {})))
+    source))
+
+(def ^:private expected-aggregate-call
+  '(aggregate-invariant-entry
+    (first initial)
+    (sorted-map*
+     (for [[op-id result] results]
+       [op-id (:preservation-status result)]))
+    (first induction)
+    (first open-reasons)))
+
+(def ^:private expected-aggregate-guard
+  '(when-not (and (= 1 (count initial))
+                  (= 1 (count induction))
+                  (= 1 (count open-reasons))
+                  (set/subset? steps
+                               #{:checked-conditional-inference :open})
+                  (= (first induction)
+                     (if all-checked?
+                       :checked-conditional-induction :open)))
+     (reject! :incompatible-invariant-evidence
+              {:invariant-id invariant-id})))
+
+(defn- source-nodes [form predicate]
+  (let [found (atom [])]
+    (walk/postwalk (fn [node]
+                     (when (predicate node) (swap! found conj node))
+                     node) form)
+    @found))
+
+(def ^:private expected-status-acquisition
+  {'results
+   '(sorted-map*
+     (for [[op-id op] interfaces]
+       [op-id (get-in op [:conditional-invariant-results invariant-id])]))
+   'values '(vals results)
+   'initial '(set (map :initial-status values))
+   'induction '(set (map :induction-status values))
+   'open-reasons '(set (map :open-reason values))
+   'steps '(into #{} (map :preservation-status) values)
+   'all-checked? '(and (= initial #{:checked-conditional-inference})
+                       (= steps #{:checked-conditional-inference}))})
+
+(defn- check-aggregate-source! [forms]
+  (let [source (original forms 'invariant-results!)
+        body (last source)
+        iteration (second body)
+        let-body (when (and (seq? iteration) (= 'for (first iteration)))
+                   (nth iteration 2))
+        bindings (when (and (seq? let-body) (= 'let (first let-body)))
+                   (second let-body))
+        acquired (when (vector? bindings)
+                   (into {} (map vec (partition 2 bindings))))
+        calls (source-nodes source #(and (seq? %)
+                                         (= 'aggregate-invariant-entry (first %))))
+        guards (source-nodes source #(and (seq? %)
+                                          (= 'when-not (first %))))]
+    (when-not (and (= '[invariant-id (sorted-ids invariant-ids)] (second iteration))
+                   (= expected-status-acquisition acquired)
+                   (= [expected-aggregate-call] calls)
+                   (= [expected-aggregate-guard] guards))
+      (throw (ex-info "Original invariant aggregation lost source agreement"
+                      {:acquired acquired :calls calls :guards guards})))
+    true))
+
+(defn- replace-unique-source [source original-expression substitution]
+  (let [hits (atom 0)
+        altered (walk/postwalk
+                 (fn [node]
+                   (if (= node original-expression)
+                     (do (swap! hits inc) substitution)
+                     node)) source)]
+    (when-not (= 1 @hits)
+      (throw (ex-info "Original invariant source expression changed"
+                      {:expression original-expression :hits @hits})))
+    altered))
+
+(defn- check-aggregate! [checker forms]
+  (let [source (aggregate-form! forms)
+        aggregate-source (original forms 'invariant-results!)]
+    (check! checker :original-aggregate-invariant-entry source)
+    (check-aggregate-source! forms)
+    (check! checker :valid-aggregate-invariant-call
+            '(aggregate-invariant-entry
+              :checked-conditional-inference
+              {:operation/a :checked-conditional-inference :operation/b :open}
+              :open :source-has-an-open-step))
+    (doseq [[name transform]
+            [[:wrong-initial-status #(assoc % :initial-status :proved)]
+             [:wrong-step-status #(assoc % :preservation-by-operation
+                                          '{:operation/a :proved})]
+             [:wrong-step-map #(assoc % :preservation-by-operation #{:open})]
+             [:wrong-step-map-key #(assoc % :preservation-by-operation
+                                           '{"not-a-keyword" :open})]
+             [:wrong-induction-status #(assoc % :induction-status :proved)]
+             [:induction-from-initial #(assoc % :induction-status 'initial-status)]
+             [:initial-from-induction #(assoc % :initial-status 'induction-status)]
+             [:missing-initial #(dissoc % :initial-status)]
+             [:missing-preservation #(dissoc % :preservation-by-operation)]
+             [:missing-induction #(dissoc % :induction-status)]
+             [:missing-open-reason #(dissoc % :open-reason)]
+             [:invented-certificate #(assoc % :certificate :issued)]
+             [:invented-proof-status #(assoc % :proof-status :proved)]]]
+      (let [body (last source)
+            mutated (transform body)]
+        (when (= body mutated)
+          (throw (ex-info "No-op aggregate test mutation" {:name name})))
+        (reject! checker [:malformed-invariant-aggregate name]
+                 (apply list (concat (butlast source) [mutated])))))
+    (doseq [[name expression]
+            [[:raw-preservation
+              '(aggregate-invariant-entry :open {} :proved :reason)]
+             [:wrong-initial-call
+              '(aggregate-invariant-entry :checked-conditional-induction {} :open nil)]
+             [:wrong-induction-call
+              '(aggregate-invariant-entry :open {} :checked-conditional-inference nil)]
+             [:wrong-preservation-call
+              '(aggregate-invariant-entry :open {:operation/a :proved} :open nil)]]]
+      (reject! checker [:aggregate-argument name] expression))
+    ;; Same-typed operation keys can be switched or one operation's status
+    ;; substituted for another without static error. The ORIGINAL source
+    ;; audit must preserve exactly which status belongs to which operation.
+    (doseq [[name old new]
+            [[:wrong-preservation-value
+              '(:preservation-status result) '(:initial-status result)]
+             [:wrong-operation-key 'op-id 'invariant-id]
+             [:wrong-overall-induction '(first induction) '(first initial)]
+             [:disabled-consistency-guard expected-aggregate-guard true]
+             [:initial-from-step-set
+              '(set (map :initial-status values))
+              '(set (map :preservation-status values))]
+             [:preservation-from-initial-set
+              '(into #{} (map :preservation-status) values)
+              '(into #{} (map :initial-status) values)]
+             [:induction-from-initial-set
+              '(set (map :induction-status values))
+              '(set (map :initial-status values))]
+             [:wrong-source-invariant
+              '(get-in op [:conditional-invariant-results invariant-id])
+              '(get-in op [:conditional-invariant-results :unrelated-id])]]]
+      (let [changed (if (or (= old expected-aggregate-guard)
+                            (contains? (set (vals expected-status-acquisition)) old)
+                            (= old '(get-in op [:conditional-invariant-results
+                                                    invariant-id])))
+                      (replace-unique-source aggregate-source old new)
+                      (replace-unique-source aggregate-source
+                       expected-aggregate-call
+                       (walk/postwalk-replace {old new}
+                                              expected-aggregate-call)))
+            substituted (mapv #(if (= aggregate-source %) changed %) forms)]
+        (when-not (try (check-aggregate-source! substituted)
+                       false
+                       (catch clojure.lang.ExceptionInfo _ true))
+          (throw (ex-info "Mutated source escaped aggregate audit"
+                          {:case name})))))
+    true))
+
 (defn- checks! [checker forms]
   (binding [*ns* (the-ns source-ns)]
     (doseq [name '[compose-derived! compose-operation-interfaces!
                    require-current-operation-composition!]]
       (check! checker [:original name] (original forms name)))
     (audit-public! forms)
+    (check-aggregate! checker forms)
     (let [source (original forms 'compose-derived!)]
       (assert-provenance! source)
       ;; Status fields are NOT just comments. The exact checked HMap
@@ -229,6 +419,37 @@
                [:wrong-report-fingerprint #(assoc % :fingerprint 17)]
                [:wrong-operation-ids #(assoc % :operation-ids [])]
                [:wrong-invariant-ids #(assoc % :invariant-ids {})]
+               [:wrong-invariant-results-container
+                #(assoc % :invariant-results [])]
+               [:wrong-aggregated-initial-status
+                #(assoc % :invariant-results
+                        '(assoc invariant-results :invariant/x
+                                {:initial-status :proved
+                                 :preservation-by-operation {}
+                                 :induction-status :open
+                                 :open-reason nil}))]
+               [:wrong-aggregated-induction-status
+                #(assoc % :invariant-results
+                        '(assoc invariant-results :invariant/x
+                                {:initial-status :open
+                                 :preservation-by-operation {}
+                                 :induction-status :proved
+                                 :open-reason nil}))]
+               [:wrong-preservation-status-map
+                #(assoc % :invariant-results
+                        '(assoc invariant-results :invariant/x
+                                {:initial-status :open
+                                 :preservation-by-operation {:operation/a :proved}
+                                 :induction-status :open
+                                 :open-reason nil}))]
+               [:invented-aggregate-proof
+                #(assoc % :invariant-results
+                        '(assoc invariant-results :invariant/x
+                                {:initial-status :open
+                                 :preservation-by-operation {}
+                                 :induction-status :open
+                                 :open-reason nil
+                                 :proof-status :proved}))]
                [:invented-authorization #(assoc % :transaction-authority :granted)]
                [:meta-as-map #(assoc % :open-meta-obligations {})]
                [:assumptions-as-set #(assoc % :open-assumptions #{:open})]
@@ -302,8 +523,8 @@
         forms (source-forms)]
     (checks! checker forms)
     (runtime-guard!)
-    (println "Typed operation composition passed: 3 original source bodies,")
-    (println "29 invalid composition-map mutations, 4 nominal closure calls,")
-    (println "2 type-compatible provenance swaps caught by source audit,")
-    (println "and runtime forged-closure rejection; no proof/authority claim.")
+    (println "Typed operation composition passed: 4 original source bodies,")
+    (println "34 invalid composition-map mutations, 17 aggregate mutations,")
+    (println "8 original aggregate-source mutants and 4 nominal closure calls;")
+    (println "2 report provenance swaps and runtime forged-closure rejection.")
     :ok))
