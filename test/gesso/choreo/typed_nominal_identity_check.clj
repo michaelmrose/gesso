@@ -6,6 +6,7 @@
    assertions protect direct runtime calls from accidental wrong-category
    values. No production identity representation is changed by this pilot."
   (:require [clojure.java.io :as io]
+            [clojure.walk :as walk]
             [gesso.choreo.typed-nominal-identity-pilot :as pilot]
             [gesso.choreo.typed-nominal-identity-bridge :as bridge]
             [typed.clojure :as t]))
@@ -30,7 +31,7 @@
 
 (defn- source-definition [forms name]
   (let [found (filter #(and (seq? %)
-                            (= 'defn (first %))
+                            (#{'defn 'defn-} (first %))
                             (= name (second %))) forms)]
     (when-not (= 1 (count found))
       (throw (ex-info "Missing or duplicate nominal source function."
@@ -77,15 +78,90 @@
                         :kinds kinds :exception (some-> ex ex-message)})))
      true)))
 
-(defn- check-tagged-to-nominal-bridge! [checker]
-  ;; These annotations are local to the opt-in checker. The public tagged
-  ;; identity API and ordinary Gesso runtime do not load Typed Clojure.
-  ;; Their runtime behavior remains covered by the production identity suite.
+(def ^:private correspondence
+  ;; This is the intended *semantic* correspondence; static map types alone
+  ;; cannot distinguish which tagged constructor corresponds to each class.
+  [{:kind :principal :class 'gesso.choreo.typed_nominal_identity_pilot.Principal
+    :nominal 'nominal/->Principal :tagged 'tagged/principal}
+   {:kind :actor :class 'gesso.choreo.typed_nominal_identity_pilot.Actor
+    :nominal 'nominal/->Actor :tagged 'tagged/actor}
+   {:kind :authority :class 'gesso.choreo.typed_nominal_identity_pilot.Authority
+    :nominal 'nominal/->Authority :tagged 'tagged/authority}
+   {:kind :host :class 'gesso.choreo.typed_nominal_identity_pilot.Host
+    :nominal 'nominal/->Host :tagged 'tagged/host}
+   {:kind :command :class 'gesso.choreo.typed_nominal_identity_pilot.CommandId
+    :nominal 'nominal/->CommandId :tagged 'tagged/command-id}
+   {:kind :execution :class 'gesso.choreo.typed_nominal_identity_pilot.ExecutionId
+    :nominal 'nominal/->ExecutionId :tagged 'tagged/execution-id}])
+
+(defn- audit-forward-correspondence! [definition]
+  ;; Audit the *actual original case expression*, not a separately authored
+  ;; reconstruction that could keep passing after production pilot drift.
+  (let [let-form (last definition)
+        case-form (when (and (seq? let-form) (= 'let (first let-form)))
+                    (last let-form))
+        expected (vec (mapcat (fn [{:keys [kind nominal]}]
+                                [kind (list nominal 'raw 'extensions)])
+                              correspondence))]
+    (when-not (and (seq? case-form)
+                   (= 'case (first case-form))
+                   (= '(tagged/kind reference) (second case-form))
+                   (= expected (vec (drop 2 case-form))))
+      (throw (ex-info "Forward identity category correspondence changed."
+                      {:error/kind :wrong-forward-correspondence})))
+    true))
+
+(defn- audit-reverse-correspondence! [definition]
+  ;; Cond/instance? is not a dependent-type proof: each arm returns the same
+  ;; structural map type. Audit every class-to-constructor association and
+  ;; both hinted field reads, including a fail-closed final error branch.
+  (let [cond-form (last definition)
+        branches (when (and (seq? cond-form)
+                            (= 'cond (first cond-form)))
+                   (vec (partition-all 2 (rest cond-form))))
+        body-ok?
+        (and (= 7 (count branches))
+             (every?
+              true?
+              (map (fn [{:keys [class tagged]} [pred body]]
+                     (and (= (list 'instance? class 'reference) pred)
+                          (= 'restore-tagged (first body))
+                          (= tagged (second body))
+                          (= 4 (count body))
+                          (every?
+                           true?
+                           (map (fn [field expr]
+                                  (and (= (list field 'reference) expr)
+                                       (= class (:tag (meta (second expr))))))
+                                ['.-raw '.-extensions]
+                                (drop 2 body)))))
+                   correspondence (take 6 branches)))
+             (= :else (first (last branches)))
+             (let [error (second (last branches))]
+               (and (seq? error) (= 'throw (first error)))))]
+    (when-not body-ok?
+      (throw (ex-info "Reverse identity category correspondence changed."
+                      {:error/kind :wrong-reverse-correspondence})))
+    true))
+
+(defn- expect-audit-rejection! [audit label changed expected-kind]
+  (let [kind (try (audit changed) nil
+                  (catch clojure.lang.ExceptionInfo e
+                    (:error/kind (ex-data e))))]
+    (when-not (= expected-kind kind)
+      (throw (ex-info "Semantic category mutation escaped bridge audit."
+                      {:label label :expected expected-kind :actual kind})))
+    true))
+
+(defn- check-bridge! [checker]
   (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
         class-types (mapv #(symbol (str class-prefix %)) categories)
+        map-type '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
         bridge-sources (source-forms
                         "gesso/choreo/typed_nominal_identity_bridge.cljc")
-        original (source-definition bridge-sources 'tagged->nominal)]
+        forward (source-definition bridge-sources 'tagged->nominal)
+        restore (source-definition bridge-sources 'restore-tagged)
+        reverse (source-definition bridge-sources 'nominal->tagged)]
     (eval (list 'typed.clojure/ann
                 (symbol (str bridge-ns) "canonical-keys")
                 '(typed.clojure/Set typed.clojure/Any)))
@@ -98,20 +174,67 @@
               '[typed.clojure/Any -> typed.clojure/Any]]]]
       (eval (list 'typed.clojure/ann function
                   (list 'typed.clojure/IFn signature))))
+    (doseq [factory '[principal actor authority host command-id execution-id]]
+      (eval (list 'typed.clojure/ann
+                  (symbol "gesso.choreo.identity" (str factory))
+                  (list 'typed.clojure/IFn ['typed.clojure/Any '-> map-type]))))
     (eval (list 'typed.clojure/ann
                 (symbol (str bridge-ns) "tagged->nominal")
                 (list 'typed.clojure/IFn
-                      [(list 'typed.clojure/Map
-                             'typed.clojure/Any 'typed.clojure/Any)
-                       '-> (cons 'typed.clojure/U class-types)])))
+                      [map-type '-> (cons 'typed.clojure/U class-types)])))
+    (eval (list 'typed.clojure/ann
+                (symbol (str bridge-ns) "restore-tagged")
+                (list 'typed.clojure/IFn
+                      [(list 'typed.clojure/IFn
+                             ['typed.clojure/Any '-> map-type])
+                       'typed.clojure/Any
+                       'typed.clojure/Any
+                       '-> map-type])))
+    (eval (list 'typed.clojure/ann
+                (symbol (str bridge-ns) "nominal->tagged")
+                (list 'typed.clojure/IFn
+                      [(cons 'typed.clojure/U class-types) '-> map-type])))
     (binding [*ns* (the-ns bridge-ns)]
-      (check! checker :actual-tagged-to-nominal-body original)
-      ;; A generic tagged map is not itself a nominal identity. The return
-      ;; type must not silently widen to Any if the implementation regresses.
-      (let [broken (apply list (concat (butlast original)
-                                       [:not-a-nominal]))]
-        (check-rejection! checker :wrong-tagged-to-nominal-return
-                          broken :typed.clojure/type-mismatch-error)))
+      (doseq [[label form] [[:tagged-to-nominal forward]
+                            [:restore-tagged restore]
+                            [:nominal-to-tagged reverse]]]
+        (check! checker [:actual-bridge-body label] form))
+      (audit-forward-correspondence! forward)
+      (audit-reverse-correspondence! reverse)
+      (doseq [constructor '[principal actor authority host command-id execution-id]]
+        (check! checker [:valid-reverse-call constructor]
+                (list 'nominal->tagged (list (symbol "nominal" (str constructor)) :id))))
+      (doseq [bad [nil {:raw :id} :role]]
+        (check-rejection! checker [:invalid-reverse-call bad]
+                          (list 'nominal->tagged bad)))
+      (doseq [[label original bogus expected-error]
+              [[:forward-return forward :not-a-nominal
+                :typed.clojure/type-mismatch-error]
+               [:reverse-return reverse :not-a-tagged-map
+                :typed.clojure/type-mismatch-error]]]
+        (check-rejection! checker label
+                          (apply list (concat (butlast original) [bogus]))
+                          expected-error))
+      ;; Mutations that *preserve* type signatures but violate semantics:
+      ;; neither the union nor the Map return can recognize these swaps.
+      (expect-audit-rejection!
+       audit-forward-correspondence! :forward-category-swap
+       (walk/postwalk-replace {'nominal/->Principal 'nominal/->Actor} forward)
+       :wrong-forward-correspondence)
+      (expect-audit-rejection!
+       audit-reverse-correspondence! :reverse-category-swap
+       (walk/postwalk-replace {'tagged/principal 'tagged/actor} reverse)
+       :wrong-reverse-correspondence)
+      (expect-audit-rejection!
+       audit-reverse-correspondence! :reverse-field-hint-removed
+       (walk/postwalk
+        (fn [node] (if (and (symbol? node)
+                            (= 'reference node)
+                            (:tag (meta node)))
+                     (with-meta node nil)
+                     node))
+        reverse)
+       :wrong-reverse-correspondence))
     true))
 
 (defn -main [& _]
@@ -120,7 +243,7 @@
   (doseq [category categories]
     (eval (list 'typed.clojure/ann-datatype
                 (symbol (str class-prefix category))
-                '[raw :- typed.clojure/Any extensions :- typed.clojure/Any])))
+                '[raw :- typed.clojure/Any extensions :- (typed.clojure/Map typed.clojure/Any typed.clojure/Any)])))
   ;; The annotations are optional and only occur in this checker harness.
   ;; Production and downstream Clojure never need a Typed Clojure runtime.
   (doseq [[category factory] (map vector categories factories)]
@@ -173,8 +296,8 @@
         (when-not (= :missing-runtime-contract kind)
           (throw (ex-info "Missing runtime guard was not detected."
                           {:error/kind kind})))))
-    (check-tagged-to-nominal-bridge! checker)
+    (check-bridge! checker)
     (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
-    (println "1 tagged-to-nominal bridge body, 7 valid calls, 49 invalid")
-    (println "calls, 3 mutation checks (including bridge return type).")
+    (println "3 bridge bodies, 13 valid calls, 52 invalid static calls,")
+    (println "7 mutation checks (source return, guards, and categories).")
     :ok))

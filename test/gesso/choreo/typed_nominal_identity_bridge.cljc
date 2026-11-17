@@ -41,7 +41,7 @@
   "Reject an invalid nominal extension payload instead of overwriting kind."
   [constructor raw extensions]
   (when-not (and (map? extensions)
-                 (not-any? canonical-keys (keys extensions)))
+                 (empty? (select-keys extensions canonical-keys)))
     (throw (ex-info "Nominal identity extensions must be an independent map."
                     {:error/kind :invalid-nominal-extensions
                      :extensions extensions})))
@@ -57,22 +57,22 @@
   [reference]
   (cond
     (instance? gesso.choreo.typed_nominal_identity_pilot.Principal reference)
-    (restore-tagged tagged/principal (.-raw reference) (.-extensions reference))
+    (restore-tagged tagged/principal (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Principal reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Principal reference))
 
     (instance? gesso.choreo.typed_nominal_identity_pilot.Actor reference)
-    (restore-tagged tagged/actor (.-raw reference) (.-extensions reference))
+    (restore-tagged tagged/actor (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Actor reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Actor reference))
 
     (instance? gesso.choreo.typed_nominal_identity_pilot.Authority reference)
-    (restore-tagged tagged/authority (.-raw reference) (.-extensions reference))
+    (restore-tagged tagged/authority (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Authority reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Authority reference))
 
     (instance? gesso.choreo.typed_nominal_identity_pilot.Host reference)
-    (restore-tagged tagged/host (.-raw reference) (.-extensions reference))
+    (restore-tagged tagged/host (.-raw ^gesso.choreo.typed_nominal_identity_pilot.Host reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.Host reference))
 
     (instance? gesso.choreo.typed_nominal_identity_pilot.CommandId reference)
-    (restore-tagged tagged/command-id (.-raw reference) (.-extensions reference))
+    (restore-tagged tagged/command-id (.-raw ^gesso.choreo.typed_nominal_identity_pilot.CommandId reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.CommandId reference))
 
     (instance? gesso.choreo.typed_nominal_identity_pilot.ExecutionId reference)
-    (restore-tagged tagged/execution-id (.-raw reference) (.-extensions reference))
+    (restore-tagged tagged/execution-id (.-raw ^gesso.choreo.typed_nominal_identity_pilot.ExecutionId reference) (.-extensions ^gesso.choreo.typed_nominal_identity_pilot.ExecutionId reference))
 
     :else
     (throw (ex-info "Expected one of the six nominal identity categories."
