@@ -126,6 +126,7 @@
   (:require
    [clojure.set :as set]
    [gesso.choreo.identity :as identity]
+   [gesso.choreo.internal.nominal-bindings :as nominal-bindings]
    [gesso.choreo.knowledge :as knowledge]
    [gesso.choreo.project :as project]
    [gesso.choreo.type :as type])
@@ -1046,11 +1047,20 @@
   (let [runtime-identities
         (non-role-bindings bindings)
 
+        ;; Read identities through the checked nominal slots before
+        ;; emitting the *same* portable tagged descriptor fields. This is
+        ;; an internal use of nominal categories, not a change to the
+        ;; machine's stored representation or public API.
+        nominals
+        (nominal-bindings/bindings->nominal bindings)
+
         command-id
-        (:command-id bindings)
+        (when-let [command (:command-id nominals)]
+          (nominal-bindings/command-id->tagged command))
 
         execution-id
-        (:execution-id bindings)]
+        (when-let [attempt (:execution-id nominals)]
+          (nominal-bindings/execution-id->tagged attempt))]
 
     (cond->
      (assoc descriptor

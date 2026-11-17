@@ -11,6 +11,7 @@
             [gesso.choreo.internal.nominal-identity :as internal]
             [gesso.choreo.typed-nominal-identity-bridge :as bridge]
             [gesso.choreo.internal.nominal-bindings :as internal-bindings]
+            [gesso.choreo.internal.machine-nominal-bindings :as machine-bindings]
             [gesso.choreo.typed-nominal-machine-boundary-test :as machine-seam]
             [typed.clojure :as t]))
 
@@ -494,7 +495,7 @@
   ;; and the checked nominal adapter must handle the conversion. A returned
   ;; HMap annotation alone would not detect fabricated data or bypassing
   ;; machine execution validation.
-  (when-not (= '(bindings->nominal
+  (when-not (= '(bindings/bindings->nominal
                  (machine/identity-bindings execution))
                (last definition))
     (throw (ex-info "Machine-to-nominal seam bypasses its real boundary."
@@ -506,7 +507,7 @@
   ;; Annotating machine/identity-bindings models the existing validated public
   ;; accessor's output; its production body is not yet statically checked.
   ;; This gate source-checks the REAL internal machine seam and both adapters.
-  (let [machine-ns 'gesso.choreo.internal.nominal-bindings
+  (let [machine-ns 'gesso.choreo.internal.machine-nominal-bindings
         class-types (mapv #(symbol (str class-prefix %)) categories)
         hmap (list 'typed.clojure/HMap
                    :optional (into {:role 'typed.clojure/Kw}
@@ -521,7 +522,7 @@
                                       (typed.clojure/Map
                                        typed.clojure/Any typed.clojure/Any)))
         source (source-definition
-                (source-forms "gesso/choreo/internal/nominal_bindings.cljc")
+                (source-forms "gesso/choreo/internal/machine_nominal_bindings.cljc")
                 'execution->nominal-bindings)]
     (eval (list 'typed.clojure/ann
                 'gesso.choreo.machine/identity-bindings
@@ -542,17 +543,120 @@
        :wrong-machine-boundary-source))
     (binding [*ns* (the-ns 'gesso.choreo.typed-nominal-machine-boundary-test)]
       (check! checker :real-machine-principal-propagation
-              '(let [bindings (internal-bindings/execution->nominal-bindings
+              '(let [bindings (machine-bindings/execution->nominal-bindings
                                :machine-execution)]
                  (if-let [principal (:principal bindings)]
                    (gesso.choreo.typed-nominal-identity-pilot/step-1 principal)
                    nil)))
       (check-rejection! checker :real-machine-actor-as-principal
-                        '(let [bindings (internal-bindings/execution->nominal-bindings
+                        '(let [bindings (machine-bindings/execution->nominal-bindings
                                          :machine-execution)]
                            (if-let [actor (:actor bindings)]
                              (gesso.choreo.typed-nominal-identity-pilot/step-1 actor)
                              nil))))
+    true))
+
+(defn- audit-machine-descriptor-identity-consumer! [definition]
+  ;; Static nominal types protect the class-specific extraction, but the
+  ;; larger machine source is still dynamically authored. Audit its actual
+  ;; identity projection so neither category can be accidentally exchanged
+  ;; while preserving a well-typed tagged-map return value.
+  (let [body (last definition)
+        let-bindings (when (and (seq? body) (= 'let (first body)))
+                       (second body))
+        fields (when (vector? let-bindings)
+                 (into {} (map vec (partition 2 let-bindings))))
+        expected-command
+        '(when-let [command (:command-id nominals)]
+           (nominal-bindings/command-id->tagged command))
+        expected-execution
+        '(when-let [attempt (:execution-id nominals)]
+           (nominal-bindings/execution-id->tagged attempt))]
+    (when-not (and (= '(nominal-bindings/bindings->nominal bindings)
+                      (get fields 'nominals))
+                   (= expected-command (get fields 'command-id))
+                   (= expected-execution (get fields 'execution-id))
+                   (= '(non-role-bindings bindings)
+                      (get fields 'runtime-identities))
+                   ;; Reject replacement of the portable descriptor result
+                   ;; with nominal values even if the intermediate is right.
+                   (= '(cond-> (assoc descriptor :execution-id execution-id)
+                         (some? command-id) (assoc :command-id command-id)
+                         (seq runtime-identities) (assoc :identity-bindings bindings))
+                      (last body)))
+      (throw (ex-info "Production descriptor identity projection changed."
+                      {:error/kind :wrong-descriptor-identity-consumer})))
+    true))
+
+(defn- audit-nominal-identity-consumer! [definition category]
+  (let [parameter (first (nth definition 2 nil))
+        class (symbol (str class-prefix category))]
+    (when-not (and (= {:pre [(list 'instance? class parameter)]}
+                      (nth definition 3 nil))
+                   (= class (:tag (meta parameter)))
+                   (= (list 'nominal->tagged parameter)
+                      (last definition)))
+      (throw (ex-info "Production category-specific consumer lost its contract."
+                      {:error/kind :wrong-nominal-identity-consumer
+                       :category category})))
+    true))
+
+(defn- check-production-descriptor-consumers! [checker]
+  (let [bridge-ns 'gesso.choreo.internal.nominal-bindings
+        class-command (symbol (str class-prefix "CommandId"))
+        class-execution (symbol (str class-prefix "ExecutionId"))
+        map-type '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
+        forms (source-forms "gesso/choreo/internal/nominal_bindings.cljc")
+        command-source (source-definition forms 'command-id->tagged)
+        execution-source (source-definition forms 'execution-id->tagged)
+        descriptor-source
+        (binding [*ns* (the-ns 'gesso.choreo.machine)]
+          (source-definition (source-forms "gesso/choreo/machine.cljc")
+                             'descriptor-identities))]
+    (doseq [[name input-type]
+            [['command-id->tagged class-command]
+             ['execution-id->tagged class-execution]]]
+      (eval (list 'typed.clojure/ann
+                  (symbol (str bridge-ns) (str name))
+                  (list 'typed.clojure/IFn [input-type '-> map-type]))))
+    (binding [*ns* (the-ns bridge-ns)]
+      (doseq [[label source category]
+              [[:command-source command-source "CommandId"]
+               [:execution-source execution-source "ExecutionId"]]]
+        (check! checker [:real-production-descriptor-source label] source)
+        (audit-nominal-identity-consumer! source category))
+      (check! checker :correct-command-consumer
+              '(command-id->tagged (internal/command-id :command)))
+      (check! checker :correct-execution-consumer
+              '(execution-id->tagged (internal/execution-id :attempt)))
+      (check-rejection! checker :execution-id-used-as-command-id
+                        '(command-id->tagged (internal/execution-id :attempt)))
+      (check-rejection! checker :command-id-used-as-execution-id
+                        '(execution-id->tagged (internal/command-id :command)))
+      (doseq [bad [nil {:raw :bad}]]
+        (check-rejection! checker [:invalid-command-input bad]
+                          (list 'command-id->tagged bad))
+        (check-rejection! checker [:invalid-execution-input bad]
+                          (list 'execution-id->tagged bad)))
+      (doseq [[label source opposite]
+              [[:wrong-command-return command-source '(internal/actor :bad)]
+               [:wrong-execution-return execution-source '(internal/actor :bad)]]]
+        (check-rejection! checker label
+                          (apply list (concat (butlast source) [opposite]))
+                          :typed.clojure/type-mismatch-error)))
+    (audit-machine-descriptor-identity-consumer! descriptor-source)
+    (doseq [[label modified]
+            [[:command-projection-swapped
+              (walk/postwalk-replace
+               {'nominal-bindings/command-id->tagged
+                'nominal-bindings/execution-id->tagged} descriptor-source)]
+             [:execution-projection-swapped
+              (walk/postwalk-replace
+               {'nominal-bindings/execution-id->tagged
+                'nominal-bindings/command-id->tagged} descriptor-source)]]]
+      (expect-audit-rejection!
+       audit-machine-descriptor-identity-consumer! label modified
+       :wrong-descriptor-identity-consumer))
     true))
 
 (defn -main [& _]
@@ -645,6 +749,7 @@
     (check-heterogeneous-nominal-bindings! checker)
     (check-canonical-nominal-output! checker)
     (check-machine-boundary! checker)
+    (check-production-descriptor-consumers! checker)
     (println "Nominal static gate passed: 6 production constructors, 6 test")
     (println "facades, 7 stage bodies, and source-backed bridge checks;")
     (println "6 bridge bodies including canonical sparse output,")
@@ -655,4 +760,6 @@
     (println "wrong downstream consumer and slot-swap mutations rejected.")
     (println "Real production machine/start conversion seam: body checked,")
     (println "typed seven-slot output; invalid consumer/bypass rejected.")
+    (println "Production machine descriptors: nominal command/execution")
+    (println "consumers source-checked; wrong-category swaps rejected.")
     :ok))

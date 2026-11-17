@@ -8,8 +8,7 @@
    identity extensions are preserved in memory, not added to the closed wire
    representation. Nominal identity is not an authentication assertion."
   (:require [gesso.choreo.identity :as tagged]
-            [gesso.choreo.internal.nominal-identity :as internal]
-            [gesso.choreo.machine :as machine]))
+            [gesso.choreo.internal.nominal-identity :as internal]))
 
 (def ^:private canonical-keys
   #{:gesso.choreo.identity/type
@@ -208,9 +207,18 @@
               {}
               bindings)))
 
-(defn execution->nominal-bindings
-  "Read a *validated production machine execution* and convert its portable
-   tagged bindings into a closed, category-specific nominal map. The machine
-   execution itself, its descriptors, and its wire format are untouched."
-  [execution]
-  (bindings->nominal (machine/identity-bindings execution)))
+
+;; These are deliberately category-specific internal consumers, not generic
+;; tag inspectors. Ordinary defn preconditions ensure independently invoked
+;; functions reject accidental substitution even from unchecked Clojure.
+(defn command-id->tagged
+  [^gesso.choreo.internal.nominal_identity.CommandId command-id]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.CommandId
+                    command-id)]}
+  (nominal->tagged command-id))
+
+(defn execution-id->tagged
+  [^gesso.choreo.internal.nominal_identity.ExecutionId execution-id]
+  {:pre [(instance? gesso.choreo.internal.nominal_identity.ExecutionId
+                    execution-id)]}
+  (nominal->tagged execution-id))

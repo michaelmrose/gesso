@@ -7,6 +7,7 @@
             [gesso.choreo.machine :as machine]
             [gesso.choreo.project :as project]
             [gesso.choreo.internal.nominal-bindings :as internal-bindings]
+            [gesso.choreo.internal.machine-nominal-bindings :as machine-bindings]
             [gesso.choreo.typed-nominal-identity-pilot :as nominal]))
 
 (defn- machine-plan []
@@ -47,7 +48,7 @@
                           [slot (get all slot)]))
             execution (machine/start plan {:identity-bindings input})
             public (machine/identity-bindings execution)
-            internals (internal-bindings/execution->nominal-bindings execution)
+            internals (machine-bindings/execution->nominal-bindings execution)
             action (machine/pending-action execution)]
         (testing (str "real machine boundary, sparse subset " mask)
           (is (machine/execution? execution))
@@ -69,7 +70,7 @@
   (let [plan (machine-plan)
         all (reference-bindings)
         execution (machine/start plan {:identity-bindings all})
-        internal (internal-bindings/execution->nominal-bindings execution)]
+        internal (machine-bindings/execution->nominal-bindings execution)]
     (is (instance? gesso.choreo.internal.nominal_identity.Principal
                    (:principal internal)))
     (is (instance? gesso.choreo.internal.nominal_identity.Actor
@@ -94,7 +95,7 @@
         completed (machine/complete-local started)
         tagged-before (machine/identity-bindings started)
         tagged-after (machine/identity-bindings completed)
-        nominal-after (internal-bindings/execution->nominal-bindings completed)]
+        nominal-after (machine-bindings/execution->nominal-bindings completed)]
     (is (machine/execution? completed))
     (is (machine/completed? completed))
     (is (= tagged-before tagged-after))
@@ -164,8 +165,59 @@
                      (dissoc started :state)
                      (assoc started :role :browser)]]
       (is (= :invalid-execution
-             (error-kind #(internal-bindings/execution->nominal-bindings
+             (error-kind #(machine-bindings/execution->nominal-bindings
                            invalid)))))))
+
+(deftest production-descriptor-consumers-reject-category-substitutions
+  (let [tagged-command (tagged/command-id :same-id)
+        tagged-execution (tagged/execution-id :same-id)
+        nominal-command (internal-bindings/tagged->nominal tagged-command)
+        nominal-execution (internal-bindings/tagged->nominal tagged-execution)]
+    (is (= tagged-command
+           (internal-bindings/command-id->tagged nominal-command)))
+    (is (= tagged-execution
+           (internal-bindings/execution-id->tagged nominal-execution)))
+    ;; The nominal wrappers reject all five wrong categories, plain maps,
+    ;; and nil when invoked *directly*, regardless of their upstream caller.
+    (doseq [invalid [(nominal/principal :same-id)
+                     (nominal/actor :same-id)
+                     (nominal/authority :same-id)
+                     (nominal/host :same-id)
+                     (nominal/execution-id :same-id)
+                     {:raw :same-id} nil]]
+      (is (thrown? #?(:clj AssertionError :cljs js/Error)
+                   (internal-bindings/command-id->tagged invalid))))
+    (doseq [invalid [(nominal/principal :same-id)
+                     (nominal/actor :same-id)
+                     (nominal/authority :same-id)
+                     (nominal/host :same-id)
+                     (nominal/command-id :same-id)
+                     {:raw :same-id} nil]]
+      (is (thrown? #?(:clj AssertionError :cljs js/Error)
+                   (internal-bindings/execution-id->tagged invalid))))))
+
+(deftest real-machine-descriptors-remain-exactly-portable
+  (let [plan (machine-plan)
+        sample (reference-bindings)]
+    ;; The new production descriptor path must not leak nominal classes into
+    ;; machine outputs, and it must not lose extension-bearing identity maps.
+    (doseq [mask (range 128)]
+      (let [bindings (into {}
+                           (for [[idx slot] (map-indexed vector slots)
+                                 :when (bit-test mask idx)]
+                             [slot (get sample slot)]))
+            execution (machine/start plan {:identity-bindings bindings})
+            public (machine/identity-bindings execution)
+            descriptor (machine/pending-action execution)
+            expected-non-role (dissoc public :role)]
+        (is (= (:command-id public) (:command-id descriptor)))
+        (is (= (:execution-id public) (:execution-id descriptor)))
+        (is (= (contains? descriptor :command-id)
+               (contains? public :command-id)))
+        (is (= (boolean (seq expected-non-role))
+               (contains? descriptor :identity-bindings)))
+        (when (seq expected-non-role)
+          (is (= public (:identity-bindings descriptor))))))))
 
 #?(:clj
    (defn -main [& _]
