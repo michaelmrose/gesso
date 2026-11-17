@@ -79,6 +79,36 @@
                     {:error/kind :invalid-nominal-identity
                      :value reference}))))
 
+(defn- nominal-binding-entry
+  "Convert one entry after the public sparse binding map has been checked."
+  [acc key value]
+  (assoc acc key (if (= key :role)
+                   (if (keyword? value)
+                     value
+                     (throw (ex-info "Expected a keyword for :role."
+                                     {:error/kind :invalid-role
+                                      :binding key :value value})))
+                   (if (map? value)
+                     (tagged->nominal value)
+                     (throw (ex-info "Expected a tagged identity in binding."
+                                     {:error/kind :invalid-tagged-identity
+                                      :binding key :value value}))))))
+
+(defn- tagged-binding-entry
+  "Convert one nominal entry, without bypassing the final public validator."
+  [acc key value]
+  (assoc acc key (if (= key :role)
+                   (if (keyword? value)
+                     value
+                     (throw (ex-info "Expected a keyword for :role."
+                                     {:error/kind :invalid-role
+                                      :binding key :value value})))
+                   (if (keyword? value)
+                     (throw (ex-info "Expected a nominal identity in binding."
+                                     {:error/kind :invalid-nominal-identity
+                                      :binding key :value value}))
+                     (nominal->tagged value)))))
+
 (defn bindings->nominal
   "Convert a validated, sparse public binding map to internal nominal values.
 
@@ -86,10 +116,7 @@
    passes through the public validator before a category-specific conversion.
    Extension fields are preserved instead of discarded."
   [bindings]
-  (reduce-kv (fn [acc key value]
-               (assoc acc key (if (= key :role)
-                                value
-                                (tagged->nominal value))))
+  (reduce-kv nominal-binding-entry
              {}
              (tagged/bindings bindings)))
 
@@ -104,10 +131,7 @@
                     {:error/kind :invalid-nominal-bindings
                      :value bindings})))
   (tagged/bindings
-   (reduce-kv (fn [acc key value]
-                (assoc acc key (if (= key :role)
-                                 value
-                                 (nominal->tagged value))))
+   (reduce-kv tagged-binding-entry
               {}
               bindings)))
 
@@ -268,6 +292,57 @@
             (is (= {slot (nominal->tagged (expected-ctor :same-raw-id))}
                    (bindings->tagged {slot value}))))
           (is (= :invalid-binding result)))))))
+
+(deftest all-sparse-binding-subsets-survive-round-trip
+  ;; Seven independent binding slots means 128 sparse presence combinations.
+  ;; This checks that neither converter invents missing bindings, drops a
+  ;; present role, or strips extensions from an individual identity.
+  (let [all {:role :server
+             :principal (assoc (tagged/principal :user) :metadata {:a 1})
+             :actor (tagged/actor :member)
+             :authority (tagged/authority :requests)
+             :host (tagged/host :node)
+             :command-id (tagged/command-id :intent)
+             :execution-id (assoc (tagged/execution-id :attempt) :note nil)}
+        slots [:role :principal :actor :authority :host
+               :command-id :execution-id]]
+    (doseq [mask (range 128)]
+      (let [selected (into {}
+                           (for [[idx slot] (map-indexed vector slots)
+                                 :when (bit-test mask idx)]
+                             [slot (get all slot)]))
+            internal (bindings->nominal selected)
+            restored (bindings->tagged internal)]
+        (is (= selected restored) (str "sparse subset " mask))
+        (is (= (set (keys selected)) (set (keys internal))))
+        (is (= (count selected) (count internal)))))))
+
+(deftest tagged-identity-categories-are-not-interchangeable-in-bindings
+  (let [slots [:principal :actor :authority :host :command-id :execution-id]
+        taggers [tagged/principal tagged/actor tagged/authority
+                 tagged/host tagged/command-id tagged/execution-id]
+        nominal-factories [nominal/principal nominal/actor nominal/authority
+                           nominal/host nominal/command-id nominal/execution-id]]
+    (doseq [[slot nominal-fn] (map vector slots nominal-factories)
+            [source-slot tag-fn] (map vector slots taggers)]
+      (let [input {slot (tag-fn :shared-id)}
+            result (error-kind #(bindings->nominal input))]
+        (if (= slot source-slot)
+          (do
+            (is (nil? result))
+            (is (= (type (nominal-fn :shared-id))
+                   (type (get (bindings->nominal input) slot)))))
+          (is (= :invalid-binding result)))))))
+
+(deftest malformed-binding-containers-fail-closed
+  (doseq [invalid [nil [] :role 42 "text" [[:role :server]]]]
+    (is (= :invalid-bindings
+           (error-kind #(bindings->nominal invalid))))
+    (is (= :invalid-nominal-bindings
+           (error-kind #(bindings->tagged invalid)))))
+  (doseq [invalid [nil 42 {} (nominal/principal :id)]]
+    (is (= :invalid-role
+           (error-kind #(bindings->tagged {:role invalid}))))))
 
 #?(:clj
    (defn -main [& _]

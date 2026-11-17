@@ -237,6 +237,143 @@
        :wrong-reverse-correspondence))
     true))
 
+(defn- audit-binding-helper! [definition conversion role-predicate]
+  ;; A structural map type does not associate its keys with individual
+  ;; nominal identity categories. Audit the exact slot-preserving conversion
+  ;; path, while separate runtime tests exercise the 6x6 category matrix.
+  (let [body (last definition)
+        outer-if (when (and (seq? body) (= 'assoc (first body))
+                            (= ['acc 'key] (vec (take 2 (rest body)))))
+                   (nth body 3 nil))
+        role-branch (when (and (seq? outer-if) (= 'if (first outer-if)))
+                      (nth outer-if 2 nil))
+        identity-branch (when (and (seq? outer-if) (= 'if (first outer-if)))
+                          (nth outer-if 3 nil))]
+    (when-not (and (= '(= key :role) (second outer-if))
+                   (= 'if (first role-branch))
+                   (= '(keyword? value) (second role-branch))
+                   (= 'value (nth role-branch 2 nil))
+                   (= 'throw (first (nth role-branch 3 nil)))
+                   (= 'if (first identity-branch))
+                   (= role-predicate (second identity-branch))
+                   (= conversion
+                      (if (= conversion '(tagged->nominal value))
+                        (nth identity-branch 2 nil)
+                        (nth identity-branch 3 nil)))
+                   (= 'throw
+                      (first (if (= conversion '(tagged->nominal value))
+                               (nth identity-branch 3 nil)
+                               (nth identity-branch 2 nil)))))
+      (throw (ex-info "Binding entry conversion bypasses a required slot guard."
+                      {:error/kind :wrong-binding-entry
+                       :function (second definition)})))
+    true))
+
+(defn- audit-binding-assemblies! [forward reverse]
+  ;; Never allow a refactor to bypass either the public tagged binding
+  ;; validator on ingress or its final validation on egress.
+  (when-not (= '(reduce-kv nominal-binding-entry {}
+                           (tagged/bindings bindings))
+               (last forward))
+    (throw (ex-info "Forward binding adapter lost its public validator."
+                    {:error/kind :wrong-binding-assembly :direction :forward})))
+  (when-not (= '(tagged/bindings
+                 (reduce-kv tagged-binding-entry {} bindings))
+               (last reverse))
+    (throw (ex-info "Reverse binding adapter lost its public validator."
+                    {:error/kind :wrong-binding-assembly :direction :reverse})))
+  true)
+
+(defn- check-bindings! [checker]
+  (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
+        class-types (mapv #(symbol (str class-prefix %)) categories)
+        tagged-reference '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
+        nominal-union (cons 'typed.clojure/U class-types)
+        tagged-value (list 'typed.clojure/U 'typed.clojure/Kw tagged-reference)
+        nominal-value (list 'typed.clojure/U 'typed.clojure/Kw nominal-union)
+        tagged-map (list 'typed.clojure/Map 'typed.clojure/Kw tagged-value)
+        nominal-map (list 'typed.clojure/Map 'typed.clojure/Kw nominal-value)
+        sources (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
+        forward-helper (source-definition sources 'nominal-binding-entry)
+        reverse-helper (source-definition sources 'tagged-binding-entry)
+        forward (source-definition sources 'bindings->nominal)
+        reverse (source-definition sources 'bindings->tagged)]
+    ;; Source-backed runtime validation exists in gesso.choreo.identity/bindings;
+    ;; its preexisting tests check category correspondence. This opt-in typed
+    ;; annotation models the *validated* sparse result, not arbitrary input.
+    (eval (list 'typed.clojure/ann 'gesso.choreo.identity/bindings
+                (list 'typed.clojure/IFn ['typed.clojure/Any '-> tagged-map])))
+    (doseq [[name signature]
+            [['nominal-binding-entry [nominal-map 'typed.clojure/Kw tagged-value
+                                     '-> nominal-map]]
+             ['tagged-binding-entry [tagged-map 'typed.clojure/Kw nominal-value
+                                    '-> tagged-map]]
+             ['bindings->nominal [tagged-map '-> nominal-map]]
+             ['bindings->tagged [nominal-map '-> tagged-map]]]]
+      (eval (list 'typed.clojure/ann
+                  (symbol (str bridge-ns) (str name))
+                  (list 'typed.clojure/IFn signature))))
+    (binding [*ns* (the-ns bridge-ns)]
+      (doseq [[label source]
+              [[:forward-entry forward-helper] [:reverse-entry reverse-helper]
+               [:forward-bindings forward] [:reverse-bindings reverse]]]
+        (check! checker [:actual-binding-body label] source))
+      (audit-binding-helper! forward-helper '(tagged->nominal value)
+                             '(map? value))
+      (audit-binding-helper! reverse-helper '(nominal->tagged value)
+                             '(keyword? value))
+      (audit-binding-assemblies! forward reverse)
+      ;; A correctly typed internal map must pass both binding interfaces.
+      (check! checker :valid-sparse-public-binding-map
+              '(bindings->nominal {:principal (tagged/principal :person)
+                                   :role :browser}))
+      (check! checker :valid-sparse-nominal-binding-map
+              '(bindings->tagged {:principal (nominal/principal :person)
+                                  :role :browser}))
+      ;; Incorrect representation at either boundary, even under a valid key,
+      ;; must be a static checker error rather than a runtime-only failure.
+      (doseq [[label form]
+              [[:forward-nominal-in-map
+                '(bindings->nominal {:principal (nominal/principal :person)})]
+               [:reverse-tagged-in-map
+                '(bindings->tagged {:principal (tagged/principal :person)})]
+               [:forward-string '(bindings->nominal "bad")]
+               [:reverse-string '(bindings->tagged "bad")]
+               [:forward-nil '(bindings->nominal nil)]
+               [:reverse-nil '(bindings->tagged nil)]]]
+        (check-rejection! checker label form))
+      (doseq [[label original]
+              [[:forward-binding-return forward]
+               [:reverse-binding-return reverse]]]
+        (check-rejection! checker label
+                          (apply list (concat (butlast original) [:not-a-map]))
+                          :typed.clojure/type-mismatch-error))
+      ;; Deliberately type-correct invalid changes: if the original source
+      ;; stops validating the sparse map or preserves a wrong key, fail closed.
+      (expect-audit-rejection!
+       (fn [candidate] (audit-binding-assemblies! candidate reverse))
+       :forward-validation-removed
+       (walk/postwalk-replace {'tagged/bindings 'identity} forward)
+       :wrong-binding-assembly)
+      (expect-audit-rejection!
+       (fn [candidate] (audit-binding-assemblies! forward candidate))
+       :reverse-validation-removed
+       (walk/postwalk-replace {'tagged/bindings 'identity} reverse)
+       :wrong-binding-assembly)
+      (expect-audit-rejection!
+       (fn [candidate] (audit-binding-helper! candidate
+                      '(tagged->nominal value) '(map? value)))
+       :forward-key-rewritten
+       (walk/postwalk-replace {'key :role} forward-helper)
+       :wrong-binding-entry)
+      (expect-audit-rejection!
+       (fn [candidate] (audit-binding-helper! candidate
+                      '(nominal->tagged value) '(keyword? value)))
+       :reverse-converter-swapped
+       (walk/postwalk-replace {'nominal->tagged 'tagged->nominal} reverse-helper)
+       :wrong-binding-entry))
+    true))
+
 (defn -main [& _]
   ;; Use the actual classes, not structural maps. Register the six datatypes
   ;; with the Typed Clojure checker, including the fields' real names.
@@ -297,7 +434,8 @@
           (throw (ex-info "Missing runtime guard was not detected."
                           {:error/kind kind})))))
     (check-bridge! checker)
+    (check-bindings! checker)
     (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
-    (println "3 bridge bodies, 13 valid calls, 52 invalid static calls,")
-    (println "7 mutation checks (source return, guards, and categories).")
+    (println "7 bridge bodies, 15 valid calls, 58 invalid static calls,")
+    (println "13 mutation checks (returns, guards, slots, and categories).")
     :ok))
