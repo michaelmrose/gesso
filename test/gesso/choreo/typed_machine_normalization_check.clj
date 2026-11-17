@@ -444,6 +444,89 @@
                             :typed.clojure/type-mismatch-error))))
     true))
 
+
+(defn- check-discriminated-normalization! [checker forms]
+  ;; Internal callers can preserve the command/execution :kind distinction
+  ;; using structural HMaps. External input still needs the existing runtime
+  ;; schema guards; typed annotations do not validate untrusted values.
+  (let [generic-map '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
+        tagged-value '(typed.clojure/U typed.clojure/Kw
+                       (typed.clojure/Map typed.clojure/Any typed.clojure/Any))
+        tagged-map (list 'typed.clojure/Map 'typed.clojure/Kw tagged-value)
+        tagged-id (fn [kind]
+                    (list 'typed.clojure/HMap :mandatory
+                          {:gesso.choreo.identity/type
+                           '(typed.clojure/Val :gesso.choreo.identity/ref)
+                           :gesso.choreo.identity/kind
+                           (list 'typed.clojure/Val kind)
+                           :gesso.choreo.identity/value 'typed.clojure/Any}
+                          :complete? false))
+        command (tagged-id :command)
+        execution (tagged-id :execution)
+        command-opt (list 'typed.clojure/U nil command)
+        execution-opt (list 'typed.clojure/U nil execution)
+        original (source-definition forms 'normalize-machine-bindings)
+        command-validator (source-definition forms 'require-command-id!)
+        execution-validator (source-definition forms 'require-execution-id!)]
+    ;; The existing public bindings constructor validates sparse inputs; its
+    ;; broad annotation is intentionally not a proof of each binding's kind.
+    (eval (list 'typed.clojure/ann 'gesso.choreo.identity/bindings
+                (list 'typed.clojure/IFn ['typed.clojure/Any '-> tagged-map])))
+    (doseq [[name arguments result]
+            [['require-command-id! [command] command]
+             ['require-execution-id! [execution] execution]
+             ['normalize-machine-bindings
+              [generic-map 'typed.clojure/Any command-opt execution-opt]
+              tagged-map]]]
+      (eval (list 'typed.clojure/ann
+                  (symbol "gesso.choreo.machine" (str name))
+                  (list 'typed.clojure/IFn (vec (concat arguments ['-> result]))))))
+    (binding [*ns* (the-ns 'gesso.choreo.machine)]
+      (doseq [[name source]
+              [[:validated-command-body command-validator]
+               [:validated-execution-body execution-validator]
+               [:normalize-with-discriminated-identities original]]]
+        (check-source! checker name source))
+      ;; Wrong validator calls must fail under the actual static checker,
+      ;; not just under the separate production-source semantic audit.
+      (doseq [[label swapped]
+              [[:normalize-uses-execution-validator-for-command
+                (walk/postwalk-replace
+                 {'require-command-id! 'require-execution-id!} original)]
+               [:normalize-uses-command-validator-for-execution
+                (walk/postwalk-replace
+                 {'require-execution-id! 'require-command-id!} original)]]]
+        (when (= swapped original)
+          (throw (ex-info "Discriminated validator mutation had no target."
+                          {:label label})))
+        (check-rejection! checker label swapped :typed.clojure/app-type-error))
+      (doseq [[label source]
+              [[:command-validator-wrong-return command-validator]
+               [:execution-validator-wrong-return execution-validator]]]
+        (check-rejection! checker label
+                          (apply list (concat (butlast source) [nil]))
+                          :typed.clojure/type-mismatch-error))
+      ;; Calls from typed internals must not pass the opposite tagged kind
+      ;; to an otherwise valid convenience binding.
+      (check-rejection!
+       checker :execution-tag-in-command-slot
+       '(normalize-machine-bindings
+         {:role :server} nil
+         {:gesso.choreo.identity/type :gesso.choreo.identity/ref
+          :gesso.choreo.identity/kind :execution
+          :gesso.choreo.identity/value :x}
+         nil)
+       :typed.clojure/app-type-error)
+      (check-rejection!
+       checker :command-tag-in-execution-slot
+       '(normalize-machine-bindings
+         {:role :server} nil nil
+         {:gesso.choreo.identity/type :gesso.choreo.identity/ref
+          :gesso.choreo.identity/kind :command
+          :gesso.choreo.identity/value :x})
+       :typed.clojure/app-type-error))
+    true))
+
 (defn check! [checker]
   ;; A verified Map argument/return discipline for the original production
   ;; normalizer. Valid tagged identity *kinds* remain runtime schema checks:
@@ -593,5 +676,6 @@
        (walk/postwalk-replace
         {'identity/bindings 'identity} normalize)
        :wrong-machine-binding-normalization))
+    (check-discriminated-normalization! checker forms)
     true))
 
