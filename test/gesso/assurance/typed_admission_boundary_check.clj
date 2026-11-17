@@ -7,6 +7,7 @@
    expected-subject checks remain essential. This gate deliberately treats
    the registry lookup as opaque rather than asserting a checked map shape."
   (:require [clojure.java.io :as io]
+            [clojure.walk :as walk]
             [gesso.assurance.admission :as admission]
             [gesso.assurance.assumption]
             [gesso.assurance.subject]
@@ -16,6 +17,39 @@
 (def ^:private admission-ns 'gesso.assurance.admission)
 (def ^:private handle-class 'gesso.assurance.admission.AdmissionHandle)
 (def ^:private generic-map '(typed.clojure/Map typed.clojure/Any typed.clojure/Any))
+
+;; The private issuer accepts two *structurally distinct* payloads. These
+;; static shapes do not say that a proof was checked or an assumption discharged.
+;; Subject kind/id are deliberately Any until their raw validation bodies are
+;; separately checked; typed annotations must not invent such guarantees.
+(def ^:private subject-entry
+  '(typed.clojure/HMap
+    :mandatory {:kind (typed.clojure/Val :subject-identity)
+                :subject-fingerprint typed.clojure/Str
+                :subject-kind typed.clojure/Any
+                :subject-id typed.clojure/Any}
+    :complete? true))
+(def ^:private premise-entry
+  '(typed.clojure/HMap
+    :mandatory {:kind (typed.clojure/Val :premise-structural-match)
+                :subject-fingerprint typed.clojure/Str
+                :subject-kind typed.clojure/Any
+                :subject-id typed.clojure/Any
+                :premise-fingerprint typed.clojure/Str}
+    :complete? true))
+(def ^:private structural-entry
+  (list 'typed.clojure/U subject-entry premise-entry))
+
+;; These are contracts on existing runtime validators, not proofs of the
+;; validators themselves. Both validators compute their own SHA-256 digests.
+(def ^:private described-subject
+  '(typed.clojure/HMap
+    :mandatory {:fingerprint typed.clojure/Str}
+    :complete? false))
+(def ^:private matched-premise
+  '(typed.clojure/HMap
+    :mandatory {:required-premise typed.clojure/Str}
+    :complete? false))
 
 (defn- original-definitions []
   (let [source (or (io/resource "gesso/assurance/admission.clj")
@@ -80,11 +114,11 @@
            ['gesso.assurance.admission/admission-error!
             ['typed.clojure/Any generic-map '-> 'typed.clojure/Nothing]]
            ['gesso.assurance.subject/describe-subject
-            ['typed.clojure/Any '-> generic-map]]
+            ['typed.clojure/Any '-> described-subject]]
            ['gesso.assurance.assumption/match-premise!
-            ['typed.clojure/Any 'typed.clojure/Any '-> generic-map]]
+            ['typed.clojure/Any 'typed.clojure/Any '-> matched-premise]]
            ['gesso.assurance.admission/issue-structural-handle!
-            [generic-map '-> handle-class]]
+            [structural-entry '-> handle-class]]
            ['gesso.assurance.admission/admit-subject!
             ['typed.clojure/Any '-> handle-class]]
            ['gesso.assurance.admission/admit-premise-match!
@@ -95,6 +129,20 @@
             [handle-class 'typed.clojure/Any 'typed.clojure/Any
              '-> handle-class]]]]
     (annotate! name signature)))
+
+(defn- mutate-entry [source expected-kind update-entry]
+  ;; Mutate the actual map passed by the original production issuer.
+  (let [count* (atom 0)
+        changed (walk/postwalk
+                 (fn [form]
+                   (if (and (map? form) (= expected-kind (:kind form)))
+                     (do (swap! count* inc) (update-entry form))
+                     form))
+                 source)]
+    (when-not (= 1 @count*)
+      (throw (ex-info "Production issuer map changed shape."
+                      {:kind expected-kind :occurrences @count*})))
+    changed))
 
 (defn- check-production! [checker forms]
   (binding [*ns* (the-ns admission-ns)]
@@ -121,6 +169,30 @@
               '[:made-up {} {}]]]]
       (let [expr (list* function arguments)]
         (check-rejection! checker label expr
+                          :typed.clojure/app-type-error)))
+    ;; The issuer accepts precisely its two structural entries. Changes to
+    ;; either original producer must not smuggle a different check kind,
+    ;; missing fingerprint, or alleged proof/admission metadata through.
+    (doseq [[label function kind mutator]
+            [[:subject-kind 'admit-subject! :subject-identity
+              #(assoc % :kind :premise-structural-match)]
+             [:subject-missing-id 'admit-subject! :subject-identity
+              #(dissoc % :subject-id)]
+             [:subject-bad-fingerprint 'admit-subject! :subject-identity
+              #(assoc % :subject-fingerprint 17)]
+             [:subject-fake-proof 'admit-subject! :subject-identity
+              #(assoc % :proof-status :proved)]
+             [:premise-kind 'admit-premise-match! :premise-structural-match
+              #(assoc % :kind :subject-identity)]
+             [:premise-missing-fingerprint 'admit-premise-match!
+              :premise-structural-match #(dissoc % :premise-fingerprint)]
+             [:premise-bad-fingerprint 'admit-premise-match!
+              :premise-structural-match #(assoc % :premise-fingerprint 17)]
+             [:premise-fake-authority 'admit-premise-match!
+              :premise-structural-match #(assoc % :authority :granted)]]]
+      (let [source (original forms function)]
+        (check-rejection! checker label source
+                          (mutate-entry source kind mutator)
                           :typed.clojure/app-type-error)))
     ;; Wrong source returns are rejected in the ORIGINAL definition body.
     (doseq [[label name bogus]
@@ -174,6 +246,7 @@
     (check-runtime-guard!)
     (println "Typed structural admission passed: six real source bodies,")
     (println "two correctly typed calls, five raw-value rejections, five")
-    (println "source-return mutations, and runtime forged-handle rejection.")
-    (println "Scope: JVM structural handles only; no theorem or auth claim.")
+    (println "source-return and eight issuer-payload mutations, plus forged-")
+    (println "handle rejection. Only handle shape is statically checked;")
+    (println "registry authority, subject validity, proofs and auth are not.")
     :ok))
