@@ -415,6 +415,22 @@
     :command-id
     :execution-id})
 
+(defn- validate-command-binding
+  "Validate one command binding, preserving the supplied tagged reference.
+
+   A command identity is an admitted opaque reference, not a value to be
+   constructed from untrusted data. This focused private helper gives Typed
+   Clojure a checkable per-kind function body while retaining the same
+   fail-closed behavior of the former inline :command-id case arm."
+  [value]
+  (if (command-id? value)
+    value
+    (identity-error
+     :invalid-binding
+     "Identity binding :command-id must contain a command identity."
+     {:binding :command-id
+      :value value})))
+
 (defn- validate-binding
   [key value]
   (case key
@@ -458,13 +474,7 @@
         :value value}))
 
     :command-id
-    (if (command-id? value)
-      value
-      (identity-error
-       :invalid-binding
-       "Identity binding :command-id must contain a command identity."
-       {:binding key
-        :value value}))
+    (validate-command-binding value)
 
     :execution-id
     (if (execution-id? value)

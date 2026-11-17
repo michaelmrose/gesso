@@ -10,6 +10,11 @@
    Valid identity references may retain extra keys. Their HMap types must
    remain OPEN: a closed HMap (:complete? true) is unsound as a refinement
    of identity?/kind?, because production identities accept extra keys.
+   The original :command-id branch is now a call to the private, source-
+   checked validate-command-binding helper. We check the helper body against
+   its key-specific return type, its error path, and the dispatch wiring.
+   That contract relies on the independently stated positive predicate
+   refinement, not on a dependent proof of admitted identity provenance.
    We test this with the real predicates and Typed Clojure's subtyping.
    All six original category-predicate bodies are checked for Boolean results
    and audited against the original kind dispatcher. Their occurrence-typing
@@ -139,6 +144,9 @@
 ;; checked separately for each exact source arm.
 (t/ann identity/validate-binding
        [BindingKey t/Any -> ValidatedBindingValue])
+;; The original command-specific helper has a checked implementation body,
+;; unlike the broad dispatcher whose key/result dependency is not proved.
+(t/ann identity/validate-command-binding [t/Any -> CommandRef])
 
 ;; `bindings` accepts arbitrary downstream data, but normal return means
 ;; a sparse map of supported keys. Rejection occurs by exception, not by a
@@ -332,8 +340,20 @@
        (throw (ex-info "Binding pilot namespace did not type-check." {})))
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
        (doseq [name ['identity? 'kind 'role? 'require-role 'kind?
-                     'validate-binding 'bindings? 'binding-value]]
+                     'validate-command-binding 'validate-binding
+                     'bindings? 'binding-value]]
          (check-form name (source-function name)))
+       ;; The command case delegates to the checked production helper, not
+       ;; an untyped wrapper or an old copied branch. Reject any alternate
+       ;; expression before trusting the helper's key-specific evidence.
+       (when-not (= '(validate-command-binding value)
+                    (get branches :command-id))
+         (throw (ex-info "Command binding no longer uses checked helper."
+                         {:actual (get branches :command-id)})))
+       (let [helper (source-function 'validate-command-binding)
+             wrong (apply list (concat (butlast helper)
+                                       [:wrong-command-result]))]
+         (check-negative :checked-command-helper-wrong-return helper wrong))
        ;; Under the seven-key input domain, the original whole dispatcher
        ;; must return only a role keyword or one of the six category shapes.
        ;; Mutate an ACTUAL case arm, rather than a typed synthetic branch:
@@ -422,7 +442,9 @@
                                 (= 'identity-error (first error-expr))
                                 (= :invalid-binding (second error-expr))
                                 (string? (nth error-expr 2 nil))
-                                (= {:binding 'key :value 'value}
+                                (= {:binding (if (= key :command-id)
+                                                :command-id 'key)
+                                    :value 'value}
                                    (nth error-expr 3 nil)))
                    (throw (ex-info "Identity validation failure path changed."
                                    {:error/kind :unsafe-binding-failure-path
@@ -474,8 +496,12 @@
                                   'value forged)
                  mutant (substitute-case-arm binding-definition key mutant-arm)
                  mutant-typed (typed-branch mutant-arm type)
-                 original-typed (typed-branch original-arm type)]
-             (audit-identity-guard! key predicate original-arm)
+                 original-typed (typed-branch original-arm type)
+                 original-guard (if (= key :command-id)
+                                  (last (source-function
+                                         'validate-command-binding))
+                                  original-arm)]
+             (audit-identity-guard! key predicate original-guard)
              (check-form [:valid-guarded-arm key] original-typed)
              (check-form [:forged-arm-still-specific-type key] mutant-typed)
              (check-form [:forged-dispatch-still-union-typed key] mutant)
@@ -551,7 +577,9 @@
            (check-form :role original)
            (check-negative :role original mutated)))
        (doseq [{:keys [key predicate wrong type]} identity-cases]
-         (let [branch (get branches key)
+         (let [branch (if (= key :command-id)
+                        (last (source-function 'validate-command-binding))
+                        (get branches key))
                guard (list predicate 'value)
                replacement (list wrong 'value)]
            (when-not (and (seq? branch)
