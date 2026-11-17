@@ -18,7 +18,16 @@
    values can have that shape and still fail identity?. Prior (Pred HMap)
    annotations incorrectly declared both directions. Positive refinement
    claims remain trusted until source-backed semantic proofs establish them.
-   This does not certify `bindings`, authorization, or full admission."
+   The public `bindings` contract is a PARTIAL boundary over untrusted data:
+   if it returns normally the result is a map, but it may reject malformed
+   inputs by throwing. Its narrow command/execution overload preserves a
+   shape for already well-typed input; neither overload by itself proves
+   that an input has passed admission. The gate checks the original
+   `bindings?` and `binding-value` consumers against the broad overload and
+   audits that they actually call `bindings`. The `bindings` implementation
+   itself remains unchecked due to a Typed Clojure inference limitation;
+   source audits and bounded runtime checks are not universal proofs.
+   This does not establish authorization or full application admission."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.choreo.identity :as identity]
@@ -93,6 +102,21 @@
 ;; The original multi-key dispatcher has a broad, honest whole-form type.
 ;; Its key-specific value/result relations are checked per original case arm.
 (t/ann identity/validate-binding [t/Kw t/Any -> t/Any])
+
+;; `bindings` accepts arbitrary downstream data, but normal return means
+;; a sparse map of supported keys. Rejection occurs by exception, not by a
+;; value-level type. The narrow overload is only useful for typed callers;
+;; it does NOT turn a structural HMap into evidence of runtime admission.
+;; Its implementation is source-audited and runtime-tested below, not checked
+;; in full (the checker currently encounters an inference error in `into`).
+(t/ann identity/binding-keys (t/Set t/Kw))
+(t/ann identity/bindings
+       (t/IFn
+        [gesso.choreo.typed-identity-pilot/CommandExecutionBindings
+         -> gesso.choreo.typed-identity-pilot/CommandExecutionBindings]
+        [t/Any -> (t/Map t/Kw t/Any)]))
+(t/ann identity/bindings? [t/Any -> t/Bool])
+(t/ann identity/binding-value [t/Any t/Kw -> t/Any])
 
 (t/tc-ignore
  (defn -main [& _]
@@ -188,7 +212,7 @@
        (throw (ex-info "Binding pilot namespace did not type-check." {})))
      (binding [*ns* (the-ns 'gesso.choreo.identity)]
        (doseq [name ['identity? 'kind 'role? 'require-role 'kind?
-                     'validate-binding]]
+                     'validate-binding 'bindings? 'binding-value]]
          (check-form name (source-function name)))
        ;; The original category predicates merely delegate to kind?. The
        ;; checker proves Boolean results under a truthful broad annotation;
@@ -216,6 +240,34 @@
        (let [original (source-function 'kind?)
              mutated (apply list (concat (butlast original) [42]))]
          (check-negative 'kind?-wrong-return original mutated))
+       ;; The broad signature does not certify the body of `bindings`.
+       ;; Demand that the original functions still route untrusted data
+       ;; through it, and that it still invokes per-key validation.
+       ;; This source check is intentionally fail-closed on refactoring.
+       (let [count-calls (fn [form symbol]
+                           (count (filter #(and (seq? %)
+                                                (= symbol (first %)))
+                                          (tree-seq coll? seq form))))
+             checks [['bindings 'validate-binding 1]
+                     ['bindings 'map? 1]
+                     ['bindings 'remove 1]
+                     ['bindings? 'bindings 1]
+                     ['binding-value 'bindings 1]]]
+         (doseq [[name invoked expected] checks]
+           (let [actual (count-calls (source-function name) invoked)]
+             (when-not (= expected actual)
+               (throw (ex-info "Original admission call path changed."
+                               {:source name :call invoked
+                                :expected expected :actual actual}))))))
+       (let [original (source-function 'bindings?)
+             mutated (apply list (concat (butlast original) [:admitted]))]
+         (check-negative 'bindings?-wrong-return original mutated))
+       (let [binding-keys-defs
+             (filter #(and (seq? %) (= 'def (first %))
+                           (= 'binding-keys (second %))) source-forms)]
+         (when-not (= 1 (count binding-keys-defs))
+           (throw (ex-info "Missing or ambiguous original binding keys." {})))
+         (check-form 'binding-keys (first binding-keys-defs)))
        (let [role-branch (:role branches)]
          (when-not (= '(require-role value) role-branch)
            (throw (ex-info "Role branch no longer delegates to require-role." {})))
@@ -350,21 +402,57 @@
            ;; under the honest open-HMap alias.
            (check-form [:shape-with-nil name]
                        (list 'typed.clojure/ann-form raw-nil type-name))
+           (check-form [:shape-with-nested name]
+                       (list 'typed.clojure/ann-form raw-nested type-name))
            (doseq [bad [raw-nil raw-nested]]
-             (when (or (identity/identity? bad)
-                       (predicate bad)
-                       (not= :invalid-binding
-                             (try (identity/bindings {key bad})
-                                  nil
-                                  (catch clojure.lang.ExceptionInfo e
-                                    (:error/kind (ex-data e))))))
-               (throw (ex-info "Invalid identity shape was admitted."
-                               {:kind kind :identity name :bad bad}))))
+             (let [binding-map {key bad}
+                   error-kind
+                   (fn [thunk]
+                     (try
+                       (thunk)
+                       nil
+                       (catch clojure.lang.ExceptionInfo e
+                         (:error/kind (ex-data e)))))]
+               (when (or (identity/identity? bad)
+                         (predicate bad)
+                         (identity/bindings? binding-map)
+                         (not= :invalid-binding
+                               (error-kind #(identity/bindings binding-map)))
+                         (not= :invalid-binding
+                               (error-kind #(identity/binding-value binding-map key)))
+                         (not= :invalid-binding
+                               (error-kind #(identity/explain binding-map))))
+                 (throw (ex-info "Structurally typed but invalid data escaped admission."
+                                 {:kind kind :identity name :bad bad})))))
            ;; Unlike (Pred HMap), one-way refinements must not erase a
            ;; false branch merely because the input has the tagged shape.
            (check-form [:one-way-false-is-reachable name] safe)
            (check-negative [:one-way-excludes-unsound-bottom name]
                            safe unsafe))))
+     ;; Successful sparse inputs must pass all public access paths, while
+     ;; unsupported map keys and non-map inputs must not pass admission.
+     (let [command (identity/command-id [:opaque 17])
+           valid {:command-id command}]
+       (when-not (and (= valid (identity/bindings valid))
+                      (identity/bindings? valid)
+                      (= command (identity/binding-value valid :command-id))
+                      (= {:command-id {:kind :command :value [:opaque 17]}}
+                         (identity/explain valid))
+                      (= {} (identity/bindings {}))
+                      (identity/bindings? {}))
+         (throw (ex-info "Valid sparse admission paths disagreed." {})))
+       (doseq [[bad expected-error]
+               [[{:unsupported command} :unknown-binding]
+                [[:command-id command] :invalid-bindings]
+                [{:command-id (identity/execution-id [:opaque 17])}
+                 :invalid-binding]]]
+         (let [kind (try (identity/bindings bad) nil
+                         (catch clojure.lang.ExceptionInfo e
+                           (:error/kind (ex-data e))))]
+           (when (or (not= expected-error kind)
+                     (identity/bindings? bad))
+             (throw (ex-info "Malformed downstream bindings were admitted."
+                             {:value bad :expected expected-error :actual kind}))))))
      ;; Check the real runtime predicates against all category combinations,
      ;; using opaque numeric, vector, and map raw identities. This is bounded
      ;; behavioral evidence, not a universal proof of the Pred refinements.
@@ -385,6 +473,8 @@
        (when (predicate invalid)
          (throw (ex-info "Predicate accepted malformed/non-identity data."
                          {:predicate pred-name :value invalid}))))
+     (println "Checked original bindings? and binding-value bodies;")
+     (println "validated sparse maps and rejected malformed typed shapes.")
      (println "Checked six original predicate bodies, seven negative return")
      (println "mutations, 36 kind comparisons and malformed-data matrix.")
      (println "Typed Choreo binding source gate passed (7 branches).")
