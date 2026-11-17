@@ -247,6 +247,15 @@
              [:false-authority '(assoc declared :authority :granted)]
              [:false-writer-coverage
               '(assoc declared :installed-writer-coverage :complete)]
+             [:wrong-open-meta-kind
+              '(assoc declared :open-meta-obligations {})]
+             [:wrong-classified-assumptions
+              '(assoc declared :open-assumptions #{:unclassified})]
+             [:wrong-original-operation-obligations
+              '(assoc declared :original-open-obligation-ids-by-operation #{})]
+             [:premise-source-family-swap
+              '(assoc declared :open-assumptions
+                      (:open-meta-obligations declared))]
              [:swapped-composition 'composed]
              [:swapped-writer 'observed]]]
       (reject! checker [:invalid-declared-closure label]
@@ -430,7 +439,7 @@
     (runtime-forgery!)
     (println "Typed application assurance report passed: 2 original complete")
     (println "source bodies, 12 wrong-closure call/producer substitutions,")
-    (println "11 false status mutations; 14 declared-closure, 10 composition,")
+    (println "11 false status mutations; 18 declared-closure, 10 composition,")
     (println "10 provenance, and 12 writer malformed handoffs rejected;")
     (println "two Any-typed original-source mistakes caught by audit;")
     (println "the provenance/writer swap rejected statically, plus")

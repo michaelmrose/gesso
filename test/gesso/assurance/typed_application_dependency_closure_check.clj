@@ -19,8 +19,10 @@
    its proof/admission/authority fields cannot silently become affirmative.
    The entry! registry result remains opaque, so this assumes the descriptor
    shape produced by our separately checked issuer rather than proving the
-   registry populated it. Provenance of Any-typed ledger fields is audited
-   against the original source, not misrepresented as static type safety."
+   registry populated it. Open meta IDs, classified assumptions, and original
+   operation obligations now have distinct internal structural contracts.
+   These contracts assume the original ledger's runtime validation; a static
+   HMap alone cannot establish correct classification or source provenance."
   (:require [clojure.java.io :as io]
             [clojure.walk :as walk]
             [gesso.assurance.dependency :as dependency]
@@ -35,13 +37,32 @@
   'gesso.assurance.proof.induction_dependency.InductionDependencyHandle)
 (def ^:private application-handle
   'gesso.assurance.proof.application_dependency.ApplicationDependencyHandle)
+(def obligation-id-set
+  '(typed.clojure/Set typed.clojure/Kw))
+(def open-assumptions-type
+  ;; The original induction ledger classifies each still-open meta premise
+  ;; into a keyword category, preserving a set of keyword obligation IDs.
+  '(typed.clojure/Map typed.clojure/Kw (typed.clojure/Set typed.clojure/Kw)))
+(def original-obligations-type
+  ;; Operation-keyed registers retain vector-shaped obligation IDs. A
+  ;; broader Vec Any admits future obligation kinds without inventing them.
+  '(typed.clojure/Map typed.clojure/Kw
+     (typed.clojure/Set (typed.clojure/Vec typed.clojure/Any))))
+(def ^:private ledger-type
+  `(typed.clojure/HMap
+    :mandatory {:open-meta-obligations ~obligation-id-set
+                :open-assumptions ~open-assumptions-type
+                :original-open-obligation-ids-by-operation
+                ~original-obligations-type}
+    :complete? false))
+
 (def ^:private registered-entry
-  '(typed.clojure/HMap
+  `(typed.clojure/HMap
     :mandatory {:graph-handle gesso.assurance.dependency.CheckedGraph
                 :inner-handle
                 gesso.assurance.proof.induction_dependency.InductionDependencyHandle
                 :graph-content typed.clojure/Any
-                :ledger typed.clojure/Any
+                :ledger ~ledger-type
                 :catalog-id typed.clojure/Any
                 :operation-ids (typed.clojure/Set typed.clojure/Kw)
                 :invariant-ids (typed.clojure/Set typed.clojure/Kw)
@@ -53,7 +74,7 @@
 ;; describe-application-dependencies function with downstream report checks.
 ;; This copyable structure is NOT a proof or authenticated registry handle.
 (def description-type
-  '(typed.clojure/HMap
+  `(typed.clojure/HMap
     :mandatory {:type typed.clojure/Kw
                 :version typed.clojure/Int
                 :catalog-id typed.clojure/Any
@@ -64,9 +85,9 @@
                 :invariant-ids (typed.clojure/Set typed.clojure/Kw)
                 :node-count typed.clojure/Int
                 :edge-count typed.clojure/Int
-                :open-meta-obligations typed.clojure/Any
-                :open-assumptions typed.clojure/Any
-                :original-open-obligation-ids-by-operation typed.clojure/Any
+                :open-meta-obligations ~obligation-id-set
+                :open-assumptions ~open-assumptions-type
+                :original-open-obligation-ids-by-operation ~original-obligations-type
                 :checking (typed.clojure/Val
                            :original-source-and-exact-application-dependency-graph)
                 :scope (typed.clojure/Val
@@ -128,7 +149,7 @@
             ['typed.clojure/Any '-> graph-handle]]
            ['gesso.assurance.proof.application-dependency/closure-entry
             [graph-handle induction-handle 'typed.clojure/Any
-             'typed.clojure/Any 'typed.clojure/Any
+             ledger-type 'typed.clojure/Any
              '(typed.clojure/Set typed.clojure/Kw)
              '(typed.clojure/Set typed.clojure/Kw)
              'typed.clojure/Int 'typed.clojure/Int
@@ -237,6 +258,12 @@
              [:wrong-edge-count #(assoc % :edge-count false)]
              [:raw-operations #(assoc % :operation-ids {})]
              [:raw-invariants #(assoc % :invariant-ids [])]
+             [:missing-validated-ledger #(assoc % :ledger {})]
+             [:wrong-ledger-assumption-family
+              #(assoc % :ledger
+                      {:open-meta-obligations #{}
+                       :open-assumptions #{:not-a-classification}
+                       :original-open-obligation-ids-by-operation {}})]
              [:invented-proof #(assoc % :proof-status :proved)]
              [:invented-authority #(assoc % :authority :granted)]]]
       (reject! checker [:descriptor label] (change-descriptor source alter)))
@@ -244,7 +271,12 @@
             '(closure-entry (dependency/check-graph! {})
                             (induction-dependency/check-induction-dependencies!
                              {} {})
-                            {} {} :catalog #{:op} #{:inv} 2 1))
+                            {}
+                            {:open-meta-obligations #{:meta/x}
+                             :open-assumptions {:meta #{:meta/x}}
+                             :original-open-obligation-ids-by-operation
+                             {:op #{[:assumption :x]}}}
+                            :catalog #{:op} #{:inv} 2 1))
     (doseq [[label invalid]
             [[:raw-graph-argument
               '(closure-entry {} (induction-dependency/check-induction-dependencies!
@@ -267,7 +299,15 @@
              [:non-integer-edge-count
               '(closure-entry (dependency/check-graph! {})
                               (induction-dependency/check-induction-dependencies!
-                               {} {}) {} {} :catalog #{} #{} 2 "one")]]]
+                               {} {}) {} {} :catalog #{} #{} 2 "one")]
+             [:wrong-ledger-argument
+              '(closure-entry (dependency/check-graph! {})
+                              (induction-dependency/check-induction-dependencies!
+                               {} {}) {}
+                              {:open-meta-obligations #{}
+                               :open-assumptions #{}
+                               :original-open-obligation-ids-by-operation {}}
+                              :catalog #{} #{} 2 1)]]]
       (reject! checker [:descriptor-call label] invalid))
     true))
 
@@ -363,25 +403,36 @@
                 (describe-application-dependencies
                  (check-application-dependencies! {} {})))]]]
       (reject! checker [:description-call label] expression))
-    ;; Prove these mutations are NOT rejected by the type system and MUST
-    ;; instead be rejected by the source-provenance audit. Their values share
-    ;; the same broad Any type but represent different original facts.
-    (doseq [[label altered]
-            [[:swapped-catalog-fingerprint
-              #(assoc % :catalog-fingerprint '(:induction-fingerprint ledger))]
-             [:swapped-open-assumptions
+    ;; The original catalog/induction fingerprints still share an Any type;
+    ;; their source identity is audited, not claimed as statically proven.
+    (let [changed (mutate-description original-source
+                   #(assoc % :catalog-fingerprint
+                           '(:induction-fingerprint ledger)))]
+      (check! checker :type-compatible-fingerprint-swap changed)
+      (when-not (try (assert-description-provenance! changed)
+                     false (catch clojure.lang.ExceptionInfo _ true))
+        (throw (ex-info "Fingerprint provenance escaped source audit" {}))))
+    ;; Unlike arbitrary fingerprints, these premise families have genuinely
+    ;; different values: a Set of keywords, a category->Set map, and an
+    ;; operation->Set-of-vector-ID register. Wrong-family substitutions now
+    ;; fail STATICALLY in the original production description body.
+    (doseq [[label changed]
+            [[:assumption-map-from-meta
               #(assoc % :open-assumptions '(:open-meta-obligations ledger))]
-             [:swapped-original-obligations
+             [:original-register-from-assumptions
               #(assoc % :original-open-obligation-ids-by-operation
-                      '(:open-assumptions ledger))]]]
-      (let [changed (mutate-description original-source altered)
-            caught? (try (assert-description-provenance! changed)
-                         false
-                         (catch clojure.lang.ExceptionInfo _ true))]
-        (when-not caught?
-          (throw (ex-info "Incorrect description provenance escaped source audit"
-                          {:case label})))
-        (check! checker [:type-compatible-but-invalid-source label] changed)))
+                      '(:open-assumptions ledger))]
+             [:meta-from-assumptions
+              #(assoc % :open-meta-obligations '(:open-assumptions ledger))]
+             [:wrong-original-register-element
+              #(assoc % :original-open-obligation-ids-by-operation
+                      '{:operation/id #{:not-a-vector}})]]]
+      (let [mutant (mutate-description original-source changed)]
+        (reject! checker [:wrong-premise-family label] mutant)
+        (when-not (try (assert-description-provenance! mutant)
+                       false (catch clojure.lang.ExceptionInfo _ true))
+          (throw (ex-info "Premise family escaped provenance audit"
+                          {:label label})))))
     true))
 
 (defn- swap-original-call [source op new-call]
@@ -509,7 +560,8 @@
     (check-forgery!)
     (println "Typed application closure passed: original graph revalidation")
     (println "and exact issuance descriptor source; source-bound handoffs;")
-    (println "53 negative type cases, three Any-typed provenance mutations")
-    (println "caught by source audit, forged handle and pure-data checks.")
+    (println "60 negative type cases: wrong premise families now fail")
+    (println "statically; one fingerprint provenance swap remains audit-only.")
+    (println "Forged handle and pure-data checks still reject runtime forgery.")
     (println "Original registry validity, proof and authority remain open.")
     :ok))
