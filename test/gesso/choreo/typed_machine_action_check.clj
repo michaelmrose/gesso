@@ -190,6 +190,18 @@
             (check-mutation! checker
                              [name :action-overwrites-kind]
                              original corrupted-action))
+          ;; Also check that the helper and caller cannot silently drop a
+          ;; mandatory field after the descriptor has been constructed.
+          (let [projection-missing-field
+                (apply list (concat (butlast projection)
+                                    [(list 'dissoc (last projection) required)]))
+                action-missing-field
+                (apply list (concat (butlast original)
+                                    [(list 'dissoc (last original) required)]))]
+            (check-mutation! checker [name :projection-drops-required-field]
+                             projection projection-missing-field)
+            (check-mutation! checker [name :action-drops-required-field]
+                             original action-missing-field))
           (check-mutation!
            checker [name :wrong-kind] original
            (annotate-descriptor-literal
