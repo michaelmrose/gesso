@@ -374,6 +374,80 @@
        :wrong-binding-entry))
     true))
 
+(defn- check-heterogeneous-nominal-bindings! [checker]
+  ;; Verify the actual ordinary defn against a *closed, sparse HMap* input.
+  ;; Each optional key has its own nominal type. No replacement for defn or
+  ;; source changes to the downstream map-based API are needed.
+  ;;
+  ;; The output is intentionally still a general tagged map. The existing
+  ;; reduce-kv implementation does not statically derive a per-key HMap
+  ;; result, and simply annotating it as such would invent a guarantee.
+  (let [ns-sym 'gesso.choreo.typed-nominal-identity-bridge
+        class-types (mapv #(symbol (str class-prefix %)) categories)
+        field-types (into {:role 'typed.clojure/Kw}
+                          (map vector
+                               [:principal :actor :authority :host
+                                :command-id :execution-id]
+                               class-types))
+        hmap (list 'typed.clojure/HMap :optional field-types :complete? true)
+        tagged-map '(typed.clojure/Map
+                     typed.clojure/Kw
+                     (typed.clojure/U typed.clojure/Kw
+                                      (typed.clojure/Map
+                                       typed.clojure/Any typed.clojure/Any)))
+        forms (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
+        original (source-definition forms 'bindings->tagged)
+        slots [:role :principal :actor :authority :host :command-id
+               :execution-id]
+        constructors ['nominal/principal 'nominal/actor 'nominal/authority
+                      'nominal/host 'nominal/command-id 'nominal/execution-id]
+        values (into {:role :server}
+                     (map vector (rest slots)
+                          (map #(list % :same-raw-id) constructors)))
+        checked-form (fn [entries] (list 'bindings->tagged entries))]
+    (eval (list 'typed.clojure/ann
+                (symbol (str ns-sym) "bindings->tagged")
+                (list 'typed.clojure/IFn [hmap '-> tagged-map])))
+    (binding [*ns* (the-ns ns-sym)]
+      ;; This verifies the *original source body* accepts the stronger input
+      ;; declaration, not just that invented calls can be checked against it.
+      (check! checker :actual-hmap-binding-adapter original)
+      ;; All 2^7 sparse subsets: omission is allowed, nil in a present slot
+      ;; isn't. One checker invocation covers every positive expression.
+      (let [valid-expressions
+            (mapv (fn [mask]
+                    (checked-form
+                     (into {}
+                           (for [[index slot] (map-indexed vector slots)
+                                 :when (bit-test mask index)]
+                             [slot (get values slot)]))))
+                  (range 128))]
+        (check! checker :all-128-sparse-hmap-subsets valid-expressions))
+      ;; For *every* of the six nominal slots, supplying any of the other
+      ;; five nominal classes must be a *static* application error, even
+      ;; though these values would all fit the old broad union map type.
+      (doseq [[slot expected-ctor] (map vector (rest slots) constructors)
+              actual-ctor constructors
+              :when (not= expected-ctor actual-ctor)]
+        (check-rejection!
+         checker [:wrong-nominal-category slot actual-ctor]
+         (checked-form {slot (list actual-ctor :same-raw-id)})))
+      (doseq [slot (rest slots)]
+        (check-rejection! checker [:nil-nominal-slot slot]
+                          (checked-form {slot nil})))
+      (check-rejection! checker :nominal-in-role
+                        (checked-form {:role '(nominal/principal :id)}))
+      (check-rejection! checker :unknown-binding-key
+                        (checked-form {:unsupported :value}))
+      (check-rejection! checker :nominal-from-unchecked-map
+                        (checked-form {:principal {:raw :id}}))
+      ;; A signature swapped in the wrong direction would reject this real
+      ;; valid program; the positive suite detects that regression.
+      (check! checker :principal-and-actor-distinct
+              (checked-form {:principal '(nominal/principal :id)
+                             :actor '(nominal/actor :id)})))
+    true))
+
 (defn -main [& _]
   ;; Use the actual classes, not structural maps. Register the six datatypes
   ;; with the Typed Clojure checker, including the fields' real names.
@@ -435,7 +509,10 @@
                           {:error/kind kind})))))
     (check-bridge! checker)
     (check-bindings! checker)
+    (check-heterogeneous-nominal-bindings! checker)
     (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
     (println "7 bridge bodies, 15 valid calls, 58 invalid static calls,")
     (println "13 mutation checks (returns, guards, slots, and categories).")
+    (println "Closed sparse nominal HMap: 128 valid subsets, 39 invalid")
+    (println "per-slot category/key cases; original adapter body checked.")
     :ok))
