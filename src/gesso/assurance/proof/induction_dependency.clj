@@ -224,6 +224,28 @@
   [handle]
   (boolean (registered handle)))
 
+(defn- closure-entry
+  "Pure descriptor for a *source-relative structural* dependency closure.
+   The CheckedGraph argument is a nominal category, not proof of current
+   registration or a substitute for the caller's original source checks.
+   This helper cannot mint InductionDependencyHandle or grant authority."
+  [graph-handle snap source-fingerprint report identity graph]
+  {:graph-handle graph-handle
+   :graph-snapshot snap
+   :source-fingerprint source-fingerprint
+   :induction-fingerprint (:fingerprint report)
+   :catalog-fingerprint (:catalog-fingerprint report)
+   :catalog-id (:catalog-id report)
+   :operation-ids (:declared-operation-ids report)
+   :invariant-ids (:declared-invariant-ids report)
+   :open-meta-obligations (:open-meta-obligations report)
+   :original-open-obligation-ids-by-operation
+   (:original-open-obligation-ids-by-operation report)
+   :fingerprint identity
+   :node-count (count (:nodes graph))
+   :edge-count (reduce + (map #(count (:depends-on %))
+                             (:nodes graph)))})
+
 (defn check-induction-dependencies!
   "Recheck the ORIGINAL catalog and its full conditional induction, then
    require the supplied live DAG to match ALL source-derived dependency nodes
@@ -239,21 +261,8 @@
         identity (fingerprint (raw-node identity-id
                                         {:source-fingerprint source-fingerprint
                                          :graph snap}))
-        entry {:graph-handle graph-handle
-               :graph-snapshot snap
-               :source-fingerprint source-fingerprint
-               :induction-fingerprint (:fingerprint report)
-               :catalog-fingerprint (:catalog-fingerprint report)
-               :catalog-id (:catalog-id report)
-               :operation-ids (:declared-operation-ids report)
-               :invariant-ids (:declared-invariant-ids report)
-               :open-meta-obligations (:open-meta-obligations report)
-               :original-open-obligation-ids-by-operation
-               (:original-open-obligation-ids-by-operation report)
-               :fingerprint identity
-               :node-count (count (:nodes graph))
-               :edge-count (reduce + (map #(count (:depends-on %))
-                                         (:nodes graph)))}
+        entry (closure-entry graph-handle snap source-fingerprint
+                             report identity graph)
         handle (InductionDependencyHandle.)]
     (locking live-handles (.put live-handles handle entry))
     handle))
