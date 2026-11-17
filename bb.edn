@@ -64,13 +64,15 @@
    :task (dispatch-gesso-test! "quick" *command-line-args*)}
 
   test:typed
-  {:doc "Run opt-in Typed Clojure source, mutation, and admission checks (JVM)."
+  {:doc "Run opt-in Typed Clojure Choreo and assurance source checks (JVM)."
    :task
    (do
      (shell "clojure" "-M:typed" "-m"
             "gesso.choreo.typed-nominal-identity-check")
      (shell "clojure" "-M:typed" "-m"
-            "gesso.assurance.typed-admission-boundary-check"))}
+            "gesso.assurance.typed-admission-boundary-check")
+     (shell "clojure" "-M:typed" "-m"
+            "gesso.assurance.typed-dependency-graph-check"))}
 
   test:jvm
   {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."
