@@ -1,14 +1,16 @@
 (ns gesso.choreo.typed-nominal-transition-node-runner
-  "Focused Node/CLJS CI runner for portable identity and machine behavior.
-   All four suites remain part of the standard Choreo Node test corpus."
+  "Focused Node/CLJS CI runner for identity, machine, type and semantic behavior.
+   All included suites belong to Gesso's standard Choreo Node corpus."
   (:require [cljs.test :as t]
             [gesso.choreo.typed-nominal-transition-boundary-test]
             [gesso.choreo.typed-nominal-machine-boundary-test]
             [gesso.choreo.machine-test]
-            [gesso.choreo.identity-test]))
+            [gesso.choreo.identity-test]
+            [gesso.choreo.type-test]
+            [gesso.choreo.semantics-test]))
 
-(def ^:private minimum-assertions 8037)
-(def ^:private minimum-tests 135)
+(def ^:private minimum-assertions 8340)
+(def ^:private minimum-tests 203)
 
 (derive ::reporter ::t/default)
 
@@ -19,7 +21,7 @@
                      (zero? (or (:error summary) 0)))]
     (println "GESSO_TYPED_NODE_TRANSITIONS" (pr-str summary))
     (when-not passed?
-      (println "Missing or diminished Node/CLJS identity and machine coverage."))
+      (println "Missing or diminished Node/CLJS identity, machine, type and semantics coverage."))
     (.exit js/process (if passed? 0 1))))
 
 (defn main []
@@ -27,6 +29,8 @@
                'gesso.choreo.typed-nominal-transition-boundary-test
                'gesso.choreo.typed-nominal-machine-boundary-test
                'gesso.choreo.machine-test
-               'gesso.choreo.identity-test))
+               'gesso.choreo.identity-test
+               'gesso.choreo.type-test
+               'gesso.choreo.semantics-test))
 
 (set! *main-cli-fn* main)
