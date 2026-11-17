@@ -111,11 +111,67 @@
    :installed-handler-semantic-equivalence :not-established
    :physical-transition-refinement :not-established})
 
+(defn- coverage-entry
+  "Pure, copyable snapshot join descriptor. This map is not an observed-host
+   inventory guarantee, certification, proof, or authority. The caller must
+   first validate original source closure and independent writer accounting."
+  [declared writer-report
+   {:keys [ids independent issued abstract-join issued-join
+           independent-join extras exact? conditional? open-obligations
+           operation-rows]}]
+  {:type coverage-type
+     :version coverage-version
+     :checking :current-declared-source-and-independent-issued-host-snapshot
+     :scope :supplied-live-declared-application-and-host-observation
+     :catalog-id (:catalog-id declared)
+     :catalog-fingerprint (:catalog-fingerprint declared)
+     :induction-fingerprint (:induction-fingerprint declared)
+     :application-dependency-ledger-fingerprint (:ledger-fingerprint declared)
+     :writer-source-catalog-id (:induction-catalog-id writer-report)
+     :writer-application-catalog-fingerprint
+     (:application-catalog-fingerprint writer-report)
+     :declared-operation-ids ids
+     :independent-operation-ids independent
+     :issued-operation-ids issued
+     :declared-vs-independent abstract-join
+     :declared-vs-issued issued-join
+     :independent-vs-issued independent-join
+     :exact-observed-operation-id-join? exact?
+     :operation-rows operation-rows
+     :observed-semantic-route-ids
+     (:observed-semantic-route-ids writer-report)
+     :observed-entry-point-ids (:observed-entry-point-ids writer-report)
+     :observed-unclassified-entry-point-ids extras
+     :host-snapshot-status (if (seq extras)
+                             :contains-unclassified-observed-entries
+                             :no-unclassified-entries-observed)
+     :status (cond
+               (not exact?) :open-operation-catalog-mismatch
+               (seq extras) :open-unclassified-observed-entry-points
+               conditional? :conditional-observed-operation-id-join
+               :else :open-independent-source-premises)
+     :original-open-obligation-ids-by-operation
+     (:original-open-obligation-ids-by-operation declared)
+     :open-assumptions (:open-assumptions declared)
+     :open-obligations open-obligations
+     :assumption-discharge :not-performed
+     :declaration-semantic-equivalence :not-established
+     :host-enumerator-exhaustiveness :not-established
+     :physical-writer-coverage :not-established
+     :abstract-to-physical-correspondence :not-established
+     :deployment-correspondence :not-established
+     :universal-kernel-soundness :not-established
+     :proof-status :conditional-snapshot-id-join-only
+     :certificate :not-issued
+     :admission :not-admitted
+     :transaction-authority :none
+     :authority :none})
+
 (defn- assemble-snapshot-report!
   "Pure, NONAUTHORITATIVE three-catalog set accounting. Input reports are
    accepted only here as data; the public source path never takes such reports."
   [declared writer-report]
-  (let [        ids (:operation-ids declared)
+  (let [ids (:operation-ids declared)
         independent (:independent-operation-ids writer-report)
         issued (:issued-application-operation-ids writer-report)
         abstract-join (differences ids independent)
@@ -146,54 +202,15 @@
                    (= :not-admitted (:admission declared))
                    (= :none (:authority declared)))
       (reject! :unexpected-application-closure-contract {}))
-    {:type coverage-type
-     :version coverage-version
-     :checking :current-declared-source-and-independent-issued-host-snapshot
-     :scope :supplied-live-declared-application-and-host-observation
-     :catalog-id (:catalog-id declared)
-     :catalog-fingerprint (:catalog-fingerprint declared)
-     :induction-fingerprint (:induction-fingerprint declared)
-     :application-dependency-ledger-fingerprint (:ledger-fingerprint declared)
-     :writer-source-catalog-id (:induction-catalog-id writer-report)
-     :writer-application-catalog-fingerprint
-     (:application-catalog-fingerprint writer-report)
-     :declared-operation-ids ids
-     :independent-operation-ids independent
-     :issued-operation-ids issued
-     :declared-vs-independent abstract-join
-     :declared-vs-issued issued-join
-     :independent-vs-issued independent-join
-     :exact-observed-operation-id-join? exact?
-     :operation-rows (mapv #(row % ids independent issued)
-                           (sort-by str all-ids))
-     :observed-semantic-route-ids
-     (:observed-semantic-route-ids writer-report)
-     :observed-entry-point-ids (:observed-entry-point-ids writer-report)
-     :observed-unclassified-entry-point-ids extras
-     :host-snapshot-status (if (seq extras)
-                             :contains-unclassified-observed-entries
-                             :no-unclassified-entries-observed)
-     :status (cond
-               (not exact?) :open-operation-catalog-mismatch
-               (seq extras) :open-unclassified-observed-entry-points
-               conditional? :conditional-observed-operation-id-join
-               :else :open-independent-source-premises)
-     :original-open-obligation-ids-by-operation
-     (:original-open-obligation-ids-by-operation declared)
-     :open-assumptions (:open-assumptions declared)
-     :open-obligations open-obligations
-     :assumption-discharge :not-performed
-     :declaration-semantic-equivalence :not-established
-     :host-enumerator-exhaustiveness :not-established
-     :physical-writer-coverage :not-established
-     :abstract-to-physical-correspondence :not-established
-     :deployment-correspondence :not-established
-     :universal-kernel-soundness :not-established
-     :proof-status :conditional-snapshot-id-join-only
-     :certificate :not-issued
-     :admission :not-admitted
-     :transaction-authority :none
-     :authority :none}))
+    (coverage-entry
+     declared writer-report
+     {:ids ids :independent independent :issued issued
+      :abstract-join abstract-join :issued-join issued-join
+      :independent-join independent-join :extras extras
+      :exact? exact? :conditional? conditional?
+      :open-obligations open-obligations
+      :operation-rows (mapv (fn [id] (row id ids independent issued))
+                            (sort-by str all-ids))})))
 
 (defn describe-application-writer-coverage!
   "Revalidate the current original catalog and live v1440 closure, then

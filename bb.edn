@@ -84,11 +84,13 @@
      (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-application-dependency-closure-check")
      (shell "clojure" "-M:typed" "-m"
-            "gesso.assurance.typed-application-assurance-report-check")
-     (shell "clojure" "-M:typed" "-m"
             "gesso.assurance.typed-operation-interface-composition-check")
      (shell "clojure" "-M:typed" "-m"
-            "gesso.assurance.typed-operation-interface-provenance-check"))}
+            "gesso.assurance.typed-operation-interface-provenance-check")
+     (shell "clojure" "-M:typed" "-m"
+            "gesso.assurance.typed-application-writer-coverage-check")
+     (shell "clojure" "-M:typed" "-m"
+            "gesso.assurance.typed-application-assurance-report-check"))}
 
   test:jvm
   {:doc "Run all JVM tests; use -n N to distribute JVM namespaces with Shard. Included by `bb test`."

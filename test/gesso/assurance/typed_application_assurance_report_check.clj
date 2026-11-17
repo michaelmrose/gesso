@@ -9,8 +9,8 @@
    kernel soundness, authorization, or the trustworthiness of a copied map.
 
    Original upstream functions are independently checked and tested.
-   Composition and provenance evidence reuse their independently checked
-   exact structural HMaps. Writer coverage remains opaque. All cross-source
+   Composition, provenance, and observed writer coverage now reuse the
+   respective producer's independently checked exact HMap. All cross-source
    semantic correspondence is still runtime-validated.
    None of these copyable reports is a proof or authority token. The
    application closure handle is nominal: live registry authentication
@@ -24,6 +24,7 @@
             [gesso.assurance.proof.operation-interface-provenance :as provenance]
             [gesso.assurance.typed-operation-interface-composition-check :as comp-check]
             [gesso.assurance.typed-operation-interface-provenance-check :as prov-check]
+            [gesso.assurance.typed-application-writer-coverage-check :as writer-check]
             [typed.clojure]))
 
 (def ^:private config {:max-processors 1 :check-form-eval :never})
@@ -38,6 +39,10 @@
   ;; Identical to the original manifest-entry return type in the standalone
   ;; provenance source checker. A copyable manifest is not proof authority.
   prov-check/manifest-type)
+(def ^:private writer-evidence-type
+  ;; Reuse the complete, source-checked writer descriptor; it remains an
+  ;; observed-host snapshot report, not evidence of writer exhaustiveness.
+  writer-check/report-type)
 
 (def ^:private non-authority-fields
   {:checking :source-derived-composition-provenance-and-observed-writer-join
@@ -79,9 +84,8 @@
 
 (defn- install-contracts! []
   (eval (list 'typed.clojure/ann-datatype app-handle '[]))
-  ;; Composition and provenance share source-backed exact return contracts.
-  ;; Writer evidence remains Any and all semantics are independently audited.
-  ;; None of these annotations certifies correctness or live authority.
+  ;; All three derived reports share their own source-backed exact HMaps.
+  ;; This checks structural categories, not source truth or runtime authority.
   (doseq [[name signature]
           [['gesso.assurance.proof.application-dependency/check-application-dependencies!
             ['typed.clojure/Any 'typed.clojure/Any '-> app-handle]]
@@ -94,10 +98,10 @@
              app-handle '-> provenance-evidence-type]]
            ['gesso.assurance.proof.application-writer-coverage/describe-application-writer-coverage!
             ['typed.clojure/Any 'typed.clojure/Any app-handle
-             'typed.clojure/Any '-> 'typed.clojure/Any]]
+             'typed.clojure/Any '-> writer-evidence-type]]
            ['gesso.assurance.proof.application-assurance-report/checked-summary!
             ['typed.clojure/Any composed-evidence-type provenance-evidence-type
-             'typed.clojure/Any '-> 'typed.clojure/Any]]
+             writer-evidence-type '-> 'typed.clojure/Any]]
            ['gesso.assurance.proof.application-assurance-report/ordinary-map?
             ['typed.clojure/Any '-> 'typed.clojure/Bool]]
            ['gesso.assurance.proof.application-assurance-report/reject!
@@ -270,6 +274,35 @@
     (check! checker :source-bound-provenance-handoff source)
     true))
 
+(defn- check-writer-evidence! [checker forms]
+  ;; The ORIGINAL application report builder acquires a fresh writer snapshot
+  ;; and passes it to the actual summary join. Static types now reject
+  ;; impossible or affirmative coverage claims in that original call.
+  (let [source (original forms 'describe-application-assurance!)
+        genuine '(checked-summary! declared composed manifest observed)]
+    (doseq [[label replacement]
+            [[:raw-writer-report '{}]
+             [:nil-writer-report nil]
+             [:wrong-proof-status '(assoc observed :proof-status :proved)]
+             [:fake-physical-coverage
+              '(assoc observed :physical-writer-coverage :established)]
+             [:fake-authority '(assoc observed :authority :granted)]
+             [:fake-certificate '(assoc observed :certificate :issued)]
+             [:missing-declared-ids '(dissoc observed :declared-operation-ids)]
+             [:invalid-independent-ids
+              '(assoc observed :independent-operation-ids [])]
+             [:invalid-join-flag
+              '(assoc observed :exact-observed-operation-id-join? :true)]
+             [:missing-open-obligations '(dissoc observed :open-obligations)]
+             [:wrong-rows '(assoc observed :operation-rows {})]
+             [:wrong-status '(assoc observed :status :all-physical-writers-covered)]]]
+      (reject! checker [:invalid-writer-coverage-input label]
+               (mutate-original-call source genuine
+                 (list 'checked-summary! 'declared 'composed 'manifest
+                       replacement))))
+    (check! checker :original-source-bound-writer-coverage-handoff source)
+    true))
+
 (defn- checks! [checker forms]
   (binding [*ns* (the-ns report-ns)]
     (check! checker :original-application-assurance-builder
@@ -281,6 +314,7 @@
     (check-final-flags! checker forms)
     (check-composition-evidence! checker forms)
     (check-provenance-evidence! checker forms)
+    (check-writer-evidence! checker forms)
     ;; Catalog and graph remain Any: their reversal stays type-compatible
     ;; and is caught by source audit. Provenance and writer evidence NOW have
     ;; different static types, so their original source-map swap must FAIL.
@@ -346,9 +380,9 @@
     (runtime-forgery!)
     (println "Typed application assurance report passed: 2 original complete")
     (println "source bodies, 12 wrong-closure call/producer substitutions,")
-    (println "11 false authority/status mutations, 10 malformed composition")
-    (println "and 10 malformed provenance handoffs; one Any-typed source")
-    (println "substitution rejected by source audit and a provenance/writer")
-    (println "swap now rejected statically, plus")
+    (println "11 false authority/status mutations; 10 composition, 10")
+    (println "provenance and 12 writer malformed handoffs; one Any-typed")
+    (println "catalog/graph swap rejected by source audit; the provenance/")
+    (println "writer swap now rejected statically, plus")
     (println "copy/forgery runtime rejection. No theorem or authority claims.")
     :ok))
