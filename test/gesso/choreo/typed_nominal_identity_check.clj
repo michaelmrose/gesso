@@ -269,14 +269,8 @@
                        :function (second definition)})))
     true))
 
-(defn- audit-binding-assemblies! [forward reverse]
-  ;; Never allow a refactor to bypass either the public tagged binding
-  ;; validator on ingress or its final validation on egress.
-  (when-not (= '(reduce-kv nominal-binding-entry {}
-                           (tagged/bindings bindings))
-               (last forward))
-    (throw (ex-info "Forward binding adapter lost its public validator."
-                    {:error/kind :wrong-binding-assembly :direction :forward})))
+(defn- audit-reverse-binding-assembly! [reverse]
+  ;; Keep the public validator on the nominal->tagged egress boundary.
   (when-not (= '(tagged/bindings
                  (reduce-kv tagged-binding-entry {} bindings))
                (last reverse))
@@ -285,87 +279,53 @@
   true)
 
 (defn- check-bindings! [checker]
+  ;; The forward conversion is verified separately against its precise HMap
+  ;; return type; avoid a second broad annotation that would erase precision.
   (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
         class-types (mapv #(symbol (str class-prefix %)) categories)
         tagged-reference '(typed.clojure/Map typed.clojure/Any typed.clojure/Any)
         nominal-union (cons 'typed.clojure/U class-types)
-        tagged-value (list 'typed.clojure/U 'typed.clojure/Kw tagged-reference)
         nominal-value (list 'typed.clojure/U 'typed.clojure/Kw nominal-union)
+        tagged-value (list 'typed.clojure/U 'typed.clojure/Kw tagged-reference)
         tagged-map (list 'typed.clojure/Map 'typed.clojure/Kw tagged-value)
         nominal-map (list 'typed.clojure/Map 'typed.clojure/Kw nominal-value)
         sources (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
-        forward-helper (source-definition sources 'nominal-binding-entry)
         reverse-helper (source-definition sources 'tagged-binding-entry)
-        forward (source-definition sources 'bindings->nominal)
         reverse (source-definition sources 'bindings->tagged)]
-    ;; Source-backed runtime validation exists in gesso.choreo.identity/bindings;
-    ;; its preexisting tests check category correspondence. This opt-in typed
-    ;; annotation models the *validated* sparse result, not arbitrary input.
+    ;; This existing runtime function validates the sparse map; its annotation
+    ;; describes the broad result used to analyze the reverse body.
     (eval (list 'typed.clojure/ann 'gesso.choreo.identity/bindings
                 (list 'typed.clojure/IFn ['typed.clojure/Any '-> tagged-map])))
     (doseq [[name signature]
-            [['nominal-binding-entry [nominal-map 'typed.clojure/Kw tagged-value
-                                     '-> nominal-map]]
-             ['tagged-binding-entry [tagged-map 'typed.clojure/Kw nominal-value
+            [['tagged-binding-entry [tagged-map 'typed.clojure/Kw nominal-value
                                     '-> tagged-map]]
-             ['bindings->nominal [tagged-map '-> nominal-map]]
              ['bindings->tagged [nominal-map '-> tagged-map]]]]
       (eval (list 'typed.clojure/ann
                   (symbol (str bridge-ns) (str name))
                   (list 'typed.clojure/IFn signature))))
     (binding [*ns* (the-ns bridge-ns)]
       (doseq [[label source]
-              [[:forward-entry forward-helper] [:reverse-entry reverse-helper]
-               [:forward-bindings forward] [:reverse-bindings reverse]]]
+              [[:reverse-entry reverse-helper] [:reverse-bindings reverse]]]
         (check! checker [:actual-binding-body label] source))
-      (audit-binding-helper! forward-helper '(tagged->nominal value)
-                             '(map? value))
       (audit-binding-helper! reverse-helper '(nominal->tagged value)
                              '(keyword? value))
-      (audit-binding-assemblies! forward reverse)
-      ;; A correctly typed internal map must pass both binding interfaces.
-      (check! checker :valid-sparse-public-binding-map
-              '(bindings->nominal {:principal (tagged/principal :person)
-                                   :role :browser}))
+      (audit-reverse-binding-assembly! reverse)
       (check! checker :valid-sparse-nominal-binding-map
               '(bindings->tagged {:principal (nominal/principal :person)
                                   :role :browser}))
-      ;; Incorrect representation at either boundary, even under a valid key,
-      ;; must be a static checker error rather than a runtime-only failure.
       (doseq [[label form]
-              [[:forward-nominal-in-map
-                '(bindings->nominal {:principal (nominal/principal :person)})]
-               [:reverse-tagged-in-map
+              [[:reverse-tagged-in-map
                 '(bindings->tagged {:principal (tagged/principal :person)})]
-               [:forward-string '(bindings->nominal "bad")]
                [:reverse-string '(bindings->tagged "bad")]
-               [:forward-nil '(bindings->nominal nil)]
                [:reverse-nil '(bindings->tagged nil)]]]
         (check-rejection! checker label form))
-      (doseq [[label original]
-              [[:forward-binding-return forward]
-               [:reverse-binding-return reverse]]]
-        (check-rejection! checker label
-                          (apply list (concat (butlast original) [:not-a-map]))
-                          :typed.clojure/type-mismatch-error))
-      ;; Deliberately type-correct invalid changes: if the original source
-      ;; stops validating the sparse map or preserves a wrong key, fail closed.
+      (check-rejection! checker :reverse-binding-return
+                        (apply list (concat (butlast reverse) [:not-a-map]))
+                        :typed.clojure/type-mismatch-error)
       (expect-audit-rejection!
-       (fn [candidate] (audit-binding-assemblies! candidate reverse))
-       :forward-validation-removed
-       (walk/postwalk-replace {'tagged/bindings 'identity} forward)
-       :wrong-binding-assembly)
-      (expect-audit-rejection!
-       (fn [candidate] (audit-binding-assemblies! forward candidate))
-       :reverse-validation-removed
+       audit-reverse-binding-assembly! :reverse-validation-removed
        (walk/postwalk-replace {'tagged/bindings 'identity} reverse)
        :wrong-binding-assembly)
-      (expect-audit-rejection!
-       (fn [candidate] (audit-binding-helper! candidate
-                      '(tagged->nominal value) '(map? value)))
-       :forward-key-rewritten
-       (walk/postwalk-replace {'key :role} forward-helper)
-       :wrong-binding-entry)
       (expect-audit-rejection!
        (fn [candidate] (audit-binding-helper! candidate
                       '(nominal->tagged value) '(keyword? value)))
@@ -448,9 +408,9 @@
                              :actor '(nominal/actor :id)})))
     true))
 
-(defn- audit-precise-output-validation! [definition]
-  ;; A precise HMap return cannot prove all present keys survive, nor that
-  ;; untyped input was validated. Insist on the original public admission
+(defn- audit-canonical-output-validation! [definition]
+  ;; A closed optional HMap cannot prove all present keys survive, nor that
+  ;; untyped input was validated. Insist on the public admission
   ;; boundary; exhaustive runtime equivalence checks key preservation.
   (let [body (last definition)
         bindings (when (and (seq? body) (= 'let (first body)))
@@ -458,14 +418,13 @@
         validation (when (vector? bindings)
                      (second bindings))]
     (when-not (= '(tagged/bindings bindings) validation)
-      (throw (ex-info "Precise binding converter bypasses public validation."
-                      {:error/kind :missing-precise-binding-validation})))
+      (throw (ex-info "Canonical binding converter bypasses public validation."
+                      {:error/kind :missing-canonical-binding-validation})))
     true))
 
-(defn- check-precise-nominal-output! [checker]
-  ;; The generic reduce-kv bridge checks only a broad value union. This
-  ;; alternate ordinary defn explicitly constructs each optional key using
-  ;; if-let, so the checker can prove the *output* category relationships.
+(defn- check-canonical-nominal-output! [checker]
+  ;; The single canonical conversion uses fixed-key if-let construction,
+  ;; allowing the checker to prove category-specific optional output slots.
   (let [bridge-ns 'gesso.choreo.typed-nominal-identity-bridge
         class-types (mapv #(symbol (str class-prefix %)) categories)
         hmap (list 'typed.clojure/HMap
@@ -481,38 +440,38 @@
                                       (typed.clojure/Map
                                        typed.clojure/Any typed.clojure/Any)))
         sources (source-forms "gesso/choreo/typed_nominal_identity_bridge.cljc")
-        source (source-definition sources 'bindings->nominal-precise)]
+        source (source-definition sources 'bindings->nominal)]
     (eval (list 'typed.clojure/ann
-                (symbol (str bridge-ns) "bindings->nominal-precise")
+                (symbol (str bridge-ns) "bindings->nominal")
                 (list 'typed.clojure/IFn [tagged-map '-> hmap])))
     (binding [*ns* (the-ns bridge-ns)]
       (check! checker :actual-precise-nominal-output-body source)
-      (audit-precise-output-validation! source)
+      (audit-canonical-output-validation! source)
       (check! checker :valid-precise-nominal-output-call
-              '(bindings->nominal-precise
+              '(bindings->nominal
                 {:principal (tagged/principal :person)
                  :actor (tagged/actor :member)
                  :role :server}))
       ;; A client may read the type of an optional entry only after checking
       ;; presence. The value is statically Principal rather than the old union.
-      (check! checker :precise-output-flows-to-stage-one
-              '(let [result (bindings->nominal-precise
+      (check! checker :canonical-output-flows-to-stage-one
+              '(let [result (bindings->nominal
                              {:principal (tagged/principal :person)})]
                  (if-let [p (:principal result)]
                    (nominal/step-1 p)
                    nil)))
       ;; A deliberately wrong consumer type fails at the *next* function,
       ;; demonstrating that category precision is propagated downstream.
-      (check-rejection! checker :precise-output-rejects-wrong-consumer
-                        '(let [result (bindings->nominal-precise
+      (check-rejection! checker :canonical-output-rejects-wrong-consumer
+                        '(let [result (bindings->nominal
                                        {:actor (tagged/actor :person)})]
                            (if-let [actor (:actor result)]
                              (nominal/step-1 actor)
                              nil)))
       (expect-audit-rejection!
-       audit-precise-output-validation! :precise-public-validator-removed
+       audit-canonical-output-validation! :canonical-public-validator-removed
        (walk/postwalk-replace {'tagged/bindings 'identity} source)
-       :missing-precise-binding-validation)
+       :missing-canonical-binding-validation)
       (let [modified (walk/postwalk
                       (fn [node]
                         (if (= '(assoc out :principal nominal-value) node)
@@ -520,9 +479,9 @@
                           node))
                       source)]
         (when (= modified source)
-          (throw (ex-info "Precise source mutation did not modify its target."
+          (throw (ex-info "Canonical source mutation did not modify its target."
                           {:error/kind :missing-mutation-target})))
-        (check-rejection! checker :precise-output-slot-swap
+        (check-rejection! checker :canonical-output-slot-swap
                           modified :typed.clojure/type-mismatch-error)))
     true))
 
@@ -588,12 +547,12 @@
     (check-bridge! checker)
     (check-bindings! checker)
     (check-heterogeneous-nominal-bindings! checker)
-    (check-precise-nominal-output! checker)
+    (check-canonical-nominal-output! checker)
     (println "Nominal static gate passed: 6 constructors, 7 stage bodies,")
-    (println "7 bridge bodies, 15 valid calls, 58 invalid static calls,")
-    (println "13 mutation checks (returns, guards, slots, and categories).")
+    (println "6 bridge bodies including canonical sparse output,")
+    (println "static source, category, return, and mutation checks passed.")
     (println "Closed sparse nominal HMap: 128 valid subsets, 39 invalid")
     (println "per-slot category/key cases; original adapter body checked.")
-    (println "Precise output HMap: real body checked, seven optional slots;")
+    (println "Canonical output HMap: real body checked, seven optional slots;")
     (println "wrong downstream consumer and slot-swap mutations rejected.")
     :ok))

@@ -79,21 +79,6 @@
                     {:error/kind :invalid-nominal-identity
                      :value reference}))))
 
-(defn- nominal-binding-entry
-  "Convert one entry after the public sparse binding map has been checked."
-  [acc key value]
-  (assoc acc key (if (= key :role)
-                   (if (keyword? value)
-                     value
-                     (throw (ex-info "Expected a keyword for :role."
-                                     {:error/kind :invalid-role
-                                      :binding key :value value})))
-                   (if (map? value)
-                     (tagged->nominal value)
-                     (throw (ex-info "Expected a tagged identity in binding."
-                                     {:error/kind :invalid-tagged-identity
-                                      :binding key :value value}))))))
-
 (defn- tagged-binding-entry
   "Convert one nominal entry, without bypassing the final public validator."
   [acc key value]
@@ -110,22 +95,10 @@
                      (nominal->tagged value)))))
 
 (defn bindings->nominal
-  "Convert a validated, sparse public binding map to internal nominal values.
-
-   A role is already a keyword and remains unchanged. Every other binding
-   passes through the public validator before a category-specific conversion.
-   Extension fields are preserved instead of discarded."
-  [bindings]
-  (reduce-kv nominal-binding-entry
-             {}
-             (tagged/bindings bindings)))
-
-(defn bindings->nominal-precise
-  "Experimental seven-slot adapter whose *actual output* can be statically
-   checked as a closed optional HMap with category-specific nominal values.
-   The public tagged/bindings validator remains authoritative on input.
-   Unlike the generic reduce-kv converter, each fixed slot is visible to
-   Typed Clojure and if-let narrows present values away from nil."
+  "Canonical pilot adapter converting validated tagged bindings to nominal
+   values with independently checkable category-specific output slots.
+   Uses ordinary defn and fixed-key if-let, not special function syntax.
+   The existing tagged/bindings validator remains authoritative on input."
   [bindings]
   (let [validated (tagged/bindings bindings)
         out (if-let [role (:role validated)]
@@ -418,9 +391,10 @@
         (is (= (set (keys selected)) (set (keys internal))))
         (is (= (count selected) (count internal)))))))
 
-(deftest precise-nominal-output-is-equivalent-for-every-sparse-binding-map
-  ;; For all 128 legal presence patterns, the alternative explicit adapter
-  ;; produces exactly the same nominal map as the existing generic adapter.
+(deftest canonical-nominal-output-matches-independent-reference
+  ;; Independently compute the former generic reduce-kv result *in the test*
+  ;; for all 128 presence patterns. Only the precise implementation remains
+  ;; in the actual pilot adapter, so the behavior cannot silently regress.
   (let [all {:role :server
              :principal (assoc (tagged/principal :user) :extra {:a 1})
              :actor (tagged/actor :member)
@@ -435,26 +409,34 @@
                         (for [[index slot] (map-indexed vector slots)
                               :when (bit-test mask index)]
                           [slot (get all slot)]))
-            precise (bindings->nominal-precise input)]
-        (is (= (bindings->nominal input) precise))
-        (is (= input (bindings->tagged precise)))
-        (is (= (set (keys input)) (set (keys precise))))))))
+            canonical (bindings->nominal input)
+            reference (reduce-kv
+                       (fn [acc key value]
+                         (assoc acc key
+                                (if (= key :role)
+                                  value
+                                  (tagged->nominal value))))
+                       {}
+                       (tagged/bindings input))]
+        (is (= reference canonical))
+        (is (= input (bindings->tagged canonical)))
+        (is (= (set (keys input)) (set (keys canonical))))))))
 
-(deftest precise-nominal-output-rejects-incorrect-binding-categories
+(deftest canonical-nominal-output-rejects-incorrect-binding-categories
   (let [slots [:principal :actor :authority :host :command-id :execution-id]
         factories [tagged/principal tagged/actor tagged/authority
                    tagged/host tagged/command-id tagged/execution-id]]
     (doseq [[slot expected] (map vector slots factories)
             [other-slot actual] (map vector slots factories)]
       (let [input {slot (actual :id)}
-            error (error-kind #(bindings->nominal-precise input))]
+            error (error-kind #(bindings->nominal input))]
         (if (= slot other-slot)
           (is (= nil error))
           (is (= :invalid-binding error)))))
     (is (= :invalid-role
-           (error-kind #(bindings->nominal-precise {:role 42}))))
+           (error-kind #(bindings->nominal {:role 42}))))
     (is (= :unknown-binding
-           (error-kind #(bindings->nominal-precise {:unknown :value}))))))
+           (error-kind #(bindings->nominal {:unknown :value}))))))
 
 (deftest tagged-identity-categories-are-not-interchangeable-in-bindings
   (let [slots [:principal :actor :authority :host :command-id :execution-id]
