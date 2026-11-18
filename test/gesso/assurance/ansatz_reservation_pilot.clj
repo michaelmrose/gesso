@@ -28,6 +28,12 @@
    Neither the proof nor its expected-subject token is a certificate or an
    application admission/authority credential.
 
+   The exact kernel proposition is now independently re-elaborated from the
+   CURRENT Gesso obligation before issuance and consumption. A valid proof
+   of a different quantified goal cannot be substituted under unchanged
+   source metadata. This checks goal identity, not general translation
+   fidelity or interpreter refinement.
+
    Invoke using the optional dependency alias:
      clojure -M:ansatz:typed:test -m gesso.assurance.ansatz-reservation-pilot
 
@@ -268,10 +274,24 @@
                        :permitted-axioms permitted-axioms})))
     (assoc report :policy :ansatz-reservation-pilot/lean-core-axioms-v1)))
 
+(defn- elaborate-source-proposition! [{:keys [parameters goal-form]}]
+  ;; Build the EXACT kernel goal directly from the original source-derived
+  ;; signed-Int telescope, without invoking a tactic or using a stored proof.
+  ;; This is the same public elaborator Ansatz 0.2.617 uses in prove-law;
+  ;; agreement establishes kernel-expression identity, not translator soundness.
+  (:type-ansatz
+   (ansatz/elab-signature (ansatz/env)
+                          (ansatz/parse-params parameters)
+                          goal-form)))
+
 (defn- check-obligation! [{:keys [parameters goal-form] :as obligation}]
   (let [[goal proof] (binding [ansatz/*verbose* false]
                        (ansatz/prove-law parameters goal-form '[(omega)]))
         env (ansatz/env)]
+    (when-not (= (elaborate-source-proposition! obligation) goal)
+      (reject! :proof-proposition-mismatch
+               {:operation-id (:operation-id obligation)
+                :invariant-id (:invariant-id obligation)}))
     (when-not (kernel/verifies? env goal proof)
       (reject! :kernel-rejected
                {:operation-id (:operation-id obligation)
@@ -561,12 +581,17 @@
       ;; expecting a DIFFERENT operation/invariant/source proposition.
       (when-not (= description expected)
         (pilot-failure! :proof-subject-mismatch))
-      ;; Recheck both the original stored proof term and the current axiom
-      ;; closure rather than trusting the registry's copied report alone.
+      ;; Proof metadata is not the proposition. Re-elaborate the exact
+      ;; CURRENT source obligation, including its precondition and write
+      ;; binders, and compare kernel expressions before checking the proof.
+      ;; A proof valid for the wrong statement must never qualify here.
       (let [env (ansatz/env)
             goal (:goal issued)
             proof (:proof issued)
-            current-deps (when (kernel/verifies? env goal proof)
+            expected-goal (elaborate-source-proposition! current)
+            _ (when-not (= expected-goal goal)
+                (pilot-failure! :proof-proposition-mismatch))
+            current-deps (when (kernel/verifies? env expected-goal proof)
                            (qualify-proof-dependencies!
                             (inspect-proof-dependencies env goal proof)))]
         (when-not (= current-deps (:dependencies issued))
@@ -722,6 +747,79 @@
                         (assoc-in catalog
                                   [:operations 0 :construction :replacements claim-field]
                                   [:literal 2])))))))
+
+(deftest proof-issuance-rejects-a-valid-but-unrelated-kernel-proposition
+  (let [catalog (example/reservation-catalog)
+        original (original-obligation! catalog
+                   :slot/reserve :slot/at-most-one-claim)
+        other (original-obligation! catalog
+                :slot/release :slot/nonnegative-claims)
+        other-checked (check-obligation! other)]
+    ;; This is genuinely kernel-checked proof evidence, just not for the
+    ;; source proposition being requested. The mismatch must reject at
+    ;; issuance, not be hidden behind a valid :goal/:proof pair.
+    (is (kernel/verifies? (ansatz/env)
+                          (:goal other-checked) (:proof other-checked)))
+    (is (= :proof-proposition-mismatch
+           (-> (try (with-redefs [ansatz/prove-law
+                                 (fn [& _]
+                                   [(:goal other-checked)
+                                    (:proof other-checked)])]
+                      (check-obligation! original))
+                    nil
+                    (catch clojure.lang.ExceptionInfo ex (ex-data ex)))
+               :reason)))))
+
+(deftest proof-consumption-rejects-valid-substituted-theorems
+  (let [catalog (example/reservation-catalog)
+        handle (issue-audited-pilot-handle!
+                catalog :slot/reserve :slot/at-most-one-claim)
+        expected (issue-expected-pilot-subject!
+                  catalog :slot/reserve :slot/at-most-one-claim)
+        original (locking issued-pilot-proofs
+                   (.get issued-pilot-proofs handle))
+        other-operations
+        [(original-obligation! catalog :slot/release :slot/at-most-one-claim)
+         (original-obligation! catalog :slot/reserve :slot/nonnegative-claims)
+         ;; A proof about the same declared operation and invariant, but a
+         ;; modified literal assignment, still has a different proposition.
+         (first (filter #(and (= :slot/reserve (:operation-id %))
+                              (= :slot/at-most-one-claim (:invariant-id %)))
+                        (source-obligations!
+                         (assoc-in catalog
+                                   [:operations 0 :construction :replacements
+                                    claim-field]
+                                   [:literal 0]))))]]
+    (is (= :slot/reserve
+           (:operation-id (require-current-audited-pilot-proof!
+                           handle expected catalog))))
+    (doseq [source other-operations]
+      (let [alternate (check-obligation! source)
+            ;; Simulate a corrupted issuance entry that retains matching
+            ;; nominal handles and ORIGINAL source metadata while holding
+            ;; an independently kernel-valid proof for another proposition.
+            swapped (assoc original
+                           :goal (:goal alternate)
+                           :proof (:proof alternate)
+                           :dependencies (:dependencies alternate))]
+        (is (not= (:goal original) (:goal alternate)))
+        (is (kernel/verifies? (ansatz/env)
+                              (:goal alternate) (:proof alternate)))
+        (try
+          (locking issued-pilot-proofs
+            (.put issued-pilot-proofs handle swapped))
+          (is (= :proof-proposition-mismatch
+                 (-> (try (require-current-audited-pilot-proof!
+                           handle expected catalog)
+                          nil
+                          (catch clojure.lang.ExceptionInfo ex (ex-data ex)))
+                     :reason)))
+          (finally
+            (locking issued-pilot-proofs
+              (.put issued-pilot-proofs handle original))))))
+    (is (= :slot/reserve
+           (:operation-id (require-current-audited-pilot-proof!
+                           handle expected catalog))))))
 
 (deftest original-audited-handoff-is-statically-distinct-from-ordinary-evidence
   (is (true? (check-typed-pilot-handoff!))))
