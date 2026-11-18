@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.certified-claim-http-boot
-  "v1785: A concrete, opt-in BOOT ENTRY for the checked claim example.
+  "v1788: A concrete, opt-in BOOT ENTRY for the checked claim example.
 
    This application entry owns its operation ID, literal POST route, one
    checked contract, one selected HTTP adapter, and one catalog-derived
@@ -75,7 +75,7 @@
     ;; declared claim operation and pinned typed owner. The runtime callback
     ;; is still host-supplied and is NOT an authentication certificate.
     (principal/issue-request-principal-gate!
-     policy operation-id (:inputs source)))
+     policy operation-id (:inputs source) (:catalog-source source)))
   (let [contract (:contract-source source)
         catalog-source (get-in source [:catalog-source :catalog])
         checked (try (original-contract-check contract)

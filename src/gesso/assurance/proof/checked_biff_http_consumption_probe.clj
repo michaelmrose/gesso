@@ -193,7 +193,8 @@
                                 {:principal (when-let [policy (:principal-policy typed-config)]
                                               (original-principal-issuer
                                                policy (:operation typed-config)
-                                               (:inputs typed-config)))
+                                               (:inputs typed-config)
+                                               (:catalog-source typed-config)))
                                  :issued (original-typed-issuer
                                           host-handle contract-source host-system
                                           (:catalog-source typed-config)

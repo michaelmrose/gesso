@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.certified-claim-http-principal-test
-  "v1787: Real network principal acquisition and exact owner grant must be
+  "v1788: Real network principal acquisition and exact owner grant must be
    checked before the v1785 boot's ONE catalog-bound typed XTDB write."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.example.certified-claim-http-boot :as boot]
@@ -307,3 +307,45 @@
                        (assoc-in source [:principal-policy :verify-request-intent!]
                                  bad))))))
     (is (nil? @server-state))))
+
+(deftest authorization-grant-must-match-original-typed-owner-write
+  (let [{:keys [source server-state]} (with-source)
+        ;; These are valid-looking host grants for the SAME owner and operation,
+        ;; but each changes what the original source actually promises.
+        changes [(assoc-in source [:catalog-source :catalog :operations 0
+                                   :construction :replacements :doc/owner]
+                           [:literal "helper-a"])
+                 (assoc-in source [:catalog-source :catalog :operations 0
+                                   :construction :input-types :input/owner]
+                           {:type :integer})
+                 (update-in source [:catalog-source :catalog :operations 0
+                                    :construction :reads]
+                            disj :input/owner)
+                 (assoc-in source [:catalog-source :physical-field-map
+                                   :doc/owner] :unrelated-field)]]
+    (doseq [changed changes]
+      (is (= :principal-owner-not-bound-to-original-catalog
+             (reason #(boot/issue-claim-http-boot! changed)))))
+    ;; None of the source mismatches may start the Biff server.
+    (is (nil? @server-state))))
+
+(deftest principal-gate-rechecks-original-source-at-request-time
+  (let [{:keys [source session-id data env] :as e} (with-source)
+        {:keys [request binding]} data
+        issued (boot/issue-claim-http-boot! source)]
+    (seed! [:requests request])
+    (try
+      ((:boot! issued))
+      ;; The original catalog checker is an active dependency, not a caller-
+      ;; supplied success report or a silently replaceable executable check.
+      (with-redefs [gesso.assurance.proof.operation-set/check-operation-set!
+                    (fn [_] {:type :fabricated :authority :none})]
+        (is (= 500 (send! e session-id))))
+      (is (= request (read-request (:xt/id request))))
+      (is (nil? (read-command (resolution/record-id binding))))
+      (is (zero? @(get-in env [:environment :constructs])))
+      (is (= 200 (send! e session-id)))
+      (is (= ((model 'next-version) request {:owner "helper-a"})
+             (read-request (:xt/id request))))
+      (is (some? (read-command (resolution/record-id binding))))
+      (finally (cleanup! e issued)))))
