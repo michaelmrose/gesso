@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-request-principal
-  "v1789: Source-relative ONE-operation principal/owner correspondence before
+  "v1790: Source-relative ONE-operation principal/owner correspondence before
    the v1781 checked HTTP -> typed/canonical execution trial.
 
    A trusted host acquisition callback sees the ACTUAL selected Ring request,
@@ -19,14 +19,21 @@
    map. This is a source-relative declaration, not independently authenticated
    policy provenance. This module does not authenticate cookies, credentials
    or Ring adapters, audit callback purity, or certify CSRF protection.
-   No admission, certificate, transaction or retry capability is issued."
-  (:require [gesso.assurance.proof.operation-set :as catalog]))
+   v1790 also requires that SAME transition to be the original construction
+   attached to the ONE checked ApplicationAssembly certified executor and
+   registered handler. No admission, certificate, transaction or retry
+   capability is issued."
+  (:require [gesso.assurance.proof.operation-set :as catalog]
+            [gesso.live.application-preflight :as application]
+            [gesso.live.application-preflight.certified-contract :as certified]))
 
 (def report-type
   :gesso.assurance.proof.checked-biff-request-principal/local-request-gate)
 (def report-version 1)
 
 (def ^:private original-catalog-check catalog/check-operation-set!)
+(def ^:private original-contract-check certified/check-certified-contracts!)
+(def ^:private original-operation-summary application/operation-summary)
 
 (defn- closed-map? [m ks]
   (and (or (instance? clojure.lang.PersistentArrayMap m)
@@ -74,6 +81,42 @@
       (reject! :principal-owner-not-bound-to-original-catalog))
     true))
 
+(defn- check-original-authorization-assembly! [contract-source catalog-source operation]
+  ;; Do NOT claim this policy is part of the application's original business
+  ;; rules: the authorization declaration is still application-supplied. This
+  ;; joins that declaration's one typed operation to the actual issued-plan
+  ;; source and assembled certified handler, not a caller-supplied report.
+  (when-not (and (closed-map? contract-source
+                             #{:application-assembly :semantic-route-handlers
+                               :certified-operations})
+                 (identical? original-contract-check
+                             (var-get #'certified/check-certified-contracts!))
+                 (identical? original-operation-summary
+                             (var-get #'application/operation-summary)))
+    (reject! :authorization-not-bound-to-original-assembly))
+  ;; The existing boot source checker freshly executes the expensive
+  ;; original certified-contract/assembly validation after this gate, and
+  ;; the checked Biff host repeats it before adoption. Do not re-run full
+  ;; application derivation here: bind to that exact supplied source rather
+  ;; than accepting a caller-supplied report or a second route table.
+  (let [binding (get-in contract-source [:certified-operations operation])
+        original-construction (get-in binding [:current-source :construction])
+        declared-construction (get-in catalog-source
+                                      [:catalog :operations 0 :construction])
+        selected-handler (get-in contract-source
+                                 [:semantic-route-handlers operation])]
+    (when-not (and (some? (:application-assembly contract-source))
+                   (= #{operation}
+                      (set (keys (:certified-operations contract-source)))
+                      (set (keys (:semantic-route-handlers contract-source))))
+                   (fn? (:executor binding))
+                   (certified/certified-handler? selected-handler)
+                   (= declared-construction original-construction)
+                   (= operation (:operation (get-in binding [:current-source
+                                                               :certified-source]))))
+      (reject! :authorization-not-bound-to-original-assembly))
+    true))
+
 (defn- check-authorization-declaration! [source policy operation inputs catalog-source]
   ;; The declaration belongs to this selected application's boot source,
   ;; not to the host's request callbacks. It is checked against the SAME
@@ -115,10 +158,12 @@
    principal capability or a proof certificate. An optional
    :verify-request-intent! callback must return an exact boolean; false
    denies with 403, and an exception or malformed answer fails closed.
-   The original catalog and application-owned authorization declaration
-   are mandatory; the host cannot introduce additional grants."
-  [policy operation inputs catalog-source authorization-source]
+   The original catalog, current certified application assembly and
+   application-owned authorization declaration are mandatory; the host
+   cannot introduce additional grants."
+  [policy operation inputs catalog-source authorization-source contract-source]
   (check-declared-owner-source! catalog-source operation)
+  (check-original-authorization-assembly! contract-source catalog-source operation)
   (when-not (and (or (closed-map? policy #{:policy-id :acquire-principal!})
                      (closed-map? policy #{:policy-id :acquire-principal!
                                           :verify-request-intent!}))
@@ -141,7 +186,11 @@
                    ;; data; the selected source is checked once at issuance.
                    ;; Reject replacement of the original checker at runtime
                    ;; without re-running expensive admission in the HTTP path.
-                   (when-not (and (identical? original-catalog-check
+                   (when-not (and (identical? original-contract-check
+                                              (var-get #'certified/check-certified-contracts!))
+                                  (identical? original-operation-summary
+                                              (var-get #'application/operation-summary))
+                                  (identical? original-catalog-check
                                               (var-get #'catalog/check-operation-set!))
                                   (identical? original-acquire
                                               (:acquire-principal! policy))

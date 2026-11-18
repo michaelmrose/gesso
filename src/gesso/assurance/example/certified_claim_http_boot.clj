@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.certified-claim-http-boot
-  "v1789: A concrete, opt-in BOOT ENTRY for the checked claim example.
+  "v1790: A concrete, opt-in BOOT ENTRY for the checked claim example.
 
    This application entry owns its operation ID, literal POST route, one
    checked contract, one selected HTTP adapter, and one catalog-derived
@@ -76,7 +76,7 @@
     ;; host callback. Both must correspond to the exact typed owner write.
     (principal/issue-request-principal-gate!
      policy operation-id (:inputs source) (:catalog-source source)
-     (:authorization-source source)))
+     (:authorization-source source) (:contract-source source)))
   (let [contract (:contract-source source)
         catalog-source (get-in source [:catalog-source :catalog])
         checked (try (original-contract-check contract)
@@ -127,6 +127,10 @@
      :trusted-host-principal-must-match-declared-typed-owner-grant
      :not-established)
    :authorization-declaration-provenance :application-supplied-not-certified
+   :authorization-to-original-assembly
+   (if principal-bound?
+     :one-declaration-matched-to-current-issued-certified-handler
+     :not-established)
    :host-principal-acquisition-authenticity :not-established
    :principal-authentication :not-established
    :authenticated-xtdb-receipt :not-established

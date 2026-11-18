@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.certified-claim-http-principal-test
-  "v1789: Real network principal acquisition and exact owner grant must be
+  "v1790: Real network principal acquisition and exact owner grant must be
    checked before the v1785 boot's ONE catalog-bound typed XTDB write."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.example.certified-claim-http-boot :as boot]
@@ -101,6 +101,10 @@
       (is (= :verified-configured-start (:status ((:boot! issued)))))
       (is (= :trusted-host-principal-must-match-declared-typed-owner-grant
              (:principal-authorization-check ((:summary! issued)))))
+      (is (= :one-declaration-matched-to-current-issued-certified-handler
+             (:authorization-to-original-assembly ((:summary! issued)))))
+      (is (= :application-supplied-not-certified
+             (:authorization-declaration-provenance ((:summary! issued)))))
       (is (= :not-established
              (:host-principal-acquisition-authenticity ((:summary! issued)))))
       ;; Challenge is read-only and never acquires a user.
@@ -401,3 +405,37 @@
       (is (= :invalid-or-unbound-authorization-declaration
              (reason #(boot/issue-claim-http-boot! changed)))))
     (is (nil? @server-state))))
+
+
+(deftest declared-authorization-requires-current-original-certified-assembly
+  (let [{:keys [source server-state]} (with-source)
+        unrelated (assoc-in source
+                            [:contract-source :certified-operations :request/claim
+                             :current-source :construction :replacements :doc/owner]
+                            [:literal "helper-a"])
+        fake-handler (assoc-in source
+                               [:contract-source :semantic-route-handlers :request/claim]
+                               (fn [_] {:status 200}))]
+    (doseq [changed [unrelated fake-handler]]
+      (is (= :authorization-not-bound-to-original-assembly
+             (reason #(boot/issue-claim-http-boot! changed)))))
+    (is (nil? @server-state))))
+
+(deftest substituted-assembly-checker-rejected-before-principal-write
+  (let [{:keys [source session-id data env] :as e} (with-source)
+        {:keys [request binding]} data
+        issued (boot/issue-claim-http-boot! source)]
+    (seed! [:requests request])
+    (try
+      ((:boot! issued))
+      (with-redefs [gesso.live.application-preflight.certified-contract/check-certified-contracts!
+                    (fn [_] {:type :fabricated :transaction-authority :none})]
+        (is (= 500 (send! e session-id))))
+      (is (= request (read-request (:xt/id request))))
+      (is (nil? (read-command (resolution/record-id binding))))
+      (is (zero? @(get-in env [:environment :constructs])))
+      (is (= 200 (send! e session-id)))
+      (is (= ((model 'next-version) request {:owner "helper-a"})
+             (read-request (:xt/id request))))
+      (is (some? (read-command (resolution/record-id binding))))
+      (finally (cleanup! e issued)))))

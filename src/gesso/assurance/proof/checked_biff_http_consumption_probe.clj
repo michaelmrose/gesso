@@ -196,7 +196,8 @@
                                                policy (:operation typed-config)
                                                (:inputs typed-config)
                                                (:catalog-source typed-config)
-                                               (:authorization-source typed-config)))
+                                               (:authorization-source typed-config)
+                                               contract-source))
                                  :issued (original-typed-issuer
                                           host-handle contract-source host-system
                                           (:catalog-source typed-config)
