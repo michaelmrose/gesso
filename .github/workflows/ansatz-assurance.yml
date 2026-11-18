@@ -1,0 +1,97 @@
+name: Ansatz proof regression
+
+on:
+  push:
+    branches:
+      - typed-clojure
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ansatz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proof-regression:
+    name: Ansatz kernel proofs and abstract transition regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Clojure CLI
+        uses: DeLaGuardo/setup-clojure@13.7.0
+        with:
+          cli: '1.12.0.1530'
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.gitlibs
+            .cpcache
+          key: ansatz-v1-${{ runner.os }}-${{ hashFiles('deps.edn') }}
+          restore-keys: |
+            ansatz-v1-${{ runner.os }}-
+
+      # Keep Ansatz off ordinary downstream application classpaths.
+      # Discover all source-derived pilots so newly added pilots cannot
+      # silently escape independent verification. The checked theorem scope
+      # remains abstract; CI success is not installed XTDB correspondence.
+      - name: Kernel-check all Ansatz pilots and adjacent rule/transition regressions
+        env:
+          JAVA_TOOL_OPTIONS: >-
+            -Xmx3g
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --enable-native-access=ALL-UNNAMED
+            -Dio.netty.tryReflectionSetAccessible=true
+            -Dio.netty.noUnsafe=false
+        run: |
+          cat > "$RUNNER_TEMP/ansatz-proof-regression.clj" <<'CLOJURE'
+          (do
+            (require '[ansatz.core :as ansatz]
+                     '[clojure.string :as str]
+                     '[clojure.test :as t])
+            (let [directory (java.io.File. "test/gesso/assurance")
+                  _ (when-not (.isDirectory directory)
+                      (throw (ex-info "Ansatz pilot directory missing" {:directory (str directory)})))
+                  pilots (->> (.listFiles directory)
+                              (filter #(.isFile ^java.io.File %))
+                              (map #(.getName ^java.io.File %))
+                              (filter #(re-matches #"ansatz_.*_pilot\.clj" %))
+                              (map #(symbol (str "gesso.assurance."
+                                                 (str/replace (subs % 0 (- (count %) 4)) "_" "-"))))
+                              sort
+                              vec)
+                  adjacent '[gesso.assurance.rule-test
+                             gesso.assurance.rule-type-test
+                             gesso.assurance.rule-eval-test
+                             gesso.assurance.transition-test
+                             gesso.assurance.proof.transition-test
+                             gesso.assurance.proof.independent-transition-semantics-test]
+                  selected (into pilots adjacent)]
+              (when (< (count pilots) 14)
+                (throw (ex-info "Ansatz pilot inventory shrank unexpectedly"
+                                {:expected-at-least 14 :found (count pilots) :pilots pilots})))
+              (println "Verifying" (count pilots) "Ansatz pilots and" (count adjacent)
+                       "adjacent Gesso regression namespaces")
+              (doseq [ns-sym selected] (require ns-sym))
+              (binding [ansatz/*verbose* false] (ansatz/load-init!))
+              (let [{:keys [test fail error] :as report} (apply t/run-tests selected)]
+                (when (or (< test 193) (pos? (+ fail error)))
+                  (throw (ex-info "Ansatz CI proof regression failed or lost test coverage"
+                                  {:required-tests-at-least 193 :report report}))))
+              (println "Ansatz CI proof and regression checks passed")
+              (System/exit 0)))
+          CLOJURE
+          clojure -M:typed:ansatz "$RUNNER_TEMP/ansatz-proof-regression.clj"
