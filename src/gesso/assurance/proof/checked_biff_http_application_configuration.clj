@@ -64,7 +64,7 @@
    listener endpoint. Neither :inspect-running! nor :inspect-generation!
    may silently move a fresh liveness challenge to another local port
    when the caller-owned URL locator changes. Same-port replacement is
-   not independently identifiable from a loopback response.
+   not independently identifiable from a loopback response."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
