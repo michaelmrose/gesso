@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe
-  "v1796: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
+  "v1797: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
    actually consumes the final checked Ring handler installed through Biff's
    ordinary module start lifecycle.
 
@@ -18,8 +18,11 @@
    host wrapper into the actual installed Ring router under a synchronous
    read-only dispatch scope. Matching emits an exact issued-handler identity
    event BEFORE invoking that handler. Wrong route, handler, or source rejects.
-   This proves the selected inner route was matched; it does not execute a
-   business transition, attest deployment or issue a certificate.
+   v1797: Repeat the read-only challenge for each certified catalog route,
+   with one concrete witness for each parameterized template. An incomplete
+   route inventory is not promoted to full observed dispatch coverage. This
+   proves only those selected requests, not universal parameter behavior.
+   No business transition, deployed-service claim or certificate is issued.
 
    This is local test evidence for a selected HTTP server module only: Biff
    core 2 does not choose/install an HTTP listener for Gesso. It does not
@@ -79,7 +82,8 @@
 
 (defn- report [state outcome hits trial-enabled? typed-result typed-hits
                principal-enabled? principal-rejections principal-admissions
-               route-outcome route-hits]
+               route-outcome route-hits catalog-expected catalog-observed
+               parameterized-routes]
   {:type report-type :version report-version
    :scope :one-final-ring-handler-loopback-http-consumption-challenge
    :module-state (if (map? state) :started state)
@@ -117,6 +121,16 @@
      :one-checked-router-matched-selected-issued-handler
      :not-established)
    :selected-route-business-handler-execution :not-invoked-by-read-only-probe
+   :catalog-read-only-route-dispatch
+   (if (and (seq catalog-expected)
+            (= catalog-expected catalog-observed)
+            (= (count catalog-expected) route-hits))
+     :all-selected-certified-routes-observed-through-original-router
+     :not-established)
+   :catalog-expected-certified-route-ids catalog-expected
+   :catalog-observed-certified-route-ids catalog-observed
+   :catalog-parameterized-witness-route-ids parameterized-routes
+   :parameterized-route-generalization :not-established
    :csrf-protection :not-established
    :selected-adapter-typed-atomic-correspondence
    (if (and (= outcome :one-final-checked-wrapper-http-challenge-returned)
@@ -148,6 +162,48 @@
                    (contains? #{nil "" "/"} (.getRawPath uri)))
       (reject! :nonloopback-or-unsafe-probe-target))
     uri))
+
+(def ^:private route-parameter-pattern #"(?<=/):[A-Za-z][A-Za-z0-9_-]*(?=/|$)")
+
+(defn- concrete-route-path [path]
+  ;; One deterministic, syntactically valid witness per template segment.
+  ;; This is NOT proof of universal dynamic-route matching or parameter
+  ;; semantics. The original router must still match the actual request.
+  (when (and (string? path) (str/starts-with? path "/")
+             (not (re-find #"[?*{}#]" path)))
+    (str/replace path route-parameter-pattern "gesso-route-witness")))
+
+(defn- catalog-route-targets! [contract-source catalog-source host-report]
+  ;; Source-derived catalog selection, not a separate caller-provided
+  ;; route table. v1793 checks complete certified catalog closure before
+  ;; Biff startup; this local probe refuses to silently narrow that scope.
+  (let [entries (get-in catalog-source [:catalog :operations])
+        operation-ids (mapv :id entries)
+        summary (app/operation-summary
+                 (get-in contract-source
+                         [:application-assembly :operation-acquisition-assembly]))
+        targets (vec
+                 (for [op operation-ids
+                       {:keys [route-id method path]} (get-in summary [op :routes])]
+                   {:operation op :route-id route-id :method method
+                    :template path :path (concrete-route-path path)}))
+        route-ids (mapv :route-id targets)]
+    (when-not (and (vector? entries)
+                   (seq operation-ids)
+                   (= (count operation-ids) (count (set operation-ids)))
+                   (every? qualified-keyword? operation-ids)
+                   (every? #(seq (get-in summary [% :routes])) operation-ids)
+                   (= (count targets) (count (set route-ids)))
+                   (every? (fn [{:keys [route-id method path]}]
+                             (and (qualified-keyword? route-id)
+                                  (keyword? method)
+                                  (string? path)
+                                  (str/starts-with? path "/")))
+                           targets)
+                   (= (set route-ids)
+                      (:checked-certified-route-ids host-report)))
+      (reject! :catalog-route-selection-does-not-match-original-host))
+    (vec (sort-by (juxt (comp str :route-id) (comp str :method)) targets))))
 
 (defn issue-http-consumption-probe-module!
   "Issue a one-use Biff lifecycle module. Start order is:
@@ -188,6 +244,9 @@
         route-secret (str (UUID/randomUUID))
         route-response (str "gesso-route-observed-" (UUID/randomUUID))
         route-pending (atom :inactive)
+        route-active (atom nil)
+        catalog-targets (atom [])
+        observed-route-ids (atom #{})
         route-hits (atom 0)
         route-dispatch-outcome (atom :not-established)
         route-outcome (atom :not-established)
@@ -232,15 +291,10 @@
                                           (:catalog-source typed-config)
                                           (:operation typed-config)
                                           (:inputs typed-config))
-                                 :route-ids (into {}
-                                                  (map (fn [{:keys [method path route-id]}]
-                                                         [[method path] route-id])
-                                                       (get-in (app/operation-summary
-                                                                (get-in contract-source
-                                                                        [:application-assembly
-                                                                         :operation-acquisition-assembly]))
-                                                               [(:operation typed-config)
-                                                                :routes])))
+                                 :catalog-routes
+                                 (catalog-route-targets!
+                                  contract-source (:catalog-source typed-config)
+                                  host-report)
                                  :route-keys (set (map (juxt :method :path)
                                                        (get-in (app/operation-summary
                                                                 (get-in contract-source
@@ -259,8 +313,8 @@
                                ;; business execution, even with a wrong secret,
                                ;; route or method. This is vital for POST routes.
                                (contains? (:headers request) route-probe-header)
-                               (if (and selected-route
-                                        (= selected-route
+                               (if (and @route-active
+                                        (= [(:method @route-active) (:path @route-active)]
                                            [(:request-method request) (:uri request)])
                                         (= route-secret
                                            (get-in request [:headers route-probe-header]))
@@ -270,17 +324,20 @@
                                  ;; callback intercepts BEFORE its real handler.
                                  (try
                                    (let [selected-route-id
-                                         (get-in selected [:route-ids selected-route])
+                                         (:route-id @route-active)
                                          response {:status 200
                                                    :headers {"content-type" "text/plain"}
                                                    :body route-response}
                                          observed (routes/observe-read-only-selected-route!
                                                    contract-source
-                                                   (:operation typed-config)
+                                                   (:operation @route-active)
                                                    selected-route-id
                                                    request response
                                                    #(original request))]
                                      (swap! route-hits inc)
+                                     ;; Only the verified HTTP RESPONSE, not
+                                     ;; a local router callback, may record
+                                     ;; completed per-route coverage.
                                      (reset! route-dispatch-outcome
                                              :one-selected-route-matched-exact-original-handler-read-only)
                                      (:response observed))
@@ -363,7 +420,8 @@
                (when-not (compare-and-set! state :starting
                                            {:host-system host-system
                                             :wrapper wrapped
-                                            :selected-route selected-route})
+                                            :selected-route selected-route
+                                            :catalog-routes (:catalog-routes selected)})
                  (reset! state :failed)
                  (reject! :probe-installation-state-changed))
                wrapped-system)))
@@ -383,7 +441,12 @@
                            @typed-outcome @typed-attempts
                            (some? (:principal-policy typed-config))
                            @principal-denials @principal-admissions
-                           @route-outcome @route-hits))
+                           @route-outcome @route-hits
+                           (set (map :route-id @catalog-targets))
+                           @observed-route-ids
+                           (set (map :route-id
+                                     (filter #(not= (:template %) (:path %))
+                                             @catalog-targets)))))
         verify! (fn [final-system base-url]
                   (when-not (.compareAndSet claimed false true)
                     (reject! :http-consumption-probe-already-attempted))
@@ -419,56 +482,66 @@
                                   (if qualified?
                                     :one-final-checked-wrapper-http-challenge-returned
                                     :http-consumption-challenge-unconfirmed))
-                          ;; An additional, independently distinguishable
-                          ;; read-only observation for the ONE selected literal
-                          ;; method/path. The private marker is never passed
-                          ;; to the original router or the typed XTDB writer.
-                          (when (and qualified? (:selected-route started))
-                            (let [[method path] (:selected-route started)
-                                  target (try
-                                           (URI/create (str url path))
-                                           (catch Exception _ nil))]
-                              (when (and (keyword? method)
-                                         (string? path)
-                                         (str/starts-with? path "/")
-                                         target
-                                         (= path (.getRawPath target))
-                                         (nil? (.getRawQuery target))
-                                         (nil? (.getRawFragment target)))
-                                (reset! route-pending :armed)
-                                (try
-                                  (let [route-request
-                                        (-> (HttpRequest/newBuilder target)
-                                            (.timeout (Duration/ofSeconds 5))
-                                            (.header route-probe-header route-secret)
-                                            (.method (str/upper-case (name method))
-                                                     (HttpRequest$BodyPublishers/noBody))
-                                            (.build))
-                                        route-answer
-                                        (.send client route-request
-                                               (HttpResponse$BodyHandlers/ofString))]
-                                    (reset! route-outcome
-                                            (if (and (= 200 (.statusCode route-answer))
-                                                     (= route-response (.body route-answer))
-                                                     (= :seen @route-pending)
-                                                     (= 1 @route-hits))
-                                              (if (= :one-selected-route-matched-exact-original-handler-read-only
-                                                     @route-dispatch-outcome)
-                                                :one-selected-route-matched-exact-original-handler-read-only
-                                                :not-established)
-                                              :not-established)))
-                                  (catch Throwable _
-                                    (reset! route-outcome :not-established))
-                                  (finally (reset! route-pending :inactive)))))))
+                          ;; Separate one-use read-only real HTTP challenge for
+                          ;; EVERY certified route in the selected catalog.
+                          ;; No business handler is invoked by any marker.
+                          (when qualified?
+                            (reset! catalog-targets (:catalog-routes started))
+                            (doseq [{:keys [route-id method path] :as target}
+                                    (:catalog-routes started)]
+                              (let [uri (when path
+                                          (try (URI/create (str url path))
+                                               (catch Exception _ nil)))
+                                    valid? (and uri (keyword? method)
+                                                (= path (.getRawPath uri))
+                                                (nil? (.getRawQuery uri))
+                                                (nil? (.getRawFragment uri)))]
+                                (when valid?
+                                  (reset! route-dispatch-outcome :not-established)
+                                  (let [prior-hits @route-hits]
+                                  (reset! route-active target)
+                                  (reset! route-pending :armed)
+                                  (try
+                                    (let [route-request
+                                          (-> (HttpRequest/newBuilder uri)
+                                              (.timeout (Duration/ofSeconds 5))
+                                              (.header route-probe-header route-secret)
+                                              (.method (str/upper-case (name method))
+                                                       (HttpRequest$BodyPublishers/noBody))
+                                              (.build))
+                                          route-answer
+                                          (.send client route-request
+                                                 (HttpResponse$BodyHandlers/ofString))
+                                          ok? (and (= 200 (.statusCode route-answer))
+                                                   (= route-response (.body route-answer))
+                                                   (= :seen @route-pending)
+                                                   (= (inc prior-hits) @route-hits)
+                                                   (= :one-selected-route-matched-exact-original-handler-read-only
+                                                      @route-dispatch-outcome))]
+                                      (when ok?
+                                        (swap! observed-route-ids conj route-id)
+                                        (when (= [method (:template target)]
+                                                 (:selected-route started))
+                                          (reset! route-outcome
+                                                  :one-selected-route-matched-exact-original-handler-read-only))))
+                                    (catch Throwable _ nil)
+                                    (finally (reset! route-pending :inactive)
+                                             (reset! route-active nil)))))))))
                         (catch Throwable _
                           (reset! result :http-consumption-challenge-unconfirmed))
                         (finally (reset! pending :inactive)
-                                 (reset! route-pending :inactive)))
+                                 (reset! route-pending :inactive)
+                                 (reset! route-active nil)))
                       (report (current!) @result @hits (boolean typed-config)
                            @typed-outcome @typed-attempts
                            (some? (:principal-policy typed-config))
                            @principal-denials @principal-admissions
-                           @route-outcome @route-hits))))]
+                           @route-outcome @route-hits
+                           (set (map :route-id @catalog-targets))
+                           @observed-route-ids
+                           (set (map :route-id
+                                     (filter #(not= (:template %) (:path %))
+                                             @catalog-targets)))))))]
     (locking issued
       (.put issued handle {:source contract-source
                            :host-handle host-handle

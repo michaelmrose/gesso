@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1796: A separate Biff server adapter must actually consume the checked
+  "v1797: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
    copied Biff system or return a synthetic success status."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -315,6 +315,12 @@
             (is (= :one-selected-route-matched-exact-original-handler-read-only
                    (:selected-route-http-reachability r)))
             (is (= 1 (:selected-route-challenge-observations r)))
+            (is (= :all-selected-certified-routes-observed-through-original-router
+                   (:catalog-read-only-route-dispatch r)))
+            (is (= #{:request/claim} (:catalog-expected-certified-route-ids r)))
+            (is (= #{:request/claim} (:catalog-observed-certified-route-ids r)))
+            (is (= #{} (:catalog-parameterized-witness-route-ids r)))
+            (is (= :not-established (:parameterized-route-generalization r)))
             (is (= :one-checked-router-matched-selected-issued-handler
                    (:selected-route-inner-router-dispatch r)))
             (is (= :not-invoked-by-read-only-probe
@@ -338,3 +344,46 @@
                  (read-request (:xt/id request))))
           (is (some? (read-command (resolution/record-id binding))))
           (is (= 1 @(get-in env [:environment :constructs]))))))))
+
+
+(deftest catalog-route-targets-enumerate-each-declared-operation-and-route
+  ;; Isolate only the deterministic enumeration function with a controlled
+  ;; two-operation summary. The real HTTP fixture above still exercises the
+  ;; original router/handler path; this unit check does NOT certify a second
+  ;; physical adapter or invent an issued handler for a synthetic route.
+  (let [source {:application-assembly {:operation-acquisition-assembly :fixture}}
+        catalog {:catalog {:operations [{:id :request/claim}
+                                        {:id :request/cancel}]}}
+        host-report {:checked-certified-route-ids
+                     #{:route/claim :route/claim-alt :route/cancel}}
+        summary {:request/claim {:routes [{:route-id :route/claim
+                                            :method :post :path "/claim"}
+                                           {:route-id :route/claim-alt
+                                            :method :get :path "/claim/:id"}]}
+                 :request/cancel {:routes [{:route-id :route/cancel
+                                             :method :post :path "/cancel"}]}}
+        enumerator (var-get #'probe/catalog-route-targets!)]
+    (with-redefs [app/operation-summary (fn [_] summary)]
+      (let [targets (enumerator source catalog host-report)]
+        (is (= #{:route/claim :route/claim-alt :route/cancel}
+               (set (map :route-id targets))))
+        (is (= "/claim/gesso-route-witness"
+               (:path (first (filter #(= :route/claim-alt (:route-id %)) targets)))))
+        (is (= "/claim/:id"
+               (:template (first (filter #(= :route/claim-alt (:route-id %)) targets)))))
+        (is (= #{:request/claim :request/cancel}
+               (set (map :operation targets))))))
+    (with-redefs [app/operation-summary (fn [_] summary)]
+      (is (= :catalog-route-selection-does-not-match-original-host
+             (error-reason #(enumerator source catalog
+                                        (assoc host-report :checked-certified-route-ids
+                                               #{:route/claim :route/cancel})))))
+      (is (= :catalog-route-selection-does-not-match-original-host
+             (error-reason #(enumerator source
+                                        {:catalog {:operations [{:id :request/claim}]}}
+                                        host-report))))
+      (is (= :catalog-route-selection-does-not-match-original-host
+             (error-reason #(enumerator source
+                                        {:catalog {:operations [{:id :request/claim}
+                                                                {:id :request/claim}]}}
+                                        host-report)))))))
