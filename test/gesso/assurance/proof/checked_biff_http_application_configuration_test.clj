@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1794: The actual application startup entrypoint owns module issuance,
+  "v1798: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -88,6 +88,7 @@
                (:real-http-consumption report)))
         (is (= :not-established (:declared-route-coverage-at-start report)))
         (is (= :not-established (:returned-host-selected-route-inventory report)))
+        (is (= :not-established (:selected-catalog-read-only-http-dispatch report)))
         (is (= :not-established (:external-deployment report)))
         (is (= :none (:authority report) (:retry-authority report)))
         (is (not-any? #(contains? report %)
@@ -113,6 +114,9 @@
                (:declared-route-coverage-at-start report)))
         (is (= :exact-selected-certified-route-set-observed-beneath-final-probe-wrapper
                (:returned-host-selected-route-inventory report)))
+        (is (= :all-selected-certified-routes-observed-before-start-return
+               (:selected-catalog-read-only-http-dispatch report)))
+        (is (= :not-established (:parameterized-route-generalization report)))
         (is (= :not-established (:unprobed-routes-over-real-http report)))
         (is (= :not-established
                (:selected-catalog-business-policy-completeness report))))
@@ -337,6 +341,71 @@
                {check-var (fn [& _]
                             (throw (ex-info "host mismatch"
                                             {:reason :selected-catalog-route-inventory-not-adopted})))}
+               #(reason (fn [] ((:start-once! issued) {}))))))
+      (is (some? @(:server-state s)))
+      (is (.isShutdown (:executor @(:server-state s))))
+      (is (= :start-failed-physical-state-unknown
+             (:status ((:summary! issued)))))
+      (is (= :configured-start-already-attempted
+             (reason #((:start-once! issued) {}))))
+      (finally (cleanup! s issued)))))
+
+
+(deftest selected-route-observation-report-must-be-complete-and-source-aligned
+  ;; Structural regression, not a substitute for the issued probe's genuine
+  ;; capability and actual HTTP challenge. Those are checked in start!.
+  (let [selected {:matched-certified-route-ids #{:request/claim :request/finish}}
+        good {:type probe/report-type :version probe/report-version
+              :status :one-final-checked-wrapper-http-challenge-returned
+              :final-checked-handler-consumed-over-http
+              :observed-on-selected-loopback-adapter
+              :typed-trial-enabled true
+              :catalog-read-only-route-dispatch
+              :all-selected-certified-routes-observed-through-original-router
+              :catalog-expected-certified-route-ids #{:request/claim :request/finish}
+              :catalog-observed-certified-route-ids #{:request/claim :request/finish}
+              :selected-route-challenge-observations 2
+              :selected-route-business-handler-execution :not-invoked-by-read-only-probe
+              :catalog-parameterized-witness-route-ids #{:request/finish}
+              :parameterized-route-generalization :not-established
+              :typed-trial-attempts 0 :authority :none :transaction-authority :none
+              :retry-authority :none :certificate :not-issued :admission :not-admitted}
+        check! (var-get #'config/require-selected-catalog-dispatch!)
+        from (fn [report] {:summary! (fn [] report)})]
+    (is (true? (check! selected (from good))))
+    (doseq [bad [(assoc good :catalog-observed-certified-route-ids #{:request/claim})
+                 (assoc good :catalog-expected-certified-route-ids #{:request/claim})
+                 (assoc good :selected-route-challenge-observations 1)
+                 (assoc good :selected-route-challenge-observations 3)
+                 (assoc good :catalog-read-only-route-dispatch :not-established)
+                 (assoc good :typed-trial-enabled false)
+                 (assoc good :typed-trial-attempts 1)
+                 (assoc good :catalog-parameterized-witness-route-ids #{:request/other})
+                 (assoc good :parameterized-route-generalization :proved)
+                 (assoc good :selected-route-business-handler-execution :executed)
+                 (assoc good :status :attempt-consumed-without-confirmation)
+                 (assoc good :authority :issued)
+                 (assoc good :certificate :forged)]]
+      (is (= :selected-catalog-http-dispatch-not-observed
+             (reason #(check! selected (from bad)))) (pr-str bad)))
+    (is (= :selected-catalog-http-dispatch-not-observed
+           (reason #(check! selected {:summary! (fn []
+                                                  (throw (ex-info "uncertain" {})))}))))))
+
+(deftest incomplete-route-observation-after-server-start-stops-selected-adapter
+  ;; Deliberately fail the final report qualification AFTER the sealed
+  ;; application and real HTTP server have started. This tests cleanup and
+  ;; rejection rather than pretending to manufacture a real issued report.
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))
+        check-var #'config/require-selected-catalog-dispatch!]
+    (try
+      (is (= :selected-catalog-http-dispatch-not-observed
+             (with-redefs-fn
+               {check-var (fn [& _]
+                            (throw (ex-info "unobserved certified route"
+                                            {:reason :selected-catalog-http-dispatch-not-observed})))}
                #(reason (fn [] ((:start-once! issued) {}))))))
       (is (some? @(:server-state s)))
       (is (.isShutdown (:executor @(:server-state s))))

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1794: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1798: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -22,7 +22,12 @@
    FINAL consumption probe wrapper to remain in the returned Biff system.
    Recheck the ORIGINAL host's captured pre-probe system and its full certified
    route inventory beneath the wrapper. Only one real loopback challenge is
-   observed; other routes are not claimed to be individually exercised."
+   observed; other routes are not claimed to be individually exercised.
+
+   v1798: Require that the original issued probe has confirmed EACH route
+   selected in the source-checked catalog through the original checked router
+   on the actual returned adapter BEFORE declaring startup successful.
+   Parameterized routes have one observed witness, not universal coverage."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -165,6 +170,45 @@
     (reject! :selected-catalog-route-inventory-not-adopted))
   true)
 
+(defn- require-selected-catalog-dispatch!
+  "Demand real, read-only per-route observations from the ORIGINAL issued
+   probe, not from a supplied success map or a synthetic route inventory.
+   The caller first checks the probe handle, final Biff wrapper, and host
+   route inventory via require-current-final-probe-route-inventory!."
+  [selected issued-probe]
+  (let [expected (:matched-certified-route-ids selected)
+        observed (try ((:summary! issued-probe))
+                      (catch Throwable _
+                        (reject! :selected-catalog-http-dispatch-not-observed)))]
+    (when-not (and (set? expected)
+                   (seq expected)
+                   (= probe/report-type (:type observed))
+                   (= probe/report-version (:version observed))
+                   (= :one-final-checked-wrapper-http-challenge-returned
+                      (:status observed))
+                   (= :observed-on-selected-loopback-adapter
+                      (:final-checked-handler-consumed-over-http observed))
+                   (true? (:typed-trial-enabled observed))
+                   (= :all-selected-certified-routes-observed-through-original-router
+                      (:catalog-read-only-route-dispatch observed))
+                   (= expected (:catalog-expected-certified-route-ids observed)
+                      (:catalog-observed-certified-route-ids observed))
+                   (= (count expected) (:selected-route-challenge-observations observed))
+                   (= :not-invoked-by-read-only-probe
+                      (:selected-route-business-handler-execution observed))
+                   (set? (:catalog-parameterized-witness-route-ids observed))
+                   (set/subset? (:catalog-parameterized-witness-route-ids observed)
+                                expected)
+                   (= :not-established (:parameterized-route-generalization observed))
+                   (zero? (:typed-trial-attempts observed))
+                   (= :none (:authority observed)
+                      (:transaction-authority observed)
+                      (:retry-authority observed))
+                   (= :not-issued (:certificate observed))
+                   (= :not-admitted (:admission observed)))
+      (reject! :selected-catalog-http-dispatch-not-observed))
+    true))
+
 (defn- report [state typed-selected?]
   {:type report-type :version report-version
    :scope :one-application-owned-closed-biff-http-start
@@ -185,7 +229,12 @@
    (if (and typed-selected? (= state :verified-configured-start))
      :exact-selected-certified-route-set-observed-beneath-final-probe-wrapper
      :not-established)
+   :selected-catalog-read-only-http-dispatch
+   (if (and typed-selected? (= state :verified-configured-start))
+     :all-selected-certified-routes-observed-before-start-return
+     :not-established)
    :unprobed-routes-over-real-http :not-established
+   :parameterized-route-generalization :not-established
    :selected-catalog-business-policy-completeness :not-established
    :external-deployment :not-established
    :independent-biff-starts :not-established
@@ -267,7 +316,12 @@
                                           (catch Throwable _
                                             (reject! :selected-catalog-route-inventory-not-adopted)))]
                            (require-matching-selected-host-routes!
-                            selected-coverage observed)))
+                            selected-coverage observed)
+                           ;; The v1797 probe's original closure owns the
+                           ;; per-route HTTP response and exact router match.
+                           ;; Missing even one route prevents startup success.
+                           (require-selected-catalog-dispatch!
+                            selected-coverage issued-probe)))
                        (when-not (compare-and-set! state :starting
                                                     :verified-configured-start)
                          (reject! :configured-start-state-diverged))
