@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-authorization-assembly
-  "v1791: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
+  "v1792: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
 
    For any selected qualified operation and route ID, relate its declared
    catalog construction to the SAME current-source construction of an issued
@@ -19,6 +19,7 @@
 (def report-version 1)
 
 (def ^:private original-issued-binding certified/issued-handler-binding?)
+(def ^:private original-contract-check certified/check-certified-contracts!)
 
 (defn- plain-map? [m]
   (and (or (instance? clojure.lang.PersistentArrayMap m)
@@ -84,3 +85,79 @@
      :admission :not-admitted
      :transaction-authority :none
      :authority :none}))
+
+;; v1792: This is an opt-in *catalog-scoped* assembly coverage check. The
+;; catalog is the declared selection, NOT a proof that every business action
+;; in a deployment belongs to it. The original certified-contract checker
+;; establishes route-table closure for its supplied current assembly.
+(def coverage-report-type
+  :gesso.assurance.proof.checked-authorization-assembly/catalog-route-coverage)
+
+(defn check-declared-route-coverage!
+  "Recheck the ORIGINAL certified-contract closure ONCE, then verify every
+   route of every certified operation in the selected catalog against its
+   original construction and exact issued handler. Refuse both an omitted
+   certified operation and an unaccounted route. Other operations may remain
+   explicitly uncertified; this is not a business-policy coverage proof.
+
+   The supplied assembly and route table must actually be installed by the
+   host; this function cannot inspect a deployed router or issue authority."
+  [{:keys [contract-source catalog-source] :as selection}]
+  (when-not (and (closed-map? selection #{:contract-source :catalog-source})
+                 (closed-map? contract-source
+                              #{:application-assembly :semantic-route-handlers
+                                :certified-operations})
+                 (closed-map? catalog-source #{:catalog :physical-field-map})
+                 (plain-map? (:catalog catalog-source))
+                 (vector? (get-in catalog-source [:catalog :operations]))
+                 (identical? original-contract-check
+                             (var-get #'certified/check-certified-contracts!))
+                 (identical? original-issued-binding
+                             (var-get #'certified/issued-handler-binding?)))
+    (reject!))
+  (let [entries (get-in catalog-source [:catalog :operations])
+        operation-ids (mapv :id entries)
+        selected (set operation-ids)]
+    (when-not (and (seq operation-ids)
+                   (= (count operation-ids) (count selected))
+                   (every? qualified-keyword? operation-ids)
+                   (= selected (set (keys (:certified-operations contract-source)))))
+      (reject!))
+    ;; Do not accept a copied report supplied by the caller. This full check
+    ;; validates the present ApplicationAssembly, all its semantic routes,
+    ;; every certified plan source and the exact registered Ring handlers.
+    (let [checked (try (original-contract-check contract-source)
+                       (catch Exception _ (reject!)))
+          certified-rows (:certified-operations checked)
+          route-ids (into #{} (mapcat :route-ids (vals certified-rows)))]
+      (when-not (and (= certified/report-type (:type checked))
+                     (= certified/adapter-version (:version checked))
+                     (= selected (set (keys certified-rows)))
+                     (= route-ids (:matched-certified-route-ids checked))
+                     (every? (fn [operation]
+                               (seq (get-in certified-rows [operation :route-ids])))
+                             operation-ids))
+        (reject!))
+      (doseq [operation operation-ids
+              route-id (get-in certified-rows [operation :route-ids])]
+        ;; Keep this relation source-relative: no per-route proof or
+        ;; transaction capability is produced or cached for later requests.
+        (check-selected-binding!
+         {:contract-source contract-source
+          :catalog-source catalog-source
+          :operation operation
+          :route-id route-id}))
+      {:type coverage-report-type
+       :version report-version
+       :checking :all-declared-catalog-operations-and-issued-routes
+       :catalog-operations selected
+       :matched-certified-route-ids route-ids
+       :uncertified-application-operations (:uncertified-operations checked)
+       :catalog-scope :selected-not-all-possible-application-policy
+       :current-assembly-closure :source-relative-checked
+       :installed-handler-adoption :not-established
+       :authorization-policy-provenance :not-established
+       :certificate :not-issued
+       :admission :not-admitted
+       :transaction-authority :none
+       :authority :none})))

@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1791: adversarial source-relative checks for issued Ring bindings.
+  "v1792: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
@@ -483,3 +483,102 @@
                           (catch clojure.lang.ExceptionInfo e (ex-data e)))]
               (is (= :authorization-not-bound-to-original-assembly
                      (:reason ex)) (pr-str bad)))))))))
+
+
+(deftest catalog-wide-coverage-checks-every-issued-route
+  (let [{:keys [base source]} (environment)
+        catalog-source {:catalog {:operations [{:id claim
+                                                :construction (:construction source)}]}
+                        :physical-field-map {}}
+        input {:contract-source base :catalog-source catalog-source}]
+    (with-summary summary
+      (fn []
+        (let [report (authorization/check-declared-route-coverage! input)]
+          (is (= authorization/coverage-report-type (:type report)))
+          (is (= :all-declared-catalog-operations-and-issued-routes
+                 (:checking report)))
+          (is (= #{claim} (:catalog-operations report)))
+          (is (= #{route-1 route-2} (:matched-certified-route-ids report)))
+          (is (= #{cancel} (:uncertified-application-operations report)))
+          (is (= :selected-not-all-possible-application-policy
+                 (:catalog-scope report)))
+          (is (= :source-relative-checked (:current-assembly-closure report)))
+          (is (= :not-established (:installed-handler-adoption report)))
+          (is (= :not-established (:authorization-policy-provenance report)))
+          (is (= :none (:transaction-authority report)))
+          (is (= :not-issued (:certificate report))))))))
+
+(deftest catalog-wide-coverage-rejects-missing-replaced-or-undeclared-bindings
+  (let [{:keys [base source unrelated issue-source]} (environment)
+        second-executor (plan/build-certified-plan-operation! source)
+        second-handler (binding/issue-certified-handler!
+                        (assoc issue-source :executor second-executor))
+        catalog-source {:catalog {:operations [{:id claim
+                                                :construction (:construction source)}]}
+                        :physical-field-map {}}
+        input {:contract-source base :catalog-source catalog-source}
+        bad-catalog (fn [entries]
+                      (assoc-in input [:catalog-source :catalog :operations]
+                                entries))
+        entry {:id claim :construction (:construction source)}
+        mutations [(assoc-in input [:contract-source :semantic-route-handlers route-2]
+                             unrelated)
+                   (assoc-in input [:contract-source :semantic-route-handlers route-2]
+                             second-handler)
+                   (update-in input [:contract-source :semantic-route-handlers]
+                              dissoc route-2)
+                   (assoc-in input [:contract-source :certified-operations]
+                             {})
+                   (bad-catalog [])
+                   (bad-catalog [entry entry])
+                   (bad-catalog [{:id cancel :construction (:construction source)}])
+                   (bad-catalog [(assoc-in entry [:construction :subject :id]
+                                           cancel)])
+                   (assoc input :certified? true)
+                   (assoc input :catalog-source
+                          (with-meta catalog-source {:proof :forged}))]]
+    (with-summary summary
+      (fn []
+        (doseq [bad mutations]
+          (let [data (failure #(authorization/check-declared-route-coverage!
+                               bad))]
+            (is (= :authorization-not-bound-to-original-assembly
+                   (:reason data)) (pr-str bad))))))))
+
+(deftest coverage-pins-original-contract-checker
+  (let [{:keys [base source]} (environment)
+        catalog-source {:catalog {:operations [{:id claim
+                                                :construction (:construction source)}]}
+                        :physical-field-map {}}
+        input {:contract-source base :catalog-source catalog-source}]
+    (with-summary summary
+      (fn []
+        (with-redefs [binding/check-certified-contracts!
+                      (fn [_] {:type binding/report-type
+                               :version binding/adapter-version
+                               :certified-operations {claim {:route-ids #{route-1 route-2}}}
+                               :matched-certified-route-ids #{route-1 route-2}})]
+          (is (= :authorization-not-bound-to-original-assembly
+                 (:reason (failure #(authorization/check-declared-route-coverage!
+                                    input))))))))))
+
+(deftest catalog-wide-coverage-uses-genuine-application-assembly
+  (let [{:keys [source executor handler]} (environment)
+        operations {claim (fixture/trusted-operation claim
+                                                     {:published-change-topics #{}})}]
+    (fixture/with-closed-application
+      {:operations operations}
+      (fn [{:keys [assembly]}]
+        (let [contract {:application-assembly assembly
+                        :semantic-route-handlers {claim handler}
+                        :certified-operations
+                        {claim {:executor executor :current-source source}}}
+              catalog-source {:catalog {:operations [{:id claim
+                                                      :construction (:construction source)}]}
+                              :physical-field-map {}}
+              report (authorization/check-declared-route-coverage!
+                      {:contract-source contract :catalog-source catalog-source})]
+          (is (= #{claim} (:catalog-operations report)))
+          (is (= #{claim} (:matched-certified-route-ids report)))
+          (is (= #{} (:uncertified-application-operations report)))
+          (is (= :not-established (:installed-handler-adoption report))))))))
