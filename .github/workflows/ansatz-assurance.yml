@@ -45,9 +45,10 @@ jobs:
             ansatz-v1-${{ runner.os }}-
 
       # Keep Ansatz off ordinary downstream application classpaths.
-      # Discover all source-derived pilots so newly added pilots cannot
-      # silently escape independent verification. The checked theorem scope
-      # remains abstract; CI success is not installed XTDB correspondence.
+      # Discover all source-derived pilots so new pilots cannot escape checks.
+      # The real-XTDB fixture observes ONE bounded guarded gateway; neither
+      # it nor abstract proofs establish deployed writer completeness,
+      # source authenticity, general physical refinement, or certification.
       - name: Kernel-check all Ansatz pilots and adjacent rule/transition regressions
         env:
           JAVA_TOOL_OPTIONS: >-
@@ -78,7 +79,8 @@ jobs:
                              gesso.assurance.rule-eval-test
                              gesso.assurance.transition-test
                              gesso.assurance.proof.transition-test
-                             gesso.assurance.proof.independent-transition-semantics-test]
+                             gesso.assurance.proof.independent-transition-semantics-test
+                             gesso.assurance.proof.xtdb-gateway-typed-transition-seam-test]
                   selected (into pilots adjacent)]
               (when (< (count pilots) 14)
                 (throw (ex-info "Ansatz pilot inventory shrank unexpectedly"
