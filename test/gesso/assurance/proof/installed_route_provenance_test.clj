@@ -282,3 +282,46 @@
     (is (= 1 @input-calls))
     (is (= before (count @calls)) "A nested observation never reaches another handler")
     (is (= 1 (:route-count (description))))))
+
+(deftest read-only-original-route-selection-hits-the-exact-issued-handler
+  (let [{:keys [router source calls]} *case*
+        request (ring-request :read-only-dispatch)
+        before (count @calls)
+        sterile {:status 200 :headers {"content-type" "text/plain"}
+                 :body "read-only-router-selection"}
+        {:keys [response report]}
+        (installed/observe-read-only-selected-route!
+         source operation operation request sterile #(router request))]
+    (is (= sterile response))
+    (is (= installed/read-only-selection-report-type (:type report)))
+    (is (= operation (:route-id report) (:operation report)))
+    (is (= :one-original-router-selected-exact-issued-handler
+           (:checking report)))
+    (is (= :intercepted-before-handler (:issued-handler-invocation report)))
+    (is (= :not-invoked-by-observer (:physical-writes report)))
+    (is (= :none (:authority report)))
+    (is (= :not-established (:installed-http-adapter report)))
+    (is (= before (count @calls))
+        "No handler input, executor, or response conversion is invoked")))
+
+(deftest read-only-router-selection-rejects-forged-or-unmatched-dispatch
+  (let [{:keys [router source calls]} *case*
+        request (ring-request :wrong-selection)
+        sterile {:status 200 :body "only-after-router-match"}
+        before (count @calls)
+        observe (fn [operation route-id ring-request invoke]
+                  (installed/observe-read-only-selected-route!
+                   source operation route-id ring-request sterile invoke))]
+    (rejects! :no-exact-original-read-only-route-selection
+              #(observe operation operation request (fn [] sterile)))
+    (rejects! :no-exact-original-read-only-route-selection
+              #(observe operation operation (assoc request :uri "/missing")
+                        (fn [] (router (assoc request :uri "/missing")))))
+    (rejects! :wrong-original-read-only-route-selection
+              #(observe operation :example/other request (fn [] (router request))))
+    (rejects! :wrong-original-read-only-route-selection
+              #(observe :example/other operation request (fn [] (router request))))
+    (rejects! :invalid-read-only-route-selection
+              #(observe operation operation request nil))
+    (is (= before (count @calls))
+        "Even mistaken route scopes must never invoke a real handler")))

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe
-  "v1795: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
+  "v1796: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
    actually consumes the final checked Ring handler installed through Biff's
    ordinary module start lifecycle.
 
@@ -14,8 +14,12 @@
    same-method/same-literal-path loopback challenge. A private probe marker
    is intercepted in the final wrapper BEFORE original business dispatch;
    all marked requests fail closed unless the one-use challenge is armed.
-   This proves method/path HTTP REACHABILITY at the final wrapper, NOT that
-   the inner router selected a handler or that any business transition ran.
+   v1796: The same one-use marker now passes through the ORIGINAL checked
+   host wrapper into the actual installed Ring router under a synchronous
+   read-only dispatch scope. Matching emits an exact issued-handler identity
+   event BEFORE invoking that handler. Wrong route, handler, or source rejects.
+   This proves the selected inner route was matched; it does not execute a
+   business transition, attest deployment or issue a certificate.
 
    This is local test evidence for a selected HTTP server module only: Biff
    core 2 does not choose/install an HTTP listener for Gesso. It does not
@@ -23,6 +27,7 @@
    normal routes, or authorize model transactions, retries or certificates."
   (:require [clojure.string :as str]
             [gesso.assurance.proof.checked-biff-host-adoption :as host]
+            [gesso.assurance.proof.installed-route-provenance :as routes]
             [gesso.assurance.proof.xtdb-gateway-biff-issued-catalog-canonical-trial
              :as typed-trial]
             [gesso.assurance.proof.checked-biff-request-principal :as principal]
@@ -107,8 +112,11 @@
    :principal-policy-catalog-equivalence :not-established
    :selected-route-http-reachability route-outcome
    :selected-route-challenge-observations route-hits
-   :selected-route-inner-router-dispatch :not-established
-   :selected-route-business-handler-execution :not-established
+   :selected-route-inner-router-dispatch
+   (if (= route-outcome :one-selected-route-matched-exact-original-handler-read-only)
+     :one-checked-router-matched-selected-issued-handler
+     :not-established)
+   :selected-route-business-handler-execution :not-invoked-by-read-only-probe
    :csrf-protection :not-established
    :selected-adapter-typed-atomic-correspondence
    (if (and (= outcome :one-final-checked-wrapper-http-challenge-returned)
@@ -181,6 +189,7 @@
         route-response (str "gesso-route-observed-" (UUID/randomUUID))
         route-pending (atom :inactive)
         route-hits (atom 0)
+        route-dispatch-outcome (atom :not-established)
         route-outcome (atom :not-established)
         pending (atom :inactive)
         hits (atom 0)
@@ -223,6 +232,15 @@
                                           (:catalog-source typed-config)
                                           (:operation typed-config)
                                           (:inputs typed-config))
+                                 :route-ids (into {}
+                                                  (map (fn [{:keys [method path route-id]}]
+                                                         [[method path] route-id])
+                                                       (get-in (app/operation-summary
+                                                                (get-in contract-source
+                                                                        [:application-assembly
+                                                                         :operation-acquisition-assembly]))
+                                                               [(:operation typed-config)
+                                                                :routes])))
                                  :route-keys (set (map (juxt :method :path)
                                                        (get-in (app/operation-summary
                                                                 (get-in contract-source
@@ -247,10 +265,27 @@
                                         (= route-secret
                                            (get-in request [:headers route-probe-header]))
                                         (compare-and-set! route-pending :armed :seen))
-                                 (do (swap! route-hits inc)
-                                     {:status 200
-                                      :headers {"content-type" "text/plain"}
-                                      :body route-response})
+                                 ;; The actual original host wrapper runs
+                                 ;; the exact installed router, but a scoped
+                                 ;; callback intercepts BEFORE its real handler.
+                                 (try
+                                   (let [selected-route-id
+                                         (get-in selected [:route-ids selected-route])
+                                         response {:status 200
+                                                   :headers {"content-type" "text/plain"}
+                                                   :body route-response}
+                                         observed (routes/observe-read-only-selected-route!
+                                                   contract-source
+                                                   (:operation typed-config)
+                                                   selected-route-id
+                                                   request response
+                                                   #(original request))]
+                                     (swap! route-hits inc)
+                                     (reset! route-dispatch-outcome
+                                             :one-selected-route-matched-exact-original-handler-read-only)
+                                     (:response observed))
+                                   (catch Throwable _
+                                     {:status 404 :body "Not found"}))
                                  {:status 404 :body "Not found"})
 
                                (= challenge-path (:uri request))
@@ -417,7 +452,10 @@
                                                      (= route-response (.body route-answer))
                                                      (= :seen @route-pending)
                                                      (= 1 @route-hits))
-                                              :one-selected-method-path-reached-final-wrapper
+                                              (if (= :one-selected-route-matched-exact-original-handler-read-only
+                                                     @route-dispatch-outcome)
+                                                :one-selected-route-matched-exact-original-handler-read-only
+                                                :not-established)
                                               :not-established)))
                                   (catch Throwable _
                                     (reset! route-outcome :not-established))

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1795: A separate Biff server adapter must actually consume the checked
+  "v1796: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
    copied Biff system or return a synthetic success status."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -312,11 +312,13 @@
           (let [r ((:verify-once! probe) system base)]
             (is (= :one-final-checked-wrapper-http-challenge-returned
                    (:status r)))
-            (is (= :one-selected-method-path-reached-final-wrapper
+            (is (= :one-selected-route-matched-exact-original-handler-read-only
                    (:selected-route-http-reachability r)))
             (is (= 1 (:selected-route-challenge-observations r)))
-            (is (= :not-established (:selected-route-inner-router-dispatch r)))
-            (is (= :not-established (:selected-route-business-handler-execution r)))
+            (is (= :one-checked-router-matched-selected-issued-handler
+                   (:selected-route-inner-router-dispatch r)))
+            (is (= :not-invoked-by-read-only-probe
+                   (:selected-route-business-handler-execution r)))
             (is (not-any? #(contains? r %)
                           [:route-secret :route-response :selected-route
                            :route-probe-header :request :uri :token])))

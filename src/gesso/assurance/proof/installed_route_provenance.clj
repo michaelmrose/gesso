@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.installed-route-provenance
-  "v1476/v1487: Checked in-process Ring router for v1253-issued handlers.
+  "v1476/v1487/v1796: Checked in-process Ring router for issued handlers.
 
    v1487 additionally admits a deliberately narrow route-template vocabulary:
    complete :name segments, uniquely named, each matching one nonempty raw
@@ -29,6 +29,7 @@
 (def ^:private ^WeakHashMap registered-routers (WeakHashMap.))
 (def ^:private ^WeakHashMap registered-observations (WeakHashMap.))
 (def ^:dynamic ^:private *observing* false)
+(def ^:dynamic ^:private *read-only-selection* nil)
 (def ^:private original-check contract/check-certified-contracts!)
 (def ^:private original-summary application/operation-summary)
 
@@ -254,7 +255,13 @@
                                                       contract-source)]
                    (if-let [{:keys [row path-params]}
                             (matched-route! (:index entry) request)]
-                     ((:handler row) (bound-request! request path-params))
+                     ;; A scoped v1796 challenge intercepts AFTER the actual
+                     ;; original router matched a registered row, but BEFORE
+                     ;; any issued handler, input conversion or XTDB effect.
+                     (if *read-only-selection*
+                       (*read-only-selection* checked-ring-dispatch
+                                             contract-source request row path-params)
+                       ((:handler row) (bound-request! request path-params)))
                      {:status 404 :headers {} :body "Not found"})))
         entry {:source contract-source :index index :contract contract}]
     (locking registered-routers (.put registered-routers router entry))
@@ -333,3 +340,67 @@
                        (matched-route! (:index entry) request))))
       (reject! :stale-or-forged-route-dispatch-witness))
     (describe-checked-ring-router router contract-source)))
+
+;; v1796: Thread-scoped dispatch proof, intentionally not a public metadata or
+;; header protocol. The only callback site is the actual checked router AFTER
+;; matching, before any application handler invocation. The caller must ensure
+;; its invoke! is the selected installed HTTP wrapper, as in the v1794 probe.
+(def read-only-selection-report-type
+  :gesso.assurance.proof.installed-route-provenance/read-only-selection)
+
+(defn observe-read-only-selected-route!
+  "Invoke an ORIGINAL Ring wrapper synchronously under one read-only selection
+   scope. A matched original registered router row emits a callback in place of
+   invoking its application handler. Verify route, operation, request object,
+   original source identity, and installed handler identity. No handler is
+   called by this observation. The caller-supplied response is accepted only
+   if the original route selection callback occurred exactly once.
+
+   This does NOT itself attest which HTTP adapter owns invoke!, establish
+   authentication, or provide application/transaction authority."
+  [contract-source operation route-id request response invoke!]
+  (when (or *read-only-selection* *observing*)
+    (reject! :nested-read-only-route-selection))
+  (when-not (and (plain-map? contract-source)
+                 (qualified-keyword? operation)
+                 (qualified-keyword? route-id)
+                 (map? request)
+                 (keyword? (:request-method request))
+                 (string? (:uri request))
+                 (fn? invoke!)
+                 (map? response)
+                 (= 200 (:status response)))
+    (reject! :invalid-read-only-route-selection))
+  (let [hits (volatile! [])
+        observed (binding [*read-only-selection*
+                          (fn [router actual-source actual-request row params]
+                            ;; An arbitrary Ring handler cannot mint an event:
+                            ;; the callback must come from the original checked
+                            ;; router with its current registered index.
+                            (let [entry (require-current-router! router actual-source)
+                                  matched (matched-route! (:index entry) request)
+                                  exact? (and (identical? contract-source actual-source)
+                                              (identical? request actual-request)
+                                              (= operation (:operation row))
+                                              (= route-id (:route-id row))
+                                              (identical? (:handler row)
+                                                          (get-in matched [:row :handler]))
+                                              (= params (:path-params matched))
+                                              (contains? (:matched-certified-route-ids
+                                                          (:contract entry)) route-id))]
+                              (vswap! hits conj exact?)
+                              (if exact? response
+                                (reject! :wrong-original-read-only-route-selection))))]
+                   (invoke!))]
+    (when-not (and (= [true] @hits) (= response observed))
+      (reject! :no-exact-original-read-only-route-selection))
+    {:response observed
+     :report {:type read-only-selection-report-type
+              :version report-version
+              :operation operation
+              :route-id route-id
+              :checking :one-original-router-selected-exact-issued-handler
+              :issued-handler-invocation :intercepted-before-handler
+              :physical-writes :not-invoked-by-observer
+              :installed-http-adapter :not-established
+              :authority :none :certificate :not-issued}}))
