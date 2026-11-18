@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1805: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1806: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -64,7 +64,14 @@
    listener endpoint. Neither :inspect-running! nor :inspect-generation!
    may silently move a fresh liveness challenge to another local port
    when the caller-owned URL locator changes. Same-port replacement is
-   not independently identifiable from a loopback response."
+   not independently identifiable from a loopback response.
+
+   v1806: The selected trusted adapter may supply :listener-instance!
+   returning its actual in-process listener object. Configured startup
+   captures that object after the real HTTP proof, and later inspections
+   recheck exact reference identity before and after fresh HTTP liveness.
+   Same-port replacement is detected conditional on truthful host callback
+   instrumentation; this does not authenticate an external deployment."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -133,15 +140,49 @@
            (instance? clojure.lang.PersistentHashMap x))
        (nil? (meta x))))
 
+(defn- host-listener-instance!
+  "Read one source-trusted actual listener object. A missing, data-shaped
+   or throwing host callback cannot establish object identity."
+  [listener-instance! system]
+  (let [instance (try (listener-instance! system)
+                      (catch Throwable _
+                        (reject! :configured-physical-listener-not-current)))]
+    (when-not (and (some? instance)
+                   (not (or (map? instance) (coll? instance)
+                            (string? instance) (number? instance)
+                            (keyword? instance) (symbol? instance)
+                            (boolean? instance) (char? instance)
+                            (fn? instance))))
+      (reject! :configured-physical-listener-not-current))
+    instance))
+
+(defn- require-original-host-listener!
+  "The original trusted callback must still return the exact object captured
+   after startup. Does not independently authenticate the callback."
+  [listener-instance! original-listener system]
+  (when listener-instance!
+    (when-not (and (some? original-listener)
+                   (identical? original-listener
+                               (host-listener-instance! listener-instance!
+                                                        system)))
+      (reject! :configured-physical-listener-not-current)))
+  true)
+
 (defn- checked-source! [config]
   (pinned!)
   (when-not (and (plain-map? config)
                  (contains? #{#{:contract-source :adapter-module :base-url!}
                               #{:contract-source :adapter-module :base-url!
-                                :typed-trial}}
+                                :typed-trial}
+                              #{:contract-source :adapter-module :base-url!
+                                :listener-instance!}
+                              #{:contract-source :adapter-module :base-url!
+                                :listener-instance! :typed-trial}}
                             (set (keys config)))
                  (plain-map? (:contract-source config))
                  (fn? (:base-url! config))
+                 (or (not (contains? config :listener-instance!))
+                     (fn? (:listener-instance! config)))
                  (or (not (contains? config :typed-trial))
                      (nil? (:typed-trial config))
                      (and (plain-map? (:typed-trial config))
@@ -325,7 +366,8 @@
    (:stop! issued) stops the selected Biff system at most once. A failed start
    consumes issuance; it cannot promise rollback of earlier callback effects."
   [source]
-  (let [{:keys [contract-source adapter-module base-url! typed-trial]}
+  (let [{:keys [contract-source adapter-module base-url! typed-trial
+               listener-instance!]}
         (checked-source! source)
         ;; Issuance itself validates original router, original proof
         ;; construction and the selected adapter before any server startup.
@@ -344,6 +386,7 @@
         lifecycle-monitor (Object.)
         instance-generation (StartedInstanceGeneration.)
         selected-startup-routes (atom nil)
+        original-listener-instance (atom nil)
         summary! (fn [] (pinned!) (report @state (some? typed-trial)))
         inspect-running! (fn [candidate-system]
                            (locking lifecycle-monitor
@@ -377,6 +420,11 @@
                                             (= :verified-configured-start @state)
                                             (identical? candidate-system @started))
                                (reject! :configured-instance-not-current))
+                             ;; Recheck the actual listener object reported
+                             ;; by the original trusted host callback.
+                             (require-original-host-listener!
+                              listener-instance! @original-listener-instance
+                              candidate-system)
                              ;; Reuse the CURRENT original issued probe and
                              ;; checked host inventory without replaying the
                              ;; one-use read-only dispatch challenges. The
@@ -420,6 +468,9 @@
                                              (:transaction-authority fresh)
                                              (:retry-authority fresh)))
                                  (reject! :configured-instance-http-liveness-not-observed)))
+                             (require-original-host-listener!
+                              listener-instance! @original-listener-instance
+                              candidate-system)
                              {:type running-report-type :version report-version
                               :scope :one-original-managed-in-process-biff-instance
                               :status :current-at-inspection
@@ -436,6 +487,14 @@
                               :fresh-local-http-response :observed-at-current-inspection
                               :original-local-listener-endpoint
                               :matches-startup-verified-loopback-port
+                              :physical-listener-instance
+                              (if listener-instance!
+                                :matches-original-host-reported-object
+                                :not-established)
+                              :physical-instance-provenance
+                              (if listener-instance!
+                                :trusted-host-callback-conditional
+                                :not-established)
                               :future-local-listener-availability :not-established
                               :certificate :not-issued :admission :not-admitted
                               :retry-authority :none :transaction-authority :none
@@ -503,6 +562,12 @@
                            ;; Missing even one route prevents startup success.
                            (require-selected-catalog-dispatch!
                             selected-coverage observed)))
+                       ;; Capture after the real HTTP startup checks. Failure
+                       ;; here is handled by the existing adapter cleanup.
+                       (when listener-instance!
+                         (reset! original-listener-instance
+                                 (host-listener-instance!
+                                  listener-instance! (:system result))))
                        (when-not (compare-and-set! state :starting
                                                     :verified-configured-start)
                          (reject! :configured-start-state-diverged))

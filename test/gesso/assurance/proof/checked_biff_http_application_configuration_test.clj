@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1805: The actual application startup entrypoint owns module issuance,
+  "v1806: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -759,3 +759,82 @@
       (finally
         (cleanup! first-s first-issued)
         (cleanup! second-s second-issued)))))
+
+
+(deftest trusted-physical-listener-reference-stays-bound-to-original-instance
+  ;; A source-trusted callback returns the selected adapter's actual JDK
+  ;; HttpServer. Changing the reported object at the same port rejects
+  ;; original instance identity, even while the original socket still serves.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        alternate (atom nil)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source :listener-instance!
+                       (fn [_]
+                         (or @alternate (:server @(:server-state s))))))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            inspect! (fn []
+                       ((:inspect-generation! issued)
+                        instance-generation system))
+            initial (inspect!)
+            original-server (:server @(:server-state s))
+            original-port (:port @(:server-state s))]
+        (is (some? original-server))
+        (is (= :matches-original-host-reported-object
+               (:physical-listener-instance initial)))
+        (is (= :trusted-host-callback-conditional
+               (:physical-instance-provenance initial)))
+        (is (= :matches-startup-verified-loopback-port
+               (:original-local-listener-endpoint initial)))
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding initial)))
+        (is (not-any? #(contains? initial %)
+                      [:listener-instance! :listener-instance :server
+                       :listener-handle :source :url :port :generation
+                       :instance-generation]))
+        (reset! alternate (Object.))
+        (is (= original-port (:port @(:server-state s))))
+        (is (= :configured-physical-listener-not-current
+               (reason inspect!)))
+        (is (= :configured-physical-listener-not-current
+               (reason #((:inspect-running! issued) system))))
+        (reset! alternate nil)
+        (is (= :matches-original-host-reported-object
+               (:physical-listener-instance (inspect!))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason inspect!))))
+      (finally (cleanup! s issued)))))
+
+(deftest physical-listener-identity-is-optional-and-explicitly-unestablished
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))]
+    (try
+      (let [{:keys [system]} ((:start-once! issued) {})
+            observed ((:inspect-running! issued) system)]
+        (is (= :not-established (:physical-listener-instance observed)))
+        (is (= :not-established (:physical-instance-provenance observed))))
+      (finally (cleanup! s issued)))))
+
+(deftest invalid-physical-listener-callback-fails-closed-and-cleans-up
+  (let [s (scenario :honest)
+        source (original-source s)]
+    (is (= :invalid-application-owned-http-configuration
+           (reason #(config/issue-configured-checked-http-application!
+                     (assoc source :listener-instance! :synthetic/not-a-callback)))))
+    (is (nil? @(:server-state s)))
+    (let [issued (config/issue-configured-checked-http-application!
+                  (assoc source :listener-instance!
+                         (fn [_] {:server :fabricated})))]
+      (try
+        (is (= :configured-physical-listener-not-current
+               (reason #((:start-once! issued) {}))))
+        (is (some? @(:server-state s)))
+        (is (.isShutdown (:executor @(:server-state s))))
+        (is (= :start-failed-physical-state-unknown
+               (:status ((:summary! issued)))))
+        (is (= :configured-start-already-attempted
+               (reason #((:start-once! issued) {}))))
+        (finally (cleanup! s issued))))))
