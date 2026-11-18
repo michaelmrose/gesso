@@ -2,8 +2,9 @@
   "Opt-in Ansatz 0.2.617, source-derived, signed-integer preservation pilot.
 
    From the ORIGINAL Gesso reservation catalog, construct quantified
-   conditional preservation propositions for BOTH claim-count invariants
-   across EVERY declared operation. For pre/post Int states, assume the
+   conditional preservation propositions for ALL THREE original invariants
+   across EVERY declared operation: two signed-integer claim bounds and one
+   closed two-member status enumeration. For pre/post Int states, assume the
    original invariant at pre and the original literal replacement at post;
    prove the invariant at post. The proposition and proof are checked by
    Ansatz's kernel. Neither the goals nor the operations are authored in a
@@ -16,8 +17,8 @@
 
    Scope remains conditional: bounded interpreter observations do NOT prove
    universal interpreter correctness, original-to-Ansatz translation fidelity,
-   invariant initialization, status-domain preservation, or any physical/
-   installed correspondence. The proof declaration closure is inspected under
+   invariant initialization, general enum translation correctness, or any
+   physical/installed correspondence. The proof declaration closure is inspected under
    an explicit pilot axiom policy; no authority-bearing evidence is issued.
    This pilot accepts only the exact known reservation source shape.
 
@@ -54,6 +55,7 @@
   (:import [java.util WeakHashMap]))
 
 (def ^:private claim-field :slot/active-claims)
+(def ^:private status-field :slot/status)
 (def ^:private claim-invariant-ids
   #{:slot/nonnegative-claims :slot/at-most-one-claim})
 (def ^:private expected-invariant-ids
@@ -88,6 +90,34 @@
      :bound (integer-literal! (nth expression 2)
                               [:invariants invariant-id :expression])}))
 
+(defn- status-invariant! [catalog]
+  (let [id :slot/status-domain
+        invariant (get-in catalog [:invariants id])
+        {:keys [readers expression]} invariant
+        raw-values (get-in expression [2 1])]
+    ;; The original Gesso enum is an ordinary set of keywords. Encode its
+    ;; TWO members deterministically into Int solely for this pilot. Such an
+    ;; encoding is an EXPLICIT translation assumption, not a proven general
+    ;; theorem about enum interpretation or Clojure equality.
+    (when-not (and (= #{:readers :expression} (set (keys invariant)))
+                   (= #{status-field} readers)
+                   (= [:in [:read status-field] [:literal raw-values]]
+                      expression)
+                   (set? raw-values)
+                   (= #{:available :reserved} raw-values))
+      (reject! :unsupported-status-domain
+               {:invariant-id id :invariant invariant}))
+    {:invariant-id id
+     :values raw-values
+     :encoding (zipmap (sort-by str raw-values) (range))}))
+
+(defn- status-literal! [form at]
+  (when-not (and (vector? form) (= :literal (first form))
+                 (= 2 (count form)) (keyword? (second form)))
+    (reject! :unsupported-status-literal
+             {:at at :expression form}))
+  (second form))
+
 (defn- source-transition! [operation]
   (let [{:keys [id construction]} operation
         {:keys [subject state-types input-types reads writes replacements frame]}
@@ -104,6 +134,11 @@
                    (= #{:slot/status claim-field :slot/audit-tag}
                       (set (keys state-types)))
                    (= {:type :integer} (get state-types claim-field))
+                   (= {:type :enum :name :slot/status
+                       :values #{:available :reserved}}
+                      (get state-types status-field))
+                   (= {:type :keyword :nullable? true}
+                      (get state-types :slot/audit-tag))
                    (= {} input-types)
                    (= #{:slot/status} reads)
                    (= #{:slot/status claim-field} writes)
@@ -113,6 +148,9 @@
                                         :construction construction}))
     (let [replacement (integer-literal! (get replacements claim-field)
                                         [:operations id :replacements claim-field])
+          status-replacement
+          (status-literal! (get replacements status-field)
+                           [:operations id :replacements status-field])
           ;; IMPORTANT: do not infer an interpreter's write semantics from
           ;; raw syntax alone. Ask Gesso to construct and normalize the
           ;; ORIGINAL guarded transition, and compare the checked RHS.
@@ -126,9 +164,12 @@
                      (= (:frame built) (:frame-fields semantics))
                      (= (:transition-fingerprint built) (:fingerprint described))
                      (= [:literal replacement]
-                        (get-in semantics [:assignments claim-field])))
+                        (get-in semantics [:assignments claim-field]))
+                     (= [:literal status-replacement]
+                        (get-in semantics [:assignments status-field])))
         (reject! :transition-premise-mismatch {:operation-id id}))
       {:replacement replacement
+       :status-replacement status-replacement
        :transition transition
        :transition-fingerprint (:fingerprint described)})))
 
@@ -136,6 +177,11 @@
   ;; This pilot maps Gesso's :integer to Ansatz Int, not Nat: negative
   ;; assignments must remain representable and fail the lower-bound proof.
   (list (case comparison :<= '<= :>= '>=) 'Int value bound))
+
+(defn- status-membership-form [encoding value]
+  (let [[first-status second-status] (sort-by str (keys encoding))]
+    (list 'Or (list '= 'Int value (get encoding first-status))
+              (list '= 'Int value (get encoding second-status)))))
 
 (defn- source-obligations! [catalog]
   (when-not (and (map? catalog)
@@ -154,53 +200,85 @@
                    (= declared (set ids)))
       (reject! :incomplete-operation-catalog
                {:declared declared :observed ids}))
-    ;; Keep the known catalog CLOSED for this pilot. An added/removed
-    ;; invariant must be reviewed rather than silently inheriting coverage.
     (when-not (= expected-invariant-ids (set (keys invariants)))
       (reject! :changed-invariant-catalog
                {:expected expected-invariant-ids
                 :observed (set (keys invariants))})))
-  (let [invariants (mapv (partial claim-invariant! catalog)
-                         (sort claim-invariant-ids))
+  (let [claims (into {} (map (fn [id] [id (claim-invariant! catalog id)])
+                             (sort claim-invariant-ids)))
+        status (status-invariant! catalog)
         catalog-fingerprint
         (:fingerprint
          (subject/describe-subject
           {:kind :rule
            :id :gesso.assurance.ansatz-reservation-pilot/catalog
-           :interface catalog}))]
-    (vec
-     (for [operation (:operations catalog)
-           :let [{:keys [replacement transition-fingerprint]}
-                 (source-transition! operation)]
-           {:keys [invariant-id comparison bound]} invariants]
-       (let [id (:id operation)
-             source-invariant (get-in catalog [:invariants invariant-id])
-             exact-subject
-             {:kind :operation
-              :id id
-              :interface
-              {:catalog-id (:id catalog)
-               :construction (:construction operation)
-               :invariant-id invariant-id
-               :invariant source-invariant}}]
-         {:operation-id id
-          :invariant-id invariant-id
-          :catalog-fingerprint catalog-fingerprint
-          :transition-fingerprint transition-fingerprint
-          :source-fingerprint
-          (:fingerprint (subject/describe-subject exact-subject))
-          :replacement replacement
-          :comparison comparison
-          :bound bound
-          ;; The proof is universally quantified over signed pre/post
-          ;; values. We assume ONLY a pre-invariant and the literal-write
-          ;; equality, then prove the post-invariant.
-          :parameters
-          ['pre ':- 'Int
-           'post ':- 'Int
-           'hpre ':- (comparison-form comparison 'pre bound)
-           'hwrite ':- (list '= 'Int 'post replacement)]
-          :goal-form (comparison-form comparison 'post bound)})))))
+           :interface catalog}))
+        ;; Source coverage must be a complete Cartesian product; no part of
+        ;; the original 2-operation x 3-invariant catalog is allowed to
+        ;; disappear behind an unmentioned unsupported case.
+        obligations
+        (vec
+         (for [operation (:operations catalog)
+               invariant-id (concat (sort claim-invariant-ids)
+                                    [:slot/status-domain])]
+           (let [{:keys [replacement status-replacement
+                         transition-fingerprint]}
+                 (source-transition! operation)
+                 id (:id operation)
+                 source-invariant (get-in catalog [:invariants invariant-id])
+                 subject-data {:kind :operation
+                               :id id
+                               :interface
+                               {:catalog-id (:id catalog)
+                                :construction (:construction operation)
+                                :invariant-id invariant-id
+                                :invariant source-invariant}}
+                 common {:operation-id id
+                         :invariant-id invariant-id
+                         :catalog-fingerprint catalog-fingerprint
+                         :transition-fingerprint transition-fingerprint
+                         :source-fingerprint
+                         (:fingerprint (subject/describe-subject subject-data))}
+                 proof-data
+                 (if (= invariant-id :slot/status-domain)
+                   (let [{:keys [encoding values]} status
+                         code (get encoding status-replacement)]
+                     (when (nil? code)
+                       (reject! :status-assignment-outside-invariant
+                                {:operation-id id
+                                 :status status-replacement
+                                 :allowed values}))
+                     {:proof-kind :quantified-conditional-enum-preservation
+                      :replacement status-replacement
+                      :status-encoding encoding
+                      :parameters ['pre ':- 'Int
+                                   'post ':- 'Int
+                                   'hpre ':- (status-membership-form encoding 'pre)
+                                   'hwrite ':- (list '= 'Int 'post code)]
+                      :goal-form (status-membership-form encoding 'post)
+                      :proof-script (if (= code 0)
+                                      '[(subst hwrite) (left) (rfl)]
+                                      '[(subst hwrite) (right) (rfl)])})
+                   (let [{:keys [comparison bound]} (get claims invariant-id)]
+                     {:proof-kind :quantified-conditional-int-preservation
+                      :replacement replacement
+                      :comparison comparison
+                      :bound bound
+                      :parameters ['pre ':- 'Int
+                                   'post ':- 'Int
+                                   'hpre ':- (comparison-form comparison 'pre bound)
+                                   'hwrite ':- (list '= 'Int 'post replacement)]
+                      :goal-form (comparison-form comparison 'post bound)
+                      :proof-script '[(omega)]}))]
+             (merge common proof-data))))
+        expected (set (for [id (:declared-operation-ids catalog) invariant-id expected-invariant-ids]
+                        [id invariant-id]))
+        observed (mapv (juxt :operation-id :invariant-id) obligations)]
+    (when-not (and (= expected (set observed))
+                   (= (count expected) (count observed)))
+      (reject! :incomplete-proof-coverage
+               {:expected expected :observed observed}))
+    obligations))
 
 ;; These are foundational assumptions of the published Ansatz/Lean arithmetic
 ;; library, not Gesso business axioms. Naming them is a policy decision, NOT a
@@ -284,9 +362,9 @@
                           (ansatz/parse-params parameters)
                           goal-form)))
 
-(defn- check-obligation! [{:keys [parameters goal-form] :as obligation}]
+(defn- check-obligation! [{:keys [parameters goal-form proof-script] :as obligation}]
   (let [[goal proof] (binding [ansatz/*verbose* false]
-                       (ansatz/prove-law parameters goal-form '[(omega)]))
+                       (ansatz/prove-law parameters goal-form proof-script))
         env (ansatz/env)]
     (when-not (= (elaborate-source-proposition! obligation) goal)
       (reject! :proof-proposition-mismatch
@@ -298,7 +376,7 @@
                 :invariant-id (:invariant-id obligation)}))
     (let [dependencies (qualify-proof-dependencies!
                         (inspect-proof-dependencies env goal proof))]
-      {:description (dissoc obligation :parameters :goal-form)
+      {:description (dissoc obligation :parameters :goal-form :proof-script)
        :dependencies dependencies
        :goal goal
        :proof proof})))
@@ -314,12 +392,23 @@
     (is (= #{[:slot/reserve :slot/at-most-one-claim]
              [:slot/reserve :slot/nonnegative-claims]
              [:slot/release :slot/at-most-one-claim]
-             [:slot/release :slot/nonnegative-claims]}
+             [:slot/release :slot/nonnegative-claims]
+             [:slot/reserve :slot/status-domain]
+             [:slot/release :slot/status-domain]}
            subjects))
+    (is (= 6 (count results)))
     (is (= #{[1 :<= 1] [1 :>= 0] [0 :<= 1] [0 :>= 0]}
            (set (map (juxt (comp :replacement :description)
                            (comp :comparison :description)
-                           (comp :bound :description)) results))))
+                           (comp :bound :description))
+                     (remove #(= :slot/status-domain
+                                 (get-in % [:description :invariant-id]))
+                             results)))))
+    (is (= #{:available :reserved}
+           (set (map (comp :replacement :description)
+                     (filter #(= :slot/status-domain
+                                 (get-in % [:description :invariant-id]))
+                             results)))))
     (is (every? (fn [{:keys [goal proof]}]
                   (kernel/verifies? (ansatz/env) goal proof)) results))
     (testing "Every original proof has a closed and explicitly qualified axiom closure"
@@ -327,10 +416,15 @@
         (is (= :ansatz-reservation-pilot/lean-core-axioms-v1
                (:policy dependencies)))
         (is (pos-int? (:declarations-scanned dependencies)))
-        (is (= #{"Classical.choice" "Quot.sound" "propext"}
-               (set (:axioms dependencies))))
+        (is (set/subset? (set (:axioms dependencies)) permitted-axioms))
         (is (empty? (:non-safe dependencies)))
         (is (empty? (:unresolved dependencies)))))
+    (testing "Arithmetic proofs still depend on their explicit axiom closure"
+      (doseq [entry (remove #(= :slot/status-domain
+                               (get-in % [:description :invariant-id]))
+                           results)]
+        (is (= #{"Classical.choice" "Quot.sound" "propext"}
+               (set (get-in entry [:dependencies :axioms]))))))
     (testing "an upper-bound proof is not a lower-bound proof"
       (is (false? (kernel/verifies? (ansatz/env)
                                    (:goal (second results))
@@ -338,7 +432,7 @@
     (testing "an operation's proof is not another operation's proof"
       (is (false? (kernel/verifies? (ansatz/env)
                                    (:goal (first results))
-                                   (:proof (nth results 2))))))
+                                   (:proof (nth results 3))))))
     (is (false? (kernel/verifies? (ansatz/env)
                                   (:goal (first results)) nil)))))
 
@@ -463,15 +557,28 @@
                                          :slot/extra] {:type :integer}))
                       (catch clojure.lang.ExceptionInfo ex (ex-data ex)))
                  :reason))))
-    (testing "the full catalog fingerprint changes when other invariants change"
+    (testing "a silently narrowed status invariant is NOT accepted"
+      (is (= :unsupported-status-domain
+             (-> (try (source-obligations!
+                       (assoc-in source [:invariants :slot/status-domain
+                                         :expression 2 1]
+                                 #{:available}))
+                      (catch clojure.lang.ExceptionInfo ex (ex-data ex)))
+                 :reason))))
+    (testing "the full catalog fingerprint also binds the initial condition"
       (let [before (first (source-obligations! source))
-            mutant (assoc-in source [:invariants :slot/status-domain
-                                     :expression 2 1]
-                             #{:available})
+            mutant (assoc-in source [:initial-condition :expression 2 2]
+                             [:literal 2])
             after (first (source-obligations! mutant))]
         (is (= (:source-fingerprint before) (:source-fingerprint after)))
         (is (not= (:catalog-fingerprint before)
                   (:catalog-fingerprint after)))))
+    (testing "an assignment to an unknown enum member cannot inherit a proof"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (source-obligations!
+                    (assoc-in source [:operations reserve-index
+                                      :construction :replacements status-field]
+                              [:literal :slot/unknown])))))
     (testing "a same-type guard edit changes subject identity"
       (let [mutant (assoc-in source [:operations reserve-index :construction
                                     :guard :expression]
@@ -502,7 +609,7 @@
       (is (denied? (assoc clean :declarations-scanned 0)))
       (is (denied? (dissoc clean :unresolved))))))
 
-;; Pilot qualification never upgrades the four mathematical statements to
+;; Pilot qualification never upgrades the six conditional theorems to
 ;; operation certificates. A directly constructed instance is NOT accepted:
 ;; only handles issued by the kernel/audit/source path enter this JVM registry.
 (deftype AuditedAnsatzPilotHandle []
@@ -545,7 +652,7 @@
         expected (ExpectedAnsatzPilotSubject.)]
     (locking issued-pilot-subjects
       (.put issued-pilot-subjects expected
-            (dissoc obligation :parameters :goal-form)))
+            (dissoc obligation :parameters :goal-form :proof-script)))
     expected))
 
 (defn- issue-audited-pilot-handle! [catalog operation-id invariant-id]
@@ -574,7 +681,7 @@
     (let [description (:description issued)
           current (original-obligation! catalog
                     (:operation-id expected) (:invariant-id expected))
-          current-description (dissoc current :parameters :goal-form)]
+          current-description (dissoc current :parameters :goal-form :proof-script)]
       (when-not (= expected current-description)
         (pilot-failure! :source-subject-changed))
       ;; A valid proof of one source obligation cannot satisfy a consumer
@@ -602,7 +709,7 @@
          :source-fingerprint (:source-fingerprint description)
          :catalog-fingerprint (:catalog-fingerprint description)
          :transition-fingerprint (:transition-fingerprint description)
-         :proof-kind :quantified-conditional-int-preservation
+         :proof-kind (:proof-kind description)
          :checking :ansatz-kernel-with-audited-dependency-closure
          :axiom-policy (:policy current-deps)
          :interpreter-correspondence :not-universally-proved
@@ -747,6 +854,22 @@
                         (assoc-in catalog
                                   [:operations 0 :construction :replacements claim-field]
                                   [:literal 2])))))))
+
+(deftest status-domain-proof-can-be-consumed-for-each-original-operation
+  (let [catalog (example/reservation-catalog)]
+    (doseq [id [:slot/reserve :slot/release]]
+      (let [handle (issue-audited-pilot-handle!
+                    catalog id :slot/status-domain)
+            expected (issue-expected-pilot-subject!
+                      catalog id :slot/status-domain)
+            report (require-current-audited-pilot-proof!
+                    handle expected catalog)]
+        (is (= id (:operation-id report)))
+        (is (= :slot/status-domain (:invariant-id report)))
+        (is (= :quantified-conditional-enum-preservation
+               (:proof-kind report)))
+        (is (= :not-issued (:certificate report)))
+        (is (= :none (:authority report)))))))
 
 (deftest proof-issuance-rejects-a-valid-but-unrelated-kernel-proposition
   (let [catalog (example/reservation-catalog)
