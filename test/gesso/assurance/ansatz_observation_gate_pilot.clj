@@ -1,5 +1,5 @@
 (ns gesso.assurance.ansatz-observation-gate-pilot
-  "Opt-in v1737 source-attested, fail-closed ABSTRACT observer boundary.
+  "Opt-in v1738 primitive-checked ABSTRACT observer boundary.
 
    After the original reservation's Ansatz source/step bridge is kernel-checked
    and dependency-audited, validate EVERY observed matching transition against
@@ -13,6 +13,13 @@
    exact Boolean acceptance conjunction before the observation boundary can
    be constructed. This is source-identity/structural evidence, not a proof
    that the JVM executes those forms or that their primitives are sound.
+
+   The guarded trace step is an OVERAPPROXIMATION: even two colluding
+   observers could otherwise falsely accept a *different* permitted step.
+   A separate, closed-source primitive oracle therefore recomputes the exact
+   original guard, both literal writes, and audit-field framing on EVERY
+   invocation, comparing each Boolean against BOTH observer reports. Invalid
+   before/after projections are also refused independently of the observers.
 
    This is NOT a universal mathematical proof of either Clojure interpreter.
    It makes no assertion about calls that bypass this boundary, guard/assignment
@@ -151,6 +158,64 @@
         (fail! :observer-acceptance-inconsistent
                {:operation-id (:operation-id result)})))))
 
+(def ^:private closed-reservation-state-fields
+  #{status-field claims-field audit-field})
+
+(defn- plain-state? [state]
+  (or (instance? clojure.lang.PersistentArrayMap state)
+      (instance? clojure.lang.PersistentHashMap state)))
+
+(defn- verify-closed-projection! [model label state]
+  ;; Our original catalog has three REQUIRED state fields. This is NOT a
+  ;; general Gesso type validator; it checks the exact source subset whose
+  ;; transition relation and proofs were regenerated earlier in the pilot.
+  ;; Revalidate independently so two corrupted observers cannot silently
+  ;; accept malformed maps that the real typed interpreter would have thrown.
+  (let [status (get state status-field)
+        claims (get state claims-field)
+        audit (get state audit-field)]
+    (when-not (and (plain-state? state)
+                   (nil? (meta state))
+                   (= closed-reservation-state-fields (set (keys state)))
+                   (contains? (:status-encoding model) status)
+                   (integer? claims)
+                   (<= (count (str claims)) 2048)
+                   (or (nil? audit)
+                       (and (keyword? audit) (<= (count (str audit)) 2048))))
+      (fail! :invalid-original-state-projection
+             {:field label :value state}))
+    state))
+
+(defn- source-primitive-flags! [model source before after]
+  ;; These predicates are deliberately small and independent of BOTH Gesso
+  ;; interpreters. Their constants come from the checked ORIGINAL transition
+  ;; source, not a second handwritten operation catalog. All three facts are
+  ;; necessary for the ORIGINAL relation; the induction model's step formula
+  ;; alone is strictly weaker and must never be treated as a full guard.
+  (verify-closed-projection! model :before before)
+  (verify-closed-projection! model :after after)
+  (let [encoding (:status-encoding model)
+        guard? (= (get encoding (get before status-field)) (:before-code source))
+        assignments? (and (= (get encoding (get after status-field))
+                             (:after-code source))
+                          (= (get after claims-field) (:claim-value source)))
+        frame? (= (get before audit-field) (get after audit-field))]
+    {:guard-holds? (boolean guard?)
+     :assignments-hold? (boolean assignments?)
+     :frame-holds? (boolean frame?)
+     :matches? (boolean (and guard? assignments? frame?))}))
+
+(defn- source-primitives-agree! [model source before after original other]
+  (let [expected (source-primitive-flags! model source before after)
+        keys [:guard-holds? :assignments-hold? :frame-holds? :matches?]
+        actual (select-keys original keys)
+        other-actual (select-keys other keys)]
+    (when-not (and (= expected actual) (= expected other-actual))
+      (fail! :primitive-semantics-disagreement
+             {:operation-id (:operation-id source)
+              :expected expected :original actual :independent other-actual}))
+    expected))
+
 (defn- audited-observation-boundary! [catalog]
   ;; This is a proof/check-time CONSTRUCTOR, not an HTTP-path proof invocation.
   ;; The three source-specific bridge theorems are checked BEFORE any witness
@@ -169,6 +234,7 @@
      :original-interpreter-source-attestation source-attestation
      :catalog-fingerprint (:catalog-fingerprint model)
      :observer-correspondence :per-invocation-checked-not-universally-proved
+     :primitive-correspondence :closed-source-per-invocation-checked
      :physical-correspondence :not-established
      :certificate :not-issued
      :admission :not-admitted
@@ -183,6 +249,7 @@
          (let [original (abstract/observe-transition! transition before {} after)
                other (independent/observe-transition! transition before {} after)]
            (exact-report-shape! source original other)
+           (source-primitives-agree! model source before after original other)
            (let [matches? (:matches? original)
                  represented? (when matches?
                                 (from-source! 'step-holds? model before after))]
@@ -215,6 +282,8 @@
                              :compiled-runtime-correspondence])))
     (is (= :per-invocation-checked-not-universally-proved
            (:observer-correspondence boundary)))
+    (is (= :closed-source-per-invocation-checked
+           (:primitive-correspondence boundary)))
     (doseq [operation-id [:slot/reserve :slot/release]
             before states
             after states]
@@ -256,10 +325,10 @@
       (with-redefs [abstract/observe-transition! fake-primary]
         (is (= :observer-disagreement
                (reason #(check! :slot/reserve before bad))))))
-    (testing "Even two colluding false-positive reports cannot bypass step check"
+    (testing "Two colluding false-positive reports fail the exact write check"
       (with-redefs [abstract/observe-transition! fake-primary
                    independent/observe-transition! fake-secondary]
-        (is (= :accepted-abstract-transition-outside-proved-step
+        (is (= :primitive-semantics-disagreement
                (reason #(check! :slot/reserve before bad))))))
     (testing "Unknown operation and invalid source projection fail closed"
       (is (= :unknown-source-operation
@@ -267,6 +336,71 @@
       (is (thrown? clojure.lang.ExceptionInfo
                    (check! :slot/reserve
                            (assoc before :slot/unregistered 1) valid))))))
+
+(deftest exact-source-primitives-reject-steps-that-induction-overapproximates
+  (let [catalog (example/reservation-catalog)
+        bridge (from-source! 'source-bridge-obligations! catalog)
+        model (:model bridge)
+        transition (:transition (first (:sources bridge)))
+        step? (ns-resolve source-ns 'step-holds?)
+        check! (:observe! (audited-observation-boundary! catalog))
+        valid-before {status-field :available claims-field 0 audit-field nil}
+        reserved-before {status-field :reserved claims-field 0 audit-field nil}
+        valid-after {status-field :reserved claims-field 1 audit-field nil}
+        ;; All three remain legal to the WEAKER trace relation because
+        ;; that relation permits any declared write regardless of guard,
+        ;; and does not track the framed audit field.
+        cases {:false-guard [reserved-before valid-after]
+               :wrong-literal-write [valid-before valid-before]
+               :changed-audit-frame
+               [valid-before (assoc valid-after audit-field :audit/changed)]}
+        original abstract/observe-transition!
+        secondary independent/observe-transition!
+        fake-original (fn [d b in a]
+                        (assoc (original d b in a)
+                               :guard-holds? true :assignments-hold? true
+                               :frame-holds? true :matches? true))
+        fake-secondary (fn [d b in a]
+                         (assoc (secondary d b in a)
+                                :guard-holds? true :assignments-hold? true
+                                :frame-holds? true :matches? true))
+        reason (fn [before after]
+                 (try (check! :slot/reserve before after) nil
+                      (catch clojure.lang.ExceptionInfo e
+                        (:reason (ex-data e)))))]
+    (doseq [[case-id [before after]] cases]
+      (is (step? model before after)
+          (str case-id " fits the weaker Ansatz trace relation"))
+      (is (false? (:matches? (check! :slot/reserve before after)))
+          (str case-id " is NOT a valid guarded reservation"))
+      (with-redefs [abstract/observe-transition! fake-original
+                   independent/observe-transition! fake-secondary]
+        (is (= :primitive-semantics-disagreement (reason before after))
+            (str case-id " cannot inherit false observer acceptance"))))
+    (testing "Two colluding false-negative reports are also detected"
+      (let [fake-no (fn [observer]
+                      (fn [d b in a]
+                        (assoc (observer d b in a)
+                               :guard-holds? false :assignments-hold? false
+                               :frame-holds? false :matches? false)))]
+        (with-redefs [abstract/observe-transition! (fake-no original)
+                     independent/observe-transition! (fake-no secondary)]
+          (is (= :primitive-semantics-disagreement
+                 (reason valid-before valid-after))))))
+    (testing "Forged acceptance cannot bypass independent source type checks"
+      (let [bad (assoc valid-after :slot/extra :unproven)
+            valid-original (original transition valid-before {} valid-after)
+            valid-independent (secondary transition valid-before {} valid-after)]
+        (with-redefs [abstract/observe-transition! (fn [& _] valid-original)
+                     independent/observe-transition! (fn [& _] valid-independent)]
+          (is (= :invalid-original-state-projection (reason valid-before bad))))))
+    (testing "An invalid claim type cannot inherit a forged acceptance"
+      (let [bad (assoc valid-after claims-field 1.0)
+            valid-original (original transition valid-before {} valid-after)
+            valid-independent (secondary transition valid-before {} valid-after)]
+        (with-redefs [abstract/observe-transition! (fn [& _] valid-original)
+                     independent/observe-transition! (fn [& _] valid-independent)]
+          (is (= :invalid-original-state-projection (reason valid-before bad))))))))
 
 (deftest per-observation-check-does-not-depend-on-a-bounded-integer-range
   (let [check! (:observe! (audited-observation-boundary!
