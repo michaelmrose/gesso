@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1797: A separate Biff server adapter must actually consume the checked
+  "v1799: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
    copied Biff system or return a synthetic success status."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -387,3 +387,60 @@
                                         {:catalog {:operations [{:id :request/claim}
                                                                 {:id :request/claim}]}}
                                         host-report)))))))
+
+
+(deftest final-catalog-dispatch-inspects-original-issuance-and-returned-http-system
+  (let [env ((earlier-helper 'case-env))
+        config {:catalog-source (:catalog-source env)
+                :operation :request/claim
+                :inputs {:input/owner "helper-a"}}]
+    (with-adapter! :honest nil config
+      (fn [{:keys [env probe system base]}]
+        (let [contract (:contract env)
+              selected #{:request/claim}
+              inspect! (fn [cap src sys ids]
+                         (probe/require-current-final-catalog-dispatch!
+                          cap src sys ids))
+              data (:data env)
+              request (:request data)]
+          (seed! [:requests request])
+          (is (= :final-probe-wrapper-or-http-challenge-not-current
+                 (error-reason #(inspect! probe contract system selected))))
+          (is (= :one-final-checked-wrapper-http-challenge-returned
+                 (:status ((:verify-once! probe) system base))))
+          (let [checked (inspect! probe contract system selected)]
+            (is (= probe/final-catalog-dispatch-report-type (:type checked)))
+            (is (= :one-original-probe-one-returned-system-and-host (:scope checked)))
+            (is (= selected (:checked-certified-route-ids checked)))
+            (is (= selected (:catalog-expected-certified-route-ids checked)))
+            (is (= selected (:catalog-observed-certified-route-ids checked)))
+            (is (= 1 (:selected-route-challenge-observations checked)))
+            (is (= :all-selected-certified-routes-observed-through-original-router
+                   (:catalog-read-only-route-dispatch checked)))
+            (is (= :not-established (:parameterized-route-generalization checked)))
+            (is (= :none (:authority checked) (:retry-authority checked))))
+          (is (= request (read-request (:xt/id request))))
+          (is (nil? (read-command (resolution/record-id (:binding data)))))
+          (is (= :final-catalog-dispatch-not-observed-on-original-probe
+                 (error-reason #(inspect! probe contract system
+                                          #{:request/claim :request/cancel}))))
+          (is (= :final-probe-wrapper-or-http-challenge-not-current
+                 (error-reason #(inspect! probe contract
+                                          (assoc system :biff.ring/handler (fn [_] {:status 200}))
+                                          selected))))
+          (is (= :final-probe-wrapper-or-http-challenge-not-current
+                 (error-reason #(inspect! probe (assoc contract :fake true)
+                                          system selected))))
+          (is (= :unissued-or-substituted-http-consumption-probe
+                 (error-reason #(inspect! (assoc probe :summary! (fn [] {:status :pass}))
+                                          contract system selected))))
+          (with-redefs [probe/require-current-final-probe-route-inventory!
+                        (fn [& _] {:type probe/final-route-inventory-report-type
+                                   :final-probe-handler-slot :exact-issued-wrapper})]
+            (is (= :substituted-original-final-dispatch-boundary
+                   (error-reason #(inspect! probe contract system selected)))))
+          ;; The authorization callback and source map are not proof of a
+          ;; second instance. The original issued handle remains necessary.
+          (is (= :unissued-or-substituted-http-consumption-probe
+                 (error-reason #(inspect! (assoc probe :verify-once! (fn [& _] nil))
+                                          contract system selected)))))))))

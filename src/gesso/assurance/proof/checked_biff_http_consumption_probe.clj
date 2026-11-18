@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe
-  "v1797: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
+  "v1799: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
    actually consumes the final checked Ring handler installed through Biff's
    ordinary module start lifecycle.
 
@@ -22,6 +22,9 @@
    with one concrete witness for each parameterized template. An incomplete
    route inventory is not promoted to full observed dispatch coverage. This
    proves only those selected requests, not universal parameter behavior.
+   v1799: Bind catalog-wide dispatch evidence to the original issued probe,
+   its captured Biff module state, current original host, and the same final
+   returned Biff system. Summary maps alone cannot qualify startup.
    No business transition, deployed-service claim or certificate is issued.
 
    This is local test evidence for a selected HTTP server module only: Biff
@@ -546,6 +549,14 @@
       (.put issued handle {:source contract-source
                            :host-handle host-handle
                            :state state :outcome result :hits hits
+                           :claimed claimed
+                           :typed-config typed-config
+                           :catalog-targets catalog-targets
+                           :observed-route-ids observed-route-ids
+                           :route-hits route-hits
+                           :route-pending route-pending
+                           :route-active route-active
+                           :typed-attempts typed-attempts
                            :module module
                            :summary! summary!
                            :verify-once! verify!}))
@@ -642,3 +653,87 @@
        :certification :not-issued
        :admission :not-admitted
        :transaction-authority :none :authority :none})))
+
+
+;; v1799: One original issuance inspection ties the current host inventory
+;; and all observed route-selection challenges to the SAME returned Biff
+;; handler slot. Unlike a separately interpreted :summary! map, this checks
+;; the private per-issuance cells captured by the exact issued handle.
+(def final-catalog-dispatch-report-type
+  :gesso.assurance.proof.checked-biff-http-consumption-probe/final-catalog-dispatch)
+
+(def ^:private original-final-inventory
+  require-current-final-probe-route-inventory!)
+
+(defn require-current-final-catalog-dispatch!
+  "Recheck original issued probe, final returned Biff handler, underlying
+   original host and exact selected catalog dispatch witness observations as
+   ONE source-relative inspection. expected-route-ids is the caller's
+   separately admitted catalog selection. Reject a detached success summary,
+   a swapped final wrapper, a stale/stopped probe, or partial dispatch.
+
+   Results describe selected local HTTP observations only, with no reusable
+   authority, general dynamic-route proof or external deployment claim."
+  [candidate contract-source final-system expected-route-ids]
+  (pinned!)
+  (when-not (identical? original-final-inventory
+                        (var-get #'require-current-final-probe-route-inventory!))
+    (reject! :substituted-original-final-dispatch-boundary))
+  (let [inventory (original-final-inventory candidate contract-source final-system)
+        record (or (entry (:handle candidate))
+                   (reject! :missing-issued-final-route-probe))
+        started @(:state record)
+        targets @(:catalog-targets record)
+        selected (:catalog-routes started)
+        route-ids (mapv :route-id targets)
+        expected (set route-ids)
+        observed @(:observed-route-ids record)
+        witnessed (set (map :route-id
+                            (filter #(not= (:template %) (:path %)) targets)))]
+    (when-not (and (= final-route-inventory-report-type (:type inventory))
+                   (= report-version (:version inventory))
+                   (= :exact-issued-wrapper (:final-probe-handler-slot inventory))
+                   (set? expected-route-ids)
+                   (seq expected-route-ids)
+                   (some? (:typed-config record))
+                   (map? started)
+                   (= targets selected)
+                   (vector? targets)
+                   (= (count route-ids) (count expected))
+                   (= expected-route-ids expected observed
+                      (:checked-certified-route-ids inventory))
+                   (= (count targets) @(:route-hits record))
+                   (= :inactive @(:route-pending record))
+                   (nil? @(:route-active record))
+                   (= 0 @(:typed-attempts record))
+                   (.get ^AtomicBoolean (:claimed record))
+                   (= :one-final-checked-wrapper-http-challenge-returned
+                      @(:outcome record))
+                   (= 1 @(:hits record))
+                   (= :none (:authority inventory)
+                      (:transaction-authority inventory))
+                   (= :not-issued (:certification inventory))
+                   (= :not-admitted (:admission inventory)))
+      (reject! :final-catalog-dispatch-not-observed-on-original-probe))
+    {:type final-catalog-dispatch-report-type
+     :version report-version
+     :scope :one-original-probe-one-returned-system-and-host
+     :module-id module-id :host-module-id host/module-id
+     :final-probe-handler-slot :exact-issued-wrapper
+     :checked-route-ids (:checked-route-ids inventory)
+     :checked-certified-route-ids (:checked-certified-route-ids inventory)
+     :catalog-expected-certified-route-ids expected
+     :catalog-observed-certified-route-ids observed
+     :selected-route-challenge-observations @(:route-hits record)
+     :catalog-read-only-route-dispatch
+     :all-selected-certified-routes-observed-through-original-router
+     :catalog-parameterized-witness-route-ids witnessed
+     :parameterized-route-generalization :not-established
+     :selected-route-business-handler-execution :not-invoked-by-read-only-probe
+     :typed-trial-attempts 0
+     :installed-handler-adoption :one-returned-in-process-probe-handler-slot
+     :normal-http-route-inventory :checked-and-selected-dispatch-witnessed
+     :external-deployment :not-established
+     :authorization-policy-provenance :not-established
+     :certificate :not-issued :admission :not-admitted
+     :retry-authority :none :transaction-authority :none :authority :none}))

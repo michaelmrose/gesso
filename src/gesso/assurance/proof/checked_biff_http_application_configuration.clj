@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1798: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1799: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -27,7 +27,9 @@
    v1798: Require that the original issued probe has confirmed EACH route
    selected in the source-checked catalog through the original checked router
    on the actual returned adapter BEFORE declaring startup successful.
-   Parameterized routes have one observed witness, not universal coverage."
+   Parameterized routes have one observed witness, not universal coverage.
+   v1799 qualifies route inventory and dispatch from ONE original issued
+   probe and the SAME returned Biff system, not a separate success summary."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -52,7 +54,7 @@
 (def ^:private original-sealed-start sealed/start-closed-checked-http-application!)
 (def ^:private original-biff-stop biff/stop)
 (def ^:private original-route-coverage coverage/check-declared-route-coverage!)
-(def ^:private original-probe-inventory probe/require-current-final-probe-route-inventory!)
+(def ^:private original-probe-dispatch probe/require-current-final-catalog-dispatch!)
 
 (defn- reject! [reason]
   (throw (ex-info "Configured closed Biff HTTP startup not established."
@@ -72,8 +74,8 @@
                              (var-get #'biff/stop))
                  (identical? original-route-coverage
                              (var-get #'coverage/check-declared-route-coverage!))
-                 (identical? original-probe-inventory
-                             (var-get #'probe/require-current-final-probe-route-inventory!)))
+                 (identical? original-probe-dispatch
+                             (var-get #'probe/require-current-final-catalog-dispatch!)))
     (reject! :substituted-original-configured-start-boundary)))
 
 (defn- plain-map? [x]
@@ -144,17 +146,17 @@
                     (:current-assembly-closure selected))
                  (set? (:matched-certified-route-ids selected))
                  (seq (:matched-certified-route-ids selected))
-                 (= probe/final-route-inventory-report-type (:type host-report))
+                 (= probe/final-catalog-dispatch-report-type (:type host-report))
                  (= probe/report-version (:version host-report))
                  (= probe/module-id (:module-id host-report))
                  (= host/module-id (:host-module-id host-report))
-                 (= :one-returned-in-process-probe-handler-slot
+                 (= :one-original-probe-one-returned-system-and-host
                     (:scope host-report))
                  (= :exact-issued-wrapper
                     (:final-probe-handler-slot host-report))
-                 (= :verified-on-selected-loopback-adapter
-                    (:one-real-http-consumption-challenge host-report))
-                 (= :checked-not-individually-probed
+                 (= :one-returned-in-process-probe-handler-slot
+                    (:installed-handler-adoption host-report))
+                 (= :checked-and-selected-dispatch-witnessed
                     (:normal-http-route-inventory host-report))
                  (set? (:checked-certified-route-ids host-report))
                  (set? (:checked-route-ids host-report))
@@ -162,8 +164,8 @@
                     (:checked-certified-route-ids host-report))
                  (set/subset? (:checked-certified-route-ids host-report)
                               (:checked-route-ids host-report))
-                 (= :not-established (:host-deployment host-report))
-                 (= :not-issued (:certification host-report))
+                 (= :not-established (:external-deployment host-report))
+                 (= :not-issued (:certificate host-report))
                  (= :not-admitted (:admission host-report))
                  (= :none (:authority host-report)
                     (:transaction-authority host-report)))
@@ -171,24 +173,16 @@
   true)
 
 (defn- require-selected-catalog-dispatch!
-  "Demand real, read-only per-route observations from the ORIGINAL issued
-   probe, not from a supplied success map or a synthetic route inventory.
-   The caller first checks the probe handle, final Biff wrapper, and host
-   route inventory via require-current-final-probe-route-inventory!."
-  [selected issued-probe]
-  (let [expected (:matched-certified-route-ids selected)
-        observed (try ((:summary! issued-probe))
-                      (catch Throwable _
-                        (reject! :selected-catalog-http-dispatch-not-observed)))]
+  "Qualify one ORIGINAL probe inspection already bound to the real final
+   Biff system, not a separate callback-supplied success summary."
+  [selected observed]
+  (let [expected (:matched-certified-route-ids selected)]
     (when-not (and (set? expected)
                    (seq expected)
-                   (= probe/report-type (:type observed))
+                   (= probe/final-catalog-dispatch-report-type (:type observed))
                    (= probe/report-version (:version observed))
-                   (= :one-final-checked-wrapper-http-challenge-returned
-                      (:status observed))
-                   (= :observed-on-selected-loopback-adapter
-                      (:final-checked-handler-consumed-over-http observed))
-                   (true? (:typed-trial-enabled observed))
+                   (= :one-original-probe-one-returned-system-and-host
+                      (:scope observed))
                    (= :all-selected-certified-routes-observed-through-original-router
                       (:catalog-read-only-route-dispatch observed))
                    (= expected (:catalog-expected-certified-route-ids observed)
@@ -310,9 +304,10 @@
                          ;; route inventory under a single issued handle.
                          (let [observed (try
                                           (pinned!)
-                                          (original-probe-inventory
+                                          (original-probe-dispatch
                                            issued-probe contract-source
-                                           (:system result))
+                                           (:system result)
+                                           (:matched-certified-route-ids selected-coverage))
                                           (catch Throwable _
                                             (reject! :selected-catalog-route-inventory-not-adopted)))]
                            (require-matching-selected-host-routes!
@@ -321,7 +316,7 @@
                            ;; per-route HTTP response and exact router match.
                            ;; Missing even one route prevents startup success.
                            (require-selected-catalog-dispatch!
-                            selected-coverage issued-probe)))
+                            selected-coverage observed)))
                        (when-not (compare-and-set! state :starting
                                                     :verified-configured-start)
                          (reject! :configured-start-state-diverged))

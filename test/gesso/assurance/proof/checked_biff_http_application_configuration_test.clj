@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1798: The actual application startup entrypoint owns module issuance,
+  "v1799: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -292,19 +292,18 @@
                   :version coverage/report-version
                   :current-assembly-closure :source-relative-checked
                   :matched-certified-route-ids #{:request/claim :request/finish}}
-        observed {:type probe/final-route-inventory-report-type
+        observed {:type probe/final-catalog-dispatch-report-type
                   :version probe/report-version
                   :module-id probe/module-id
                   :host-module-id host/module-id
-                  :scope :one-returned-in-process-probe-handler-slot
+                  :scope :one-original-probe-one-returned-system-and-host
                   :final-probe-handler-slot :exact-issued-wrapper
-                  :one-real-http-consumption-challenge
-                  :verified-on-selected-loopback-adapter
-                  :normal-http-route-inventory :checked-not-individually-probed
+                  :installed-handler-adoption :one-returned-in-process-probe-handler-slot
+                  :normal-http-route-inventory :checked-and-selected-dispatch-witnessed
                   :checked-route-ids #{:request/claim :request/finish :page/home}
                   :checked-certified-route-ids #{:request/claim :request/finish}
-                  :host-deployment :not-established
-                  :certification :not-issued :admission :not-admitted
+                  :external-deployment :not-established
+                  :certificate :not-issued :admission :not-admitted
                   :transaction-authority :none :authority :none}
         check! (var-get #'config/require-matching-selected-host-routes!)]
     (is (true? (check! selected observed)))
@@ -314,11 +313,11 @@
                           #{:request/claim :request/finish :request/extra})
                    (assoc observed :checked-route-ids #{:request/claim})
                    (assoc observed :final-probe-handler-slot :untrusted-replacement)
-                   (assoc observed :one-real-http-consumption-challenge
+                   (assoc observed :installed-handler-adoption
                           :not-established)
                    (assoc observed :type :synthetic/proof)
                    (assoc observed :authority :issued)
-                   (assoc observed :host-deployment :certified)
+                   (assoc observed :external-deployment :certified)
                    (dissoc observed :checked-route-ids)]]
       (is (= :selected-catalog-route-inventory-not-adopted
              (reason #(check! selected wrong)))
@@ -355,11 +354,9 @@
   ;; Structural regression, not a substitute for the issued probe's genuine
   ;; capability and actual HTTP challenge. Those are checked in start!.
   (let [selected {:matched-certified-route-ids #{:request/claim :request/finish}}
-        good {:type probe/report-type :version probe/report-version
-              :status :one-final-checked-wrapper-http-challenge-returned
-              :final-checked-handler-consumed-over-http
-              :observed-on-selected-loopback-adapter
-              :typed-trial-enabled true
+        good {:type probe/final-catalog-dispatch-report-type
+              :version probe/report-version
+              :scope :one-original-probe-one-returned-system-and-host
               :catalog-read-only-route-dispatch
               :all-selected-certified-routes-observed-through-original-router
               :catalog-expected-certified-route-ids #{:request/claim :request/finish}
@@ -370,27 +367,27 @@
               :parameterized-route-generalization :not-established
               :typed-trial-attempts 0 :authority :none :transaction-authority :none
               :retry-authority :none :certificate :not-issued :admission :not-admitted}
-        check! (var-get #'config/require-selected-catalog-dispatch!)
-        from (fn [report] {:summary! (fn [] report)})]
-    (is (true? (check! selected (from good))))
+        check! (var-get #'config/require-selected-catalog-dispatch!)]
+    (is (true? (check! selected good)))
     (doseq [bad [(assoc good :catalog-observed-certified-route-ids #{:request/claim})
                  (assoc good :catalog-expected-certified-route-ids #{:request/claim})
                  (assoc good :selected-route-challenge-observations 1)
                  (assoc good :selected-route-challenge-observations 3)
                  (assoc good :catalog-read-only-route-dispatch :not-established)
-                 (assoc good :typed-trial-enabled false)
+                 (assoc good :scope :synthetic/detached)
                  (assoc good :typed-trial-attempts 1)
                  (assoc good :catalog-parameterized-witness-route-ids #{:request/other})
                  (assoc good :parameterized-route-generalization :proved)
                  (assoc good :selected-route-business-handler-execution :executed)
-                 (assoc good :status :attempt-consumed-without-confirmation)
+                 (assoc good :type :synthetic/report)
                  (assoc good :authority :issued)
                  (assoc good :certificate :forged)]]
       (is (= :selected-catalog-http-dispatch-not-observed
-             (reason #(check! selected (from bad)))) (pr-str bad)))
+             (reason #(check! selected bad))) (pr-str bad)))
+    ;; A detached map with an issuer-like callback is not an original source
+    ;; result; the original probe check must precede this structural check.
     (is (= :selected-catalog-http-dispatch-not-observed
-           (reason #(check! selected {:summary! (fn []
-                                                  (throw (ex-info "uncertain" {})))}))))))
+           (reason #(check! selected {:summary! (fn [] good)}))))))
 
 (deftest incomplete-route-observation-after-server-start-stops-selected-adapter
   ;; Deliberately fail the final report qualification AFTER the sealed
