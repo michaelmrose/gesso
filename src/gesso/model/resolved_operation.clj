@@ -130,7 +130,8 @@
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx :as tx]
    [gesso.model.canonical-transaction-site :as site]
-   [gesso.model.typed-writer-adoption-preflight :as writer-adoption]))
+   [gesso.model.typed-writer-adoption-preflight :as writer-adoption]
+   [gesso.model.guarded-atomic-canonical-trial :as guarded-trial]))
 
 (def configuration-keys
   #{:operation :read-record! :may-disclose? :construct!})
@@ -450,7 +451,8 @@
         ;; inspection. Under inspection it refuses the current one-document
         ;; gateway BEFORE calling the canonical authoritative writer: the
         ;; atomic incorporated command ledger must never be silently omitted.
-        _ (writer-adoption/require-before-canonical-submit! binding incorporated)]
+        _ (writer-adoption/require-before-canonical-submit! binding incorporated)
+        _ (guarded-trial/before-canonical-submit! binding incorporated)]
     ;; This event says what THIS wrapper handed to tx/transact!, not what
     ;; XTDB necessarily received. In particular, there is no fabricated
     ;; physical tx-id when a rejection has no receipt.
@@ -463,7 +465,11 @@
                        {:error exception}))
           result (physical-result (:transaction executed) (:error executed))
           _ (publish-canonical-site! (:operation binding) site-token :completed
-                               (:physical/status result))]
+                               (:physical/status result))
+          ;; Failure of a post-commit observer must never reinterpret a write.
+          _ (try (guarded-trial/after-canonical-submit!
+                  binding (:physical/status result))
+                 (catch Throwable _ nil))]
       (publish-observation! observer
                             (merge base {:phase :physical-outcome} result))
       executed)))
