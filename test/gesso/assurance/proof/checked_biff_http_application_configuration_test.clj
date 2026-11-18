@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1800: The actual application startup entrypoint owns module issuance,
+  "v1801: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -494,3 +494,50 @@
         (is (= :stop-cleanup-not-established
                (:status ((:summary! issued))))))
       (finally (cleanup! s issued)))))
+
+(deftest current-instance-inspection-does-not-overlap-managed-shutdown
+  ;; Block the real raw adapter stop after the managed lifecycle has entered
+  ;; :stopping. The inspection must remain pending until the ORIGINAL Biff
+  ;; stop returns, not merely race a state check while cleanup is underway.
+  (let [s (scenario :honest)
+        raw-stop (get-in s [:raw :biff.core/stop])
+        stop-entered (promise)
+        allow-stop (promise)
+        adapter (assoc (:raw s)
+                       :biff.core/stop
+                       (fn [system]
+                         (deliver stop-entered true)
+                         (when-not (deref allow-stop 15000 false)
+                           (throw (ex-info "stop fixture timed out" {})))
+                         (raw-stop system)))
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true) :adapter-module adapter))]
+    (try
+      (let [{:keys [system]} ((:start-once! issued) {})
+            stopping (future ((:stop! issued)))]
+        (try
+          (is (true? (deref stop-entered 15000 false)))
+          (let [inspection-entered (promise)
+                inspection (future
+                             (deliver inspection-entered true)
+                             (reason #((:inspect-running! issued) system)))]
+            (is (true? (deref inspection-entered 5000 false)))
+            ;; Without the shared lifecycle lock the inspection immediately
+            ;; rejects while the stop callback is blocked, making the
+            ;; observer and physical stop operations overlap in time.
+            (is (= :inspection-still-pending
+                   (deref inspection 250 :inspection-still-pending)))
+            (deliver allow-stop true)
+            (is (= :stopped (:status (deref stopping 15000 :timeout))))
+            (is (= :configured-instance-not-current
+                   (deref inspection 15000 :timeout)))
+            (is (= :configured-instance-not-current
+                   (reason #((:inspect-running! issued) system))))
+            (is (= :configured-start-already-attempted
+                   (reason #((:start-once! issued) {})))))
+          (finally
+            (deliver allow-stop true)
+            (deref stopping 15000 :timeout))))
+      (finally
+        (deliver allow-stop true)
+        (cleanup! s issued)))))

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1800: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1801: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -35,7 +35,12 @@
    guarded adapter/probe lifecycle before reporting current instance status.
    Managed stops and uncertain cleanup cannot be requalified by a saved
    startup report. Out-of-band raw adapter stops or external deployment
-   liveness are outside this local observation."
+   liveness are outside this local observation.
+
+   v1801: Inspect and managed stop share one private lifecycle monitor,
+   preventing a successful in-process inspection from overlapping the
+   transition to stopping or the physical stop call. Each report is still
+   strictly point-in-time; it is NOT a lease on future liveness."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -280,8 +285,10 @@
         consumed (AtomicBoolean. false)
         state (atom :issued)
         started (atom nil)
+        lifecycle-monitor (Object.)
         summary! (fn [] (pinned!) (report @state (some? typed-trial)))
         inspect-running! (fn [candidate-system]
+                           (locking lifecycle-monitor
                            ;; Historical startup success cannot be reused
                            ;; as present-tense local instance evidence.
                            (pinned!)
@@ -318,12 +325,13 @@
                               :returned-system :exact-identity
                               :original-guarded-adapter :verified-not-stopped
                               :original-probe-handler-slot :exact-issued-wrapper
-                              :selected-catalog-source :checked-at-startup-only
+                              :selected-catalog-source
+                              (if typed-trial :checked-at-startup-only :not-selected)
                               :external-listener-liveness :not-established
                               :out-of-band-adapter-stops :not-established
                               :certificate :not-issued :admission :not-admitted
                               :retry-authority :none :transaction-authority :none
-                              :authority :none}))
+                              :authority :none})))
         start! (fn [initial-system]
                  (when-not (.compareAndSet consumed false true)
                    (reject! :configured-start-already-attempted))
@@ -392,6 +400,7 @@
                      (reset! state :start-failed-physical-state-unknown)
                      (throw error))))
         stop! (fn []
+                (locking lifecycle-monitor
                 (loop []
                   (let [current @state]
                     (case current
@@ -427,6 +436,6 @@
                         (recur))
                       ;; A failed startup may have unrolled partially and may
                       ;; still have an external listener: retain uncertainty.
-                      (summary!)))))]
+                      (summary!))))))]
     {:start-once! start! :stop! stop! :summary! summary!
      :inspect-running! inspect-running!}))
