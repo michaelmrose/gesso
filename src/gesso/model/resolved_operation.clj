@@ -129,7 +129,8 @@
    [gesso.model.command :as command]
    [gesso.model.command-resolution :as resolution]
    [gesso.model.tx :as tx]
-   [gesso.model.canonical-transaction-site :as site]))
+   [gesso.model.canonical-transaction-site :as site]
+   [gesso.model.typed-writer-adoption-preflight :as writer-adoption]))
 
 (def configuration-keys
   #{:operation :read-record! :may-disclose? :construct!})
@@ -444,7 +445,12 @@
               :operation (:operation binding)
               :binding binding
               :record (:record incorporated)
-              :plan (:plan incorporated)}]
+              :plan (:plan incorporated)}
+        ;; This fail-closed check is inert outside an explicit typed-writer
+        ;; inspection. Under inspection it refuses the current one-document
+        ;; gateway BEFORE calling the canonical authoritative writer: the
+        ;; atomic incorporated command ledger must never be silently omitted.
+        _ (writer-adoption/require-before-canonical-submit! binding incorporated)]
     ;; This event says what THIS wrapper handed to tx/transact!, not what
     ;; XTDB necessarily received. In particular, there is no fabricated
     ;; physical tx-id when a rejection has no receipt.
