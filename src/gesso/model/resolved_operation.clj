@@ -128,7 +128,8 @@
    [gesso.live.core :as live]
    [gesso.model.command :as command]
    [gesso.model.command-resolution :as resolution]
-   [gesso.model.tx :as tx]))
+   [gesso.model.tx :as tx]
+   [gesso.model.canonical-transaction-site :as site]))
 
 (def configuration-keys
   #{:operation :read-record! :may-disclose? :construct!})
@@ -431,6 +432,12 @@
      :physical/source (if error :unclassified-transaction-exception
                           :unrecognized-transaction-response)}))
 
+(defn- publish-canonical-site! [operation token phase status]
+  ;; A diagnostic, including a substituted observer Var, cannot abort or
+  ;; reinterpret an authoritative transaction at this call site.
+  (try (site/record-site! operation token phase status)
+       (catch Throwable _ nil)))
+
 (defn- transact-observed! [ctx incorporated binding observer]
   (let [attempt-id (random-uuid)
         base {:attempt-id attempt-id
@@ -442,11 +449,15 @@
     ;; XTDB necessarily received. In particular, there is no fabricated
     ;; physical tx-id when a rejection has no receipt.
     (publish-observation! observer (assoc base :phase :prepared))
-    (let [executed (try
+    (let [site-token (Object.)
+          _ (publish-canonical-site! (:operation binding) site-token :entered nil)
+          executed (try
                      {:transaction (tx/transact! ctx (:plan incorporated))}
                      (catch Exception exception
                        {:error exception}))
-          result (physical-result (:transaction executed) (:error executed))]
+          result (physical-result (:transaction executed) (:error executed))
+          _ (publish-canonical-site! (:operation binding) site-token :completed
+                               (:physical/status result))]
       (publish-observation! observer
                             (merge base {:phase :physical-outcome} result))
       executed)))
