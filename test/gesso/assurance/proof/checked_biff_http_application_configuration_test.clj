@@ -1,8 +1,9 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1806: The actual application startup entrypoint owns module issuance,
+  "v1807: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
+            [clojure.string :as str]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.checked-biff-http-application-configuration :as config]
             [gesso.assurance.proof.checked-biff-host-adoption :as host]
@@ -14,10 +15,13 @@
             [gesso.live.application-preflight.fixture :as app-fixture]
             [gesso.model.command-resolution :as resolution]
             [gesso.model.resolved-operation-test])
-  (:import [java.net URI]
+  (:import [com.sun.net.httpserver HttpHandler HttpServer]
+           [java.net BindException InetSocketAddress URI]
            [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
             HttpResponse$BodyHandlers]
-           [java.time Duration]))
+           [java.nio.charset StandardCharsets]
+           [java.time Duration]
+           [java.util.concurrent Executors TimeUnit]))
 
 (def ^:private scenario-ns
   'gesso.assurance.proof.checked-biff-http-adapter-start-test)
@@ -838,3 +842,133 @@
         (is (= :configured-start-already-attempted
                (reason #((:start-once! issued) {}))))
         (finally (cleanup! s issued))))))
+
+;; v1807: A second, genuinely bound JDK HttpServer replaces the first on the
+;; SAME loopback port. Reusing its checked Ring wrapper is intentional: a
+;; fresh private HTTP nonce alone cannot identify the physical server object.
+(defn- bind-replacement-on-port! [port checked-ring-handler]
+  (let [address (InetSocketAddress. "127.0.0.1" (int port))
+        server (loop [attempt 0]
+                 (let [outcome (try
+                                 {:server (HttpServer/create address 0)}
+                                 (catch BindException ex {:error ex}))]
+                   (if-let [bound (:server outcome)]
+                     bound
+                     (if (< attempt 9)
+                       (do (Thread/sleep 30) (recur (inc attempt)))
+                       (throw (:error outcome))))))
+        executor (Executors/newSingleThreadExecutor)
+        hits (atom 0)]
+    (try
+      (.createContext server "/"
+        (reify HttpHandler
+          (handle [_ exchange]
+            (swap! hits inc)
+            (try
+              (let [method (keyword (str/lower-case (.getRequestMethod exchange)))
+                    uri (.getRequestURI exchange)
+                    headers (into {}
+                                  (for [[k v] (.entrySet (.getRequestHeaders exchange))]
+                                    [(str/lower-case k) (first v)]))
+                    response (checked-ring-handler
+                              {:request-method method
+                               :uri (.getPath uri)
+                               :headers headers
+                               :biff.xtdb/node ((model 'database))})
+                    bytes (.getBytes (str (:body response))
+                                     StandardCharsets/UTF_8)]
+                (.sendResponseHeaders exchange
+                                      (int (or (:status response) 500))
+                                      (alength bytes))
+                (with-open [out (.getResponseBody exchange)]
+                  (.write out bytes)))
+              (catch Throwable _
+                (try (.sendResponseHeaders exchange 500 (long -1))
+                     (catch Throwable _ nil)))
+              (finally (.close exchange))))))
+      (.setExecutor server executor)
+      (.start server)
+      {:server server :executor executor
+       :port (.getPort (.getAddress server)) :hits hits}
+      (catch Throwable failure
+        (try (.stop server 0) (catch Throwable _ nil))
+        (.shutdownNow executor)
+        (throw failure)))))
+
+(defn- replace-actual-listener-at-same-port! [scenario system]
+  (let [original @(:server-state scenario)
+        {:keys [server port]} original]
+    (when-not (and (some? server) (integer? port)
+                   (fn? (:biff.ring/handler system)))
+      (throw (ex-info "Original listener fixture missing"
+                      {:reason :missing-original-http-listener})))
+    ;; Intentionally bypass managed stop; its historical adapter report
+    ;; remains :verified-selected-adapter-start until managed shutdown.
+    ((get-in scenario [:raw :biff.core/stop]) system)
+    (let [replacement
+          (bind-replacement-on-port! port (:biff.ring/handler system))]
+      (reset! (:server-state scenario) replacement)
+      {:old original :new replacement})))
+
+(deftest real-same-port-server-replacement-invalidates-trusted-generation
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true)
+                       :listener-instance!
+                       (fn [_] (:server @(:server-state s)))))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))
+            old-server (:server @(:server-state s))
+            old-port (:port @(:server-state s))]
+        (is (= :matches-original-host-reported-object
+               (:physical-listener-instance (inspect!))))
+        (let [{:keys [new]} (replace-actual-listener-at-same-port! s system)]
+          (is (= old-port (:port new)))
+          (is (not (identical? old-server (:server new))))
+          (is (not (.isShutdown (:executor new))))
+          (is (= :verified-configured-start
+                 (:status ((:summary! issued)))))
+          (is (= :configured-physical-listener-not-current
+                 (reason inspect!)))
+          (is (= :configured-physical-listener-not-current
+                 (reason #((:inspect-running! issued) system))))
+          (is (zero? @(:hits new))
+              "Exact-object mismatch rejected before any liveness request"))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason inspect!))))
+      (finally (cleanup! s issued)))))
+
+(deftest real-same-port-replacement-exposes-uninstrumented-identity-limit
+  ;; Without :listener-instance!, the second physical server can answer the
+  ;; original wrapper's fresh one-use HTTP challenge on the original port.
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))
+            old-server (:server @(:server-state s))
+            old-port (:port @(:server-state s))]
+        (is (= :observed-at-current-inspection
+               (:fresh-local-http-response (inspect!))))
+        (let [{:keys [new]} (replace-actual-listener-at-same-port! s system)
+              before @(:hits new)
+              observed (inspect!)]
+          (is (= old-port (:port new)))
+          (is (not (identical? old-server (:server new))))
+          (is (< before @(:hits new))
+              "A real fresh challenge reached the replacement HttpServer")
+          (is (= :observed-at-current-inspection
+                 (:fresh-local-http-response observed)))
+          (is (= :matches-startup-verified-loopback-port
+                 (:original-local-listener-endpoint observed)))
+          (is (= :not-established (:physical-listener-instance observed)))
+          (is (= :not-established (:physical-instance-provenance observed))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason inspect!))))
+      (finally (cleanup! s issued)))))
