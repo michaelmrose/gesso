@@ -15,6 +15,8 @@
    authenticate an external deployment or user principal, verify arbitrary
    normal routes, or authorize model transactions, retries or certificates."
   (:require [gesso.assurance.proof.checked-biff-host-adoption :as host]
+            [gesso.assurance.proof.xtdb-gateway-biff-issued-catalog-canonical-trial
+             :as typed-trial]
             [gesso.live.application-preflight :as app])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
@@ -34,6 +36,8 @@
 
 (def ^:private ^WeakHashMap issued (WeakHashMap.))
 (def ^:private original-host-check host/require-current-biff-host-adoption!)
+(def ^:private original-typed-issuer
+  typed-trial/issue-biff-issued-catalog-canonical-trial!)
 (def ^:private original-handler-slot app/biff-ring-handler-key)
 
 (defn- reject! [reason]
@@ -44,6 +48,8 @@
 (defn- pinned! []
   (when-not (and (identical? original-host-check
                              (var-get #'host/require-current-biff-host-adoption!))
+                 (identical? original-typed-issuer
+                             (var-get #'typed-trial/issue-biff-issued-catalog-canonical-trial!))
                  (= original-handler-slot app/biff-ring-handler-key))
     (reject! :substituted-original-host-or-handler-slot)))
 
@@ -51,7 +57,7 @@
   (when (instance? ConsumptionProbeHandle handle)
     (locking issued (.get issued handle))))
 
-(defn- report [state outcome hits]
+(defn- report [state outcome hits trial-enabled? typed-result typed-hits]
   {:type report-type :version report-version
    :scope :one-final-ring-handler-loopback-http-consumption-challenge
    :module-state (if (map? state) :started state)
@@ -61,8 +67,25 @@
    (if (= :one-final-checked-wrapper-http-challenge-returned outcome)
      :observed-on-selected-loopback-adapter
      :not-established)
-   :normal-http-route-consumption :not-established
-   :same-request-typed-catalog-execution :not-established
+   :normal-http-route-consumption
+   (if (and (= outcome :one-final-checked-wrapper-http-challenge-returned)
+            (= typed-result :bounded-biff-issued-catalog-atomic-acknowledgment))
+     :one-selected-tested-route-through-final-wrapper
+     :not-established)
+   :same-request-typed-catalog-execution
+   (if (and (= outcome :one-final-checked-wrapper-http-challenge-returned)
+            (= typed-result :bounded-biff-issued-catalog-atomic-acknowledgment))
+     :one-original-catalog-atomic-ack-in-selected-wrapper-call
+     :not-established)
+   :typed-trial-enabled trial-enabled?
+   :typed-trial-attempts typed-hits
+   :typed-trial-last-outcome typed-result
+   :selected-adapter-typed-atomic-correspondence
+   (if (and (= outcome :one-final-checked-wrapper-http-challenge-returned)
+            (= typed-result :bounded-biff-issued-catalog-atomic-acknowledgment)
+            (= 1 typed-hits))
+     :bounded-challenge-and-one-typed-canonical-execution
+     :not-established)
    :deployed-server-identity :not-established
    :external-server-deployment :not-established
    :authenticated-principal :not-established
@@ -98,8 +121,19 @@
    loopback URL. Verifies a single read-only challenge; no data write or
    ordinary operation is executed by the challenge. Normal requests delegate
    unchanged to the originally checked Ring handler."
-  [host-handle contract-source]
+  ([host-handle contract-source]
+   (issue-http-consumption-probe-module! host-handle contract-source nil))
+  ([host-handle contract-source typed-config]
   (pinned!)
+  (when-not (or (nil? typed-config)
+                (and (map? typed-config) (nil? (meta typed-config))
+                     (= #{:catalog-source :operation :inputs}
+                        (set (keys typed-config)))
+                     (map? (:catalog-source typed-config))
+                     (map? (:catalog (:catalog-source typed-config)))
+                     (qualified-keyword? (:operation typed-config))
+                     (map? (:inputs typed-config))))
+    (reject! :invalid-typed-adapter-trial-source))
   (when-not (and (host/checked-biff-host-adoption? host-handle)
                  (map? contract-source))
     (reject! :invalid-original-host-source))
@@ -113,6 +147,8 @@
         secret-response (str "gesso-consumed-" (UUID/randomUUID))
         pending (atom :inactive)
         hits (atom 0)
+        typed-attempts (atom 0)
+        typed-outcome (atom :not-established)
         module
         {:biff.core/id module-id
          :biff.core/start
@@ -132,7 +168,26 @@
                             (fn? original))
                (reset! state :failed)
                (reject! :not-the-original-checked-biff-handler))
-             (let [wrapped (fn [request]
+             ;; Issue the original catalog-bound trial against the checked
+             ;; ORIGINAL host-system, before any adapter captures the wrapper.
+             (let [selected (when typed-config
+                              (try
+                                {:issued (original-typed-issuer
+                                          host-handle contract-source host-system
+                                          (:catalog-source typed-config)
+                                          (:operation typed-config)
+                                          (:inputs typed-config))
+                                 :route-keys (set (map (juxt :method :path)
+                                                       (get-in (app/operation-summary
+                                                                (get-in contract-source
+                                                                        [:application-assembly
+                                                                         :operation-acquisition-assembly]))
+                                                               [(:operation typed-config)
+                                                                :routes])))}
+                                (catch Throwable error
+                                  (reset! state :failed)
+                                  (throw error))))
+                   wrapped (fn [request]
                              (if (= challenge-path (:uri request))
                                (if (and (= :get (:request-method request))
                                         (= secret-header
@@ -144,7 +199,50 @@
                                       :headers {"content-type" "text/plain"}
                                       :body secret-response})
                                  {:status 404 :body "Not found"})
-                               (original request)))
+                               (if (and selected
+                                        (contains? (:route-keys selected)
+                                                   [(:request-method request)
+                                                    (:uri request)]))
+                                 (if (not= :one-final-checked-wrapper-http-challenge-returned
+                                            @result)
+                                   {:status 503 :body "Local adapter challenge required"}
+                                   (do
+                                     (swap! typed-attempts inc)
+                                     (let [observed (try
+                                                      ((:observe-once! (:issued selected)) request)
+                                                      (catch Throwable _ nil))
+                                           qualified? (and
+                                                       (= typed-trial/report-type (:type observed))
+                                                       (= typed-trial/report-version (:version observed))
+                                                       (= (:operation typed-config)
+                                                          (:operation-id observed))
+                                                       (= :one-original-adopted-biff-handler-returned
+                                                          (:host-handler-return observed))
+                                                       (= :one-original-issued-executor-returned
+                                                          (:certified-executor-return observed))
+                                                       (= :one-source-relative-model-transaction-acknowledged
+                                                          (:canonical-physical-execution observed))
+                                                       (= :bounded-biff-issued-catalog-atomic-acknowledgment
+                                                          (:status observed))
+                                                       (= :not-issued (:certificate observed))
+                                                       (= :none (:authority observed)
+                                                          (:retry-authority observed)))
+                                           status (if qualified?
+                                                    :bounded-biff-issued-catalog-atomic-acknowledgment
+                                                    (if (and (= typed-trial/report-type
+                                                                (:type observed))
+                                                             (= typed-trial/report-version
+                                                                (:version observed)))
+                                                      (:status observed)
+                                                      :unqualified-or-uncertain))]
+                                       (reset! typed-outcome status)
+                                       ;; Do not replay an uncertain transaction.
+                                       ;; A 500 is NOT evidence of no physical commit.
+                                       {:status (if qualified? 200 500)
+                                        :body (if qualified?
+                                                "One local typed atomic operation acknowledged"
+                                                "Local typed execution unqualified")})))
+                                 (original request))))
                    wrapped-system (assoc host-system original-handler-slot
                                          wrapped)]
                (when-not (compare-and-set! state :starting
@@ -165,7 +263,7 @@
                                             (:host-system started)))
                      started))
         summary! (fn []
-                   (report (current!) @result @hits))
+                   (report (current!) @result @hits (boolean typed-config) @typed-outcome @typed-attempts))
         verify! (fn [final-system base-url]
                   (when-not (.compareAndSet claimed false true)
                     (reject! :http-consumption-probe-already-attempted))
@@ -204,7 +302,7 @@
                         (catch Throwable _
                           (reset! result :http-consumption-challenge-unconfirmed))
                         (finally (reset! pending :inactive)))
-                      (report (current!) @result @hits))))]
+                      (report (current!) @result @hits (boolean typed-config) @typed-outcome @typed-attempts))))]
     (locking issued (.put issued handle {:source contract-source}))
     {:handle handle :module module :summary! summary!
-     :verify-once! verify!}))
+     :verify-once! verify!})))
