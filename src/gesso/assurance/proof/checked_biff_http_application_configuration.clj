@@ -68,8 +68,10 @@
                  (or (not (contains? config :typed-trial))
                      (nil? (:typed-trial config))
                      (and (plain-map? (:typed-trial config))
-                          (= #{:catalog-source :operation :inputs}
-                             (set (keys (:typed-trial config))))
+                          (contains? #{#{:catalog-source :operation :inputs}
+                                       #{:catalog-source :operation :inputs
+                                         :principal-policy}}
+                                     (set (keys (:typed-trial config))))
                           (plain-map? (get-in config [:typed-trial :catalog-source]))
                           (plain-map? (get-in config [:typed-trial :inputs]))
                           (qualified-keyword? (get-in config [:typed-trial :operation])))))

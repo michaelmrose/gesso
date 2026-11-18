@@ -15,6 +15,7 @@
    certified-plan admission and is deliberately not relabeled as certified."
   (:require [gesso.assurance.proof.checked-biff-http-application-configuration
              :as configured]
+            [gesso.assurance.proof.checked-biff-request-principal :as principal]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]))
@@ -55,9 +56,11 @@
 (defn- check-source! [source]
   (pinned!)
   (when-not (and (plain-map? source)
-                 (= #{:contract-source :catalog-source :inputs
-                      :adapter-module :base-url!}
-                    (set (keys source)))
+                 (contains? #{#{:contract-source :catalog-source :inputs
+                                :adapter-module :base-url!}
+                              #{:contract-source :catalog-source :inputs
+                                :adapter-module :base-url! :principal-policy}}
+                            (set (keys source)))
                  (plain-map? (:contract-source source))
                  (plain-map? (:catalog-source source))
                  (= #{:catalog :physical-field-map}
@@ -67,6 +70,12 @@
                  (plain-map? (:inputs source))
                  (fn? (:base-url! source)))
     (reject! :invalid-claim-example-boot-source))
+  (when-let [policy (:principal-policy source)]
+    ;; Fail before Biff startup if this source's grant cannot match the exact
+    ;; declared claim operation and pinned typed owner. The runtime callback
+    ;; is still host-supplied and is NOT an authentication certificate.
+    (principal/issue-request-principal-gate!
+     policy operation-id (:inputs source)))
   (let [contract (:contract-source source)
         catalog-source (get-in source [:catalog-source :catalog])
         checked (try (original-contract-check contract)
@@ -97,7 +106,7 @@
     (pinned!)
     true))
 
-(defn- report [status]
+(defn- report [status principal-bound?]
   {:type report-type :version report-version
    :operation-id operation-id
    :selected-http-route :post-request-claim
@@ -112,6 +121,11 @@
    :authentic-business-policy :not-established
    :deployed-server-identity :not-established
    :independent-startup-coverage :not-established
+   :principal-authorization-check
+   (if principal-bound?
+     :trusted-host-result-must-match-granted-typed-owner
+     :not-established)
+   :host-principal-acquisition-authenticity :not-established
    :principal-authentication :not-established
    :authenticated-xtdb-receipt :not-established
    :actual-live-delivery :not-established
@@ -139,10 +153,16 @@
                  :base-url! (:base-url! source)
                  :typed-trial {:catalog-source (:catalog-source source)
                                :operation operation-id
-                               :inputs (:inputs source)}})
+                               :inputs (:inputs source)
+                               ;; Only the separately selected opt-in claim
+                               ;; boot supplies this policy to v1781's actual
+                               ;; request wrapper. Never manufacture an auth
+                               ;; conclusion from an absent policy.
+                               :principal-policy (:principal-policy source)}})
         summary! (fn []
                    (pinned!)
-                   (report (:status ((:summary! issued)))))
+                   (report (:status ((:summary! issued)))
+                           (some? (:principal-policy source))))
         boot! (fn []
                 (check-source! source)
                 (let [started ((:start-once! issued) {})]
@@ -152,8 +172,10 @@
                                     (get-in started [:report :status]))
                                  (= :none (get-in started [:report :authority])))
                     (reject! :unqualified-claim-app-startup))
-                  (report (:status (:report started)))))
+                  (report (:status (:report started))
+                          (some? (:principal-policy source)))))
         stop! (fn []
                 (pinned!)
-                (report (:status ((:stop! issued)))))]
+                (report (:status ((:stop! issued)))
+                        (some? (:principal-policy source))))]
     {:boot! boot! :stop! stop! :summary! summary!}))

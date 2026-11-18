@@ -17,6 +17,7 @@
   (:require [gesso.assurance.proof.checked-biff-host-adoption :as host]
             [gesso.assurance.proof.xtdb-gateway-biff-issued-catalog-canonical-trial
              :as typed-trial]
+            [gesso.assurance.proof.checked-biff-request-principal :as principal]
             [gesso.live.application-preflight :as app])
   (:import [java.net URI]
            [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
@@ -38,6 +39,8 @@
 (def ^:private original-host-check host/require-current-biff-host-adoption!)
 (def ^:private original-typed-issuer
   typed-trial/issue-biff-issued-catalog-canonical-trial!)
+(def ^:private original-principal-issuer
+  principal/issue-request-principal-gate!)
 (def ^:private original-handler-slot app/biff-ring-handler-key)
 
 (defn- reject! [reason]
@@ -50,6 +53,8 @@
                              (var-get #'host/require-current-biff-host-adoption!))
                  (identical? original-typed-issuer
                              (var-get #'typed-trial/issue-biff-issued-catalog-canonical-trial!))
+                 (identical? original-principal-issuer
+                             (var-get #'principal/issue-request-principal-gate!))
                  (= original-handler-slot app/biff-ring-handler-key))
     (reject! :substituted-original-host-or-handler-slot)))
 
@@ -57,7 +62,8 @@
   (when (instance? ConsumptionProbeHandle handle)
     (locking issued (.get issued handle))))
 
-(defn- report [state outcome hits trial-enabled? typed-result typed-hits]
+(defn- report [state outcome hits trial-enabled? typed-result typed-hits
+               principal-enabled? principal-rejections principal-admissions]
   {:type report-type :version report-version
    :scope :one-final-ring-handler-loopback-http-consumption-challenge
    :module-state (if (map? state) :started state)
@@ -80,6 +86,15 @@
    :typed-trial-enabled trial-enabled?
    :typed-trial-attempts typed-hits
    :typed-trial-last-outcome typed-result
+   :request-principal-gate
+   (if principal-enabled?
+     :host-acquired-grant-must-match-pinned-typed-owner
+     :not-established)
+   :principal-request-denials principal-rejections
+   :principal-request-grants principal-admissions
+   :host-principal-acquisition-authenticity :not-established
+   :principal-policy-catalog-equivalence :not-established
+   :csrf-protection :not-established
    :selected-adapter-typed-atomic-correspondence
    (if (and (= outcome :one-final-checked-wrapper-http-challenge-returned)
             (= typed-result :bounded-biff-issued-catalog-atomic-acknowledgment)
@@ -127,8 +142,9 @@
   (pinned!)
   (when-not (or (nil? typed-config)
                 (and (map? typed-config) (nil? (meta typed-config))
-                     (= #{:catalog-source :operation :inputs}
-                        (set (keys typed-config)))
+                     (contains? #{#{:catalog-source :operation :inputs}
+                                  #{:catalog-source :operation :inputs :principal-policy}}
+                                (set (keys typed-config)))
                      (map? (:catalog-source typed-config))
                      (map? (:catalog (:catalog-source typed-config)))
                      (qualified-keyword? (:operation typed-config))
@@ -149,6 +165,8 @@
         hits (atom 0)
         typed-attempts (atom 0)
         typed-outcome (atom :not-established)
+        principal-denials (atom 0)
+        principal-admissions (atom 0)
         module
         {:biff.core/id module-id
          :biff.core/start
@@ -172,7 +190,11 @@
              ;; ORIGINAL host-system, before any adapter captures the wrapper.
              (let [selected (when typed-config
                               (try
-                                {:issued (original-typed-issuer
+                                {:principal (when-let [policy (:principal-policy typed-config)]
+                                              (original-principal-issuer
+                                               policy (:operation typed-config)
+                                               (:inputs typed-config)))
+                                 :issued (original-typed-issuer
                                           host-handle contract-source host-system
                                           (:catalog-source typed-config)
                                           (:operation typed-config)
@@ -206,9 +228,24 @@
                                  (if (not= :one-final-checked-wrapper-http-challenge-returned
                                             @result)
                                    {:status 503 :body "Local adapter challenge required"}
-                                   (do
-                                     (swap! typed-attempts inc)
-                                     (let [observed (try
+                                   (let [authorization (when-let [gate (:principal selected)]
+                                                         (try
+                                                           ((:check-request! gate) request)
+                                                           (catch Throwable _
+                                                             {:status :principal-check-uncertain
+                                                              :http-status 500})))
+                                         admitted? (or (nil? authorization)
+                                                       (= :grant-and-typed-owner-matched
+                                                          (:status authorization)))]
+                                     (if-not admitted?
+                                       (do (swap! principal-denials inc)
+                                           {:status (:http-status authorization)
+                                            :body "Request principal not admitted"})
+                                       (do
+                                         (when authorization
+                                           (swap! principal-admissions inc))
+                                         (swap! typed-attempts inc)
+                                         (let [observed (try
                                                       ((:observe-once! (:issued selected)) request)
                                                       (catch Throwable _ nil))
                                            qualified? (and
@@ -241,7 +278,7 @@
                                        {:status (if qualified? 200 500)
                                         :body (if qualified?
                                                 "One local typed atomic operation acknowledged"
-                                                "Local typed execution unqualified")})))
+                                                "Local typed execution unqualified")})))))
                                  (original request))))
                    wrapped-system (assoc host-system original-handler-slot
                                          wrapped)]
@@ -263,7 +300,10 @@
                                             (:host-system started)))
                      started))
         summary! (fn []
-                   (report (current!) @result @hits (boolean typed-config) @typed-outcome @typed-attempts))
+                   (report (current!) @result @hits (boolean typed-config)
+                           @typed-outcome @typed-attempts
+                           (some? (:principal-policy typed-config))
+                           @principal-denials @principal-admissions))
         verify! (fn [final-system base-url]
                   (when-not (.compareAndSet claimed false true)
                     (reject! :http-consumption-probe-already-attempted))
@@ -302,7 +342,10 @@
                         (catch Throwable _
                           (reset! result :http-consumption-challenge-unconfirmed))
                         (finally (reset! pending :inactive)))
-                      (report (current!) @result @hits (boolean typed-config) @typed-outcome @typed-attempts))))]
+                      (report (current!) @result @hits (boolean typed-config)
+                           @typed-outcome @typed-attempts
+                           (some? (:principal-policy typed-config))
+                           @principal-denials @principal-admissions))))]
     (locking issued
       (.put issued handle {:source contract-source
                            :module module
