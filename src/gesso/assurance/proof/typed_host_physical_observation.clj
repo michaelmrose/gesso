@@ -145,8 +145,17 @@
                                     (= false (:xtdb-receipt-authenticated? report))
                                     (= :not-issued (:certificate report))
                                     (= :none (:authority report))
+                                    ;; A positive v1480 physical status is only
+                                    ;; useful with ALL independently captured
+                                    ;; operations/options/execute-key evidence.
+                                    ;; Never elevate a status label alone.
                                     (if positive?
-                                      (and handle
+                                      (and (true? (:actual-issued-executor-attempt-observed? report))
+                                           (true? (:one-adapter-call-observed? report))
+                                           (true? (:prepared-operations-agree? report))
+                                           (true? (:prepared-options-agree? report))
+                                           (true? (:definitive-execute-key-observed? report))
+                                           handle
                                            (= report
                                               (original-require handle options report)))
                                       (nil? handle)))
@@ -164,6 +173,14 @@
                         (:actual-issued-executor-attempt-observed? report)
                         :one-adapter-call-observed?
                         (:one-adapter-call-observed? report)
+                        ;; Redacted original v1480 facts are necessary for
+                        ;; v1764's conditional composition with v1763 source.
+                        :prepared-operations-agree?
+                        (:prepared-operations-agree? report)
+                        :prepared-options-agree?
+                        (:prepared-options-agree? report)
+                        :definitive-execute-key-observed?
+                        (:definitive-execute-key-observed? report)
                         :typed-to-certified-executor-transition-equivalence
                         :not-established
                         :typed-gateway-used-by-handler :not-established

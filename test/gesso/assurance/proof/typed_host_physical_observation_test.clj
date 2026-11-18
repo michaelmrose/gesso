@@ -194,6 +194,12 @@
        (is (re-matches #"sha256:[0-9a-f]{64}"
                        (:transition-fingerprint observed)))
        (is (= :bounded-same-invocation-adapter-correlation (:status observed)))
+       (is (true? (:prepared-operations-agree? observed)))
+       (is (true? (:prepared-options-agree? observed)))
+       (is (true? (:definitive-execute-key-observed? observed)))
+       (is (= :bounded-source-matched-adapter-plan-footprint
+              (:declared-source-to-observed-adapter-footprint observed)
+              (:declared-source-to-observed-adapter-footprint after)))
        (is (= :bounded-same-invocation-adapter-correlation
               (:observation-status after)))
        (is (= 1 @transactions))
@@ -248,3 +254,48 @@
     (is (= :aligned-observation-already-attempted
            (reason #((:observe-once! bound) (request)))))
     (is (empty? @(:calls *case*)))))
+
+
+;; v1764: Source equality alone is never a physical-transaction observation.
+;; The adapter's exact prepared transaction footprint must match as well.
+(deftest aligned-source-does-not-promote-a-reconcile-only-execution
+  (reset! (:mode *case*) :reconcile)
+  (let [bound (aligned-issuer)
+        before ((:summary! bound))
+        result ((:observe-once! bound) (request))
+        after ((:summary! bound))]
+    (is (= :not-established
+           (:declared-source-to-observed-adapter-footprint before)
+           (:declared-source-to-observed-adapter-footprint result)
+           (:declared-source-to-observed-adapter-footprint after)))
+    (is (= :exact-typed-catalog-to-issued-certified-plan-match
+           (:original-transition-source result)))
+    (is (= :no-qualified-same-invocation-adapter-correlation (:status result)))
+    (is (= :not-issued (:certificate result)))
+    (is (= [:input :response] @(:calls *case*)))))
+
+(deftest altered-physical-ops-options-and-nondefinitive-submits-are-not-promoted
+  (doseq [[settings expected-status]
+          [[{:change-ops #(conj % [:rogue :unaccounted])}
+            :prepared-plan-diverges-from-adapter]
+           [{:tx-options {:metadata {:unexpected :value}}}
+            :prepared-options-diverge-from-adapter]
+           [{:tx-mode :submit-tx}
+            :submit-only-not-definitive]
+           [{:status :rejected}
+            :unconfirmed-or-uncertain-outcome]]]
+    ((helper fixture-ns 'artificial-execution) settings
+     (fn [{:keys [transactions api-calls]}]
+       (let [bound (aligned-issuer)
+             result ((:observe-once! bound) (request))]
+         (is (= expected-status (:physical-observation-status result)))
+         (is (= :no-qualified-same-invocation-adapter-correlation
+                (:status result)))
+         (is (= :not-established
+                (:declared-source-to-observed-adapter-footprint result)
+                (:declared-source-to-observed-adapter-footprint
+                 ((:summary! bound)))))
+         (is (= :not-established (:typed-gateway-used-by-handler result)))
+         (is (= :not-issued (:certificate result)))
+         (is (= 1 @transactions) "No retries to repair an observation")
+         (is (= 1 (count @api-calls))))))))

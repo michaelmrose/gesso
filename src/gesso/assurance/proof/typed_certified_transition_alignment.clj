@@ -12,7 +12,11 @@
    This is a declared SOURCE correspondence, not a formal proof of arbitrary
    executable behavior, authenticity of the declared business policy,
    complete deployed writers, deployed HTTP adoption, or actual XTDB
-   causality. Neither a source fingerprint nor this observer is a certificate."
+   causality. v1764 separately labels the bounded composition of exact
+   declared transition source and one matched adapter transaction footprint;
+   that label is conditional on the v1480 actual prepared-ops/options and
+   definitive execute-key checks. It is NOT transaction-time CAS proof.
+   Neither a source fingerprint nor this observer is a certificate."
   (:require [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.typed-host-physical-observation :as observed]
             [gesso.assurance.transition :as construction]
@@ -120,6 +124,7 @@
                                              catalog operation)
         consumed (AtomicBoolean. false)
         qualified (atom :not-observed)
+        footprint (atom :not-established)
         recheck! (fn []
                    (when-not (= initial
                                 (current-declaration! catalog contract-source
@@ -136,6 +141,8 @@
                           (:transition-fingerprint initial)
                           :typed-to-certified-executor-transition-equivalence
                           :not-established
+                          :declared-source-to-observed-adapter-footprint
+                          @footprint
                           :original-business-policy-authenticity
                           :not-established
                           :typed-gateway-used-by-handler :not-established
@@ -166,8 +173,28 @@
                                     (= :not-issued (:certificate result))
                                     (= :none (:authority result)))
                        (reject! :unexpected-underlying-physical-observation))
-                     (reset! qualified (:status result))
-                     (decorate result)))]
+                     ;; The original declared transition construction is
+                     ;; source-equal to the checked issued executor. Only a
+                     ;; qualified v1480 single-call observation may compose
+                     ;; that source fact with its *prepared transaction
+                     ;; footprint*, NOT with authenticated XTDB persistence.
+                     (let [positive? (= :bounded-same-invocation-adapter-correlation
+                                        (:status result))
+                           footprint-qualified?
+                           (and positive?
+                                (true? (:resolved-executor-attempt-observed? result))
+                                (true? (:one-adapter-call-observed? result))
+                                (true? (:prepared-operations-agree? result))
+                                (true? (:prepared-options-agree? result))
+                                (true? (:definitive-execute-key-observed? result)))]
+                       (when (and positive? (not footprint-qualified?))
+                         (reject! :positive-adapter-correlation-lacks-required-footprint))
+                       (reset! footprint
+                               (if footprint-qualified?
+                                 :bounded-source-matched-adapter-plan-footprint
+                                 :not-established))
+                       (reset! qualified (:status result))
+                       (decorate result))))]
     (recheck!)
     {:type report-type :version report-version
      :observe-once! observe! :summary! summary!}))
