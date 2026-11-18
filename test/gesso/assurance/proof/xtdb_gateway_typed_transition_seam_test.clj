@@ -6,6 +6,8 @@
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
             [clojure.set :as set]
             [gesso.assurance.proof.xtdb-gateway-typed-transition-seam :as seam]
+            [gesso.assurance.proof.xtdb-gateway-assembled-typed-transition-seam :as assembled-seam]
+            [gesso.assurance.proof.installed-route-provenance :as installed-router]
             [gesso.assurance.proof.transition :as transition]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate-test]
             [xtdb.api :as xt]))
@@ -363,4 +365,117 @@
               ((:summary! (bound-prepare weaker-binder
                                          (candidate b (assoc (after b) :owner "reserved"))
                                          {:input/owner "reserved"}))))))
+      (is (= b (physical))))))
+
+;; v1758: the caller's declared source must match the CURRENT independently
+;; assembled operation/issued handler/registered in-process route universe.
+;; This is not evidence that Biff/HTTP actually adopted the checked router.
+(defn- assembled-preparer
+  ([] (assembled-preparer declared-catalog))
+  ([catalog]
+   (let [{:keys [contract]} (case-context)
+         router (installed-router/install-checked-ring-router! contract)]
+     (assembled-seam/issue-assembled-source-bound-typed-transition-gateway!
+      catalog contract router :example/claim))))
+
+(defn- assembled-prepare
+  ([binder candidate-source]
+   (assembled-prepare binder candidate-source
+                     {:request-method :post :uri "/operations/example/claim"}))
+  ([binder candidate-source request]
+   (let [{:keys [issuance]} (case-context)]
+     ((:prepare! binder) (node) issuance request candidate-source
+      {:input/owner "claimed"} mapping))))
+
+(deftest assembled-source-preparer-reuses-real-protected-xtdb-path
+  (let [b (before)]
+    (put! b)
+    (let [binder (assembled-preparer)
+          source-summary ((:summary! binder))
+          prepared (assembled-prepare binder (candidate b))
+          summary ((:summary! prepared))]
+      (is (= assembled-seam/binding-type (:type binder) (:type source-summary)))
+      (is (= :closed-declared-set-equals-assembly
+             (:source-operation-coverage source-summary)))
+      (is (= :exact-current-assembly-certified-handlers-and-local-router
+             (:assembled-source-binding summary)))
+      (is (= :not-established (:installed-router-adoption summary)))
+      (is (= :not-established (:original-business-policy-authenticity summary)))
+      (is (= :not-established (:complete-deployed-writer-coverage summary)))
+      (is (= :not-issued (:production-certification summary)))
+      (is (= b (physical)))
+      (is (some? ((:submit! prepared))))
+      (is (= (after b) (physical)))
+      (is (= :assembled-one-shot-already-attempted
+             (reason (:submit! prepared)))))))
+
+(deftest assembled-seam-refuses-caller-selected-catalog-op-divergence
+  (let [b (before)]
+    (put! b)
+    (let [other (assoc-in (first (:operations declared-catalog))
+                          [:construction :subject :id] :example/other)
+          extra (-> declared-catalog
+                    (update :declared-operation-ids conj :example/other)
+                    (update :operations conj
+                            {:id :example/other
+                             :construction other}))]
+      (is (= :invalid-original-operation-catalog
+             (reason #(assembled-preparer extra))))
+      (is (= :declared-catalog-assembly-or-router-closure-not-established
+             (reason #(let [{:keys [contract]} (case-context)
+                            router (installed-router/install-checked-ring-router! contract)]
+                        (assembled-seam/issue-assembled-source-bound-typed-transition-gateway!
+                         declared-catalog contract router :example/unclaim)))))
+      (is (= b (physical))))))
+
+(deftest assembled-seam-rejects-incorrect-route-before-physical-preparation
+  (let [b (before)]
+    (put! b)
+    (let [binder (assembled-preparer)]
+      (doseq [request [{:request-method :post :uri "/wrong"}
+                       {:request-method :get :uri "/operations/example/claim"}
+                       {:request-method :post :uri "/operations/example/claim/other"}]]
+        (is (= :request-is-not-a-bound-operation-route
+               (reason #(assembled-prepare binder (candidate b) request)))))
+      (is (= b (physical))))))
+
+(deftest assembled-seam-refuses-unregistered-or-stale-in-process-routers
+  (let [b (before)
+        {:keys [contract issuance]} (case-context)]
+    (put! b)
+    (is (= :unregistered-or-stale-ring-router
+           (reason #(assembled-seam/issue-assembled-source-bound-typed-transition-gateway!
+                     declared-catalog contract (fn [_] {:status 200}) :example/claim))))
+    (let [router (installed-router/install-checked-ring-router! contract)
+          binder (assembled-seam/issue-assembled-source-bound-typed-transition-gateway!
+                  declared-catalog contract router :example/claim)]
+      ;; A swapped checker can neither launder a source report nor get past the
+      ;; one-use submission recheck. The underlying XTDB writer is untouched.
+      (with-redefs [gesso.live.application-preflight.certified-contract/check-certified-contracts!
+                    (fn [_] {:type :forged})]
+        (is (= :substituted-application-or-source-checker
+               (reason #((:summary! binder))))))
+      (let [prepared ((:prepare! binder) (node) issuance
+                      {:request-method :post :uri "/operations/example/claim"}
+                      (candidate b) {:input/owner "claimed"} mapping)]
+        (with-redefs [gesso.live.application-preflight.certified-contract/check-certified-contracts!
+                      (fn [_] {:type :forged})]
+          (is (= :substituted-application-or-source-checker
+                 (reason (:submit! prepared)))))
+        (is (= :assembled-one-shot-already-attempted
+               (reason (:submit! prepared)))))
+      (is (= b (physical))))))
+
+(deftest assembled-route-check-does-not-authenticate-weaker-original-policy
+  (let [b (before)
+        weaker (update declared-catalog :invariants dissoc :doc/owner-not-reserved)]
+    (put! b)
+    (let [binder (assembled-preparer weaker)
+          summary ((:summary! binder))]
+      ;; An existing route/plan checks the *same operation ID*, not whether the
+      ;; supplied catalog contains all of the business's intended rules.
+      (is (= :not-established (:original-business-policy-authenticity summary)))
+      (is (= :not-established (:installed-router-adoption summary)))
+      (is (= :closed-declared-set-equals-assembly
+             (:source-operation-coverage summary)))
       (is (= b (physical))))))
