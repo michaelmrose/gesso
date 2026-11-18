@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1801: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1802: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -40,7 +40,13 @@
    v1801: Inspect and managed stop share one private lifecycle monitor,
    preventing a successful in-process inspection from overlapping the
    transition to stopping or the physical stop call. Each report is still
-   strictly point-in-time; it is NOT a lease on future liveness."
+   strictly point-in-time; it is NOT a lease on future liveness.
+
+   v1802: The current-instance check also compares the ORIGINAL live
+   checked-host certified routes to the EXACT selected catalog route IDs
+   accepted at this startup. No one-shot request dispatch challenge is
+   repeated after business execution; no new policy or liveness authority
+   is inferred from this scoped inventory correspondence."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -219,6 +225,28 @@
       (reject! :selected-catalog-http-dispatch-not-observed))
     true))
 
+(defn- require-running-selected-route-continuity!
+  "Require the CURRENT original host route inventory to equal the saved
+   startup-selected certified catalog route set. This predicate accepts
+   inventory evidence ONLY from the original issued probe inspection done
+   by its caller, never as an independently issued certificate.
+
+   An application WITHOUT a selected typed catalog must not acquire
+   selected-catalog correspondence by implication."
+  [typed-selected? startup-route-ids inventory]
+  (when-not
+   (if typed-selected?
+     (and (set? startup-route-ids)
+          (seq startup-route-ids)
+          (every? qualified-keyword? startup-route-ids)
+          (set? (:checked-certified-route-ids inventory))
+          (set? (:checked-route-ids inventory))
+          (= startup-route-ids (:checked-certified-route-ids inventory))
+          (set/subset? startup-route-ids (:checked-route-ids inventory)))
+     (nil? startup-route-ids))
+    (reject! :configured-instance-selected-routes-not-current))
+  true)
+
 (defn- report [state typed-selected?]
   {:type report-type :version report-version
    :scope :one-application-owned-closed-biff-http-start
@@ -286,6 +314,7 @@
         state (atom :issued)
         started (atom nil)
         lifecycle-monitor (Object.)
+        selected-startup-routes (atom nil)
         summary! (fn [] (pinned!) (report @state (some? typed-trial)))
         inspect-running! (fn [candidate-system]
                            (locking lifecycle-monitor
@@ -319,6 +348,13 @@
                                             (= :verified-configured-start @state)
                                             (identical? candidate-system @started))
                                (reject! :configured-instance-not-current))
+                             ;; Reuse the CURRENT original issued probe and
+                             ;; checked host inventory without replaying the
+                             ;; one-use read-only dispatch challenges. The
+                             ;; complete selected set must remain identical
+                             ;; to the set checked before this startup.
+                             (require-running-selected-route-continuity!
+                              (some? typed-trial) @selected-startup-routes inventory)
                              {:type running-report-type :version report-version
                               :scope :one-original-managed-in-process-biff-instance
                               :status :current-at-inspection
@@ -327,6 +363,9 @@
                               :original-probe-handler-slot :exact-issued-wrapper
                               :selected-catalog-source
                               (if typed-trial :checked-at-startup-only :not-selected)
+                              :selected-catalog-route-continuity
+                              (if typed-trial :matches-current-original-host-route-set
+                                  :not-selected)
                               :external-listener-liveness :not-established
                               :out-of-band-adapter-stops :not-established
                               :certificate :not-issued :admission :not-admitted
@@ -383,6 +422,8 @@
                        (when-not (compare-and-set! state :starting
                                                     :verified-configured-start)
                          (reject! :configured-start-state-diverged))
+                       (reset! selected-startup-routes
+                               (:matched-certified-route-ids selected-coverage))
                        (reset! started (:system result))
                        {:system (:system result)
                         :report (report @state (some? typed-trial))}

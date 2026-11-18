@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1801: The actual application startup entrypoint owns module issuance,
+  "v1802: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -432,6 +432,8 @@
         (is (= :exact-identity (:returned-system observed)))
         (is (= :verified-not-stopped (:original-guarded-adapter observed)))
         (is (= :exact-issued-wrapper (:original-probe-handler-slot observed)))
+        (is (= :matches-current-original-host-route-set
+               (:selected-catalog-route-continuity observed)))
         (is (= :not-established (:external-listener-liveness observed)))
         (is (= :not-established (:out-of-band-adapter-stops observed)))
         (is (= :none (:authority observed) (:transaction-authority observed)))
@@ -445,6 +447,8 @@
         ;; has legitimately advanced. Current lifecycle/host identity can.
         (is (= 200 (post! s)))
         (is (= :current-at-inspection (:status (inspect! system))))
+        (is (= :matches-current-original-host-route-set
+               (:selected-catalog-route-continuity (inspect! system))))
         (is (= :stopped (:status ((:stop! issued)))))
         (is (= :configured-instance-not-current
                (reason #(inspect! system))))
@@ -464,6 +468,9 @@
                (:status ((:inspect-running! issued) system))))
         (is (= :not-selected
                (:selected-catalog-source ((:inspect-running! issued) system))))
+        (is (= :not-selected
+               (:selected-catalog-route-continuity
+                ((:inspect-running! issued) system))))
         (is (= :stopped (:status ((:stop! issued)))))
         (is (= :configured-instance-not-current
                (reason #((:inspect-running! issued) system)))))
@@ -541,3 +548,31 @@
       (finally
         (deliver allow-stop true)
         (cleanup! s issued)))))
+
+(deftest running-selected-route-continuity-demands-exact-original-host-set
+  ;; The actual current host inventory is authenticated by the original
+  ;; issued probe in inspect-running!. These plain maps test only the
+  ;; secondary shape/equality predicate, never evidence authenticity.
+  (let [check! (var-get #'config/require-running-selected-route-continuity!)
+        routes #{:request/claim :request/finish}
+        inventory {:checked-certified-route-ids routes
+                   :checked-route-ids (conj routes :page/home)}]
+    (is (true? (check! true routes inventory)))
+    (is (true? (check! false nil inventory)))
+    (doseq [[selected? saved current]
+            [[true routes (assoc inventory :checked-certified-route-ids
+                                 #{:request/claim})]
+             [true routes (assoc inventory :checked-certified-route-ids
+                                 (conj routes :request/other))]
+             [true routes (assoc inventory :checked-route-ids
+                                 #{:request/claim :page/home})]
+             [true routes (dissoc inventory :checked-route-ids)]
+             [true routes (assoc inventory :checked-certified-route-ids
+                                 [:request/claim :request/finish])]
+             [true nil inventory]
+             [true #{} inventory]
+             [true #{:request/claim "request/finish"} inventory]
+             [false routes inventory]]]
+      (is (= :configured-instance-selected-routes-not-current
+             (reason #(check! selected? saved current)))
+          (pr-str {:selected? selected? :saved saved :current current})))))
