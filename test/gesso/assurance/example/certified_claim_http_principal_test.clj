@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.certified-claim-http-principal-test
-  "v1786: Real network principal acquisition and exact owner grant must be
+  "v1787: Real network principal acquisition and exact owner grant must be
    checked before the v1785 boot's ONE catalog-bound typed XTDB write."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.example.certified-claim-http-boot :as boot]
@@ -237,3 +237,73 @@
            (:principal-authorization-check ((:summary! issued)))))
     (is (= :not-established
            (:principal-authentication ((:summary! issued)))))))
+
+(deftest request-intent-gate-uses-same-ring-request-and-cannot-grant
+  (let [{:keys [source session-id data env] :as e} (with-source)
+        {:keys [request binding]} data
+        original-acquire (get-in source [:principal-policy :acquire-principal!])
+        acquired (atom nil)
+        intent-calls (atom [])
+        source (-> source
+                   (assoc-in [:principal-policy :acquire-principal!]
+                             (fn [ring-request]
+                               (reset! acquired ring-request)
+                               (original-acquire ring-request)))
+                   (assoc-in [:principal-policy :verify-request-intent!]
+                             (fn [ring-request person operation]
+                               (swap! intent-calls conj
+                                      {:same-request? (identical? @acquired ring-request)
+                                       :principal person :operation operation})
+                               (= "valid-request-token"
+                                  (get-in ring-request [:headers "x-request-token"])))))
+        issued (boot/issue-claim-http-boot! source)]
+    (seed! [:requests request])
+    (try
+      ((:boot! issued))
+      ;; An authenticated and granted principal still cannot submit without
+      ;; the host-supplied request-integrity decision on this SAME request.
+      (is (= 403 (send! e session-id)))
+      (is (= 403 (send! e session-id [["x-request-token" "forged"]])))
+      (is (= request (read-request (:xt/id request))))
+      (is (nil? (read-command (resolution/record-id binding))))
+      (is (zero? @(get-in env [:environment :constructs])))
+      (is (= 2 (count @intent-calls)))
+      (is (every? #(= {:same-request? true
+                       :principal :user/helper-a
+                       :operation :request/claim} %)
+                  @intent-calls))
+      (is (= 200 (send! e session-id
+                        [["x-request-token" "valid-request-token"]])))
+      (is (= 3 (count @intent-calls)))
+      (is (= ((model 'next-version) request {:owner "helper-a"})
+             (read-request (:xt/id request))))
+      (is (some? (read-command (resolution/record-id binding))))
+      (is (= 1 @(get-in env [:environment :constructs])))
+      (finally (cleanup! e issued)))))
+
+(deftest malformed-request-intent-or-throwing-callback-fails-closed
+  (doseq [bad-intent [(fn [_ _ _] {:status :ok})
+                      (fn [_ _ _] nil)
+                      (fn [_ _ _] (throw (ex-info "intent unavailable" {})))]]
+    (let [{:keys [source session-id data env] :as e} (with-source)
+          {:keys [request binding]} data
+          source (assoc-in source [:principal-policy :verify-request-intent!]
+                           bad-intent)
+          issued (boot/issue-claim-http-boot! source)]
+      (seed! [:requests request])
+      (try
+        ((:boot! issued))
+        (is (= 500 (send! e session-id)))
+        (is (= request (read-request (:xt/id request))))
+        (is (nil? (read-command (resolution/record-id binding))))
+        (is (zero? @(get-in env [:environment :constructs])))
+        (finally (cleanup! e issued))))))
+
+(deftest malformed-intent-policy-is-rejected-before-http-start
+  (let [{:keys [source server-state]} (with-source)]
+    (doseq [bad [nil true {:untrusted true}]]
+      (is (= :invalid-or-unbound-principal-owner-grant
+             (reason #(boot/issue-claim-http-boot!
+                       (assoc-in source [:principal-policy :verify-request-intent!]
+                                 bad))))))
+    (is (nil? @server-state))))

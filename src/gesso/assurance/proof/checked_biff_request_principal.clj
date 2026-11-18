@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-request-principal
-  "v1786: Source-relative ONE-operation principal/owner correspondence before
+  "v1787: Source-relative ONE-operation principal/owner correspondence before
    the v1781 checked HTTP -> typed/canonical execution trial.
 
    A trusted host acquisition callback sees the ACTUAL selected Ring request,
@@ -7,9 +7,11 @@
    the selected operation to the principal and bind it to the exact typed
    :input/owner. Denials never invoke the original certified handler.
 
-   The callback and grants are APPLICATION SUPPLIED. This module does not
+   An optional request-intent callback can deny even an otherwise granted
+   request, using the SAME Ring request and resolved principal/operation.
+   Both callbacks and grants are APPLICATION SUPPLIED. This module does not
    authenticate cookies, credentials or Ring adapters, audit callback purity,
-   establish CSRF protection, or prove the policy is in the original catalog.
+   certify CSRF protection, or prove the policy is in the original catalog.
    No admission, certificate, transaction or retry capability is issued.")
 
 (def report-type
@@ -32,10 +34,16 @@
    Exactly one subject is supported here to avoid suggesting that the static
    trial can represent multiple distinct command owners. The trusted callback
    itself is NOT independently verified. Return a private invoke! gate, not a
-   principal capability or a proof certificate."
+   principal capability or a proof certificate. An optional
+   :verify-request-intent! callback must return an exact boolean; false
+   denies with 403, and an exception or malformed answer fails closed."
   [policy operation inputs]
-  (when-not (and (closed-map? policy #{:policy-id :principal-owners :grants
-                                      :acquire-principal!})
+  (when-not (and (or (closed-map? policy #{:policy-id :principal-owners :grants
+                                          :acquire-principal!})
+                     (closed-map? policy #{:policy-id :principal-owners :grants
+                                          :acquire-principal! :verify-request-intent!}))
+                 (or (not (contains? policy :verify-request-intent!))
+                     (fn? (:verify-request-intent! policy)))
                  (qualified-keyword? (:policy-id policy))
                  (fn? (:acquire-principal! policy))
                  (closed-map? inputs #{:input/owner})
@@ -57,12 +65,15 @@
     (reject! :invalid-or-unbound-principal-owner-grant))
   (let [[authorized-id] (keys (:principal-owners policy))
         original-acquire (:acquire-principal! policy)
+        original-verify-intent (:verify-request-intent! policy)
         original-owners (:principal-owners policy)
         original-grants (:grants policy)
         policy-id (:policy-id policy)
         recheck! (fn []
                    (when-not (and (identical? original-acquire
                                               (:acquire-principal! policy))
+                                  (identical? original-verify-intent
+                                              (:verify-request-intent! policy))
                                   (= original-owners (:principal-owners policy))
                                   (= original-grants (:grants policy))
                                   (= policy-id (:policy-id policy)))
@@ -93,8 +104,24 @@
                               (contains? (get original-grants
                                               (:principal-id acquired) #{})
                                          operation))
-                       {:type report-type :version report-version
-                        :status :grant-and-typed-owner-matched :http-status 200}
+                       ;; Grant/owner matching cannot be manufactured by the
+                       ;; intent callback. It can only DENY a previously
+                       ;; granted request, using that exact Ring request.
+                       (let [intent-ok? (if original-verify-intent
+                                          (original-verify-intent
+                                           request (:principal-id acquired)
+                                           operation)
+                                          true)]
+                         (cond
+                           (true? intent-ok?)
+                           {:type report-type :version report-version
+                            :status :grant-and-typed-owner-matched :http-status 200}
+
+                           (false? intent-ok?)
+                           {:type report-type :version report-version
+                            :status :request-intent-denied :http-status 403}
+
+                           :else (reject! :invalid-request-intent-result)))
                        {:type report-type :version report-version
                         :status :operation-not-granted :http-status 403})
 
