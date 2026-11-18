@@ -9,12 +9,16 @@
    Ansatz's kernel. Neither the goals nor the operations are authored in a
    separate downstream specification.
 
-   Scope remains conditional: this does not prove that Gesso's transition
-   interpreter implements the equality premise, that guards are enabled,
-   that the initial state is valid, that the translation is generally sound,
-   that all invariants are covered, or that any physical/installed execution
-   refines the theorem. It does not audit axioms or issue authority-bearing
-   evidence. This test deliberately checks only a closed known source shape.
+   The proof's literal-write premise is now checked against Gesso's
+   original guarded-replacement constructor and normalized transition source;
+   the original and independent abstract observers are also compared over a
+   bounded set of concrete witnesses, including false guards and bad writes.
+
+   Scope remains conditional: bounded interpreter observations do NOT prove
+   universal interpreter correctness, original-to-Ansatz translation fidelity,
+   invariant initialization, status-domain preservation, axiom safety, or any
+   physical/installed correspondence. No authority-bearing evidence is issued.
+   This pilot accepts only the exact known reservation source shape.
 
    Invoke using the optional dependency alias:
      clojure -M:ansatz:test -m gesso.assurance.ansatz-reservation-pilot
@@ -26,7 +30,10 @@
             [clojure.set :as set]
             [clojure.test :refer [deftest is run-tests testing]]
             [gesso.assurance.example.single-node-proving :as example]
-            [gesso.assurance.subject :as subject]))
+            [gesso.assurance.proof.independent-transition-semantics :as independent]
+            [gesso.assurance.proof.transition :as abstract]
+            [gesso.assurance.subject :as subject]
+            [gesso.assurance.transition :as guarded]))
 
 (def ^:private claim-field :slot/active-claims)
 (def ^:private claim-invariant-ids
@@ -63,27 +70,49 @@
      :bound (integer-literal! (nth expression 2)
                               [:invariants invariant-id :expression])}))
 
-(defn- replacement! [operation]
+(defn- source-transition! [operation]
   (let [{:keys [id construction]} operation
-        {:keys [subject state-types writes replacements frame]} construction]
-    ;; Do not silently ignore a new writer or effect mechanism. This is
-    ;; intentionally NOT a general interpreter for Gesso transition data.
+        {:keys [subject state-types input-types reads writes replacements frame]}
+        construction]
+    ;; This is the exact closed reservation pilot, not a generic translator.
+    ;; Reject future state/input/effect shapes instead of silently applying a
+    ;; proof to a declaration whose semantics have grown beyond this subset.
     (when-not (and (= #{:id :construction} (set (keys operation)))
                    (keyword? id)
                    (= supported-construction-keys (set (keys construction)))
                    (= :operation (:kind subject))
                    (= id (:id subject))
                    (= {:operation id} (:interface subject))
+                   (= #{:slot/status claim-field :slot/audit-tag}
+                      (set (keys state-types)))
                    (= {:type :integer} (get state-types claim-field))
-                   (set? writes) (contains? writes claim-field)
-                   (map? replacements)
+                   (= {} input-types)
+                   (= #{:slot/status} reads)
+                   (= #{:slot/status claim-field} writes)
                    (= writes (set (keys replacements)))
-                   (set? frame) (not (contains? frame claim-field))
-                   (empty? (set/intersection writes frame)))
+                   (= #{:slot/audit-tag} frame))
       (reject! :unsupported-transition {:operation-id id
-                                          :construction construction}))
-    (integer-literal! (get replacements claim-field)
-                      [:operations id :replacements claim-field])))
+                                        :construction construction}))
+    (let [replacement (integer-literal! (get replacements claim-field)
+                                        [:operations id :replacements claim-field])
+          ;; IMPORTANT: do not infer an interpreter's write semantics from
+          ;; raw syntax alone. Ask Gesso to construct and normalize the
+          ;; ORIGINAL guarded transition, and compare the checked RHS.
+          built (guarded/build-guarded-replacement! construction)
+          transition (:transition built)
+          described (abstract/describe-transition! transition)
+          semantics (:semantics described)]
+      (when-not (and (= replacements (:assignments transition))
+                     (= (:reads built) (:reads semantics))
+                     (= (:writes built) (:writes semantics))
+                     (= (:frame built) (:frame-fields semantics))
+                     (= (:transition-fingerprint built) (:fingerprint described))
+                     (= [:literal replacement]
+                        (get-in semantics [:assignments claim-field])))
+        (reject! :transition-premise-mismatch {:operation-id id}))
+      {:replacement replacement
+       :transition transition
+       :transition-fingerprint (:fingerprint described)})))
 
 (defn- comparison-form [comparison value bound]
   ;; This pilot maps Gesso's :integer to Ansatz Int, not Nat: negative
@@ -114,12 +143,19 @@
                {:expected expected-invariant-ids
                 :observed (set (keys invariants))})))
   (let [invariants (mapv (partial claim-invariant! catalog)
-                         (sort claim-invariant-ids))]
+                         (sort claim-invariant-ids))
+        catalog-fingerprint
+        (:fingerprint
+         (subject/describe-subject
+          {:kind :rule
+           :id :gesso.assurance.ansatz-reservation-pilot/catalog
+           :interface catalog}))]
     (vec
      (for [operation (:operations catalog)
+           :let [{:keys [replacement transition-fingerprint]}
+                 (source-transition! operation)]
            {:keys [invariant-id comparison bound]} invariants]
-       (let [replacement (replacement! operation)
-             id (:id operation)
+       (let [id (:id operation)
              source-invariant (get-in catalog [:invariants invariant-id])
              exact-subject
              {:kind :operation
@@ -131,6 +167,8 @@
                :invariant source-invariant}}]
          {:operation-id id
           :invariant-id invariant-id
+          :catalog-fingerprint catalog-fingerprint
+          :transition-fingerprint transition-fingerprint
           :source-fingerprint
           (:fingerprint (subject/describe-subject exact-subject))
           :replacement replacement
@@ -186,6 +224,58 @@
                                    (:proof (nth results 2))))))
     (is (false? (kernel/verifies? (ansatz/env)
                                   (:goal (first results)) nil)))))
+
+(deftest original-transition-observers-support-the-write-premise-on-witnesses
+  (let [catalog (example/reservation-catalog)
+        ops (:operations catalog)
+        invariant-ids claim-invariant-ids]
+    ;; Bounded observations are NOT a proof of the interpreters. They test
+    ;; whether the original semantic construction supports the equality
+    ;; premise used by Ansatz, over enabled and disabled representative
+    ;; before/after maps, and whether two existing interpreters agree.
+    (doseq [{:keys [id construction] :as op} ops
+            status [:available :reserved]
+            claims [-1 0 1 2]
+            audit [nil :audit/unchanged]]
+      (let [{:keys [transition replacement transition-fingerprint]}
+            (source-transition! op)
+            before {:slot/status status
+                    claim-field claims
+                    :slot/audit-tag audit}
+            after (reduce-kv (fn [st field [form value]]
+                               (assert (= :literal form))
+                               (assoc st field value))
+                             before (:assignments transition))
+            primary (abstract/observe-transition! transition before {} after)
+            separate (independent/observe-transition! transition before {} after)
+            enabled? (= status (get-in construction [:guard :expression 2 1]))]
+        (is (= transition-fingerprint (:transition-fingerprint primary)))
+        (is (= enabled? (:matches? primary) (:matches? separate)))
+        (is (:assignments-hold? primary))
+        (is (:assignments-hold? separate))
+        (is (= replacement (get after claim-field)))
+        (when (and enabled? (<= 0 claims 1))
+          (doseq [invariant-id invariant-ids]
+            (let [{:keys [comparison bound]}
+                  (claim-invariant! catalog invariant-id)]
+              (is ((case comparison :<= <= :>= >=)
+                   (get after claim-field) bound)))))))
+    (testing "real observers reject violating writes and frame mutations"
+      (let [op (first ops)
+            {:keys [transition]} (source-transition! op)
+            before {:slot/status :available claim-field 0
+                    :slot/audit-tag :audit/preserved}
+            after {:slot/status :reserved claim-field 1
+                   :slot/audit-tag :audit/preserved}]
+        (is (:matches? (abstract/observe-transition! transition before {} after)))
+        (is (:matches? (independent/observe-transition! transition before {} after)))
+        (doseq [bad [(assoc after claim-field 2)
+                     (assoc after :slot/status :available)
+                     (assoc after :slot/audit-tag :audit/changed)]]
+          (is (false? (:matches? (abstract/observe-transition!
+                                transition before {} bad))))
+          (is (false? (:matches? (independent/observe-transition!
+                                transition before {} bad)))))))))
 
 (defn- proof-fails? [obligation]
   ;; A malformed source is not evidence that Ansatz refuted a proposition.
@@ -243,9 +333,32 @@
                                          :construction :unchecked-effect] :unknown))
                       (catch clojure.lang.ExceptionInfo ex (ex-data ex)))
                  :reason))))
+    (testing "Gesso's original constructor rejects an invalid guard footprint"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (source-obligations!
+                    (assoc-in source [:operations reserve-index
+                                      :construction :guard :readers] #{})))))
+    (testing "the pilot rejects a new unproved field in the state projection"
+      (is (= :unsupported-transition
+             (-> (try (source-obligations!
+                       (assoc-in source [:operations reserve-index
+                                         :construction :state-types
+                                         :slot/extra] {:type :integer}))
+                      (catch clojure.lang.ExceptionInfo ex (ex-data ex)))
+                 :reason))))
+    (testing "the full catalog fingerprint changes when other invariants change"
+      (let [before (first (source-obligations! source))
+            mutant (assoc-in source [:invariants :slot/status-domain
+                                     :expression 2 1]
+                             #{:available})
+            after (first (source-obligations! mutant))]
+        (is (= (:source-fingerprint before) (:source-fingerprint after)))
+        (is (not= (:catalog-fingerprint before)
+                  (:catalog-fingerprint after)))))
     (testing "a same-type guard edit changes subject identity"
       (let [mutant (assoc-in source [:operations reserve-index :construction
-                                    :guard :expression] [:literal true])
+                                    :guard :expression]
+                             [:= [:read :slot/status] [:literal :reserved]])
             before (source-obligations! source)
             after (source-obligations! mutant)]
         (is (not= (:source-fingerprint (first before))
