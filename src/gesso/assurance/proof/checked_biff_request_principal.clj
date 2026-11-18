@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-request-principal
-  "v1788: Source-relative ONE-operation principal/owner correspondence before
+  "v1789: Source-relative ONE-operation principal/owner correspondence before
    the v1781 checked HTTP -> typed/canonical execution trial.
 
    A trusted host acquisition callback sees the ACTUAL selected Ring request,
@@ -13,9 +13,12 @@
    used by the typed trial to declare its input/owner -> document/owner
    relationship. This is source-relative ownership CORRESPONDENCE, not
    independent proof of principal authentication or business authorization.
-   Both callbacks and grants are APPLICATION SUPPLIED. This module does not
-   authenticate cookies, credentials or Ring adapters, audit callback purity,
-   certify CSRF protection, or prove the policy is in the original catalog.
+   v1789 binds the one-operation grant to a closed, APPLICATION-DECLARED
+   authorization source. The host callback supplies principal acquisition
+   and optional request integrity, but cannot supply an independent grant
+   map. This is a source-relative declaration, not independently authenticated
+   policy provenance. This module does not authenticate cookies, credentials
+   or Ring adapters, audit callback purity, or certify CSRF protection.
    No admission, certificate, transaction or retry capability is issued."
   (:require [gesso.assurance.proof.operation-set :as catalog]))
 
@@ -71,6 +74,39 @@
       (reject! :principal-owner-not-bound-to-original-catalog))
     true))
 
+(defn- check-authorization-declaration! [source policy operation inputs catalog-source]
+  ;; The declaration belongs to this selected application's boot source,
+  ;; not to the host's request callbacks. It is checked against the SAME
+  ;; original typed operation catalog as the physical XTDB trial. This is
+  ;; NOT an independently certified policy provenance or universal auth DSL.
+  (when-not (and (closed-map? source #{:policy-id :catalog-id :operation-id
+                                      :owner-input :owner-state-field
+                                      :principal-owners :grants})
+                 (qualified-keyword? (:policy-id source))
+                 (= (:policy-id source) (:policy-id policy))
+                 (= (:catalog-id source) (get-in catalog-source [:catalog :id]))
+                 (= (:operation-id source) operation)
+                 (= :input/owner (:owner-input source))
+                 (= :doc/owner (:owner-state-field source))
+                 (closed-map? inputs #{:input/owner})
+                 (string? (:input/owner inputs))
+                 (not-empty (:input/owner inputs))
+                 (map? (:principal-owners source))
+                 (nil? (meta (:principal-owners source)))
+                 (map? (:grants source))
+                 (nil? (meta (:grants source)))
+                 (= 1 (count (:principal-owners source)))
+                 (= (set (keys (:principal-owners source)))
+                    (set (keys (:grants source))))
+                 (every? qualified-keyword? (keys (:principal-owners source)))
+                 (= #{(:input/owner inputs)}
+                    (set (vals (:principal-owners source))))
+                 (= #{#{operation}} (set (vals (:grants source))))
+                 (every? #(and (set? %) (nil? (meta %)))
+                         (vals (:grants source))))
+    (reject! :invalid-or-unbound-authorization-declaration))
+  source)
+
 (defn issue-request-principal-gate!
   "Issue one constrained principal grant for one typed operation/owner pair.
    Exactly one subject is supported here to avoid suggesting that the static
@@ -79,40 +115,26 @@
    principal capability or a proof certificate. An optional
    :verify-request-intent! callback must return an exact boolean; false
    denies with 403, and an exception or malformed answer fails closed.
-   The original catalog is mandatory; caller-supplied operation and owner
-   labels by themselves cannot establish the typed Claim write."
-  [policy operation inputs catalog-source]
+   The original catalog and application-owned authorization declaration
+   are mandatory; the host cannot introduce additional grants."
+  [policy operation inputs catalog-source authorization-source]
   (check-declared-owner-source! catalog-source operation)
-  (when-not (and (or (closed-map? policy #{:policy-id :principal-owners :grants
-                                          :acquire-principal!})
-                     (closed-map? policy #{:policy-id :principal-owners :grants
-                                          :acquire-principal! :verify-request-intent!}))
+  (when-not (and (or (closed-map? policy #{:policy-id :acquire-principal!})
+                     (closed-map? policy #{:policy-id :acquire-principal!
+                                          :verify-request-intent!}))
                  (or (not (contains? policy :verify-request-intent!))
                      (fn? (:verify-request-intent! policy)))
                  (qualified-keyword? (:policy-id policy))
                  (fn? (:acquire-principal! policy))
-                 (closed-map? inputs #{:input/owner})
-                 (string? (:input/owner inputs))
-                 (not-empty (:input/owner inputs))
-                 (qualified-keyword? operation)
-                 (map? (:principal-owners policy))
-                 (map? (:grants policy))
-                 (= 1 (count (:principal-owners policy)))
-                 (= (set (keys (:principal-owners policy)))
-                    (set (keys (:grants policy))))
-                 (every? qualified-keyword?
-                         (keys (:principal-owners policy)))
-                 (= #{(:input/owner inputs)}
-                    (set (vals (:principal-owners policy))))
-                 (= #{#{operation}} (set (vals (:grants policy))))
-                 (every? #(and (set? %) (nil? (meta %)))
-                         (vals (:grants policy))))
+                 (qualified-keyword? operation))
     (reject! :invalid-or-unbound-principal-owner-grant))
-  (let [[authorized-id] (keys (:principal-owners policy))
+  (check-authorization-declaration! authorization-source policy operation
+                                    inputs catalog-source)
+  (let [[authorized-id] (keys (:principal-owners authorization-source))
         original-acquire (:acquire-principal! policy)
         original-verify-intent (:verify-request-intent! policy)
-        original-owners (:principal-owners policy)
-        original-grants (:grants policy)
+        original-owners (:principal-owners authorization-source)
+        original-grants (:grants authorization-source)
         policy-id (:policy-id policy)
         recheck! (fn []
                    ;; The original, admitted catalog is immutable Clojure
@@ -125,8 +147,8 @@
                                               (:acquire-principal! policy))
                                   (identical? original-verify-intent
                                               (:verify-request-intent! policy))
-                                  (= original-owners (:principal-owners policy))
-                                  (= original-grants (:grants policy))
+                                  (= original-owners (:principal-owners authorization-source))
+                                  (= original-grants (:grants authorization-source))
                                   (= policy-id (:policy-id policy)))
                      (reject! :principal-policy-changed))
                    true)

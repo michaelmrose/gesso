@@ -143,7 +143,8 @@
   (when-not (or (nil? typed-config)
                 (and (map? typed-config) (nil? (meta typed-config))
                      (contains? #{#{:catalog-source :operation :inputs}
-                                  #{:catalog-source :operation :inputs :principal-policy}}
+                                  #{:catalog-source :operation :inputs :principal-policy
+                                    :authorization-source}}
                                 (set (keys typed-config)))
                      (map? (:catalog-source typed-config))
                      (map? (:catalog (:catalog-source typed-config)))
@@ -194,7 +195,8 @@
                                               (original-principal-issuer
                                                policy (:operation typed-config)
                                                (:inputs typed-config)
-                                               (:catalog-source typed-config)))
+                                               (:catalog-source typed-config)
+                                               (:authorization-source typed-config)))
                                  :issued (original-typed-issuer
                                           host-handle contract-source host-system
                                           (:catalog-source typed-config)

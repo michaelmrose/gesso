@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.certified-claim-http-principal-test
-  "v1788: Real network principal acquisition and exact owner grant must be
+  "v1789: Real network principal acquisition and exact owner grant must be
    checked before the v1785 boot's ONE catalog-bound typed XTDB write."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.example.certified-claim-http-boot :as boot]
@@ -60,11 +60,18 @@
                           {:status :anonymous})))
          policy (or override-policy
                     {:policy-id :request/claim-authority
-                     :principal-owners {:user/helper-a "helper-a"}
-                     :grants {:user/helper-a #{:request/claim}}
-                     :acquire-principal! acquire!})]
+                     :acquire-principal! acquire!})
+         declared {:policy-id :request/claim-authority
+                   :catalog-id (get-in env [:source :catalog-source :catalog :id])
+                   :operation-id :request/claim
+                   :owner-input :input/owner
+                   :owner-state-field :doc/owner
+                   :principal-owners {:user/helper-a "helper-a"}
+                   :grants {:user/helper-a #{:request/claim}}}]
      (assoc env :calls calls :sessions known :session-id session-id
-            :source (assoc (:source env) :principal-policy policy)))))
+            :source (assoc (:source env)
+                           :principal-policy policy
+                           :authorization-source declared)))))
 (defn- send! [env cookie & [extra-headers]]
   (let [port (:port @(:server-state env))
         builder (-> (HttpRequest/newBuilder
@@ -92,7 +99,7 @@
     (seed! [:requests request])
     (try
       (is (= :verified-configured-start (:status ((:boot! issued)))))
-      (is (= :trusted-host-result-must-match-granted-typed-owner
+      (is (= :trusted-host-principal-must-match-declared-typed-owner-grant
              (:principal-authorization-check ((:summary! issued)))))
       (is (= :not-established
              (:host-principal-acquisition-authenticity ((:summary! issued)))))
@@ -136,17 +143,17 @@
 
 (deftest principal-owner-mismatch-rejected-before-http-start
   (let [{:keys [source server-state]} (with-source)
-        bad (assoc-in source [:principal-policy :principal-owners :user/helper-a]
+        bad (assoc-in source [:authorization-source :principal-owners :user/helper-a]
                       "not-the-declared-owner")]
-    (is (= :invalid-or-unbound-principal-owner-grant
+    (is (= :invalid-or-unbound-authorization-declaration
            (reason #(boot/issue-claim-http-boot! bad))))
     (is (nil? @server-state))))
 
 (deftest ungranted-claim-is-not-accepted-as-an-authorization-declaration
   (let [{:keys [source server-state]} (with-source)
-        bad (assoc-in source [:principal-policy :grants :user/helper-a]
+        bad (assoc-in source [:authorization-source :grants :user/helper-a]
                       #{:request/cancel})]
-    (is (= :invalid-or-unbound-principal-owner-grant
+    (is (= :invalid-or-unbound-authorization-declaration
            (reason #(boot/issue-claim-http-boot! bad))))
     (is (nil? @server-state))))
 
@@ -186,7 +193,10 @@
         ;; original certified executor is generated from the immutable
         ;; fixture; override the source using the earlier membership fixture.
         guarded ((old 'environment) {:guard-membership? true} :honest)
-        source (assoc (:source guarded) :principal-policy (:principal-policy source))
+        source (assoc (:source guarded)
+                      :principal-policy (:principal-policy source)
+                      :authorization-source (assoc (:authorization-source source)
+                                                   :catalog-id (get-in guarded [:source :catalog-source :catalog :id])))
         {:keys [request membership binding]} (:data guarded)
         issued (boot/issue-claim-http-boot! source)]
     (seed! [:requests request] [:memberships membership])
@@ -349,3 +359,45 @@
              (read-request (:xt/id request))))
       (is (some? (read-command (resolution/record-id binding))))
       (finally (cleanup! e issued)))))
+
+(deftest original-application-authorization-source-is-required
+  (let [{:keys [source server-state]} (with-source)]
+    (is (= :invalid-claim-example-boot-source
+           (reason #(boot/issue-claim-http-boot!
+                     (dissoc source :authorization-source)))))
+    (is (= :invalid-claim-example-boot-source
+           (reason #(boot/issue-claim-http-boot!
+                     (dissoc source :principal-policy)))))
+    (is (nil? @server-state))))
+
+(deftest independently-supplied-host-grant-cannot-override-declaration
+  (let [{:keys [source server-state]} (with-source)]
+    (doseq [grant [{:user/outsider #{:request/claim}}
+                   {:user/helper-a #{:request/cancel}}]]
+      (is (= :invalid-or-unbound-principal-owner-grant
+             (reason #(boot/issue-claim-http-boot!
+                       (assoc-in source [:principal-policy :grants] grant))))))
+    (is (nil? @server-state))))
+
+(deftest altered-or-unrelated-authorization-declarations-fail-before-start
+  (let [{:keys [source server-state]} (with-source)
+        mutations [(assoc-in source [:authorization-source :policy-id]
+                             :other/policy)
+                   (assoc-in source [:authorization-source :catalog-id]
+                             :other/catalog)
+                   (assoc-in source [:authorization-source :operation-id]
+                             :request/cancel)
+                   (assoc-in source [:authorization-source :owner-input]
+                             :input/other)
+                   (assoc-in source [:authorization-source :owner-state-field]
+                             :doc/other)
+                   (assoc-in source [:authorization-source :grants]
+                             {:user/outsider #{:request/claim}})
+                   (assoc-in source [:authorization-source :principal-owners]
+                             {:user/outsider "helper-a"})
+                   (assoc-in source [:authorization-source :proof-status]
+                             :certified)]]
+    (doseq [changed mutations]
+      (is (= :invalid-or-unbound-authorization-declaration
+             (reason #(boot/issue-claim-http-boot! changed)))))
+    (is (nil? @server-state))))

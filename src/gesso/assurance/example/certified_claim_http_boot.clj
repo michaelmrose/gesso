@@ -1,5 +1,5 @@
 (ns gesso.assurance.example.certified-claim-http-boot
-  "v1788: A concrete, opt-in BOOT ENTRY for the checked claim example.
+  "v1789: A concrete, opt-in BOOT ENTRY for the checked claim example.
 
    This application entry owns its operation ID, literal POST route, one
    checked contract, one selected HTTP adapter, and one catalog-derived
@@ -59,7 +59,8 @@
                  (contains? #{#{:contract-source :catalog-source :inputs
                                 :adapter-module :base-url!}
                               #{:contract-source :catalog-source :inputs
-                                :adapter-module :base-url! :principal-policy}}
+                                :adapter-module :base-url! :principal-policy
+                                :authorization-source}}
                             (set (keys source)))
                  (plain-map? (:contract-source source))
                  (plain-map? (:catalog-source source))
@@ -71,11 +72,11 @@
                  (fn? (:base-url! source)))
     (reject! :invalid-claim-example-boot-source))
   (when-let [policy (:principal-policy source)]
-    ;; Fail before Biff startup if this source's grant cannot match the exact
-    ;; declared claim operation and pinned typed owner. The runtime callback
-    ;; is still host-supplied and is NOT an authentication certificate.
+    ;; Original application boot source declares grants independently of the
+    ;; host callback. Both must correspond to the exact typed owner write.
     (principal/issue-request-principal-gate!
-     policy operation-id (:inputs source) (:catalog-source source)))
+     policy operation-id (:inputs source) (:catalog-source source)
+     (:authorization-source source)))
   (let [contract (:contract-source source)
         catalog-source (get-in source [:catalog-source :catalog])
         checked (try (original-contract-check contract)
@@ -123,8 +124,9 @@
    :independent-startup-coverage :not-established
    :principal-authorization-check
    (if principal-bound?
-     :trusted-host-result-must-match-granted-typed-owner
+     :trusted-host-principal-must-match-declared-typed-owner-grant
      :not-established)
+   :authorization-declaration-provenance :application-supplied-not-certified
    :host-principal-acquisition-authenticity :not-established
    :principal-authentication :not-established
    :authenticated-xtdb-receipt :not-established
@@ -158,7 +160,8 @@
                                ;; boot supplies this policy to v1781's actual
                                ;; request wrapper. Never manufacture an auth
                                ;; conclusion from an absent policy.
-                               :principal-policy (:principal-policy source)}})
+                               :principal-policy (:principal-policy source)
+                               :authorization-source (:authorization-source source)}})
         summary! (fn []
                    (pinned!)
                    (report (:status ((:summary! issued)))

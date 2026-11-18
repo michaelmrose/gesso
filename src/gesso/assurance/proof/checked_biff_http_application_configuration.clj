@@ -70,7 +70,7 @@
                      (and (plain-map? (:typed-trial config))
                           (contains? #{#{:catalog-source :operation :inputs}
                                        #{:catalog-source :operation :inputs
-                                         :principal-policy}}
+                                         :principal-policy :authorization-source}}
                                      (set (keys (:typed-trial config))))
                           (plain-map? (get-in config [:typed-trial :catalog-source]))
                           (plain-map? (get-in config [:typed-trial :inputs]))
