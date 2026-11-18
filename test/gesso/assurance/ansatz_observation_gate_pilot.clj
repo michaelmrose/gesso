@@ -1,5 +1,5 @@
 (ns gesso.assurance.ansatz-observation-gate-pilot
-  "Opt-in v1738 primitive-checked ABSTRACT observer boundary.
+  "Opt-in v1739 rule-evaluator-source-checked ABSTRACT observer boundary.
 
    After the original reservation's Ansatz source/step bridge is kernel-checked
    and dependency-audited, validate EVERY observed matching transition against
@@ -21,6 +21,11 @@
    invocation, comparing each Boolean against BOTH observer reports. Invalid
    before/after projections are also refused independently of the observers.
 
+   Close the immediate guard-evaluator SOURCE dependency chain by attesting
+   every top-level form in the original rule syntax, type, and value evaluators.
+   Also call the actual typed rule evaluator on each original guard and compare
+   its result against the separately checked source-derived predicate.
+
    This is NOT a universal mathematical proof of either Clojure interpreter.
    It makes no assertion about calls that bypass this boundary, guard/assignment
    implementation correctness, installed handlers, XTDB writers or commits,
@@ -34,7 +39,8 @@
             [gesso.assurance.ansatz-transition-correspondence-pilot]
             [gesso.assurance.example.single-node-proving :as example]
             [gesso.assurance.proof.independent-transition-semantics :as independent]
-            [gesso.assurance.proof.transition :as abstract])
+            [gesso.assurance.proof.transition :as abstract]
+            [gesso.assurance.rule-eval :as rule-eval])
   (:import [java.io PushbackReader StringReader]
            [java.math BigInteger]
            [java.security MessageDigest]))
@@ -130,6 +136,85 @@
                  (fail! :missing-original-interpreter-source {}))]
     (interpreter-source-attestation! (slurp file))))
 
+;; The abstract observer calls rule-eval, which in turn depends on the
+;; rule-type checker and rule syntax checker. Pin ALL parsed top-level source
+;; forms in this deliberately closed test pilot, rather than attesting only
+;; the observer entrypoint and silently trusting its transitive evaluator.
+;; These hashes are reviewed-source identities, NOT mathematical proofs of
+;; the interpreter, type checker, compiler, or JVM's actual behavior.
+(def ^:private reviewed-rule-source-closure
+  {"gesso/assurance/rule.clj"
+   {:namespace 'gesso.assurance.rule
+    :forms 26
+    :digest "3edfccc8e8d7b94531f82a16a415a4c542536e3414490e8e1d0ad661b15da2ad"
+    :required-functions #{'check-rule! 'check-expression!}}
+   "gesso/assurance/rule_type.clj"
+   {:namespace 'gesso.assurance.rule-type
+    :forms 26
+    :digest "d70ecbcdec3da4d7ce2bdbded73039f2143af45b507452aa9ea82b25d689708d"
+    :required-functions #{'check-rule-type! 'type-expression! 'refine 'valid-equality?}}
+   "gesso/assurance/rule_eval.clj"
+   {:namespace 'gesso.assurance.rule-eval
+    :forms 14
+    :digest "09b99cc8d3866c928ca48f841e12666fb4772a0bcb51e6f8b9360e858feb87a9"
+    :required-functions #{'evaluate-rule! 'check-bindings! 'interpret!}}})
+
+(defn- attest-rule-source! [path source]
+  (let [{:keys [namespace forms digest required-functions] :as policy}
+        (get reviewed-rule-source-closure path)
+        parsed (read-interpreter-forms! source)
+        namespaces (filter #(and (seq? %) (= 'ns (first %))) parsed)
+        functions (set (keep (fn [form]
+                               (when (and (seq? form)
+                                          (#{'defn 'defn-} (first form)))
+                                 (second form))) parsed))
+        observed (form-digest parsed)]
+    (when-not (and policy
+                   (= forms (count parsed))
+                   (= 1 (count namespaces))
+                   (= namespace (second (first namespaces)))
+                   (every? functions required-functions)
+                   (= digest observed))
+      (fail! :unreviewed-rule-evaluator-source
+             {:source path :expected-digest digest :observed-digest observed
+              :observed-functions functions :form-count (count parsed)}))
+    {:source path :digest observed :scope :parsed-top-level-forms-only}))
+
+(defn- current-rule-source-closure! []
+  (let [reports (mapv (fn [path]
+                        (let [resource (or (io/resource path)
+                                           (fail! :missing-rule-evaluator-source
+                                                  {:source path}))]
+                          (attest-rule-source! path (slurp resource))))
+                      (sort (keys reviewed-rule-source-closure)))]
+    (when-not (= (set (keys reviewed-rule-source-closure))
+                 (set (map :source reports)))
+      (fail! :incomplete-rule-evaluator-source-closure
+             {:reports reports}))
+    {:policy :original-rule-syntax-types-evaluator-source-v1
+     :source-form-closure reports
+     :source-correspondence :reviewed-only
+     :implementation-correctness :not-established}))
+
+(defn- original-typed-guard! [source before]
+  ;; Evaluate the SAME original guard through Gesso's actual checked rule
+  ;; runtime, but compare its Boolean with our source-derived primitive oracle.
+  ;; Pinning the source closure does not replace this per-invocation check.
+  (let [transition (:transition source)
+        original-guard (:guard transition)
+        guard-types (select-keys (:state-types transition) #{status-field})
+        bindings (select-keys before #{status-field})
+        observation (rule-eval/evaluate-rule! original-guard guard-types bindings)]
+    (when-not (and (= :syntax-and-types (:checking observation))
+                   (= :pure-interpreted (:evaluation observation))
+                   (= :none (:authority observation))
+                   (= (:readers original-guard) (:readers observation))
+                   (= (:expression original-guard) (:expression observation))
+                   (instance? Boolean (:value observation)))
+      (fail! :invalid-original-guard-evaluation
+             {:operation-id (:operation-id source) :observation observation}))
+    (:value observation)))
+
 (defn- exact-report-shape! [result original independent-observation]
   (let [flags [:guard-holds? :assignments-hold? :frame-holds? :matches?]]
     (when-not (and (= :gesso.assurance.proof.transition/abstract-observation
@@ -207,6 +292,12 @@
 
 (defn- source-primitives-agree! [model source before after original other]
   (let [expected (source-primitive-flags! model source before after)
+        evaluated-guard (original-typed-guard! source before)
+        _ (when-not (= evaluated-guard (:guard-holds? expected))
+            (fail! :rule-evaluator-guard-disagreement
+                   {:operation-id (:operation-id source)
+                    :source-guard (:guard-holds? expected)
+                    :evaluated-guard evaluated-guard}))
         keys [:guard-holds? :assignments-hold? :frame-holds? :matches?]
         actual (select-keys original keys)
         other-actual (select-keys other keys)]
@@ -221,6 +312,7 @@
   ;; The three source-specific bridge theorems are checked BEFORE any witness
   ;; can be accepted. No dynamic application-supplied proof report is trusted.
   (let [source-attestation (current-interpreter-source!)
+        rule-source-closure (current-rule-source-closure!)
         bridge (from-source! 'check-original-bridge! catalog)
         {:keys [model sources]} (from-source! 'source-bridge-obligations! catalog)
         sources-by-id (into {} (map (juxt :operation-id identity)) sources)]
@@ -232,6 +324,7 @@
       (fail! :incomplete-kernel-bridge bridge))
     {:checking :kernel-audited-abstract-observation-boundary-pilot
      :original-interpreter-source-attestation source-attestation
+     :original-rule-source-closure rule-source-closure
      :catalog-fingerprint (:catalog-fingerprint model)
      :observer-correspondence :per-invocation-checked-not-universally-proved
      :primitive-correspondence :closed-source-per-invocation-checked
@@ -277,6 +370,10 @@
     (is (= :kernel-audited-abstract-observation-boundary-pilot (:checking boundary)))
     (is (= :original-abstract-observer-source-forms-v1
            (get-in boundary [:original-interpreter-source-attestation :policy])))
+    (is (= :original-rule-syntax-types-evaluator-source-v1
+           (get-in boundary [:original-rule-source-closure :policy])))
+    (is (= 3 (count (get-in boundary
+                           [:original-rule-source-closure :source-form-closure]))))
     (is (= :not-established
            (get-in boundary [:original-interpreter-source-attestation
                              :compiled-runtime-correspondence])))
@@ -455,6 +552,77 @@
              (denial (str/replace source
                                   "[gesso.assurance.rule-eval :as rule-eval]"
                                   "[clojure.core :as rule-eval]")))))))
+
+(deftest original-rule-evaluator-transitive-source-is-attested
+  (let [report (current-rule-source-closure!)
+        read-source (fn [path] (slurp (io/resource path)))
+        fail-reason (fn [path content]
+                      (try (attest-rule-source! path content)
+                           nil
+                           (catch clojure.lang.ExceptionInfo e
+                             (:reason (ex-data e)))))]
+    (is (= :original-rule-syntax-types-evaluator-source-v1 (:policy report)))
+    (is (= 3 (count (:source-form-closure report))))
+    (is (= :not-established (:implementation-correctness report)))
+    (doseq [path (keys reviewed-rule-source-closure)]
+      (testing (str "Attesting original parsed forms " path)
+        (let [source (read-source path)]
+          (is (string? (:digest (attest-rule-source! path source))))
+          (is (= (:digest (attest-rule-source! path source))
+                 (:digest (attest-rule-source! path
+                                                (str "; whitespace test\n" source)))))
+          (is (= :unreviewed-rule-evaluator-source
+                 (fail-reason path (str source "\n(defn backdoor [] true)")))))))
+    (testing "Literal, read and equality evaluator changes are detected"
+      (let [path "gesso/assurance/rule_eval.clj"
+            source (read-source path)]
+        (doseq [[original mutation]
+                [[":read (if (contains? bindings a)" ":read true (if (contains? bindings a)"]
+                 [":= (= (interpret! a" ":= true (= (interpret! a"]
+                 ["(interpret! (:expression checked) bindings [:expression])"
+                  "true"]]]
+          (is (not= source (str/replace source original mutation)))
+          (is (= :unreviewed-rule-evaluator-source
+                 (fail-reason path (str/replace source original mutation)))))))
+    (testing "Type checker and syntax check changes cannot inherit attestation"
+      (let [p "gesso/assurance/rule_type.clj"
+            source (read-source p)]
+        (is (= :unreviewed-rule-evaluator-source
+               (fail-reason p (str/replace source
+                                           "(valid-equality? left right)"
+                                           "true"))))))))
+
+(deftest typed-guard-evaluation-must-match-source-derived-guard
+  (let [catalog (example/reservation-catalog)
+        {:keys [model sources]} (from-source! 'source-bridge-obligations! catalog)
+        source (first sources)
+        before {status-field :available claims-field 0 audit-field nil}
+        after {status-field :reserved claims-field 1 audit-field nil}
+        other-before (assoc before status-field :reserved)
+        original-observer (abstract/observe-transition!
+                           (:transition source) before {} after)
+        independent-observer (independent/observe-transition!
+                              (:transition source) before {} after)
+        real-evaluator rule-eval/evaluate-rule!
+        reason (fn [before eval-fn]
+                 (with-redefs [rule-eval/evaluate-rule! eval-fn]
+                   (try (source-primitives-agree!
+                         model source before after
+                         original-observer independent-observer)
+                        nil
+                        (catch clojure.lang.ExceptionInfo ex
+                          (:reason (ex-data ex))))))]
+    (is (true? (original-typed-guard! source before)))
+    (is (false? (original-typed-guard! source other-before)))
+    (is (= :rule-evaluator-guard-disagreement
+           (reason before (fn [& args]
+                            (assoc (apply real-evaluator args) :value false)))))
+    (is (= :rule-evaluator-guard-disagreement
+           (reason other-before (fn [& args]
+                                  (assoc (apply real-evaluator args) :value true)))))
+    (is (= :invalid-original-guard-evaluation
+           (reason before (fn [& args]
+                            (assoc (apply real-evaluator args) :checking :unchecked)))))))
 
 (defn -main [& _]
   (binding [ansatz/*verbose* false] (ansatz/load-init!))
