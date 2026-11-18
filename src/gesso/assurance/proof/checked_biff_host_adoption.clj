@@ -25,7 +25,8 @@
             [gesso.assurance.proof.installed-route-provenance :as routes]
             [gesso.assurance.proof.xtdb-gateway-assembled-typed-transition-seam
              :as assembled]
-            [gesso.live.application-preflight :as application])
+            [gesso.live.application-preflight :as application]
+            [gesso.live.application-preflight.certified-contract :as certified])
   (:import (java.util WeakHashMap)
            (java.util.concurrent.atomic AtomicBoolean)))
 
@@ -201,6 +202,8 @@
   assembled/issue-assembled-source-bound-typed-transition-gateway!)
 (def ^:private original-host-recheck require-current-biff-host-adoption!)
 (def ^:private original-operation-summary application/operation-summary)
+(def ^:private original-executor-observer
+  certified/observe-issued-executor-invocation!)
 
 (defn issue-host-adopted-assembled-typed-transition-gateway!
   "Bind ONE declared typed operation to the exact checked Ring router captured
@@ -213,9 +216,10 @@
    Returned :prepare! accepts the v1758 arguments
    [node resolver-issuance request candidate inputs field-map]. The separate
    one-use :observe-handler! directly invokes the current Biff system handler
-   on one exact, selected, literal route and returns only a redacted report.
+   on one exact selected literal route and requires the exact issued handler
+   to have returned from its certified-plan executor during that invocation.
    Observation is NOT coupled to :prepare! or :submit!: even successful
-   invocation gives no evidence that this request caused an XTDB write.
+   executor execution gives no evidence that this request caused an XTDB write.
    This is a CURRENT IN-PROCESS system-slot join, not evidence of a deployed
    HTTP server's handler, a complete original business policy, authorized
    actor, independent writer completeness, or universal refinement."
@@ -236,9 +240,11 @@
         initial ((:summary! bound))
         selected-routes!
         (fn []
-          (when-not (identical? original-operation-summary
-                                (var-get #'application/operation-summary))
-            (reject! :substituted-operation-summary))
+          (when-not (and (identical? original-operation-summary
+                                    (var-get #'application/operation-summary))
+                         (identical? original-executor-observer
+                                     (var-get #'certified/observe-issued-executor-invocation!)))
+            (reject! :substituted-operation-or-executor-observer))
           (let [operations (original-operation-summary
                             (:operation-acquisition-assembly
                              (:application-assembly contract-source)))
@@ -251,7 +257,11 @@
                                           (not (re-find #"[{}:*]" path))))
                                    routes))
               (reject! :invalid-selected-literal-routes))
-            (set (map (juxt :method :path) routes))))
+            (when-not (= (count routes)
+                         (count (set (map (juxt :method :path) routes))))
+              (reject! :duplicate-selected-literal-route))
+            (into {} (map (fn [{:keys [method path route-id]}]
+                            [[method path] route-id]) routes))))
         selected-routes (selected-routes!)
         host-routes (:checked-certified-route-ids host-report)
         _ (when-not (and (= :identical-to-guarded-checked-router-wrapper
@@ -283,6 +293,7 @@
                      (reject! :selected-literal-routes-changed))
                    true)
         observe-attempt (AtomicBoolean. false)
+        observed-executor (AtomicBoolean. false)
         summary! (fn []
                    (recheck!)
                    {:type host-typed-binding-type
@@ -294,6 +305,10 @@
                     :handler-dispatch (if (.get observe-attempt)
                                         :one-shot-attempt-consumed
                                         :available-one-shot-not-yet-attempted)
+                    :issued-executor-invocation
+                    (if (.get observed-executor)
+                      :one-exact-issued-handler-executor-returned
+                      :not-established)
                     :handler-dispatch-to-xtdb-causality :not-established
                     :original-business-policy-authenticity :not-established
                     :deployed-http-handler-adoption :not-established
@@ -344,17 +359,27 @@
          ;; Invoke the EXACT Biff slot, including its canonical HTML guard,
          ;; not the separately registered bare Ring router. No handler
          ;; substitution, simulated response or additional XTDB submission.
-         (let [response ((get biff-system application/biff-ring-handler-key)
-                         request)]
+         (let [route-id (get selected-routes
+                             [(:request-method request) (:uri request)])
+               issued-handler (get-in contract-source
+                                      [:semantic-route-handlers route-id])
+               {:keys [result executor-calls]}
+               (original-executor-observer
+                issued-handler request
+                (fn [] ((get biff-system application/biff-ring-handler-key)
+                        request)))
+               response result]
            (recheck!)
            (when-not (and (map? response)
                           (integer? (:status response))
                           (<= 100 (:status response) 599))
              (reject! :invalid-observed-ring-response))
+           (.set observed-executor true)
            {:type host-typed-binding-type
             :version host-typed-binding-version
             :operation-id selected-operation
             :dispatch :one-in-process-biff-handler-slot-invocation
+            :issued-executor-invocation executor-calls
             :ring-response-status (:status response)
             :request-principal-authenticity :not-established
             :handler-dispatch-to-xtdb-causality :not-established

@@ -96,6 +96,11 @@
   (when (fn? handler)
     (locking issued-handlers (.get issued-handlers handler))))
 
+;; v1761: Observation is dynamically scoped to a SYNCHRONOUS local Ring call.
+;; This reports that the original issued handler returned from its certified
+;; plan executor. It does not trace any database write or prove authority.
+(def ^:dynamic ^:private *issued-executor-observer* nil)
+
 (defn certified-handler?
   "Identity-based recognition only; does not itself establish freshness."
   [handler]
@@ -122,21 +127,58 @@
   (let [{:keys [executor current-source request->input! result->response!]} source]
     (when-not (and (fn? request->input!) (fn? result->response!))
       (fail! :invalid-handler-callbacks [:callbacks] {}))
-    (let [proof-description (require-current-binding! executor current-source)
-          issued (fn certified-route-handler [ctx]
-                   ;; Revalidation is deliberately part of the invocation path;
-                   ;; this alone cannot detect an independently changed router.
-                   (require-current-binding! executor current-source)
-                   (let [input (request->input! ctx)
-                         result (executor ctx input)]
-                     (result->response! ctx result)))
-          entry {:executor executor
-                 :original-source current-source
-                 :operation (:operation proof-description)
-                 :request->input! request->input!
-                 :result->response! result->response!}]
-      (locking issued-handlers (.put issued-handlers issued entry))
-      issued)))
+    (let [proof-description (require-current-binding! executor current-source)]
+      (letfn [(certified-route-handler [ctx]
+                ;; Revalidation remains in the actual handler invocation.
+                (require-current-binding! executor current-source)
+                (let [input (request->input! ctx)
+                      result (executor ctx input)]
+                  ;; Only the authentic issued handler emits this process-local
+                  ;; event, after the selected certified executor has returned.
+                  ;; A callback-driven nested or duplicate execution is not
+                  ;; accepted by the scoped observer below.
+                  (when-let [observe! *issued-executor-observer*]
+                    (observe! certified-route-handler ctx))
+                  (result->response! ctx result)))]
+        (let [issued certified-route-handler
+              entry {:executor executor
+                     :original-source current-source
+                     :operation (:operation proof-description)
+                     :request->input! request->input!
+                     :result->response! result->response!}]
+          (locking issued-handlers (.put issued-handlers issued entry))
+          issued)))))
+
+(defn observe-issued-executor-invocation!
+  "Run invoke! synchronously, accepting exactly one callback from the exact
+   registered issued handler, with the identical Ring request object, after
+   its certified-plan executor returned. A synthetic 200 response alone is
+   insufficient. Reject missing, nested, substituted-request, or duplicate
+   executions. Caller must independently prove that invoke! is the selected
+   Biff handler slot; this helper cannot certify host adoption or XTDB writes.
+   Output contains only the invocation count and actual return, never source
+   capabilities or captured requests."
+  [handler request invoke!]
+  (when-not (and (fn? invoke!) (map? request)
+                 (registered-handler handler))
+    (fail! :invalid-issued-executor-observation [:observation] {}))
+  (when *issued-executor-observer*
+    (fail! :nested-issued-executor-observation [:observation] {}))
+  (let [{:keys [executor original-source]} (registered-handler handler)
+        _ (require-current-binding! executor original-source)
+        events (volatile! [])]
+    (binding [*issued-executor-observer*
+              (fn [called-handler called-request]
+                ;; Never retain the request or handler in an observer report.
+                (vswap! events conj (and (identical? called-handler handler)
+                                         (identical? called-request request))))]
+      (let [result (invoke!)]
+        (when-not (= [true] @events)
+          (fail! :missing-or-ambiguous-issued-executor-invocation
+                 [:observation] {}))
+        {:result result
+         :executor-calls :one-exact-issued-handler-executor-returned
+         :physical-causality :not-established}))))
 
 (defn- require-issued-handler! [handler executor operation source at]
   (let [entry (or (registered-handler handler)

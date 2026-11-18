@@ -10,6 +10,7 @@
             [gesso.assurance.proof.installed-route-provenance :as installed-router]
             [gesso.assurance.proof.checked-biff-host-adoption :as host]
             [gesso.live.application-preflight :as application]
+            [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.assurance.proof.transition :as transition]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate-test]
             [xtdb.api :as xt]))
@@ -595,6 +596,10 @@
       (is (= host/host-typed-binding-type (:type report)))
       (is (= :example/claim (:operation-id report)))
       (is (= :one-in-process-biff-handler-slot-invocation (:dispatch report)))
+      (is (= :one-exact-issued-handler-executor-returned
+             (:issued-executor-invocation report)))
+      (is (= :one-exact-issued-handler-executor-returned
+             (:issued-executor-invocation ((:summary! builder)))))
       (is (= 200 (:ring-response-status report)))
       (is (= :not-established (:request-principal-authenticity report)))
       (is (= :not-established (:handler-dispatch-to-xtdb-causality report)))
@@ -639,3 +644,54 @@
       (is (= :host-handler-observation-already-attempted
              (reason #(observe! request))))
       (is (= b (physical))))))
+
+;; v1761: A successful Ring status alone cannot impersonate the issued
+;; certified executor's actual call. The callback is counted only after its
+;; real executor returns with the same exact request object.
+(deftest issued-executor-observer-refuses-synthetic-success
+  (let [b (before)
+        {:keys [contract]} (case-context)
+        handler (get-in contract [:semantic-route-handlers :example/claim])
+        request {:request-method :post :uri "/operations/example/claim"}]
+    (put! b)
+    (is (= :missing-or-ambiguous-issued-executor-invocation
+           (reason #(certified/observe-issued-executor-invocation!
+                     handler request (fn [] {:status 200})))))
+    (is (= :missing-or-ambiguous-issued-executor-invocation
+           (reason #(certified/observe-issued-executor-invocation!
+                     handler request
+                     (fn [] (handler (assoc request :different true)))))))
+    (is (= :missing-or-ambiguous-issued-executor-invocation
+           (reason #(certified/observe-issued-executor-invocation!
+                     handler request
+                     (fn [] (handler request)
+                       (handler request) {:status 200})))))
+    (is (= b (physical)))))
+
+(deftest issued-executor-observer-refuses-nested-claims
+  (let [b (before)
+        {:keys [contract]} (case-context)
+        handler (get-in contract [:semantic-route-handlers :example/claim])
+        request {:request-method :post :uri "/operations/example/claim"}]
+    (put! b)
+    (is (= :nested-issued-executor-observation
+           (reason #(certified/observe-issued-executor-invocation!
+                     handler request
+                     (fn []
+                       (certified/observe-issued-executor-invocation!
+                        handler request (fn [] (handler request))))))))
+    (is (= b (physical)))))
+
+(deftest host-typed-observation-proves-executor-dispatch-not-xtdb-causality
+  (let [b (before)]
+    (put! b)
+    (let [{:keys [builder]} (host-typed-preparer)
+          report ((:observe-handler! builder)
+                  {:request-method :post :uri "/operations/example/claim"})]
+      (is (= :one-exact-issued-handler-executor-returned
+             (:issued-executor-invocation report)))
+      (is (= :not-established (:handler-dispatch-to-xtdb-causality report)))
+      (is (= :not-established (:deployed-http-handler-adoption report)))
+      (is (= :not-established (:request-principal-authenticity report)))
+      (is (= b (physical))
+          "A certified executor invocation is not an XTDB commit"))))
