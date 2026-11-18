@@ -57,6 +57,22 @@ jobs:
             -n gesso.choreo.typed-nominal-transition-boundary-test \
             -n gesso.script.repo-integrity-metadata-test
 
+      # v1800: Exercise the actual local Biff lifecycle and read-only
+      # HTTP dispatch gate, including managed stop and uncertain cleanup.
+      # This is scoped in-process evidence, not external deployment proof.
+      - name: Verify checked Biff HTTP running-instance lifecycle
+        env:
+          JAVA_TOOL_OPTIONS: >-
+            -Xmx3g
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --enable-native-access=ALL-UNNAMED
+            -Dio.netty.tryReflectionSetAccessible=true
+            -Dio.netty.noUnsafe=false
+        run: |
+          clojure -M:test \
+            -n gesso.assurance.proof.checked-biff-http-consumption-probe-test \
+            -n gesso.assurance.proof.checked-biff-http-application-configuration-test
+
       - name: Record JVM sparse identity transition observations
         run: |
           mkdir -p target/typed-node

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1799: The actual application startup entrypoint owns module issuance,
+  "v1800: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -410,4 +410,87 @@
              (:status ((:summary! issued)))))
       (is (= :configured-start-already-attempted
              (reason #((:start-once! issued) {}))))
+      (finally (cleanup! s issued)))))
+
+
+(deftest configured-managed-instance-inspection-is-current-only
+  (let [s (scenario :honest)
+        {:keys [request]} (get-in s [:env :data])
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))]
+    ((model 'seed!) [:requests request])
+    (try
+      (is (= :configured-instance-not-current
+             (reason #((:inspect-running! issued) {}))))
+      (let [{:keys [system report]} ((:start-once! issued) {})
+            inspect! (:inspect-running! issued)
+            observed (inspect! system)]
+        (is (= :verified-configured-start (:status report)))
+        (is (= config/running-report-type (:type observed)))
+        (is (= :current-at-inspection (:status observed)))
+        (is (= :one-original-managed-in-process-biff-instance (:scope observed)))
+        (is (= :exact-identity (:returned-system observed)))
+        (is (= :verified-not-stopped (:original-guarded-adapter observed)))
+        (is (= :exact-issued-wrapper (:original-probe-handler-slot observed)))
+        (is (= :not-established (:external-listener-liveness observed)))
+        (is (= :not-established (:out-of-band-adapter-stops observed)))
+        (is (= :none (:authority observed) (:transaction-authority observed)))
+        (is (not-any? #(contains? observed %)
+                      [:system :handler :host-handle :probe :source
+                       :catalog :biff.ring/handler :port :url :token]))
+        (is (= :configured-instance-not-current
+               (reason #(inspect! (assoc system :unrelated :copy)))))
+        ;; Startup-only route dispatch evidence cannot be re-run after a
+        ;; successful typed command because the command's attempt counter
+        ;; has legitimately advanced. Current lifecycle/host identity can.
+        (is (= 200 (post! s)))
+        (is (= :current-at-inspection (:status (inspect! system))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-not-current
+               (reason #(inspect! system))))
+        (is (= :configured-start-already-attempted
+               (reason #((:start-once! issued) {}))))
+        (is (= :requires-current-instance-inspection
+               (:managed-instance-liveness ((:summary! issued))))))
+      (finally (cleanup! s issued)))))
+
+(deftest unselected-configured-instance-inspection-stops-with-adapter
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s))]
+    (try
+      (let [{:keys [system]} ((:start-once! issued) {})]
+        (is (= :current-at-inspection
+               (:status ((:inspect-running! issued) system))))
+        (is (= :not-selected
+               (:selected-catalog-source ((:inspect-running! issued) system))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-not-current
+               (reason #((:inspect-running! issued) system)))))
+      (finally (cleanup! s issued)))))
+
+(deftest uncertain-guarded-adapter-stop-cannot-be-reported-as-clean
+  (let [s (scenario :honest)
+        original-stop (get-in s [:raw :biff.core/stop])
+        stopping (assoc (:raw s) :biff.core/stop
+                        (fn [system]
+                          ;; Real listener cleanup runs, but the callback
+                          ;; subsequently raises. Its completion is unknown
+                          ;; to the checked guarded adapter.
+                          (original-stop system)
+                          (throw (ex-info "stop completion uncertain" {}))))
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s)
+                       :adapter-module stopping))]
+    (try
+      (let [{:keys [system]} ((:start-once! issued) {})]
+        (is (= :current-at-inspection
+               (:status ((:inspect-running! issued) system))))
+        (is (= :stop-cleanup-not-established
+               (:status ((:stop! issued)))))
+        (is (= :configured-instance-not-current
+               (reason #((:inspect-running! issued) system))))
+        (is (.isShutdown (:executor @(:server-state s))))
+        (is (= :stop-cleanup-not-established
+               (:status ((:summary! issued))))))
       (finally (cleanup! s issued)))))

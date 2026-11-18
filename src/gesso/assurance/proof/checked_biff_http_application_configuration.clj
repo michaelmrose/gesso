@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1799: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1800: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -29,7 +29,13 @@
    on the actual returned adapter BEFORE declaring startup successful.
    Parameterized routes have one observed witness, not universal coverage.
    v1799 qualifies route inventory and dispatch from ONE original issued
-   probe and the SAME returned Biff system, not a separate success summary."
+   probe and the SAME returned Biff system, not a separate success summary.
+
+   v1800: Recheck the SAME managed in-process Biff system and original
+   guarded adapter/probe lifecycle before reporting current instance status.
+   Managed stops and uncertain cleanup cannot be requalified by a saved
+   startup report. Out-of-band raw adapter stops or external deployment
+   liveness are outside this local observation."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -43,6 +49,8 @@
 (def report-type
   :gesso.assurance.proof.checked-biff-http-application-configuration/selected-start)
 (def report-version 1)
+(def running-report-type
+  :gesso.assurance.proof.checked-biff-http-application-configuration/current-instance)
 
 ;; The ONLY Biff module Var used by this configured entry point. Its dynamic
 ;; binding is scoped around BOTH the v1783 preflight and Biff startup.
@@ -55,6 +63,7 @@
 (def ^:private original-biff-stop biff/stop)
 (def ^:private original-route-coverage coverage/check-declared-route-coverage!)
 (def ^:private original-probe-dispatch probe/require-current-final-catalog-dispatch!)
+(def ^:private original-probe-inventory probe/require-current-final-probe-route-inventory!)
 
 (defn- reject! [reason]
   (throw (ex-info "Configured closed Biff HTTP startup not established."
@@ -75,7 +84,9 @@
                  (identical? original-route-coverage
                              (var-get #'coverage/check-declared-route-coverage!))
                  (identical? original-probe-dispatch
-                             (var-get #'probe/require-current-final-catalog-dispatch!)))
+                             (var-get #'probe/require-current-final-catalog-dispatch!))
+                 (identical? original-probe-inventory
+                             (var-get #'probe/require-current-final-probe-route-inventory!)))
     (reject! :substituted-original-configured-start-boundary)))
 
 (defn- plain-map? [x]
@@ -229,6 +240,7 @@
      :not-established)
    :unprobed-routes-over-real-http :not-established
    :parameterized-route-generalization :not-established
+   :managed-instance-liveness :requires-current-instance-inspection
    :selected-catalog-business-policy-completeness :not-established
    :external-deployment :not-established
    :independent-biff-starts :not-established
@@ -269,6 +281,49 @@
         state (atom :issued)
         started (atom nil)
         summary! (fn [] (pinned!) (report @state (some? typed-trial)))
+        inspect-running! (fn [candidate-system]
+                           ;; Historical startup success cannot be reused
+                           ;; as present-tense local instance evidence.
+                           (pinned!)
+                           (when-not (and (= :verified-configured-start @state)
+                                          (map? candidate-system)
+                                          (identical? candidate-system @started))
+                             (reject! :configured-instance-not-current))
+                           (let [guard-status (try ((:summary! issued-guarded))
+                                                   (catch Throwable _ nil))
+                                 inventory (try
+                                             (original-probe-inventory
+                                              issued-probe contract-source
+                                              candidate-system)
+                                             (catch Throwable _ nil))]
+                             (when-not (and (= :verified-selected-adapter-start
+                                                (:status guard-status))
+                                            (= :not-attempted
+                                               (:selected-adapter-cleanup guard-status))
+                                            (= probe/final-route-inventory-report-type
+                                               (:type inventory))
+                                            (= :exact-issued-wrapper
+                                               (:final-probe-handler-slot inventory))
+                                            (= :verified-on-selected-loopback-adapter
+                                               (:one-real-http-consumption-challenge inventory))
+                                            (set? (:checked-certified-route-ids inventory))
+                                            (= :none (:authority inventory)
+                                               (:transaction-authority inventory))
+                                            (= :verified-configured-start @state)
+                                            (identical? candidate-system @started))
+                               (reject! :configured-instance-not-current))
+                             {:type running-report-type :version report-version
+                              :scope :one-original-managed-in-process-biff-instance
+                              :status :current-at-inspection
+                              :returned-system :exact-identity
+                              :original-guarded-adapter :verified-not-stopped
+                              :original-probe-handler-slot :exact-issued-wrapper
+                              :selected-catalog-source :checked-at-startup-only
+                              :external-listener-liveness :not-established
+                              :out-of-band-adapter-stops :not-established
+                              :certificate :not-issued :admission :not-admitted
+                              :retry-authority :none :transaction-authority :none
+                              :authority :none}))
         start! (fn [initial-system]
                  (when-not (.compareAndSet consumed false true)
                    (reject! :configured-start-already-attempted))
@@ -353,7 +408,19 @@
                           (try
                             (pinned!)
                             (original-biff-stop @started)
-                            (reset! state :stopped)
+                            ;; A returned stop call is not enough: require
+                            ;; original guarded adapter and probe cleanup.
+                            (let [guard-status (try ((:summary! issued-guarded))
+                                                    (catch Throwable _ nil))
+                                  probe-status (try ((:summary! issued-probe))
+                                                    (catch Throwable _ nil))]
+                              (reset! state
+                                      (if (and (= :stopped (:status guard-status))
+                                               (= :completed
+                                                  (:selected-adapter-cleanup guard-status))
+                                               (= :stopped (:module-state probe-status)))
+                                        :stopped
+                                        :stop-cleanup-not-established)))
                             (catch Throwable _
                               (reset! state :stop-cleanup-not-established)))
                           (summary!))
@@ -361,4 +428,5 @@
                       ;; A failed startup may have unrolled partially and may
                       ;; still have an external listener: retain uncertainty.
                       (summary!)))))]
-    {:start-once! start! :stop! stop! :summary! summary!}))
+    {:start-once! start! :stop! stop! :summary! summary!
+     :inspect-running! inspect-running!}))
