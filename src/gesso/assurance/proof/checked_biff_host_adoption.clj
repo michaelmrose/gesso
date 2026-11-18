@@ -23,8 +23,11 @@
    handler invocation is made by this module or its inspection functions."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.installed-route-provenance :as routes]
+            [gesso.assurance.proof.xtdb-gateway-assembled-typed-transition-seam
+             :as assembled]
             [gesso.live.application-preflight :as application])
-  (:import (java.util WeakHashMap)))
+  (:import (java.util WeakHashMap)
+           (java.util.concurrent.atomic AtomicBoolean)))
 
 (def report-type
   :gesso.assurance.proof.checked-biff-host-adoption/local-handler-slot)
@@ -186,3 +189,113 @@
        :certification :not-issued
        :admission :not-admitted
        :authority :none})))
+
+
+;; v1759: Join the v1758 source-relative typed XTDB preparer to the EXACT
+;; router already captured by the v1478 Biff host-adoption issuer. The caller
+;; must not be allowed to substitute a separately registered checked router.
+(def host-typed-binding-type
+  :gesso.assurance.proof.checked-biff-host-adoption/host-typed-binding)
+(def host-typed-binding-version 1)
+(def ^:private original-assembled-issuer
+  assembled/issue-assembled-source-bound-typed-transition-gateway!)
+(def ^:private original-host-recheck require-current-biff-host-adoption!)
+
+(defn issue-host-adopted-assembled-typed-transition-gateway!
+  "Bind ONE declared typed operation to the exact checked Ring router captured
+   by an issued and locally started Biff host-adoption module. Requires the
+   original adoption handle, contract source and returned Biff system map;
+   the caller cannot supply a replacement router. Rechecks the original host
+   slot, assembled source, and certified route coverage at issuance, prepare,
+   summary and the sole physical XTDB submission attempt.
+
+   Returned :prepare! accepts the v1758 arguments
+   [node resolver-issuance request candidate inputs field-map]. This is a
+   CURRENT IN-PROCESS system-slot join, not evidence of a deployed HTTP
+   server's handler, a complete original business policy, authorized actor,
+   independent writer completeness, or universal abstract/physical proof."
+  [host-handle contract-source biff-system catalog selected-operation]
+  (pinned-boundaries!)
+  (when-not (and (identical? original-assembled-issuer
+                             (var-get #'assembled/issue-assembled-source-bound-typed-transition-gateway!))
+                 (identical? original-host-recheck
+                             (var-get #'require-current-biff-host-adoption!)))
+    (reject! :substituted-host-or-assembled-boundary))
+  (let [host-report (original-host-recheck host-handle contract-source
+                                           biff-system)
+        record (or (entry host-handle)
+                   (reject! :unissued-host-adoption))
+        router (:router record)
+        bound (original-assembled-issuer catalog contract-source router
+                                          selected-operation)
+        initial ((:summary! bound))
+        host-routes (:checked-certified-route-ids host-report)
+        _ (when-not (and (= :identical-to-guarded-checked-router-wrapper
+                            (:handler-slot host-report))
+                         (= :not-established (:host-deployment host-report))
+                         (= assembled/binding-type (:type initial))
+                         (= assembled/binding-version (:version initial))
+                         (= :closed-declared-set-equals-assembly
+                            (:source-operation-coverage initial))
+                         (= :all-declared-literal-routes-rechecked
+                            (:route-coverage initial))
+                         (= host-routes (:checked-route-ids host-report))
+                         (seq host-routes))
+            (reject! :host-and-assembled-route-coverage-diverged))
+        recheck! (fn []
+                   (pinned-boundaries!)
+                   (when-not (and (identical? original-assembled-issuer
+                                              (var-get #'assembled/issue-assembled-source-bound-typed-transition-gateway!))
+                                  (identical? original-host-recheck
+                                              (var-get #'require-current-biff-host-adoption!)))
+                     (reject! :substituted-host-or-assembled-boundary))
+                   (when-not (= host-report
+                                (original-host-recheck host-handle
+                                                       contract-source biff-system))
+                     (reject! :host-handler-or-source-changed))
+                   (when-not (= initial ((:summary! bound)))
+                     (reject! :assembled-typed-source-changed))
+                   true)
+        summary! (fn []
+                   (recheck!)
+                   {:type host-typed-binding-type
+                    :version host-typed-binding-version
+                    :operation-id selected-operation
+                    :host-slot-binding :exact-issued-checked-router-under-canonical-wrapper
+                    :host-module-start :observed-once
+                    :route-coverage :complete-current-certified-literal-routes
+                    :original-business-policy-authenticity :not-established
+                    :deployed-http-handler-adoption :not-established
+                    :complete-deployed-writer-coverage :not-established
+                    :formal-to-physical-proof :not-established
+                    :certificate :not-issued :admission :not-admitted
+                    :transaction-authority :none :authority :none})
+        prepare! (fn [node resolver-issuance request candidate inputs field-map]
+                   (recheck!)
+                   (let [prepared ((:prepare! bound) node resolver-issuance
+                                   request candidate inputs field-map)
+                         attempt (AtomicBoolean. false)
+                         submit! (fn []
+                                   (when-not (.compareAndSet attempt false true)
+                                     (reject! :host-typed-one-shot-already-attempted))
+                                   (recheck!)
+                                   ((:submit! prepared)))
+                         prepared-summary! (fn []
+                                             (recheck!)
+                                             (assoc ((:summary! prepared))
+                                                    :host-slot-binding
+                                                    :exact-issued-checked-router-under-canonical-wrapper
+                                                    :deployed-http-handler-adoption :not-established
+                                                    :original-business-policy-authenticity :not-established
+                                                    :complete-deployed-writer-coverage :not-established
+                                                    :production-certification :not-issued))]
+                     (recheck!)
+                     {:type (:type prepared)
+                      :version (:version prepared)
+                      :submit! submit!
+                      :summary! prepared-summary!}))]
+    (recheck!)
+    {:type host-typed-binding-type
+     :version host-typed-binding-version
+     :prepare! prepare!
+     :summary! summary!}))

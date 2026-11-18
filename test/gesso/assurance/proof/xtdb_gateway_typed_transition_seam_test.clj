@@ -8,6 +8,8 @@
             [gesso.assurance.proof.xtdb-gateway-typed-transition-seam :as seam]
             [gesso.assurance.proof.xtdb-gateway-assembled-typed-transition-seam :as assembled-seam]
             [gesso.assurance.proof.installed-route-provenance :as installed-router]
+            [gesso.assurance.proof.checked-biff-host-adoption :as host]
+            [gesso.live.application-preflight :as application]
             [gesso.assurance.proof.transition :as transition]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate-test]
             [xtdb.api :as xt]))
@@ -478,4 +480,96 @@
       (is (= :not-established (:installed-router-adoption summary)))
       (is (= :closed-declared-set-equals-assembly
              (:source-operation-coverage summary)))
+      (is (= b (physical))))))
+
+
+;; v1759: Reuse the actual Biff module lifecycle and its privately recorded
+;; checked router rather than allowing a caller to nominate another router.
+(def ^:dynamic *host-typed-biff-modules* [])
+
+(defn- host-typed-preparer
+  ([] (host-typed-preparer declared-catalog))
+  ([catalog]
+   (let [{:keys [contract]} (case-context)
+         issued (host/issue-checked-biff-host-module! contract)
+         modules [application/application-handler-module (:module issued)]
+         system (binding [*host-typed-biff-modules* modules]
+                  (application/start-biff-application!
+                   (:application-assembly contract) {}
+                   #'*host-typed-biff-modules*
+                   [application/application-handler-module-id host/module-id]))
+         builder (host/issue-host-adopted-assembled-typed-transition-gateway!
+                  (:handle issued) contract system catalog :example/claim)]
+     {:builder builder :issued issued :system system})))
+
+(deftest adopted-host-typed-gateway-reuses-checked-real-xtdb-submission
+  (let [b (before)]
+    (put! b)
+    (let [{:keys [builder issued system]} (host-typed-preparer)
+          status ((:summary! builder))
+          prepared (assembled-prepare builder (candidate b))
+          summary ((:summary! prepared))]
+      (is (= host/host-typed-binding-type (:type builder) (:type status)))
+      (is (= :exact-issued-checked-router-under-canonical-wrapper
+             (:host-slot-binding status) (:host-slot-binding summary)))
+      (is (= :observed-once (:host-module-start status)))
+      (is (= :complete-current-certified-literal-routes
+             (:route-coverage status)))
+      (is (= :not-established (:deployed-http-handler-adoption status)))
+      (is (= :not-established (:deployed-http-handler-adoption summary)))
+      (is (= :not-established (:original-business-policy-authenticity summary)))
+      (is (= :not-established (:complete-deployed-writer-coverage summary)))
+      (is (= :not-issued (:production-certification summary)))
+      (is (fn? (:biff.ring/handler system)))
+      (is (= host/report-type
+             (:type (host/require-current-biff-host-adoption!
+                     (:handle issued) (:contract (case-context)) system))))
+      (is (= b (physical)) "Neither Biff startup nor preparation writes")
+      (is (some? ((:submit! prepared))))
+      (is (= (after b) (physical)))
+      (is (= :host-typed-one-shot-already-attempted
+             (reason (:submit! prepared)))))))
+
+(deftest host-typed-gateway-rejects-altered-slot-and-unissued-handles
+  (let [b (before)
+        {:keys [contract]} (case-context)]
+    (put! b)
+    (let [{:keys [issued system]} (host-typed-preparer)
+          attempt (fn [handle system-value catalog]
+                    (host/issue-host-adopted-assembled-typed-transition-gateway!
+                     handle contract system-value catalog :example/claim))]
+      (is (= :host-handler-slot-mismatch
+             (reason #(attempt (:handle issued)
+                               (assoc system :biff.ring/handler (fn [_] {:status 200}))
+                               declared-catalog))))
+      (is (= :unissued-host-adoption
+             (reason #(attempt (host/->HostAdoptionHandle)
+                               system declared-catalog))))
+      (is (= :changed-host-adoption-source
+             (reason #(host/issue-host-adopted-assembled-typed-transition-gateway!
+                       (:handle issued) (into {} contract) system
+                       declared-catalog :example/claim))))
+      (is (= b (physical))))))
+
+(deftest host-typed-gateway-rechecks-before-submission-and-consumes-permit
+  (let [b (before)]
+    (put! b)
+    (let [{:keys [builder]} (host-typed-preparer)
+          prepared (assembled-prepare builder (candidate b))]
+      (with-redefs [gesso.assurance.proof.xtdb-gateway-assembled-typed-transition-seam/issue-assembled-source-bound-typed-transition-gateway!
+                    (fn [& _] :forged)]
+        (is (= :substituted-host-or-assembled-boundary
+               (reason (:submit! prepared)))))
+      (is (= :host-typed-one-shot-already-attempted
+             (reason (:submit! prepared))))
+      (is (= b (physical))))))
+
+(deftest host-typed-route-check-is-not-original-policy-authentication
+  (let [b (before)
+        weaker (update declared-catalog :invariants dissoc :doc/owner-not-reserved)]
+    (put! b)
+    (let [{:keys [builder]} (host-typed-preparer weaker)
+          summary ((:summary! builder))]
+      (is (= :not-established (:original-business-policy-authenticity summary)))
+      (is (= :not-established (:deployed-http-handler-adoption summary)))
       (is (= b (physical))))))
