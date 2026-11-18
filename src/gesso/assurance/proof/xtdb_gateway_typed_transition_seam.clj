@@ -21,11 +21,13 @@
    This is conditional physical gate COMPOSITION, NOT source authenticity,
    complete proof-premise coverage, business authorization, global writer
    completeness, a commit-causality theorem or formal-to-production transfer.
-   In particular, the v1754 source-read invariant predicates have NOT been
-   bound to this caller-supplied transition. A forged declaration can describe
+   v1756 binds caller-declared source-relative read invariant premises and
+   reevaluates their values at preparation and submission, but does NOT
+   authenticate the original invariant inventory or its kernel proof. A forged declaration can describe
    a different business policy. No certificate or application admission is
    issued. A submitted result is not automatically a committed result."
-  (:require [gesso.assurance.proof.transition :as transition]
+  (:require [gesso.assurance.rule-eval :as rule-eval]
+            [gesso.assurance.proof.transition :as transition]
             [gesso.assurance.proof.independent-transition-semantics :as independent]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate :as physical]
             [gesso.model.command :as command])
@@ -39,6 +41,7 @@
 (def ^:private independent-observe independent/observe-transition!)
 (def ^:private original-physical physical/prepare-plan-bound-acquired-one-shot!)
 (def ^:private original-operation command/operation)
+(def ^:private original-rule-eval rule-eval/evaluate-rule!)
 
 (defn- reject! [reason]
   ;; Do not include documents, inputs, target IDs, plans, tokens or exception causes.
@@ -54,7 +57,8 @@
                              (var-get #'independent/observe-transition!))
                  (identical? original-physical
                              (var-get #'physical/prepare-plan-bound-acquired-one-shot!))
-                 (identical? original-operation (var-get #'command/operation)))
+                 (identical? original-operation (var-get #'command/operation))
+                 (identical? original-rule-eval (var-get #'rule-eval/evaluate-rule!)))
     (reject! :substituted-source-or-physical-interpreter)))
 
 (defn- plain-map? [m]
@@ -121,6 +125,100 @@
       (seams!)
       true)))
 
+(defn- screened-read-premises!
+  "Reconstruct every claimed read obligation from ALL declared invariant rules
+   and the ORIGINAL guarded assignment relation. A copied caller inventory is
+   never authority: it must match the derived pairs exactly. A :read target
+   without a supplied invariant is unsupported here (even if the abstract
+   transition alone is valid). Invariants themselves remain caller supplied;
+   this check CANNOT establish that the application's source inventory is
+   complete, authentic, or theorem-proved.
+
+   Both prestate and poststate invariant predicates are checked as concrete
+   values. Each read-value premise is checked directly on its original input
+   or prestate source, not inferred from the target field's type. Re-run on
+   each submission attempt; no check is a persistent prestate lock."
+  [selected-operation candidate-source declaration inputs field-map proof-context]
+  (seams!)
+  (let [invariants (:invariants proof-context)
+        claimed (:read-premises proof-context)
+        state-types (:state-types declaration)
+        input-types (:input-types declaration)
+        assignments (:assignments declaration)
+        cmd (first (get-in candidate-source [:plan :commands]))
+        before (into {} (map (fn [[field phys]]
+                               [field (get-in cmd [:model/before phys])]) field-map))
+        after (into {} (map (fn [[field phys]]
+                              [field (get-in cmd [:model/after phys])]) field-map))]
+    (when-not (and (plain-map? proof-context)
+                   (= #{:invariants :read-premises} (set (keys proof-context)))
+                   (plain-map? invariants) (seq invariants)
+                   (<= (count invariants) 32)
+                   (vector? claimed) (seq claimed) (<= (count claimed) 128)
+                   (every? plain-map? claimed))
+      (reject! :invalid-or-absent-read-proof-context))
+    (let [checked-invariants
+          (into (sorted-map)
+                (for [[id rule] invariants]
+                  (let [field (first (:readers rule))
+                        typ (get state-types field)]
+                    (when-not (and (keyword? id) (namespace id)
+                                   (plain-map? rule)
+                                   (= #{:readers :expression} (set (keys rule)))
+                                   (set? (:readers rule))
+                                   (= 1 (count (:readers rule)))
+                                   (contains? state-types field)
+                                   (not (true? (:optional? typ)))
+                                   (not (true? (:nullable? typ))))
+                      (reject! :unsupported-read-invariant-declaration))
+                    (try (original-rule-eval rule {field typ} {field (get before field)})
+                         (catch Exception _
+                           (reject! :unsupported-or-invalid-read-invariant)))
+                    [id {:field field :rule rule :type typ}])))
+          read-targets (into {}
+                             (for [[target [kind reader]] assignments
+                                   :when (= :read kind)]
+                               [target reader]))
+          expected (vec (for [[target reader] (sort-by key read-targets)
+                              [inv-id {:keys [field]}] checked-invariants
+                              :when (= target field)]
+                          {:operation-id selected-operation
+                           :invariant-id inv-id :field target
+                           :reader reader
+                           :reader-origin (if (contains? input-types reader)
+                                            :input :prestate)}))]
+      (when-not (and (seq expected)
+                     (= (set (keys read-targets)) (set (map :field expected)))
+                     (= (count expected) (count claimed))
+                     (= (frequencies expected) (frequencies claimed))
+                     (every? (fn [{:keys [field reader]}]
+                               (= (get state-types field)
+                                  (get (merge state-types input-types) reader)))
+                             expected))
+        (reject! :read-premise-inventory-not-source-derived))
+      (letfn [(holds? [rule field typ value]
+                (let [report (try (original-rule-eval rule {field typ} {field value})
+                                  (catch Exception _
+                                    (reject! :invalid-read-invariant-value)))]
+                  (and (= rule-eval/evaluated-type (:type report))
+                       (= :syntax-and-types (:checking report))
+                       (= :pure-interpreted (:evaluation report))
+                       (= :none (:authority report))
+                       (true? (:value report)))))]
+        (doseq [[_ {:keys [field rule type]}] checked-invariants]
+          (when-not (holds? rule field type (get before field))
+            (reject! :source-prestate-invariant-failed)))
+        (doseq [{:keys [invariant-id field reader reader-origin]} expected
+                :let [{:keys [rule type]} (get checked-invariants invariant-id)
+                      source (if (= :input reader-origin) inputs before)]]
+          (when-not (holds? rule field type (get source reader))
+            (reject! :source-read-premise-failed)))
+        (doseq [[_ {:keys [field rule type]}] checked-invariants]
+          (when-not (holds? rule field type (get after field))
+            (reject! :source-poststate-invariant-failed))))
+      (seams!)
+      true)))
+
 (defn prepare-typed-transition-one-shot!
   "Join the original abstract guarded transition to an actual plan-bound,
    externally acquired complete-CAS one-shot XTDB gateway. `declaration` and
@@ -136,8 +234,10 @@
    by the existing transaction-time full-top-level CAS. Neither a copied
    abstract report nor a preceding preflight can submit a transaction."
   [node contract-source resolver-issuance selected-operation request
-   candidate-source declaration inputs field-map]
+   candidate-source declaration inputs field-map proof-context]
   (source-relation! selected-operation candidate-source declaration inputs field-map)
+  (screened-read-premises! selected-operation candidate-source declaration inputs
+                           field-map proof-context)
   (let [prepared (try (original-physical node contract-source resolver-issuance
                                         selected-operation request candidate-source)
                       (catch Exception _
@@ -153,12 +253,16 @@
                    (fn? (:submit! prepared)) (fn? (:summary! prepared)))
       (reject! :unexpected-physical-gateway-contract))
     (source-relation! selected-operation candidate-source declaration inputs field-map)
+    (screened-read-premises! selected-operation candidate-source declaration inputs
+                             field-map proof-context)
     (let [attempted (AtomicBoolean. false)
           submit! (fn []
                     (when-not (.compareAndSet attempted false true)
                       (reject! :one-shot-already-attempted))
                     (source-relation! selected-operation candidate-source
                                       declaration inputs field-map)
+                    (screened-read-premises! selected-operation candidate-source
+                                             declaration inputs field-map proof-context)
                     ;; The underlying prepared gateway rechecks current route
                     ;; correspondence and consumes its own one-use permit.
                     ;; Its XTDB transaction, not this preflight, guards against
@@ -173,7 +277,9 @@
                       :external-prestate :same-node-pinned-read-matched-at-preparation
                       :transaction-time-guard :existing-complete-top-level-cas
                       :source-declaration-provenance :caller-supplied-not-authenticated
-                      :source-read-theorem-premises :not-established
+                      :source-read-theorem-premises :source-relative-values-screened-not-proof-established
+                      :claimed-read-premise-count (count (:read-premises proof-context))
+                      :original-invariant-source-authenticity :not-established
                       :principal-authorization :not-established
                       :whole-application-writer-coverage :not-established
                       :aba-history-detection :not-established

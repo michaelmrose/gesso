@@ -40,6 +40,19 @@
    :doc/owner :owner
    :doc/note :note})
 
+(def ^:private proof-context
+  {:invariants
+   {:doc/owner-not-empty {:readers #{:doc/owner}
+                          :expression [:not= [:read :doc/owner] [:literal ""]]}
+    :doc/revision-nonnegative {:readers #{:doc/revision}
+                               :expression [:>= [:read :doc/revision] [:literal 0]]}
+    :doc/note-not-empty {:readers #{:doc/note}
+                         :expression [:not= [:read :doc/note] [:literal ""]]}}
+   :read-premises [{:operation-id :example/claim
+                    :invariant-id :doc/owner-not-empty
+                    :field :doc/owner :reader :input/owner
+                    :reader-origin :input}]})
+
 (defn- before [] ((helper 'before)))
 (defn- after [b] ((helper 'after) b))
 (defn- candidate
@@ -51,13 +64,15 @@
 (defn- node [] (helper '*node*))
 
 (defn- prepare
-  ([candidate-source] (prepare candidate-source source mapping {:input/owner "claimed"}))
+  ([candidate-source] (prepare candidate-source source mapping {:input/owner "claimed"} proof-context))
   ([candidate-source declaration field-map inputs]
+   (prepare candidate-source declaration field-map inputs proof-context))
+  ([candidate-source declaration field-map inputs proof-context]
    (let [{:keys [contract issuance]} (case-context)]
      (seam/prepare-typed-transition-one-shot!
       (node) contract issuance :example/claim
       {:request-method :post :uri "/operations/example/claim"}
-      candidate-source declaration inputs field-map))))
+      candidate-source declaration inputs field-map proof-context))))
 
 (defn- reason [f]
   (try (f) :no-error
@@ -77,7 +92,10 @@
       (is (= :prepared (:status summary)))
       (is (= :checked-per-attempt (:original-and-independent-abstract-relations summary)))
       (is (= :existing-complete-top-level-cas (:transaction-time-guard summary)))
-      (is (= :not-established (:source-read-theorem-premises summary)))
+      (is (= :source-relative-values-screened-not-proof-established
+             (:source-read-theorem-premises summary)))
+      (is (= 1 (:claimed-read-premise-count summary)))
+      (is (= :not-established (:original-invariant-source-authenticity summary)))
       (is (= :caller-supplied-not-authenticated (:source-declaration-provenance summary)))
       (is (= :not-issued (:certificate summary)))
       (is (= :not-admitted (:admission summary)))
@@ -103,6 +121,41 @@
            (reason #(prepare src source mapping {:input/owner 5}))))
     (is (= :invalid-abstract-transition-values
            (reason #(prepare src source mapping {}))))
+    (is (= b (physical)))))
+
+(deftest original-source-derived-premises-cannot-be-omitted-or-forged
+  (let [b (before) src (candidate b)]
+    (put! b)
+    (doseq [[ctx expected]
+            [[(dissoc proof-context :read-premises) :invalid-or-absent-read-proof-context]
+             [(assoc proof-context :read-premises []) :invalid-or-absent-read-proof-context]
+             [(assoc proof-context :read-premises
+                     (conj (:read-premises proof-context)
+                           (first (:read-premises proof-context))))
+              :read-premise-inventory-not-source-derived]
+             [(assoc-in proof-context [:read-premises 0 :reader] :input/other)
+              :read-premise-inventory-not-source-derived]
+             [(assoc-in proof-context [:read-premises 0 :reader-origin] :prestate)
+              :read-premise-inventory-not-source-derived]
+             [(assoc proof-context :invariants
+                     (dissoc (:invariants proof-context) :doc/owner-not-empty))
+              :read-premise-inventory-not-source-derived]
+             [(assoc-in proof-context [:invariants :doc/owner-not-empty :readers]
+                        #{:doc/other})
+              :unsupported-read-invariant-declaration]]]
+      (is (= expected
+             (reason #(prepare src source mapping {:input/owner "claimed"} ctx)))))
+    (is (= b (physical)))))
+
+(deftest source-read-value-must-satisfy-original-invariant-not-merely-type
+  (let [b (before)]
+    (put! b)
+    (is (= :source-read-premise-failed
+           (reason #(prepare (candidate b (assoc (after b) :owner ""))
+                             source mapping {:input/owner ""} proof-context))))
+    (is (= :source-prestate-invariant-failed
+           (reason #(prepare (candidate (assoc b :note ""))
+                             source mapping {:input/owner "claimed"} proof-context))))
     (is (= b (physical)))))
 
 (deftest full-bijective-physical-field-correspondence-required
