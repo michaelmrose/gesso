@@ -21,10 +21,12 @@
    an explicit pilot axiom policy; no authority-bearing evidence is issued.
    This pilot accepts only the exact known reservation source shape.
 
-   A nominal, registry-validated handle now carries a SINGLE kernel-audited
-   conditional obligation to a Typed Clojure-checked consumer. The handle is
-   not a certificate: there is no general translation theorem, and even a
-   legitimate pilot handle grants neither application admission nor authority.
+   A nominal proof handle and separately issued expected-subject token now
+   identify the exact original operation/invariant/source relationship. A
+   Typed Clojure-checked consumer requires BOTH nominal categories; at
+   runtime their source-bound subjects must match before proof revalidation.
+   Neither the proof nor its expected-subject token is a certificate or an
+   application admission/authority credential.
 
    Invoke using the optional dependency alias:
      clojure -M:ansatz:typed:test -m gesso.assurance.ansatz-reservation-pilot
@@ -487,7 +489,16 @@
   Object
   (toString [_] "#<gesso.assurance/ansatz-conditional-pilot>"))
 
+;; A subject token is independent of a proof handle. The caller must identify
+;; the expected original obligation, not merely supply *some* valid proof.
+;; Nominal types alone are not unforgeable, so both categories are validated
+;; against JVM-local issuance registries and the current original source.
+(deftype ExpectedAnsatzPilotSubject []
+  Object
+  (toString [_] "#<gesso.assurance/ansatz-expected-subject>"))
+
 (def ^:private issued-pilot-proofs (WeakHashMap.))
+(def ^:private issued-pilot-subjects (WeakHashMap.))
 
 (defn- pilot-failure! [reason]
   (throw (ex-info "Invalid or stale Ansatz pilot evidence"
@@ -501,37 +512,55 @@
     (pilot-failure! :not-original-reservation-catalog))
   (source-obligations! catalog))
 
-(defn- issue-audited-pilot-handle! [catalog operation-id invariant-id]
+(defn- original-obligation! [catalog operation-id invariant-id]
   (let [obligations (original-catalog! catalog)
         matching (filter #(and (= operation-id (:operation-id %))
                                (= invariant-id (:invariant-id %))) obligations)]
     (when-not (= 1 (count matching))
       (pilot-failure! :unknown-or-ambiguous-proof-subject))
+    (first matching)))
+
+(defn- issue-expected-pilot-subject! [catalog operation-id invariant-id]
+  (let [obligation (original-obligation! catalog operation-id invariant-id)
+        expected (ExpectedAnsatzPilotSubject.)]
+    (locking issued-pilot-subjects
+      (.put issued-pilot-subjects expected
+            (dissoc obligation :parameters :goal-form)))
+    expected))
+
+(defn- issue-audited-pilot-handle! [catalog operation-id invariant-id]
+  (let [obligation (original-obligation! catalog operation-id invariant-id)]
     ;; This includes real Ansatz elaboration, strict kernel checking, and the
     ;; dependency-closure policy. Caller-provided :proved fields are ignored.
-    (let [checked (check-obligation! (first matching))
+    (let [checked (check-obligation! obligation)
           handle (AuditedAnsatzPilotHandle.)]
       (locking issued-pilot-proofs
         (.put issued-pilot-proofs handle checked))
       handle)))
 
-(defn- validated-pilot-description! [handle catalog]
+(defn- validated-pilot-description! [handle expected-subject catalog]
   (when-not (instance? AuditedAnsatzPilotHandle handle)
     (pilot-failure! :wrong-evidence-category))
+  (when-not (instance? ExpectedAnsatzPilotSubject expected-subject)
+    (pilot-failure! :wrong-proof-subject-category))
   (let [issued (locking issued-pilot-proofs
-                 (.get issued-pilot-proofs handle))]
+                 (.get issued-pilot-proofs handle))
+        expected (locking issued-pilot-subjects
+                   (.get issued-pilot-subjects expected-subject))]
     (when-not issued
       (pilot-failure! :unregistered-pilot-handle))
-    (let [obligations (original-catalog! catalog)
-          description (:description issued)
-          matching (filter #(and (= (:operation-id description)
-                                   (:operation-id %))
-                                 (= (:invariant-id description)
-                                    (:invariant-id %))) obligations)]
-      (when-not (and (= 1 (count matching))
-                     (= description
-                        (dissoc (first matching) :parameters :goal-form)))
+    (when-not expected
+      (pilot-failure! :unregistered-proof-subject))
+    (let [description (:description issued)
+          current (original-obligation! catalog
+                    (:operation-id expected) (:invariant-id expected))
+          current-description (dissoc current :parameters :goal-form)]
+      (when-not (= expected current-description)
         (pilot-failure! :source-subject-changed))
+      ;; A valid proof of one source obligation cannot satisfy a consumer
+      ;; expecting a DIFFERENT operation/invariant/source proposition.
+      (when-not (= description expected)
+        (pilot-failure! :proof-subject-mismatch))
       ;; Recheck both the original stored proof term and the current axiom
       ;; closure rather than trusting the registry's copied report alone.
       (let [env (ansatz/env)
@@ -558,11 +587,11 @@
          :authority :none}))))
 
 (defn require-current-audited-pilot-proof!
-  "Revalidate a live, registered pilot handle for the exact original catalog.
-   Typechecked callers must supply AuditedAnsatzPilotHandle, not a map.
-   Returns only descriptive, nonauthoritative evidence."
-  [handle catalog]
-  (validated-pilot-description! handle catalog))
+  "Revalidate a live proof against its separate original-source subject.
+   Checked callers must supply two distinct nominal tokens. A valid proof
+   for the wrong subject is rejected at runtime, not treated as admissible."
+  [handle expected-subject catalog]
+  (validated-pilot-description! handle expected-subject catalog))
 
 ;; Source-backed Typed Clojure check for the REAL public handoff. This does
 ;; NOT typecheck Ansatz internals, the registry's implementation, or the proof
@@ -584,7 +613,7 @@
         (when-not (= 1 (count found))
           (pilot-failure! :original-pilot-consumer-missing))
         (let [original (first found)]
-          (when-not (= '(validated-pilot-description! handle catalog)
+          (when-not (= '(validated-pilot-description! handle expected-subject catalog)
                        (last original))
             (pilot-failure! :original-pilot-consumer-changed))
           original)))))
@@ -592,15 +621,18 @@
 (defn- check-typed-pilot-handoff! []
   (let [handle-type
         'gesso.assurance.ansatz_reservation_pilot.AuditedAnsatzPilotHandle
+        subject-type
+        'gesso.assurance.ansatz_reservation_pilot.ExpectedAnsatzPilotSubject
         function 'gesso.assurance.ansatz-reservation-pilot/require-current-audited-pilot-proof!]
     (eval (list 'typed.clojure/ann-datatype handle-type '[]))
+    (eval (list 'typed.clojure/ann-datatype subject-type '[]))
     (eval (list 'typed.clojure/ann
                 'gesso.assurance.ansatz-reservation-pilot/validated-pilot-description!
                 (list 'typed.clojure/IFn
-                      [handle-type 'typed.clojure/Any :-> 'typed.clojure/Any])))
+                      [handle-type subject-type 'typed.clojure/Any :-> 'typed.clojure/Any])))
     (eval (list 'typed.clojure/ann function
                 (list 'typed.clojure/IFn
-                      [handle-type 'typed.clojure/Any :-> 'typed.clojure/Any])))
+                      [handle-type subject-type 'typed.clojure/Any :-> 'typed.clojure/Any])))
     (let [checker (requiring-resolve 'typed.clj.checker/check-form-info)
           check (fn [form] (checker form :check-config typed-check-config))
           original (checked-public-source!)
@@ -613,11 +645,21 @@
       ;; The negative cases must fail with actual type errors, not checker
       ;; crashes. This makes the type distinction executable, not decorative.
       (doseq [[label form]
-              [[:raw-map '(require-current-audited-pilot-proof! {} {})]
+              [[:raw-map '(require-current-audited-pilot-proof!
+                            {} (ExpectedAnsatzPilotSubject.) {})]
                [:conditional-map
                 '(require-current-audited-pilot-proof!
-                  {:proof-status :checked-conditional-inference} {})]
-               [:nil-evidence '(require-current-audited-pilot-proof! nil {})]]]
+                  {:proof-status :checked-conditional-inference}
+                  (ExpectedAnsatzPilotSubject.) {})]
+               [:nil-evidence
+                '(require-current-audited-pilot-proof!
+                  nil (ExpectedAnsatzPilotSubject.) {})]
+               [:raw-subject
+                '(require-current-audited-pilot-proof!
+                  (AuditedAnsatzPilotHandle.) {} {})]
+               [:nil-subject
+                '(require-current-audited-pilot-proof!
+                  (AuditedAnsatzPilotHandle.) nil {})]]]
         (let [result (binding [*ns* (the-ns 'gesso.assurance.ansatz-reservation-pilot)]
                        (check form))
               kinds (mapv :type-error (:type-errors result))]
@@ -629,18 +671,27 @@
                             (:ex result))))))
       true)))
 
-(deftest audited-ansatz-proof-handoff-requires-nominal-live-evidence
+(deftest audited-ansatz-proof-is-bound-to-the-consumer-expected-subject
   (let [catalog (example/reservation-catalog)
         handle (issue-audited-pilot-handle!
                 catalog :slot/reserve :slot/at-most-one-claim)
-        accepted (require-current-audited-pilot-proof! handle catalog)
+        expected (issue-expected-pilot-subject!
+                  catalog :slot/reserve :slot/at-most-one-claim)
+        wrong-operation (issue-expected-pilot-subject!
+                         catalog :slot/release :slot/at-most-one-claim)
+        wrong-invariant (issue-expected-pilot-subject!
+                         catalog :slot/reserve :slot/nonnegative-claims)
+        accepted (require-current-audited-pilot-proof! handle expected catalog)
         forged (AuditedAnsatzPilotHandle.)
-        rejection (fn [value source]
-                    (try (require-current-audited-pilot-proof! value source)
+        forged-subject (ExpectedAnsatzPilotSubject.)
+        rejection (fn [value subject source]
+                    (try (require-current-audited-pilot-proof!
+                          value subject source)
                          nil
                          (catch clojure.lang.ExceptionInfo ex
                            (:reason (ex-data ex)))))]
     (is (instance? AuditedAnsatzPilotHandle handle))
+    (is (instance? ExpectedAnsatzPilotSubject expected))
     (is (= :slot/reserve (:operation-id accepted)))
     (is (= :slot/at-most-one-claim (:invariant-id accepted)))
     (is (= :quantified-conditional-int-preservation (:proof-kind accepted)))
@@ -649,16 +700,28 @@
     (is (= :not-issued (:certificate accepted)))
     (is (= :not-admitted (:admission accepted)))
     (is (= :none (:authority accepted)))
-    (is (= :wrong-evidence-category (rejection accepted catalog)))
-    (is (= :wrong-evidence-category (rejection {} catalog)))
-    (is (= :unregistered-pilot-handle (rejection forged catalog)))
-    (is (= :not-original-reservation-catalog
-           (rejection handle (assoc catalog :id :slot/changed))))
-    (is (= :not-original-reservation-catalog
-           (rejection handle (assoc-in catalog
-                                       [:operations 0 :construction
-                                        :replacements claim-field]
-                                      [:literal 2]))))))
+    (testing "Valid proof for the WRONG original obligation is refused"
+      (is (= :proof-subject-mismatch
+             (rejection handle wrong-operation catalog)))
+      (is (= :proof-subject-mismatch
+             (rejection handle wrong-invariant catalog))))
+    (testing "Neither nominal category is interchangeable with a map"
+      (is (= :wrong-evidence-category (rejection accepted expected catalog)))
+      (is (= :wrong-evidence-category (rejection {} expected catalog)))
+      (is (= :wrong-proof-subject-category (rejection handle {} catalog)))
+      (is (= :wrong-proof-subject-category (rejection handle nil catalog))))
+    (testing "Directly constructed nominal instances are not registered"
+      (is (= :unregistered-pilot-handle (rejection forged expected catalog)))
+      (is (= :unregistered-proof-subject
+             (rejection handle forged-subject catalog))))
+    (testing "Source drift invalidates BOTH the proof and expected subject"
+      (is (= :not-original-reservation-catalog
+             (rejection handle expected (assoc catalog :id :slot/changed))))
+      (is (= :not-original-reservation-catalog
+             (rejection handle expected
+                        (assoc-in catalog
+                                  [:operations 0 :construction :replacements claim-field]
+                                  [:literal 2])))))))
 
 (deftest original-audited-handoff-is-statically-distinct-from-ordinary-evidence
   (is (true? (check-typed-pilot-handoff!))))
