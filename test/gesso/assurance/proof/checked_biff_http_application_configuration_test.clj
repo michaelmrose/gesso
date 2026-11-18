@@ -1,10 +1,12 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1793: The actual application startup entrypoint owns module issuance,
+  "v1794: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.checked-biff-http-application-configuration :as config]
+            [gesso.assurance.proof.checked-biff-host-adoption :as host]
+            [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
             [gesso.assurance.proof.checked-biff-http-module-assembly :as sealed]
             [gesso.assurance.proof.checked-biff-http-adapter-start-test]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test
@@ -85,6 +87,7 @@
         (is (= :selected-adapter-challenge-passed-during-start
                (:real-http-consumption report)))
         (is (= :not-established (:declared-route-coverage-at-start report)))
+        (is (= :not-established (:returned-host-selected-route-inventory report)))
         (is (= :not-established (:external-deployment report)))
         (is (= :none (:authority report) (:retry-authority report)))
         (is (not-any? #(contains? report %)
@@ -108,6 +111,9 @@
         (is (= :verified-configured-start (:status report)))
         (is (= :selected-certified-catalog-routes-source-checked-before-start
                (:declared-route-coverage-at-start report)))
+        (is (= :exact-selected-certified-route-set-observed-beneath-final-probe-wrapper
+               (:returned-host-selected-route-inventory report)))
+        (is (= :not-established (:unprobed-routes-over-real-http report)))
         (is (= :not-established
                (:selected-catalog-business-policy-completeness report))))
       (is (= 200 (post! s)))
@@ -271,4 +277,71 @@
         (is (= :substituted-original-configured-start-boundary
                (reason #((:start-once! issued) {})))))
       (is (nil? @(:server-state s)))
+      (finally (cleanup! s issued)))))
+
+
+(deftest selected-host-route-inventory-must-match-declared-catalog-exactly
+  ;; These isolated reports test only the structural comparison predicate.
+  ;; Real report authenticity is established by the original host handle and
+  ;; returned system in the configured start, not by these plain maps.
+  (let [selected {:type coverage/coverage-report-type
+                  :version coverage/report-version
+                  :current-assembly-closure :source-relative-checked
+                  :matched-certified-route-ids #{:request/claim :request/finish}}
+        observed {:type probe/final-route-inventory-report-type
+                  :version probe/report-version
+                  :module-id probe/module-id
+                  :host-module-id host/module-id
+                  :scope :one-returned-in-process-probe-handler-slot
+                  :final-probe-handler-slot :exact-issued-wrapper
+                  :one-real-http-consumption-challenge
+                  :verified-on-selected-loopback-adapter
+                  :normal-http-route-inventory :checked-not-individually-probed
+                  :checked-route-ids #{:request/claim :request/finish :page/home}
+                  :checked-certified-route-ids #{:request/claim :request/finish}
+                  :host-deployment :not-established
+                  :certification :not-issued :admission :not-admitted
+                  :transaction-authority :none :authority :none}
+        check! (var-get #'config/require-matching-selected-host-routes!)]
+    (is (true? (check! selected observed)))
+    (doseq [wrong [(assoc observed :checked-certified-route-ids
+                          #{:request/claim})
+                   (assoc observed :checked-certified-route-ids
+                          #{:request/claim :request/finish :request/extra})
+                   (assoc observed :checked-route-ids #{:request/claim})
+                   (assoc observed :final-probe-handler-slot :untrusted-replacement)
+                   (assoc observed :one-real-http-consumption-challenge
+                          :not-established)
+                   (assoc observed :type :synthetic/proof)
+                   (assoc observed :authority :issued)
+                   (assoc observed :host-deployment :certified)
+                   (dissoc observed :checked-route-ids)]]
+      (is (= :selected-catalog-route-inventory-not-adopted
+             (reason #(check! selected wrong)))
+          (pr-str wrong)))
+    (is (= :selected-catalog-route-inventory-not-adopted
+           (reason #(check! (assoc selected :matched-certified-route-ids
+                                  #{:request/claim}) observed))))))
+
+(deftest selected-route-check-failure-after-http-start-stops-the-adapter
+  ;; Inject a failure AFTER the real sealed adapter has returned, to test
+  ;; cleanup of the selected already-open listener. This deliberately does
+  ;; not mock the original host's source/identity evidence.
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))
+        check-var #'config/require-matching-selected-host-routes!]
+    (try
+      (is (= :selected-catalog-route-inventory-not-adopted
+             (with-redefs-fn
+               {check-var (fn [& _]
+                            (throw (ex-info "host mismatch"
+                                            {:reason :selected-catalog-route-inventory-not-adopted})))}
+               #(reason (fn [] ((:start-once! issued) {}))))))
+      (is (some? @(:server-state s)))
+      (is (.isShutdown (:executor @(:server-state s))))
+      (is (= :start-failed-physical-state-unknown
+             (:status ((:summary! issued)))))
+      (is (= :configured-start-already-attempted
+             (reason #((:start-once! issued) {}))))
       (finally (cleanup! s issued)))))

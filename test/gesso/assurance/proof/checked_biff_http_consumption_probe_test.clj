@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1780: A separate Biff server adapter must actually consume the checked
+  "v1794: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
    copied Biff system or return a synthetic success status."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -231,3 +231,49 @@
     (is (= :invalid-original-host-source
            (error-reason #(probe/issue-http-consumption-probe-module!
                            (host/->HostAdoptionHandle) contract))))))
+
+
+(deftest final-issued-probe-route-inventory-is-source-bound-and-read-only
+  (with-adapter! :honest nil
+    (fn [{:keys [env probe system base]}]
+      (let [contract (:contract env)
+            inspect! (fn [p src sys]
+                       (probe/require-current-final-probe-route-inventory!
+                        p src sys))]
+        ;; Simply starting the Biff modules doesn't prove the adapter uses
+        ;; its final handler. The real loopback challenge must complete.
+        (is (= :final-probe-wrapper-or-http-challenge-not-current
+               (error-reason #(inspect! probe contract system))))
+        (is (= :one-final-checked-wrapper-http-challenge-returned
+               (:status ((:verify-once! probe) system base))))
+        (let [checked (inspect! probe contract system)]
+          (is (= probe/final-route-inventory-report-type (:type checked)))
+          (is (= probe/report-version (:version checked)))
+          (is (= :one-returned-in-process-probe-handler-slot
+                 (:scope checked)))
+          (is (= :exact-issued-wrapper (:final-probe-handler-slot checked)))
+          (is (= :verified-on-selected-loopback-adapter
+                 (:one-real-http-consumption-challenge checked)))
+          (is (= #{:request/claim} (:checked-certified-route-ids checked)))
+          (is (contains? (:checked-route-ids checked) :request/claim))
+          (is (= :checked-not-individually-probed
+                 (:normal-http-route-inventory checked)))
+          (is (= :not-established (:host-deployment checked)))
+          (is (= :not-issued (:certification checked)))
+          (is (= :none (:authority checked) (:transaction-authority checked)))
+          (is (not-any? #(contains? checked %)
+                        [:handler :host-system :request :secret :http-token
+                         :router :xtdb-node :tx-ops :receipt :certificate-handle])))
+        (is (= :final-probe-wrapper-or-http-challenge-not-current
+               (error-reason #(inspect! probe contract
+                                        (assoc system :biff.ring/handler
+                                               (fn [_] {:status 200}))))))
+        (is (= :final-probe-wrapper-or-http-challenge-not-current
+               (error-reason #(inspect! probe contract
+                                        (dissoc system :biff.ring/handler)))))
+        (is (= :final-probe-wrapper-or-http-challenge-not-current
+               (error-reason #(inspect! probe (assoc contract :false-proof true)
+                                        system))))
+        (is (= :unissued-or-substituted-http-consumption-probe
+               (error-reason #(inspect! (assoc probe :verify-once! (fn [& _] nil))
+                                        contract system))))))))

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1793: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1794: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -16,8 +16,15 @@
    route set must match the current original application assembly before
    the sealed Biff startup touches an HTTP listener. The coverage checker
    does not establish installed/deployed handler identity or prove that the
-   selected catalog includes every business rule."
-  (:require [com.biffweb.core :as biff]
+   selected catalog includes every business rule.
+
+   v1794: AFTER the actual sealed adapter startup, require the exact issued
+   FINAL consumption probe wrapper to remain in the returned Biff system.
+   Recheck the ORIGINAL host's captured pre-probe system and its full certified
+   route inventory beneath the wrapper. Only one real loopback challenge is
+   observed; other routes are not claimed to be individually exercised."
+  (:require [clojure.set :as set]
+            [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.checked-biff-host-adoption :as host]
             [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
@@ -40,6 +47,7 @@
 (def ^:private original-sealed-start sealed/start-closed-checked-http-application!)
 (def ^:private original-biff-stop biff/stop)
 (def ^:private original-route-coverage coverage/check-declared-route-coverage!)
+(def ^:private original-probe-inventory probe/require-current-final-probe-route-inventory!)
 
 (defn- reject! [reason]
   (throw (ex-info "Configured closed Biff HTTP startup not established."
@@ -58,7 +66,9 @@
                  (identical? original-biff-stop
                              (var-get #'biff/stop))
                  (identical? original-route-coverage
-                             (var-get #'coverage/check-declared-route-coverage!)))
+                             (var-get #'coverage/check-declared-route-coverage!))
+                 (identical? original-probe-inventory
+                             (var-get #'probe/require-current-final-probe-route-inventory!)))
     (reject! :substituted-original-configured-start-boundary)))
 
 (defn- plain-map? [x]
@@ -108,13 +118,52 @@
                                 (:operation typed-trial))
                      (= :source-relative-checked
                         (:current-assembly-closure checked))
+                     (set? (:matched-certified-route-ids checked))
+                     (seq (:matched-certified-route-ids checked))
                      (= :not-established (:installed-handler-adoption checked))
                      (= :none (:transaction-authority checked)
                         (:authority checked))
                      (= :not-issued (:certificate checked))
                      (= :not-admitted (:admission checked)))
-        (reject! :selected-catalog-route-coverage-not-checked)))
-    true))
+        (reject! :selected-catalog-route-coverage-not-checked))
+      checked)))
+
+(defn- require-matching-selected-host-routes!
+  "Check a genuine host-adoption report against the previously checked
+   selected catalog. Only the caller's original issued host observation can
+   establish the report itself; this helper cannot authenticate reports."
+  [selected host-report]
+  (when-not (and (= coverage/coverage-report-type (:type selected))
+                 (= coverage/report-version (:version selected))
+                 (= :source-relative-checked
+                    (:current-assembly-closure selected))
+                 (set? (:matched-certified-route-ids selected))
+                 (seq (:matched-certified-route-ids selected))
+                 (= probe/final-route-inventory-report-type (:type host-report))
+                 (= probe/report-version (:version host-report))
+                 (= probe/module-id (:module-id host-report))
+                 (= host/module-id (:host-module-id host-report))
+                 (= :one-returned-in-process-probe-handler-slot
+                    (:scope host-report))
+                 (= :exact-issued-wrapper
+                    (:final-probe-handler-slot host-report))
+                 (= :verified-on-selected-loopback-adapter
+                    (:one-real-http-consumption-challenge host-report))
+                 (= :checked-not-individually-probed
+                    (:normal-http-route-inventory host-report))
+                 (set? (:checked-certified-route-ids host-report))
+                 (set? (:checked-route-ids host-report))
+                 (= (:matched-certified-route-ids selected)
+                    (:checked-certified-route-ids host-report))
+                 (set/subset? (:checked-certified-route-ids host-report)
+                              (:checked-route-ids host-report))
+                 (= :not-established (:host-deployment host-report))
+                 (= :not-issued (:certification host-report))
+                 (= :not-admitted (:admission host-report))
+                 (= :none (:authority host-report)
+                    (:transaction-authority host-report)))
+    (reject! :selected-catalog-route-inventory-not-adopted))
+  true)
 
 (defn- report [state typed-selected?]
   {:type report-type :version report-version
@@ -132,6 +181,11 @@
    (if (and typed-selected? (= state :verified-configured-start))
      :selected-certified-catalog-routes-source-checked-before-start
      :not-established)
+   :returned-host-selected-route-inventory
+   (if (and typed-selected? (= state :verified-configured-start))
+     :exact-selected-certified-route-set-observed-beneath-final-probe-wrapper
+     :not-established)
+   :unprobed-routes-over-real-http :not-established
    :selected-catalog-business-policy-completeness :not-established
    :external-deployment :not-established
    :independent-biff-starts :not-established
@@ -186,29 +240,48 @@
                    ;; The route and exact issued handler coverage must be
                    ;; checked against CURRENT original sources before Biff
                    ;; initializes modules or installs the real HTTP listener.
-                   (require-selected-route-coverage! contract-source typed-trial)
-                   (let [result (binding [*configured-modules* modules]
+                   (let [selected-coverage
+                         (require-selected-route-coverage! contract-source typed-trial)
+                         result (binding [*configured-modules* modules]
                                   (original-sealed-start
                                    (:application-assembly contract-source)
                                    initial-system issued-host issued-probe
                                    issued-guarded #'*configured-modules* order))]
-                     (when-not (and (= sealed/report-type
-                                       (get-in result [:report :type]))
-                                    (= :one-selected-verified-adapter-start
-                                       (get-in result [:report :physical-server-start]))
-                                    (= :none (get-in result [:report :authority])))
-                       (when-let [system (:system result)]
-                         (try (original-biff-stop system)
-                              (catch Throwable _ nil)))
-                       (reject! :unqualified-closed-http-start))
-                     (when-not (compare-and-set! state :starting
-                                                  :verified-configured-start)
-                       (try (original-biff-stop (:system result))
-                            (catch Throwable _ nil))
-                       (reject! :configured-start-state-diverged))
-                     (reset! started (:system result))
-                     {:system (:system result)
-                      :report (report @state (some? typed-trial))})
+                     (try
+                       (when-not (and (= sealed/report-type
+                                         (get-in result [:report :type]))
+                                      (= :one-selected-verified-adapter-start
+                                         (get-in result [:report :physical-server-start]))
+                                      (= :none (get-in result [:report :authority])))
+                         (reject! :unqualified-closed-http-start))
+                       (when selected-coverage
+                         ;; The probe runs AFTER the host, and intentionally
+                         ;; wraps its checked handler. Verify that exact FINAL
+                         ;; probe wrapper and the original host's pre-probe
+                         ;; route inventory under a single issued handle.
+                         (let [observed (try
+                                          (pinned!)
+                                          (original-probe-inventory
+                                           issued-probe contract-source
+                                           (:system result))
+                                          (catch Throwable _
+                                            (reject! :selected-catalog-route-inventory-not-adopted)))]
+                           (require-matching-selected-host-routes!
+                            selected-coverage observed)))
+                       (when-not (compare-and-set! state :starting
+                                                    :verified-configured-start)
+                         (reject! :configured-start-state-diverged))
+                       (reset! started (:system result))
+                       {:system (:system result)
+                        :report (report @state (some? typed-trial))}
+                       (catch Throwable error
+                         ;; The adapter has already started. Any failed
+                         ;; post-start coverage check MUST stop it before
+                         ;; propagating failure; cleanup can still fail.
+                         (when-let [system (:system result)]
+                           (try (original-biff-stop system)
+                                (catch Throwable _ nil)))
+                         (throw error))))
                    (catch Throwable error
                      ;; A selected adapter that opened a port must implement
                      ;; its own stop cleanup on failed Biff startup.

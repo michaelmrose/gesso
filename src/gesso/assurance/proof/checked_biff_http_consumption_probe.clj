@@ -352,6 +352,8 @@
                            @principal-denials @principal-admissions))))]
     (locking issued
       (.put issued handle {:source contract-source
+                           :host-handle host-handle
+                           :state state :outcome result :hits hits
                            :module module
                            :summary! summary!
                            :verify-once! verify!}))
@@ -385,3 +387,66 @@
      :external-server-deployment :not-established
      :certificate :not-issued :transaction-authority :none
      :authority :none}))
+
+
+;; v1794: The final Biff slot belongs to THIS issued probe, not the earlier
+;; checked host module. Recheck host identity on the originally captured
+;; pre-probe Biff system; then correlate its route inventory with the final
+;; exact probe wrapper in the returned system after real HTTP verification.
+(def final-route-inventory-report-type
+  :gesso.assurance.proof.checked-biff-http-consumption-probe/final-route-inventory)
+
+(defn require-current-final-probe-route-inventory!
+  "Inspect the exact issued probe's final returned Biff system handler slot
+   after the real one-shot HTTP consumption challenge. Recheck the issued
+   checked host beneath that wrapper and return its redacted current route
+   inventory. Only this in-process Biff system and one challenge are observed;
+   it does not claim every business route has been exercised over HTTP."
+  [candidate contract-source final-system]
+  (pinned!)
+  (require-current-issued-http-consumption-probe! candidate)
+  (let [record (or (entry (:handle candidate))
+                   (reject! :missing-issued-final-route-probe))
+        started @(:state record)]
+    (when-not (and (identical? contract-source (:source record))
+                   (map? started)
+                   (map? final-system)
+                   (identical? (:wrapper started)
+                               (get final-system original-handler-slot))
+                   (= :one-final-checked-wrapper-http-challenge-returned
+                      @(:outcome record))
+                   (= 1 @(:hits record)))
+      (reject! :final-probe-wrapper-or-http-challenge-not-current))
+    ;; This check MUST use the pre-probe host-system captured at the actual
+    ;; probe module's start, not final-system: the later probe intentionally
+    ;; replaced :biff.ring/handler with its own checked wrapper.
+    (let [host-report (try
+                        (original-host-check (:host-handle record)
+                                             contract-source
+                                             (:host-system started))
+                        (catch Exception _
+                          (reject! :original-host-route-inventory-not-current)))]
+      (when-not (and (= host/report-type (:type host-report))
+                     (= host/report-version (:version host-report))
+                     (= :identical-to-guarded-checked-router-wrapper
+                        (:handler-slot host-report))
+                     (= :observed-once (:module-start host-report)
+                        (:biff-module-init host-report))
+                     (set? (:checked-route-ids host-report))
+                     (set? (:checked-certified-route-ids host-report))
+                     (= :none (:authority host-report)))
+        (reject! :original-host-route-inventory-not-current))
+      {:type final-route-inventory-report-type
+       :version report-version
+       :scope :one-returned-in-process-probe-handler-slot
+       :module-id module-id
+       :host-module-id host/module-id
+       :final-probe-handler-slot :exact-issued-wrapper
+       :one-real-http-consumption-challenge :verified-on-selected-loopback-adapter
+       :checked-route-ids (:checked-route-ids host-report)
+       :checked-certified-route-ids (:checked-certified-route-ids host-report)
+       :normal-http-route-inventory :checked-not-individually-probed
+       :host-deployment :not-established
+       :certification :not-issued
+       :admission :not-admitted
+       :transaction-authority :none :authority :none})))
