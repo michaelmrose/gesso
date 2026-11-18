@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe
-  "v1780: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
+  "v1795: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
    actually consumes the final checked Ring handler installed through Biff's
    ordinary module start lifecycle.
 
@@ -10,17 +10,25 @@
    startup callback, fabricated 200 response, or server that ignores the
    final handler cannot by itself qualify.
 
+   v1795: A selected original operation can also receive a read-only
+   same-method/same-literal-path loopback challenge. A private probe marker
+   is intercepted in the final wrapper BEFORE original business dispatch;
+   all marked requests fail closed unless the one-use challenge is armed.
+   This proves method/path HTTP REACHABILITY at the final wrapper, NOT that
+   the inner router selected a handler or that any business transition ran.
+
    This is local test evidence for a selected HTTP server module only: Biff
    core 2 does not choose/install an HTTP listener for Gesso. It does not
    authenticate an external deployment or user principal, verify arbitrary
    normal routes, or authorize model transactions, retries or certificates."
-  (:require [gesso.assurance.proof.checked-biff-host-adoption :as host]
+  (:require [clojure.string :as str]
+            [gesso.assurance.proof.checked-biff-host-adoption :as host]
             [gesso.assurance.proof.xtdb-gateway-biff-issued-catalog-canonical-trial
              :as typed-trial]
             [gesso.assurance.proof.checked-biff-request-principal :as principal]
             [gesso.live.application-preflight :as app])
   (:import [java.net URI]
-           [java.net.http HttpClient HttpRequest HttpResponse$BodyHandlers]
+           [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers HttpResponse$BodyHandlers]
            [java.time Duration]
            [java.util WeakHashMap UUID]
            [java.util.concurrent.atomic AtomicBoolean]))
@@ -30,6 +38,8 @@
 (def report-type
   :gesso.assurance.proof.checked-biff-http-consumption-probe/local-http-consumption)
 (def report-version 1)
+
+(def ^:private route-probe-header "x-gesso-operation-route-probe")
 
 (deftype ConsumptionProbeHandle []
   Object
@@ -63,7 +73,8 @@
     (locking issued (.get issued handle))))
 
 (defn- report [state outcome hits trial-enabled? typed-result typed-hits
-               principal-enabled? principal-rejections principal-admissions]
+               principal-enabled? principal-rejections principal-admissions
+               route-outcome route-hits]
   {:type report-type :version report-version
    :scope :one-final-ring-handler-loopback-http-consumption-challenge
    :module-state (if (map? state) :started state)
@@ -94,6 +105,10 @@
    :principal-request-grants principal-admissions
    :host-principal-acquisition-authenticity :not-established
    :principal-policy-catalog-equivalence :not-established
+   :selected-route-http-reachability route-outcome
+   :selected-route-challenge-observations route-hits
+   :selected-route-inner-router-dispatch :not-established
+   :selected-route-business-handler-execution :not-established
    :csrf-protection :not-established
    :selected-adapter-typed-atomic-correspondence
    (if (and (= outcome :one-final-checked-wrapper-http-challenge-returned)
@@ -162,6 +177,11 @@
                             (UUID/randomUUID))
         secret-header (str (UUID/randomUUID))
         secret-response (str "gesso-consumed-" (UUID/randomUUID))
+        route-secret (str (UUID/randomUUID))
+        route-response (str "gesso-route-observed-" (UUID/randomUUID))
+        route-pending (atom :inactive)
+        route-hits (atom 0)
+        route-outcome (atom :not-established)
         pending (atom :inactive)
         hits (atom 0)
         typed-attempts (atom 0)
@@ -213,8 +233,27 @@
                                 (catch Throwable error
                                   (reset! state :failed)
                                   (throw error))))
+                   selected-route (when selected
+                                    (first (sort-by pr-str (:route-keys selected))))
                    wrapped (fn [request]
-                             (if (= challenge-path (:uri request))
+                             (cond
+                               ;; Reserved header is NEVER forwarded into normal
+                               ;; business execution, even with a wrong secret,
+                               ;; route or method. This is vital for POST routes.
+                               (contains? (:headers request) route-probe-header)
+                               (if (and selected-route
+                                        (= selected-route
+                                           [(:request-method request) (:uri request)])
+                                        (= route-secret
+                                           (get-in request [:headers route-probe-header]))
+                                        (compare-and-set! route-pending :armed :seen))
+                                 (do (swap! route-hits inc)
+                                     {:status 200
+                                      :headers {"content-type" "text/plain"}
+                                      :body route-response})
+                                 {:status 404 :body "Not found"})
+
+                               (= challenge-path (:uri request))
                                (if (and (= :get (:request-method request))
                                         (= secret-header
                                            (get-in request [:headers
@@ -225,7 +264,7 @@
                                       :headers {"content-type" "text/plain"}
                                       :body secret-response})
                                  {:status 404 :body "Not found"})
-                               (if (and selected
+                               :else (if (and selected
                                         (contains? (:route-keys selected)
                                                    [(:request-method request)
                                                     (:uri request)]))
@@ -288,7 +327,8 @@
                                          wrapped)]
                (when-not (compare-and-set! state :starting
                                            {:host-system host-system
-                                            :wrapper wrapped})
+                                            :wrapper wrapped
+                                            :selected-route selected-route})
                  (reset! state :failed)
                  (reject! :probe-installation-state-changed))
                wrapped-system)))
@@ -307,7 +347,8 @@
                    (report (current!) @result @hits (boolean typed-config)
                            @typed-outcome @typed-attempts
                            (some? (:principal-policy typed-config))
-                           @principal-denials @principal-admissions))
+                           @principal-denials @principal-admissions
+                           @route-outcome @route-hits))
         verify! (fn [final-system base-url]
                   (when-not (.compareAndSet claimed false true)
                     (reject! :http-consumption-probe-already-attempted))
@@ -342,14 +383,54 @@
                           (reset! result
                                   (if qualified?
                                     :one-final-checked-wrapper-http-challenge-returned
-                                    :http-consumption-challenge-unconfirmed)))
+                                    :http-consumption-challenge-unconfirmed))
+                          ;; An additional, independently distinguishable
+                          ;; read-only observation for the ONE selected literal
+                          ;; method/path. The private marker is never passed
+                          ;; to the original router or the typed XTDB writer.
+                          (when (and qualified? (:selected-route started))
+                            (let [[method path] (:selected-route started)
+                                  target (try
+                                           (URI/create (str url path))
+                                           (catch Exception _ nil))]
+                              (when (and (keyword? method)
+                                         (string? path)
+                                         (str/starts-with? path "/")
+                                         target
+                                         (= path (.getRawPath target))
+                                         (nil? (.getRawQuery target))
+                                         (nil? (.getRawFragment target)))
+                                (reset! route-pending :armed)
+                                (try
+                                  (let [route-request
+                                        (-> (HttpRequest/newBuilder target)
+                                            (.timeout (Duration/ofSeconds 5))
+                                            (.header route-probe-header route-secret)
+                                            (.method (str/upper-case (name method))
+                                                     (HttpRequest$BodyPublishers/noBody))
+                                            (.build))
+                                        route-answer
+                                        (.send client route-request
+                                               (HttpResponse$BodyHandlers/ofString))]
+                                    (reset! route-outcome
+                                            (if (and (= 200 (.statusCode route-answer))
+                                                     (= route-response (.body route-answer))
+                                                     (= :seen @route-pending)
+                                                     (= 1 @route-hits))
+                                              :one-selected-method-path-reached-final-wrapper
+                                              :not-established)))
+                                  (catch Throwable _
+                                    (reset! route-outcome :not-established))
+                                  (finally (reset! route-pending :inactive)))))))
                         (catch Throwable _
                           (reset! result :http-consumption-challenge-unconfirmed))
-                        (finally (reset! pending :inactive)))
+                        (finally (reset! pending :inactive)
+                                 (reset! route-pending :inactive)))
                       (report (current!) @result @hits (boolean typed-config)
                            @typed-outcome @typed-attempts
                            (some? (:principal-policy typed-config))
-                           @principal-denials @principal-admissions))))]
+                           @principal-denials @principal-admissions
+                           @route-outcome @route-hits))))]
     (locking issued
       (.put issued handle {:source contract-source
                            :host-handle host-handle

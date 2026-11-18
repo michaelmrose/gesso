@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1794: A separate Biff server adapter must actually consume the checked
+  "v1795: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
    copied Biff system or return a synthetic success status."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -95,12 +95,14 @@
        (.shutdownNow executor)
        (.awaitTermination executor 3 TimeUnit/SECONDS)))})
 
-(defn- with-adapter! [mode start-order f]
+(defn- with-adapter!
+  ([mode start-order f] (with-adapter! mode start-order nil f))
+  ([mode start-order typed-config f]
   (let [env ((earlier-helper 'case-env))
         contract (:contract env)
         adopted (host/issue-checked-biff-host-module! contract)
         probe-issued (probe/issue-http-consumption-probe-module!
-                      (:handle adopted) contract)
+                      (:handle adopted) contract typed-config)
         server-state (atom nil)
         adapter (adapter-module mode server-state)
         modules [app/application-handler-module (:module adopted)
@@ -122,7 +124,7 @@
           (try (biff/stop started) (catch Throwable _ nil)))
         (when-let [{:keys [^HttpServer server executor]} @server-state]
           (try (.stop server 0) (catch Throwable _ nil))
-          (.shutdownNow executor))))))
+          (.shutdownNow executor)))))))
 
 (defn- post! [base]
   (let [request (-> (HttpRequest/newBuilder
@@ -277,3 +279,60 @@
         (is (= :unissued-or-substituted-http-consumption-probe
                (error-reason #(inspect! (assoc probe :verify-once! (fn [& _] nil))
                                         contract system))))))))
+
+
+(deftest selected-post-method-path-is-observed-read-only-over-actual-http
+  (let [env ((earlier-helper 'case-env))
+        config {:catalog-source (:catalog-source env)
+                :operation :request/claim
+                :inputs {:input/owner "helper-a"}}]
+    (with-adapter! :honest nil config
+      (fn [{:keys [env probe system base]}]
+        (let [{:keys [request binding]} (:data env)
+              client (HttpClient/newHttpClient)
+              marked-post (fn [method token]
+                            (let [req (-> (HttpRequest/newBuilder
+                                           (URI/create
+                                            (str base "/operations/request/claim")))
+                                          (.timeout (Duration/ofSeconds 5))
+                                          (.header "x-gesso-operation-route-probe" token)
+                                          (.method method
+                                                   (HttpRequest$BodyPublishers/noBody))
+                                          (.build))]
+                              (.statusCode (.send client req
+                                                  (HttpResponse$BodyHandlers/ofString)))))]
+          (seed! [:requests request])
+          ;; Any public attempt with a reserved marker is rejected BEFORE
+          ;; business routing, even before the ephemeral challenge is armed.
+          (is (= 404 (marked-post "POST" "forged")))
+          (is (= 404 (marked-post "GET" "forged")))
+          (is (= request (read-request (:xt/id request))))
+          (is (nil? (read-command (resolution/record-id binding))))
+          (is (= 0 @(get-in env [:environment :constructs])))
+          (let [r ((:verify-once! probe) system base)]
+            (is (= :one-final-checked-wrapper-http-challenge-returned
+                   (:status r)))
+            (is (= :one-selected-method-path-reached-final-wrapper
+                   (:selected-route-http-reachability r)))
+            (is (= 1 (:selected-route-challenge-observations r)))
+            (is (= :not-established (:selected-route-inner-router-dispatch r)))
+            (is (= :not-established (:selected-route-business-handler-execution r)))
+            (is (not-any? #(contains? r %)
+                          [:route-secret :route-response :selected-route
+                           :route-probe-header :request :uri :token])))
+          ;; The actual POST path was challenged, but NEVER passed through
+          ;; the declared operation handler or the XTDB transaction path.
+          (is (= request (read-request (:xt/id request))))
+          (is (nil? (read-command (resolution/record-id binding))))
+          (is (= 0 @(get-in env [:environment :constructs])))
+          (is (= 404 (marked-post "POST" "still-forged")))
+          (is (= 404 (marked-post "GET" "still-forged")))
+          (is (= 1 (:selected-route-challenge-observations
+                    ((:summary! probe)))))
+          ;; An ordinary request with no private probe header retains the
+          ;; existing intentional one-shot typed atomic business behavior.
+          (is (= 200 (post! base)))
+          (is (= ((model 'next-version) request {:owner "helper-a"})
+                 (read-request (:xt/id request))))
+          (is (some? (read-command (resolution/record-id binding))))
+          (is (= 1 @(get-in env [:environment :constructs]))))))))
