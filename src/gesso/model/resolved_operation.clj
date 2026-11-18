@@ -131,7 +131,8 @@
    [gesso.model.tx :as tx]
    [gesso.model.canonical-transaction-site :as site]
    [gesso.model.typed-writer-adoption-preflight :as writer-adoption]
-   [gesso.model.guarded-atomic-canonical-trial :as guarded-trial]))
+   [gesso.model.guarded-atomic-canonical-trial :as guarded-trial]
+   [gesso.model.typed-atomic-pre-submit-hook :as typed-atomic-hook]))
 
 (def configuration-keys
   #{:operation :read-record! :may-disclose? :construct!})
@@ -452,7 +453,8 @@
         ;; gateway BEFORE calling the canonical authoritative writer: the
         ;; atomic incorporated command ledger must never be silently omitted.
         _ (writer-adoption/require-before-canonical-submit! binding incorporated)
-        _ (guarded-trial/before-canonical-submit! binding incorporated)]
+        _ (guarded-trial/before-canonical-submit! binding incorporated)
+        _ (typed-atomic-hook/before-canonical-submit! binding incorporated)]
     ;; This event says what THIS wrapper handed to tx/transact!, not what
     ;; XTDB necessarily received. In particular, there is no fabricated
     ;; physical tx-id when a rejection has no receipt.
