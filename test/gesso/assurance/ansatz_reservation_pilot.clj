@@ -17,8 +17,10 @@
 
    Scope remains conditional: bounded interpreter observations do NOT prove
    universal interpreter correctness, original-to-Ansatz translation fidelity,
-   invariant initialization, general enum translation correctness, or any
-   physical/installed correspondence. The proof declaration closure is inspected under
+   actual initial database state, general enum translation correctness, or
+   any physical/installed correspondence. The original initial-condition is
+   a PREDICATE, not an installed initial state: we additionally kernel-prove
+   that it entails each declared invariant and has a nonvacuity witness. The proof declaration closure is inspected under
    an explicit pilot axiom policy; no authority-bearing evidence is issued.
    This pilot accepts only the exact known reservation source shape.
 
@@ -381,6 +383,112 @@
        :goal goal
        :proof proof})))
 
+(defn- initial-predicate-source! [catalog]
+  ;; Gesso declares a predicate selecting acceptable initial states, NOT a
+  ;; concrete row or an actual installed database snapshot. No claim of
+  ;; physical initial-state validity can follow from these abstract proofs.
+  (source-obligations! catalog)
+  (let [{:keys [readers expression] :as initial} (:initial-condition catalog)
+        invariants (:invariants catalog)
+        inv-expressions (into {} (map (fn [[id v]] [(:expression v) id]) invariants))
+        leaves (when (and (vector? expression) (= :and (first expression)))
+                 (vec (rest expression)))
+        expected-expressions (mapv :expression (vals invariants))]
+    (when-not (and (= #{:readers :expression} (set (keys initial)))
+                   (= #{status-field claim-field} readers)
+                   (= 3 (count leaves))
+                   (= 3 (count (set expected-expressions)))
+                   (= (frequencies expected-expressions)
+                      (frequencies leaves)))
+      (reject! :unsupported-initial-condition
+               {:initial-condition initial
+                :expected-invariants (set (keys invariants))}))
+    (let [nonnegative (claim-invariant! catalog :slot/nonnegative-claims)
+          upper (claim-invariant! catalog :slot/at-most-one-claim)]
+      (when-not (and (= :>= (:comparison nonnegative))
+                     (= :<= (:comparison upper)))
+        (reject! :unsupported-initial-claim-order
+                 {:nonnegative nonnegative :upper upper}))
+      {:order (mapv inv-expressions leaves)
+       :source initial
+       :catalog-fingerprint
+       (:fingerprint (subject/describe-subject
+                      {:kind :rule
+                       :id :gesso.assurance.ansatz-reservation-pilot/catalog
+                       :interface catalog}))})))
+
+(defn- initial-invariant-proposition! [catalog invariant-id status claims]
+  (if (= invariant-id :slot/status-domain)
+    (status-membership-form (:encoding (status-invariant! catalog)) status)
+    (let [{:keys [comparison bound]} (claim-invariant! catalog invariant-id)]
+      (comparison-form comparison claims bound))))
+
+(defn- three-conjunction [forms]
+  ;; The known three-leaf Gesso :and is translated to nested Ansatz And.
+  ;; A generic conjunction translator is explicitly NOT claimed here.
+  (when-not (= 3 (count forms))
+    (reject! :unsupported-conjunction-size {:forms forms}))
+  (list 'And (nth forms 0)
+        (list 'And (nth forms 1) (nth forms 2))))
+
+(defn- witness-script! [catalog order witness-status]
+  (let [encoding (:encoding (status-invariant! catalog))
+        status-value (get encoding witness-status)
+        codes (mapv encoding (sort-by str (keys encoding)))
+        step (fn [invariant-id]
+               (if (= invariant-id :slot/status-domain)
+                 (if (= status-value (first codes))
+                   '[(left) (rfl)]
+                   '[(right) (rfl)])
+                 '[(omega)]))]
+    (vec (concat '[(constructor)]
+                 (step (nth order 0))
+                 '[(constructor)]
+                 (step (nth order 1))
+                 (step (nth order 2))))))
+
+(defn- source-initialization-obligations! [catalog]
+  (let [{:keys [order catalog-fingerprint]} (initial-predicate-source! catalog)
+        status (status-invariant! catalog)
+        witness-status (first (sort-by str (:values status)))
+        witness-claims (:bound (claim-invariant! catalog :slot/nonnegative-claims))
+        abstract-forms (mapv #(initial-invariant-proposition!
+                              catalog % 'status 'claim) order)
+        initial-proposition (three-conjunction abstract-forms)
+        witness-forms (mapv #(initial-invariant-proposition!
+                             catalog % (get (:encoding status) witness-status)
+                             witness-claims) order)
+        descriptions (mapv (fn [i invariant-id]
+                             {:obligation-kind :initial-predicate-entails-invariant
+                              :invariant-id invariant-id
+                              :catalog-fingerprint catalog-fingerprint
+                              :parameters ['status ':- 'Int
+                                           'claim ':- 'Int
+                                           'hinit ':- initial-proposition]
+                              :goal-form (nth abstract-forms i)
+                              ;; Destructure ORIGINAL :and expression order
+                              ;; rather than assuming a handwritten index.
+                              :proof-script
+                              [(list 'rcases 'hinit '[hi0 [hi1 hi2]])
+                               (list 'exact (nth '[hi0 hi1 hi2] i))]})
+                           (range 3) order)
+        witness {:obligation-kind :initial-predicate-nonvacuity-witness
+                 :invariant-id nil
+                 :catalog-fingerprint catalog-fingerprint
+                 :witness {status-field witness-status
+                           claim-field witness-claims
+                           :slot/audit-tag nil}
+                 :parameters []
+                 :goal-form (three-conjunction witness-forms)
+                 :proof-script (witness-script! catalog order witness-status)}]
+    ;; One implication proof per original invariant, plus an actual
+    ;; mathematical witness that the conjunction is satisfiable. None of
+    ;; these are evidence of an actual initial DB row or installed snapshot.
+    (conj descriptions witness)))
+
+(defn- check-initialization! [catalog]
+  (mapv check-obligation! (source-initialization-obligations! catalog)))
+
 (defn- check-catalog! [catalog]
   (mapv check-obligation! (source-obligations! catalog)))
 
@@ -587,6 +695,71 @@
             after (source-obligations! mutant)]
         (is (not= (:source-fingerprint (first before))
                   (:source-fingerprint (first after))))))))
+
+(deftest original-initial-predicate-entails-every-invariant-and-is-inhabited
+  (let [catalog (example/reservation-catalog)
+        results (check-initialization! catalog)
+        projections (filter #(= :initial-predicate-entails-invariant
+                                 (get-in % [:description :obligation-kind])) results)
+        witnesses (filter #(= :initial-predicate-nonvacuity-witness
+                               (get-in % [:description :obligation-kind])) results)]
+    (is (= 4 (count results)))
+    (is (= expected-invariant-ids
+           (set (map #(get-in % [:description :invariant-id]) projections))))
+    (is (= 1 (count witnesses)))
+    (is (= {status-field :available
+            claim-field 0
+            :slot/audit-tag nil}
+           (get-in (first witnesses) [:description :witness])))
+    (doseq [{:keys [goal proof dependencies]} results]
+      (is (kernel/verifies? (ansatz/env) goal proof))
+      (is (= :ansatz-reservation-pilot/lean-core-axioms-v1 (:policy dependencies)))
+      (is (set/subset? (set (:axioms dependencies)) permitted-axioms))
+      (is (empty? (:non-safe dependencies)))
+      (is (empty? (:unresolved dependencies))))
+    (testing "A different original proposition does not inherit an initialization proof"
+      (is (false? (kernel/verifies? (ansatz/env)
+                                   (:goal (second results))
+                                   (:proof (first results))))))))
+
+(deftest mutated-initial-predicate-fails-closed
+  (let [catalog (example/reservation-catalog)
+        errors (fn [source]
+                 (try (source-initialization-obligations! source)
+                      nil
+                      (catch clojure.lang.ExceptionInfo e
+                        (:reason (ex-data e)))))
+        broken-branch (assoc-in catalog [:initial-condition :expression 0] :or)
+        missing-conjunct (update-in catalog [:initial-condition :expression] pop)
+        duplicate-conjunct (assoc-in catalog [:initial-condition :expression 3]
+                                     (get-in catalog [:invariants :slot/status-domain :expression]))
+        wrong-readers (assoc-in catalog [:initial-condition :readers]
+                                #{:slot/status})]
+    (doseq [source [broken-branch missing-conjunct
+                    duplicate-conjunct wrong-readers]]
+      (is (= :unsupported-initial-condition (errors source))))
+    (testing "A permutation of the same three declared predicates stays provable"
+      (let [reordered (assoc-in catalog [:initial-condition :expression]
+                                (into [:and] (reverse (rest (get-in catalog
+                                                        [:initial-condition :expression])))))
+            results (check-initialization! reordered)]
+        (is (= 4 (count results)))
+        (is (every? #(kernel/verifies? (ansatz/env) (:goal %) (:proof %))
+                    results))))
+    (testing "An inconsistent initial predicate must not gain vacuous safety"
+      ;; Both the invariant declaration and the initial source predicate
+      ;; change together; syntactic coverage is still complete. The
+      ;; source-derived witness fails because claims >= 0 and claims <= -1
+      ;; have no common state. This is a genuine failed proof obligation.
+      (let [upper' [:<= [:read claim-field] [:literal -1]]
+            mutant (-> catalog
+                       (assoc-in [:invariants :slot/at-most-one-claim :expression] upper')
+                       (assoc-in [:initial-condition :expression 3] upper'))
+            obligations (source-initialization-obligations! mutant)
+            witness (last obligations)]
+        (is (= :initial-predicate-nonvacuity-witness
+               (:obligation-kind witness)))
+        (is (proof-fails? witness))))))
 
 (deftest proof-dependency-policy-fails-closed
   (let [clean {:declarations-scanned 1 :axioms []
