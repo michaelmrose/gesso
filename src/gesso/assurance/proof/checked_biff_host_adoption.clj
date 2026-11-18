@@ -149,6 +149,30 @@
                            :start-state start-state}))
     {:module module :handle handle}))
 
+;; v1783: Verify the exact original HOST MODULE independently of startup.
+;; A copied module map or identical module ID is not proof of issuance.
+(defn require-original-issued-biff-host-module!
+  "Recognize only the originally issued host handle and exact module object.
+   This is a process-local identity check, not a deployed handler claim."
+  [candidate]
+  (pinned-boundaries!)
+  (when-not (and (or (instance? clojure.lang.PersistentArrayMap candidate)
+                     (instance? clojure.lang.PersistentHashMap candidate))
+                 (nil? (meta candidate))
+                 (= #{:module :handle} (set (keys candidate))))
+    (reject! :invalid-original-host-module-shape))
+  (let [record (entry (:handle candidate))]
+    (when-not (and record
+                   (identical? (:module candidate) (:module record))
+                   (= module-id (get-in candidate [:module :biff.core/id])))
+      (reject! :unissued-or-substituted-host-module))
+    {:type report-type :version report-version
+     :scope :original-issued-biff-host-module
+     :original-host-module :exact-identity
+     :host-startup :not-established
+     :host-deployment :not-established
+     :certification :not-issued :authority :none}))
+
 (defn require-current-biff-host-adoption!
   "Check the completed Biff system's actual handler slot by exact identity.
 

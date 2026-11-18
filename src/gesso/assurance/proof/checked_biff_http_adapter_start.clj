@@ -15,13 +15,23 @@
    can perform effects before failure; no auth, retry, or proof certificate."
   (:require [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
             [gesso.live.application-preflight :as application])
-  (:import (java.util.concurrent.atomic AtomicBoolean)))
+  (:import (java.util WeakHashMap)
+           (java.util.concurrent.atomic AtomicBoolean)))
 
 (def module-id
   :gesso.assurance.proof.checked-biff-http-adapter-start/install)
 (def report-type
   :gesso.assurance.proof.checked-biff-http-adapter-start/verified-start)
 (def report-version 1)
+
+(deftype GuardedAdapterHandle []
+  Object
+  (toString [_] "#<gesso.assurance/guarded-biff-http-adapter>"))
+(def ^:private ^WeakHashMap issued (WeakHashMap.))
+
+(defn- issued-entry [handle]
+  (when (instance? GuardedAdapterHandle handle)
+    (locking issued (.get issued handle))))
 
 (def ^:private original-probe-check
   probe/require-current-issued-http-consumption-probe!)
@@ -85,7 +95,8 @@
   (when-not (and (clean-module? adapter-module) (fn? base-url!))
     (reject! :invalid-selected-http-adapter-module))
   (original-probe-check issued-probe)
-  (let [original-start (:biff.core/start adapter-module)
+  (let [handle (GuardedAdapterHandle.)
+        original-start (:biff.core/start adapter-module)
         original-stop (:biff.core/stop adapter-module)
         started-state (atom :issued)
         stop-called (AtomicBoolean. false)
@@ -173,4 +184,29 @@
                                   :issued :issued)]
                      (assoc (report status)
                             :selected-adapter-cleanup @cleanup)))]
-    {:module module :summary! summary!}))
+    (locking issued
+      (.put issued handle {:module module :summary! summary!}))
+    {:handle handle :module module :summary! summary!}))
+
+(defn require-original-issued-http-adapter-start!
+  "Recognize one ORIGINAL issued guarded HTTP adapter module, not a copied
+   module map or matching ID. No physical startup or deployment is proved."
+  [candidate]
+  (pinned!)
+  (when-not (and (or (instance? clojure.lang.PersistentArrayMap candidate)
+                     (instance? clojure.lang.PersistentHashMap candidate))
+                 (nil? (meta candidate))
+                 (= #{:handle :module :summary!} (set (keys candidate))))
+    (reject! :invalid-original-guarded-adapter-shape))
+  (let [record (issued-entry (:handle candidate))]
+    (when-not (and record
+                   (identical? (:module candidate) (:module record))
+                   (identical? (:summary! candidate) (:summary! record))
+                   (= module-id (get-in candidate [:module :biff.core/id])))
+      (reject! :unissued-or-substituted-guarded-adapter))
+    {:type report-type :version report-version
+     :scope :original-issued-guarded-http-adapter
+     :original-guarded-module :exact-identity
+     :selected-adapter-start :not-established
+     :external-server-deployment :not-established
+     :certificate :not-issued :authority :none}))
