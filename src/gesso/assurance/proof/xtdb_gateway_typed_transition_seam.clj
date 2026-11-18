@@ -225,6 +225,34 @@
       (seams!)
       true)))
 
+;; v1773: Reuse the original typed semantic interpreters and read-premise
+;; screening WITHOUT coupling them to the one-document physical gateway.
+;; The full atomic typed preparer needs precisely this pure domain check while
+;; retaining the separate durable ledger and every original transaction guard.
+(def source-check-type
+  :gesso.assurance.proof.xtdb-gateway-typed-transition-seam/domain-source-check)
+(def source-check-version 1)
+
+(defn check-source-relative-typed-domain!
+  "Check the EXACT one-domain-command source against the original AND
+   independent typed transition interpreters and original declared read
+   premise values. Does not touch or prepare an XTDB writer. The declaration,
+   read invariant inventory and document projection remain caller supplied,
+   so the result is SOURCE RELATIVE, never business-policy authentication."
+  [selected-operation domain-source declaration inputs field-map proof-context]
+  (source-relation! selected-operation domain-source declaration inputs field-map)
+  (screened-read-premises! selected-operation domain-source declaration inputs
+                           field-map proof-context)
+  (seams!)
+  {:type source-check-type :version source-check-version
+   :operation-id selected-operation
+   :abstract-interpreters :original-and-independent-agree
+   :original-read-premises :source-relative-values-screened
+   :complete-domain-field-projection :bijective
+   :source-policy-authenticity :not-established
+   :physical-submission :disabled
+   :certificate :not-issued :admission :not-admitted :authority :none})
+
 (defn- prepare-typed-transition-one-shot!
   "Join the original abstract guarded transition to an actual plan-bound,
    externally acquired complete-CAS one-shot XTDB gateway. `declaration` and
