@@ -200,6 +200,7 @@
 (def ^:private original-assembled-issuer
   assembled/issue-assembled-source-bound-typed-transition-gateway!)
 (def ^:private original-host-recheck require-current-biff-host-adoption!)
+(def ^:private original-operation-summary application/operation-summary)
 
 (defn issue-host-adopted-assembled-typed-transition-gateway!
   "Bind ONE declared typed operation to the exact checked Ring router captured
@@ -210,10 +211,14 @@
    summary and the sole physical XTDB submission attempt.
 
    Returned :prepare! accepts the v1758 arguments
-   [node resolver-issuance request candidate inputs field-map]. This is a
-   CURRENT IN-PROCESS system-slot join, not evidence of a deployed HTTP
-   server's handler, a complete original business policy, authorized actor,
-   independent writer completeness, or universal abstract/physical proof."
+   [node resolver-issuance request candidate inputs field-map]. The separate
+   one-use :observe-handler! directly invokes the current Biff system handler
+   on one exact, selected, literal route and returns only a redacted report.
+   Observation is NOT coupled to :prepare! or :submit!: even successful
+   invocation gives no evidence that this request caused an XTDB write.
+   This is a CURRENT IN-PROCESS system-slot join, not evidence of a deployed
+   HTTP server's handler, a complete original business policy, authorized
+   actor, independent writer completeness, or universal refinement."
   [host-handle contract-source biff-system catalog selected-operation]
   (pinned-boundaries!)
   (when-not (and (identical? original-assembled-issuer
@@ -229,6 +234,25 @@
         bound (original-assembled-issuer catalog contract-source router
                                           selected-operation)
         initial ((:summary! bound))
+        selected-routes!
+        (fn []
+          (when-not (identical? original-operation-summary
+                                (var-get #'application/operation-summary))
+            (reject! :substituted-operation-summary))
+          (let [operations (original-operation-summary
+                            (:operation-acquisition-assembly
+                             (:application-assembly contract-source)))
+                routes (get-in operations [selected-operation :routes])]
+            (when-not (and (seq routes)
+                           (every? (fn [{:keys [method path]}]
+                                     (and (keyword? method)
+                                          (string? path)
+                                          (.startsWith ^String path "/")
+                                          (not (re-find #"[{}:*]" path))))
+                                   routes))
+              (reject! :invalid-selected-literal-routes))
+            (set (map (juxt :method :path) routes))))
+        selected-routes (selected-routes!)
         host-routes (:checked-certified-route-ids host-report)
         _ (when-not (and (= :identical-to-guarded-checked-router-wrapper
                             (:handler-slot host-report))
@@ -255,7 +279,10 @@
                      (reject! :host-handler-or-source-changed))
                    (when-not (= initial ((:summary! bound)))
                      (reject! :assembled-typed-source-changed))
+                   (when-not (= selected-routes (selected-routes!))
+                     (reject! :selected-literal-routes-changed))
                    true)
+        observe-attempt (AtomicBoolean. false)
         summary! (fn []
                    (recheck!)
                    {:type host-typed-binding-type
@@ -264,6 +291,10 @@
                     :host-slot-binding :exact-issued-checked-router-under-canonical-wrapper
                     :host-module-start :observed-once
                     :route-coverage :complete-current-certified-literal-routes
+                    :handler-dispatch (if (.get observe-attempt)
+                                        :one-shot-attempt-consumed
+                                        :available-one-shot-not-yet-attempted)
+                    :handler-dispatch-to-xtdb-causality :not-established
                     :original-business-policy-authenticity :not-established
                     :deployed-http-handler-adoption :not-established
                     :complete-deployed-writer-coverage :not-established
@@ -298,4 +329,38 @@
     {:type host-typed-binding-type
      :version host-typed-binding-version
      :prepare! prepare!
+     :observe-handler!
+     (fn [request]
+         ;; Consume the local observation before checking any user-supplied
+         ;; request. Neither a rejection nor an uncertain handler execution
+         ;; may become a second invocation by retrying the same capability.
+         (when-not (.compareAndSet observe-attempt false true)
+           (reject! :host-handler-observation-already-attempted))
+         (recheck!)
+         (when-not (and (map? request)
+                        (contains? selected-routes
+                                   [(:request-method request) (:uri request)]))
+           (reject! :request-is-not-a-bound-operation-route))
+         ;; Invoke the EXACT Biff slot, including its canonical HTML guard,
+         ;; not the separately registered bare Ring router. No handler
+         ;; substitution, simulated response or additional XTDB submission.
+         (let [response ((get biff-system application/biff-ring-handler-key)
+                         request)]
+           (recheck!)
+           (when-not (and (map? response)
+                          (integer? (:status response))
+                          (<= 100 (:status response) 599))
+             (reject! :invalid-observed-ring-response))
+           {:type host-typed-binding-type
+            :version host-typed-binding-version
+            :operation-id selected-operation
+            :dispatch :one-in-process-biff-handler-slot-invocation
+            :ring-response-status (:status response)
+            :request-principal-authenticity :not-established
+            :handler-dispatch-to-xtdb-causality :not-established
+            :deployed-http-handler-adoption :not-established
+            :original-business-policy-authenticity :not-established
+            :complete-deployed-writer-coverage :not-established
+            :certificate :not-issued :admission :not-admitted
+            :authority :none}))
      :summary! summary!}))

@@ -573,3 +573,69 @@
       (is (= :not-established (:original-business-policy-authenticity summary)))
       (is (= :not-established (:deployed-http-handler-adoption summary)))
       (is (= b (physical))))))
+
+
+;; v1760: execute the CURRENT Biff handler slot, not a synthetic Ring result.
+;; This gives process-local invocation evidence only. It is deliberately NOT
+;; proof that this HTTP request caused the independent guarded XTDB submit!.
+(deftest host-typed-observation-invokes-the-current-guarded-biff-handler
+  (let [b (before)]
+    (put! b)
+    (let [{:keys [builder system]} (host-typed-preparer)
+          observe! (:observe-handler! builder)
+          request {:request-method :post :uri "/operations/example/claim"
+                   :request-id :v1760-observed-handler}
+          before-report ((:summary! builder))
+          report (observe! request)]
+      (is (= :available-one-shot-not-yet-attempted
+             (:handler-dispatch before-report)))
+      (is (= :one-shot-attempt-consumed
+             (:handler-dispatch ((:summary! builder)))))
+      (is (fn? (:biff.ring/handler system)))
+      (is (= host/host-typed-binding-type (:type report)))
+      (is (= :example/claim (:operation-id report)))
+      (is (= :one-in-process-biff-handler-slot-invocation (:dispatch report)))
+      (is (= 200 (:ring-response-status report)))
+      (is (= :not-established (:request-principal-authenticity report)))
+      (is (= :not-established (:handler-dispatch-to-xtdb-causality report)))
+      (is (= :not-established (:deployed-http-handler-adoption report)))
+      (is (= :not-established (:original-business-policy-authenticity report)))
+      (is (= :not-established (:complete-deployed-writer-coverage report)))
+      (is (= :not-issued (:certificate report)))
+      (is (not-any? #(contains? report %)
+                    [:request :response :handler :system :contract :router
+                     :witness :node :executor :transaction]))
+      (is (= b (physical)) "Biff invocation does not certify or submit this XTDB write")
+      (is (= :host-handler-observation-already-attempted
+             (reason #(observe! request)))))))
+
+(deftest host-typed-observation-fails-closed-on-wrong-route
+  (let [b (before)]
+    (put! b)
+    (doseq [bad-request [{:request-method :get :uri "/operations/example/claim"}
+                         {:request-method :post :uri "/wrong"}
+                         {:request-method :post :uri "/operations/example/claim/more"}
+                         {:request-method :post :uri nil}
+                         {}]]
+      (let [{:keys [builder]} (host-typed-preparer)
+            observe! (:observe-handler! builder)]
+        (is (= :request-is-not-a-bound-operation-route
+               (reason #(observe! bad-request))))
+        (is (= :host-handler-observation-already-attempted
+               (reason #(observe! {:request-method :post
+                                   :uri "/operations/example/claim"}))))))
+    (is (= b (physical)))))
+
+(deftest host-typed-observation-consumes-permit-on-substituted-source
+  (let [b (before)]
+    (put! b)
+    (let [{:keys [builder]} (host-typed-preparer)
+          observe! (:observe-handler! builder)
+          request {:request-method :post :uri "/operations/example/claim"}]
+      (with-redefs [gesso.live.application-preflight/operation-summary
+                    (fn [& _] {:example/claim {:routes []}})]
+        (is (= :substituted-application-or-route-checker
+               (reason #(observe! request)))))
+      (is (= :host-handler-observation-already-attempted
+             (reason #(observe! request))))
+      (is (= b (physical))))))
