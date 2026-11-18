@@ -1,12 +1,12 @@
 (ns gesso.assurance.ansatz-rule-semantics-pilot
-  "Opt-in v1740 Ansatz pilot: semantics of the ORIGINAL reservation guards.
+  "Opt-in v1742: ORIGINAL reservation guards through the SHARED enum compiler.
 
-   Translate only [:read :slot/status], [:literal enum-member], and [:= a b]
-   into equality propositions over the exact closed source-derived enum
-   encoding. Kernel-check mutual exclusion and COMPLETE coverage of the
-   two status guards for arbitrary encoded states satisfying the source
-   status-domain predicate. Also exhaustively compare the real Gesso typed
-   evaluator against those propositions on ALL allowed enum values.
+   The v1741 generic finite-enum compiler now owns equality-guard translation,
+   enum encoding, source bijection, pairwise exclusion, and exhaustive Gesso
+   evaluator observations. This ORIGINAL reservation pilot binds the shared
+   results to the checked guarded transitions and retains its earlier,
+   stronger complement and exclusive-or propositions without a second AST
+   translator or evaluator loop.
 
    This covers the original two-member finite guard domain, NOT arbitrary
    Clojure expressions or a general evaluator-correctness theorem. The enum
@@ -19,13 +19,14 @@
             [gesso.assurance.ansatz-transition-correspondence-pilot]
             [gesso.assurance.ansatz-observation-gate-pilot]
             [gesso.assurance.ansatz-reservation-pilot]
+            [gesso.assurance.ansatz-finite-enum-partition-pilot]
             [gesso.assurance.example.single-node-proving :as example]
-            [gesso.assurance.rule-eval :as rule-eval]
-            [gesso.assurance.rule-type :as rule-type]))
+            [gesso.assurance.rule-eval :as rule-eval]))
 
 (def ^:private proof-ns 'gesso.assurance.ansatz-reservation-pilot)
 (def ^:private bridge-ns 'gesso.assurance.ansatz-transition-correspondence-pilot)
 (def ^:private gate-ns 'gesso.assurance.ansatz-observation-gate-pilot)
+(def ^:private enum-ns 'gesso.assurance.ansatz-finite-enum-partition-pilot)
 (def ^:private status-field :slot/status)
 
 (defn- from-pilot! [ns-name function & args]
@@ -39,85 +40,66 @@
   (throw (ex-info "Unsupported original Gesso guard semantics"
                   {:reason reason :details details})))
 
-(defn- strict-guard-expression! [expression encoding]
-  ;; A strict structural translator for precisely the expression constructors
-  ;; present in the original reservation guards. No host-language eval, no
-  ;; unhandled AST nodes, and no invented or implicit enum conversions.
-  (letfn [(translate [expr]
-            (when-not (vector? expr)
-              (reject! :unsupported-guard-expression expr))
-            (case (first expr)
-              :read (if (= expr [:read status-field])
-                      'status
-                      (reject! :unsupported-guard-reader expr))
-              :literal (let [member (second expr)]
-                         (if (and (= 2 (count expr))
-                                  (keyword? member)
-                                  (contains? encoding member))
-                           (get encoding member)
-                           (reject! :unsupported-guard-literal expr)))
-              := (if (= 3 (count expr))
-                   (list '= 'Int (translate (second expr))
-                         (translate (nth expr 2)))
-                   (reject! :unsupported-guard-arity expr))
-              (reject! :unsupported-guard-operator expr)))]
-    (let [formula (translate expression)]
-      (when-not (and (seq? formula)
-                     (= '= (first formula))
-                     (= 'Int (second formula))
-                     (= 4 (count formula))
-                     (#{'status} (nth formula 2))
-                     (integer? (nth formula 3)))
-        (reject! :unsupported-original-guard-shape expression))
-      formula)))
-
-(defn- guard-partition-source! [ordered parsed encoding]
-  (let [targets (mapv (comp #(nth % 3) :formula) parsed)]
-    (when-not (and (= [:slot/reserve :slot/release] ordered)
-                   (= ordered (mapv :operation-id parsed))
-                   (= #{:available :reserved} (set (keys encoding)))
-                   (= #{0 1} (set (vals encoding)))
-                   (= 2 (count parsed))
-                   (= (set (vals encoding)) (set targets))
-                   (= (count targets) (count (set targets))))
-      (reject! :incomplete-or-aliased-guard-domain
-               {:targets targets :encoding encoding :operation-ids ordered}))
-    parsed))
+(defn- source-guard-rules [catalog]
+  ;; Adapt the ORIGINAL unannotated Gesso operation declarations to the
+  ;; shared v1741 compiler's source-rule interface. This is a projection of
+  ;; existing rules, NOT a second handwritten guard specification.
+  (mapv (fn [{:keys [id construction]}]
+          (let [guard (:guard construction)]
+            {:id id
+             :rule guard
+             :reader-types (select-keys (:state-types construction)
+                                        (:readers guard))}))
+        (:operations catalog)))
 
 (defn- checked-guard-model! [catalog]
-  ;; Source-closure and all earlier proofs are checked before deriving ANY
-  ;; proposition. This is still an opt-in test, not an admission API.
-  (let [_ (from-pilot! gate-ns 'current-rule-source-closure!)
-        _ (from-pilot! gate-ns 'current-interpreter-source!)
-        {:keys [model sources]} (from-pilot! bridge-ns
-                                                'source-bridge-obligations! catalog)
+  ;; The bridge independently checks the ORIGINAL operations/transition
+  ;; construction. The shared compiler owns all guard AST translation and
+  ;; finite-domain coverage. Reject a mismatch between these two sources.
+  (let [_ (from-pilot! gate-ns 'current-interpreter-source!)
+        {:keys [model sources]}
+        (from-pilot! bridge-ns 'source-bridge-obligations! catalog)
+        source-rules (source-guard-rules catalog)
+        shared (from-pilot! enum-ns 'derive-portfolio! source-rules)
         encoding (:status-encoding model)
         inv (get-in catalog [:invariants :slot/status-domain])
-        ordered (mapv :id (:operations catalog))
-        parsed (mapv (fn [{:keys [operation-id transition before-code]}]
+        parsed (mapv (fn [{:keys [operation-id transition before-code]}
+                          {:keys [id source code formula]}]
                        (let [guard (:guard transition)
-                             type-map (select-keys (:state-types transition)
-                                                   #{status-field})
-                             checked (rule-type/check-rule-type! guard type-map)
-                             formula (strict-guard-expression! (:expression checked)
-                                                               encoding)]
-                         (when-not (and (= #{status-field} (:readers checked))
-                                        (= before-code (nth formula 3)))
+                             types (select-keys (:state-types transition)
+                                                #{status-field})]
+                         (when-not (and (= operation-id id)
+                                        (= guard (:rule source))
+                                        (= types (:reader-types source))
+                                        (= code before-code)
+                                        (= formula (list '= 'Int 'status before-code)))
                            (reject! :guard-formula-bridge-mismatch
-                                    {:operation-id operation-id :formula formula}))
+                                    {:operation-id operation-id
+                                     :shared-guard id :formula formula
+                                     :source-code before-code}))
                          {:operation-id operation-id
-                          :guard guard :reader-types type-map
+                          :guard guard :reader-types types
                           :formula formula :source-transition transition}))
-                     sources)
-        _ (guard-partition-source! ordered parsed encoding)]
-    (when-not (= [:in [:read status-field]
-                  [:literal (set (keys encoding))]] (:expression inv))
-      (reject! :unsupported-status-domain inv))
+                     sources (:guards shared))]
+    (when-not (and (= (count sources) (count source-rules) (count parsed))
+                   (= [:slot/reserve :slot/release]
+                      (mapv :id source-rules))
+                   (= encoding (get-in shared [:domain :codes]))
+                   (= status-field (get-in shared [:domain :field]))
+                   (= [:in [:read status-field]
+                       [:literal (set (keys encoding))]] (:expression inv))
+                   (= (set (keys encoding))
+                      (set (get-in shared [:domain :values])))
+                   (= (:domain-form shared) (:guard-disjunction shared)))
+      (reject! :shared-guard-model-mismatch
+               {:source-operations (mapv :operation-id sources)
+                :shared-operations (mapv :id (:guards shared))}))
     {:catalog-fingerprint (:catalog-fingerprint model)
      :status-encoding encoding
+     :source-rules source-rules
+     :shared-portfolio shared
      :operations parsed
-     :closed-domain (list 'Or (list '= 'Int 'status (first (sort (vals encoding))))
-                          (list '= 'Int 'status (second (sort (vals encoding)))))}))
+     :closed-domain (:domain-form shared)}))
 
 (defn- proof-obligations! [{:keys [catalog-fingerprint operations closed-domain]}]
   (let [[a b] (map :formula operations)
@@ -147,9 +129,15 @@
 
 (defn- check-guard-proofs! [catalog]
   (let [model (checked-guard-model! catalog)
+        shared (from-pilot! enum-ns 'check-portfolio! (:source-rules model))
         checked (mapv #(from-pilot! proof-ns 'check-obligation! %)
                       (proof-obligations! model))]
-    (when-not (and (= 3 (count checked))
+    (when-not (and (= 2 (:proposition-count shared))
+                   (= :kernel-checked-conditional-finite-enum-partition
+                      (:proof-status shared))
+                   (= (:shared-portfolio model) (:model shared))
+                   (= 2 (count (:checked shared)))
+                   (= 3 (count checked))
                    (every? (fn [{:keys [goal proof dependencies description]}]
                              (and (= (:catalog-fingerprint model)
                                      (:catalog-fingerprint description))
@@ -158,11 +146,17 @@
                                      (:policy dependencies))
                                   (empty? (:non-safe dependencies))
                                   (empty? (:unresolved dependencies)))) checked))
-      (reject! :unqualified-guard-proof checked))
+      (reject! :unqualified-shared-or-reservation-proof
+               {:shared-count (:proposition-count shared)
+                :reservation-count (count checked)}))
     {:model model
      :checked checked
      :proof-count (count checked)
+     :shared-checked (:checked shared)
+     :shared-proof-count (:proposition-count shared)
+     :total-proof-count (+ (count checked) (:proposition-count shared))
      :scope :closed-enum-guard-domain
+     :translation-path :shared-source-derived-finite-enum-compiler
      :evaluator-correspondence :exhaustive-domain-observations-only
      :general-expression-semantics :not-proved
      :physical-correspondence :not-established
@@ -171,42 +165,21 @@
      :authority :none}))
 
 (defn- evaluate-original-guards! [model]
-  ;; Since the entire typed input footprint is one REQUIRED member of a
-  ;; two-member enum, these calls enumerate all valid rule-eval binding maps
-  ;; for the checked source guards. This is exhaustive for this closed
-  ;; projection, but not a universal proof of the JVM evaluator algorithm.
-  (let [encoding (:status-encoding model)
-        reports (vec
-                 (for [member (sort-by str (keys encoding))
-                       {:keys [operation-id guard reader-types formula]}
-                       (:operations model)]
-                   (let [result (rule-eval/evaluate-rule! guard reader-types
-                                                          {status-field member})
-                         symbolic (= (get encoding member) (nth formula 3))]
-                     (when-not (and (= :syntax-and-types (:checking result))
-                                    (= :pure-interpreted (:evaluation result))
-                                    (= :none (:authority result))
-                                    (= (:expression guard) (:expression result))
-                                    (instance? Boolean (:value result))
-                                    (= symbolic (:value result)))
-                       (reject! :original-evaluator-formula-mismatch
-                                {:member member :operation-id operation-id
-                                 :observed result :symbolic symbolic}))
-                     {:operation-id operation-id
-                      :status member :value (:value result)})))]
-    (when-not (and (= 4 (count reports))
-                   (every? #(= 1 (count (filter :value (filter
-                                                        (fn [r] (= (:status r) %))
-                                                        reports))))
-                           (keys encoding)))
-      (reject! :guard-evaluator-not-a-partition reports))
-    reports))
+  ;; One implementation of exhaustive typed evaluator correspondence:
+  ;; delegate to the shared finite-enum proof compiler's observation loop.
+  (mapv (fn [{:keys [member guard matches?]}]
+          {:operation-id guard :status member :value matches?})
+        (from-pilot! enum-ns 'observe-all! (:shared-portfolio model))))
 
 (deftest original-guards-form-kernel-checked-exhaustive-exclusive-partition
   (let [{:keys [model checked] :as result}
         (check-guard-proofs! (example/reservation-catalog))
         reports (evaluate-original-guards! model)]
     (is (= 3 (:proof-count result)))
+    (is (= 2 (:shared-proof-count result)))
+    (is (= 5 (:total-proof-count result)))
+    (is (= :shared-source-derived-finite-enum-compiler (:translation-path result)))
+    (is (= 2 (count (:shared-checked result))))
     (is (= #{:original-reservation-guard-partition
              :original-reservation-reserve-guard-complement
              :original-reservation-release-guard-complement}
@@ -217,33 +190,54 @@
              [:slot/release :reserved true]}
            (set (map (juxt :operation-id :status :value) reports))))
     (is (every? #(kernel/verifies? (ansatz/env) (:goal %) (:proof %)) checked))
+    (is (every? #(kernel/verifies? (ansatz/env) (:goal %) (:proof %))
+                (:shared-checked result)))
     (is (= :not-issued (:certificate result)))
     (is (= :none (:authority result)))))
 
 (deftest unsupported-guards-and-aliased-translations-fail-closed
   (let [catalog (example/reservation-catalog)
         model (checked-guard-model! catalog)
-        enc (:status-encoding model)
+        source-rules (:source-rules model)
         denial (fn [f]
                  (try (f) nil
                       (catch clojure.lang.ExceptionInfo ex
                         (:reason (ex-data ex)))))]
-    (is (= :unsupported-guard-operator
-           (denial #(strict-guard-expression!
-                     [:not= [:read status-field] [:literal :available]] enc))))
-    (is (= :unsupported-guard-reader
-           (denial #(strict-guard-expression!
-                     [:= [:read :slot/audit-tag] [:literal :available]] enc))))
-    (is (= :unsupported-guard-literal
-           (denial #(strict-guard-expression!
-                     [:= [:read status-field] [:literal :unknown]] enc))))
-    (testing "A duplicated encoded guard target loses exclusivity"
-      (is (= :incomplete-or-aliased-guard-domain
-             (denial #(guard-partition-source!
-                        (mapv :operation-id (:operations model))
-                        (assoc-in (:operations model) [1 :formula]
-                                  (:formula (first (:operations model))))
-                        enc)))))
+    (testing "The SHARED compiler, not a reservation translator, rejects AST changes"
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (from-pilot! enum-ns 'derive-portfolio!
+                                (assoc-in source-rules [0 :rule :expression]
+                                          [:not= [:read status-field]
+                                           [:literal :available]]))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (from-pilot! enum-ns 'derive-portfolio!
+                                (assoc-in source-rules [0 :rule :expression]
+                                          [:= [:read :slot/audit-tag]
+                                           [:literal :available]]))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (from-pilot! enum-ns 'derive-portfolio!
+                                (assoc-in source-rules [0 :rule :expression]
+                                          [:= [:read status-field]
+                                           [:literal :unknown]])))))
+    (testing "A duplicated source guard target loses shared coverage"
+      (is (= :incomplete-or-aliased-guard-portfolio
+             (denial #(from-pilot! enum-ns 'derive-portfolio!
+                                  (assoc-in source-rules [1 :rule :expression]
+                                            (get-in source-rules [0 :rule :expression])))))))
+    (testing "A corrupted shared translation is rejected by the original bridge"
+      (let [v (ns-resolve enum-ns 'derive-portfolio!)
+            original @v]
+        (with-redefs-fn {v (fn [rules]
+                            (update-in (original rules) [:guards 0 :code] inc))}
+          #(is (= :guard-formula-bridge-mismatch
+                  (denial (fn [] (checked-guard-model! catalog))))))))
+    (testing "Shared proof completeness is required by the original consumer"
+      (let [v (ns-resolve enum-ns 'check-portfolio!)
+            original @v]
+        (with-redefs-fn {v (fn [rules]
+                            (assoc (original rules) :proposition-count 1))}
+          #(is (= :unqualified-shared-or-reservation-proof
+                  (denial (fn [] (check-guard-proofs! catalog))))))))
     (testing "Mutating the actual original guard cannot inherit old proofs"
       (is (= :not-original-reservation-catalog
              (denial #(checked-guard-model!
@@ -270,10 +264,10 @@
                    (try (evaluate-original-guards! model) nil
                         (catch clojure.lang.ExceptionInfo ex
                           (:reason (ex-data ex))))))]
-    (is (= :original-evaluator-formula-mismatch
+    (is (= :typed-evaluator-disagrees
            (denial (fn [& args]
                      (assoc (apply original args) :value true)))))
-    (is (= :original-evaluator-formula-mismatch
+    (is (= :typed-evaluator-disagrees
            (denial (fn [& args]
                      (assoc (apply original args) :checking :unchecked)))))
     (testing "Outside-domain status is rejected by the ORIGINAL typed runtime"
