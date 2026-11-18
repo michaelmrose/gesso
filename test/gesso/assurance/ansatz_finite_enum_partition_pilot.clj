@@ -1,5 +1,6 @@
 (ns gesso.assurance.ansatz-finite-enum-partition-pilot
-  "Opt-in v1741: reusable finite-enum equality-guard proof compiler.
+  "Opt-in v1744: reusable finite-enum equality-guard proof compiler and
+   checked encoding shared with source-derived invariant preservation.
 
    Accepts ordinary, unannotated Gesso rule declarations with precisely one
    shared, required, nonnullable, nominal enum reader. The reader field,
@@ -41,6 +42,30 @@
                   {:error/type ::unsupported-guard-portfolio
                    :reason reason :data data})))
 
+(defn checked-enum-encoding!
+  "One closed, deterministic, injective Int encoding of a checked Gesso enum.
+   Shared by guard partitions and invariant preservation. THIS encoding is an
+   explicit translation assumption; it is not proof of Clojure enum equality
+   in the Ansatz kernel. The caller must ALSO run the original type checker."
+  [field descriptor]
+  (let [values (:values descriptor)]
+    (when-not (and (keyword? field) (namespace field)
+                   (map? descriptor)
+                   (every? #{:type :name :values :nullable? :optional?}
+                           (keys descriptor))
+                   (= :enum (:type descriptor))
+                   (keyword? (:name descriptor))
+                   (namespace (:name descriptor))
+                   (not (true? (:optional? descriptor)))
+                   (not (true? (:nullable? descriptor)))
+                   (set? values) (<= 2 (count values) 8)
+                   (every? keyword? values))
+      (reject! :unsupported-closed-enum-encoding
+               {:field field :descriptor descriptor}))
+    (let [ordered (vec (sort-by str values))]
+      {:field field :descriptor descriptor :values ordered
+       :codes (zipmap ordered (range))})))
+
 (defn- enum-domain! [sources]
   (when-not (and (vector? sources) (<= 2 (count sources) 8)
                  (every? map? sources))
@@ -58,8 +83,7 @@
                    (not (true? (:nullable? desc)))
                    (set? values) (= (count sources) (count values)))
       (reject! :unsupported-enum-reader {:field field :descriptor desc}))
-    {:field field :descriptor desc :values (vec (sort-by str values))
-     :codes (zipmap (sort-by str values) (range))}))
+    (checked-enum-encoding! field desc)))
 
 (defn- source-guard! [{:keys [field descriptor codes]} source]
   (let [{:keys [id rule reader-types]} source
