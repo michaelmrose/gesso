@@ -4,6 +4,7 @@
    The synthetic XTDB API in the positive case is NOT authenticated." 
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.proof.typed-host-physical-observation :as seam]
+            [gesso.assurance.proof.typed-certified-transition-alignment :as aligned]
             [gesso.assurance.proof.installed-route-physical-correlation-test]
             [gesso.assurance.proof.checked-biff-host-adoption :as host]
             [gesso.assurance.proof.xtdb-gateway-typed-transition-seam-test]
@@ -151,4 +152,99 @@
              (reason #((:observe-once! binder) (request))))))
     (is (= :one-shot-observation-already-attempted
            (reason #((:observe-once! binder) (request)))))
+    (is (empty? @(:calls *case*)))))
+
+;; v1763: The positive catalog is derived from the SAME original construction
+;; as the issued v1251 executor. These are still application-supplied rules:
+;; matching them never proves that the business policy was complete/correct.
+(defn- aligned-catalog []
+  {:id :example/certified-transition-catalog
+   :declared-operation-ids #{:example/claim}
+   :initial-condition
+   {:readers #{:request/status}
+    :expression [:= [:read :request/status] [:literal :open]]}
+   :invariants
+   {:request/version-nonnegative
+    {:readers #{:request/version}
+     :expression [:>= [:read :request/version] [:literal 0]]}}
+   :operations [{:id :example/claim
+                 :construction
+                 (get-in *case* [:contract :certified-operations :example/claim
+                                 :current-source :construction])}]})
+
+(defn- aligned-issuer
+  ([] (aligned-issuer (aligned-catalog)))
+  ([source]
+   (aligned/issue-source-aligned-host-physical-observer!
+    (:host *case*) (:contract *case*) (:system *case*)
+    source :example/claim)))
+
+(deftest exact-original-catalog-source-matches-issued-plan
+  ((helper fixture-ns 'artificial-execution) {}
+   (fn [{:keys [transactions api-calls]}]
+     (let [bound (aligned-issuer)
+           before ((:summary! bound))
+           observed ((:observe-once! bound) (request))
+           after ((:summary! bound))]
+       (is (= aligned/report-type (:type bound) (:type observed) (:type after)))
+       (is (= :not-attempted (:observation-status before)))
+       (is (= :exact-typed-catalog-to-issued-certified-plan-match
+              (:original-transition-source before)
+              (:original-transition-source observed)))
+       (is (re-matches #"sha256:[0-9a-f]{64}"
+                       (:transition-fingerprint observed)))
+       (is (= :bounded-same-invocation-adapter-correlation (:status observed)))
+       (is (= :bounded-same-invocation-adapter-correlation
+              (:observation-status after)))
+       (is (= 1 @transactions))
+       (is (= 1 (count @api-calls)))
+       (is (= :not-established
+              (:typed-to-certified-executor-transition-equivalence observed)))
+       (is (= :not-established (:original-business-policy-authenticity observed)))
+       (is (= :not-established (:typed-gateway-used-by-handler observed)))
+       (is (= :not-established (:xtdb-api-and-receipt-authenticity observed)))
+       (is (= :not-issued (:certificate observed)))
+       (is (not-any? #(contains? observed %)
+                     [:contract :source :catalog :executor :handler :plan
+                      :request :response :tx-ops :witness :handle]))
+       (is (= :aligned-observation-already-attempted
+              (reason #((:observe-once! bound) (request)))))))))
+
+(deftest differing-guard-or-assignment-cannot-match-original-source
+  (let [c (aligned-catalog)]
+    (doseq [changed [(assoc-in c
+                              [:operations 0 :construction :guard :expression 1 2 1]
+                              :claimed)
+                     (assoc-in c
+                               [:operations 0 :construction :replacements
+                                :request/status]
+                               [:literal :open])]]
+      (is (= :typed-and-certified-original-transition-diverged
+             (reason #(aligned-issuer changed)))))
+    (is (empty? @(:calls *case*)))))
+
+(deftest source-alignment-does-not-authenticate-weakened-business-rules
+  (let [weak (assoc (aligned-catalog) :invariants
+                    {:request/version-weak-bound
+                     {:readers #{:request/version}
+                      :expression [:< [:read :request/version]
+                                   [:literal 1000000]]}})
+        bound (aligned-issuer weak)
+        r ((:summary! bound))]
+    ;; The exact transition matches but declared invariants are chosen by the
+    ;; caller; the matcher cannot know which business rules were omitted.
+    (is (= :exact-typed-catalog-to-issued-certified-plan-match
+           (:original-transition-source r)))
+    (is (= :not-established (:original-business-policy-authenticity r)))
+    (is (= :not-issued (:certificate r)))
+    (is (empty? @(:calls *case*)))))
+
+(deftest source-alignment-checker-swap-consumes-local-permit
+  (let [bound (aligned-issuer)]
+    (with-redefs [gesso.model.certified-plan/describe-plan-operation
+                  (fn [_] {:transition-fingerprint :forged})]
+      (is (= :substituted-original-source-checker
+             (reason #((:observe-once! bound) (request))))))
+    (is (= :aligned-observation-already-attempted
+           (reason #((:observe-once! bound) (request)))))
     (is (empty? @(:calls *case*)))))
