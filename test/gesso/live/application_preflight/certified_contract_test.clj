@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1254: adversarial source-relative checks for v1253 certified Ring bindings.
+  "v1791: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
@@ -10,6 +10,7 @@
    a deliberately stubbed operation summary used solely to isolate malformed
    route/binding inputs. We never replace the certified-plan proof checks."
   (:require [clojure.test :refer [deftest is testing]]
+            [gesso.assurance.proof.checked-authorization-assembly :as authorization]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as binding]
             [gesso.live.application-preflight.fixture :as fixture]
@@ -412,3 +413,73 @@
           (is (= :not-established (:deployment-adoption report)))
           (is (contains? (:open-assumptions report)
                          :installed-route-table-is-current-and-complete)))))))
+
+
+(deftest selected-issued-binding-is-generic-and-exact
+  (let [{:keys [source executor handler issue-source]} (environment)
+        second (plan/build-certified-plan-operation! source)
+        second-handler (binding/issue-certified-handler!
+                        (assoc issue-source :executor second))
+        imitation (with-meta (fn [_] nil) {:issued true})]
+    (is (binding/issued-handler-binding? handler executor claim source))
+    (is (not (binding/issued-handler-binding? handler executor cancel source)))
+    (is (not (binding/issued-handler-binding? handler second claim source)))
+    (is (not (binding/issued-handler-binding? second-handler executor claim source)))
+    (is (binding/issued-handler-binding? second-handler second claim source))
+    (is (not (binding/issued-handler-binding? handler executor claim
+                                              (assoc source :unbound true))))
+    (is (not (binding/issued-handler-binding? imitation executor claim source)))))
+
+(deftest reusable-authorization-assembly-check-selects-exact-operation-and-route
+  (let [{:keys [source executor handler unrelated]} (environment)
+        operations {claim (fixture/trusted-operation claim
+                                                     {:published-change-topics #{}})
+                    cancel (fixture/trusted-operation cancel
+                                                      {:published-change-topics #{}})}]
+    (fixture/with-closed-application
+      {:operations operations}
+      (fn [{:keys [assembly]}]
+        (let [contract {:application-assembly assembly
+                        :semantic-route-handlers {claim handler cancel unrelated}
+                        :certified-operations
+                        {claim {:executor executor :current-source source}}}
+              catalog-source {:catalog {:operations [{:id claim
+                                                      :construction (:construction source)}]}
+                              :physical-field-map {}}
+              selection {:contract-source contract
+                         :catalog-source catalog-source
+                         :operation claim :route-id claim}
+              check authorization/check-selected-binding!
+              accepted (check selection)
+              second-executor (plan/build-certified-plan-operation! source)
+              second-handler (binding/issue-certified-handler!
+                              {:executor second-executor :current-source source
+                               :request->input! (fn [_] (reconcile-input))
+                               :result->response! (fn [_ r] r)})]
+          (is (= authorization/report-type (:type accepted)))
+          (is (= :selected-original-construction-to-exact-issued-handler
+                 (:checking accepted)))
+          (is (= :not-established (:application-assembly-closure accepted)))
+          (is (= :not-established (:installed-handler-adoption accepted)))
+          (is (= :not-established (:authorization-policy-provenance accepted)))
+          (is (= :none (:transaction-authority accepted)))
+          (is (= :not-issued (:certificate accepted)))
+          ;; This selected binding coexists with another declared, un-certified
+          ;; operation. The local relation does not claim anything about it.
+          (is (= #{claim cancel}
+                 (set (keys (:semantic-route-handlers contract)))))
+          (doseq [bad [(assoc selection :operation cancel)
+                       (assoc selection :route-id cancel)
+                       (assoc-in selection [:contract-source :semantic-route-handlers claim]
+                                 unrelated)
+                       (assoc-in selection [:contract-source :semantic-route-handlers claim]
+                                 second-handler)
+                       (assoc-in selection [:catalog-source :catalog :operations 0
+                                             :construction :subject :id] cancel)
+                       (assoc-in selection [:catalog-source :catalog :operations]
+                                 [{:id claim :construction (:construction source)}
+                                  {:id claim :construction (:construction source)}])]]
+            (let [ex (try (check bad) nil
+                          (catch clojure.lang.ExceptionInfo e (ex-data e)))]
+              (is (= :authorization-not-bound-to-original-assembly
+                     (:reason ex)) (pr-str bad)))))))))

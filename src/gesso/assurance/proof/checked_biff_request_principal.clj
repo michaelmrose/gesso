@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-request-principal
-  "v1790: Source-relative ONE-operation principal/owner correspondence before
+  "v1791: Source-relative ONE-operation principal/owner correspondence before
    the v1781 checked HTTP -> typed/canonical execution trial.
 
    A trusted host acquisition callback sees the ACTUAL selected Ring request,
@@ -19,11 +19,12 @@
    map. This is a source-relative declaration, not independently authenticated
    policy provenance. This module does not authenticate cookies, credentials
    or Ring adapters, audit callback purity, or certify CSRF protection.
-   v1790 also requires that SAME transition to be the original construction
-   attached to the ONE checked ApplicationAssembly certified executor and
-   registered handler. No admission, certificate, transaction or retry
-   capability is issued."
+   v1791 delegates the selected original construction/executor/handler
+   identity relation to a reusable per-route checker, which also rejects a
+   DIFFERENT legitimately issued handler spliced into the selected route.
+   No admission, certificate, transaction or retry capability is issued."
   (:require [gesso.assurance.proof.operation-set :as catalog]
+            [gesso.assurance.proof.checked-authorization-assembly :as assembly-binding]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]))
 
@@ -34,6 +35,7 @@
 (def ^:private original-catalog-check catalog/check-operation-set!)
 (def ^:private original-contract-check certified/check-certified-contracts!)
 (def ^:private original-operation-summary application/operation-summary)
+(def ^:private original-assembly-binding assembly-binding/check-selected-binding!)
 
 (defn- closed-map? [m ks]
   (and (or (instance? clojure.lang.PersistentArrayMap m)
@@ -82,40 +84,26 @@
     true))
 
 (defn- check-original-authorization-assembly! [contract-source catalog-source operation]
-  ;; Do NOT claim this policy is part of the application's original business
-  ;; rules: the authorization declaration is still application-supplied. This
-  ;; joins that declaration's one typed operation to the actual issued-plan
-  ;; source and assembled certified handler, not a caller-supplied report.
-  (when-not (and (closed-map? contract-source
-                             #{:application-assembly :semantic-route-handlers
-                               :certified-operations})
-                 (identical? original-contract-check
+  ;; The generic v1791 checker can bind a selected operation to a distinct
+  ;; route ID within a larger application. This Claim gate intentionally keeps
+  ;; its own ONE-operation closed boot; its chosen route ID equals operation.
+  ;; Original full assembly/admission still runs at the boot and host bounds.
+  (when-not (and (identical? original-contract-check
                              (var-get #'certified/check-certified-contracts!))
                  (identical? original-operation-summary
-                             (var-get #'application/operation-summary)))
+                             (var-get #'application/operation-summary))
+                 (identical? original-assembly-binding
+                             (var-get #'assembly-binding/check-selected-binding!)))
     (reject! :authorization-not-bound-to-original-assembly))
-  ;; The existing boot source checker freshly executes the expensive
-  ;; original certified-contract/assembly validation after this gate, and
-  ;; the checked Biff host repeats it before adoption. Do not re-run full
-  ;; application derivation here: bind to that exact supplied source rather
-  ;; than accepting a caller-supplied report or a second route table.
-  (let [binding (get-in contract-source [:certified-operations operation])
-        original-construction (get-in binding [:current-source :construction])
-        declared-construction (get-in catalog-source
-                                      [:catalog :operations 0 :construction])
-        selected-handler (get-in contract-source
-                                 [:semantic-route-handlers operation])]
-    (when-not (and (some? (:application-assembly contract-source))
-                   (= #{operation}
-                      (set (keys (:certified-operations contract-source)))
-                      (set (keys (:semantic-route-handlers contract-source))))
-                   (fn? (:executor binding))
-                   (certified/certified-handler? selected-handler)
-                   (= declared-construction original-construction)
-                   (= operation (:operation (get-in binding [:current-source
-                                                               :certified-source]))))
-      (reject! :authorization-not-bound-to-original-assembly))
-    true))
+  (try
+    (original-assembly-binding
+     {:contract-source contract-source
+      :catalog-source catalog-source
+      :operation operation
+      :route-id operation})
+    (catch Exception _
+      (reject! :authorization-not-bound-to-original-assembly)))
+  true)
 
 (defn- check-authorization-declaration! [source policy operation inputs catalog-source]
   ;; The declaration belongs to this selected application's boot source,
@@ -186,7 +174,9 @@
                    ;; data; the selected source is checked once at issuance.
                    ;; Reject replacement of the original checker at runtime
                    ;; without re-running expensive admission in the HTTP path.
-                   (when-not (and (identical? original-contract-check
+                   (when-not (and (identical? original-assembly-binding
+                                              (var-get #'assembly-binding/check-selected-binding!))
+                                  (identical? original-contract-check
                                               (var-get #'certified/check-certified-contracts!))
                                   (identical? original-operation-summary
                                               (var-get #'application/operation-summary))

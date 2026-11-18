@@ -112,6 +112,22 @@
   [handler]
   (boolean (registered-handler handler)))
 
+;; v1791: A reusable, non-authoritative selected-route identity check.
+;; Useful to scoped application/source binding checks that do not need to
+;; repeat the expensive full application-assembly derivation. The caller
+;; must still run check-certified-contracts! on its CURRENT installed table.
+(defn issued-handler-binding?
+  "Does this EXACT issued handler hold this executor, operation and original
+   source? This checks only the in-process registration relation. It does
+   NOT check executor freshness, route-table completeness, actual adapter
+   adoption, policy authorization, or transaction authority."
+  [handler executor operation current-source]
+  (let [entry (registered-handler handler)]
+    (boolean (and entry
+                  (identical? executor (:executor entry))
+                  (= operation (:operation entry))
+                  (= current-source (:original-source entry))))))
+
 (defn- require-current-binding! [executor current-source]
   (when-not (plan/checked-plan-operation? executor)
     (fail! :unregistered-certified-plan-executor [:executor] {}))
