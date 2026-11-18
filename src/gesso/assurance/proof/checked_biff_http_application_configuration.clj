@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1784: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1793: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -10,8 +10,15 @@
    replacement for Biff's unrestricted start API. This code does not control
    independent Biff instances, raw socket listeners, a remote deployment,
    authentic request principals or physical transaction writers. It issues
-   no proof certificate, admission, retry or transaction authority."
+   no proof certificate, admission, retry or transaction authority.
+
+   v1793: If a typed trial selects a catalog, its ENTIRE declared certified
+   route set must match the current original application assembly before
+   the sealed Biff startup touches an HTTP listener. The coverage checker
+   does not establish installed/deployed handler identity or prove that the
+   selected catalog includes every business rule."
   (:require [com.biffweb.core :as biff]
+            [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.checked-biff-host-adoption :as host]
             [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
             [gesso.assurance.proof.checked-biff-http-adapter-start :as guarded]
@@ -32,6 +39,7 @@
 (def ^:private original-guarded-issuer guarded/issue-checked-http-adapter-start!)
 (def ^:private original-sealed-start sealed/start-closed-checked-http-application!)
 (def ^:private original-biff-stop biff/stop)
+(def ^:private original-route-coverage coverage/check-declared-route-coverage!)
 
 (defn- reject! [reason]
   (throw (ex-info "Configured closed Biff HTTP startup not established."
@@ -48,7 +56,9 @@
                  (identical? original-sealed-start
                              (var-get #'sealed/start-closed-checked-http-application!))
                  (identical? original-biff-stop
-                             (var-get #'biff/stop)))
+                             (var-get #'biff/stop))
+                 (identical? original-route-coverage
+                             (var-get #'coverage/check-declared-route-coverage!)))
     (reject! :substituted-original-configured-start-boundary)))
 
 (defn- plain-map? [x]
@@ -78,7 +88,35 @@
     (reject! :invalid-application-owned-http-configuration))
   config)
 
-(defn- report [state]
+(defn- require-selected-route-coverage! [contract-source typed-trial]
+  ;; There is deliberately no caller-supplied checked report to trust. Only
+  ;; selected typed execution requires this check. Run it BEFORE Biff init,
+  ;; since an invalid selected catalog must never start an HTTP listener.
+  (when typed-trial
+    (pinned!)
+    (let [checked (try
+                    (original-route-coverage
+                     {:contract-source contract-source
+                      :catalog-source (:catalog-source typed-trial)})
+                    (catch Exception _
+                      (reject! :selected-catalog-route-coverage-not-checked)))]
+      (when-not (and (= coverage/coverage-report-type (:type checked))
+                     (= coverage/report-version (:version checked))
+                     (= :all-declared-catalog-operations-and-issued-routes
+                        (:checking checked))
+                     (contains? (:catalog-operations checked)
+                                (:operation typed-trial))
+                     (= :source-relative-checked
+                        (:current-assembly-closure checked))
+                     (= :not-established (:installed-handler-adoption checked))
+                     (= :none (:transaction-authority checked)
+                        (:authority checked))
+                     (= :not-issued (:certificate checked))
+                     (= :not-admitted (:admission checked)))
+        (reject! :selected-catalog-route-coverage-not-checked)))
+    true))
+
+(defn- report [state typed-selected?]
   {:type report-type :version report-version
    :scope :one-application-owned-closed-biff-http-start
    :status state
@@ -90,6 +128,11 @@
      :selected-adapter-challenge-passed-during-start
      :not-established)
    :typed-catalog-execution :optional-separately-observed
+   :declared-route-coverage-at-start
+   (if (and typed-selected? (= state :verified-configured-start))
+     :selected-certified-catalog-routes-source-checked-before-start
+     :not-established)
+   :selected-catalog-business-policy-completeness :not-established
    :external-deployment :not-established
    :independent-biff-starts :not-established
    :uncontrolled-socket-listeners :not-established
@@ -128,7 +171,7 @@
         consumed (AtomicBoolean. false)
         state (atom :issued)
         started (atom nil)
-        summary! (fn [] (pinned!) (report @state))
+        summary! (fn [] (pinned!) (report @state (some? typed-trial)))
         start! (fn [initial-system]
                  (when-not (.compareAndSet consumed false true)
                    (reject! :configured-start-already-attempted))
@@ -140,6 +183,10 @@
                                   (not (contains? initial-system
                                                   app/biff-ring-handler-key)))
                      (reject! :invalid-or-preinstalled-biff-initial-system))
+                   ;; The route and exact issued handler coverage must be
+                   ;; checked against CURRENT original sources before Biff
+                   ;; initializes modules or installs the real HTTP listener.
+                   (require-selected-route-coverage! contract-source typed-trial)
                    (let [result (binding [*configured-modules* modules]
                                   (original-sealed-start
                                    (:application-assembly contract-source)
@@ -161,7 +208,7 @@
                        (reject! :configured-start-state-diverged))
                      (reset! started (:system result))
                      {:system (:system result)
-                      :report (report @state)})
+                      :report (report @state (some? typed-trial))})
                    (catch Throwable error
                      ;; A selected adapter that opened a port must implement
                      ;; its own stop cleanup on failed Biff startup.

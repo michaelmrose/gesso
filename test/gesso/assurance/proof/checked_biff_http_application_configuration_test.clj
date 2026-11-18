@@ -1,8 +1,9 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1784: The actual application startup entrypoint owns module issuance,
+  "v1793: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
+            [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.checked-biff-http-application-configuration :as config]
             [gesso.assurance.proof.checked-biff-http-module-assembly :as sealed]
             [gesso.assurance.proof.checked-biff-http-adapter-start-test]
@@ -83,6 +84,7 @@
         (is (= :internally-derived-canonical (:module-order report)))
         (is (= :selected-adapter-challenge-passed-during-start
                (:real-http-consumption report)))
+        (is (= :not-established (:declared-route-coverage-at-start report)))
         (is (= :not-established (:external-deployment report)))
         (is (= :none (:authority report) (:retry-authority report)))
         (is (not-any? #(contains? report %)
@@ -102,8 +104,12 @@
                 (original-source s true))]
     ((model 'seed!) [:requests request])
     (try
-      (is (= :verified-configured-start
-             (get-in ((:start-once! issued) {}) [:report :status])))
+      (let [report (:report ((:start-once! issued) {}))]
+        (is (= :verified-configured-start (:status report)))
+        (is (= :selected-certified-catalog-routes-source-checked-before-start
+               (:declared-route-coverage-at-start report)))
+        (is (= :not-established
+               (:selected-catalog-business-policy-completeness report))))
       (is (= 200 (post! s)))
       (is (= ((model 'next-version) request {:owner "helper-a"})
              ((model 'read-request) (:xt/id request))))
@@ -230,3 +236,39 @@
         (deliver continue true)
         (future-cancel started)
         (cleanup! s issued)))))
+
+
+(deftest selected-catalog-coverage-refuses-incomplete-declarations-before-biff-start
+  (let [s (scenario :honest)
+        original (original-source s true)
+        catalog (get-in original [:typed-trial :catalog-source])
+        claim (first (get-in catalog [:catalog :operations]))
+        other (assoc claim :id :request/other)
+        bad-sources [(assoc-in original [:typed-trial :catalog-source
+                                         :catalog :operations] [])
+                     (assoc-in original [:typed-trial :catalog-source
+                                         :catalog :operations] [claim other])
+                     (assoc-in original [:typed-trial :catalog-source
+                                         :catalog :operations] [claim claim])]]
+    (doseq [bad bad-sources]
+      (let [issued (config/issue-configured-checked-http-application! bad)]
+        (try
+          (is (= :selected-catalog-route-coverage-not-checked
+                 (reason #((:start-once! issued) {}))))
+          (is (nil? @(:server-state s)))
+          (is (= :configured-start-already-attempted
+                 (reason #((:start-once! issued) {}))))
+          (finally (cleanup! s issued)))))))
+
+(deftest selected-catalog-coverage-checker-substitution-blocks-real-start
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))]
+    (try
+      (with-redefs [coverage/check-declared-route-coverage!
+                    (fn [_] {:type coverage/coverage-report-type
+                             :checking :all-declared-catalog-operations-and-issued-routes})]
+        (is (= :substituted-original-configured-start-boundary
+               (reason #((:start-once! issued) {})))))
+      (is (nil? @(:server-state s)))
+      (finally (cleanup! s issued)))))
