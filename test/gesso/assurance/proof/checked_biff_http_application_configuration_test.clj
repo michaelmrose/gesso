@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1804: The actual application startup entrypoint owns module issuance,
+  "v1805: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -706,3 +706,56 @@
       (finally
         (cleanup! s1 a)
         (cleanup! s2 b)))))
+
+
+(deftest original-listener-endpoint-survives-repointed-locator-and-independent-adapter
+  ;; Both instances start on distinct real loopback ports. Redirecting the
+  ;; first instance's mutable locator to the second instance must NOT
+  ;; let the first one's generation qualify.
+  (let [first-s (scenario :honest)
+        second-s (scenario :honest)
+        first-source (original-source first-s true)
+        first-locator (:base-url! first-source)
+        redirected (atom nil)
+        first-issued
+        (config/issue-configured-checked-http-application!
+         (assoc first-source :base-url!
+                (fn [system] (or @redirected (first-locator system)))))
+        second-issued
+        (config/issue-configured-checked-http-application!
+         (original-source second-s true))]
+    (try
+      (let [first-start ((:start-once! first-issued) {})
+            second-start ((:start-once! second-issued) {})
+            first-system (:system first-start)
+            first-generation (:instance-generation first-start)
+            second-system (:system second-start)
+            second-generation (:instance-generation second-start)
+            inspect-first (fn []
+                            ((:inspect-generation! first-issued)
+                             first-generation first-system))
+            inspect-second (fn []
+                             ((:inspect-generation! second-issued)
+                              second-generation second-system))
+            second-url (str "http://127.0.0.1:"
+                            (:port @(:server-state second-s)))]
+        (is (not= (:port @(:server-state first-s))
+                  (:port @(:server-state second-s))))
+        (is (= :matches-startup-verified-loopback-port
+               (:original-local-listener-endpoint (inspect-first))))
+        (reset! redirected second-url)
+        (is (= :configured-instance-http-liveness-not-observed
+               (reason inspect-first)))
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding (inspect-second))))
+        (reset! redirected nil)
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding (inspect-first))))
+        (is (= :stopped (:status ((:stop! first-issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason inspect-first)))
+        (is (= :matches-startup-verified-loopback-port
+               (:original-local-listener-endpoint (inspect-second)))))
+      (finally
+        (cleanup! first-s first-issued)
+        (cleanup! second-s second-issued)))))

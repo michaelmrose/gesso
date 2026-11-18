@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1803: A separate Biff server adapter must actually consume the checked
+  "v1805: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
    copied Biff system or return a synthetic success status."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -496,3 +496,34 @@
           (is (= ((model 'next-version) request {:owner "helper-a"})
                  (read-request (:xt/id request))))
           (is (= 1 @(get-in env [:environment :constructs]))))))))
+
+
+(deftest current-local-liveness-rejects-repointed-loopback-port
+  ;; The original issued probe, not a mutable later locator, owns the port
+  ;; that proved real HTTP consumption at startup. No new endpoint can be
+  ;; learned from a later liveness inspection.
+  (with-adapter! :honest nil
+    (fn [{:keys [env probe system base]}]
+      (let [contract (:contract env)
+            port (.getPort (URI/create base))
+            other-port (if (= port 65535) 65534 (inc port))
+            redirected (str "http://127.0.0.1:" other-port)
+            inspect! (fn [url]
+                       (probe/require-fresh-local-http-liveness!
+                        probe contract system url))]
+        (is (= :one-final-checked-wrapper-http-challenge-returned
+               (:status ((:verify-once! probe) system base))))
+        (is (= :responded-to-current-inspection-challenge
+               (:status (inspect! base))))
+        (is (= :local-checked-http-endpoint-changed
+               (error-reason #(inspect! redirected))))
+        (is (= :responded-to-current-inspection-challenge
+               (:status (inspect! (str base "/"))))
+            "A harmless trailing slash does not change the socket endpoint")
+        (is (= :responded-to-current-inspection-challenge
+               (:status (inspect! base))))
+        (let [report (inspect! base)]
+          (is (= :same-verified-loopback-port
+                 (:original-start-listener-endpoint report)))
+          (is (not-any? #(contains? report %)
+                        [:port :url :base-url :server :system :nonce :request])))))))

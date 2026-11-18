@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1804: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1805: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -58,7 +58,13 @@
    the current handler/host/HTTP observations. Old or unrelated generation
    handles cannot be exchanged between independent starts. The generation
    is a local equality witness, not a lease, auth credential, certificate
-   or proof that a remote deployment remains available."
+   or proof that a remote deployment remains available.
+
+   v1805: The original probe captures the successful startup's loopback
+   listener endpoint. Neither :inspect-running! nor :inspect-generation!
+   may silently move a fresh liveness challenge to another local port
+   when the caller-owned URL locator changes. Same-port replacement is
+   not independently identifiable from a loopback response.
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -399,6 +405,8 @@
                                              (:scope fresh))
                                           (= :exact-issued-wrapper
                                              (:original-final-handler-slot fresh))
+                                          (= :same-verified-loopback-port
+                                             (:original-start-listener-endpoint fresh))
                                           (= :not-forwarded-to-business-router
                                              (:read-only-request fresh))
                                           (= :observed-at-inspection-only
@@ -426,6 +434,8 @@
                               :external-listener-liveness :not-established
                               :out-of-band-adapter-stops :not-established
                               :fresh-local-http-response :observed-at-current-inspection
+                              :original-local-listener-endpoint
+                              :matches-startup-verified-loopback-port
                               :future-local-listener-availability :not-established
                               :certificate :not-issued :admission :not-admitted
                               :retry-authority :none :transaction-authority :none

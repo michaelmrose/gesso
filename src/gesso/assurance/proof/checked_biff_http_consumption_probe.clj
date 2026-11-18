@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe
-  "v1803: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
+  "v1805: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
    actually consumes the final checked Ring handler installed through Biff's
    ordinary module start lifecycle.
 
@@ -29,6 +29,10 @@
    current-instance inspection, bound to this SAME issued final wrapper.
    Forged or replayed marker requests never reach the business router.
    An observed response is not continuous or external listener liveness.
+   v1805: A later locator cannot redirect an inspection to another loopback
+   port. The issued probe remembers only the original successfully verified
+   port and checks it BEFORE sending a fresh health challenge. Same-port
+   listener replacement and external identity remain outside this claim.
    No business transition, deployed-service claim or certificate is issued.
 
    This is local test evidence for a selected HTTP server module only: Biff
@@ -169,7 +173,10 @@
                    (nil? (.getRawFragment uri))
                    (contains? #{nil "" "/"} (.getRawPath uri)))
       (reject! :nonloopback-or-unsafe-probe-target))
-    uri))
+    ;; Local probes use an origin, never an arbitrary path. Canonicalizing
+    ;; the permitted empty or "/" path avoids introducing a double slash
+    ;; when constructing private challenge paths.
+    (URI/create (str "http://127.0.0.1:" (.getPort uri)))))
 
 (def ^:private route-parameter-pattern #"(?<=/):[A-Za-z][A-Za-z0-9_-]*(?=/|$)")
 
@@ -251,6 +258,7 @@
                            (UUID/randomUUID))
         liveness-pending (atom nil)
         liveness-monitor (Object.)
+        verified-start-port (atom nil)
         secret-header (str (UUID/randomUUID))
         secret-response (str "gesso-consumed-" (UUID/randomUUID))
         route-secret (str (UUID/randomUUID))
@@ -490,6 +498,14 @@
                                                  @result))
                                  (reject! :local-checked-http-liveness-not-observed))
                                (let [url (local-base-uri! base-url)
+                                     ;; Every URL is constrained to
+                                     ;; http://127.0.0.1; pin the original
+                                     ;; successful listener PORT, not a
+                                     ;; caller's later target hint.
+                                     start-port @verified-start-port
+                                     _ (when-not (and (integer? start-port)
+                                                      (= start-port (.getPort url)))
+                                         (reject! :local-checked-http-endpoint-changed))
                                      nonce (str (UUID/randomUUID))
                                      response (str "gesso-live-" (UUID/randomUUID))
                                      challenge {:nonce nonce :response response}
@@ -550,6 +566,11 @@
                                               (= secret-response (.body response))
                                               (= :seen @pending)
                                               (= 1 @hits))]
+                          ;; Only the original one-shot HTTP verification
+                          ;; can establish this endpoint; never learn a
+                          ;; replacement from later liveness inspections.
+                          (when qualified?
+                            (reset! verified-start-port (.getPort url)))
                           (reset! result
                                   (if qualified?
                                     :one-final-checked-wrapper-http-challenge-returned
@@ -628,6 +649,7 @@
                            :typed-attempts typed-attempts
                            :module module
                            :verify-liveness! verify-liveness!
+                           :verified-start-port verified-start-port
                            :summary! summary!
                            :verify-once! verify!}))
     {:handle handle :module module :summary! summary!
@@ -837,6 +859,14 @@
                       (:transaction-authority inventory)))
       (reject! :local-checked-http-liveness-not-observed))
     (when-not (try (true? (live-check! final-system base-url))
+                   (catch clojure.lang.ExceptionInfo error
+                     ;; Preserve this bounded failure so a changed local
+                     ;; endpoint cannot be confused with ordinary packet
+                     ;; loss. Never disclose the actual port.
+                     (if (= :local-checked-http-endpoint-changed
+                            (:reason (ex-data error)))
+                       (throw error)
+                       (reject! :local-checked-http-liveness-not-observed)))
                    (catch Throwable _
                      (reject! :local-checked-http-liveness-not-observed)))
       (reject! :local-checked-http-liveness-not-observed))
@@ -845,6 +875,7 @@
      :scope :one-fresh-local-loopback-response-on-original-issued-wrapper
      :status :responded-to-current-inspection-challenge
      :original-final-handler-slot :exact-issued-wrapper
+     :original-start-listener-endpoint :same-verified-loopback-port
      :read-only-request :not-forwarded-to-business-router
      :selected-local-listener :observed-at-inspection-only
      :external-listener-liveness :not-established
