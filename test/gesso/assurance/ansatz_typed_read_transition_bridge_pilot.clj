@@ -1,5 +1,5 @@
 (ns gesso.assurance.ansatz-typed-read-transition-bridge-pilot
-  "Opt-in v1751: exact conditional typed-read observation-to-induction step.
+  "Opt-in v1751/v1753: exact conditional typed-read observation-to-induction step.
 
    Construct the exact mixed typed-read trace STEP generated in v1750 from
    ORIGINAL guarded replacement operations. Instantiate it over typed before,
@@ -10,7 +10,10 @@
    A current original and independent abstract observer must agree with a
    separately recomputed closed source relation before an observation may be
    associated with the proved trace branch. This is a per-invocation abstract
-   correspondence CHECK, not a general proof that the original interpreter,
+   correspondence CHECK. v1753 additionally re-evaluates the FULL original
+   guarded source relation at the bridge boundary, so even a fabricated
+   lower-layer verdict cannot conceal a failing guard or untracked write.
+   This is not a general proof that the original interpreter,
    JVM, XTDB, all installed writers or source translation are sound.
    No application certification, admission, physical authority or downstream
    Typed Clojure/Ansatz requirement is conferred."
@@ -275,6 +278,71 @@
       (refuse! :tracked-invariant-not-established
                {:side side :invariant id :field (:field invariant)}))))
 
+(defn- require-original-source-relation!
+  "Independently rederive the FULL guarded replacement relation from the
+   original normalized declaration, not the downstream observer's verdict.
+   The Ansatz trace projection tracks only selected invariant fields; it does
+   not encode the original guard or writes to other fields. Thus a forged or
+   stale intermediate gate may never bridge an otherwise-valid trace branch.
+   This is a scoped per-observation oracle, not a universal correctness proof."
+  [model id before inputs after]
+  (let [source (first (filter #(= id (:id %))
+                              (get-in model [:source :sources])))
+        declaration (:source source)
+        semantics (:semantics source)
+        state-types (:state-types declaration)
+        input-types (:input-types declaration)
+        guard (:guard declaration)
+        expression (:expression guard)
+        [operator lhs rhs] expression
+        guard-field (second lhs)
+        guard-literal (second rhs)
+        assigned (:assignments semantics)
+        frames (:frame-fields semantics)
+        available (merge before inputs)]
+    (when-not (and source
+                   (= (:id source) id)
+                   (= (:assignments declaration) assigned)
+                   (= (:frame-fields semantics)
+                      (set/difference (set (keys state-types))
+                                      (set (keys assigned))))
+                   (vector? expression) (= 3 (count expression))
+                   (= := operator)
+                   (vector? lhs) (= [:read guard-field] lhs)
+                   (vector? rhs) (= [:literal guard-literal] rhs)
+                   (= #{guard-field} (:readers guard))
+                   (= :enum (get-in state-types [guard-field :type]))
+                   (contains? (get-in state-types [guard-field :values])
+                              guard-literal))
+      (refuse! :unsupported-original-source-relation
+               {:operation id :guard guard :writes (keys assigned)}))
+    (pilot! read-ns 'projection! state-types :before before)
+    (pilot! read-ns 'projection! input-types :inputs inputs)
+    (pilot! read-ns 'projection! state-types :after after)
+    (let [guard-ok? (= guard-literal (get before guard-field))
+          assignments-ok?
+          (every? (fn [[target expression]]
+                    (let [[assignment-op operand] expression
+                          expected (case assignment-op
+                                     :literal operand
+                                     :read (get available operand)
+                                     (refuse! :unsupported-original-assignment
+                                              {:target target :expression expression}))]
+                      (and (contains? after target)
+                           (= expected (get after target)))))
+                  assigned)
+          frames-ok?
+          (every? (fn [field]
+                    (and (= (contains? before field) (contains? after field))
+                         (= (get before field) (get after field))))
+                  frames)]
+      (when-not (and guard-ok? assignments-ok? frames-ok?)
+        (refuse! :original-source-relation-not-satisfied
+                 {:operation id :guard? guard-ok?
+                  :assignments? assignments-ok? :frame? frames-ok?}))
+      {:guard? guard-ok? :assignments? assignments-ok?
+       :frame? frames-ok? :authority :none})))
+
 (defn- audited-boundary! [catalog]
   (let [{:keys [model checked] :as bridge} (check-bridge! catalog)
         read-gate (:observe! (pilot! read-ns 'audited-read-boundary!
@@ -310,6 +378,11 @@
                           (= :none (:authority observed)))
              (refuse! :original-observation-not-accepted
                       {:operation id :observation observed})))
+         ;; Do not trust even an affirmative v1749 sub-gate as the complete
+         ;; source relation. Its output is a copyable diagnostic, not a proof
+         ;; handle. Re-evaluate guard, EVERY original write, and the full frame
+         ;; before projecting the tracked fields into the checked trace step.
+         (require-original-source-relation! model id before inputs after)
          (require-state-invariants! model :before before)
          (require-state-invariants! model :after after)
          (let [variables (variables! model before inputs after)
@@ -497,6 +570,56 @@
                      (assoc inputs :input/count 4)
                      (assoc after :ticket/count 4)))))
     (is (= :none (:authority gate)))))
+
+(deftest forged-intermediate-gate-cannot-launder-an-unchecked-original-operation
+  (let [catalog (ticket-catalog)
+        [before inputs after] (witness)
+        lower-var (ns-resolve read-ns 'audited-read-boundary!)
+        fake (fn [_]
+               {:observe! (fn [id _before _inputs _after]
+                            {:operation-id id :matches? true :authority :none})})
+        bridge (with-redefs-fn {lower-var fake}
+                 #(audited-boundary! catalog))
+        observe (:observe! bridge)
+        wrong-guard (assoc before :ticket/status :claimed)
+        wrong-owner (assoc after :ticket/owner :user/forged)
+        wrong-audit (assoc after :ticket/audit :audit/forged)]
+    (is (:step-holds? (observe :ticket/assign before inputs after)))
+    (doseq [bad [[wrong-guard inputs after]
+                 [before inputs wrong-owner]
+                 [before inputs wrong-audit]]]
+      (is (= :original-source-relation-not-satisfied
+             (reason #(apply observe :ticket/assign bad)))))
+    (is (= :invalid-typed-projection
+           (reason #(observe :ticket/assign before
+                             (assoc inputs :input/count 3.5) after))))
+    (is (= :tracked-invariant-not-established
+           (reason #(observe :ticket/assign before
+                             (assoc inputs :input/count 8)
+                             (assoc after :ticket/count 8)))))
+    (is (= :none (:authority bridge)))))
+
+(deftest forged-intermediate-gate-cannot-launder-prestate-copy-or-enum-subset
+  (let [catalog (ticket-catalog)
+        [before inputs after] (witness)
+        lower-var (ns-resolve read-ns 'audited-read-boundary!)
+        fake (fn [_]
+               {:observe! (fn [id _before _inputs _after]
+                            {:operation-id id :matches? true :authority :none})})
+        bridge (with-redefs-fn {lower-var fake}
+                 #(audited-boundary! catalog))
+        observe (:observe! bridge)
+        restored (assoc before :ticket/status :claimed)
+        good (assoc restored :ticket/count (:ticket/backup restored))
+        unsafe (assoc restored :ticket/backup 9)]
+    (is (:step-holds? (observe :ticket/restore restored {} good)))
+    (is (= :original-source-relation-not-satisfied
+           (reason #(observe :ticket/restore restored {}
+                             (assoc good :ticket/count 3)))))
+    (is (= :tracked-invariant-not-established
+           (reason #(observe :ticket/restore unsafe {}
+                             (assoc unsafe :ticket/count 9)))))
+    (is (= :none (:authority bridge)))))
 
 (deftest weakened-or-forged-proof-edges-are-rejected
   (let [{:keys [model obligations]} (bridge-obligations! (ticket-catalog))
