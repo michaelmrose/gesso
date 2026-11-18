@@ -101,6 +101,12 @@
 ;; plan executor. It does not trace any database write or prove authority.
 (def ^:dynamic ^:private *issued-executor-observer* nil)
 
+;; v1767: Narrower than the v1761 whole-handler observer. This hook runs
+;; exclusively around the *original certified executor call*, after the
+;; request->input! callback and before result->response!. Any trusted callback
+;; invoked BY that executor remains inside the scope: no causal proof follows.
+(def ^:dynamic ^:private *issued-executor-scope* nil)
+
 (defn certified-handler?
   "Identity-based recognition only; does not itself establish freshness."
   [handler]
@@ -132,7 +138,10 @@
                 ;; Revalidation remains in the actual handler invocation.
                 (require-current-binding! executor current-source)
                 (let [input (request->input! ctx)
-                      result (executor ctx input)]
+                      result (if-let [scope! *issued-executor-scope*]
+                               (scope! certified-route-handler ctx
+                                       (fn [] (executor ctx input)))
+                               (executor ctx input))]
                   ;; Only the authentic issued handler emits this process-local
                   ;; event, after the selected certified executor has returned.
                   ;; A callback-driven nested or duplicate execution is not
@@ -178,6 +187,64 @@
                  [:observation] {}))
         {:result result
          :executor-calls :one-exact-issued-handler-executor-returned
+         :physical-causality :not-established}))))
+
+;; v1767: Capture the original certified executor's invocation interval,
+;; never merely the presence of a gateway trace in an input or output callback.
+(defn observe-issued-executor-scope!
+  "Invoke the actual issued handler via invoke-handler!, wrapping ONLY its
+   original certified executor call with around-executor!. The latter receives
+   a single-use function that runs the real registered executor. A qualifying
+   return requires one matching handler and identical request, one completed
+   executor call, and an unchanged result. Nested capture, callback-only
+   invocations and manufactured results fail closed.
+
+   This is local cooperative JVM instrumentation: callbacks EXECUTED WITHIN
+   the original executor remain trusted, and neither physical effects nor
+   deployed-server routing are independently authenticated."
+  [handler request around-executor! invoke-handler!]
+  (when-not (and (fn? around-executor!) (fn? invoke-handler!) (map? request)
+                 (registered-handler handler))
+    (fail! :invalid-executor-scope-observation [:scope] {}))
+  (when *issued-executor-scope*
+    (fail! :nested-executor-scope-observation [:scope] {}))
+  (let [{:keys [executor original-source]} (registered-handler handler)
+        _ (require-current-binding! executor original-source)
+        calls (volatile! 0)
+        returned (volatile! false)
+        observer-thread (Thread/currentThread)
+        scope! (fn [actual-handler actual-request invoke-executor!]
+                 (when-not (and (identical? observer-thread
+                                            (Thread/currentThread))
+                                (identical? handler actual-handler)
+                                (identical? request actual-request)
+                                (zero? @calls))
+                   (fail! :wrong-or-repeated-executor-scope [:scope] {}))
+                 (vswap! calls inc)
+                 (let [attempted (volatile! false)
+                       completed (volatile! false)
+                       original-result (volatile! nil)
+                       invoke-once! (fn []
+                                      (when @attempted
+                                        (fail! :executor-scope-double-invocation
+                                               [:scope] {}))
+                                      (vreset! attempted true)
+                                      (let [r (invoke-executor!)]
+                                        (vreset! original-result r)
+                                        (vreset! completed true)
+                                        r))
+                       result (around-executor! invoke-once!)]
+                   (when-not (and @completed (= result @original-result))
+                     (fail! :executor-not-returned-or-result-substituted
+                            [:scope] {}))
+                   (vreset! returned true)
+                   result))]
+    (binding [*issued-executor-scope* scope!]
+      (let [result (invoke-handler!)]
+        (when-not (and (= 1 @calls) @returned)
+          (fail! :missing-or-incomplete-executor-scope [:scope] {}))
+        {:result result
+         :executor-scope :one-original-issued-executor-returned
          :physical-causality :not-established}))))
 
 (defn- require-issued-handler! [handler executor operation source at]
