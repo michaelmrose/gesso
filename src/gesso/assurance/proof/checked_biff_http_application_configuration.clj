@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1803: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1804: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -50,7 +50,15 @@
 
    v1803: Inspection also requires a fresh read-only loopback challenge
    reaching the same issued final handler on the selected local adapter.
-   This is a one-time observation, not a guarantee of future availability."
+   This is a one-time observation, not a guarantee of future availability.
+
+   v1804: Return one opaque original-issued STARTED instance generation only
+   after successful startup. A new :inspect-generation! callback requires
+   that exact generation AND the exact returned Biff system, and rechecks
+   the current handler/host/HTTP observations. Old or unrelated generation
+   handles cannot be exchanged between independent starts. The generation
+   is a local equality witness, not a lease, auth credential, certificate
+   or proof that a remote deployment remains available."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -66,6 +74,13 @@
 (def report-version 1)
 (def running-report-type
   :gesso.assurance.proof.checked-biff-http-application-configuration/current-instance)
+
+;; Deliberately NOT a UUID/string or data-shaped status report. An issued
+;; generation is a process-local exact-identity witness and is never emitted
+;; inside a redacted assurance summary.
+(deftype StartedInstanceGeneration []
+  Object
+  (toString [_] "#<gesso.assurance/started-instance-generation>"))
 
 ;; The ONLY Biff module Var used by this configured entry point. Its dynamic
 ;; binding is scoped around BOTH the v1783 preflight and Biff startup.
@@ -321,6 +336,7 @@
         state (atom :issued)
         started (atom nil)
         lifecycle-monitor (Object.)
+        instance-generation (StartedInstanceGeneration.)
         selected-startup-routes (atom nil)
         summary! (fn [] (pinned!) (report @state (some? typed-trial)))
         inspect-running! (fn [candidate-system]
@@ -414,6 +430,21 @@
                               :certificate :not-issued :admission :not-admitted
                               :retry-authority :none :transaction-authority :none
                               :authority :none})))
+        inspect-generation!
+        (fn [candidate-generation candidate-system]
+          ;; Keep the generation comparison and the fresh observation
+          ;; serialized with the managed stop. The original inspection is
+          ;; reentrant under the same JVM monitor, not a copied report.
+          (locking lifecycle-monitor
+            (when-not (and (instance? StartedInstanceGeneration
+                                       candidate-generation)
+                           (identical? candidate-generation instance-generation)
+                           (= :verified-configured-start @state)
+                           (identical? candidate-system @started))
+              (reject! :configured-instance-generation-not-current))
+            (assoc (inspect-running! candidate-system)
+                   :generation-binding
+                   :exact-original-issued-started-instance)))
         start! (fn [initial-system]
                  (when-not (.compareAndSet consumed false true)
                    (reject! :configured-start-already-attempted))
@@ -469,6 +500,7 @@
                                (:matched-certified-route-ids selected-coverage))
                        (reset! started (:system result))
                        {:system (:system result)
+                        :instance-generation instance-generation
                         :report (report @state (some? typed-trial))}
                        (catch Throwable error
                          ;; The adapter has already started. Any failed
@@ -522,4 +554,5 @@
                       ;; still have an external listener: retain uncertainty.
                       (summary!))))))]
     {:start-once! start! :stop! stop! :summary! summary!
-     :inspect-running! inspect-running!}))
+     :inspect-running! inspect-running!
+     :inspect-generation! inspect-generation!}))

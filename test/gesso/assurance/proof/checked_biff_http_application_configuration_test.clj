@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1803: The actual application startup entrypoint owns module issuance,
+  "v1804: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -619,3 +619,90 @@
         (is (= :observed-at-current-inspection
                (:fresh-local-http-response ((:inspect-running! issued) system)))))
       (finally (cleanup! s issued)))))
+
+
+(deftest started-instance-generation-requires-exact-issued-identity
+  ;; A redacted status or a caller-constructed map is not the opaque started
+  ;; generation. The new observation remains a fresh read-only HTTP check.
+  (let [s (scenario :honest)
+        {:keys [request]} (get-in s [:env :data])
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))
+        inspect! (:inspect-generation! issued)]
+    ((model 'seed!) [:requests request])
+    (try
+      (is (= :configured-instance-generation-not-current
+             (reason #(inspect! (Object.) {}))))
+      (let [{:keys [system report instance-generation]}
+            ((:start-once! issued) {})
+            observed (inspect! instance-generation system)]
+        (is (= :verified-configured-start (:status report)))
+        (is (some? instance-generation))
+        (is (= "#<gesso.assurance/started-instance-generation>"
+               (str instance-generation)))
+        (is (= config/running-report-type (:type observed)))
+        (is (= :current-at-inspection (:status observed)))
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding observed)))
+        (is (= :observed-at-current-inspection
+               (:fresh-local-http-response observed)))
+        (is (not-any? #(contains? observed %)
+                      [:instance-generation :generation :system :handler
+                       :port :url :nonce :token]))
+        (doseq [wrong [(Object.) report observed
+                       {:type config/running-report-type
+                        :generation-binding :exact-original-issued-started-instance}]]
+          (is (= :configured-instance-generation-not-current
+                 (reason #(inspect! wrong system)))))
+        (is (= :configured-instance-generation-not-current
+               (reason #(inspect! instance-generation
+                                  (assoc system :copied true)))))
+        (is (= 200 (post! s)))
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding (inspect! instance-generation system))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason #(inspect! instance-generation system)))))
+      (finally (cleanup! s issued)))))
+
+(deftest independent-started-generations-cannot-be-cross-adopted
+  ;; Two independently issued adapters may expose identical application
+  ;; route sets and report shapes. They MUST NOT exchange the local, opaque
+  ;; started-generation or exact returned Biff-system identity witnesses.
+  (let [s1 (scenario :honest)
+        s2 (scenario :honest)
+        a (config/issue-configured-checked-http-application!
+           (original-source s1 true))
+        b (config/issue-configured-checked-http-application!
+           (original-source s2 true))]
+    (try
+      (let [first-start ((:start-once! a) {})
+            second-start ((:start-once! b) {})
+            first-gen (:instance-generation first-start)
+            second-gen (:instance-generation second-start)
+            first-system (:system first-start)
+            second-system (:system second-start)
+            inspect-a (:inspect-generation! a)
+            inspect-b (:inspect-generation! b)]
+        (is (not (identical? first-gen second-gen)))
+        (is (not (identical? first-system second-system)))
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding (inspect-a first-gen first-system))))
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding (inspect-b second-gen second-system))))
+        (doseq [[inspect! generation system]
+                [[inspect-a second-gen first-system]
+                 [inspect-b first-gen second-system]
+                 [inspect-a first-gen second-system]
+                 [inspect-b second-gen first-system]]]
+          (is (= :configured-instance-generation-not-current
+                 (reason #(inspect! generation system)))))
+        ;; Even after the first instance stops, the second remains current.
+        (is (= :stopped (:status ((:stop! a)))))
+        (is (= :configured-instance-generation-not-current
+               (reason #(inspect-a first-gen first-system))))
+        (is (= :exact-original-issued-started-instance
+               (:generation-binding (inspect-b second-gen second-system)))))
+      (finally
+        (cleanup! s1 a)
+        (cleanup! s2 b)))))
