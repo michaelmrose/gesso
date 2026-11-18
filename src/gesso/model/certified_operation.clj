@@ -112,7 +112,11 @@
     (when-not (and (plain-map? raw)
                    (= :operation (:kind raw))
                    (= operation (:id raw))
-                   (= operation (get-in raw [:interface :operation])))
+                   ;; The operation subject names the ROUTE/authoritative
+                   ;; operation. Its interface may separately name the
+                   ;; domain-command keyword (e.g. :claim), which the v1251
+                   ;; plan checker binds to its exact command operation.
+                   (keyword? (get-in raw [:interface :operation])))
       (reject! :operation-subject-mismatch [:proof-source :transition :subject]
                {:operation operation}))
     (:fingerprint (subject/describe-subject raw))))

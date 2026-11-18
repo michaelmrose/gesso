@@ -95,8 +95,12 @@
     (reject! :incomplete-field-map [:field-map]
              {:missing (set/difference state-fields (set (keys field-map)))
               :unexpected (set/difference (set (keys field-map)) state-fields)}))
-  (when-not (and (every? qualified-operation? (vals field-map))
-                 (not-any? #{:xt/id} (vals field-map))
+  (when-not (and (every? keyword? (vals field-map))
+                 ;; The existing qualified-field policy stays in force
+                 ;; unless the complete state projection explicitly models
+                 ;; the immutable document identity as :xt/id.
+                 (or (every? qualified-operation? (vals field-map))
+                     (some #{:xt/id} (vals field-map)))
                  (= (count field-map) (count (set (vals field-map)))))
     (reject! :non-injective-or-invalid-field-map [:field-map] {}))
   field-map)
@@ -104,6 +108,24 @@
 (defn- checked-construction! [original field-map]
   (let [built (construction/build-guarded-replacement! original)]
     (checked-mapping! field-map (:state-projection built))
+    ;; v1776: An identity coordinate can participate in the COMPLETE
+    ;; document projection only when it is immutable and mandatory. It
+    ;; cannot be an assignment, optional field, or nullable state field.
+    (when-let [identity-field (first (for [[field physical] field-map
+                                           :when (= physical :xt/id)] field))]
+      ;; v1251 previously rejected numeric score -> :xt/id. Preserve that
+      ;; restriction; the new source-relative projection admits only a
+      ;; mandatory STRING identity, as in the v1775 complete document model.
+      (when-not (= :string (get-in original [:state-types identity-field :type]))
+        (reject! :non-injective-or-invalid-field-map [:field-map] {}))
+      (when-not (and (contains? (:frame built) identity-field)
+                     (not (contains? (get-in built [:transition :writes])
+                                     identity-field))
+                     (not (true? (get-in original
+                                         [:state-types identity-field :optional?])))
+                     (not (true? (get-in original
+                                         [:state-types identity-field :nullable?]))))
+        (reject! :mutable-or-optional-identity-projection [:field-map] {})))
     built))
 
 (defn- checked-target! [target]
@@ -248,6 +270,11 @@
                    (not= :create command-operation))
       (reject! :invalid-command-operation [:command-operation] {}))
     (let [built (checked-construction! construction field-map)]
+      (when-not (contains? #{command-operation
+                             (:operation certified-source)}
+                           (get-in construction [:subject :interface :operation]))
+        (reject! :interface-domain-command-mismatch
+                 [:construction :subject :interface] {}))
       (when-not (= (:transition built)
                    (get-in certified-source [:proof-source :transition]))
         (reject! :proof-transition-source-mismatch [:construction] {}))
