@@ -16,8 +16,9 @@
 
    Scope remains conditional: bounded interpreter observations do NOT prove
    universal interpreter correctness, original-to-Ansatz translation fidelity,
-   invariant initialization, status-domain preservation, axiom safety, or any
-   physical/installed correspondence. No authority-bearing evidence is issued.
+   invariant initialization, status-domain preservation, or any physical/
+   installed correspondence. The proof declaration closure is inspected under
+   an explicit pilot axiom policy; no authority-bearing evidence is issued.
    This pilot accepts only the exact known reservation source shape.
 
    Invoke using the optional dependency alias:
@@ -27,6 +28,7 @@
    suite must not acquire an implicit Ansatz dependency."
   (:require [ansatz.core :as ansatz]
             [ansatz.kernel.env :as kernel]
+            [ansatz.export.non-safe :as non-safe]
             [clojure.set :as set]
             [clojure.test :refer [deftest is run-tests testing]]
             [gesso.assurance.example.single-node-proving :as example]
@@ -184,16 +186,92 @@
            'hwrite ':- (list '= 'Int 'post replacement)]
           :goal-form (comparison-form comparison 'post bound)})))))
 
+;; These are foundational assumptions of the published Ansatz/Lean arithmetic
+;; library, not Gesso business axioms. Naming them is a policy decision, NOT a
+;; theorem that these axioms are sound. No `sorryAx` or user axioms are allowed.
+(def ^:private permitted-axioms
+  #{"propext" "Quot.sound" "Classical.choice"})
+
+(defn- dependency-references [ci]
+  ;; Traverse the actual term DAG of each reachable declaration; do not trust
+  ;; compiler metadata such as DefinitionVal.all as a substitute for a body.
+  (let [tag (kernel/ci-tag ci)
+        exprs (cond-> [(kernel/ci-type ci)]
+                (#{:def :thm :opaque} tag) (conj (kernel/ci-value ci))
+                (= :recursor tag) (into (map #(.rhs %) (.rules ci))))
+        refs (reduce (fn [acc expr]
+                       (if expr
+                         (into acc (non-safe/expression-dependencies expr))
+                         acc))
+                     #{} exprs)]
+    ;; Constructors, mutual inductives, and recursors refer to companion
+    ;; declarations through kernel metadata as well as term expressions.
+    (cond-> refs
+      (= :ctor tag) (conj (.inductName ci))
+      (= :induct tag) (into (seq (.ctors ci)))
+      (#{:induct :recursor} tag) (into (seq (.all ci))))))
+
+(defn- inspect-proof-dependencies [env goal proof]
+  ;; This is an experimental, deliberately conservative closure walk for
+  ;; Ansatz 0.2.617. It is not independent kernel soundness certification.
+  (loop [pending (vec (into (non-safe/expression-dependencies goal)
+                            (non-safe/expression-dependencies proof)))
+         visited #{}
+         axioms #{}
+         unsafe #{}
+         unresolved #{}]
+    (if (empty? pending)
+      {:declarations-scanned (count visited)
+       :axioms (vec (sort axioms))
+       :non-safe (vec (sort unsafe))
+       :unresolved (vec (sort unresolved))}
+      (let [name (peek pending)
+            remaining (pop pending)]
+        (if (contains? visited name)
+          (recur remaining visited axioms unsafe unresolved)
+          (if-let [ci (kernel/lookup env name)]
+            (recur (into remaining (dependency-references ci))
+                   (conj visited name)
+                   (cond-> axioms (kernel/axiom? ci) (conj (str name)))
+                   (cond-> unsafe
+                     (or (.isUnsafeDeclaration ci)
+                         (non-safe/non-safe-definition? ci))
+                     (conj (str name)))
+                   unresolved)
+            (recur remaining (conj visited name) axioms unsafe
+                   (conj unresolved (str name)))))))))
+
+(defn- qualify-proof-dependencies! [report]
+  (let [{:keys [axioms non-safe unresolved]} report]
+    (when-not (and (map? report)
+                   (pos-int? (:declarations-scanned report))
+                   (vector? axioms) (every? string? axioms)
+                   (vector? non-safe) (every? string? non-safe)
+                   (vector? unresolved) (every? string? unresolved)
+                   (set/subset? (set axioms) permitted-axioms)
+                   (empty? non-safe)
+                   (empty? unresolved))
+      (throw (ex-info "Ansatz proof fails the explicit dependency policy"
+                      {:error/type ::unqualified-proof
+                       :reason :unpermitted-proof-dependencies
+                       :report report
+                       :permitted-axioms permitted-axioms})))
+    (assoc report :policy :ansatz-reservation-pilot/lean-core-axioms-v1)))
+
 (defn- check-obligation! [{:keys [parameters goal-form] :as obligation}]
   (let [[goal proof] (binding [ansatz/*verbose* false]
-                       (ansatz/prove-law parameters goal-form '[(omega)]))]
-    (when-not (kernel/verifies? (ansatz/env) goal proof)
+                       (ansatz/prove-law parameters goal-form '[(omega)]))
+        env (ansatz/env)]
+    (when-not (kernel/verifies? env goal proof)
       (reject! :kernel-rejected
                {:operation-id (:operation-id obligation)
                 :invariant-id (:invariant-id obligation)}))
-    {:description (dissoc obligation :parameters :goal-form)
-     :goal goal
-     :proof proof}))
+    (let [dependencies (qualify-proof-dependencies!
+                        (inspect-proof-dependencies env goal proof))]
+      {:description (dissoc obligation :parameters :goal-form)
+       :dependencies dependencies
+       :goal goal
+       :proof proof})))
 
 (defn- check-catalog! [catalog]
   (mapv check-obligation! (source-obligations! catalog)))
@@ -214,6 +292,15 @@
                            (comp :bound :description)) results))))
     (is (every? (fn [{:keys [goal proof]}]
                   (kernel/verifies? (ansatz/env) goal proof)) results))
+    (testing "Every original proof has a closed and explicitly qualified axiom closure"
+      (doseq [{:keys [dependencies]} results]
+        (is (= :ansatz-reservation-pilot/lean-core-axioms-v1
+               (:policy dependencies)))
+        (is (pos-int? (:declarations-scanned dependencies)))
+        (is (= #{"Classical.choice" "Quot.sound" "propext"}
+               (set (:axioms dependencies))))
+        (is (empty? (:non-safe dependencies)))
+        (is (empty? (:unresolved dependencies)))))
     (testing "an upper-bound proof is not a lower-bound proof"
       (is (false? (kernel/verifies? (ansatz/env)
                                    (:goal (second results))
@@ -363,6 +450,27 @@
             after (source-obligations! mutant)]
         (is (not= (:source-fingerprint (first before))
                   (:source-fingerprint (first after))))))))
+
+(deftest proof-dependency-policy-fails-closed
+  (let [clean {:declarations-scanned 1 :axioms []
+               :non-safe [] :unresolved []}
+        denied? (fn [report]
+                  (try (qualify-proof-dependencies! report)
+                       false
+                       (catch clojure.lang.ExceptionInfo e
+                         (= :unpermitted-proof-dependencies
+                            (:reason (ex-data e))))))]
+    (is (= :ansatz-reservation-pilot/lean-core-axioms-v1
+           (:policy (qualify-proof-dependencies! clean))))
+    (testing "Admitted or new axioms are never silently trusted"
+      (is (denied? (assoc clean :axioms ["sorryAx"])))
+      (is (denied? (assoc clean :axioms ["Classical.choice" "user.fake"]))))
+    (testing "Partial, unsafe, or missing dependencies reject"
+      (is (denied? (assoc clean :non-safe ["user.partial"])))
+      (is (denied? (assoc clean :unresolved ["missing.theorem"]))))
+    (testing "An empty or incomplete closure report is not accepted"
+      (is (denied? (assoc clean :declarations-scanned 0)))
+      (is (denied? (dissoc clean :unresolved))))))
 
 (defn -main [& _]
   (binding [ansatz/*verbose* false]
