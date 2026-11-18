@@ -305,6 +305,79 @@
 (def binding-type :gesso.assurance.proof.xtdb-gateway-typed-transition-seam/source-bound)
 (def binding-version 1)
 
+;; v1765: An optional, synchronous DIAGNOSTIC capture. Only the actual
+;; source-bound :submit! closure publishes these private events. This is
+;; process-local and does not authenticate application callbacks, JVM code,
+;; a durable XTDB receipt, or the deployed handler path.
+(def ^:dynamic ^:private *source-bound-submission-trace* nil)
+(def source-bound-trace-type
+  :gesso.assurance.proof.xtdb-gateway-typed-transition-seam/source-bound-trace)
+(def source-bound-trace-version 1)
+
+(defn- publish-source-bound-submission! [operation token phase]
+  (when-let [{:keys [thread events]} *source-bound-submission-trace*]
+    (swap! events conj {:operation operation :token token :phase phase
+                        :same-thread? (identical? thread (Thread/currentThread))})))
+
+(defn observe-source-bound-typed-submission!
+  "Run invoke! ONCE under an opt-in, process-local trace. Only genuine
+   v1757 source-bound gateway submit closures can publish the private pair of
+   :entered/:returned events. The trace positively reports ONE same-thread
+   matching operation's gateway return; no copied report, success-like Ring
+   status or other adapter call can replace the private event pair.
+
+   Returns {:execution {:outcome :returned/:threw :result/:error ...}
+            :report redacted-map}. :execution may contain sensitive results
+   or Throwables; never expose it as certification evidence. A thrown or
+   ambiguous execution must NOT be retried on the strength of this trace.
+   This is NOT proof that the Biff handler invoked the gateway or that a
+   transaction committed, nor evidence that XTDB receipts are authentic."
+  [selected-operation invoke!]
+  (when-not (and (keyword? selected-operation)
+                 (namespace selected-operation)
+                 (fn? invoke!))
+    (reject! :invalid-source-bound-submission-observer))
+  (when *source-bound-submission-trace*
+    (reject! :nested-source-bound-submission-observer))
+  (let [events (atom [])
+        observation {:thread (Thread/currentThread) :events events}
+        execution (binding [*source-bound-submission-trace* observation]
+                    (try {:outcome :returned :result (invoke!)}
+                         (catch Throwable e {:outcome :threw :error e})))
+        captured @events
+        exactly-one-return?
+        (and (= :returned (:outcome execution))
+             (= 2 (count captured))
+             (let [[entered returned] captured]
+               (and (= :entered (:phase entered))
+                    (= :returned (:phase returned))
+                    (= selected-operation (:operation entered)
+                       (:operation returned))
+                    (identical? (:token entered) (:token returned))
+                    (true? (:same-thread? entered))
+                    (true? (:same-thread? returned)))))
+        status (cond
+                 exactly-one-return? :one-source-bound-typed-submit-return-observed
+                 (empty? captured) :no-source-bound-typed-submit-observed
+                 (= :threw (:outcome execution)) :submission-or-invocation-threw
+                 :else :ambiguous-or-mismatched-source-bound-submission)]
+    {:execution execution
+     :report {:type source-bound-trace-type
+              :version source-bound-trace-version
+              :operation-id selected-operation
+              :scope :one-synchronous-process-local-invocation
+              :status status
+              :source-bound-gateway-return
+              (if exactly-one-return? :observed :not-established)
+              :installed-biff-handler-invocation :not-established
+              :gateway-to-adapter-causality :not-established
+              :xtdb-transaction-committed :not-established
+              :xtdb-receipt-authenticity :not-established
+              :original-business-policy-authenticity :not-established
+              :complete-deployed-writer-coverage :not-established
+              :certificate :not-issued :admission :not-admitted
+              :authority :none}}))
+
 (defn- check-bound-source!
   [catalog selected-operation]
   (seams!)
@@ -387,6 +460,7 @@
                                      (:proof-context now))
                            original-submit (:submit! prepared)
                            first-attempt (AtomicBoolean. false)
+                           trace-token (Object.)
                            submit! (fn []
                                      (when-not (.compareAndSet first-attempt false true)
                                        (reject! :source-bound-one-shot-already-attempted))
@@ -394,7 +468,20 @@
                                                   (:report (check-bound-source!
                                                             stable-source selected-operation)))
                                        (reject! :bound-source-report-changed))
-                                     (original-submit))
+                                     ;; A trace is emitted by THIS genuine
+                                     ;; source-bound closure, not by a supplied
+                                     ;; adapter report or synthetic response.
+                                     (publish-source-bound-submission!
+                                      selected-operation trace-token :entered)
+                                     (try
+                                       (let [result (original-submit)]
+                                         (publish-source-bound-submission!
+                                          selected-operation trace-token :returned)
+                                         result)
+                                       (catch Throwable e
+                                         (publish-source-bound-submission!
+                                          selected-operation trace-token :threw)
+                                         (throw e))))
                            summary! (fn []
                                       (assoc ((:summary! prepared))
                                              :source-catalog-binding :closed-declared-source-checked

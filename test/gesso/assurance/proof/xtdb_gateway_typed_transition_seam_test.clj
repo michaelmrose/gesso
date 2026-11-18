@@ -695,3 +695,134 @@
       (is (= :not-established (:request-principal-authenticity report)))
       (is (= b (physical))
           "A certified executor invocation is not an XTDB commit"))))
+
+
+;; v1765: The source-bound gateway itself emits this opt-in trace. An
+;; unrelated adapter report or caller-supplied success value is insufficient.
+(deftest source-bound-gateway-return-is-captured-with-real-xtdb
+  (let [b (before)]
+    (put! b)
+    (let [g (bound-prepare (bound-preparer) (candidate b))
+          {:keys [execution report]}
+          (seam/observe-source-bound-typed-submission!
+           :example/claim (fn [] ((:submit! g))))]
+      (is (= :returned (:outcome execution)))
+      (is (some? (:result execution)))
+      (is (= seam/source-bound-trace-type (:type report)))
+      (is (= seam/source-bound-trace-version (:version report)))
+      (is (= :one-source-bound-typed-submit-return-observed (:status report)))
+      (is (= :observed (:source-bound-gateway-return report)))
+      (is (= :not-established (:installed-biff-handler-invocation report)))
+      (is (= :not-established (:gateway-to-adapter-causality report)))
+      (is (= :not-established (:xtdb-transaction-committed report)))
+      (is (= :not-established (:original-business-policy-authenticity report)))
+      (is (= :not-issued (:certificate report)))
+      (is (= :none (:authority report)))
+      (is (not-any? #(contains? report %)
+                    [:execution :result :error :token :events :source :node
+                     :request :response :transaction :prepared :submit!]))
+      (is (= (after b) (physical)))
+      (is (= :source-bound-one-shot-already-attempted
+             (reason (:submit! g)))))))
+
+(deftest synthetic-success-and-unbound-physical-gateway-do-not-qualify
+  (let [b (before)]
+    (put! b)
+    (let [{:keys [report execution]}
+          (seam/observe-source-bound-typed-submission!
+           :example/claim (fn [] {:status 200 :committed true}))]
+      (is (= :returned (:outcome execution)))
+      (is (= :no-source-bound-typed-submit-observed (:status report)))
+      (is (= :not-established (:source-bound-gateway-return report)))
+      (is (= b (physical))))
+    ;; Even the *real* low-level XTDB writer cannot impersonate a v1757
+    ;; source-bound gateway, though it updates physical state on success.
+    (let [g (prepare (candidate b))
+          {:keys [report]}
+          (seam/observe-source-bound-typed-submission!
+           :example/claim (fn [] ((:submit! g))))]
+      (is (= :no-source-bound-typed-submit-observed (:status report)))
+      (is (= :not-established (:source-bound-gateway-return report)))
+      (is (= (after b) (physical))))))
+
+(deftest wrong-operation-is-not-a-source-bound-gateway-witness
+  (let [b (before)]
+    (put! b)
+    (let [g (bound-prepare (bound-preparer) (candidate b))
+          {:keys [report]}
+          (seam/observe-source-bound-typed-submission!
+           :example/cancel (fn [] ((:submit! g))))]
+      (is (= :ambiguous-or-mismatched-source-bound-submission
+             (:status report)))
+      (is (= :not-established (:source-bound-gateway-return report)))
+      (is (= (after b) (physical))))))
+
+(deftest uncertain-cas-failure-is-never-promoted-to-gateway-return
+  (let [b (before)]
+    (put! b)
+    (let [g (bound-prepare (bound-preparer) (candidate b))
+          intervened (assoc b :note "v1765-cas-intervened")]
+      (put! intervened)
+      (let [{:keys [report execution]}
+            (seam/observe-source-bound-typed-submission!
+             :example/claim (fn [] ((:submit! g))))]
+        (is (= :threw (:outcome execution)))
+        (is (= :xtdb/assert-failed
+               (or (:xtdb.error/code (ex-data (:error execution)))
+                   (:reason (ex-data (:error execution))))))
+        (is (= :submission-or-invocation-threw (:status report)))
+        (is (= :not-established (:source-bound-gateway-return report)))
+        (is (= intervened (physical)))
+        (is (= :source-bound-one-shot-already-attempted
+               (reason (:submit! g))))))))
+
+(deftest nested-source-bound-submission-capture-is-rejected
+  (let [b (before)]
+    (put! b)
+    (let [{:keys [report]}
+          (seam/observe-source-bound-typed-submission!
+           :example/claim
+           (fn []
+             (is (= :nested-source-bound-submission-observer
+                    (reason #(seam/observe-source-bound-typed-submission!
+                              :example/claim (fn [] :forged)))))
+             :ok))]
+      (is (= :no-source-bound-typed-submit-observed (:status report)))
+      (is (= b (physical))))))
+
+(deftest two-typed-gateway-attempts-cannot-masquerade-as-one-return
+  (let [b (before)]
+    (put! b)
+    (let [binder (bound-preparer)
+          first-g (bound-prepare binder (candidate b))
+          stale-g (bound-prepare binder (candidate b))
+          {:keys [report execution]}
+          (seam/observe-source-bound-typed-submission!
+           :example/claim
+           (fn []
+             ((:submit! first-g))
+             (is (= :xtdb/assert-failed (reason (:submit! stale-g))))
+             :completed))]
+      (is (= :returned (:outcome execution)))
+      (is (= :ambiguous-or-mismatched-source-bound-submission
+             (:status report)))
+      (is (= :not-established (:source-bound-gateway-return report)))
+      (is (= (after b) (physical)))
+      (is (= :source-bound-one-shot-already-attempted
+             (reason (:submit! first-g))))
+      (is (= :source-bound-one-shot-already-attempted
+             (reason (:submit! stale-g)))))))
+
+(deftest cross-thread-typed-submit-does-not-qualify-for-synchronous-capture
+  (let [b (before)]
+    (put! b)
+    (let [g (bound-prepare (bound-preparer) (candidate b))
+          {:keys [report execution]}
+          (seam/observe-source-bound-typed-submission!
+           :example/claim
+           (fn [] @(future ((:submit! g)))))]
+      (is (= :returned (:outcome execution)))
+      (is (= :ambiguous-or-mismatched-source-bound-submission
+             (:status report)))
+      (is (= :not-established (:source-bound-gateway-return report)))
+      (is (= (after b) (physical))))))
