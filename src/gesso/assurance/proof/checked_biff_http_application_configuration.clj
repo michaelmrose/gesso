@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1802: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1803: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -46,7 +46,11 @@
    checked-host certified routes to the EXACT selected catalog route IDs
    accepted at this startup. No one-shot request dispatch challenge is
    repeated after business execution; no new policy or liveness authority
-   is inferred from this scoped inventory correspondence."
+   is inferred from this scoped inventory correspondence.
+
+   v1803: Inspection also requires a fresh read-only loopback challenge
+   reaching the same issued final handler on the selected local adapter.
+   This is a one-time observation, not a guarantee of future availability."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -75,6 +79,7 @@
 (def ^:private original-route-coverage coverage/check-declared-route-coverage!)
 (def ^:private original-probe-dispatch probe/require-current-final-catalog-dispatch!)
 (def ^:private original-probe-inventory probe/require-current-final-probe-route-inventory!)
+(def ^:private original-probe-live probe/require-fresh-local-http-liveness!)
 
 (defn- reject! [reason]
   (throw (ex-info "Configured closed Biff HTTP startup not established."
@@ -97,7 +102,9 @@
                  (identical? original-probe-dispatch
                              (var-get #'probe/require-current-final-catalog-dispatch!))
                  (identical? original-probe-inventory
-                             (var-get #'probe/require-current-final-probe-route-inventory!)))
+                             (var-get #'probe/require-current-final-probe-route-inventory!))
+                 (identical? original-probe-live
+                             (var-get #'probe/require-fresh-local-http-liveness!)))
     (reject! :substituted-original-configured-start-boundary)))
 
 (defn- plain-map? [x]
@@ -355,6 +362,40 @@
                              ;; to the set checked before this startup.
                              (require-running-selected-route-continuity!
                               (some? typed-trial) @selected-startup-routes inventory)
+                             ;; A fresh original issued probe challenge is
+                             ;; required for this exact local listener. The
+                             ;; captured URL locator supplies the target only;
+                             ;; the original wrapper owns the new nonce.
+                             (let [fresh (try
+                                           (pinned!)
+                                           (original-probe-live
+                                            issued-probe contract-source
+                                            candidate-system (base-url! candidate-system))
+                                           (catch Throwable _
+                                             (reject! :configured-instance-http-liveness-not-observed)))]
+                               (when-not (and
+                                          (= probe/fresh-local-http-liveness-report-type
+                                             (:type fresh))
+                                          (= probe/report-version (:version fresh))
+                                          (= :responded-to-current-inspection-challenge
+                                             (:status fresh))
+                                          (= :one-fresh-local-loopback-response-on-original-issued-wrapper
+                                             (:scope fresh))
+                                          (= :exact-issued-wrapper
+                                             (:original-final-handler-slot fresh))
+                                          (= :not-forwarded-to-business-router
+                                             (:read-only-request fresh))
+                                          (= :observed-at-inspection-only
+                                             (:selected-local-listener fresh))
+                                          (= :not-established
+                                             (:external-listener-liveness fresh)
+                                             (:future-liveness fresh))
+                                          (= :not-issued (:certificate fresh))
+                                          (= :not-admitted (:admission fresh))
+                                          (= :none (:authority fresh)
+                                             (:transaction-authority fresh)
+                                             (:retry-authority fresh)))
+                                 (reject! :configured-instance-http-liveness-not-observed)))
                              {:type running-report-type :version report-version
                               :scope :one-original-managed-in-process-biff-instance
                               :status :current-at-inspection
@@ -368,6 +409,8 @@
                                   :not-selected)
                               :external-listener-liveness :not-established
                               :out-of-band-adapter-stops :not-established
+                              :fresh-local-http-response :observed-at-current-inspection
+                              :future-local-listener-availability :not-established
                               :certificate :not-issued :admission :not-admitted
                               :retry-authority :none :transaction-authority :none
                               :authority :none})))

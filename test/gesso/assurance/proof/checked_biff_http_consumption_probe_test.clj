@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe-test
-  "v1799: A separate Biff server adapter must actually consume the checked
+  "v1803: A separate Biff server adapter must actually consume the checked
    FINAL Ring handler over a real HTTP loopback socket, not just accept a
    copied Biff system or return a synthetic success status."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -444,3 +444,55 @@
           (is (= :unissued-or-substituted-http-consumption-probe
                  (error-reason #(inspect! (assoc probe :verify-once! (fn [& _] nil))
                                           contract system selected)))))))))
+
+
+(deftest fresh-local-liveness-challenges-are-read-only-and-never-replay-startup
+  (let [env ((earlier-helper 'case-env))
+        config {:catalog-source (:catalog-source env)
+                :operation :request/claim
+                :inputs {:input/owner "helper-a"}}]
+    (with-adapter! :honest nil config
+      (fn [{:keys [env probe system base]}]
+        (let [contract (:contract env)
+              {:keys [request binding]} (:data env)
+              live! (fn []
+                      (probe/require-fresh-local-http-liveness!
+                       probe contract system base))
+              client (HttpClient/newHttpClient)
+              forged (fn []
+                       (let [req (-> (HttpRequest/newBuilder
+                                      (URI/create (str base "/operations/request/claim")))
+                                     (.timeout (Duration/ofSeconds 5))
+                                     (.header "x-gesso-local-liveness-probe" "forged")
+                                     (.POST (HttpRequest$BodyPublishers/noBody))
+                                     (.build))]
+                         (.statusCode (.send client req
+                                             (HttpResponse$BodyHandlers/ofString)))))]
+          (seed! [:requests request])
+          (is (= :final-probe-wrapper-or-http-challenge-not-current
+                 (error-reason live!)))
+          (is (= 404 (forged)))
+          (is (= :one-final-checked-wrapper-http-challenge-returned
+                 (:status ((:verify-once! probe) system base))))
+          (doseq [_ (range 2)]
+            (let [observed (live!)]
+              (is (= probe/fresh-local-http-liveness-report-type (:type observed)))
+              (is (= :responded-to-current-inspection-challenge (:status observed)))
+              (is (= :not-forwarded-to-business-router (:read-only-request observed)))
+              (is (= :observed-at-inspection-only (:selected-local-listener observed)))
+              (is (= :not-established (:future-liveness observed)))
+              (is (= :none (:authority observed) (:transaction-authority observed)))
+              (is (not-any? #(contains? observed %)
+                            [:nonce :token :response :url :request :system :handler]))))
+          (is (= 404 (forged)))
+          (is (= request (read-request (:xt/id request))))
+          (is (nil? (read-command (resolution/record-id binding))))
+          (is (= 0 @(get-in env [:environment :constructs])))
+          ;; Fresh health observations do not replay the one-time startup
+          ;; probe and cannot change the ordinary typed POST semantics.
+          (is (= :http-consumption-probe-already-attempted
+                 (error-reason #((:verify-once! probe) system base))))
+          (is (= 200 (post! base)))
+          (is (= ((model 'next-version) request {:owner "helper-a"})
+                 (read-request (:xt/id request))))
+          (is (= 1 @(get-in env [:environment :constructs]))))))))

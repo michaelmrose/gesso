@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1802: The actual application startup entrypoint owns module issuance,
+  "v1803: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -436,6 +436,10 @@
                (:selected-catalog-route-continuity observed)))
         (is (= :not-established (:external-listener-liveness observed)))
         (is (= :not-established (:out-of-band-adapter-stops observed)))
+        (is (= :observed-at-current-inspection
+               (:fresh-local-http-response observed)))
+        (is (= :not-established
+               (:future-local-listener-availability observed)))
         (is (= :none (:authority observed) (:transaction-authority observed)))
         (is (not-any? #(contains? observed %)
                       [:system :handler :host-handle :probe :source
@@ -447,6 +451,8 @@
         ;; has legitimately advanced. Current lifecycle/host identity can.
         (is (= 200 (post! s)))
         (is (= :current-at-inspection (:status (inspect! system))))
+        (is (= :observed-at-current-inspection
+               (:fresh-local-http-response (inspect! system))))
         (is (= :matches-current-original-host-route-set
                (:selected-catalog-route-continuity (inspect! system))))
         (is (= :stopped (:status ((:stop! issued)))))
@@ -471,6 +477,8 @@
         (is (= :not-selected
                (:selected-catalog-route-continuity
                 ((:inspect-running! issued) system))))
+        (is (= :observed-at-current-inspection
+               (:fresh-local-http-response ((:inspect-running! issued) system))))
         (is (= :stopped (:status ((:stop! issued)))))
         (is (= :configured-instance-not-current
                (reason #((:inspect-running! issued) system)))))
@@ -576,3 +584,38 @@
       (is (= :configured-instance-selected-routes-not-current
              (reason #(check! selected? saved current)))
           (pr-str {:selected? selected? :saved saved :current current})))))
+
+
+(deftest current-instance-detects-out-of-band-listener-shutdown
+  ;; An out-of-band raw adapter stop is not tracked by the managed state,
+  ;; but a fresh private loopback HTTP challenge MUST fail instead of
+  ;; promoting that old managed status to present-tense liveness.
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))]
+    (try
+      (let [{:keys [system]} ((:start-once! issued) {})]
+        (is (= :observed-at-current-inspection
+               (:fresh-local-http-response ((:inspect-running! issued) system))))
+        ((get-in s [:raw :biff.core/stop]) system)
+        (is (= :configured-instance-http-liveness-not-observed
+               (reason #((:inspect-running! issued) system))))
+        (is (= :verified-configured-start
+               (:status ((:summary! issued))))
+            "Historical managed startup status cannot prove current listener response"))
+      (finally (cleanup! s issued)))))
+
+(deftest substituted-liveness-checker-cannot-authorize-current-instance
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))]
+    (try
+      (let [{:keys [system]} ((:start-once! issued) {})]
+        (with-redefs [probe/require-fresh-local-http-liveness!
+                      (fn [& _] {:type probe/fresh-local-http-liveness-report-type
+                                 :status :responded-to-current-inspection-challenge})]
+          (is (= :substituted-original-configured-start-boundary
+                 (reason #((:inspect-running! issued) system)))))
+        (is (= :observed-at-current-inspection
+               (:fresh-local-http-response ((:inspect-running! issued) system)))))
+      (finally (cleanup! s issued)))))

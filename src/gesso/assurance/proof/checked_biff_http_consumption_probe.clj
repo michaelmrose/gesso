@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-consumption-probe
-  "v1799: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
+  "v1803: Optional Biff 2 module testing whether a SEPARATE HTTP adapter
    actually consumes the final checked Ring handler installed through Biff's
    ordinary module start lifecycle.
 
@@ -25,6 +25,10 @@
    v1799: Bind catalog-wide dispatch evidence to the original issued probe,
    its captured Biff module state, current original host, and the same final
    returned Biff system. Summary maps alone cannot qualify startup.
+   v1803: A fresh, read-only HTTP challenge is issued during each local
+   current-instance inspection, bound to this SAME issued final wrapper.
+   Forged or replayed marker requests never reach the business router.
+   An observed response is not continuous or external listener liveness.
    No business transition, deployed-service claim or certificate is issued.
 
    This is local test evidence for a selected HTTP server module only: Biff
@@ -51,6 +55,7 @@
 (def report-version 1)
 
 (def ^:private route-probe-header "x-gesso-operation-route-probe")
+(def ^:private liveness-probe-header "x-gesso-local-liveness-probe")
 
 (deftype ConsumptionProbeHandle []
   Object
@@ -242,6 +247,10 @@
         result (atom :not-attempted)
         challenge-path (str "/__gesso_assurance_http_consumption/"
                             (UUID/randomUUID))
+        liveness-path (str "/__gesso_assurance_http_liveness/"
+                           (UUID/randomUUID))
+        liveness-pending (atom nil)
+        liveness-monitor (Object.)
         secret-header (str (UUID/randomUUID))
         secret-response (str "gesso-consumed-" (UUID/randomUUID))
         route-secret (str (UUID/randomUUID))
@@ -312,6 +321,23 @@
                                     (first (sort-by pr-str (:route-keys selected))))
                    wrapped (fn [request]
                              (cond
+                               ;; A private liveness request may not fall through
+                               ;; to business routing even with a forged marker.
+                               (or (contains? (:headers request) liveness-probe-header)
+                                   (= liveness-path (:uri request)))
+                               (let [challenge @liveness-pending]
+                                 (if (and (map? challenge)
+                                          (= :get (:request-method request))
+                                          (= liveness-path (:uri request))
+                                          (= (:nonce challenge)
+                                             (get-in request [:headers liveness-probe-header]))
+                                          (compare-and-set! liveness-pending
+                                                            challenge :consumed))
+                                   {:status 200
+                                    :headers {"content-type" "text/plain"}
+                                    :body (:response challenge)}
+                                   {:status 404 :body "Not found"}))
+
                                ;; Reserved header is NEVER forwarded into normal
                                ;; business execution, even with a wrong secret,
                                ;; route or method. This is vital for POST routes.
@@ -431,6 +457,7 @@
          :biff.core/stop
          (fn [_]
            (reset! pending :inactive)
+           (reset! liveness-pending nil)
            (reset! state :stopped))}
         current! (fn []
                    (pinned!)
@@ -450,6 +477,48 @@
                            (set (map :route-id
                                      (filter #(not= (:template %) (:path %))
                                              @catalog-targets)))))
+        verify-liveness! (fn [final-system base-url]
+                           ;; Each invocation owns a fresh one-use secret and
+                           ;; response unrelated to startup or business routes.
+                           (locking liveness-monitor
+                             (let [started (current!)]
+                               (when-not (and (map? started)
+                                              (map? final-system)
+                                              (identical? (:wrapper started)
+                                                          (get final-system original-handler-slot))
+                                              (= :one-final-checked-wrapper-http-challenge-returned
+                                                 @result))
+                                 (reject! :local-checked-http-liveness-not-observed))
+                               (let [url (local-base-uri! base-url)
+                                     nonce (str (UUID/randomUUID))
+                                     response (str "gesso-live-" (UUID/randomUUID))
+                                     challenge {:nonce nonce :response response}
+                                     target (URI/create (str url liveness-path))
+                                     client (-> (HttpClient/newBuilder)
+                                                (.connectTimeout (Duration/ofSeconds 2))
+                                                (.build))
+                                     request (-> (HttpRequest/newBuilder target)
+                                                 (.timeout (Duration/ofSeconds 4))
+                                                 (.header liveness-probe-header nonce)
+                                                 (.GET)
+                                                 (.build))]
+                                 (when-not (compare-and-set! liveness-pending nil challenge)
+                                   (reject! :local-checked-http-liveness-not-observed))
+                                 (try
+                                   (let [answer (.send client request
+                                                       (HttpResponse$BodyHandlers/ofString))]
+                                     (when-not (and (= 200 (.statusCode answer))
+                                                    (= response (.body answer))
+                                                    (= :consumed @liveness-pending)
+                                                    (map? @state)
+                                                    (identical? (:wrapper @state)
+                                                                (get final-system original-handler-slot)))
+                                       (reject! :local-checked-http-liveness-not-observed))
+                                     true)
+                                   (catch Throwable _
+                                     (reject! :local-checked-http-liveness-not-observed))
+                                   (finally
+                                     (reset! liveness-pending nil)))))))
         verify! (fn [final-system base-url]
                   (when-not (.compareAndSet claimed false true)
                     (reject! :http-consumption-probe-already-attempted))
@@ -558,6 +627,7 @@
                            :route-active route-active
                            :typed-attempts typed-attempts
                            :module module
+                           :verify-liveness! verify-liveness!
                            :summary! summary!
                            :verify-once! verify!}))
     {:handle handle :module module :summary! summary!
@@ -735,5 +805,49 @@
      :normal-http-route-inventory :checked-and-selected-dispatch-witnessed
      :external-deployment :not-established
      :authorization-policy-provenance :not-established
+     :certificate :not-issued :admission :not-admitted
+     :retry-authority :none :transaction-authority :none :authority :none}))
+
+;; v1803: Fresh local loopback observations stay tied to the original issued
+;; final Biff handler and cannot be manufactured from a detached status map.
+(def fresh-local-http-liveness-report-type
+  :gesso.assurance.proof.checked-biff-http-consumption-probe/fresh-local-http-liveness)
+
+(def ^:private original-liveness-inventory
+  require-current-final-probe-route-inventory!)
+
+(defn require-fresh-local-http-liveness!
+  "Observe a NEW one-use read-only loopback HTTP response on the exact
+   original issued Biff handler. This says nothing about external deployment,
+   future availability, authentication or transaction authority."
+  [candidate contract-source final-system base-url]
+  (pinned!)
+  (when-not (identical? original-liveness-inventory
+                        (var-get #'require-current-final-probe-route-inventory!))
+    (reject! :substituted-original-liveness-inventory))
+  (let [inventory (original-liveness-inventory candidate contract-source final-system)
+        record (or (entry (:handle candidate))
+                   (reject! :missing-issued-local-liveness-probe))
+        live-check! (:verify-liveness! record)]
+    (when-not (and (= final-route-inventory-report-type (:type inventory))
+                   (= report-version (:version inventory))
+                   (= :exact-issued-wrapper (:final-probe-handler-slot inventory))
+                   (fn? live-check!)
+                   (= :none (:authority inventory)
+                      (:transaction-authority inventory)))
+      (reject! :local-checked-http-liveness-not-observed))
+    (when-not (try (true? (live-check! final-system base-url))
+                   (catch Throwable _
+                     (reject! :local-checked-http-liveness-not-observed)))
+      (reject! :local-checked-http-liveness-not-observed))
+    {:type fresh-local-http-liveness-report-type
+     :version report-version
+     :scope :one-fresh-local-loopback-response-on-original-issued-wrapper
+     :status :responded-to-current-inspection-challenge
+     :original-final-handler-slot :exact-issued-wrapper
+     :read-only-request :not-forwarded-to-business-router
+     :selected-local-listener :observed-at-inspection-only
+     :external-listener-liveness :not-established
+     :future-liveness :not-established
      :certificate :not-issued :admission :not-admitted
      :retry-authority :none :transaction-authority :none :authority :none}))
