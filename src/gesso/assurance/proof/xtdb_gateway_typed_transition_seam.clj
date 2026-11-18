@@ -26,7 +26,9 @@
    authenticate the original invariant inventory or its kernel proof. A forged declaration can describe
    a different business policy. No certificate or application admission is
    issued. A submitted result is not automatically a committed result."
-  (:require [gesso.assurance.rule-eval :as rule-eval]
+  (:require [gesso.assurance.proof.operation-set :as operation-set]
+            [gesso.assurance.transition :as constructor]
+            [gesso.assurance.rule-eval :as rule-eval]
             [gesso.assurance.proof.transition :as transition]
             [gesso.assurance.proof.independent-transition-semantics :as independent]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate :as physical]
@@ -42,6 +44,8 @@
 (def ^:private original-physical physical/prepare-plan-bound-acquired-one-shot!)
 (def ^:private original-operation command/operation)
 (def ^:private original-rule-eval rule-eval/evaluate-rule!)
+(def ^:private original-catalog-check operation-set/check-operation-set!)
+(def ^:private original-constructor constructor/build-guarded-replacement!)
 
 (defn- reject! [reason]
   ;; Do not include documents, inputs, target IDs, plans, tokens or exception causes.
@@ -58,7 +62,9 @@
                  (identical? original-physical
                              (var-get #'physical/prepare-plan-bound-acquired-one-shot!))
                  (identical? original-operation (var-get #'command/operation))
-                 (identical? original-rule-eval (var-get #'rule-eval/evaluate-rule!)))
+                 (identical? original-rule-eval (var-get #'rule-eval/evaluate-rule!))
+                 (identical? original-catalog-check (var-get #'operation-set/check-operation-set!))
+                 (identical? original-constructor (var-get #'constructor/build-guarded-replacement!)))
     (reject! :substituted-source-or-physical-interpreter)))
 
 (defn- plain-map? [m]
@@ -219,7 +225,7 @@
       (seams!)
       true)))
 
-(defn prepare-typed-transition-one-shot!
+(defn- prepare-typed-transition-one-shot!
   "Join the original abstract guarded transition to an actual plan-bound,
    externally acquired complete-CAS one-shot XTDB gateway. `declaration` and
    `inputs` are caller supplied and NOT authenticated as source-owned business
@@ -292,3 +298,122 @@
       (seams!)
       {:type report-type :version report-version
        :submit! submit! :summary! summary!})))
+
+;; v1757: A narrower PUBLIC entry point. Source/catalog selection happens once
+;; at issuance, not on each physical submission. This is a source RELATIVE
+;; contract and not an authenticated application installation or trusted key.
+(def binding-type :gesso.assurance.proof.xtdb-gateway-typed-transition-seam/source-bound)
+(def binding-version 1)
+
+(defn- check-bound-source!
+  [catalog selected-operation]
+  (seams!)
+  (when-not (and (plain-map? catalog)
+                 (= #{:id :declared-operation-ids :initial-condition
+                      :invariants :operations} (set (keys catalog)))
+                 (keyword? selected-operation)
+                 (namespace selected-operation))
+    (reject! :invalid-closed-declared-source-catalog))
+  (let [report (try (original-catalog-check catalog)
+                    (catch Exception _
+                      (reject! :invalid-closed-declared-source-catalog)))
+        entries (filter #(= selected-operation (:id %)) (:operations catalog))]
+    (when-not (and (= operation-set/report-type (:type report))
+                   (= operation-set/operation-set-version (:version report))
+                   (= :closed-declared-abstract-operation-set-only (:scope report))
+                   (= :checked (:exact-declared-operation-coverage report))
+                   (= :none (:authority report))
+                   (= :not-issued (:certificate report))
+                   (= :not-admitted (:admission report))
+                   (= 1 (count entries))
+                   (contains? (:declared-operation-ids catalog) selected-operation)
+                   (= (set (keys (:invariants catalog))) (:invariant-ids report)))
+      (reject! :source-bound-operation-coverage-not-established))
+    (let [construction (:construction (first entries))
+          checked (try (original-constructor construction)
+                       (catch Exception _ (reject! :invalid-bound-original-construction)))
+          declaration (:transition checked)
+          invariants (:invariants catalog)
+          read-targets (for [[target [kind reader]] (:assignments declaration)
+                             :when (= kind :read)]
+                         [target reader])
+          required (vec (for [[target reader] (sort-by first read-targets)
+                              [inv-id rule] (sort-by key invariants)
+                              :when (= #{target} (:readers rule))]
+                          {:operation-id selected-operation
+                           :invariant-id inv-id
+                           :field target
+                           :reader reader
+                           :reader-origin (if (contains? (:input-types declaration) reader)
+                                            :input :prestate)}))
+          covered (set (map :field required))]
+      (when-not (and (= constructor/construction-type (:type checked))
+                     (= declaration (:transition checked))
+                     (= selected-operation (get-in declaration [:subject :id]))
+                     (seq required)
+                     (= covered (set (map first read-targets)))
+                     (every? #(= 1 (count (:readers (val %)))) invariants))
+        ;; The existing per-read predicate evaluator only accepts singleton
+        ;; readers. Do not silently drop compound invariants or read targets.
+        (reject! :unsupported-or-uncovered-bound-invariants))
+      {:declaration declaration
+       :proof-context {:invariants invariants :read-premises required}
+       :report report})))
+
+(defn issue-source-bound-typed-transition-gateway!
+  "Issue a process-local, source-relative physical gateway PREPARER for one
+   operation of an exact, rederived CLOSED DECLARED catalog. The resulting
+   :prepare! accepts no declaration, operation ID, invariant inventory, or
+   read-premise list: those are captured from the checked original catalog.
+
+   The issuer's catalog remains an independent APPLICATION-SOURCE PREMISE:
+   no signature, installer audit, total business-policy inventory, proof,
+   physical writer exhaustiveness, or release admission is established. The
+   returned closure is not a general authority credential. Its :prepare!
+   may issue a bounded one-shot writer only through the existing gateway."
+  [source-catalog selected-operation]
+  (let [bound (check-bound-source! source-catalog selected-operation)
+        stable-source source-catalog
+        stable-report (:report bound)
+        prepare! (fn [node contract-source resolver-issuance request
+                      candidate-source inputs field-map]
+                   (let [now (check-bound-source! stable-source selected-operation)]
+                     (when-not (= stable-report (:report now))
+                       (reject! :bound-source-report-changed))
+                     (let [prepared (prepare-typed-transition-one-shot!
+                                     node contract-source resolver-issuance
+                                     selected-operation request candidate-source
+                                     (:declaration now) inputs field-map
+                                     (:proof-context now))
+                           original-submit (:submit! prepared)
+                           first-attempt (AtomicBoolean. false)
+                           submit! (fn []
+                                     (when-not (.compareAndSet first-attempt false true)
+                                       (reject! :source-bound-one-shot-already-attempted))
+                                     (when-not (= stable-report
+                                                  (:report (check-bound-source!
+                                                            stable-source selected-operation)))
+                                       (reject! :bound-source-report-changed))
+                                     (original-submit))
+                           summary! (fn []
+                                      (assoc ((:summary! prepared))
+                                             :source-catalog-binding :closed-declared-source-checked
+                                             :source-catalog-identity :copyable-not-authenticating
+                                             :caller-selected-read-premises :not-accepted
+                                             :source-completeness :declared-only-not-production-proved))]
+                       {:type report-type :version report-version
+                        :submit! submit! :summary! summary!})))
+        summary! (fn []
+                   {:type binding-type :version binding-version
+                    :operation-id selected-operation
+                    :source-catalog-binding :closed-declared-source-checked
+                    :source-catalog-identity :copyable-not-authenticating
+                    :caller-selected-read-premises :not-accepted
+                    :source-completeness :declared-only-not-production-proved
+                    :kernel-proof :not-established
+                    :installed-source-provenance :not-established
+                    :certificate :not-issued :admission :not-admitted
+                    :authority :none})]
+    (seams!)
+    {:type binding-type :version binding-version
+     :prepare! prepare! :summary! summary!}))

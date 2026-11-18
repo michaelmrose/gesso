@@ -4,6 +4,7 @@
    actual model update and pinned/complete-CAS fixture; do not substitute an
    in-memory fake writer. Source provenance and theorem premises remain open."
   (:require [clojure.test :refer [deftest is testing use-fixtures]]
+            [clojure.set :as set]
             [gesso.assurance.proof.xtdb-gateway-typed-transition-seam :as seam]
             [gesso.assurance.proof.transition :as transition]
             [gesso.assurance.proof.xtdb-gateway-plan-bound-guarded-prestate-test]
@@ -69,7 +70,10 @@
    (prepare candidate-source declaration field-map inputs proof-context))
   ([candidate-source declaration field-map inputs proof-context]
    (let [{:keys [contract issuance]} (case-context)]
-     (seam/prepare-typed-transition-one-shot!
+     ;; Retain direct low-level adversarial tests: v1757 makes this an
+     ;; INTERNAL primitive, never a public source-authoritative entry point.
+     ((var-get (ns-resolve 'gesso.assurance.proof.xtdb-gateway-typed-transition-seam
+                           'prepare-typed-transition-one-shot!))
       (node) contract issuance :example/claim
       {:request-method :post :uri "/operations/example/claim"}
       candidate-source declaration inputs field-map proof-context))))
@@ -225,3 +229,138 @@
     (is (= :physical-gateway-preparation-rejected
            (reason #(prepare (candidate forged-before)))))
     (is (= b (physical)))))
+
+;; v1757: once a declared original source catalog is checked and captured by
+;; a binder, each submission rederives its entire declared invariant inventory.
+;; This is not evidence that the issuer chose the real installed app's source.
+(def ^:private declared-catalog
+  {:id :example/physical-typed-catalog
+   :declared-operation-ids #{:example/claim}
+   :initial-condition {:readers #{:doc/owner}
+                       :expression [:= [:read :doc/owner] [:literal "available"]]}
+   :invariants (assoc (:invariants proof-context)
+                      :doc/owner-not-reserved
+                      {:readers #{:doc/owner}
+                       :expression [:not= [:read :doc/owner]
+                                    [:literal "reserved"]]})
+   :operations [{:id :example/claim
+                 :construction (-> source
+                                   (assoc :replacements (:assignments source)
+                                          :frame (set/difference
+                                                  (set (keys (:state-types source)))
+                                                  (:writes source)))
+                                   (dissoc :assignments))}]})
+
+(defn- bound-preparer
+  ([] (bound-preparer declared-catalog))
+  ([catalog]
+   (seam/issue-source-bound-typed-transition-gateway!
+    catalog :example/claim)))
+
+(defn- bound-prepare
+  ([binder candidate-source]
+   (bound-prepare binder candidate-source {:input/owner "claimed"}))
+  ([binder candidate-source inputs]
+   (let [{:keys [contract issuance]} (case-context)]
+     ((:prepare! binder) (node) contract issuance
+      {:request-method :post :uri "/operations/example/claim"}
+      candidate-source inputs mapping))))
+
+(deftest bounded-catalog-issues-a-real-one-shot-physical-writer
+  (let [b (before)]
+    (put! b)
+    (let [binder (bound-preparer)
+          bs ((:summary! binder))]
+      (is (= seam/binding-type (:type binder) (:type bs)))
+      (is (= #{:type :version :prepare! :summary!} (set (keys binder))))
+      (is (= :closed-declared-source-checked (:source-catalog-binding bs)))
+      (is (= :declared-only-not-production-proved (:source-completeness bs)))
+      (is (= :not-established (:installed-source-provenance bs)))
+      (is (= :not-accepted (:caller-selected-read-premises bs)))
+      (is (not (contains? (ns-publics 'gesso.assurance.proof.xtdb-gateway-typed-transition-seam)
+                          'prepare-typed-transition-one-shot!)))
+      (is (= b (physical)))
+      (let [prepared (bound-prepare binder (candidate b))
+            summary ((:summary! prepared))]
+        (is (= :closed-declared-source-checked (:source-catalog-binding summary)))
+        (is (= :not-accepted (:caller-selected-read-premises summary)))
+        (is (= :not-issued (:certificate summary)))
+        (is (= :not-admitted (:admission summary)))
+        (is (= b (physical)))
+        (is (some? ((:submit! prepared))))
+        (is (= (after b) (physical)))
+        (is (= :source-bound-one-shot-already-attempted
+               (reason (:submit! prepared))))))))
+
+(deftest the-source-catalog-not-a-per-call-premise-list-controls-physical-read
+  (let [b (before)]
+    (put! b)
+    (let [binder (bound-preparer)
+          ; a well-typed string, allowed by the original v1756
+          ; supplied context's :not-empty but forbidden by catalog :not-reserved
+          src (candidate b (assoc (after b) :owner "reserved"))]
+      (is (= :source-read-premise-failed
+             (reason #(bound-prepare binder src {:input/owner "reserved"}))))
+      (is (= b (physical)))
+      ;; The public gateway accepts only seven preparation inputs; neither
+      ;; caller-selected proof-context nor a new source declaration is allowed.
+      (is (= clojure.lang.ArityException
+             (try (let [{:keys [contract issuance]} (case-context)]
+                    ((:prepare! binder) (node) contract issuance
+                     {:request-method :post :uri "/operations/example/claim"}
+                     src {:input/owner "reserved"} mapping
+                     {:read-premises []}))
+                  nil
+                  (catch clojure.lang.ArityException e (class e)))))
+      (is (= :source-bound-one-shot-already-attempted
+             (let [prepared (bound-prepare binder (candidate b))]
+               ((:submit! prepared))
+               (reason (:submit! prepared))))))))
+
+(deftest declared-catalog-must-rederive-every-original-obligation
+  (let [b (before)]
+    (put! b)
+    (doseq [bad [(assoc declared-catalog :declared-operation-ids
+                        #{:example/unclaim})
+                 (assoc-in declared-catalog [:operations 0 :id]
+                           :example/unclaim)
+                 (update declared-catalog :operations conj
+                         (first (:operations declared-catalog)))
+                 (assoc-in declared-catalog [:operations 0 :construction :frame]
+                           #{:doc/note})
+                 (assoc-in declared-catalog [:invariants :doc/owner-not-empty :readers]
+                           #{:doc/nonexistent})]]
+      (is (= :invalid-closed-declared-source-catalog
+             (reason #(bound-preparer bad)))))
+    (is (= b (physical)))))
+
+(deftest bound-gateway-rechecks-catalog-interpreter-on-one-permit
+  (let [b (before)]
+    (put! b)
+    (let [binder (bound-preparer)
+          g (bound-prepare binder (candidate b))]
+      (with-redefs [gesso.assurance.proof.operation-set/check-operation-set!
+                    (fn [& _] {:type :forged})]
+        (is (= :substituted-source-or-physical-interpreter
+               (reason (:submit! g)))))
+      (is (= b (physical)))
+      (is (= :source-bound-one-shot-already-attempted (reason (:submit! g)))))))
+
+(deftest closed-declared-catalog-remains-an-unproved-issuer-intent
+  (let [b (before)]
+    (put! b)
+    (let [weaker (update declared-catalog :invariants
+                         dissoc :doc/owner-not-reserved)
+          weaker-binder (bound-preparer weaker)]
+      ;; Reproves closure RELATIVE TO THIS newly selected source, not that the
+      ;; source is the intended application or includes all required rules.
+      (is (= :not-established (:installed-source-provenance
+                               ((:summary! weaker-binder)))))
+      (is (= :declared-only-not-production-proved
+             (:source-completeness ((:summary! weaker-binder)))))
+      (is (= :source-relative-values-screened-not-proof-established
+             (:source-read-theorem-premises
+              ((:summary! (bound-prepare weaker-binder
+                                         (candidate b (assoc (after b) :owner "reserved"))
+                                         {:input/owner "reserved"}))))))
+      (is (= b (physical))))))
