@@ -303,6 +303,38 @@
                           (reset! result :http-consumption-challenge-unconfirmed))
                         (finally (reset! pending :inactive)))
                       (report (current!) @result @hits (boolean typed-config) @typed-outcome @typed-attempts))))]
-    (locking issued (.put issued handle {:source contract-source}))
+    (locking issued
+      (.put issued handle {:source contract-source
+                           :module module
+                           :summary! summary!
+                           :verify-once! verify!}))
     {:handle handle :module module :summary! summary!
      :verify-once! verify!})))
+
+(defn require-current-issued-http-consumption-probe!
+  "v1782: Require the ORIGINAL locally issued probe handle, exact lifecycle
+   module and exact verification callbacks. A caller-composed map, cloned
+   handler, or a synthetic success report is not valid issuance. Returns
+   only a redacted source-relative inspection, NEVER a server credential."
+  [candidate]
+  (pinned!)
+  (when-not (and (or (instance? clojure.lang.PersistentArrayMap candidate)
+                     (instance? clojure.lang.PersistentHashMap candidate))
+                 (nil? (meta candidate))
+                 (= #{:handle :module :summary! :verify-once!}
+                    (set (keys candidate))))
+    (reject! :invalid-original-probe-capability-shape))
+  (let [record (entry (:handle candidate))]
+    (when-not (and record
+                   (identical? (:module candidate) (:module record))
+                   (identical? (:summary! candidate) (:summary! record))
+                   (identical? (:verify-once! candidate) (:verify-once! record))
+                   (= module-id (get-in candidate [:module :biff.core/id])))
+      (reject! :unissued-or-substituted-http-consumption-probe))
+    {:type report-type :version report-version
+     :scope :identity-bound-locally-issued-probe
+     :original-probe :issued-original-module-and-callbacks
+     :physical-http-consumption :not-established
+     :external-server-deployment :not-established
+     :certificate :not-issued :transaction-authority :none
+     :authority :none}))
