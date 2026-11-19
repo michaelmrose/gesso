@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1807: The actual application startup entrypoint owns module issuance,
+  "v1808: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -972,3 +972,67 @@
         (is (= :configured-instance-generation-not-current
                (reason inspect!))))
       (finally (cleanup! s issued)))))
+
+(deftest same-port-swap-during-inspection-rejects-even-after-fresh-http-response
+  ;; The first source-trusted listener identity check happens BEFORE the
+  ;; liveness locator is called. Suspend there, replace the actual HttpServer
+  ;; with another one on the SAME port and same final Ring handler, and let
+  ;; the second physical server answer the fresh private HTTP challenge.
+  ;; The final listener identity check must reject that apparent success.
+  ;; This is an in-process inspection TOCTOU test, not a claim about remote
+  ;; deployments or a continuously authenticated HTTP connection.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        inspection-in-locator (promise)
+        release-inspection (promise)
+        inspection-armed? (atom false)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_] (:server @(:server-state s)))
+                       :base-url!
+                       (fn [system]
+                         (when @inspection-armed?
+                           (deliver inspection-in-locator true)
+                           (when-not (deref release-inspection 15000 false)
+                             (throw (ex-info "Inspection fixture timed out" {}))))
+                         (original-locator system))))]
+    (try
+      (let [{:keys [system instance-generation]}
+            ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))
+            original-server (:server @(:server-state s))
+            original-port (:port @(:server-state s))]
+        ;; Establish the ordinary case before arming the deterministic race.
+        (is (= :matches-original-host-reported-object
+               (:physical-listener-instance (inspect!))))
+        (reset! inspection-armed? true)
+        (let [inspecting (future (reason inspect!))]
+          (try
+            (is (true? (deref inspection-in-locator 10000 false)))
+            (is (= :still-inspecting
+                   (deref inspecting 200 :still-inspecting)))
+            (let [{:keys [new]} (replace-actual-listener-at-same-port!
+                                 s system)]
+              (is (= original-port (:port new)))
+              (is (not (identical? original-server (:server new))))
+              (is (= :verified-configured-start
+                     (:status ((:summary! issued)))))
+              (deliver release-inspection true)
+              (is (= :configured-physical-listener-not-current
+                     (deref inspecting 15000 :timeout)))
+              (is (pos? @(:hits new))
+                  "Fresh HTTP challenge reached the physically new server")
+              (is (= :verified-configured-start
+                     (:status ((:summary! issued))))))
+            (finally
+              (deliver release-inspection true)
+              (deref inspecting 15000 :timeout))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason inspect!))))
+      (finally
+        (deliver release-inspection true)
+        (cleanup! s issued)))))
