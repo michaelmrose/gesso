@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test
-  "v1844: real certified multi-route parallel Biff mediation, including two
+  "v1848: real certified multi-route parallel Biff mediation, including two
    independently checked operation/writer sources and physical XTDB guards.
    Catalog-wide coverage also checks both original constructions and issued
    handlers in one assembled application; it does not establish deployment,
@@ -10,6 +10,8 @@
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.certificate :as certificate]
             [gesso.assurance.proof.checked-authorization-assembly :as catalog-coverage]
+            [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
+             :as catalog-trial]
             [gesso.assurance.proof.operation-writer-coverage-soundness :as coverage]
             [gesso.model.inductive-plan :as inductive-plan]
             [gesso.model.certified-plan-test]
@@ -249,6 +251,44 @@
                    (coverage/derive-observed-writer-coverage!
                     (:writer-source *second*)))))
   (is (not= wc/*source* (:writer-source *second*))))
+
+(deftest selected-physical-catalog-route-scope-covers-two-independent-operations
+  ;; v1847 tested both real operations at certified-contract/catalog level.
+  ;; The physical typed seam must not mistake one selected operation for the
+  ;; entire application. Validate the full ORIGINAL certified-contract report,
+  ;; without presenting this predicate as an installed physical writer proof.
+  (let [contract (certified/check-certified-contracts! (:source *case*))
+        rows (:certified-operations contract)
+        complete (:matched-certified-route-ids contract)
+        declared (:route-ids contract)
+        scope? (original
+                'gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
+                'closed-selected-route-scope?)]
+    (is (= #{claim cancel} (set (keys rows))))
+    (is (= #{claim-route cancel-route} declared complete))
+    (is (= #{claim-route} (get-in rows [claim :route-ids])))
+    (is (= #{cancel-route} (get-in rows [cancel :route-ids])))
+    (is (true? (scope? claim #{claim-route} rows complete declared)))
+    (is (true? (scope? cancel #{cancel-route} rows complete declared)))
+    ;; A one-operation view must not drop another operation, duplicate the
+    ;; route in a different row, or admit an unaccounted physical route ID.
+    (doseq [[operation selected checked all-certified all-declared]
+            [[claim #{cancel-route} rows complete declared]
+             [claim #{claim-route cancel-route} rows complete declared]
+             [claim #{claim-route} rows #{claim-route} declared]
+             [claim #{claim-route} rows complete #{claim-route}]
+             [claim #{claim-route} rows complete (conj declared :route/unknown)]
+             [claim #{claim-route} (dissoc rows cancel) complete declared]
+             [claim #{claim-route}
+              (assoc-in rows [cancel :route-ids] #{claim-route})
+              complete declared]
+             [cancel #{cancel-route}
+              (assoc-in rows [claim :route-ids] #{})
+              complete declared]
+             [:example/unissued #{claim-route} rows complete declared]]]
+      (is (false? (scope? operation selected checked
+                          all-certified all-declared))
+          (str "Unsafe source route scope accepted: " operation)))))
 
 (deftest two-independent-operations-require-source-complete-catalog-coverage
   ;; This is an ORIGINAL-source and issued-handler check over the same real

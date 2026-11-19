@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
-  "v1776: Bind the v1775 checked-catalog physical trial to the EXACT issued
+  "v1848: Bind the v1775 checked-catalog physical trial to the EXACT issued
    v1251 certified-plan executor and the CURRENT assembled application's
    certified route/operation table. An observed physical transaction comes
    from calling the registered executor, not an arbitrary invocation thunk.
@@ -8,8 +8,15 @@
    provides the contract source, application assembly, typed catalog,
    physical field projection, request context and command invocation. This
    does NOT independently attest the deployed Biff handler or prove that
-   arbitrary registered callbacks implement business policy correctly."
-  (:require [gesso.assurance.proof.operation-set :as catalog]
+   arbitrary registered callbacks implement business policy correctly.
+
+   v1848: One selected operation must own exactly its own routes; it must
+   NOT be required to own every certified route in a multi-operation app.
+   Independently verify that the disjoint certified operation route sets
+   form the complete original declared route inventory. Never relax exact
+   issued executor, construction, command identity or physical field checks."
+  (:require [clojure.set :as set]
+            [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.xtdb-gateway-catalog-bound-atomic-canonical-trial
              :as canonical]
             [gesso.assurance.transition :as constructor]
@@ -57,6 +64,35 @@
   (and (or (instance? clojure.lang.PersistentArrayMap x)
            (instance? clojure.lang.PersistentHashMap x))
        (nil? (meta x))))
+
+(defn- closed-selected-route-scope?
+  "Validate one operation's exact certified routes while retaining the
+   disjoint source-closed route inventory of every certified operation.
+   The original certified-contract check authenticates the report; this
+   predicate does not authenticate an independent deployment or handler."
+  [selected-operation selected-route-ids certified-rows
+   complete-certified-route-ids declared-route-ids]
+  (let [route-sets (when (map? certified-rows)
+                     (mapv :route-ids (vals certified-rows)))
+        flattened (vec (mapcat identity route-sets))]
+    (and (qualified-keyword? selected-operation)
+         (set? selected-route-ids)
+         (seq selected-route-ids)
+         (every? qualified-keyword? selected-route-ids)
+         (map? certified-rows)
+         (seq certified-rows)
+         (every? qualified-keyword? (keys certified-rows))
+         (every? #(and (set? %) (seq %)
+                       (every? qualified-keyword? %)) route-sets)
+         (= selected-route-ids
+            (get-in certified-rows [selected-operation :route-ids]))
+         (set? complete-certified-route-ids)
+         (set? declared-route-ids)
+         (seq complete-certified-route-ids)
+         (= (count flattened) (count (set flattened)))
+         (= (set flattened) complete-certified-route-ids
+            declared-route-ids)
+         (set/subset? selected-route-ids complete-certified-route-ids))))
 
 (defn- current-binding! [contract-source catalog-source operation]
   (pinned!)
@@ -119,9 +155,10 @@
                       (get-in (:construction source) [:subject :interface :operation]))
                    (vector? routes) (seq routes)
                    (= (count routes) (count route-ids))
-                   (= route-ids (:route-ids certified-row))
-                   (= route-ids (:matched-certified-route-ids contracts))
-                   (= route-ids (:route-ids contracts)))
+                   (closed-selected-route-scope?
+                    operation route-ids (:certified-operations contracts)
+                    (:matched-certified-route-ids contracts)
+                    (:route-ids contracts)))
       (reject! :catalog-executor-or-assembled-operation-diverged))
     (pinned!)
     {:operation-id operation
