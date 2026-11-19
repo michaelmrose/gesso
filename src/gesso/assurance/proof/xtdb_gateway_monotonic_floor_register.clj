@@ -18,7 +18,15 @@
    never sent over the socket. A fixed total receive deadline also prevents
    one connected but silent client from indefinitely blocking this serial
    service. Client-key provisioning, UID compromise, replay after a register
-   storage rollback and service independence are NOT established here."
+   storage rollback and service independence are NOT established here.
+
+   v1906: The CLIENT has one monotonic wall-clock deadline for connect,
+   request write, response header, and response body. A lost or malformed
+   advance reply means the advance OUTCOME IS UNKNOWN (no automatic retry),
+   even when the service might have persisted the new floor. The v1903
+   adapter then quarantines its already-local-committed checkpoint until a
+   freshly constructed adapter verifies recovery. This does not establish
+   service identity merely from the Unix socket path."
   (:require [clojure.edn :as edn]
             [gesso.assurance.proof.xtdb-gateway-externally-anchored-floor :as floor])
   (:import [java.io ByteArrayOutputStream DataOutputStream DataInputStream
@@ -41,6 +49,7 @@
   :gesso.assurance.proof.xtdb-gateway-monotonic-floor-register/signed-client-request)
 (def ^:private client-request-domain "gesso/xtdb/monotonic-register/client-request/v1")
 (def ^:private server-receive-timeout-ms 1500)
+(def ^:private client-exchange-timeout-ms 3500)
 (def ^:private no-links (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
 (def ^:private read-options (into-array java.nio.file.OpenOption
                                          [StandardOpenOption/READ]))
@@ -399,6 +408,66 @@
         ;; The caller only writes its bounded response after this point.
         (.configureBlocking client true)))))
 
+(defn- wait-for-client-ready!
+  "A single monotonic deadline is shared across all socket phases. A slow
+   peer cannot reset the clock by delivering one byte at a time."
+  [^Selector selector ^SocketChannel client operation deadline]
+  (let [remaining (- deadline (System/nanoTime))]
+    (when (<= remaining 0)
+      (reject! :client-socket-exchange-deadline-exceeded))
+    (.interestOps (.keyFor client selector) operation)
+    (.select selector (long (max 1 (quot (+ remaining 999999) 1000000))))
+    (.clear (.selectedKeys selector))))
+
+(defn- read-client-response-exact!
+  [^SocketChannel client ^Selector selector ^ByteBuffer buffer deadline]
+  (while (.hasRemaining buffer)
+    (when (<= (- deadline (System/nanoTime)) 0)
+      (reject! :client-socket-exchange-deadline-exceeded))
+    (let [n (.read client buffer)]
+      (cond
+        (neg? n) (reject! :register-client-response-truncated)
+        (zero? n) (wait-for-client-ready!
+                   selector client SelectionKey/OP_READ deadline)
+        :else nil)))
+  (.flip buffer)
+  buffer)
+
+(defn- exchange-client-frame-before-deadline!
+  "Make one signed-request exchange without any automatic retry. Enforce an
+   absolute socket deadline including connect, send, and complete bounded
+   response. The caller must treat an unconfirmed ADVANCE as unknown."
+  [^Path socket request]
+  (let [data (bytes-for request)
+        outgoing (ByteBuffer/allocate (+ 4 (alength ^bytes data)))
+        deadline (+ (System/nanoTime)
+                    (* 1000000 client-exchange-timeout-ms))]
+    (.putInt outgoing (int (alength ^bytes data)))
+    (.put outgoing ^bytes data)
+    (.flip outgoing)
+    (with-open [client (SocketChannel/open StandardProtocolFamily/UNIX)
+                selector (Selector/open)]
+      (.configureBlocking client false)
+      (.register client selector 0)
+      (when-not (.connect client (UnixDomainSocketAddress/of socket))
+        (while (not (.finishConnect client))
+          (wait-for-client-ready!
+           selector client SelectionKey/OP_CONNECT deadline)))
+      (while (.hasRemaining outgoing)
+        (when (<= (- deadline (System/nanoTime)) 0)
+          (reject! :client-socket-exchange-deadline-exceeded))
+        (when (zero? (.write client outgoing))
+          (wait-for-client-ready!
+           selector client SelectionKey/OP_WRITE deadline)))
+      (let [header (read-client-response-exact!
+                    client selector (ByteBuffer/allocate 4) deadline)
+            size (.getInt header)]
+        (when-not (<= 1 size max-payload)
+          (reject! :register-frame-size-out-of-bounds))
+        (let [body (read-client-response-exact!
+                    client selector (ByteBuffer/allocate size) deadline)]
+          (strict-edn! (.array body)))))))
+
 (defn prepare-unix-client
   "Provide the exact v1903 callback keys over a Unix socket. Each request
    is signed with the independently configured CLIENT private key before
@@ -406,7 +475,9 @@
    the server's authorized public key and this private key can authenticate
    itself: no deployment independence or trusted key custody is implied.
    The callbacks do NOT authenticate the socket pathname or process; v1903
-   verifies all response signatures and fresh read nonces separately."
+   verifies all response signatures and fresh read nonces separately.
+   Every socket exchange has one total deadline; an unconfirmed advance is
+   labeled :register-client-advance-outcome-unknown and never retried."
   [^Path socket config]
   (when-not (instance? Path socket)
     (reject! :invalid-socket-path))
@@ -416,17 +487,33 @@
   (let [^PrivateKey client-key (private-key!
                                 (:client-signing-private-pkcs8-base64 config))
         request! (fn [message]
-                   (let [envelope (authenticated-request message client-key)]
-                     (with-open [client (SocketChannel/open StandardProtocolFamily/UNIX)]
-                       (.connect client (UnixDomainSocketAddress/of socket))
-                       (let [out (DataOutputStream. (Channels/newOutputStream client))
-                             in (DataInputStream. (Channels/newInputStream client))]
-                         (send-frame! out envelope)
-                         (let [answer (read-frame! in)]
-                           (when (and (map? answer)
-                                      (contains? answer :register-error))
-                             (reject! :external-register-refused-request))
-                           answer)))))]
+                   (let [advance? (= :advance (:kind message))]
+                     (try
+                       (let [envelope (authenticated-request message client-key)
+                             answer (exchange-client-frame-before-deadline!
+                                     socket envelope)]
+                         (when (and (map? answer)
+                                    (contains? answer :register-error))
+                           (reject! :external-register-refused-request))
+                         answer)
+                       (catch Throwable ex
+                         (if (= :external-register-refused-request
+                                (:reason (ex-data ex)))
+                           (throw ex)
+                           ;; If the service applied the CAS and its reply
+                           ;; was lost, only an independently fresh signed
+                           ;; READ can determine the eventual register head.
+                           ;; Never retry the same compare-and-advance here.
+                           (throw (ex-info
+                                   "Signed register exchange did not complete."
+                                   {:xtdb-floor-register/rejection true
+                                    :reason (if advance?
+                                              :register-client-advance-outcome-unknown
+                                              :register-client-read-unavailable)
+                                    :outcome (if advance? :unknown :not-observed)
+                                    :no-automatic-retry true
+                                    :transport-reason (:reason (ex-data ex))}
+                                   ex)))))))]
     {:read-external-floor! request!
      :advance-external-floor! request!
      :client-authentication :ed25519-process-configured-key-only

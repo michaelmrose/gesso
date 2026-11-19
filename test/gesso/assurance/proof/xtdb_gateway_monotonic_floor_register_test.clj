@@ -370,3 +370,102 @@
                  (get-in ((:read-external-floor! (:client server))
                           (read-request)) [:statement :floor])))
           (finally (stop-server! server)))))))
+
+(defn- v1906-with-incomplete-reply [handler]
+  ;; Deliberately not the genuine signed service. A caller knows only the
+  ;; socket pathname until v1903 verifies a nonce-bound signed response.
+  (with-dir
+    (fn [dir]
+      (let [socket (.resolve ^Path dir "unresponsive-peer.sock")]
+        (with-open [server (java.nio.channels.ServerSocketChannel/open
+                            java.net.StandardProtocolFamily/UNIX)]
+          (.bind server (java.net.UnixDomainSocketAddress/of socket))
+          (let [accepted (atom 0)
+                worker (Thread.
+                        (fn []
+                          (try
+                            (with-open [peer (.accept server)]
+                              (swap! accepted inc)
+                              ;; Emit a legal length header, but just one
+                              ;; body byte: a blocking client would hang.
+                              (let [output (java.io.DataOutputStream.
+                                            (java.nio.channels.Channels/newOutputStream peer))]
+                                (.writeInt output 64)
+                                (.writeByte output (int 123))
+                                (.flush output))
+                              (Thread/sleep 4700))
+                            (catch Throwable _))))]
+            (.setDaemon worker true)
+            (.start worker)
+            (try (handler socket accepted)
+                 (finally
+                   (.close server)
+                   (.join worker 6000)))))))))
+
+(deftest v1906-unresponsive-peer-cannot-hold-read-forever
+  (v1906-with-incomplete-reply
+   (fn [socket accepted]
+     (let [client (register/prepare-unix-client
+                   socket {:client-signing-private-pkcs8-base64
+                           (pkcs8 authorized-client-pair)})
+           started (System/nanoTime)
+           exception (try ((:read-external-floor! client) (read-request))
+                          nil
+                          (catch clojure.lang.ExceptionInfo ex ex))
+           elapsed (/ (- (System/nanoTime) started) 1000000.0)]
+       (is (instance? clojure.lang.ExceptionInfo exception))
+       (is (= :register-client-read-unavailable
+              (:reason (ex-data exception))))
+       (is (= :client-socket-exchange-deadline-exceeded
+              (:transport-reason (ex-data exception))))
+       (is (= :not-observed (:outcome (ex-data exception))))
+       (is (true? (:no-automatic-retry (ex-data exception))))
+       (is (= 1 @accepted))
+       (is (< elapsed 6500.0)
+           "One total deadline covers the response header AND entire body")))))
+
+(deftest v1906-advance-with-lost-reply-is-unknown-never-retried
+  (v1906-with-incomplete-reply
+   (fn [socket accepted]
+     (let [client (register/prepare-unix-client
+                   socket {:client-signing-private-pkcs8-base64
+                           (pkcs8 authorized-client-pair)})
+           request (advance-request (genesis) (f1))
+           started (System/nanoTime)
+           exception (try ((:advance-external-floor! client) request)
+                          nil
+                          (catch clojure.lang.ExceptionInfo ex ex))
+           elapsed (/ (- (System/nanoTime) started) 1000000.0)]
+       (is (instance? clojure.lang.ExceptionInfo exception))
+       (is (= :register-client-advance-outcome-unknown
+              (:reason (ex-data exception))))
+       (is (= :client-socket-exchange-deadline-exceeded
+              (:transport-reason (ex-data exception))))
+       (is (= :unknown (:outcome (ex-data exception))))
+       (is (true? (:no-automatic-retry (ex-data exception))))
+       (is (= 1 @accepted)
+           "One attempted CAS; never automatically retry when ack is lost")
+       (is (< elapsed 6500.0))
+       (is (= :local-unix-socket-not-an-independent-authority
+              (:transport client)))))))
+
+(deftest v1906-disconnected-service-fails-closed-before-a-signed-response
+  (with-dir
+    (fn [dir]
+      (let [missing (.resolve ^Path dir "not-a-service.sock")
+            client (register/prepare-unix-client
+                    missing {:client-signing-private-pkcs8-base64
+                             (pkcs8 authorized-client-pair)})
+            read-error (try ((:read-external-floor! client) (read-request))
+                            nil
+                            (catch clojure.lang.ExceptionInfo ex ex))
+            advance-error (try ((:advance-external-floor! client)
+                                (advance-request (genesis) (f1)))
+                               nil
+                               (catch clojure.lang.ExceptionInfo ex ex))]
+        (is (= :register-client-read-unavailable
+               (:reason (ex-data read-error))))
+        (is (= :register-client-advance-outcome-unknown
+               (:reason (ex-data advance-error))))
+        (is (= :unknown (:outcome (ex-data advance-error))))
+        (is (true? (:no-automatic-retry (ex-data advance-error))))))))
