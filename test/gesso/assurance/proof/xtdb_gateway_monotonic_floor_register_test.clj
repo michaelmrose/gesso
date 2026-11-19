@@ -138,7 +138,8 @@
     (let [process (.start pb)
           client (register/prepare-unix-client
                   socket-path {:client-signing-private-pkcs8-base64
-                               (pkcs8 authorized-client-pair)})]
+                               (pkcs8 authorized-client-pair)
+                               :register-signing-public-spki-base64 (spki key)})]
       (loop [attempt 0]
         (when (>= attempt 160)
           (.destroyForcibly process)
@@ -179,7 +180,7 @@
                 (is (= (:nonce nonce) (get-in initial [:statement :nonce])))
                 (is (= (genesis) (get-in initial [:statement :floor])))
                 (is (signed-envelope? ((:advance-external-floor! c1) r1) key))
-                (is (= :external-register-refused-request
+                (is (= :register-client-authenticated-stale-cas
                        (reason #((:advance-external-floor! c2) r1))))
                 (is (= (f1) (get-in ((:read-external-floor! c2) (read-request))
                                     [:statement :floor])))
@@ -287,15 +288,17 @@
           (let [good (:client server)
                 unauthorized (register/prepare-unix-client
                               socket {:client-signing-private-pkcs8-base64
-                                      (pkcs8 (pair))})
+                                      (pkcs8 (pair))
+                                      :register-signing-public-spki-base64
+                                      (spki root)})
                 invalid (fn [f] (reason f))
                 floor-before (get-in ((:read-external-floor! good)
                                       (read-request)) [:statement :floor])]
             (is (= (genesis) floor-before))
-            (is (= :external-register-refused-request
+            (is (= :register-client-read-unavailable
                    (invalid #((:read-external-floor! unauthorized)
                               (read-request)))))
-            (is (= :external-register-refused-request
+            (is (= :register-client-advance-outcome-unknown
                    (invalid #((:advance-external-floor! unauthorized)
                               (advance-request (genesis) (f1))))))
             ;; Raw local clients can reach a socket with their UID, but an
@@ -325,6 +328,8 @@
                    (invalid #(register/prepare-unix-client
                               socket {:client-signing-private-pkcs8-base64
                                       (pkcs8 authorized-client-pair)
+                                      :register-signing-public-spki-base64
+                                      (spki root)
                                       :claim-independent true}))))
             (is (= :invalid-register-configuration
                    (invalid #(register/prepare-durable-register!
@@ -407,7 +412,8 @@
    (fn [socket accepted]
      (let [client (register/prepare-unix-client
                    socket {:client-signing-private-pkcs8-base64
-                           (pkcs8 authorized-client-pair)})
+                           (pkcs8 authorized-client-pair)
+                           :register-signing-public-spki-base64 (spki (pair))})
            started (System/nanoTime)
            exception (try ((:read-external-floor! client) (read-request))
                           nil
@@ -429,7 +435,8 @@
    (fn [socket accepted]
      (let [client (register/prepare-unix-client
                    socket {:client-signing-private-pkcs8-base64
-                           (pkcs8 authorized-client-pair)})
+                           (pkcs8 authorized-client-pair)
+                           :register-signing-public-spki-base64 (spki (pair))})
            request (advance-request (genesis) (f1))
            started (System/nanoTime)
            exception (try ((:advance-external-floor! client) request)
@@ -455,7 +462,8 @@
       (let [missing (.resolve ^Path dir "not-a-service.sock")
             client (register/prepare-unix-client
                     missing {:client-signing-private-pkcs8-base64
-                             (pkcs8 authorized-client-pair)})
+                             (pkcs8 authorized-client-pair)
+                             :register-signing-public-spki-base64 (spki (pair))})
             read-error (try ((:read-external-floor! client) (read-request))
                             nil
                             (catch clojure.lang.ExceptionInfo ex ex))
@@ -469,3 +477,108 @@
                (:reason (ex-data advance-error))))
         (is (= :unknown (:outcome (ex-data advance-error))))
         (is (true? (:no-automatic-retry (ex-data advance-error))))))))
+
+(defn- v1907-single-reply-peer [answer-fn invoke!]
+  ;; A fake Unix endpoint controls bytes on the wire. It is NOT the
+  ;; protected register; this verifies that the CLIENT does not trust an
+  ;; unsigned or incorrectly signed negative acknowledgement.
+  (with-dir
+    (fn [dir]
+      (let [socket (.resolve ^Path dir "forged-negative.sock")
+            register-key (pair)
+            accepted (atom 0)]
+        (with-open [server (java.nio.channels.ServerSocketChannel/open
+                            java.net.StandardProtocolFamily/UNIX)]
+          (.bind server (java.net.UnixDomainSocketAddress/of socket))
+          (let [worker (Thread.
+                        (fn []
+                          (try
+                            (with-open [peer (.accept server)]
+                              (swap! accepted inc)
+                              (let [input (java.io.DataInputStream.
+                                           (java.nio.channels.Channels/newInputStream peer))
+                                    output (java.io.DataOutputStream.
+                                            (java.nio.channels.Channels/newOutputStream peer))
+                                    n (.readInt input)
+                                    data (byte-array n)]
+                                (when-not (<= 1 n 4096)
+                                  (throw (ex-info "Invalid fake request size" {})))
+                                (.readFully input data)
+                                (let [envelope (edn/read-string
+                                                (String. data java.nio.charset.StandardCharsets/UTF_8))
+                                      answer (answer-fn (:request envelope) register-key)
+                                      payload (.getBytes (pr-str answer)
+                                                         java.nio.charset.StandardCharsets/UTF_8)]
+                                  (.writeInt output (alength payload))
+                                  (.write output payload)
+                                  (.flush output))))
+                            (catch Throwable _))))
+                client (register/prepare-unix-client
+                        socket {:client-signing-private-pkcs8-base64
+                                (pkcs8 authorized-client-pair)
+                                :register-signing-public-spki-base64
+                                (spki register-key)})]
+            (.setDaemon worker true)
+            (.start worker)
+            (try
+              (invoke! client accepted)
+              (finally (.join worker 5000)))))))))
+
+(defn- v1907-signed-negative [request key]
+  ((var-get (ns-resolve
+             'gesso.assurance.proof.xtdb-gateway-monotonic-floor-register
+             'signed-rejection)) request :stale-compare-and-advance
+             (.getPrivate key)))
+
+(deftest v1907-only-request-bound-verified-rejection-can-confirm-stale-cas
+  (doseq [[label make-response expected-reason expected-outcome]
+          [[:unsigned-error (fn [_ _] {:register-error :stale-compare-and-advance})
+            :register-client-advance-outcome-unknown :unknown]
+           [:wrong-key (fn [request _] (v1907-signed-negative request (pair)))
+            :register-client-advance-outcome-unknown :unknown]
+           [:wrong-request (fn [request key]
+                             (v1907-signed-negative
+                              (assoc request :nonce (str (UUID/randomUUID))) key))
+            :register-client-advance-outcome-unknown :unknown]
+           [:valid-signed-cas-rejection v1907-signed-negative
+            :register-client-authenticated-stale-cas :rejected-not-applied]]]
+    (testing (name label)
+      (v1907-single-reply-peer
+       make-response
+       (fn [client accepted]
+         (let [request (advance-request (genesis) (f1))
+               ex (try ((:advance-external-floor! client) request) nil
+                       (catch clojure.lang.ExceptionInfo caught caught))
+               details (ex-data ex)]
+           (is (instance? clojure.lang.ExceptionInfo ex))
+           (is (= expected-reason (:reason details)))
+           (is (= expected-outcome (:outcome details)))
+           (is (true? (:no-automatic-retry details)))
+           (is (= 1 @accepted) "One signed request; never retry on doubtful CAS")
+           (is (= (= label :valid-signed-cas-rejection)
+                  (true? (:signature-verified-for-pinned-register-key? details))))))))))
+
+(deftest v1907-real-register-stale-cas-is-signed-and-cannot-be-spoofed
+  (with-dir
+    (fn [dir]
+      (let [root (pair)
+            socket (.resolve ^Path dir "signed-stale.sock")
+            service (start-server! dir root socket true)]
+        (try
+          (let [client (:client service)
+                first-request (advance-request (genesis) (f1))
+                successful ((:advance-external-floor! client) first-request)
+                ex (try ((:advance-external-floor! client) first-request)
+                        nil
+                        (catch clojure.lang.ExceptionInfo caught caught))]
+            (is (signed-envelope? successful root))
+            (is (= :register-client-authenticated-stale-cas
+                   (:reason (ex-data ex))))
+            (is (= :rejected-not-applied (:outcome (ex-data ex))))
+            (is (true? (:signature-verified-for-pinned-register-key?
+                        (ex-data ex))))
+            (is (= (f1) (get-in ((:read-external-floor! client) (read-request))
+                                [:statement :floor])))
+            (is (= :none (:authority (register/prepare-durable-register!
+                                      (config dir root false))))))
+          (finally (stop-server! service)))))))

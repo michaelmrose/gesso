@@ -26,7 +26,15 @@
    even when the service might have persisted the new floor. The v1903
    adapter then quarantines its already-local-committed checkpoint until a
    freshly constructed adapter verifies recovery. This does not establish
-   service identity merely from the Unix socket path."
+   service identity merely from the Unix socket path.
+
+   v1907: ONLY an authenticated, canonical, nonce-bound request rejected
+   for stale compare-and-advance receives a separately domain-separated,
+   Ed25519 SIGNED rejection. The client pins the register's public key,
+   checks the exact request and rejection reason and NEVER interprets
+   unsigned/plaintext or forged refusals as confirmed CAS rejection.
+   Unverified responses and transport failure are UNKNOWN for advances.
+   A signer controlled by the caller is still not independently trusted."
   (:require [clojure.edn :as edn]
             [gesso.assurance.proof.xtdb-gateway-externally-anchored-floor :as floor])
   (:import [java.io ByteArrayOutputStream DataOutputStream DataInputStream
@@ -48,6 +56,10 @@
 (def ^:private request-auth-type
   :gesso.assurance.proof.xtdb-gateway-monotonic-floor-register/signed-client-request)
 (def ^:private client-request-domain "gesso/xtdb/monotonic-register/client-request/v1")
+(def ^:private rejection-type
+  :gesso.assurance.proof.xtdb-gateway-monotonic-floor-register/signed-cas-rejection)
+(def ^:private server-rejection-domain "gesso/xtdb/monotonic-register/rejection/v1")
+(def ^:private authenticatable-reasons #{:stale-compare-and-advance})
 (def ^:private server-receive-timeout-ms 1500)
 (def ^:private client-exchange-timeout-ms 3500)
 (def ^:private no-links (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
@@ -162,6 +174,52 @@
                      (catch java.security.GeneralSecurityException _ false)))
       (reject! :client-request-signature-not-verified)))
   (:request envelope))
+
+(defn- rejection-signing-bytes [request reason]
+  ;; Refuse to sign speculative or generic exceptions: only this single
+  ;; well-defined, pre-CAS stale check can establish nonapplication.
+  (when-not (and (= :advance (:kind request))
+                 (contains? authenticatable-reasons reason))
+    (reject! :unsupported-signed-rejection))
+  (let [bound-request (request-signing-bytes request)
+        out (ByteArrayOutputStream.)]
+    (with-open [writer (DataOutputStream. out)]
+      (.writeUTF writer server-rejection-domain)
+      (.writeUTF writer (name reason))
+      (.writeInt writer (alength ^bytes bound-request))
+      (.write writer ^bytes bound-request))
+    (.toByteArray out)))
+
+(defn- signed-rejection [request reason private-key]
+  {:type rejection-type :version 1 :request request :reason reason
+   :signature-base64 (signature (rejection-signing-bytes request reason)
+                                private-key)})
+
+(defn- verified-rejection! [response request public-key]
+  (when-not (and (map? response)
+                 (= #{:type :version :request :reason :signature-base64}
+                    (set (keys response)))
+                 (= rejection-type (:type response))
+                 (= 1 (:version response))
+                 (= request (:request response))
+                 (contains? authenticatable-reasons (:reason response))
+                 (string? (:signature-base64 response))
+                 (<= 1 (count (:signature-base64 response)) 128))
+    (reject! :unverified-register-rejection))
+  (let [encoded (:signature-base64 response)
+        sig (try (.decode (Base64/getDecoder) ^String encoded)
+                 (catch IllegalArgumentException _ nil))]
+    (when-not (and sig (= 64 (alength ^bytes sig))
+                   (= encoded (.encodeToString (Base64/getEncoder) sig))
+                   (try (let [v (Signature/getInstance "Ed25519")]
+                          (.initVerify v ^PublicKey public-key)
+                          (.update v ^bytes
+                                   (rejection-signing-bytes request
+                                                            (:reason response)))
+                          (.verify v ^bytes sig))
+                        (catch java.security.GeneralSecurityException _ false)))
+      (reject! :unverified-register-rejection)))
+  true)
 
 (defn- signed! [statement key]
   {:statement statement
@@ -344,6 +402,9 @@
      :require-authenticated-request!
      (fn [envelope]
        (require-authenticated-request! envelope authorized-client-key))
+     :sign-authenticated-rejection!
+     (fn [request reason]
+       (signed-rejection request reason private-key))
      :directory dir
      :client-authentication :ed25519-process-configured-key-only
      :client-key-provisioning-independence :not-established
@@ -477,15 +538,21 @@
    The callbacks do NOT authenticate the socket pathname or process; v1903
    verifies all response signatures and fresh read nonces separately.
    Every socket exchange has one total deadline; an unconfirmed advance is
-   labeled :register-client-advance-outcome-unknown and never retried."
+   labeled :register-client-advance-outcome-unknown and never retried.
+   The register's signing public key is pinned independently of the client
+   signing key; only a matching signed, request-bound stale-CAS rejection
+   permits a definitive rejection result. Untrusted/plain errors do not."
   [^Path socket config]
   (when-not (instance? Path socket)
     (reject! :invalid-socket-path))
   (when-not (and (map? config)
-                 (= #{:client-signing-private-pkcs8-base64} (set (keys config))))
+                 (= #{:client-signing-private-pkcs8-base64
+                      :register-signing-public-spki-base64} (set (keys config))))
     (reject! :invalid-client-configuration))
   (let [^PrivateKey client-key (private-key!
                                 (:client-signing-private-pkcs8-base64 config))
+        ^PublicKey register-key (public-key!
+                                 (:register-signing-public-spki-base64 config))
         request! (fn [message]
                    (let [advance? (= :advance (:kind message))]
                      (try
@@ -493,11 +560,23 @@
                              answer (exchange-client-frame-before-deadline!
                                      socket envelope)]
                          (when (and (map? answer)
+                                    (= rejection-type (:type answer)))
+                           (verified-rejection! answer message register-key)
+                           (throw (ex-info
+                                   "Authenticated register rejected stale CAS."
+                                   {:xtdb-floor-register/rejection true
+                                    :reason :register-client-authenticated-stale-cas
+                                    :outcome :rejected-not-applied
+                                    :signature-verified-for-pinned-register-key? true
+                                    :no-automatic-retry true})))
+                         (when (and (map? answer)
                                     (contains? answer :register-error))
-                           (reject! :external-register-refused-request))
+                           ;; Plain errors can come from an impersonating
+                           ;; socket endpoint. They NEVER confirm CAS refusal.
+                           (reject! :unverified-register-rejection))
                          answer)
                        (catch Throwable ex
-                         (if (= :external-register-refused-request
+                         (if (= :register-client-authenticated-stale-cas
                                 (:reason (ex-data ex)))
                            (throw ex)
                            ;; If the service applied the CAS and its reply
@@ -529,6 +608,7 @@
                  (map? register) (fn? (:read! register))
                  (fn? (:advance! register))
                  (fn? (:require-authenticated-request! register))
+                 (fn? (:sign-authenticated-rejection! register))
                  (= (.normalize (.toAbsolutePath (.getParent socket)))
                     (.normalize ^Path (:directory register)))
                  (not (Files/exists socket no-links))
@@ -547,10 +627,20 @@
             (let [out (DataOutputStream. (Channels/newOutputStream client))
                   envelope (read-client-frame-before-deadline! client)
                   request ((:require-authenticated-request! register) envelope)
-                  result (case (:kind request)
-                           :read ((:read! register) request)
-                           :advance ((:advance! register) request)
-                           (reject! :unknown-register-request))]
+                  result (try
+                           (case (:kind request)
+                             :read ((:read! register) request)
+                             :advance ((:advance! register) request)
+                             (reject! :unknown-register-request))
+                           (catch clojure.lang.ExceptionInfo ex
+                             (let [reason (:reason (ex-data ex))]
+                               (if (and (= :advance (:kind request))
+                                        (contains? authenticatable-reasons reason))
+                                 ;; Request identity was authenticated above.
+                                 ;; No CAS happened at the stale-check branch.
+                                 ((:sign-authenticated-rejection! register)
+                                  request reason)
+                                 (throw ex)))))]
               (send-frame! out result))
             (catch Throwable ex
               (try (send-frame! (DataOutputStream. (Channels/newOutputStream client))
