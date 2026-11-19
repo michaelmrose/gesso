@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1811: The actual application startup entrypoint owns module issuance,
+  "v1812: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -251,7 +251,6 @@
         (future-cancel started)
         (cleanup! s issued)))))
 
-
 (deftest selected-catalog-coverage-refuses-incomplete-declarations-before-biff-start
   (let [s (scenario :honest)
         original (original-source s true)
@@ -286,7 +285,6 @@
                (reason #((:start-once! issued) {})))))
       (is (nil? @(:server-state s)))
       (finally (cleanup! s issued)))))
-
 
 (deftest selected-host-route-inventory-must-match-declared-catalog-exactly
   ;; These isolated reports test only the structural comparison predicate.
@@ -353,7 +351,6 @@
              (reason #((:start-once! issued) {}))))
       (finally (cleanup! s issued)))))
 
-
 (deftest selected-route-observation-report-must-be-complete-and-source-aligned
   ;; Structural regression, not a substitute for the issued probe's genuine
   ;; capability and actual HTTP challenge. Those are checked in start!.
@@ -415,7 +412,6 @@
       (is (= :configured-start-already-attempted
              (reason #((:start-once! issued) {}))))
       (finally (cleanup! s issued)))))
-
 
 (deftest configured-managed-instance-inspection-is-current-only
   (let [s (scenario :honest)
@@ -589,7 +585,6 @@
              (reason #(check! selected? saved current)))
           (pr-str {:selected? selected? :saved saved :current current})))))
 
-
 (deftest current-instance-detects-out-of-band-listener-shutdown
   ;; An out-of-band raw adapter stop is not tracked by the managed state,
   ;; but a fresh private loopback HTTP challenge MUST fail instead of
@@ -623,7 +618,6 @@
         (is (= :observed-at-current-inspection
                (:fresh-local-http-response ((:inspect-running! issued) system)))))
       (finally (cleanup! s issued)))))
-
 
 (deftest started-instance-generation-requires-exact-issued-identity
   ;; A redacted status or a caller-constructed map is not the opaque started
@@ -711,7 +705,6 @@
         (cleanup! s1 a)
         (cleanup! s2 b)))))
 
-
 (deftest original-listener-endpoint-survives-repointed-locator-and-independent-adapter
   ;; Both instances start on distinct real loopback ports. Redirecting the
   ;; first instance's mutable locator to the second instance must NOT
@@ -763,7 +756,6 @@
       (finally
         (cleanup! first-s first-issued)
         (cleanup! second-s second-issued)))))
-
 
 (deftest trusted-physical-listener-reference-stays-bound-to-original-instance
   ;; A source-trusted callback returns the selected adapter's actual JDK
@@ -973,6 +965,30 @@
                (reason inspect!))))
       (finally (cleanup! s issued)))))
 
+;; v1812: Share deterministic pauses across four listener/stop races while
+;; retaining the original checked HTTP challenge after the release signal.
+(defn- paused-generation-inspection [s trusted-listener-identity?]
+  (let [source (original-source s true)
+        original-locator (:base-url! source)
+        inspection-in-locator (promise)
+        release-inspection (promise)
+        inspection-armed? (atom false)
+        instrumented (cond-> source
+                       trusted-listener-identity?
+                       (assoc :listener-instance!
+                              (fn [_] (:server @(:server-state s)))))
+        source-with-pause (assoc instrumented :base-url!
+                                 (fn [system]
+                                   (when @inspection-armed?
+                                     (deliver inspection-in-locator true)
+                                     (when-not (deref release-inspection 15000 false)
+                                       (throw (ex-info "Inspection fixture timed out" {}))))
+                                   (original-locator system)))]
+    {:issued (config/issue-configured-checked-http-application! source-with-pause)
+     :inspection-in-locator inspection-in-locator
+     :release-inspection release-inspection
+     :inspection-armed? inspection-armed?}))
+
 (deftest same-port-swap-during-inspection-rejects-even-after-fresh-http-response
   ;; The first source-trusted listener identity check happens BEFORE the
   ;; liveness locator is called. Suspend there, replace the actual HttpServer
@@ -982,22 +998,8 @@
   ;; This is an in-process inspection TOCTOU test, not a claim about remote
   ;; deployments or a continuously authenticated HTTP connection.
   (let [s (scenario :honest)
-        source (original-source s true)
-        original-locator (:base-url! source)
-        inspection-in-locator (promise)
-        release-inspection (promise)
-        inspection-armed? (atom false)
-        issued (config/issue-configured-checked-http-application!
-                (assoc source
-                       :listener-instance!
-                       (fn [_] (:server @(:server-state s)))
-                       :base-url!
-                       (fn [system]
-                         (when @inspection-armed?
-                           (deliver inspection-in-locator true)
-                           (when-not (deref release-inspection 15000 false)
-                             (throw (ex-info "Inspection fixture timed out" {}))))
-                         (original-locator system))))]
+        {:keys [issued inspection-in-locator release-inspection inspection-armed?]}
+        (paused-generation-inspection s true)]
     (try
       (let [{:keys [system instance-generation]}
             ((:start-once! issued) {})
@@ -1043,22 +1045,8 @@
   ;; stop can begin cleanup. The successful point-in-time inspection must not
   ;; become a lease or allow its generation to be reused after that stop.
   (let [s (scenario :honest)
-        source (original-source s true)
-        original-locator (:base-url! source)
-        inspection-in-locator (promise)
-        release-inspection (promise)
-        inspection-armed? (atom false)
-        issued (config/issue-configured-checked-http-application!
-                (assoc source
-                       :listener-instance!
-                       (fn [_] (:server @(:server-state s)))
-                       :base-url!
-                       (fn [system]
-                         (when @inspection-armed?
-                           (deliver inspection-in-locator true)
-                           (when-not (deref release-inspection 15000 false)
-                             (throw (ex-info "Inspection fixture timed out" {}))))
-                         (original-locator system))))]
+        {:keys [issued inspection-in-locator release-inspection inspection-armed?]}
+        (paused-generation-inspection s true)]
     (try
       (let [{:keys [system instance-generation]}
             ((:start-once! issued) {})
@@ -1112,22 +1100,8 @@
   ;; and it must still finish after the failed fresh HTTP challenge. Never
   ;; turn the historical successful-start report into present-tense liveness.
   (let [s (scenario :honest)
-        source (original-source s true)
-        original-locator (:base-url! source)
-        inspection-in-locator (promise)
-        release-inspection (promise)
-        inspection-armed? (atom false)
-        issued (config/issue-configured-checked-http-application!
-                (assoc source
-                       :listener-instance!
-                       (fn [_] (:server @(:server-state s)))
-                       :base-url!
-                       (fn [system]
-                         (when @inspection-armed?
-                           (deliver inspection-in-locator true)
-                           (when-not (deref release-inspection 15000 false)
-                             (throw (ex-info "Inspection fixture timed out" {}))))
-                         (original-locator system))))]
+        {:keys [issued inspection-in-locator release-inspection inspection-armed?]}
+        (paused-generation-inspection s true)]
     (try
       (let [{:keys [system instance-generation]} ((:start-once! issued) {})
             inspect! (fn [] ((:inspect-generation! issued)
@@ -1177,19 +1151,8 @@
   ;; physical identity, even though an independent actor replaced the real
   ;; JDK HttpServer while this inspection was waiting for its URL locator.
   (let [s (scenario :honest)
-        source (original-source s true)
-        original-locator (:base-url! source)
-        inspector-in-locator (promise)
-        release-inspector (promise)
-        armed? (atom false)
-        issued (config/issue-configured-checked-http-application!
-                (assoc source :base-url!
-                       (fn [system]
-                         (when @armed?
-                           (deliver inspector-in-locator true)
-                           (when-not (deref release-inspector 15000 false)
-                             (throw (ex-info "Inspection fixture timed out" {}))))
-                         (original-locator system))))]
+        {:keys [issued inspection-in-locator release-inspection inspection-armed?]}
+        (paused-generation-inspection s false)]
     (try
       (let [{:keys [system instance-generation]} ((:start-once! issued) {})
             inspect! (fn [] ((:inspect-generation! issued)
@@ -1197,10 +1160,10 @@
             original-server (:server @(:server-state s))
             original-port (:port @(:server-state s))]
         (is (= :not-established (:physical-listener-instance (inspect!))))
-        (reset! armed? true)
+        (reset! inspection-armed? true)
         (let [inspecting (future (inspect!))]
           (try
-            (is (true? (deref inspector-in-locator 10000 false)))
+            (is (true? (deref inspection-in-locator 10000 false)))
             (is (= :inspection-pending
                    (deref inspecting 200 :inspection-pending)))
             (let [{:keys [new]} (replace-actual-listener-at-same-port! s system)
@@ -1209,7 +1172,7 @@
               (is (not (identical? original-server (:server new))))
               (is (= :verified-configured-start
                      (:status ((:summary! issued)))))
-              (deliver release-inspector true)
+              (deliver release-inspection true)
               (let [observed (deref inspecting 15000 :inspection-timed-out)]
                 (is (= :current-at-inspection (:status observed)))
                 (is (< before @(:hits new))
@@ -1225,11 +1188,11 @@
                 (is (= :not-admitted (:admission observed)))
                 (is (= :none (:authority observed)))))
             (finally
-              (deliver release-inspector true)
+              (deliver release-inspection true)
               (deref inspecting 15000 :inspection-timed-out))))
         (is (= :stopped (:status ((:stop! issued)))))
         (is (= :configured-instance-generation-not-current
                (reason inspect!))))
       (finally
-        (deliver release-inspector true)
+        (deliver release-inspection true)
         (cleanup! s issued)))))
