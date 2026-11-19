@@ -59,6 +59,7 @@
                  (= id (:xt/id after)))
         {:table-name (name table)
          :row-id id
+         :expected-before (command/before c)
          :expected-after after}))))
 
 (defn- reject! [reason]
@@ -193,7 +194,14 @@
    An unregistered same-value PUT creates a newer system version and revokes
    the stronger dual-row temporal correlation. Bitemporal ties and missing
    history remain explicitly inconclusive. Neither a timestamp match nor
-   absence of a visible newer version establishes transaction causality."
+   absence of a visible newer version establishes transaction causality.
+
+   v1892: For a supported UPDATE, also compare the complete predecessor
+   document visible in this SAME bounded pinned history with the privately
+   retained admitted command/before. Require the preceding valid-time
+   interval to close at the returned transaction time. This checks a
+   declared BEFORE/AFTER pair, not authenticated earlier execution,
+   historic completeness, or exclusive physical transaction causality."
   [g result]
   (let [local (original-local-return g result)
         private (locking private-intents
@@ -309,7 +317,7 @@
               (try
                 (original-query
                  node
-                 [(str "SELECT _system_from, _system_to, _valid_from, _valid_to"
+                 [(str "SELECT *, _system_from, _system_to, _valid_from, _valid_to"
                        " FROM " (:table-name original-protected)
                        " FOR VALID_TIME ALL FOR SYSTEM_TIME ALL"
                        " WHERE _id = ? ORDER BY _system_from DESC LIMIT 2")
@@ -323,13 +331,15 @@
                      (<= (count protected-history-rows) 2)
                      (every? (fn [row]
                                (and (map? row)
-                                    (contains? row :xt/system-from)
-                                    (every? #{:xt/system-from :xt/system-to
-                                              :xt/valid-from :xt/valid-to}
-                                            (keys row))
-                                    (every? (fn [[_ v]]
-                                              (instance? ZonedDateTime v))
-                                            row)))
+                                    (= (:row-id original-protected) (:xt/id row))
+                                    (instance? ZonedDateTime
+                                               (:xt/system-from row))
+                                    (every? (fn [k]
+                                              (or (not (contains? row k))
+                                                  (instance? ZonedDateTime
+                                                             (get row k))))
+                                            [:xt/system-to :xt/valid-from
+                                             :xt/valid-to])))
                              protected-history-rows)))
             _ (when-not protected-history-valid?
                 (reject! :invalid-pinned-protected-history))
@@ -354,6 +364,43 @@
                     :latest-protected-version-not-open
                     :else
                     :latest-open-protected-version-starts-at-returned-tx))))
+            ;; For UPDATEs, retain the ORIGINAL admitted before-document
+            ;; privately and compare its complete persisted fields with
+            ;; the immediate preceding historical version on the SAME pin.
+            ;; The v1891 newest-first LIMIT 2 and time-tie refusal remain
+            ;; mandatory: this is not a scan or proof of complete history.
+            protected-before-status
+            (cond
+              (nil? original-protected)
+              :not-checked-unsupported-original-plan-shape
+              (not (map? (:expected-before original-protected)))
+              :not-checked-original-command-has-no-before
+              (not= :latest-open-protected-version-starts-at-returned-tx
+                    protected-history-status)
+              :latest-protected-version-not-origin-anchored
+              (< (count protected-history-rows) 2)
+              :no-visible-immediate-protected-predecessor
+              :else
+              (let [predecessor (second protected-history-rows)
+                    predecessor-document
+                    (apply dissoc predecessor
+                           [:xt/system-from :xt/system-to
+                            :xt/valid-from :xt/valid-to])
+                    predecessor-from (observed-time
+                                      (:xt/system-from predecessor))
+                    predecessor-valid-to (observed-time
+                                          (:xt/valid-to predecessor))]
+                (cond
+                  (not (and predecessor-from
+                            (neg? (compare predecessor-from tx-time))
+                            (= tx-time predecessor-valid-to)))
+                  :immediate-predecessor-not-valid-time-adjacent
+                  (private-document-matches?
+                   (:expected-before original-protected)
+                   predecessor-document)
+                  :private-original-before-matches-immediate-predecessor
+                  :else
+                  :immediate-predecessor-diverges-from-private-before)))
             intent-row (query-one
                         "SELECT * FROM gesso_guarded_write_intents WHERE _id = ? LIMIT 2"
                         (:xt/id record))
@@ -422,6 +469,23 @@
            :bounded-dual-row-history-and-ledger-coobservation
            :not-established)
          :protected-temporal-correlation-proves-transaction-causality? false
+         :protected-original-before-history-status protected-before-status
+         :protected-before-history-scope
+         :private-original-before-compared-with-pinned-immediate-predecessor
+         :protected-before-after-intent-ledger-correlation
+         (if (and positive?
+                  (= :matches-private-original-protected-after
+                     protected-status)
+                  (= :one-open-visible-history-version-starts-at-returned-tx
+                     history-status)
+                  (= :latest-open-protected-version-starts-at-returned-tx
+                     protected-history-status)
+                  (= :private-original-before-matches-immediate-predecessor
+                     protected-before-status))
+           :bounded-private-before-after-intent-ledger-coobservation
+           :not-established)
+         :protected-before-history-completeness :not-established
+         :protected-before-after-correlation-proves-causality? false
          :intent-history-origin-status history-status
          :returned-tx-time-intent-history-correlation
          (if (and positive?

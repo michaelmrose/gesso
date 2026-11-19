@@ -203,6 +203,13 @@
                 (:protected-original-history-origin-status report)))
          (is (= :bounded-dual-row-history-and-ledger-coobservation
                 (:protected-intent-ledger-temporal-correlation report)))
+         (is (= :private-original-before-matches-immediate-predecessor
+                (:protected-original-before-history-status report)))
+         (is (= :bounded-private-before-after-intent-ledger-coobservation
+                (:protected-before-after-intent-ledger-correlation report)))
+         (is (= :not-established (:protected-before-history-completeness report)))
+         (is (false? (:protected-before-after-correlation-proves-causality?
+                      report)))
          (is (= 2 (:protected-original-history-observation-limit report)))
          (is (= :not-established
                 (:protected-original-history-completeness report)))
@@ -395,6 +402,10 @@
                 (:protected-intent-ledger-coobservation replayed)))
          (is (= :not-established
                 (:protected-intent-ledger-temporal-correlation replayed)))
+         (is (= :latest-protected-version-not-origin-anchored
+                (:protected-original-before-history-status replayed)))
+         (is (= :not-established
+                (:protected-before-after-intent-ledger-correlation replayed)))
          (is (false? (:protected-temporal-correlation-proves-transaction-causality?
                       replayed)))
          (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
@@ -432,6 +443,10 @@
                 (:protected-original-poststate-status after)))
          (is (= :no-visible-pinned-protected-history
                 (:protected-original-history-origin-status after)))
+         (is (= :latest-protected-version-not-origin-anchored
+                (:protected-original-before-history-status after)))
+         (is (= :not-established
+                (:protected-before-after-intent-ledger-correlation after)))
          (is (= :not-established
                 (:protected-intent-ledger-temporal-correlation after)
                 (:protected-original-history-completeness after)
@@ -441,3 +456,38 @@
          (is (= :not-issued (:certificate after)))
          (is (false? (:protected-temporal-correlation-proves-transaction-causality?
                       after))))))))
+
+(deftest v1892-false-admitted-before-is-not-a-pinned-predecessor
+  ;; The declared before can disagree in a NON-guarded field with the real
+  ;; XTDB predecessor even though version checks, submitted PUT, intent and
+  ;; the original transaction ledger succeed. This correspondence check
+  ;; must not certify the invented before-document as physically observed.
+  (physical/with-proving-application!
+   (fn [app]
+     (let [real-before ((:read! app))
+           original-source (source real-before)
+           wrong-before (assoc real-before :audit-tag "invented-prior-value")
+           forged (assoc-in original-source
+                            [:plan :commands 0 :model/before] wrong-before)
+           g (intent/prepare-one-shot! (:node app) forged)
+           returned ((:submit! g))
+           report (intent/inspect-pinned-intent! g returned)]
+       (is (= :bounded-dual-row-history-and-ledger-coobservation
+              (:protected-intent-ledger-temporal-correlation report)))
+       (is (= :matches-private-original-protected-after
+              (:protected-original-poststate-status report)))
+       (is (= :latest-open-protected-version-starts-at-returned-tx
+              (:protected-original-history-origin-status report)))
+       (is (= :immediate-predecessor-diverges-from-private-before
+              (:protected-original-before-history-status report)))
+       (is (= :not-established
+              (:protected-before-after-intent-ledger-correlation report)
+              (:protected-before-history-completeness report)
+              (:transaction-causality report)))
+       (is (= :none (:transaction-authority report) (:authority report)))
+       (is (= :not-issued (:certificate report)))
+       (is (false? (:protected-before-after-correlation-proves-causality?
+                    report)))
+       (is (not-any? #(contains? report %)
+                     [:expected-before :historical-before :original-before
+                      :before-document :protected-document :snapshot-token]))))))
