@@ -71,7 +71,13 @@
    row visibility captured by the same later pinned read. It is a diagnostic
    comparison of two independent reports, not erase causality, completeness,
    prevention, or admission: ERASE followed by reinsert may show a row, and
-   DELETE or prior absence may leave no row without an ERASE."
+   DELETE or prior absence may leave no row without an ERASE.
+
+   v1885: Also compare a signed selected-row erase claim to the bounded,
+   independently pinned visible-history inventory from that SAME later read.
+   Actual DELETE can preserve old versions and actual ERASE can remove them,
+   but either signed-claim/history combination remains a point-in-time
+   diagnostic, not authenticated audit capture or erase causality."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -348,6 +354,42 @@
                     :signed-erasure-claim-pinned-visibility-meaning
                     :diagnostic-point-in-time-comparison-not-erase-causality
                     :signed-erasure-claim-proves-physical-erase? false
+                    ;; Use only the independently obtained, bounded history
+                    ;; inventory from this same pinned read and the same
+                    ;; immutable audit-ledger snapshot. A real DELETE can
+                    ;; preserve history, while a real ERASE can remove it.
+                    ;; Visible history could also follow an actual ERASE via
+                    ;; later reinsertion, so even this comparison cannot
+                    ;; establish that the signed claim describes a real ERASE.
+                    :per-operation-signed-erasure-claim-pinned-history
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation
+                             (if-not (map? state)
+                               :not-eligible
+                               (let [claim (:erasure-audit-intake state :not-checked)
+                                     inventory (:visible-history-inventory
+                                                state :not-checked)]
+                                 (case claim
+                                   :erase-commit-record-present-in-supplied-segment
+                                   (case inventory
+                                     :visible-pinned-history-inventory-below-cap
+                                     :signed-erase-claim-with-visible-pinned-history
+                                     :visible-pinned-history-inventory-cap-reached
+                                     :signed-erase-claim-with-visible-pinned-history-at-cap
+                                     :no-visible-pinned-history-records
+                                     :signed-erase-claim-with-no-visible-pinned-history
+                                     :not-comparable :not-comparable
+                                     :inconsistent-private-history-inventory-status)
+                                   :no-erase-commit-record-in-supplied-segment
+                                   :no-selected-erase-claim-in-supplied-range
+                                   :not-checked :not-checked
+                                   :in-flight :in-flight
+                                   :failed :failed
+                                   :inconsistent-private-audit-status)))]))
+                    :signed-erasure-claim-pinned-history-meaning
+                    :bounded-visible-history-at-one-snapshot-not-erase-causality
+                    :signed-erasure-claim-proves-history-erasure? false
                     :erasure-audit-intake-scope
                     :private-original-and-later-pinned-binding-only
                     :erasure-audit-producer-completeness :not-established

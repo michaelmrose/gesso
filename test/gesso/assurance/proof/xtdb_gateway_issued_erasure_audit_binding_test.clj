@@ -132,6 +132,13 @@
           (is (= :diagnostic-point-in-time-comparison-not-erase-causality
                  (:signed-erasure-claim-pinned-visibility-meaning accepted)))
           (is (false? (:signed-erasure-claim-proves-physical-erase? accepted)))
+          (is (= :signed-erase-claim-with-visible-pinned-history
+                 (get-in accepted
+                         [:per-operation-signed-erasure-claim-pinned-history
+                          operation])))
+          (is (= :bounded-visible-history-at-one-snapshot-not-erase-causality
+                 (:signed-erasure-claim-pinned-history-meaning accepted)))
+          (is (false? (:signed-erasure-claim-proves-history-erasure? accepted)))
           (is (= :private-original-and-later-pinned-binding-only
                  (:erasure-audit-intake-scope accepted)))
           (is (= :not-established (:erasure-audit-producer-completeness accepted)))
@@ -179,6 +186,10 @@
           (is (= :not-checked
                  (get-in next-read
                          [:per-operation-signed-erasure-claim-pinned-visibility
+                          operation])))
+          (is (= :not-checked
+                 (get-in next-read
+                         [:per-operation-signed-erasure-claim-pinned-history
                           operation])))
           (is (= :audit-segment-source-binding-mismatch
                  (reason #(inspect! operation signed)))))
@@ -407,8 +418,87 @@
                  (get-in summary
                          [:per-operation-signed-erasure-claim-pinned-visibility op])))
           (is (false? (:signed-erasure-claim-proves-physical-erase? summary)))
+          (is (= :visible-pinned-history-inventory-below-cap
+                 (get-in summary [:per-operation-visible-history-inventory op])))
+          (is (= :signed-erase-claim-with-visible-pinned-history
+                 (get-in summary
+                         [:per-operation-signed-erasure-claim-pinned-history op])))
+          (is (false? (:signed-erasure-claim-proves-history-erasure? summary)))
           (is (= :not-established (:physical-application-correspondence summary)
                  (:erasure-audit-producer-completeness summary)))
           (is (= :none (:erasure-audit-discharge summary)
                  (:transaction-authority summary) (:authority summary)))
           (is (= :not-issued (:certificate summary))))))))
+
+(deftest v1885-real-erase-with-signed-claim-remains-noncausal
+  ;; The physical ERASE here is genuinely issued to XTDB in the test, but
+  ;; the externally signed audit envelope is STILL manufactured separately.
+  ;; A matching absence of all visible row history cannot prove the signed
+  ;; record came from that ERASE (or that other writes cannot escape capture).
+  (let [op :request/claim
+        {:keys [data] :as env} (environment)
+        collector (observation/issue-current-issued-application-observer!
+                   (:contract env) (:catalog-source env))
+        inspect! (:inspect-erasure-audit-segment! collector)
+        row (:request data)
+        id (:xt/id row)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}]
+    (seed! [:requests row])
+    (let [start (test-point)]
+      ((:observe! collector) op ctx invocation)
+      (xt/execute-tx (db) [[:erase-docs :requests id]])
+      (let [end (test-point)
+            reread ((:read-only-recheck! collector) op)
+            origin (get-in reread [:certified-operation-proof-origins op])
+            expected (merge
+                      {:operation-id op
+                       :database-instance (:database start)
+                       :physical-table :requests
+                       :physical-row-id id
+                       :system-from (:system-time start)
+                       :system-to (:system-time end)}
+                      (select-keys origin
+                                   [:proof-fingerprint :proof-source-fingerprint
+                                    :proof-subject-fingerprint
+                                    :dependency-graph-fingerprint
+                                    :transition-fingerprint]))]
+        (is (= :no-current-valid-row
+               (get-in reread [:per-operation-selected-row-current-visibility op])))
+        (is (= :no-visible-pinned-history-records
+               (get-in reread [:per-operation-visible-history-inventory op])))
+        (is (= :no-visible-selected-row-system-history-returned
+               (get-in reread [:per-operation-selected-row-history-boundaries op])))
+        (is (nil? ((original 'read-request) id)))
+        (let [summary (inspect! op (sealed-segment expected))]
+          (is (= :signed-erase-claim-with-no-visible-pinned-history
+                 (get-in summary
+                         [:per-operation-signed-erasure-claim-pinned-history op])))
+          (is (= :signed-erase-claim-with-no-current-valid-row-at-pinned-read
+                 (get-in summary
+                         [:per-operation-signed-erasure-claim-pinned-visibility op])))
+          (is (= :bounded-visible-history-at-one-snapshot-not-erase-causality
+                 (:signed-erasure-claim-pinned-history-meaning summary)))
+          (is (false? (:signed-erasure-claim-proves-physical-erase? summary)))
+          (is (false? (:signed-erasure-claim-proves-history-erasure? summary)))
+          (is (= :not-established
+                 (:erasure-audit-producer-completeness summary)
+                 (:physical-application-correspondence summary)
+                 (:selected-row-history-completeness summary)))
+          (is (= :none (:erasure-audit-discharge summary)
+                 (:transaction-authority summary) (:retry-authority summary)
+                 (:authority summary)))
+          (is (= :not-issued (:certificate summary)))
+          (is (= #{} (get-in summary [:diagnostic-open-history-conditions
+                                      :discharged-conditions]))))
+        ;; A new independently pinned read must erase BOTH correlations.
+        (seed! [:requests {:xt/id (str "unrelated-v1885-" (random-uuid))
+                           :owner "newer-basis"}])
+        (let [newer ((:read-only-recheck! collector) op)]
+          (is (= :not-checked
+                 (get-in newer
+                         [:per-operation-signed-erasure-claim-pinned-history op])))
+          (is (= :not-checked
+                 (get-in newer
+                         [:per-operation-signed-erasure-claim-pinned-visibility op]))))
+        (is (= 1 @(:constructs (:environment env))))))))
