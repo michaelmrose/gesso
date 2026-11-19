@@ -23,7 +23,14 @@
    Classification trusts only the explicitly configured client callback to
    have performed the v1907 signature check; user-supplied callback exception
    data alone is NOT an independently authenticated witness. A new adapter
-   and fresh signed read must still establish exact-head recovery."
+   and fresh signed read must still establish exact-head recovery.
+
+   v1909: A quarantined instance can create a READ-ONLY, redacted recovery
+   assessment, separately revalidating its original committed local head
+   and a newly nonce-bound signed register read. An observation never clears
+   quarantine, mutates either store, retries CAS, issues admission, or
+   substitutes for constructing a new adapter. Reports are ephemeral and
+   audit-ready, NOT persisted audit events or attestations."
   (:require [gesso.assurance.proof.xtdb-gateway-durable-checkpoint-store :as durable])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.security KeyFactory MessageDigest PublicKey Signature]
@@ -176,6 +183,10 @@
         _ (when (Arrays/equals ^bytes local-der ^bytes external-der)
             (reject! :external-floor-key-must-differ-from-checkpoint-key))
         poisoned (atom false)
+        ;; Original two-resource attempt is frozen at LOCAL commit. Keep
+        ;; its exact before/after heads even if another actor later changes
+        ;; either resource. No callback or caller can rewrite this binding.
+        unresolved (atom nil)
         monitor (Object.)
         read-floor! (fn []
                       (let [nonce (str (UUID/randomUUID))
@@ -235,12 +246,18 @@
                       ;; even a malformed response or callback exception is
                       ;; an uncertain 2-resource outcome, never a retryable
                       ;; failed checkpoint submission in this instance.
+                      (reset! unresolved
+                              {:attempt-id (str (UUID/randomUUID))
+                               :prior-floor floor
+                               :committed-floor new-floor
+                               :client-reported-classification :pending})
                       (reset! poisoned true)
                       (try
                         (let [response ((:advance-external-floor! config) request)]
                           (verify-signed! response external-key request)
                           (when-not (= new-floor (read-floor!))
                             (reject! :external-advance-not-visible-on-fresh-read))
+                          (reset! unresolved nil)
                           (reset! poisoned false)
                           {:type adapter-type :version 1
                            :head-revision (:revision new-floor)
@@ -269,6 +286,11 @@
                                      (true? (:signature-verified-for-pinned-register-key?
                                              data))
                                      (true? (:no-automatic-retry data)))]
+                            (swap! unresolved assoc
+                                   :client-reported-classification
+                                   (if client-reported-rejection?
+                                     :client-reported-verified-stale-cas
+                                     :unconfirmed-outcome))
                             (throw
                              (ex-info
                               "External register update is not confirmed for the locally committed checkpoint."
@@ -290,11 +312,85 @@
                                :proof-discharge :none
                                :certificate :not-issued
                                :authority :none}
-                              ex))))))))]
+                              ex))))))))
+        inspect-recovery! (fn []
+                            (locking monitor
+                              (when-not (and @poisoned @unresolved)
+                                (reject! :recovery-inspection-requires-quarantined-attempt))
+                              (let [{:keys [attempt-id prior-floor committed-floor
+                                            client-reported-classification]}
+                                    @unresolved
+                                    ;; Re-open the complete signed history at a
+                                    ;; genesis floor solely for observation.
+                                    ;; It must NOT validate or admit remote
+                                    ;; recovery on its own. `read-floor!`
+                                    ;; independently validates a fresh nonce
+                                    ;; and the configured register signature.
+                                    observed
+                                    (try
+                                      (let [remote (read-floor!)
+                                            store (durable/prepare-local-durable-store!
+                                                   {:directory (:directory config)
+                                                    :policy (:policy config)
+                                                    :authority-ed25519-spki-base64
+                                                    (:checkpoint-authority-ed25519-spki-base64 config)
+                                                    :external-rollback-floor
+                                                    {:revision 0
+                                                     :checkpoint-digest "genesis"}
+                                                    :initialize-empty? false})
+                                            head ((:status! store))
+                                            local {:revision (:head-revision head)
+                                                   :checkpoint-digest (:head-digest head)}]
+                                        {:remote remote :local local
+                                         :observation :fresh-signed-read-and-local-signed-chain})
+                                      (catch Throwable _
+                                        ;; An unavailable or invalid signed
+                                        ;; read is NOT evidence of a remote
+                                        ;; refusal/acceptance. No retry here.
+                                        {:observation :unable-to-observe-both-heads}))
+                                    remote (:remote observed)
+                                    local (:local observed)
+                                    result (cond
+                                             (not= :fresh-signed-read-and-local-signed-chain
+                                                   (:observation observed))
+                                             :reconciliation-observation-unavailable
+                                             (not= local committed-floor)
+                                             :local-history-diverges-from-committed-attempt
+                                             (= remote committed-floor)
+                                             :fresh-signed-head-matches-committed-local-head
+                                             (= remote prior-floor)
+                                             :fresh-signed-register-still-at-prior-head
+                                             :else
+                                             :fresh-signed-register-head-diverges)]
+                                {:type
+                                 :gesso.assurance.proof.xtdb-gateway-externally-anchored-floor/recovery-assessment
+                                 :version 1
+                                 :attempt-id attempt-id
+                                 :original-advance-classification client-reported-classification
+                                 :original-local-checkpoint :already-committed
+                                 :original-prior-revision (:revision prior-floor)
+                                 :original-committed-revision (:revision committed-floor)
+                                 :observation (:observation observed)
+                                 :reconciliation result
+                                 :signed-register-exact-head-match?
+                                 (and (= :fresh-signed-read-and-local-signed-chain
+                                         (:observation observed))
+                                      (= committed-floor local remote))
+                                 :quarantine :remains-permanent
+                                 :next-step :new-adapter-required-with-fresh-signed-exact-head
+                                 :automatic-cas-retry? false
+                                 :write-or-repair-performed? false
+                                 :persistent-audit-record :not-written
+                                 :remote-execution-causality :not-established
+                                 :external-register-independence :not-established
+                                 :proof-discharge :none
+                                 :certificate :not-issued
+                                 :authority :none}))) ]
     ;; Verify the external read and local head immediately, not merely on the
     ;; first status call; fail closed on split-brain during restart.
     (checked-local!)
     {:type adapter-type :version 1 :status! status! :append! append!
+     :inspect-quarantined-recovery! inspect-recovery!
      :configured-external-key-fingerprint external-fingerprint
      :external-signature-freshness :nonce-bound-on-every-read
      :external-register-independence :not-established

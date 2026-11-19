@@ -389,3 +389,139 @@
           (is (true? (:no-automatic-retry details)))
           (is (= :unconfirmed-external-floor-advance
                  (reason #((:status! adapter))))))))))
+
+(deftest v1909-quarantined-recovery-assessment-requires-signed-exact-head
+  ;; A signed stale-CAS refusal cannot undo the original local append.
+  ;; Recovery inspection observes *both* stores afresh but never resumes
+  ;; the original adapter or mutates either store.
+  (with-directory
+    (fn [dir]
+      (let [p (policy) cp (pair) ep (pair) ext (external-register ep)
+            rejected (atom 0)
+            cfg (assoc (config dir p cp ep ext true)
+                       :advance-external-floor!
+                       (fn [_]
+                         (swap! rejected inc)
+                         (throw
+                          (ex-info "Client checked a signed stale CAS"
+                                   {:reason :register-client-authenticated-stale-cas
+                                    :outcome :rejected-not-applied
+                                    :signature-verified-for-pinned-register-key? true
+                                    :no-automatic-retry true}))))
+            a (floor/prepare-external-floor-adapter! cfg)]
+        (is (= :recovery-inspection-requires-quarantined-attempt
+               (reason #((:inspect-quarantined-recovery! a)))))
+        (is (= :external-floor-advance-client-reported-verified-rejection
+               (reason #((:append! a) (checkpoint p "genesis" cp)))))
+        (let [assessment ((:inspect-quarantined-recovery! a))]
+          (is (= :fresh-signed-register-still-at-prior-head
+                 (:reconciliation assessment)))
+          (is (= :fresh-signed-read-and-local-signed-chain
+                 (:observation assessment)))
+          (is (= :client-reported-verified-stale-cas
+                 (:original-advance-classification assessment)))
+          (is (= :already-committed (:original-local-checkpoint assessment)))
+          (is (= 0 (:original-prior-revision assessment)))
+          (is (= 1 (:original-committed-revision assessment)))
+          (is (false? (:signed-register-exact-head-match? assessment)))
+          (is (= :remains-permanent (:quarantine assessment)))
+          (is (= :new-adapter-required-with-fresh-signed-exact-head
+                 (:next-step assessment)))
+          (is (false? (:automatic-cas-retry? assessment)))
+          (is (false? (:write-or-repair-performed? assessment)))
+          (is (= :not-written (:persistent-audit-record assessment)))
+          (is (= :not-established (:remote-execution-causality assessment)
+                 (:external-register-independence assessment)))
+          (is (= :none (:proof-discharge assessment)
+                 (:authority assessment)))
+          (is (= :not-issued (:certificate assessment)))
+          (is (string? (:attempt-id assessment)))
+          (is (= 1 @rejected))
+          ;; An operator deliberately aligns the external register to the
+          ;; existing, independently reverified local history. No write to
+          ;; either resource occurs as part of the inspection itself.
+          (let [local (store/prepare-local-durable-store!
+                       {:directory dir :policy p
+                        :authority-ed25519-spki-base64 (spki cp)
+                        :external-rollback-floor {:revision 0
+                                                  :checkpoint-digest "genesis"}
+                        :initialize-empty? false})
+                head ((:status! local))]
+            (reset! (:current ext)
+                    {:revision (:head-revision head)
+                     :checkpoint-digest (:head-digest head)})
+            (let [aligned ((:inspect-quarantined-recovery! a))]
+              (is (= :fresh-signed-head-matches-committed-local-head
+                     (:reconciliation aligned)))
+              (is (true? (:signed-register-exact-head-match? aligned)))
+              (is (= (:attempt-id assessment) (:attempt-id aligned)))
+              (is (= :not-issued (:certificate aligned)))
+              (is (= :remains-permanent (:quarantine aligned)))))
+          (is (= :unconfirmed-external-floor-advance
+                 (reason #((:status! a)))))
+          (is (= :unconfirmed-external-floor-advance
+                 (reason #((:append! a) (checkpoint p "genesis" cp)))))
+          (is (= 1 @rejected) "No second CAS even during or after inspection")
+          (is (= 1 (:head-revision ((:status! (open dir p cp ep ext false)))))))))))
+
+(deftest v1909-unknown-advance-can-be-observed-but-never-auto-replayed
+  (with-directory
+    (fn [dir]
+      (let [p (policy) cp (pair) ep (pair) ext (external-register ep)
+            attempts (atom 0)
+            actual (:advance! ext)
+            cfg (assoc (config dir p cp ep ext true)
+                       :advance-external-floor!
+                       (fn [request]
+                         (swap! attempts inc)
+                         (actual request)
+                         (throw (ex-info "Receipt disappeared" {}))))
+            a (floor/prepare-external-floor-adapter! cfg)]
+        (is (= :external-floor-advance-unconfirmed
+               (reason #((:append! a) (checkpoint p "genesis" cp)))))
+        (let [result ((:inspect-quarantined-recovery! a))]
+          (is (= :unconfirmed-outcome (:original-advance-classification result)))
+          (is (= :fresh-signed-head-matches-committed-local-head
+                 (:reconciliation result)))
+          (is (true? (:signed-register-exact-head-match? result)))
+          (is (= :remains-permanent (:quarantine result)))
+          (is (= :not-written (:persistent-audit-record result)))
+          (is (= :none (:authority result) (:proof-discharge result)))
+          (is (= :not-issued (:certificate result)))
+          (is (= 1 @attempts))
+          (is (= 1 (:revision @(:current ext))))
+          (is (= :unconfirmed-external-floor-advance
+                 (reason #((:status! a)))))
+          (is (= 1 (:head-revision ((:status! (open dir p cp ep ext false)))))))))))
+
+(deftest v1909-recovery-observation-fails-closed-on-unavailable-or-diverged-heads
+  (with-directory
+    (fn [dir]
+      (let [p (policy) cp (pair) ep (pair) ext (external-register ep)
+            reject (fn [_] (throw (ex-info "Lost CAS acknowledgement" {})))
+            cfg (assoc (config dir p cp ep ext true)
+                       :advance-external-floor! reject)
+            a (floor/prepare-external-floor-adapter! cfg)]
+        (is (= :external-floor-advance-unconfirmed
+               (reason #((:append! a) (checkpoint p "genesis" cp)))))
+        (reset! (:fail-once ext) :reuse-old-read)
+        (let [unavailable ((:inspect-quarantined-recovery! a))]
+          (is (= :reconciliation-observation-unavailable
+                 (:reconciliation unavailable)))
+          (is (= :unable-to-observe-both-heads (:observation unavailable)))
+          (is (false? (:signed-register-exact-head-match? unavailable)))
+          (is (= :remains-permanent (:quarantine unavailable))))
+        ;; A SIGNED but unexpected register head is not an exact-head
+        ;; repair, even when it has a syntactically valid digest.
+        (reset! (:current ext)
+                {:revision 7
+                 :checkpoint-digest (str "sha256:" (apply str (repeat 64 "d")))})
+        (is (= :fresh-signed-register-head-diverges
+               (:reconciliation ((:inspect-quarantined-recovery! a)))))
+        ;; Another actor removes the local history. Never treat the remote
+        ;; matching the originally committed candidate as recovery.
+        (Files/deleteIfExists (.resolve ^Path dir "policy-checkpoints.edn"))
+        (is (= :reconciliation-observation-unavailable
+               (:reconciliation ((:inspect-quarantined-recovery! a)))))
+        (is (= :unconfirmed-external-floor-advance
+               (reason #((:status! a)))))))))
