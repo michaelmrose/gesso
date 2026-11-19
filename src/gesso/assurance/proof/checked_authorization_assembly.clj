@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-authorization-assembly
-  "v1837: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
+  "v1838: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
 
    For any selected qualified operation and route ID, relate its declared
    catalog construction to the SAME current-source construction of an issued
@@ -19,9 +19,15 @@
 
    v1837: Catalog-wide coverage also requires the original ApplicationAssembly
    recognizer and operation-summary facade. A substituted verifier or invented
-   route inventory cannot establish current application closure."
+   route inventory cannot establish current application closure.
+
+   v1838: Reject replacement of the original certified-plan and
+   certified-operation proof-verifier functions used by the contract checker.
+   Catalog coverage must not rely on permissive substituted proof checks."
   (:require [gesso.live.application-preflight :as application]
-            [gesso.live.application-preflight.certified-contract :as certified]))
+            [gesso.live.application-preflight.certified-contract :as certified]
+            [gesso.model.certified-operation :as certified-operation]
+            [gesso.model.certified-plan :as plan]))
 
 (def report-type
   :gesso.assurance.proof.checked-authorization-assembly/selected-binding)
@@ -31,6 +37,22 @@
 (def ^:private original-contract-check certified/check-certified-contracts!)
 (def ^:private original-application-assembly? application/application-assembly?)
 (def ^:private original-operation-summary application/operation-summary)
+(def ^:private original-checked-plan-operation? plan/checked-plan-operation?)
+(def ^:private original-require-current-plan-operation!
+  plan/require-current-plan-operation!)
+(def ^:private original-describe-plan-operation plan/describe-plan-operation)
+(def ^:private original-describe-certified-operation
+  certified-operation/describe-operation)
+
+(defn- plan-proof-boundary-current? []
+  (and (identical? original-checked-plan-operation?
+                   (var-get #'plan/checked-plan-operation?))
+       (identical? original-require-current-plan-operation!
+                   (var-get #'plan/require-current-plan-operation!))
+       (identical? original-describe-plan-operation
+                   (var-get #'plan/describe-plan-operation))
+       (identical? original-describe-certified-operation
+                   (var-get #'certified-operation/describe-operation))))
 
 (defn- application-boundary-current? []
   (and (identical? original-application-assembly?
@@ -130,6 +152,7 @@
                  (plain-map? (:catalog catalog-source))
                  (vector? (get-in catalog-source [:catalog :operations]))
                  (application-boundary-current?)
+                 (plan-proof-boundary-current?)
                  (identical? original-contract-check
                              (var-get #'certified/check-certified-contracts!))
                  (identical? original-issued-binding
@@ -173,6 +196,7 @@
       ;; must not be allowed to replace a proof boundary before a successful
       ;; catalog report is returned. This is a point-in-time observation only.
       (when-not (and (application-boundary-current?)
+                     (plan-proof-boundary-current?)
                      (identical? original-contract-check
                                  (var-get #'certified/check-certified-contracts!))
                      (identical? original-issued-binding

@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1837: adversarial source-relative checks for issued Ring bindings.
+  "v1838: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
@@ -18,6 +18,7 @@
             [gesso.live.application-preflight.certified-contract :as binding]
             [gesso.live.application-preflight.fixture :as fixture]
             [gesso.model.certified-plan :as plan]
+            [gesso.model.certified-operation :as certified-operation]
             [gesso.model.certified-plan-test]))
 
 (def ^:private error-type
@@ -611,6 +612,30 @@
         (is (= :authorization-not-bound-to-original-assembly
                (:reason (failure #(authorization/check-declared-route-coverage!
                                   input)))))))))
+
+(deftest catalog-coverage-pins-original-plan-proof-verifier-roots
+  ;; The ORIGINAL certified-contract checker calls these mutable public Vars
+  ;; while rechecking each v1251 executor. Even replacing a current-plan proof
+  ;; check with a permissive callback must never yield catalog-wide coverage.
+  ;; Set up the genuine ApplicationAssembly BEFORE substituting a proof root.
+  (with-genuine-catalog-selection
+    (fn [{:keys [input]}]
+      (is (= authorization/coverage-report-type
+             (:type (authorization/check-declared-route-coverage! input))))
+      (doseq [[label v replacement]
+              [[:registered-plan #'plan/checked-plan-operation? (constantly true)]
+               [:current-plan #'plan/require-current-plan-operation! (constantly nil)]
+               [:plan-description #'plan/describe-plan-operation nil]
+               [:operation-description #'certified-operation/describe-operation nil]]]
+        (let [original (var-get v)
+              substitute (or replacement (fn [& args] (apply original args)))]
+          (with-redefs-fn {v substitute}
+            (fn []
+              (is (= :authorization-not-bound-to-original-assembly
+                     (:reason (failure
+                               #(authorization/check-declared-route-coverage!
+                                 input))))
+                  (pr-str label)))))))))
 
 (deftest fabricated-assembly-and-invented-routes-cannot-certify-catalog
   (let [{:keys [base source]} (environment)
