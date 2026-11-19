@@ -191,6 +191,14 @@
          (is (true? (:both-observations-share-pinned-basis? report)))
          (is (= :private-original-prepared-gateway
                 (:expected-intent-origin report)))
+         (is (= :matches-private-original-protected-after
+                (:protected-original-poststate-status report)))
+         (is (= :bounded-three-way-physical-coobservation
+                (:protected-intent-ledger-coobservation report)))
+         (is (= :one-original-canonical-command-at-same-pinned-basis
+                (:protected-original-poststate-scope report)))
+         (is (false? (:protected-original-poststate-proves-transaction-causality?
+                      report)))
          (is (= :one-open-visible-history-version-starts-at-returned-tx
                 (:intent-history-origin-status report)))
          (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
@@ -281,6 +289,10 @@
                 (:returned-ledger-status later)))
          (is (= :bounded-private-intent-and-ledger-coobservation
                 (:status later)))
+         (is (= :matches-private-original-protected-after
+                (:protected-original-poststate-status later)))
+         (is (= :not-established
+                (:protected-intent-ledger-coobservation later)))
          (is (= :multiple-visible-pinned-intent-history-records-at-bound
                 (:intent-history-origin-status later)))
          (is (= :not-established
@@ -294,3 +306,84 @@
          (is (not-any? #(contains? later %)
                        [:xt/id :record :document :node :tx-key
                         :snapshot-token :system-from :system-to])))))))
+
+(deftest v1890-external-protected-write-breaks-three-way-with-unchanged-intent
+  ;; An unrelated direct writer can change the actual application row while
+  ;; the original generated intent, its single historical version and the
+  ;; original committed transaction ledger all continue to match. A report
+  ;; that checks ONLY intent/ledger would miss this divergence.
+  (physical/with-proving-application!
+   (fn [app]
+     (let [before ((:read! app))
+           g (intent/prepare-one-shot! (:node app) (source before))
+           returned ((:submit! g))
+           baseline (intent/inspect-pinned-intent! g returned)]
+       (is (= :bounded-three-way-physical-coobservation
+              (:protected-intent-ledger-coobservation baseline)))
+       (is (= :matches-private-original-protected-after
+              (:protected-original-poststate-status baseline)))
+       (let [current ((:read! app))]
+         ;; The unregistered direct writer is deliberately NOT admitted by
+         ;; the original gateway and cannot alter its privately held source.
+         (xt/execute-tx (:node app)
+                        [[:put-docs physical/table
+                          (assoc current :audit-tag "outside_writer")]])
+         (let [later (intent/inspect-pinned-intent! g returned)]
+           (is (= :bounded-private-intent-and-ledger-coobservation
+                  (:status later)))
+           (is (= :matches-private-generated-intent
+                  (:intent-record-status later)))
+           (is (= :matches-original-returned-committed-row
+                  (:returned-ledger-status later)))
+           (is (= :one-open-visible-history-version-starts-at-returned-tx
+                  (:intent-history-origin-status later)))
+           (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
+                  (:returned-tx-time-intent-history-correlation later)))
+           (is (= :diverges-from-private-original-after
+                  (:protected-original-poststate-status later)))
+           (is (= :not-established
+                  (:protected-intent-ledger-coobservation later)
+                  (:transaction-causality later)
+                  (:outside-gateway-writer-coverage later)))
+           (is (false?
+                (:protected-original-poststate-proves-transaction-causality?
+                 later)))
+           (is (= :none (:transaction-authority later)
+                  (:authority later)))
+           (is (= :not-issued (:certificate later)))
+           (is (not-any? #(contains? later %)
+                         [:protected-document :protected-after :protected-row-id
+                          :protected-table :source :node :tx-key :snapshot-token
+                          :original-plan :original-command]))))))))
+
+(deftest v1890-same-value-protected-rewrite-still-cannot-prove-causality
+  ;; This is the deliberate LIMIT of current-document three-way readback:
+  ;; a different physical writer can replay the same after-document. All
+  ;; current-value and intent/ledger observations may remain positive even
+  ;; though the application row received an unregistered second write.
+  (physical/with-proving-application!
+   (fn [app]
+     (let [g (intent/prepare-one-shot! (:node app)
+                                       (source ((:read! app))))
+           returned ((:submit! g))
+           original (intent/inspect-pinned-intent! g returned)
+           after ((:read! app))]
+       (is (= :bounded-three-way-physical-coobservation
+              (:protected-intent-ledger-coobservation original)))
+       (xt/execute-tx (:node app) [[:put-docs physical/table after]])
+       (let [replayed (intent/inspect-pinned-intent! g returned)]
+         (is (= :bounded-three-way-physical-coobservation
+                (:protected-intent-ledger-coobservation replayed)))
+         (is (= :matches-private-original-protected-after
+                (:protected-original-poststate-status replayed)))
+         (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
+                (:returned-tx-time-intent-history-correlation replayed)))
+         (is (= :not-established
+                (:transaction-causality replayed)
+                (:outside-gateway-writer-coverage replayed)
+                (:record-immutability replayed)))
+         (is (false?
+              (:protected-original-poststate-proves-transaction-causality?
+               replayed)))
+         (is (= :none (:transaction-authority replayed) (:authority replayed)))
+         (is (= :not-issued (:certificate replayed))))))))

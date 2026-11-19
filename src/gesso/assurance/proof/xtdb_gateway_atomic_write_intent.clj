@@ -42,6 +42,25 @@
    :created-at-key :created-at
    :updated-at-key :updated-at})
 
+(defn- supported-protected-command [commands]
+  ;; An additional read of a caller-named SQL table must never turn an
+  ;; admitted model keyword into SQL text unchecked. Other canonical plan
+  ;; shapes remain admissible but have NO protected-poststate correlation.
+  (when (= 1 (count commands))
+    (let [c (first commands)
+          [table id] (command/target c)
+          after (command/after c)]
+      (when (and (keyword? table)
+                 (nil? (namespace table))
+                 (re-matches #"[a-z][a-z0-9_]{0,127}" (name table))
+                 (or (and (string? id) (<= 1 (count id) 128))
+                     (instance? UUID id))
+                 (map? after)
+                 (= id (:xt/id after)))
+        {:table-name (name table)
+         :row-id id
+         :expected-after after}))))
+
 (defn- reject! [reason]
   (throw (ex-info "Unsupported atomic guarded-write intent."
                   {:xtdb-gateway-atomic-write-intent/rejection true
@@ -103,7 +122,8 @@
       (let [g (gateway/prepare-one-shot! node complete-source)]
         (locking private-intents
           (.put private-intents (:submit! g)
-                {:summary! (:summary! g) :node node :record record}))
+                {:summary! (:summary! g) :node node :record record
+                 :original-protected (supported-protected-command commands)}))
         g))))
 
 (defn- observed-time [v]
@@ -123,6 +143,23 @@
        (= (.truncatedTo ^Instant (:updated-at record) ChronoUnit/MICROS)
           (observed-time (:updated-at found)))))
 
+(defn- private-document-matches? [expected observed]
+  ;; XTDB converts Instant nanoseconds to microseconds, and may return
+  ;; ZonedDateTime values. Compare ALL fields under only this representation
+  ;; normalization, never accepting missing or additional document keys.
+  (let [normalized (fn [v]
+                     (cond
+                       (instance? Instant v)
+                       (.truncatedTo ^Instant v ChronoUnit/MICROS)
+                       (instance? ZonedDateTime v)
+                       (.toInstant ^ZonedDateTime v)
+                       :else v))]
+    (and (map? observed)
+         (= (set (keys expected)) (set (keys observed)))
+         (every? (fn [[k v]]
+                   (= (normalized v) (normalized (get observed k))))
+                 expected))))
+
 (defn inspect-pinned-intent!
   "Read back the PRIVATE v1887 generated intent and original returned-key
    ledger row at ONE independent, pinned XTDB basis. Accept ONLY the original
@@ -140,12 +177,19 @@
    the returned transaction's system time adds temporal correspondence;
    two or more visible version records (including a same-value overwrite)
    are explicitly insufficient for a unique origin claim. These are row
-   observations, not independent transaction causality or writer closure."
+   observations, not independent transaction causality or writer closure.
+
+   v1890: A third co-observation compares the one original canonical
+   protected command's expected after-document to the current document at
+   that SAME pinned basis, with a strict private table/ID binding. Later
+   unauthorized rewrites must not leave a falsely positive three-way match.
+   Only one supported original command is checked: other plan shapes are
+   explicitly not established rather than silently certified."
   [g result]
   (let [local (original-local-return g result)
         private (locking private-intents
                   (.get private-intents (:submit! g)))
-        {:keys [summary! node record]} private]
+        {:keys [summary! node record original-protected]} private]
     (when-not (and private
                    (identical? summary! (:summary! g))
                    (= :public-transaction-key (:observed-result-kind local))
@@ -230,6 +274,23 @@
                   :one-visible-history-version-start-matches-but-is-closed
                   :else
                   :one-open-visible-history-version-starts-at-returned-tx)))
+            ;; These are independent reads but all use the SAME immutable
+            ;; pin. Restrict SQL identifiers to our checked original source;
+            ;; use a parameter for the private original row ID.
+            protected-row (when original-protected
+                            (query-one (str "SELECT * FROM "
+                                            (:table-name original-protected)
+                                            " WHERE _id = ? LIMIT 2")
+                                       (:row-id original-protected)))
+            protected-status (cond
+                               (nil? original-protected)
+                               :not-checked-unsupported-original-plan-shape
+                               (nil? protected-row) :not-visible
+                               (private-document-matches?
+                                (:expected-after original-protected)
+                                protected-row)
+                               :matches-private-original-protected-after
+                               :else :diverges-from-private-original-after)
             intent-row (query-one
                         "SELECT * FROM gesso_guarded_write_intents WHERE _id = ? LIMIT 2"
                         (:xt/id record))
@@ -272,6 +333,18 @@
          :returned-ledger-status ledger-status
          :read-basis-order ordering
          :both-observations-share-pinned-basis? true
+         :protected-original-poststate-status protected-status
+         :protected-original-poststate-scope
+         :one-original-canonical-command-at-same-pinned-basis
+         :protected-intent-ledger-coobservation
+         (if (and positive?
+                  (= :matches-private-original-protected-after
+                     protected-status)
+                  (= :one-open-visible-history-version-starts-at-returned-tx
+                     history-status))
+           :bounded-three-way-physical-coobservation
+           :not-established)
+         :protected-original-poststate-proves-transaction-causality? false
          :intent-history-origin-status history-status
          :returned-tx-time-intent-history-correlation
          (if (and positive?
