@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1839: adversarial source-relative checks for issued Ring bindings.
+  "v1841: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
@@ -540,6 +540,19 @@
                (:open-premises report)))
         (is (= (:open-obligations contract-report)
                (:open-obligations report)))
+        ;; Attribute unresolved work to each original certified operation;
+        ;; the global open assumptions are not a substitute for row evidence.
+        (is (= (set (keys (:certified-operations contract-report)))
+               (set (keys (:certified-operation-open-evidence report)))))
+        (is (= (into (sorted-map)
+                     (for [[operation row] (:certified-operations contract-report)]
+                       [operation (select-keys row
+                                               [:route-ids :open-premises
+                                                :open-obligations])]))
+               (:certified-operation-open-evidence report)))
+        (is (= (:open-premises report)
+               (into #{} (mapcat :open-premises
+                                 (vals (:certified-operation-open-evidence report))))))
         (is (contains? (:open-obligations report)
                        :source-to-production-execution-correspondence))
         (is (= :all-declared-catalog-operations-and-issued-routes

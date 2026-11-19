@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test
-  "v1835: real certified multi-route parallel Biff mediation, including two
+  "v1841: real certified multi-route parallel Biff mediation, including two
    independently checked operation/writer sources and physical XTDB guards.
    Catalog-wide coverage also checks both original constructions and issued
    handlers in one assembled application; it does not establish deployment,
@@ -262,8 +262,22 @@
         selection {:contract-source contract
                    :catalog-source {:catalog {:operations entries}
                                     :physical-field-map {}}}
-        result (catalog-coverage/check-declared-route-coverage! selection)]
+        result (catalog-coverage/check-declared-route-coverage! selection)
+        contract-report (certified/check-certified-contracts! contract)
+        operation-evidence (:certified-operation-open-evidence result)]
     (is (= catalog-coverage/coverage-report-type (:type result)))
+    (is (= #{claim cancel} (set (keys operation-evidence))))
+    (is (= #{claim-route} (get-in operation-evidence [claim :route-ids])))
+    (is (= #{cancel-route} (get-in operation-evidence [cancel :route-ids])))
+    (is (= (into (sorted-map)
+                 (for [[operation row] (:certified-operations contract-report)]
+                   [operation (select-keys row
+                                           [:route-ids :open-premises
+                                            :open-obligations])]))
+           operation-evidence))
+    (is (= (:open-assumptions contract-report) (:open-assumptions result)))
+    (is (= (:open-premises contract-report) (:open-premises result)))
+    (is (= (:open-obligations contract-report) (:open-obligations result)))
     (is (= :all-declared-catalog-operations-and-issued-routes
            (:checking result)))
     (is (= #{claim cancel} (:catalog-operations result)))

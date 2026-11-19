@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-authorization-assembly
-  "v1839: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
+  "v1841: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
 
    For any selected qualified operation and route ID, relate its declared
    catalog construction to the SAME current-source construction of an issued
@@ -27,7 +27,12 @@
 
    v1839: Catalog-scoped reports preserve the original checked contract's
    unresolved premises, assumptions and obligations without discharging them
-   or turning source-relative evidence into installed application authority."
+   or turning source-relative evidence into installed application authority.
+
+   v1841: Preserve each certified operation's ORIGINAL route IDs and open
+   proof premises/obligations separately, so distinct operations cannot have
+   their unresolved requirements flattened beyond attribution. Shared
+   assumptions remain separately identified and are never discharged."
   (:require [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.model.certified-operation :as certified-operation]
@@ -219,6 +224,16 @@
        :open-assumptions (:open-assumptions checked)
        :open-premises (:open-premises checked)
        :open-obligations (:open-obligations checked)
+       ;; The original contract checker already attributed these unresolved
+       ;; predicates to each exact certified operation and its route set.
+       ;; Do not synthesize per-operation proof from flattened unions. Global
+       ;; open assumptions above apply to the whole report, not any one row.
+       :certified-operation-open-evidence
+       (into (sorted-map)
+             (for [[operation row] certified-rows]
+               [operation {:route-ids (:route-ids row)
+                           :open-premises (:open-premises row)
+                           :open-obligations (:open-obligations row)}]))
        :catalog-scope :selected-not-all-possible-application-policy
        :current-assembly-closure :source-relative-checked
        :installed-handler-adoption :not-established
