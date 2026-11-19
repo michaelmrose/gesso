@@ -14,6 +14,8 @@
              :as issued]
             [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity
              :as snapshot]
+            [gesso.assurance.proof.xtdb-gateway-issued-row-history
+             :as row-history]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test]
             [gesso.live.application-preflight.fixture :as app-fixture]
             [gesso.live.application-preflight :as application]
@@ -698,16 +700,103 @@
                      (reason #(observe! secondary ctx invoke-secondary))))
               (is (= (dissoc after :per-operation-read-only-rechecks
                                   :per-operation-historical-prestate-rechecks
-                                  :per-operation-reported-basis-relations)
+                                  :per-operation-reported-basis-relations
+                                  :per-operation-selected-row-history-boundaries)
                      (dissoc (summary!) :per-operation-read-only-rechecks
                                         :per-operation-historical-prestate-rechecks
-                                        :per-operation-reported-basis-relations)))
+                                        :per-operation-reported-basis-relations
+                                        :per-operation-selected-row-history-boundaries)))
+              (is (= {primary :visible-selected-row-system-boundary-observed
+                      secondary :same-reported-basis-no-interval}
+                     (:per-operation-selected-row-history-boundaries (summary!))))
               (is (= {primary :source-document-differed-at-read
                       secondary :source-document-matched-at-read}
                      (:per-operation-read-only-rechecks (summary!))))
               (is (= {primary :historical-prestate-differed-at-read
                       secondary :historical-prestate-matched-at-read}
                      (:per-operation-historical-prestate-rechecks (summary!)))))))))))
+
+(deftest v1873-selected-row-system-boundaries-vs-unrelated-basis-advance
+  ;; Same complete original certified plan and real XTDB fixture. The database
+  ;; basis can advance without ANY selected-row system-time boundary, whereas
+  ;; a change-and-restore leaves observable selected-row version boundaries.
+  (let [op :request/claim
+        {:keys [data environment] :as env} (v1867-alias-case-env)
+        obs (application-observation/issue-current-issued-application-observer!
+             (:contract env) (:catalog-source env))
+        observe! (:observe! obs)
+        reread! (:read-only-recheck! obs)
+        original (:request data)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}
+        status #(get-in % [:per-operation-selected-row-history-boundaries op])]
+    (is (= {op :not-eligible}
+           (:per-operation-selected-row-history-boundaries ((:summary! obs)))))
+    (seed! [:requests original])
+    (let [initial (observe! op ctx invocation)]
+      (is (= #{op} (:observed-operation-ids initial)))
+      (is (= :not-checked (status initial)))
+      (is (= :not-established (:selected-row-history-completeness initial)))
+      (is (false? (:selected-row-history-proves-no-aba? initial))))
+    (let [same (reread! op)]
+      (is (= :same-reported-basis-no-interval (status same)))
+      (is (= :same-reported-database-basis
+             (get-in same [:per-operation-reported-basis-relations op]))))
+    (seed! [:requests {:xt/id (str "unrelated-" (random-uuid))
+                       :owner "other-unrelated-request"}])
+    (let [unrelated (reread! op)]
+      (is (= :later-reported-database-basis
+             (get-in unrelated [:per-operation-reported-basis-relations op])))
+      (is (= :no-visible-selected-row-system-boundary-returned (status unrelated)))
+      (is (= :historical-prestate-matched-at-read
+             (get-in unrelated [:per-operation-historical-prestate-rechecks op])))
+      (is (= :source-document-matched-at-read
+             (get-in unrelated [:per-operation-read-only-rechecks op])))
+      (is (= :not-established (:selected-row-history-completeness unrelated)))
+      (is (false? (:selected-row-history-proves-no-aba? unrelated)))
+      (is (= :visible-pinned-system-time-boundary-presence-only
+             (:selected-row-history-meaning unrelated))))
+    (seed! [:requests (assoc original :owner "some-other-owner")])
+    (let [changed (reread! op)]
+      (is (= :visible-selected-row-system-boundary-observed (status changed)))
+      (is (= :historical-prestate-differed-at-read
+             (get-in changed [:per-operation-historical-prestate-rechecks op]))))
+    (seed! [:requests original])
+    (let [restored (reread! op)]
+      (is (= :visible-selected-row-system-boundary-observed (status restored)))
+      (is (= :historical-prestate-matched-at-read
+             (get-in restored [:per-operation-historical-prestate-rechecks op])))
+      (is (= :source-document-matched-at-read
+             (get-in restored [:per-operation-read-only-rechecks op])))
+      (is (= :later-reported-database-basis
+             (get-in restored [:per-operation-reported-basis-relations op])))
+      (is (= :not-established (:selected-row-history-completeness restored)
+             (:physical-application-correspondence restored)
+             (:physical-prestate-currentness restored)
+             (:joint-snapshot-basis restored)))
+      (is (false? (:selected-row-history-proves-no-aba? restored)))
+      (is (= :none (:transaction-authority restored)
+             (:retry-authority restored) (:authority restored)))
+      (is (= :not-issued (:certificate restored)))
+      (is (not-any? #(contains? restored %)
+                    [:snapshot-token :original-snapshot-point :xt/system-from
+                     :xt/system-to :before :target :node :executor
+                     :original-context :original-invocation
+                     :private-original-before]))
+      (is (not (.contains (pr-str restored) ":xt/system-from")))
+      (is (= 1 @(:constructs environment)))
+      (is (nil? (read-command (resolution/record-id (:binding data))))))
+    ;; Rebinding the original query helper is a fail-closed diagnostic error,
+    ;; not new evidence and never permission to retry the issued command.
+    (with-redefs [row-history/observe-pinned-row-system-boundaries!
+                  (fn [& _] :visible-selected-row-system-boundary-observed)]
+      (is (= :substituted-original-read-only-recheck-function
+             (reason #(reread! op)))))
+    (let [failed ((:summary! obs))]
+      (is (= :failed (status failed)))
+      (is (= #{op} (:observed-operation-ids failed)))
+      (is (= 1 (:observation-count failed)))
+      (is (= 1 @(:constructs environment))))))
 
 (deftest v1872-basis-relation-classification-is-not-an-aba-proof
   (let [t0 (java.time.Instant/parse "2026-01-01T00:00:00Z")

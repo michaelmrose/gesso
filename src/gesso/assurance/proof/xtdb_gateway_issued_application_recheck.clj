@@ -17,12 +17,18 @@
 
    v1872: Also compare the actual original pinned token's single database /
    system-time point with this later pinned token's point. An advanced basis
-   only proves the reported database basis advanced, not a change to the row."
+   only proves the reported database basis advanced, not a change to the row.
+
+   v1873: An extra bounded row-specific XTDB system-history query, pinned to
+   that very same later snapshot, checks whether a visible system-version
+   boundary occurred between the two basis points. No visible boundary is
+   inconclusive; neither case grants continuous history or CAS authority."
   (:require [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
             [xtdb.api :as xt]
             [xtdb.basis :as basis]
-            [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot])
+            [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot]
+            [gesso.assurance.proof.xtdb-gateway-issued-row-history :as history])
   (:import (java.time Instant)
            (java.util UUID)))
 
@@ -34,6 +40,7 @@
 (def ^:private original-require-binding resolution/require-binding)
 (def ^:private original-query xt/q)
 (def ^:private original-decode basis/<-time-basis-str)
+(def ^:private original-row-history history/observe-pinned-row-system-boundaries!)
 
 (defn- reject! [reason]
   (throw (ex-info "Read-only issued prestate comparison not established."
@@ -45,7 +52,9 @@
                  (identical? original-require-binding
                              (var-get #'resolution/require-binding))
                  (identical? original-query (var-get #'xt/q))
-                 (identical? original-decode (var-get #'basis/<-time-basis-str)))
+                 (identical? original-decode (var-get #'basis/<-time-basis-str))
+                 (identical? original-row-history
+                             (var-get #'history/observe-pinned-row-system-boundaries!)))
     (reject! :substituted-original-read-only-recheck-function)))
 
 (defn compare-original-acquired-prestate!
@@ -124,11 +133,12 @@
                        (try (map? (original-decode token))
                             (catch Throwable _ false)))
           (reject! :invalid-read-only-recheck-snapshot))
-        (let [later-point (snapshot/comparable-point (original-decode token))
+        (let [read-clock (Instant/now)
+              later-point (snapshot/comparable-point (original-decode token))
               rows (try (original-query
                          node [(str "SELECT * FROM " (name table)
                                     " WHERE _id = ? LIMIT 2") id]
-                         {:snapshot-token token :current-time (Instant/now)})
+                         {:snapshot-token token :current-time read-clock})
                         (catch Throwable _
                           (reject! :read-only-recheck-query-unavailable)))
               comparison (cond
@@ -140,6 +150,12 @@
                                 (<= 0 (count rows) 2)
                                 (every? map? rows)) :source-document-differed-at-read
                            :else (reject! :invalid-read-only-recheck-result))
+              row-boundary (if original-before
+                             (original-row-history node target token
+                                                   read-clock
+                                                   (:original-snapshot-point original-before)
+                                                   later-point)
+                             :not-compared)
               historical (if original-before
                            (if (and (= 1 (count rows))
                                     (= (:before original-before) (first rows)))
@@ -157,6 +173,11 @@
               (:original-snapshot-point original-before) later-point)
              :not-compared)
            :reported-basis-scope :single-database-system-time-only
+           :selected-row-system-history-boundary row-boundary
+           :selected-row-history-scope
+           :visible-bounded-pinned-system-time-boundaries-only
+           :selected-row-history-completeness :not-established
+           :selected-row-history-proves-no-aba? false
            :historical-target (if original-before
                                 :same-original-execution-target
                                 :not-compared)

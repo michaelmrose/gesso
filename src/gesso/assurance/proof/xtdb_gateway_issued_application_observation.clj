@@ -29,7 +29,11 @@
 
    v1872: Retain the checked read's private single-point XTDB snapshot basis
    and classify each later pinned read relative to THAT reported database/time
-   point. Basis progression is not row-change history or an ABA proof."
+   point. Basis progression is not row-change history or an ABA proof.
+
+   v1873: Also carry the selected row's visible, bounded system-time boundary
+   presence, separately from whole-database progression. Absence is not
+   evidence of no change; neither status is continuous history certification."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -241,6 +245,17 @@
                     (into (sorted-map)
                           (for [[operation state] snapshot]
                             [operation (get qualified operation :not-observed)]))
+                    :per-operation-selected-row-history-boundaries
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:selected-row-history-boundary state
+                                          :not-checked)
+                                         :not-eligible)]))
+                    :selected-row-history-meaning
+                    :visible-pinned-system-time-boundary-presence-only
+                    :selected-row-history-completeness :not-established
+                    :selected-row-history-proves-no-aba? false
                     :per-operation-reported-basis-relations
                     (into (sorted-map)
                           (for [[operation state] snapshot]
@@ -339,7 +354,8 @@
                                :original-invocation invocation
                                :read-only-recheck :not-checked
                                :historical-prestate-recheck :not-checked
-                               :reported-basis-relation :not-checked})
+                               :reported-basis-relation :not-checked
+                               :selected-row-history-boundary :not-checked})
                        (summary!))
                      (catch Throwable failure
                        ;; Never convert an unsuccessful/ambiguous attempt
@@ -401,6 +417,15 @@
                                                      :later-reported-database-basis
                                                      :same-reported-database-basis}
                                                    (:reported-basis-relation report))
+                                                  (#{:visible-selected-row-system-boundary-observed
+                                                     :no-visible-selected-row-system-boundary-returned
+                                                     :same-reported-basis-no-interval
+                                                     :not-comparable}
+                                                   (:selected-row-system-history-boundary report))
+                                                  (= :not-established
+                                                     (:selected-row-history-completeness report))
+                                                  (= false
+                                                     (:selected-row-history-proves-no-aba? report))
                                                   (= :not-established
                                                      (:historical-candidate-equality report)
                                                      (:currentness-after-read report))
@@ -415,14 +440,17 @@
                                                          :historical-prestate-recheck
                                                          (:historical-prestate-at-read report)
                                                          :reported-basis-relation
-                                                         (:reported-basis-relation report))))
+                                                         (:reported-basis-relation report)
+                                                         :selected-row-history-boundary
+                                                         (:selected-row-system-history-boundary report))))
                                    (summary!))
                                  (catch Throwable failure
                                    (swap! states update operation
                                           (fn [e] (assoc e
                                                          :read-only-recheck :failed
                                                          :historical-prestate-recheck :failed
-                                                         :reported-basis-relation :failed)))
+                                                         :reported-basis-relation :failed
+                                                         :selected-row-history-boundary :failed)))
                                    (throw failure)))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!
