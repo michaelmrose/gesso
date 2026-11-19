@@ -66,7 +66,13 @@
    and the v1858 typed check. It does not call the issued executor, Gesso's
    physical writer, or authorize submission. Arbitrary application callback
    effects remain OUTSIDE this check's guarantees; only a trusted, known-pure
-   registered constructor should be evaluated this way."
+   registered constructor should be evaluated this way.
+
+   v1860: Observe one candidate IN the exact original issued executor's
+   guarded :construct! pre-submit gate (with a second canonical-writer abort
+   hook). The check still runs trusted application callbacks, which may have
+   external effects. Typed correspondence is only conditional, local, and
+   source-relative. No XTDB submission or retry authority is granted."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -94,6 +100,9 @@
 (def issued-constructed-alias-report-type
   :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/registered-constructor-typed-alias)
 (def issued-constructed-alias-report-version 1)
+(def issued-executor-candidate-alias-report-type
+  :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/original-executor-typed-candidate)
+(def issued-executor-candidate-alias-report-version 1)
 
 (def ^:private original-contract-check certified/check-certified-contracts!)
 (def ^:private original-operation-summary application/operation-summary)
@@ -104,6 +113,8 @@
 (def ^:private original-plan-require plan/require-current-plan-operation!)
 (def ^:private original-plan-describe plan/describe-plan-operation)
 (def ^:private original-plan-candidate-check plan/check-candidate!)
+(def ^:private original-executor-candidate-observer
+  plan/observe-original-executor-candidate-before-submit!)
 (def ^:private original-binding-check resolution/require-binding)
 (def ^:private original-canonical-issuer
   canonical/issue-catalog-bound-canonical-trial!)
@@ -132,6 +143,8 @@
                              (var-get #'plan/describe-plan-operation))
                  (identical? original-plan-candidate-check
                              (var-get #'plan/check-candidate!))
+                 (identical? original-executor-candidate-observer
+                             (var-get #'plan/observe-original-executor-candidate-before-submit!))
                  (identical? original-binding-check
                              (var-get #'resolution/require-binding))
                  (identical? original-canonical-issuer
@@ -557,6 +570,79 @@
                    :callback-physical-side-effects :not-excluded
                    :installed-handler-execution :not-established
                    :physical-submission :not-invoked-by-this-check)))))))
+
+(defn check-current-issued-executor-typed-command-alias!
+  "Run the EXACT original registered executor as far as its guarded, checked
+   candidate boundary, and abort BEFORE the canonical Gesso transaction
+   writer. Reuse the original and independent typed source-relative checks.
+   The caller supplies a real trusted request context, canonical invocation
+   and read-premise values, but neither candidate nor transition projection.
+
+   This executes application-owned callbacks and cannot prove their purity,
+   authentication, independent physical effects or installed handler adoption.
+   Reports remain copyable, unadmitted and carry no transaction authority."
+  [contract-source catalog-source operation ctx invocation proof-context]
+  (let [initial (current-binding! contract-source catalog-source operation true)
+        original-invariants (get-in catalog-source [:catalog :invariants])
+        binding (:binding invocation)]
+    ;; Fail before calling any application-owned callback on bad input.
+    (when-not (and (map? ctx)
+                   (plain-map? invocation)
+                   (= #{:binding :mode} (set (keys invocation)))
+                   (= :submit (:mode invocation))
+                   (plain-map? binding)
+                   (= operation (:operation binding))
+                   (try (= binding (original-binding-check binding))
+                        (catch Exception _ false)))
+      (reject! :invalid-original-executor-alias-invocation))
+    (when-not (and (plain-map? proof-context)
+                   (plain-map? original-invariants)
+                   (seq original-invariants)
+                   (= original-invariants (:invariants proof-context)))
+      (reject! :issued-typed-read-invariants-not-original))
+    (let [source (get-in contract-source
+                         [:certified-operations operation :current-source])
+          captured (original-executor-candidate-observer
+                    (:executor initial) source ctx invocation)
+          candidate (:candidate captured)
+          witness (:witness captured)]
+      (when-not (and (= plan/captured-candidate-type (:type captured))
+                     (= plan/captured-candidate-version (:version captured))
+                     (= :actual-registered-executor-guarded-construct
+                        (:capture captured))
+                     (= :aborted-before-canonical-writer (:submit-path captured))
+                     (= :none (:authority captured))
+                     (= plan/witness-type (:type witness))
+                     (= plan/plan-version (:version witness))
+                     (= operation (:operation witness))
+                     (= (:command-operation initial) (:command-operation witness))
+                     (= :pre-submit-candidate-checked (:checking witness))
+                     (= false (:transaction-submitted? witness))
+                     (= :none (:authority witness))
+                     (= (:construction source) (:construction candidate))
+                     (= (:field-map source) (:field-map candidate))
+                     (= (:command-operation source) (:command-operation candidate)))
+        (reject! :original-executor-checked-candidate-not-qualified))
+      (let [screen (check-current-issued-typed-command-alias!
+                    contract-source catalog-source operation
+                    {:plan (:plan candidate)} (:inputs candidate) proof-context)]
+        (when-not (= initial
+                     (current-binding! contract-source catalog-source operation true))
+          (reject! :original-executor-source-changed-after-capture))
+        (assoc screen
+               :type issued-executor-candidate-alias-report-type
+               :version issued-executor-candidate-alias-report-version
+               :candidate-domain-source :original-executor-guarded-construct
+               :candidate-input-source :original-executor-acquisition
+               :candidate-prestate-check :original-certified-plan-pre-submit-checked
+               :registered-executor-invocation :aborted-after-checked-candidate
+               :callback-purity :not-established
+               :callback-physical-side-effects :not-excluded
+               :canonical-physical-alias-execution :disabled
+               :physical-submission :blocked-before-canonical-writer
+               :installed-handler-execution :not-established
+               :certificate :not-issued :admission :not-admitted
+               :transaction-authority :none :authority :none)))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]

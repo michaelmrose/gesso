@@ -664,6 +664,55 @@
       (is (nil? (read-command
                  (resolution/record-id (:binding d))))
           "Known-safe original constructor fixture must not write XTDB"))
+    ;; v1860 observes the exact executor's original guarded candidate gate.
+    ;; It installs an independent canonical-writer backstop, so the known-safe
+    ;; fixture's second constructor call cannot submit a command or domain tx.
+    (let [ctx {:biff.xtdb/node (db)}
+          invocation {:binding (:binding d) :mode :submit}
+          proof (test-helper typed-ns 'premises)
+          check! (fn [inv premises]
+                   (bound/check-current-issued-executor-typed-command-alias!
+                    contract catalog-source operation ctx inv premises))
+          before @(:constructs e)
+          original-request (read-request (:xt/id (:request d)))]
+      (is (= :invalid-original-executor-alias-invocation
+             (reason #(check! (assoc invocation :mode :reconcile) proof))))
+      (is (= :issued-typed-read-invariants-not-original
+             (reason #(check! invocation (assoc proof :invariants {})))))
+      (is (= before @(:constructs e)))
+      (let [checked (check! invocation proof)]
+        (is (= bound/issued-executor-candidate-alias-report-type
+               (:type checked)))
+        (is (= bound/issued-executor-candidate-alias-report-version
+               (:version checked)))
+        (is (= operation (:operation-id checked)))
+        (is (= {:operation-id operation
+                :interface-operation operation
+                :domain-command-operation :claim}
+               (:command-binding checked)))
+        (is (= :original-executor-guarded-construct
+               (:candidate-domain-source checked)))
+        (is (= :original-executor-acquisition
+               (:candidate-input-source checked)))
+        (is (= :original-certified-plan-pre-submit-checked
+               (:candidate-prestate-check checked)))
+        (is (= :original-and-independent-source-relative
+               (:typed-abstract-alias-correspondence checked)))
+        (is (= :aborted-after-checked-candidate
+               (:registered-executor-invocation checked)))
+        (is (= :blocked-before-canonical-writer (:physical-submission checked)))
+        (is (= :disabled (:canonical-physical-alias-execution checked)))
+        (is (= :not-established (:callback-purity checked)))
+        (is (= :not-excluded (:callback-physical-side-effects checked)))
+        (is (= :none (:transaction-authority checked) (:authority checked)))
+        (is (= :not-issued (:certificate checked)))
+        (is (= :not-admitted (:admission checked)))
+        (is (not-any? #(contains? checked %)
+                      [:executor :submit! :observe-once! :prepare!
+                       :plan :candidate :inputs :declaration :field-map])))
+      (is (= (inc before) @(:constructs e)))
+      (is (= original-request (read-request (:xt/id (:request d)))))
+      (is (nil? (read-command (resolution/record-id (:binding d))))))
     ;; A changed copy of the source cannot impersonate the registered plan.
     (is (= :invalid-current-certified-operation-table
            (reason #(bound/check-current-issued-command-alias!
@@ -674,7 +723,7 @@
                      catalog-source operation))))
     ;; Only the explicitly opted-in registered constructor evaluation above
     ;; may run the callback; the physical alias trial must remain rejected.
-    (is (= 1 @(:constructs e)))
+    (is (= 2 @(:constructs e)))
     (is (= #{operation} (set (keys (:certified-operations
                                    (certified/check-certified-contracts! contract))))))
     (seed! [:requests (:request d)])

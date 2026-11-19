@@ -29,6 +29,13 @@
    caller also remains responsible for invoking the exact issued executor at
    the installed server route; v1253 will inspect that assembly boundary.
 
+   v1860: A strictly opt-in, sensitive, process-local diagnostic invokes the
+   SAME registered executor and aborts inside its original guarded :construct!
+   immediately AFTER check-candidate! succeeds. It also installs a separate
+   fail-closed pre-submit writer hook. The tested fixture performs no write;
+   arbitrary application callbacks may have effects before capture and are
+   NOT proven pure. Captures are not physical execution or authority.
+
    This module intentionally does NOT accept create/delete, arbitrary effect
    callbacks, unrestricted document fields, or a caller-supplied executor."
   (:require [clojure.set :as set]
@@ -36,6 +43,8 @@
             [gesso.assurance.transition :as construction]
             [gesso.model.certified-operation :as certified]
             [gesso.model.command :as command]
+            [gesso.model.command-resolution :as resolution]
+            [gesso.model.typed-atomic-pre-submit-hook :as submit-hook]
             [gesso.model.tx :as tx])
   (:import (java.util WeakHashMap)))
 
@@ -58,6 +67,10 @@
     :deployed-route-and-handler-adoption
     :application-invariant-preservation})
 (def ^:private ^WeakHashMap registrations (WeakHashMap.))
+(def ^:dynamic ^:private *checked-candidate-capture* nil)
+(def captured-candidate-type
+  :gesso.model.certified-plan/original-executor-checked-candidate)
+(def captured-candidate-version 1)
 
 (defn- reject! [reason at details]
   (throw (ex-info "Invalid Gesso certified plan or candidate."
@@ -361,6 +374,75 @@
       :current-configuration (:guarded-configuration record)})
     registered))
 
+(defn observe-original-executor-candidate-before-submit!
+  "Run the exact original registered executor through its genuine guarded
+   :construct! and capture its already-checked candidate there, without
+   allowing Gesso's canonical writer to run. Requires a CURRENT plan source
+   and a valid initial :submit invocation before any application callbacks.
+
+   Private dynamic hooks abort after the candidate gate and independently
+   prevent canonical submission if that gate is accidentally missed. A replay
+   or a rejected request yields NO candidate evidence. This is explicitly
+   a controlled, trusted, process-local diagnostic: application-owned reads,
+   authorization checks, and constructors MAY have arbitrary side effects.
+   The returned candidate contains sensitive values; never persist or publish
+   it, and never treat it as execution, retry or transaction authority."
+  [registered current-source ctx invocation]
+  (require-current-plan-operation! registered current-source)
+  (when-not (and (map? ctx)
+                 (plain-map? invocation)
+                 (nil? (meta invocation))
+                 (= #{:mode :binding} (set (keys invocation)))
+                 (= :submit (:mode invocation))
+                 (let [binding (:binding invocation)]
+                   (and (plain-map? binding)
+                        (nil? (meta binding))
+                        (= (get-in current-source [:certified-source :operation])
+                           (:operation binding))
+                        (try (= binding (resolution/require-binding binding))
+                             (catch Exception _ false)))))
+    (reject! :invalid-original-candidate-observation-invocation [] {}))
+  (when (or *checked-candidate-capture*
+            submit-hook/*before-canonical-submit*)
+    (reject! :nested-or-preexisting-candidate-observer [] {}))
+  (let [token (Object.)
+        captured (volatile! nil)
+        catch-token! (fn [ex]
+                       (if (identical? token (:gesso/capture-token (ex-data ex)))
+                         :captured
+                         (throw ex)))
+        capture! (fn [candidate witness]
+                   (when @captured
+                     (reject! :multiple-original-candidate-captures [] {}))
+                   (vreset! captured {:candidate candidate :witness witness})
+                   (throw (ex-info "Original executor candidate captured before submit."
+                                   {:gesso/capture-token token})))
+        block-submit! (fn [_ _]
+                        (reject! :canonical-submit-blocked-during-capture [] {}))]
+    ;; The hook is deliberately INSIDE the guarded constructor used by the
+    ;; issued executor, not a separately replayed application constructor.
+    (let [status (try
+                   (binding [*checked-candidate-capture* capture!
+                             submit-hook/*before-canonical-submit* block-submit!]
+                     (registered ctx invocation)
+                     :executor-returned-without-capture)
+                   (catch clojure.lang.ExceptionInfo ex
+                     (catch-token! ex)))]
+      (when-not (and (= :captured status)
+                     (plain-map? @captured)
+                     (= #{:candidate :witness} (set (keys @captured))))
+        (reject! :original-executor-candidate-not-captured [] {})))
+    (require-current-plan-operation! registered current-source)
+    {:type captured-candidate-type
+     :version captured-candidate-version
+     :capture :actual-registered-executor-guarded-construct
+     :submit-path :aborted-before-canonical-writer
+     :callback-effects :not-excluded
+     :installed-handler :not-established
+     :authority :none
+     :candidate (:candidate @captured)
+     :witness (:witness @captured)}))
+
 (defn build-certified-plan-operation!
   "Issue a real canonical resolved-operation executor with a pre-submit gate.
    The guarded :construct! runs ONLY on the :submit path, after the original
@@ -381,14 +463,20 @@
             (when-not (and (plain-map? candidate)
                            (= #{:now :plan :outcome} (set (keys candidate))))
               (reject! :invalid-original-construction [:construct!] {}))
-            (check-candidate!
-             {:construction construction
-              :field-map field-map
-              :command-operation command-operation
-              :target target
-              :current-document document
-              :inputs inputs
-              :plan (:plan candidate)})
+            (let [candidate-source
+                  {:construction construction
+                   :field-map field-map
+                   :command-operation command-operation
+                   :target target
+                   :current-document document
+                   :inputs inputs
+                   :plan (:plan candidate)}
+                  witness (check-candidate! candidate-source)]
+              (when-let [capture! *checked-candidate-capture*]
+                ;; A capture is an abort-only probe. Returning from the hook
+                ;; may NEVER turn an observation into physical authority.
+                (capture! candidate-source witness)
+                (reject! :candidate-observation-must-abort [] {})))
             candidate))
         guarded-config (assoc original-config :construct! guarded-construct!)
         registered (certified/build-certified-operation!
