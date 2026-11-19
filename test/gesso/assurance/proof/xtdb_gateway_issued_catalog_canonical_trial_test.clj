@@ -454,6 +454,91 @@
            (reason #(plan/check-candidate!
                      (assoc input :target [:requests "wrong-target"])))))))
 
+(deftest v1861-pinned-executor-before-is-an-independent-physical-read
+  ;; The original constructor returns a self-consistent candidate even when
+  ;; the target is absent or its physical prestate has changed. A real pinned
+  ;; same-node XTDB read must reject those cases, without Gesso submission.
+  (let [d (data)
+        e (environment d nil)
+        base (original-issued-source d e nil)
+        operation :request/claim
+        construction (assoc-in (:construction base)
+                               [:subject :interface :operation] operation)
+        subject (:subject construction)
+        transition (-> construction (dissoc :replacements :frame)
+                       (assoc :assignments (:replacements construction)))
+        proof {:transition transition
+               :steps [{:id :step/guard :rule :guard :conclusion [:guard]}]
+               :goal [:guard]}
+        graph {:roots #{operation}
+               :nodes [{:id operation :subject subject
+                        :subject-handle (admission/admit-subject! subject)
+                        :depends-on []}]}
+        certificate (certificate/admit-certificate!
+                     {:proof-kind :guarded-transition
+                      :proof-source proof
+                      :graph-handle (dependency/check-graph! graph)
+                      :current-graph graph
+                      :expected-open-premises
+                      #{:gesso.assurance.proof.derivation/abstract-relation-match}
+                      :expected-open-obligations
+                      #{:production-transition-correspondence
+                        :current-runtime-authorization
+                        :atomic-transaction-enforcement
+                        :checker-meta-soundness}})
+        source (-> base
+                   (assoc :construction construction)
+                   (assoc-in [:certified-source :certificate] certificate)
+                   (assoc-in [:certified-source :proof-source] proof)
+                   (assoc-in [:certified-source :current-graph] graph))
+        executor (plan/build-certified-plan-operation! source)
+        handler (certified/issue-certified-handler!
+                 {:executor executor :current-source source
+                  :request->input! (fn [_] {:binding (:binding d) :mode :submit})
+                  :result->response! (fn [_ result] {:status 200 :body result})})
+        contract {:application-assembly *assembly*
+                  :semantic-route-handlers {operation handler}
+                  :certified-operations {operation {:executor executor
+                                                   :current-source source}}}
+        catalog-source {:catalog (assoc-in (original-catalog)
+                                           [:operations 0 :construction] construction)
+                        :physical-field-map (physical-map)}
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding d) :mode :submit}
+        premises (test-helper typed-ns 'premises)
+        check! (fn [context mode]
+                 (bound/check-current-issued-executor-typed-command-alias!
+                  contract catalog-source operation context invocation premises mode))]
+    (is (= :missing-issued-executor-external-before-node
+           (reason #(check! {} :pinned-external-before))))
+    (is (zero? @(:constructs e))
+        "Missing node must fail BEFORE application callbacks")
+    (is (= :unsupported-issued-executor-before-observation-mode
+           (reason #(check! ctx :invented-mode))))
+    (is (zero? @(:constructs e)))
+    (is (= :issued-executor-external-before-missing-or-ambiguous
+           (reason #(check! ctx :pinned-external-before)))
+        "An internally checked candidate is NOT proof the physical row exists")
+    (seed! [:requests (:request d)])
+    (let [result (check! ctx :pinned-external-before)]
+      (is (= bound/issued-executor-candidate-alias-report-type (:type result)))
+      (is (= :pinned-same-node-document-match (:external-before result)))
+      (is (= :caller-context-node-unattested
+             (:external-basis-authenticity result)))
+      (is (= :not-established (:transaction-time-prestate result)
+             (:prestate-aba-exclusion result)))
+      (is (= :blocked-before-canonical-writer (:physical-submission result)))
+      (is (= :none (:authority result) (:transaction-authority result)))
+      (is (not-any? #(contains? result %)
+                    [:snapshot-token :candidate :plan :current-document
+                     :node :target :sql :executor :submit! :prepare!])))
+    (seed! [:requests (assoc (:request d) :owner "other-writer")])
+    (is (= :issued-executor-external-before-mismatch
+           (reason #(check! ctx :pinned-external-before)))
+        "A changed authoritative document must defeat the captured prestate")
+    (is (nil? (read-command (resolution/record-id (:binding d)))))
+    (is (= "other-writer" (:owner (read-request (:xt/id (:request d))))))))
+
 (deftest v1857-source-bound-alias-check-requires-a-genuine-alias
   (let [env (case-env)]
     ;; A normal command/interface agreement is not an ID alias. The new

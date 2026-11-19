@@ -72,7 +72,13 @@
    guarded :construct! pre-submit gate (with a second canonical-writer abort
    hook). The check still runs trusted application callbacks, which may have
    external effects. Typed correspondence is only conditional, local, and
-   source-relative. No XTDB submission or retry authority is granted."
+   source-relative. No XTDB submission or retry authority is granted.
+
+   v1861: An explicit read-only mode independently compares the candidate's
+   SAME acquired complete prestate to a parameterized, pinned XTDB snapshot
+   on the request-context node. Mismatches and absent documents fail closed;
+   this is a point-in-time external read, not a transaction-time assertion,
+   authenticated node, callback-purity theorem, or history/ABA proof."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -85,8 +91,12 @@
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.model.certified-plan :as plan]
-            [gesso.model.command-resolution :as resolution])
-  (:import (java.util.concurrent.atomic AtomicBoolean)))
+            [gesso.model.command-resolution :as resolution]
+            [xtdb.api :as xt]
+            [xtdb.basis :as basis])
+  (:import (java.time Instant)
+           (java.util UUID)
+           (java.util.concurrent.atomic AtomicBoolean)))
 
 (def report-type
   :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/issued-executor)
@@ -116,6 +126,8 @@
 (def ^:private original-executor-candidate-observer
   plan/observe-original-executor-candidate-before-submit!)
 (def ^:private original-binding-check resolution/require-binding)
+(def ^:private original-external-query xt/q)
+(def ^:private original-snapshot-decode basis/<-time-basis-str)
 (def ^:private original-canonical-issuer
   canonical/issue-catalog-bound-canonical-trial!)
 (def ^:private original-typed-alias-screen
@@ -147,6 +159,9 @@
                              (var-get #'plan/observe-original-executor-candidate-before-submit!))
                  (identical? original-binding-check
                              (var-get #'resolution/require-binding))
+                 (identical? original-external-query (var-get #'xt/q))
+                 (identical? original-snapshot-decode
+                             (var-get #'basis/<-time-basis-str))
                  (identical? original-canonical-issuer
                              (var-get #'canonical/issue-catalog-bound-canonical-trial!)))
     (reject! :substituted-original-assembly-or-issuer)))
@@ -571,6 +586,59 @@
                    :installed-handler-execution :not-established
                    :physical-submission :not-invoked-by-this-check)))))))
 
+(defn- pinned-executor-before!
+  "Read exactly the candidate's whole acquired prestate on the SAME caller
+   context node, using a single XTDB pinned external read. No state, token,
+   SQL text or physical identity is returned; this is NOT a CAS or lock."
+  [node candidate]
+  (pinned!)
+  (let [cmd (first (get-in candidate [:plan :commands]))
+        target (:target candidate)
+        table (first target)
+        id (second target)
+        before (:current-document candidate)
+        declared-before (:model/before cmd)]
+    (when-not (and (some? node)
+                   (plain-map? candidate)
+                   (plain-map? before)
+                   (= before declared-before)
+                   (= 1 (count (get-in candidate [:plan :commands])))
+                   (plain-map? cmd)
+                   (= table (:model/entity-type cmd))
+                   (= id (:model/id cmd) (:xt/id before))
+                   (keyword? table)
+                   (nil? (namespace table))
+                   (re-matches #"[a-z][a-z0-9_]*" (name table))
+                   (or (and (string? id) (seq id))
+                       (instance? UUID id)))
+      (reject! :invalid-issued-executor-external-before-target))
+    (let [token-rows (try (original-external-query node "SHOW SNAPSHOT_TOKEN")
+                          (catch Throwable _
+                            (reject! :issued-executor-snapshot-unavailable)))
+          token (when (and (sequential? token-rows)
+                           (= 1 (count token-rows))
+                           (plain-map? (first token-rows))
+                           (= #{:snapshot-token} (set (keys (first token-rows)))))
+                  (:snapshot-token (first token-rows)))]
+      (when-not (and (string? token) (seq token)
+                     (try (map? (original-snapshot-decode token))
+                          (catch Throwable _ false)))
+        (reject! :invalid-issued-executor-snapshot))
+      (let [sql (str "SELECT * FROM " (name table) " WHERE _id = ? LIMIT 2")
+            rows (try (original-external-query node [sql id]
+                                               {:snapshot-token token
+                                                :current-time (Instant/now)})
+                      (catch Throwable _
+                        (reject! :issued-executor-external-before-read-unavailable)))]
+        (when-not (and (sequential? rows)
+                       (= 1 (count rows))
+                       (plain-map? (first rows)))
+          (reject! :issued-executor-external-before-missing-or-ambiguous))
+        (when-not (= before (first rows))
+          (reject! :issued-executor-external-before-mismatch))
+        (pinned!)
+        true))))
+
 (defn check-current-issued-executor-typed-command-alias!
   "Run the EXACT original registered executor as far as its guarded, checked
    candidate boundary, and abort BEFORE the canonical Gesso transaction
@@ -580,8 +648,23 @@
 
    This executes application-owned callbacks and cannot prove their purity,
    authentication, independent physical effects or installed handler adoption.
-   Reports remain copyable, unadmitted and carry no transaction authority."
-  [contract-source catalog-source operation ctx invocation proof-context]
+   Reports remain copyable, unadmitted and carry no transaction authority.
+
+   With a seventh argument :pinned-external-before, additionally require an
+   exact physical document match at ONE independent, pinned XTDB read on the
+   caller's original context node. This observation occurs after the guarded
+   constructor capture, so application callbacks may already have effects."
+  ([contract-source catalog-source operation ctx invocation proof-context]
+   (check-current-issued-executor-typed-command-alias!
+    contract-source catalog-source operation ctx invocation proof-context
+    :no-external-read))
+  ([contract-source catalog-source operation ctx invocation proof-context
+    read-mode]
+  (when-not (#{:no-external-read :pinned-external-before} read-mode)
+    (reject! :unsupported-issued-executor-before-observation-mode))
+  (when (and (= :pinned-external-before read-mode)
+             (nil? (:biff.xtdb/node ctx)))
+    (reject! :missing-issued-executor-external-before-node))
   (let [initial (current-binding! contract-source catalog-source operation true)
         original-invariants (get-in catalog-source [:catalog :invariants])
         binding (:binding invocation)]
@@ -623,6 +706,8 @@
                      (= (:field-map source) (:field-map candidate))
                      (= (:command-operation source) (:command-operation candidate)))
         (reject! :original-executor-checked-candidate-not-qualified))
+      (when (= :pinned-external-before read-mode)
+        (pinned-executor-before! (:biff.xtdb/node ctx) candidate))
       (let [screen (check-current-issued-typed-command-alias!
                     contract-source catalog-source operation
                     {:plan (:plan candidate)} (:inputs candidate) proof-context)]
@@ -641,8 +726,14 @@
                :canonical-physical-alias-execution :disabled
                :physical-submission :blocked-before-canonical-writer
                :installed-handler-execution :not-established
+               :external-before (if (= :pinned-external-before read-mode)
+                                  :pinned-same-node-document-match
+                                  :not-observed)
+               :external-basis-authenticity :caller-context-node-unattested
+               :transaction-time-prestate :not-established
+               :prestate-aba-exclusion :not-established
                :certificate :not-issued :admission :not-admitted
-               :transaction-authority :none :authority :none)))))
+               :transaction-authority :none :authority :none))))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]
