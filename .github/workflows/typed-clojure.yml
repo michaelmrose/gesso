@@ -137,7 +137,8 @@ jobs:
             -n gesso.assurance.proof.xtdb-gateway-owned-nonerase-boundary-test \
             -n gesso.assurance.proof.xtdb-gateway-signed-policy-checkpoint-test \
             -n gesso.assurance.proof.xtdb-gateway-durable-checkpoint-store-test \
-            -n gesso.assurance.proof.xtdb-gateway-externally-anchored-floor-test
+            -n gesso.assurance.proof.xtdb-gateway-externally-anchored-floor-test \
+            -n gesso.assurance.proof.xtdb-gateway-monotonic-floor-register-test
 
       - name: Record JVM sparse identity transition observations
         run: |
