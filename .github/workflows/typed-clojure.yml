@@ -57,11 +57,12 @@ jobs:
             -n gesso.choreo.typed-nominal-transition-boundary-test \
             -n gesso.script.repo-integrity-metadata-test
 
-      # v1847: Keep the original catalog/issued-handler and real two-operation
-      # Biff/XTDB correspondence regressions in mandatory CI. The configured
-      # HTTP gate below is not a substitute for catalog completeness, and
-      # neither gate establishes business-policy or physical-writer universality.
-      - name: Verify original catalog closure and independent Biff/XTDB routes
+      # v1850: In addition to v1847 catalog closure and parallel Biff/XTDB
+      # correspondence, run the actual issued physical-catalog trial. This
+      # guards the v1849 dependency on the original whole-catalog verifier,
+      # not merely the selected executor or a source-only route predicate.
+      # These remain bounded local checks, not deployed business authority.
+      - name: Verify catalog closure, independent routes and issued XTDB trial
         env:
           JAVA_TOOL_OPTIONS: >-
             -Xmx3g
@@ -72,7 +73,8 @@ jobs:
         run: |
           clojure -M:test \
             -n gesso.live.application-preflight.certified-contract-test \
-            -n gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test
+            -n gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test \
+            -n gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test
 
       # v1800: Exercise the actual local Biff lifecycle and read-only
       # HTTP dispatch gate, including managed stop and uncertain cleanup.
