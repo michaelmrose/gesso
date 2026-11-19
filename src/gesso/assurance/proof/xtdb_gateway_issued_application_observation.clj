@@ -59,7 +59,13 @@
    v1880: An OPT-IN audit countersignature from a DISTINCT operator-pinned
    Ed25519 key additionally authenticates the exact primary signature and
    statement under an auditor-only domain. Distinct signing keys are not
-   independently verified evidence producers or history proof."
+   independently verified evidence producers or history proof.
+
+   v1882: An OPT-IN auditor-sealed erase-segment diagnostic binds the signed
+   checkpoint to the original checked source, target, and both actual pinned
+   XTDB observations. No caller-controlled expected binding is accepted.
+   The segment is still NOT evidence of complete audit ingestion or actual
+   XTDB erase operations."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -73,6 +79,8 @@
              :as operator-claim]
             [gesso.assurance.proof.xtdb-gateway-issued-operator-audit-cosign
              :as auditor]
+            [gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-segment
+             :as erase-segment]
             [gesso.assurance.proof.xtdb-gateway-issued-operator-witness-binding
              :as witness-binding]
             [gesso.live.application-preflight.certified-contract :as certified]))
@@ -251,6 +259,7 @@
         original-recheck recheck/compare-original-acquired-prestate!
         original-operator-intake operator-claim/inspect-operator-history-claim!
         original-audit-cosign auditor/inspect-independent-auditor-cosign!
+        original-audit-segment erase-segment/inspect-pinned-erase-audit-segment!
         original-operator-binding witness-binding/expected-private-operator-binding!
         states (atom (into (sorted-map)
                            (for [operation (:certified-operation-ids initial)]
@@ -292,6 +301,16 @@
                             [operation (if (map? state)
                                          (:operator-claim-intake state :not-checked)
                                          :not-eligible)]))
+                    :per-operation-erasure-audit-intake
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:erasure-audit-intake state :not-checked)
+                                         :not-eligible)]))
+                    :erasure-audit-intake-scope
+                    :private-original-and-later-pinned-binding-only
+                    :erasure-audit-producer-completeness :not-established
+                    :erasure-audit-discharge :none
                     :operator-claim-discharge :none
                     :operator-claim-source :private-original-and-later-pinned-points
                     :per-operation-observations
@@ -421,6 +440,7 @@
                                :private-original-before original-before
                                :private-later-pinned-point nil
                                :operator-claim-intake :not-checked
+                               :erasure-audit-intake :not-checked
                                :original-context ctx
                                :original-invocation invocation
                                :read-only-recheck :not-checked
@@ -453,7 +473,9 @@
                                                            (not= :in-flight
                                                                  (:read-only-recheck entry))
                                                            (not= :in-flight
-                                                                 (:operator-claim-intake entry)))
+                                                                 (:operator-claim-intake entry))
+                                                           (not= :in-flight
+                                                                 (:erasure-audit-intake entry)))
                                                     (update current operation
                                                             #(assoc %
                                                                     :read-only-recheck :in-flight
@@ -466,6 +488,8 @@
                                  (reject! :read-only-recheck-already-in-flight))
                                (when (= :in-flight (:operator-claim-intake entry))
                                  (reject! :operator-claim-intake-already-in-flight))
+                               (when (= :in-flight (:erasure-audit-intake entry))
+                                 (reject! :erasure-audit-intake-already-in-flight))
                                (try
                                  (when-not (identical? original-recheck
                                                        (var-get #'recheck/compare-original-acquired-prestate!))
@@ -543,6 +567,7 @@
                                           (fn [e] (assoc e
                                                          :private-later-pinned-point @later-capture
                                                          :operator-claim-intake :not-checked
+                                                         :erasure-audit-intake :not-checked
                                                          :read-only-recheck
                                                          (:comparison report)
                                                          :historical-prestate-recheck
@@ -561,6 +586,7 @@
                                           (fn [e] (assoc e
                                                          :private-later-pinned-point nil
                                                          :operator-claim-intake :not-checked
+                                                         :erasure-audit-intake :not-checked
                                                          :read-only-recheck :failed
                                                          :historical-prestate-recheck :failed
                                                          :reported-basis-relation :failed
@@ -584,6 +610,8 @@
                                                                       (:read-only-recheck entry))
                                                                 (not= :in-flight
                                                                       (:operator-claim-intake entry))
+                                                                (not= :in-flight
+                                                                      (:erasure-audit-intake entry))
                                                                 (map? (:private-later-pinned-point entry)))
                                                          (assoc-in current [operation :operator-claim-intake]
                                                                    :in-flight)
@@ -595,6 +623,8 @@
                                       (reject! :read-only-recheck-already-in-flight))
                                     (when (= :in-flight (:operator-claim-intake entry))
                                       (reject! :operator-claim-intake-already-in-flight))
+                                    (when (= :in-flight (:erasure-audit-intake entry))
+                                      (reject! :erasure-audit-intake-already-in-flight))
                                     (when-not (map? (:private-later-pinned-point entry))
                                       (reject! :completed-later-pinned-read-required-for-operator-claim))
                                     (try
@@ -654,9 +684,81 @@
         inspect-operator-claim! (fn [operation envelope]
                                   (inspect-operator* operation envelope :primary))
         inspect-auditor-cosign! (fn [operation envelope]
-                                  (inspect-operator* operation envelope :auditor-cosign))]
+                                  (inspect-operator* operation envelope :auditor-cosign))
+        inspect-erasure-audit-segment!
+        (fn [operation envelope]
+          (when-not (contains? (:certified-operation-ids initial) operation)
+            (reject! :operation-not-originally-certified))
+          (recheck!)
+          ;; Reserve under the same atomic state as the pinned read and the
+          ;; operator-claim checks. No later snapshot can replace the private
+          ;; expected interval while this checkpoint is being verified.
+          (let [[prior _] (swap-vals!
+                           states
+                           (fn [current]
+                             (let [entry (get current operation)]
+                               (if (and (map? entry)
+                                        (not= :in-flight (:read-only-recheck entry))
+                                        (not= :in-flight (:operator-claim-intake entry))
+                                        (not= :in-flight (:erasure-audit-intake entry))
+                                        (map? (:private-later-pinned-point entry)))
+                                 (assoc-in current [operation :erasure-audit-intake]
+                                           :in-flight)
+                                 current))))
+                entry (get prior operation)]
+            (when-not (map? entry)
+              (reject! :original-observation-required-for-erasure-audit))
+            (when (= :in-flight (:read-only-recheck entry))
+              (reject! :read-only-recheck-already-in-flight))
+            (when (= :in-flight (:operator-claim-intake entry))
+              (reject! :operator-claim-intake-already-in-flight))
+            (when (= :in-flight (:erasure-audit-intake entry))
+              (reject! :erasure-audit-intake-already-in-flight))
+            (when-not (map? (:private-later-pinned-point entry))
+              (reject! :completed-later-pinned-read-required-for-erasure-audit))
+            (try
+              (when-not (and (identical? original-audit-segment
+                                         (var-get #'erase-segment/inspect-pinned-erase-audit-segment!))
+                             (identical? original-operator-binding
+                                         (var-get #'witness-binding/expected-private-operator-binding!)))
+                (reject! :substituted-original-erasure-audit-checker))
+              (let [origin (get-in initial [:certified-operation-proof-origins operation])
+                    expected (original-operator-binding
+                              operation origin (:private-original-before entry)
+                              (:private-later-pinned-point entry))
+                    checked (original-audit-segment expected envelope)]
+                (when-not (and (= erase-segment/report-type (:type checked))
+                               (= erase-segment/report-version (:version checked))
+                               (= :valid-distinct-auditor-ed25519-checkpoint
+                                  (:signature-integrity checked))
+                               (= :complete-hash-links-in-supplied-signed-segment-only
+                                  (:segment-integrity checked))
+                               (#{:erase-commit-record-present-in-supplied-segment
+                                  :no-erase-commit-record-in-supplied-segment}
+                                (:selected-row-erase-record checked))
+                               (= :not-established
+                                  (:audit-producer-authenticity checked)
+                                  (:actual-xtdb-erase-correspondence checked)
+                                  (:log-ingestion-completeness checked)
+                                  (:missing-segment-exclusion checked)
+                                  (:retention-enforcement checked)
+                                  (:erasure-exclusion checked)
+                                  (:history-completeness checked))
+                               (= #{} (:discharged-conditions checked))
+                               (= :not-issued (:certificate checked))
+                               (= :none (:transaction-authority checked)
+                                  (:retry-authority checked) (:authority checked)))
+                  (reject! :unqualified-private-erasure-audit-segment))
+                (recheck!)
+                (swap! states assoc-in [operation :erasure-audit-intake]
+                       (:selected-row-erase-record checked))
+                (summary!))
+              (catch Throwable failure
+                (swap! states assoc-in [operation :erasure-audit-intake] :failed)
+                (throw failure)))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!
      :read-only-recheck! read-only-recheck!
      :inspect-operator-claim! inspect-operator-claim!
-     :inspect-auditor-cosign! inspect-auditor-cosign!}))
+     :inspect-auditor-cosign! inspect-auditor-cosign!
+     :inspect-erasure-audit-segment! inspect-erasure-audit-segment!}))

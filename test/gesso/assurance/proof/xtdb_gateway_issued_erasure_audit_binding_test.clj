@@ -1,0 +1,173 @@
+(ns gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-binding-test
+  "v1882: Real XTDB: auditor-sealed segments derive expected bindings from
+   the collector's genuine original executor and later pinned read, not caller
+   supplied source/row/basis identity. No event producer is authenticated."
+  (:require [clojure.test :refer [deftest is use-fixtures]]
+            [gesso.assurance.proof.xtdb-gateway-issued-application-observation
+             :as observation]
+            [gesso.assurance.proof.xtdb-gateway-issued-application-observation-test]
+            [gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-segment
+             :as segment]
+            [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity
+             :as snapshot]
+            [gesso.model.command-resolution :as resolution]
+            [xtdb.api :as xt]
+            [xtdb.basis :as basis])
+  (:import [java.security KeyFactory Signature]
+           [java.security.spec PKCS8EncodedKeySpec]
+           [java.time Instant]
+           [java.util Base64 UUID]))
+
+(def ^:private fixture-ns
+  'gesso.assurance.proof.xtdb-gateway-issued-application-observation-test)
+(defn- original [symbol]
+  (var-get (or (ns-resolve fixture-ns symbol)
+               (throw (ex-info "Missing real XTDB fixture" {:symbol symbol})))))
+(defn- environment [] ((original 'v1867-alias-case-env)))
+(defn- db [] ((original 'db)))
+(defn- seed! [& values] (apply (original 'seed!) values))
+(defn- read-command [id] ((original 'read-command) id))
+(defn- reason [f] ((original 'reason) f))
+(use-fixtures :once (original 'parent-fixture))
+
+(defn- test-point []
+  (let [rows (xt/q (db) "SHOW SNAPSHOT_TOKEN")]
+    (snapshot/comparable-point
+     (basis/<-time-basis-str (:snapshot-token (first rows))))))
+
+(defn- sign-checkpoint [checkpoint]
+  (let [encoded (System/getenv "GESSO_TEST_AUDITOR_PRIVATE_KEY_B64")
+        private (.generatePrivate (KeyFactory/getInstance "Ed25519")
+                                 (PKCS8EncodedKeySpec.
+                                  (.decode (Base64/getDecoder) ^String encoded)))
+        signer (Signature/getInstance "Ed25519")]
+    (.initSign signer private)
+    (.update signer (segment/canonical-checkpoint-bytes! checkpoint))
+    (.encodeToString (Base64/getEncoder) (.sign signer))))
+
+(defn- sealed-segment [expected]
+  ;; The test deliberately manufactures this erase-commit EVENT without
+  ;; ever erasing the row in XTDB: signing it is NOT correspondence proof.
+  (let [stream "v1882-externally-asserted-audit-segment"
+        prior (apply str (repeat 64 "0"))
+        event {:sequence 1
+               :stream-id stream
+               :database-instance (:database-instance expected)
+               :physical-table (:physical-table expected)
+               :physical-row-id (:physical-row-id expected)
+               :event-id (UUID/randomUUID)
+               :event-kind :erase-commit-reported
+               :recorded-at (:system-to expected)
+               :previous-sha256 prior}
+        digest (segment/event-sha256! event)
+        checkpoint {:format segment/checkpoint-format
+                    :binding expected
+                    :stream-id stream
+                    :start-sequence 0 :end-sequence 1
+                    :start-sha256 prior :head-sha256 digest
+                    :record-count 1
+                    :signed-at (Instant/now)
+                    :nonce (UUID/randomUUID)}]
+    {:checkpoint checkpoint
+     :records [{:event event :digest-sha256 digest}]
+     :auditor-signature-base64 (sign-checkpoint checkpoint)}))
+
+(deftest v1882-sealed-erasure-segment-is-bound-to-private-original-xtdb-witness
+  (let [operation :request/claim
+        {:keys [data] :as env} (environment)
+        collector (observation/issue-current-issued-application-observer!
+                   (:contract env) (:catalog-source env))
+        inspect! (:inspect-erasure-audit-segment! collector)
+        summary! (:summary! collector)
+        original-request (:request data)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}]
+    (is (fn? inspect!))
+    (is (= {operation :not-eligible}
+           (:per-operation-erasure-audit-intake (summary!))))
+    (is (= :original-observation-required-for-erasure-audit
+           (reason #(inspect! operation {}))))
+    (is (= :operation-not-originally-certified
+           (reason #(inspect! :request/audit {}))))
+    (seed! [:requests original-request])
+    (let [start (test-point)]
+      (is (snapshot/valid-private-point? start))
+      (let [observed ((:observe! collector) operation ctx invocation)]
+        (is (= #{operation} (:observed-operation-ids observed)))
+        (is (= {operation :not-checked}
+               (:per-operation-erasure-audit-intake observed)))
+        (is (= :completed-later-pinned-read-required-for-erasure-audit
+               (reason #(inspect! operation {})))))
+      (seed! [:requests {:xt/id (str "unrelated-audit-" (random-uuid))
+                         :owner "new-system-basis"}])
+      (let [end (test-point)
+            reread ((:read-only-recheck! collector) operation)
+            origin (get-in reread [:certified-operation-proof-origins operation])
+            expected (merge
+                      {:operation-id operation
+                       :database-instance (:database start)
+                       :physical-table :requests
+                       :physical-row-id (:xt/id original-request)
+                       :system-from (:system-time start)
+                       :system-to (:system-time end)}
+                      (select-keys origin
+                                   [:proof-fingerprint :proof-source-fingerprint
+                                    :proof-subject-fingerprint
+                                    :dependency-graph-fingerprint
+                                    :transition-fingerprint]))
+            signed (sealed-segment expected)]
+        (is (= :later-reported-database-basis
+               (snapshot/reported-basis-relation start end)))
+        (is (= :not-checked
+               (get-in reread [:per-operation-erasure-audit-intake operation])))
+        (let [accepted (inspect! operation signed)]
+          (is (= :erase-commit-record-present-in-supplied-segment
+                 (get-in accepted [:per-operation-erasure-audit-intake operation])))
+          (is (= :private-original-and-later-pinned-binding-only
+                 (:erasure-audit-intake-scope accepted)))
+          (is (= :not-established (:erasure-audit-producer-completeness accepted)))
+          (is (= :none (:erasure-audit-discharge accepted)
+                 (:transaction-authority accepted) (:retry-authority accepted)
+                 (:authority accepted)))
+          (is (= :not-issued (:certificate accepted)))
+          (is (= #{} (get-in accepted [:diagnostic-open-history-conditions
+                                      :discharged-conditions])))
+          (is (= :not-established
+                 (get-in accepted [:diagnostic-required-independent-history-evidence
+                                   :history-continuity])))
+          (is (= original-request ((original 'read-request) (:xt/id original-request)))
+              "A signed audit event is not evidence that an erase took place")
+          (is (not-any? #(contains? accepted %)
+                        [:expected-binding :checkpoint :records :private-original-before
+                         :private-later-pinned-point :snapshot-token :database-instance
+                         :physical-row-id :system-from :system-to :head-sha256])))
+        ;; A correctly re-signed envelope for the WRONG physical row, proof
+        ;; source, database or interval still fails against private evidence.
+        (doseq [[field value] [[:physical-row-id "another-row"]
+                               [:proof-fingerprint "another-proof"]
+                               [:database-instance "other-database"]
+                               [:system-from (.minusSeconds ^Instant (:system-from expected) 1)]
+                               [:system-to (.plusSeconds ^Instant (:system-to expected) 1)]]]
+          (is (= :audit-segment-source-binding-mismatch
+                 (reason #(inspect! operation
+                                    (sealed-segment (assoc expected field value)))))
+              (str "Signed wrong binding: " field)))
+        (is (= :failed
+               (get-in (summary!) [:per-operation-erasure-audit-intake operation])))
+        (is (= :erase-commit-record-present-in-supplied-segment
+               (get-in (inspect! operation signed)
+                       [:per-operation-erasure-audit-intake operation])))
+        (with-redefs [segment/inspect-pinned-erase-audit-segment!
+                      (fn [& _] {:type segment/report-type})]
+          (is (= :substituted-original-erasure-audit-checker
+                 (reason #(inspect! operation signed)))))
+        ;; A new pinned read invalidates all earlier interval-bound evidence.
+        (seed! [:requests {:xt/id (str "unrelated-audit-" (random-uuid))
+                           :owner "even-later-basis"}])
+        (let [next-read ((:read-only-recheck! collector) operation)]
+          (is (= :not-checked
+                 (get-in next-read [:per-operation-erasure-audit-intake operation])))
+          (is (= :audit-segment-source-binding-mismatch
+                 (reason #(inspect! operation signed)))))
+        (is (= 1 @(:constructs (:environment env))))
+        (is (nil? (read-command (resolution/record-id (:binding data)))))))))
