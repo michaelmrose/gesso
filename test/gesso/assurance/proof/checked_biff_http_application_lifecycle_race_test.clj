@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1824: Real JDK listener replacement, inspection, managed stop and startup
+  "v1825: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -1062,4 +1062,75 @@
                          instance-generation system)))))
       (finally
         (deliver release-first true)
+        (cleanup! s issued)))))
+
+(deftest post-challenge-listener-identity-callback-failure-rejects-inspection
+  ;; A fresh HTTP challenge only establishes that the original issued
+  ;; wrapper responded at the captured local endpoint. Even after that
+  ;; response succeeds, failure of the trusted physical-instance callback
+  ;; at the SECOND identity check must not be promoted to a current-instance
+  ;; observation. A later healthy callback may qualify a NEW inspection,
+  ;; but cannot retroactively qualify the rejected one or issue authority.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        reject-postcheck? (atom false)
+        locator-called? (atom false)
+        identity-reads (atom 0)
+        locator-reads (atom 0)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_]
+                         (swap! identity-reads inc)
+                         (when (and @reject-postcheck? @locator-called?)
+                           (throw (ex-info "Trusted listener lookup failed"
+                                           {:reason :source-callback-failed})))
+                         (:server @(:server-state s)))
+                       :base-url!
+                       (fn [system]
+                         (swap! locator-reads inc)
+                         (when @reject-postcheck?
+                           (reset! locator-called? true))
+                         (original-locator system))))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))
+            server (:server @(:server-state s))
+            before-reads @identity-reads
+            before-locator-reads @locator-reads]
+        (is (some? server))
+        (is (pos? before-reads)
+            "Startup captured actual source-reported listener identity")
+        (reset! reject-postcheck? true)
+        (is (= :configured-physical-listener-not-current (reason inspect!)))
+        (is (true? @locator-called?)
+            "First physical identity check passed before the URL lookup")
+        (is (= (inc before-locator-reads) @locator-reads)
+            "First inspection requested its own original HTTP challenge")
+        (is (= (+ before-reads 2) @identity-reads)
+            "Source callback was read both before and after the challenge")
+        (is (= :verified-configured-start
+               (:status ((:summary! issued))))
+            "Historical startup status is not a fresh liveness claim")
+        (reset! reject-postcheck? false)
+        (reset! locator-called? false)
+        (let [observed (inspect!)]
+          (is (= :current-at-inspection (:status observed)))
+          (is (= :observed-at-current-inspection
+                 (:fresh-local-http-response observed)))
+          (is (= :matches-original-host-reported-object
+                 (:physical-listener-instance observed)))
+          (is (= :trusted-host-callback-conditional
+                 (:physical-instance-provenance observed)))
+          (is (= :not-issued (:certificate observed)))
+          (is (= :not-admitted (:admission observed)))
+          (is (= :none (:authority observed))))
+        (is (= (+ before-locator-reads 2) @locator-reads)
+            "Recovered inspection requested another independent challenge")
+        (is (identical? server (:server @(:server-state s))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current (reason inspect!))))
+      (finally
         (cleanup! s issued)))))
