@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1812: The actual application startup entrypoint owns module issuance,
+  "v1813: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -1195,4 +1195,60 @@
                (reason inspect!))))
       (finally
         (deliver release-inspection true)
+        (cleanup! s issued)))))
+
+(deftest startup-publication-cannot-race-managed-stop-on-unset-system
+  ;; Suspend the ORIGINAL successful :starting -> :verified transition just
+  ;; AFTER the real Clojure CAS succeeds. In the former implementation, the
+  ;; selected routes and @started were still nil, allowing concurrent stop to
+  ;; claim cleanup without stopping the actual Biff listener. The publication
+  ;; monitor must keep that stop waiting until every started handle is saved.
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))
+        original-cas clojure.core/compare-and-set!
+        published (promise)
+        release-publish (promise)]
+    (try
+      (with-redefs [clojure.core/compare-and-set!
+                    (fn [atm before after]
+                      (let [changed? (original-cas atm before after)]
+                        (when (and changed?
+                                   (= :starting before)
+                                   (= :verified-configured-start after))
+                          (deliver published true)
+                          (when-not (deref release-publish 15000 false)
+                            (throw (ex-info "Startup publication stalled" {}))))
+                        changed?))]
+        (let [starting (future ((:start-once! issued) {}))]
+          (try
+            (is (true? (deref published 15000 false)))
+            (let [stop-entered (promise)
+                  stopping (future
+                             (deliver stop-entered true)
+                             ((:stop! issued)))]
+              (try
+                (is (true? (deref stop-entered 5000 false)))
+                (is (= :stop-pending (deref stopping 250 :stop-pending))
+                    "Managed stop must not consume half-published startup")
+                (deliver release-publish true)
+                (let [started-result (deref starting 15000 :startup-timed-out)
+                      stop-result (deref stopping 15000 :stop-timed-out)]
+                  (is (= :verified-configured-start
+                         (get-in started-result [:report :status])))
+                  (is (some? (:system started-result)))
+                  (is (= :stopped (:status stop-result)))
+                  (is (.isShutdown (:executor @(:server-state s))))
+                  (is (= :configured-instance-generation-not-current
+                         (reason #((:inspect-generation! issued)
+                                   (:instance-generation started-result)
+                                   (:system started-result))))))
+                (finally
+                  (deliver release-publish true)
+                  (deref stopping 15000 :stop-timed-out))))
+            (finally
+              (deliver release-publish true)
+              (deref starting 15000 :startup-timed-out)))))
+      (finally
+        (deliver release-publish true)
         (cleanup! s issued)))))

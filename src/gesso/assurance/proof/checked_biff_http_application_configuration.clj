@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1806: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1813: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -71,7 +71,13 @@
    captures that object after the real HTTP proof, and later inspections
    recheck exact reference identity before and after fresh HTTP liveness.
    Same-port replacement is detected conditional on truthful host callback
-   instrumentation; this does not authenticate an external deployment."
+   instrumentation; this does not authenticate an external deployment.
+
+   v1813: Publish the selected route set, exact returned Biff system, and
+   :verified-configured-start atomically with respect to original managed
+   stop/inspection. Previously the state could become verified while the
+   returned system was still nil, letting a racing stop miss physical cleanup.
+   The monitor does not control out-of-band adapter stops or future liveness."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -568,15 +574,21 @@
                          (reset! original-listener-instance
                                  (host-listener-instance!
                                   listener-instance! (:system result))))
-                       (when-not (compare-and-set! state :starting
-                                                    :verified-configured-start)
-                         (reject! :configured-start-state-diverged))
-                       (reset! selected-startup-routes
-                               (:matched-certified-route-ids selected-coverage))
-                       (reset! started (:system result))
-                       {:system (:system result)
-                        :instance-generation instance-generation
-                        :report (report @state (some? typed-trial))}
+                       ;; Publish all original issued startup handles
+                       ;; before the verified state is externally visible.
+                       ;; The same monitor serializes managed stop and both
+                       ;; current-instance inspection entry points. No stop
+                       ;; may consume a verified state with a nil system.
+                       (locking lifecycle-monitor
+                         (reset! selected-startup-routes
+                                 (:matched-certified-route-ids selected-coverage))
+                         (reset! started (:system result))
+                         (when-not (compare-and-set! state :starting
+                                                      :verified-configured-start)
+                           (reject! :configured-start-state-diverged))
+                         {:system (:system result)
+                          :instance-generation instance-generation
+                          :report (report @state (some? typed-trial))})
                        (catch Throwable error
                          ;; The adapter has already started. Any failed
                          ;; post-start coverage check MUST stop it before
