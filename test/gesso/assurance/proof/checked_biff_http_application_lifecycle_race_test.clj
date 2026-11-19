@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1819: Real JDK listener replacement, inspection, managed stop and startup
+  "v1820: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -701,4 +701,71 @@
             (deref first-stop 15000 :first-stop-timed-out))))
       (finally
         (deliver release-physical-stop true)
+        (cleanup! s issued)))))
+
+(deftest concurrent-stops-preserve-uncertain-physical-cleanup
+  ;; A successful shutdown race is not enough: the original raw adapter may
+  ;; close its real listener but THROW while reporting completion. One
+  ;; concurrent managed caller must wait for the first, inherit its uncertain
+  ;; outcome, and never retry an ambiguous physical stop. The old generation
+  ;; remains invalid even though the process-local executor is shut down.
+  (let [s (scenario :honest)
+        original-stop (get-in s [:raw :biff.core/stop])
+        physical-stop-calls (atom 0)
+        cleanup-attempted (promise)
+        release-cleanup (promise)
+        adapter (assoc (:raw s) :biff.core/stop
+                       (fn [system]
+                         (swap! physical-stop-calls inc)
+                         (original-stop system)
+                         (deliver cleanup-attempted true)
+                         (when-not (deref release-cleanup 15000 false)
+                           (throw (ex-info "Stop fixture timed out" {})))
+                         (throw (ex-info "Original stop result uncertain" {}))))
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true) :adapter-module adapter))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            executor (:executor @(:server-state s))
+            first-stop (future ((:stop! issued)))]
+        (try
+          (is (true? (deref cleanup-attempted 15000 false)))
+          (is (= :stopping (:status ((:summary! issued)))))
+          (is (.isShutdown executor)
+              "Physical listener closed before stop reports an error")
+          (is (= 1 @physical-stop-calls))
+          (let [second-entered (promise)
+                second-stop (future
+                              (deliver second-entered true)
+                              ((:stop! issued)))]
+            (try
+              (is (true? (deref second-entered 5000 false)))
+              (is (= :second-stop-pending
+                     (deref second-stop 250 :second-stop-pending)))
+              (is (= 1 @physical-stop-calls))
+              (deliver release-cleanup true)
+              (is (= :stop-cleanup-not-established
+                     (:status (deref first-stop 15000 :first-stop-timed-out))))
+              (is (= :stop-cleanup-not-established
+                     (:status (deref second-stop 15000 :second-stop-timed-out))))
+              (is (= 1 @physical-stop-calls)
+                  "No second physical stop attempt after ambiguous cleanup")
+              (is (= :stop-cleanup-not-established
+                     (:status ((:summary! issued)))))
+              (is (.isShutdown executor))
+              (is (= :configured-instance-generation-not-current
+                     (reason #((:inspect-generation! issued)
+                               instance-generation system))))
+              (is (= :configured-instance-not-current
+                     (reason #((:inspect-running! issued) system))))
+              (is (= :configured-start-already-attempted
+                     (reason #((:start-once! issued) {}))))
+              (finally
+                (deliver release-cleanup true)
+                (deref second-stop 15000 :second-stop-timed-out))))
+          (finally
+            (deliver release-cleanup true)
+            (deref first-stop 15000 :first-stop-timed-out))))
+      (finally
+        (deliver release-cleanup true)
         (cleanup! s issued)))))
