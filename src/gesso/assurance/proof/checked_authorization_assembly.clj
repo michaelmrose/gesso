@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-authorization-assembly
-  "v1838: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
+  "v1839: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
 
    For any selected qualified operation and route ID, relate its declared
    catalog construction to the SAME current-source construction of an issued
@@ -23,7 +23,11 @@
 
    v1838: Reject replacement of the original certified-plan and
    certified-operation proof-verifier functions used by the contract checker.
-   Catalog coverage must not rely on permissive substituted proof checks."
+   Catalog coverage must not rely on permissive substituted proof checks.
+
+   v1839: Catalog-scoped reports preserve the original checked contract's
+   unresolved premises, assumptions and obligations without discharging them
+   or turning source-relative evidence into installed application authority."
   (:require [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.model.certified-operation :as certified-operation]
@@ -210,6 +214,11 @@
        :catalog-operations selected
        :matched-certified-route-ids route-ids
        :uncertified-application-operations (:uncertified-operations checked)
+       ;; Do not hide obligations already reported by the genuine v1253
+       ;; contract verification. Catalog coverage does not resolve any of them.
+       :open-assumptions (:open-assumptions checked)
+       :open-premises (:open-premises checked)
+       :open-obligations (:open-obligations checked)
        :catalog-scope :selected-not-all-possible-application-policy
        :current-assembly-closure :source-relative-checked
        :installed-handler-adoption :not-established

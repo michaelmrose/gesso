@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1838: adversarial source-relative checks for issued Ring bindings.
+  "v1839: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
@@ -526,8 +526,22 @@
 (deftest catalog-wide-coverage-checks-every-issued-route
   (with-genuine-catalog-selection
     (fn [{:keys [input]}]
-      (let [report (authorization/check-declared-route-coverage! input)]
+      (let [report (authorization/check-declared-route-coverage! input)
+            contract-report (binding/check-certified-contracts!
+                             (:contract-source input))]
         (is (= authorization/coverage-report-type (:type report)))
+        ;; Route coverage must carry, not erase or discharge, the ORIGINAL
+        ;; underlying contract's unresolved proof assumptions and premises.
+        ;; This still does not establish host adoption or transaction authority.
+        (is (seq (:open-assumptions report)))
+        (is (= (:open-assumptions contract-report)
+               (:open-assumptions report)))
+        (is (= (:open-premises contract-report)
+               (:open-premises report)))
+        (is (= (:open-obligations contract-report)
+               (:open-obligations report)))
+        (is (contains? (:open-obligations report)
+                       :source-to-production-execution-correspondence))
         (is (= :all-declared-catalog-operations-and-issued-routes
                (:checking report)))
         (is (= #{claim} (:catalog-operations report)))
