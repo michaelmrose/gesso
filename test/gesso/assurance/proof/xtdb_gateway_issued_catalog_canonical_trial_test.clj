@@ -237,7 +237,12 @@
            selection-report
            (checked-assembly/check-declared-route-coverage!
             {:contract-source (:contract full)
-             :catalog-source (:catalog-source full)})]
+             :catalog-source (:catalog-source full)})
+           expected-route-scope
+           (select-keys selection-report
+                        [:catalog-operations :matched-certified-route-ids
+                         :uncertified-application-operations
+                         :uncertified-application-route-ids])]
        (is (seq extra-routes))
        (is (= #{:request/cancel} (:uncertified-operations contract-report)))
        (is (= extra-routes (:uncertified-application-route-ids
@@ -257,12 +262,29 @@
                         (assoc-in full [:contract :semantic-route-handlers
                                         :route/invented]
                                   (fn [_] {:status 200}))))))
-       (let [trial (issued full)]
+       (let [trial (issued full)
+             initial ((:summary! trial))]
+         (is (= expected-route-scope (:catalog-route-scope initial)))
+         (is (= :original-source-rechecked
+                (:catalog-route-scope-evidence initial)))
          (seed! [:requests (get-in full [:data :request])])
-         (let [result (invoke! trial full :submit)]
+         (let [result (invoke! trial full :submit)
+               final ((:summary! trial))]
            (is (= :bounded-issued-executor-catalog-atomic-acknowledgment
                   (:status result)))
+           (is (= expected-route-scope (:catalog-route-scope result)
+                  (:catalog-route-scope final)))
+           (is (= #{:request/cancel}
+                  (get-in result [:catalog-route-scope
+                                  :uncertified-application-operations])))
+           (is (= extra-routes
+                  (get-in result [:catalog-route-scope
+                                  :uncertified-application-route-ids])))
+           (is (= :original-source-rechecked
+                  (:catalog-route-scope-evidence result)
+                  (:catalog-route-scope-evidence final)))
            (is (= :none (:transaction-authority result)))
+           (is (= :not-issued (:certificate result)))
            (is (= :not-established (:deployed-biff-handler-adoption result)))))))))
 
 (deftest unrelated-checked-catalog-cannot-impersonate-issued-executor

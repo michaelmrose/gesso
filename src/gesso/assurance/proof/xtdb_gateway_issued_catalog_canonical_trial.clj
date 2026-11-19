@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
-  "v1852: Bind the v1775 checked-catalog physical trial to the EXACT issued
+  "v1853: Bind the v1775 checked-catalog physical trial to the EXACT issued
    v1251 certified-plan executor and the CURRENT assembled application's
    certified route/operation table. An observed physical transaction comes
    from calling the registered executor, not an arbitrary invocation thunk.
@@ -31,7 +31,12 @@
    contract's complete semantic route inventory and the exact certified /
    uncertified partition rather than requiring every app route to be certified.
    This does not grant the unselected routes certification or transaction
-   authority."
+   authority.
+
+   v1853: Carry the original selected/uncertified operation and route scope
+   into the one-use trial identity and public reports. A source-relative
+   acknowledged Claim write must never hide an uncertified Cancel route or
+   promote it to certified or deployed transaction authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -171,7 +176,12 @@
         open-evidence
         (select-keys full-coverage
                      [:open-assumptions :open-premises :open-obligations
-                      :certified-operation-open-evidence])]
+                      :certified-operation-open-evidence])
+        route-scope
+        (select-keys full-coverage
+                     [:catalog-operations :matched-certified-route-ids
+                      :uncertified-application-operations
+                      :uncertified-application-route-ids])]
     (when-not (and (= catalog/report-type (:type checked))
                    (= :checked (:exact-declared-operation-coverage checked))
                    (= certified/report-type (:type contracts))
@@ -203,6 +213,13 @@
                            (set? (:open-premises row))
                            (set? (:open-obligations row))))
                     (:certified-operation-open-evidence open-evidence))
+                   ;; Capture all four current original selected/unselected
+                   ;; scope sets in the identity rechecked before and after
+                   ;; the physical trial. This does not authenticate their
+                   ;; installation in an external router.
+                   (every? set? (vals route-scope))
+                   (every? (fn [routes] (every? qualified-keyword? routes))
+                           (vals route-scope))
                    (= ids (:catalog-operations full-coverage))
                    (= (:matched-certified-route-ids contracts)
                       (:matched-certified-route-ids full-coverage))
@@ -256,15 +273,19 @@
      ;; issue, pre-observation, post-observation and every summary. It cannot
      ;; silently change while the trial still reports the original source.
      :catalog-open-evidence open-evidence
+     :catalog-route-scope route-scope
      ;; The issued callable is captured privately for invocation, never
      ;; included in a report or user-provided to the physical trial.
      :executor executor}))
 
-(defn- report [operation status invoked? catalog-open-evidence]
+(defn- report [operation status invoked? catalog-open-evidence
+               catalog-route-scope]
   {:type report-type :version report-version :operation-id operation
    :status status
    :catalog-open-evidence catalog-open-evidence
    :catalog-proof-evidence-scope :original-source-rechecked
+   :catalog-route-scope catalog-route-scope
+   :catalog-route-scope-evidence :original-source-rechecked
    :catalog-to-checked-assembly :exact-closed-operation-coverage
    :catalog-to-issued-executor :exact-original-construction-and-field-map
    :certified-routes :current-issued-handlers-in-assembly
@@ -317,7 +338,8 @@
                    true)
         summary! (fn [] (recheck!)
                    (report operation @status @returned?
-                           (:catalog-open-evidence initial)))
+                           (:catalog-open-evidence initial)
+                           (:catalog-route-scope initial)))
         observe! (fn [ctx invocation]
                    (when-not (.compareAndSet permit false true)
                      (reject! :issued-executor-trial-already-attempted))
@@ -360,7 +382,8 @@
                                      :else :not-qualified-or-uncertain)]
                        (reset! status outcome)
                        (report operation outcome @returned?
-                               (:catalog-open-evidence initial)))))]
+                               (:catalog-open-evidence initial)
+                               (:catalog-route-scope initial)))))]
     (recheck!)
     {:type report-type :version report-version
      :summary! summary! :observe-once! observe!}))
