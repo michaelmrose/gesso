@@ -161,6 +161,23 @@
                    (= (normalized v) (normalized (get observed k))))
                  expected))))
 
+(defn- historical-after-correspondence
+  "Compare one already-bounded historical row with the privately retained
+   admitted AFTER and returned transaction time. Does not query, create
+   audit records, certify causality, or infer history completeness."
+  [expected-after top returned-time]
+  (let [historical-document
+        (apply dissoc top [:xt/system-from :xt/system-to
+                           :xt/valid-from :xt/valid-to])
+        valid-from (observed-time (:xt/valid-from top))]
+    (cond
+      (not= returned-time valid-from)
+      :latest-historical-valid-start-differs-from-returned-tx
+      (not (private-document-matches? expected-after historical-document))
+      :latest-historical-after-diverges-from-private-after
+      :else
+      :private-after-matches-latest-historical-version)))
+
 (defn inspect-pinned-intent!
   "Read back the PRIVATE v1887 generated intent and original returned-key
    ledger row at ONE independent, pinned XTDB basis. Accept ONLY the original
@@ -201,7 +218,13 @@
    retained admitted command/before. Require the preceding valid-time
    interval to close at the returned transaction time. This checks a
    declared BEFORE/AFTER pair, not authenticated earlier execution,
-   historic completeness, or exclusive physical transaction causality."
+   historic completeness, or exclusive physical transaction causality.
+
+   v1893: Check the complete latest historical AFTER document and its
+   valid-time start against the privately admitted command/after, rather
+   than relying on a current-value read and historical timestamps alone.
+   Keep all historical data private and restrict the stronger before/after
+   correlation to an exact same-pinned historical post-image match."
   [g result]
   (let [local (original-local-return g result)
         private (locking private-intents
@@ -364,6 +387,23 @@
                     :latest-protected-version-not-open
                     :else
                     :latest-open-protected-version-starts-at-returned-tx))))
+            ;; Unlike the current-valid row read, this inspects the full
+            ;; physical version whose SYSTEM start matches the returned tx.
+            ;; Compare the complete historical post-image and the valid-time
+            ;; start. Do not promote a timestamp-only match into a claim
+            ;; about the admitted AFTER value.
+            protected-after-history-status
+            (cond
+              (nil? original-protected)
+              :not-checked-unsupported-original-plan-shape
+              (not= :latest-open-protected-version-starts-at-returned-tx
+                    protected-history-status)
+              :latest-protected-version-not-origin-anchored
+              :else
+              (historical-after-correspondence
+               (:expected-after original-protected)
+               (first protected-history-rows)
+               tx-time))
             ;; For UPDATEs, retain the ORIGINAL admitted before-document
             ;; privately and compare its complete persisted fields with
             ;; the immediate preceding historical version on the SAME pin.
@@ -469,6 +509,10 @@
            :bounded-dual-row-history-and-ledger-coobservation
            :not-established)
          :protected-temporal-correlation-proves-transaction-causality? false
+         :protected-original-after-history-status protected-after-history-status
+         :protected-after-history-scope
+         :private-original-after-compared-with-pinned-latest-historical-version
+         :protected-historical-after-completeness :not-established
          :protected-original-before-history-status protected-before-status
          :protected-before-history-scope
          :private-original-before-compared-with-pinned-immediate-predecessor
@@ -481,7 +525,9 @@
                   (= :latest-open-protected-version-starts-at-returned-tx
                      protected-history-status)
                   (= :private-original-before-matches-immediate-predecessor
-                     protected-before-status))
+                     protected-before-status)
+                  (= :private-after-matches-latest-historical-version
+                     protected-after-history-status))
            :bounded-private-before-after-intent-ledger-coobservation
            :not-established)
          :protected-before-history-completeness :not-established

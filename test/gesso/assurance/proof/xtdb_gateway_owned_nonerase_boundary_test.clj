@@ -205,6 +205,12 @@
                 (:protected-intent-ledger-temporal-correlation report)))
          (is (= :private-original-before-matches-immediate-predecessor
                 (:protected-original-before-history-status report)))
+         (is (= :private-after-matches-latest-historical-version
+                (:protected-original-after-history-status report)))
+         (is (= :private-original-after-compared-with-pinned-latest-historical-version
+                (:protected-after-history-scope report)))
+         (is (= :not-established
+                (:protected-historical-after-completeness report)))
          (is (= :bounded-private-before-after-intent-ledger-coobservation
                 (:protected-before-after-intent-ledger-correlation report)))
          (is (= :not-established (:protected-before-history-completeness report)))
@@ -404,6 +410,8 @@
                 (:protected-intent-ledger-temporal-correlation replayed)))
          (is (= :latest-protected-version-not-origin-anchored
                 (:protected-original-before-history-status replayed)))
+         (is (= :latest-protected-version-not-origin-anchored
+                (:protected-original-after-history-status replayed)))
          (is (= :not-established
                 (:protected-before-after-intent-ledger-correlation replayed)))
          (is (false? (:protected-temporal-correlation-proves-transaction-causality?
@@ -445,6 +453,8 @@
                 (:protected-original-history-origin-status after)))
          (is (= :latest-protected-version-not-origin-anchored
                 (:protected-original-before-history-status after)))
+         (is (= :latest-protected-version-not-origin-anchored
+                (:protected-original-after-history-status after)))
          (is (= :not-established
                 (:protected-before-after-intent-ledger-correlation after)))
          (is (= :not-established
@@ -491,3 +501,56 @@
        (is (not-any? #(contains? report %)
                      [:expected-before :historical-before :original-before
                       :before-document :protected-document :snapshot-token]))))))
+
+(deftest v1893-private-historical-after-rejects-mismatch-and-wrong-valid-start
+  ;; Feed an intentionally divergent historical post-image to the PURE
+  ;; classifier (not to an XTDB query seam). A current-row match and system
+  ;; start timestamp must not silently stand in for historical payload.
+  (let [check (var-get (or (ns-resolve
+                             'gesso.assurance.proof.xtdb-gateway-atomic-write-intent
+                             'historical-after-correspondence)
+                           (throw (ex-info "Missing historical verifier" {}))))
+        tx-time (java.time.Instant/parse "2026-11-19T19:00:00Z")
+        private {:xt/id "selected-v1893" :revision 7 :status "accepted"}
+        historical (assoc private :xt/valid-from
+                          (java.time.ZonedDateTime/ofInstant
+                           tx-time (java.time.ZoneId/of "UTC")))]
+    (is (= :private-after-matches-latest-historical-version
+           (check private historical tx-time)))
+    (is (= :latest-historical-after-diverges-from-private-after
+           (check private (assoc historical :status "wrong") tx-time)))
+    (is (= :latest-historical-after-diverges-from-private-after
+           (check private (assoc historical :unexpected-field true) tx-time)))
+    (is (= :latest-historical-valid-start-differs-from-returned-tx
+           (check private (assoc historical :xt/valid-from
+                                 (.plusSeconds tx-time 1)) tx-time)))
+    (is (= :latest-historical-valid-start-differs-from-returned-tx
+           (check private (dissoc historical :xt/valid-from) tx-time)))))
+
+(deftest v1893-real-xtdb-historical-after-matches-private-expected-write
+  (physical/with-proving-application!
+   (fn [app]
+     (let [original ((:read! app))
+           g (intent/prepare-one-shot! (:node app) (source original))
+           returned ((:submit! g))
+           baseline (intent/inspect-pinned-intent! g returned)]
+       (is (= :private-after-matches-latest-historical-version
+              (:protected-original-after-history-status baseline)))
+       (is (= :bounded-private-before-after-intent-ledger-coobservation
+              (:protected-before-after-intent-ledger-correlation baseline)))
+       ;; An unregistered same-value PUT changes the latest SYSTEM version,
+       ;; so even matching application current values cannot preserve the
+       ;; claimed original historical post-image.
+       (xt/execute-tx (:node app)
+                      [[:put-docs physical/table ((:read! app))]])
+       (let [later (intent/inspect-pinned-intent! g returned)]
+         (is (= :latest-protected-version-not-origin-anchored
+                (:protected-original-after-history-status later)))
+         (is (= :not-established
+                (:protected-before-after-intent-ledger-correlation later)
+                (:protected-historical-after-completeness later)
+                (:transaction-causality later)))
+         (is (false? (:protected-before-after-correlation-proves-causality?
+                      later)))
+         (is (= :none (:transaction-authority later) (:authority later)))
+         (is (= :not-issued (:certificate later))))))))
