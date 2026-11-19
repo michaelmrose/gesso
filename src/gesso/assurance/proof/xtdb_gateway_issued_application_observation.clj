@@ -25,12 +25,17 @@
    ONLY in a private qualified observation entry. The public summary exposes
    two independent later read outcomes: new source document versus physical
    row, and historical checked before-document versus that same physical row.
-   Witness contents are never published, replayed, or used for authority."
+   Witness contents are never published, replayed, or used for authority.
+
+   v1872: Retain the checked read's private single-point XTDB snapshot basis
+   and classify each later pinned read relative to THAT reported database/time
+   point. Basis progression is not row-change history or an ABA proof."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as issued]
             [gesso.assurance.proof.xtdb-gateway-issued-application-recheck :as recheck]
+            [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot]
             [gesso.live.application-preflight.certified-contract :as certified]))
 
 (def report-type
@@ -236,6 +241,15 @@
                     (into (sorted-map)
                           (for [[operation state] snapshot]
                             [operation (get qualified operation :not-observed)]))
+                    :per-operation-reported-basis-relations
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:reported-basis-relation state :not-checked)
+                                         :not-eligible)]))
+                    :basis-comparison-scope
+                    :reported-same-database-system-time-not-row-change-history
+                    :basis-observation-proves-no-aba? false
                     :per-operation-historical-prestate-rechecks
                     (into (sorted-map)
                           (for [[operation state] snapshot]
@@ -307,10 +321,13 @@
                            original-before @captured-before]
                        (when-not (and (map? original-before)
                                       (= #{:operation-id :target :before
-                                           :source-identity}
+                                           :original-snapshot-point :source-identity}
                                          (set (keys original-before)))
                                       (= operation (:operation-id original-before))
                                       (map? (:before original-before))
+                                      (let [p (:original-snapshot-point original-before)]
+                                        (or (nil? p)
+                                            (snapshot/valid-private-point? p)))
                                       (= (:selected-operation-source-identity result)
                                          (:source-identity original-before)))
                          (reject! :original-private-prestate-witness-not-established))
@@ -321,7 +338,8 @@
                                :original-context ctx
                                :original-invocation invocation
                                :read-only-recheck :not-checked
-                               :historical-prestate-recheck :not-checked})
+                               :historical-prestate-recheck :not-checked
+                               :reported-basis-relation :not-checked})
                        (summary!))
                      (catch Throwable failure
                        ;; Never convert an unsuccessful/ambiguous attempt
@@ -377,6 +395,12 @@
                                                    (:historical-prestate-at-read report))
                                                   (= :same-original-execution-target
                                                      (:historical-target report))
+                                                  (#{:not-comparable
+                                                     :different-reported-databases
+                                                     :earlier-reported-database-basis
+                                                     :later-reported-database-basis
+                                                     :same-reported-database-basis}
+                                                   (:reported-basis-relation report))
                                                   (= :not-established
                                                      (:historical-candidate-equality report)
                                                      (:currentness-after-read report))
@@ -389,13 +413,16 @@
                                                          :read-only-recheck
                                                          (:comparison report)
                                                          :historical-prestate-recheck
-                                                         (:historical-prestate-at-read report))))
+                                                         (:historical-prestate-at-read report)
+                                                         :reported-basis-relation
+                                                         (:reported-basis-relation report))))
                                    (summary!))
                                  (catch Throwable failure
                                    (swap! states update operation
                                           (fn [e] (assoc e
                                                          :read-only-recheck :failed
-                                                         :historical-prestate-recheck :failed)))
+                                                         :historical-prestate-recheck :failed
+                                                         :reported-basis-relation :failed)))
                                    (throw failure)))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!

@@ -13,11 +13,16 @@
    target and complete before-document permits a second comparison against
    the SAME later pinned row, without replaying a constructor. The accessor
    target must still equal the original target. Neither comparison implies
-   freshness after the read, ABA exclusion, or transaction-time identity."
+   freshness after the read, ABA exclusion, or transaction-time identity.
+
+   v1872: Also compare the actual original pinned token's single database /
+   system-time point with this later pinned token's point. An advanced basis
+   only proves the reported database basis advanced, not a change to the row."
   (:require [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
             [xtdb.api :as xt]
-            [xtdb.basis :as basis])
+            [xtdb.basis :as basis]
+            [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot])
   (:import (java.time Instant)
            (java.util UUID)))
 
@@ -94,14 +99,17 @@
       (when (and original-before
                  (not (and (map? original-before)
                            (nil? (meta original-before))
-                           (= #{:operation-id :target :before :source-identity}
+                           (= #{:operation-id :target :before
+                                :original-snapshot-point :source-identity}
                               (set (keys original-before)))
                            (= operation (:operation-id original-before))
                            (= target (:target original-before))
                            (map? (:before original-before))
                            (nil? (meta (:before original-before)))
                            (= id (get-in original-before [:before :xt/id]))
-                           (map? (:source-identity original-before)))))
+                           (map? (:source-identity original-before))
+                           (let [p (:original-snapshot-point original-before)]
+                             (or (nil? p) (snapshot/valid-private-point? p))))))
         (reject! :invalid-private-original-prestate-witness))
       (pinned!)
       (let [node (:biff.xtdb/node ctx)
@@ -116,7 +124,8 @@
                        (try (map? (original-decode token))
                             (catch Throwable _ false)))
           (reject! :invalid-read-only-recheck-snapshot))
-        (let [rows (try (original-query
+        (let [later-point (snapshot/comparable-point (original-decode token))
+              rows (try (original-query
                          node [(str "SELECT * FROM " (name table)
                                     " WHERE _id = ? LIMIT 2") id]
                          {:snapshot-token token :current-time (Instant/now)})
@@ -142,6 +151,12 @@
            :operation-id operation
            :comparison comparison
            :historical-prestate-at-read historical
+           :reported-basis-relation
+           (if original-before
+             (snapshot/reported-basis-relation
+              (:original-snapshot-point original-before) later-point)
+             :not-compared)
+           :reported-basis-scope :single-database-system-time-only
            :historical-target (if original-before
                                 :same-original-execution-target
                                 :not-compared)

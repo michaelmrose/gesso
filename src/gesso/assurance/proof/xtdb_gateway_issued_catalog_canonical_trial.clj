@@ -15,12 +15,8 @@
    premises and obligations without treating a physical acknowledgment as
    proof discharge.
 
-   v1852: A physical trial scoped to one certified operation may coexist with
-   unrelated uncertified application operations/routes. Check the ORIGINAL
-   contract's complete semantic route inventory and the exact certified /
-   uncertified partition rather than requiring every app route to be certified.
-   This does not grant the unselected routes certification or transaction
-   authority.
+   v1852: Preserve original certified/uncertified operation and route
+   partition; never grant unselected routes transaction authority.
 
    v1853: Preserve exact selected and uncertified route scopes without
    promoting uncertified routes into transaction authority.
@@ -67,17 +63,11 @@
    this is a point-in-time external read, not a transaction-time assertion,
    authenticated node, callback-purity theorem, or history/ABA proof.
 
-   v1862: A stronger explicit pinned mode derives EVERY typed read premise
-   from the ORIGINAL fully checked catalog and selected operation instead of
-   accepting a caller-produced proof-context map. It checks the derivation's
-   declaration against this same issued executor, then tests the captured
-   prestate and inputs. This is still source-relative, not persistent custody
-   of the physical read, transaction-time freshness or proof admission.
+   v1862: The strongest pinned mode derives typed premises from the original
+   complete catalog, not caller-supplied proof data; it remains source-relative.
 
-   v1863: Retain the EXACT original checked full-catalog open assumptions,
-   premises, per-operation obligations and selected source identity in the
-   source-derived/pinned executor observation. A successful abstract or
-   physical prestate check neither closes nor discharges any obligation."
+   v1863: Preserve original open proof obligations; concrete checks never
+   discharge original kernel proof or physical refinement."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -86,6 +76,8 @@
              :as canonical]
             [gesso.assurance.proof.xtdb-gateway-typed-transition-seam
              :as typed-seam]
+             [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity
+              :as snapshot]
             [gesso.assurance.transition :as constructor]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
@@ -674,7 +666,8 @@
   "Read exactly the candidate's whole acquired prestate on the SAME caller
    context node, using a single XTDB pinned external read. No state, token,
    SQL text or physical identity is returned; this is NOT a CAS or lock."
-  [node candidate]
+  ([node candidate] (pinned-executor-before! node candidate nil))
+  ([node candidate private-basis!]
   (pinned!)
   (let [cmd (first (get-in candidate [:plan :commands]))
         target (:target candidate)
@@ -721,7 +714,10 @@
         (when-not (= before (first rows))
           (reject! :issued-executor-external-before-mismatch))
         (pinned!)
-        true))))
+        (when private-basis!
+          (private-basis! (snapshot/comparable-point
+                           (original-snapshot-decode token))))
+        true)))))
 
 (defn- original-executor-open-proof-evidence!
   "Select original, already-checked, UNRESOLVED proof evidence from the
@@ -922,11 +918,10 @@
    certified operations remain unobserved. Even complete proof origins do not
    discharge obligations or establish physical application correspondence.
 
-   v1871: The optional eighth argument is an internal process-local callback
-   to receive the exact checked target and prestate AFTER all typed and pinned
-   checks pass. It is allowed only for source-derived, pinned mode; its result
-   is never added to the copyable diagnostic report. Treat that data as
-   sensitive; it confers no transaction or retry authority."
+   v1871–1872: A private callback may receive the checked prestate and
+   ACTUAL pinned read's single comparable database/system-time point after
+   both typed and physical checks pass. This sensitive value is never public
+   evidence, a history proof, or transaction authority."
   ([contract-source catalog-source operation ctx invocation proof-context]
    (check-current-issued-executor-typed-command-alias!
     contract-source catalog-source operation ctx invocation proof-context
@@ -1024,8 +1019,11 @@
                      (= (:field-map source) (:field-map candidate))
                      (= (:command-operation source) (:command-operation candidate)))
         (reject! :original-executor-checked-candidate-not-qualified))
+      (let [checked-basis (volatile! nil)]
       (when pinned-read?
-        (pinned-executor-before! (:biff.xtdb/node ctx) candidate))
+        (pinned-executor-before!
+         (:biff.xtdb/node ctx) candidate
+         (when private-before! #(vreset! checked-basis %))))
       (let [screen (check-current-issued-typed-command-alias!
                     contract-source catalog-source operation
                     {:plan (:plan candidate)} (:inputs candidate) proof-context)]
@@ -1069,9 +1067,10 @@
             (private-before! {:operation-id operation
                               :target (:target candidate)
                               :before (:current-document candidate)
+                              :original-snapshot-point @checked-basis
                               :source-identity
                               (:selected-operation-source-identity report)}))
-          report)))))))
+          report))))))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]

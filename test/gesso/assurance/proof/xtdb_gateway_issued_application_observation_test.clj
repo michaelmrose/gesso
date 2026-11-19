@@ -12,6 +12,8 @@
              :as read-only-recheck]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
              :as issued]
+            [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity
+             :as snapshot]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test]
             [gesso.live.application-preflight.fixture :as app-fixture]
             [gesso.live.application-preflight :as application]
@@ -152,6 +154,9 @@
     (is (= {operation :not-eligible} (:per-operation-read-only-rechecks initial)))
     (is (= {operation :not-eligible}
            (:per-operation-historical-prestate-rechecks initial)))
+    (is (= {operation :not-eligible}
+           (:per-operation-reported-basis-relations initial)))
+    (is (= false (:basis-observation-proves-no-aba? initial)))
     (is (= :original-observation-required-for-read-only-recheck
            (reason #((:read-only-recheck! observer) operation))))
     (is (false? (:all-certified-operations-individually-observed? initial)))
@@ -178,6 +183,8 @@
       (is (= :individually-pinned-prestate-matched (:physical-before selected)))
       (is (= {operation :not-checked}
              (:per-operation-historical-prestate-rechecks result)))
+      (is (= {operation :not-checked}
+             (:per-operation-reported-basis-relations result)))
       (is (not-any? #(contains? result %)
                     [:private-original-before :historical-before :before
                      :original-context :original-invocation :target]))
@@ -217,6 +224,11 @@
       (is (= :historical-prestate-matched-at-read
              (get-in follow [:per-operation-historical-prestate-rechecks
                              operation])))
+      (is (= :same-reported-database-basis
+             (get-in follow [:per-operation-reported-basis-relations
+                             operation])))
+      (is (= :reported-same-database-system-time-not-row-change-history
+             (:basis-comparison-scope follow)))
       (is (= :original-checked-before-against-later-pinned-row
              (:historical-prestate-recheck-meaning follow)))
       (is (= 1 (:observation-count follow)))
@@ -250,6 +262,9 @@
       (is (= :historical-prestate-differed-at-read
              (get-in changed [:per-operation-historical-prestate-rechecks
                               operation])))
+      (is (= :later-reported-database-basis
+             (get-in changed [:per-operation-reported-basis-relations
+                              operation])))
       (is (= #{operation} (:observed-operation-ids changed)))
       (is (= :not-established (:physical-prestate-currentness changed)))
       (is (= 1 @(:constructs environment)))
@@ -262,6 +277,10 @@
       (is (= :historical-prestate-matched-at-read
              (get-in restored [:per-operation-historical-prestate-rechecks
                                operation])))
+      (is (= :later-reported-database-basis
+             (get-in restored [:per-operation-reported-basis-relations
+                               operation]))
+          "Restored equal data can coexist with an advanced database basis")
       (is (= :not-established (:physical-prestate-currentness restored)
              (:joint-snapshot-basis restored)))
       (is (= :none (:transaction-authority restored)
@@ -288,6 +307,8 @@
                (reason #((:read-only-recheck! failed) operation))))
         (is (= {operation :not-eligible}
                (:per-operation-historical-prestate-rechecks summary)))
+        (is (= {operation :not-eligible}
+               (:per-operation-reported-basis-relations summary)))
         (is (= :issued-application-observation-already-attempted
                (reason #((:observe! failed) operation {:biff.xtdb/node (db)}
                          {:binding (:binding data) :mode :submit}))))))))
@@ -333,14 +354,18 @@
       (is (= :source-document-matched-at-read
              (get-in same [:per-operation-read-only-rechecks op])))
       (is (= :historical-prestate-matched-at-read
-             (get-in same [:per-operation-historical-prestate-rechecks op]))))
+             (get-in same [:per-operation-historical-prestate-rechecks op])))
+      (is (= :same-reported-database-basis
+             (get-in same [:per-operation-reported-basis-relations op]))))
     (seed! [:requests revised])
     ;; Original source accessor still gives original document; both differ.
     (let [stale (reread! op)]
       (is (= :source-document-differed-at-read
              (get-in stale [:per-operation-read-only-rechecks op])))
       (is (= :historical-prestate-differed-at-read
-             (get-in stale [:per-operation-historical-prestate-rechecks op]))))
+             (get-in stale [:per-operation-historical-prestate-rechecks op])))
+      (is (= :later-reported-database-basis
+             (get-in stale [:per-operation-reported-basis-relations op]))))
     ;; Change only mutable source DATA, not registered source/closure identity:
     ;; it now agrees with the newer physical row. The original still differs.
     (reset! document-state revised)
@@ -361,7 +386,9 @@
       (is (= :source-document-differed-at-read
              (get-in returned [:per-operation-read-only-rechecks op])))
       (is (= :historical-prestate-matched-at-read
-             (get-in returned [:per-operation-historical-prestate-rechecks op]))))
+             (get-in returned [:per-operation-historical-prestate-rechecks op])))
+      (is (= :later-reported-database-basis
+             (get-in returned [:per-operation-reported-basis-relations op]))))
     (reset! document-state original)
     (let [again (reread! op)]
       (is (= :source-document-matched-at-read
@@ -371,6 +398,10 @@
       (is (= :none (:transaction-authority again) (:retry-authority again)
              (:authority again)))
       (is (= :not-issued (:certificate again)))
+      (is (= :later-reported-database-basis
+             (get-in again [:per-operation-reported-basis-relations op])))
+      (is (not (.contains (pr-str again) ":original-snapshot-point")))
+      (is (not (.contains (pr-str again) ":snapshot-token")))
       (is (= 1 @(:constructs (:environment env))))
       (is (nil? (read-command
                  (resolution/record-id (:binding actual))))))
@@ -431,6 +462,8 @@
         (is (= {op :not-checked} (:per-operation-read-only-rechecks value)))
         (is (= {op :not-checked}
                (:per-operation-historical-prestate-rechecks value)))
+        (is (= {op :not-checked}
+               (:per-operation-reported-basis-relations value)))
         (is (= value (summary!)))
         (is (= 1 @(:constructs (:environment env))))
         (is (nil? (read-command
@@ -606,6 +639,9 @@
                        (get-in first-refresh
                                [:per-operation-historical-prestate-rechecks
                                 primary])))
+                (is (= :later-reported-database-basis
+                       (get-in first-refresh
+                               [:per-operation-reported-basis-relations primary])))
                 (is (= :source-document-matched-at-read
                        (get-in second-refresh
                                [:per-operation-read-only-rechecks secondary])))
@@ -661,12 +697,39 @@
               (is (= :issued-application-observation-already-attempted
                      (reason #(observe! secondary ctx invoke-secondary))))
               (is (= (dissoc after :per-operation-read-only-rechecks
-                                  :per-operation-historical-prestate-rechecks)
+                                  :per-operation-historical-prestate-rechecks
+                                  :per-operation-reported-basis-relations)
                      (dissoc (summary!) :per-operation-read-only-rechecks
-                                        :per-operation-historical-prestate-rechecks)))
+                                        :per-operation-historical-prestate-rechecks
+                                        :per-operation-reported-basis-relations)))
               (is (= {primary :source-document-differed-at-read
                       secondary :source-document-matched-at-read}
                      (:per-operation-read-only-rechecks (summary!))))
               (is (= {primary :historical-prestate-differed-at-read
                       secondary :historical-prestate-matched-at-read}
                      (:per-operation-historical-prestate-rechecks (summary!)))))))))))
+
+(deftest v1872-basis-relation-classification-is-not-an-aba-proof
+  (let [t0 (java.time.Instant/parse "2026-01-01T00:00:00Z")
+        t1 (java.time.Instant/parse "2026-01-01T00:00:01Z")
+        p0 {:database "xtdb" :system-time t0}
+        p1 {:database "xtdb" :system-time t1}
+        other {:database "different" :system-time t1}]
+    (is (= p0 (snapshot/comparable-point {"xtdb" [t0]})))
+    (is (= p1 (snapshot/comparable-point {"xtdb" [t1]})))
+    (is (nil? (snapshot/comparable-point {"xtdb" [nil]})))
+    (is (nil? (snapshot/comparable-point {"xtdb" [t0 t1]})))
+    (is (nil? (snapshot/comparable-point {"xtdb" [t0]
+                                          "other" [t1]})))
+    (is (= :not-comparable (snapshot/reported-basis-relation nil p1)))
+    (is (= :not-comparable (snapshot/reported-basis-relation p0 nil)))
+    (is (= :different-reported-databases
+           (snapshot/reported-basis-relation p0 other)))
+    (is (= :same-reported-database-basis
+           (snapshot/reported-basis-relation p0 p0)))
+    (is (= :later-reported-database-basis
+           (snapshot/reported-basis-relation p0 p1)))
+    (is (= :earlier-reported-database-basis
+           (snapshot/reported-basis-relation p1 p0)))
+    (is (false? (snapshot/valid-private-point?
+                 {:database "xtdb" :system-time "not-a-time"})))))
