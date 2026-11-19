@@ -2,6 +2,8 @@
   "v1886: Real-XTDB check of one actual guarded writer's negative ERASE
    footprint. A direct ERASE bypass remains outside that local scope."
   (:require [clojure.test :refer [deftest is]]
+            [gesso.assurance.proof.xtdb-gateway-atomic-write-intent :as intent]
+            [gesso.model.command :as command]
             [gesso.assurance.proof.xtdb-restricted-submission-gateway :as gate]
             [gesso.assurance.proof.xtdb-restricted-submission-gateway-test]
             [gesso.assurance.example.physical-single-node-proving :as physical]
@@ -78,3 +80,86 @@
                         a (assoc r :certificate :issued)))))
        (is (= 0 (:source-derived-erase-count
                  (gate/require-local-nonerase-write-boundary! a r))))))))
+
+(defn- intent-rows [node]
+  (xt/q node "SELECT * FROM gesso_guarded_write_intents"))
+
+(deftest v1887-intent-document-is-produced-with-same-original-guarded-write
+  (physical/with-proving-application!
+   (fn [app]
+     (let [before ((:read! app))
+           g (intent/prepare-one-shot! (:node app) (source before))]
+       (is (= gate/gateway-type (:type g)))
+       (is (= #{:type :version :submit! :summary!} (set (keys g))))
+       (is (= :prepared (:status ((:summary! g)))))
+       (is (empty? (intent-rows (:node app)))
+           "Preparation must not create any audit document")
+       (let [result ((:submit! g))
+             local (gate/require-local-nonerase-write-boundary! g result)
+             records (intent-rows (:node app))]
+         (is (= :returned-transaction-key (:status ((:summary! g)))))
+         (is (= :established-for-this-owned-vector-only
+                (:owned-erase-op-exclusion local)))
+         (is (= 2 (:source-derived-put-count local)))
+         (is (zero? (:source-derived-erase-count local)))
+         (is (= 1 (count records)))
+         (let [record (first records)]
+           (is (= intent/intent-kind (:intent-kind record)))
+           (is (= 1 (:application-command-count record)))
+           (is (= "one-admitted-xtdb-transaction-vector-only"
+                  (:intent-scope record)))
+           (is (= 0 (:revision record)))
+           (is (string? (:xt/id record)))
+           (doseq [forbidden [:tx-key :principal :source :physical-row-id
+                              :audit-signature :certificate :authority]]
+             (is (not (contains? record forbidden)))))
+         (is (= "reserved" (:status ((:read! app)))))
+         (is (= :not-established (:transaction-commit local)
+                (:durable-audit-record local)
+                (:complete-deployment-writer-coverage local)))
+         (is (= :not-issued (:certificate local))))))))
+
+(deftest v1887-rejected-protected-write-cannot-create-intent-alone
+  (physical/with-proving-application!
+   (fn [app]
+     (let [before ((:read! app))
+           g (intent/prepare-one-shot! (:node app) (source before))
+           external (assoc before :updated-at "competing-writer"
+                          :revision (inc (:revision before)))]
+       (xt/execute-tx (:node app) [[:put-docs physical/table external]])
+       (let [failure (try ((:submit! g)) nil
+                          (catch Throwable x x))]
+         (is (instance? Throwable failure))
+         (is (= :xtdb/assert-failed
+                (:xtdb.error/code (ex-data failure))))
+         (is (= :threw-outcome-unknown (:status ((:summary! g)))))
+         (is (empty? (intent-rows (:node app)))
+             "The original guarded prewrite failure must abort the intent")
+         (is (= external ((:read! app)))))))))
+
+(deftest v1887-intent-table-is-not-original-caller-write-scope
+  (physical/with-proving-application!
+   (fn [app]
+     (let [before ((:read! app))
+           base (source before)
+           reason (fn [src]
+                    (try (intent/prepare-one-shot! (:node app) src)
+                         :accepted
+                         (catch clojure.lang.ExceptionInfo x
+                           (:reason (ex-data x)))))]
+       (is (= :reserved-intent-table-or-unsupported-plan
+              (reason (update-in base [:protected-documents]
+                                 conj {:target [intent/intent-table "forged"]
+                                       :fields :all}))))
+       (is (= :invalid-original-source
+              (reason (assoc base :audit-intent "caller-control"))))
+       (is (= :reserved-intent-table-or-unsupported-plan
+              (reason (update-in base [:plan :commands]
+                                 conj (command/create
+                                       intent/intent-table
+                                       {:xt/id "forged" :revision 0
+                                        :created-at "today" :updated-at "today"}
+                                       {:revision-key :revision
+                                        :created-at-key :created-at
+                                        :updated-at-key :updated-at}))))))
+       (is (empty? (intent-rows (:node app)))))))
