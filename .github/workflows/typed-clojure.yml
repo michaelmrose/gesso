@@ -135,7 +135,8 @@ jobs:
         run: |
           clojure -M:test \
             -n gesso.assurance.proof.xtdb-gateway-owned-nonerase-boundary-test \
-            -n gesso.assurance.proof.xtdb-gateway-signed-policy-checkpoint-test
+            -n gesso.assurance.proof.xtdb-gateway-signed-policy-checkpoint-test \
+            -n gesso.assurance.proof.xtdb-gateway-durable-checkpoint-store-test
 
       - name: Record JVM sparse identity transition observations
         run: |
