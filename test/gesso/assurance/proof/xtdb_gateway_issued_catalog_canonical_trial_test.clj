@@ -600,6 +600,70 @@
                (reason #(check! candidate proof)))))
       (is (zero? @(:constructs e))
           "Source-relative checks must not execute the issued plan"))
+    ;; v1859 does not accept a caller-supplied candidate. Instead, obtain
+    ;; it from the identical constructor registered in the issued plan and
+    ;; screen it before any Gesso physical submit. Application callbacks
+    ;; are trusted but NOT proven free from side effects.
+    (let [proof (test-helper typed-ns 'premises)
+          invocation {:binding (:binding d) :mode :submit}
+          ctx {:biff.xtdb/node (db)}
+          check! (fn [inv premises]
+                   (bound/check-current-issued-constructor-typed-command-alias!
+                    contract catalog-source operation ctx inv premises))
+          before @(:constructs e)]
+      (is (= :invalid-registered-constructor-alias-invocation
+             (reason #(check! (assoc invocation :mode :reconcile) proof))))
+      (is (= :invalid-registered-constructor-alias-invocation
+             (reason #(check! (assoc-in invocation
+                                          [:binding :principal] :forged)
+                              proof))))
+      (is (= :issued-typed-read-invariants-not-original
+             (reason #(check! invocation (assoc proof :invariants {})))))
+      (is (= before @(:constructs e))
+          "Invalid calls must fail before executing application callbacks")
+      ;; A substituted constructor in a copy of the certified operation table
+      ;; is not the registered source, even when the operation ID is correct.
+      (is (= :invalid-current-certified-operation-table
+             (reason #(bound/check-current-issued-constructor-typed-command-alias!
+                       (assoc-in contract
+                                 [:certified-operations operation :current-source
+                                  :certified-source :resolved-configuration :construct!]
+                                 (fn [& _] (throw (ex-info "substituted" {}))))
+                       catalog-source operation ctx invocation proof))))
+      (is (= before @(:constructs e)))
+      (let [checked (check! invocation proof)]
+        (is (= bound/issued-constructed-alias-report-type (:type checked)))
+        (is (= bound/issued-constructed-alias-report-version (:version checked)))
+        (is (= operation (:operation-id checked)))
+        (is (= {:operation-id operation
+                :interface-operation operation
+                :domain-command-operation :claim}
+               (:command-binding checked)))
+        (is (= :original-and-independent-source-relative
+               (:typed-abstract-alias-correspondence checked)))
+        (is (= :same-registered-source-constructor-evaluated
+               (:candidate-domain-source checked)))
+        (is (= :original-registered-input-acquisition-evaluated
+               (:candidate-input-source checked)))
+        (is (= :original-certified-plan-pre-submit-checked
+               (:candidate-prestate-check checked)))
+        (is (= :not-invoked (:registered-executor-invocation checked)))
+        (is (= :not-established (:callback-purity checked)))
+        (is (= :not-excluded (:callback-physical-side-effects checked)))
+        (is (= :not-invoked-by-this-check (:physical-submission checked)))
+        (is (= :disabled (:typed-screening-physical-submission checked)))
+        (is (= :none (:transaction-authority checked) (:authority checked)))
+        (is (= :not-issued (:certificate checked)))
+        (is (= :not-admitted (:admission checked)))
+        (is (not-any? #(contains? checked %)
+                      [:executor :submit! :observe-once! :prepare!
+                       :plan :domain-source :declaration :field-map
+                       :inputs :current-document :target])))
+      (is (= (inc before) @(:constructs e))
+          "Exact registered constructor must run once for the candidate")
+      (is (nil? (read-command
+                 (resolution/record-id (:binding d))))
+          "Known-safe original constructor fixture must not write XTDB"))
     ;; A changed copy of the source cannot impersonate the registered plan.
     (is (= :invalid-current-certified-operation-table
            (reason #(bound/check-current-issued-command-alias!
@@ -608,9 +672,9 @@
                                 :current-source :command-operation]
                                :cancel)
                      catalog-source operation))))
-    ;; The source-relative alias screen MUST NOT issue the physically capable
-    ;; trial or weaken the original v1855 rejection.
-    (is (zero? @(:constructs e)))
+    ;; Only the explicitly opted-in registered constructor evaluation above
+    ;; may run the callback; the physical alias trial must remain rejected.
+    (is (= 1 @(:constructs e)))
     (is (= #{operation} (set (keys (:certified-operations
                                    (certified/check-certified-contracts! contract))))))
     (seed! [:requests (:request d)])

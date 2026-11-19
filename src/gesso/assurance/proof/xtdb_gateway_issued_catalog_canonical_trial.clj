@@ -59,7 +59,14 @@
    requiring the full original invariant inventory. A candidate domain plan,
    input values and read-premise pairs are still caller supplied; they are
    screened, NOT authenticated or physically adopted. No original physical
-   issuance or submit path changes."
+   issuance or submit path changes.
+
+   v1859: Opt-in evaluation of the ORIGINAL registered plan constructor and
+   acquisition callbacks, with the original certified-plan candidate checker
+   and the v1858 typed check. It does not call the issued executor, Gesso's
+   physical writer, or authorize submission. Arbitrary application callback
+   effects remain OUTSIDE this check's guarantees; only a trusted, known-pure
+   registered constructor should be evaluated this way."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -71,7 +78,8 @@
             [gesso.assurance.transition :as constructor]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
-            [gesso.model.certified-plan :as plan])
+            [gesso.model.certified-plan :as plan]
+            [gesso.model.command-resolution :as resolution])
   (:import (java.util.concurrent.atomic AtomicBoolean)))
 
 (def report-type
@@ -83,6 +91,9 @@
 (def issued-typed-alias-report-type
   :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/issued-typed-command-alias)
 (def issued-typed-alias-report-version 1)
+(def issued-constructed-alias-report-type
+  :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/registered-constructor-typed-alias)
+(def issued-constructed-alias-report-version 1)
 
 (def ^:private original-contract-check certified/check-certified-contracts!)
 (def ^:private original-operation-summary application/operation-summary)
@@ -92,6 +103,8 @@
 (def ^:private original-construct constructor/build-guarded-replacement!)
 (def ^:private original-plan-require plan/require-current-plan-operation!)
 (def ^:private original-plan-describe plan/describe-plan-operation)
+(def ^:private original-plan-candidate-check plan/check-candidate!)
+(def ^:private original-binding-check resolution/require-binding)
 (def ^:private original-canonical-issuer
   canonical/issue-catalog-bound-canonical-trial!)
 (def ^:private original-typed-alias-screen
@@ -117,6 +130,10 @@
                              (var-get #'plan/require-current-plan-operation!))
                  (identical? original-plan-describe
                              (var-get #'plan/describe-plan-operation))
+                 (identical? original-plan-candidate-check
+                             (var-get #'plan/check-candidate!))
+                 (identical? original-binding-check
+                             (var-get #'resolution/require-binding))
                  (identical? original-canonical-issuer
                              (var-get #'canonical/issue-catalog-bound-canonical-trial!)))
     (reject! :substituted-original-assembly-or-issuer)))
@@ -455,6 +472,91 @@
              :candidate-domain-source :caller-supplied-not-authenticated
              :physical-submission :disabled
              :typed-screening-physical-submission :disabled))))
+
+(defn check-current-issued-constructor-typed-command-alias!
+  "Opt-in, source-relative evaluation of the exact ORIGINAL registered plan
+   constructor, followed by both the original plan candidate check and the
+   independent typed transition screen. The caller provides ctx, one command
+   binding and invariant read premises, but NOT the domain candidate, abstract
+   inputs, current document, target, operation alias, construction or field map.
+
+   This intentionally invokes the application-owned original acquisition and
+   constructor callbacks OUTSIDE the issued executor. Those callbacks MAY
+   perform arbitrary side effects, including physical writes; Gesso does not
+   prove purity or isolate them. Use this only with a trusted, known-pure
+   application fixture. The check itself never calls tx/transact!, and does
+   not demonstrate that an installed handler executed this candidate.
+   Never interpret this copyable report as an authorization or retry permit."
+  [contract-source catalog-source operation ctx invocation proof-context]
+  (let [initial (current-binding! contract-source catalog-source operation true)
+        source (get-in contract-source
+                       [:certified-operations operation :current-source])
+        binding (:binding invocation)
+        original-invariants (get-in catalog-source [:catalog :invariants])]
+    ;; Reject invalid calls BEFORE running arbitrary application callbacks.
+    (when-not (and (map? ctx)
+                   (plain-map? invocation)
+                   (= #{:binding :mode} (set (keys invocation)))
+                   (= :submit (:mode invocation))
+                   (plain-map? binding)
+                   (= operation (:operation binding))
+                   (try (= binding (original-binding-check binding))
+                        (catch Exception _ false)))
+      (reject! :invalid-registered-constructor-alias-invocation))
+    (when-not (and (plain-map? proof-context)
+                   (plain-map? original-invariants)
+                   (seq original-invariants)
+                   (= original-invariants (:invariants proof-context)))
+      (reject! :issued-typed-read-invariants-not-original))
+    (let [construct! (get-in source [:certified-source
+                                    :resolved-configuration :construct!])
+          document! (:current-document! source)
+          inputs! (:transition-inputs! source)
+          target! (:target! source)]
+      (when-not (every? fn? [construct! document! inputs! target!])
+        (reject! :missing-original-registered-constructor-or-acquisition))
+      (let [document (document! ctx binding)
+            inputs (inputs! ctx binding)
+            target (target! ctx binding)
+            constructed (construct! ctx binding)]
+        (when-not (and (plain-map? constructed)
+                       (= #{:now :plan :outcome} (set (keys constructed))))
+          (reject! :invalid-original-registered-construction))
+        (let [witness (original-plan-candidate-check
+                       {:construction (:construction source)
+                        :field-map (:field-map source)
+                        :command-operation (:command-operation source)
+                        :target target :current-document document
+                        :inputs inputs :plan (:plan constructed)})]
+          (when-not (and (= plan/witness-type (:type witness))
+                         (= plan/plan-version (:version witness))
+                         (= operation (:operation witness))
+                         (= (:command-operation initial)
+                            (:command-operation witness))
+                         (= :pre-submit-candidate-checked (:checking witness))
+                         (= false (:transaction-submitted? witness))
+                         (= :none (:authority witness)))
+            (reject! :original-registered-candidate-check-not-qualified))
+          (let [screen (check-current-issued-typed-command-alias!
+                        contract-source catalog-source operation
+                        {:plan (:plan constructed)} inputs proof-context)]
+            (when-not (= initial (current-binding!
+                                  contract-source catalog-source operation true))
+              (reject! :original-registered-constructor-source-changed))
+            (assoc screen
+                   :type issued-constructed-alias-report-type
+                   :version issued-constructed-alias-report-version
+                   :candidate-domain-source
+                   :same-registered-source-constructor-evaluated
+                   :candidate-input-source
+                   :original-registered-input-acquisition-evaluated
+                   :candidate-prestate-check
+                   :original-certified-plan-pre-submit-checked
+                   :registered-executor-invocation :not-invoked
+                   :callback-purity :not-established
+                   :callback-physical-side-effects :not-excluded
+                   :installed-handler-execution :not-established
+                   :physical-submission :not-invoked-by-this-check)))))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]
