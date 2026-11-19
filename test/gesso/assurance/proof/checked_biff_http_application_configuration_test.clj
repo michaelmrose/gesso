@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1844: The actual application startup entrypoint owns module issuance,
+  "v1845: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -321,7 +321,8 @@
   (let [selected {:type coverage/coverage-report-type
                   :version coverage/report-version
                   :current-assembly-closure :source-relative-checked
-                  :matched-certified-route-ids #{:request/claim :request/finish}}
+                  :matched-certified-route-ids #{:request/claim :request/finish}
+                  :uncertified-application-route-ids #{:request/cancel}}
         observed {:type probe/final-catalog-dispatch-report-type
                   :version probe/report-version
                   :module-id probe/module-id
@@ -330,7 +331,8 @@
                   :final-probe-handler-slot :exact-issued-wrapper
                   :installed-handler-adoption :one-returned-in-process-probe-handler-slot
                   :normal-http-route-inventory :checked-and-selected-dispatch-witnessed
-                  :checked-route-ids #{:request/claim :request/finish :page/home}
+                  :checked-route-ids #{:request/claim :request/finish
+                                       :request/cancel :page/home}
                   :checked-certified-route-ids #{:request/claim :request/finish}
                   :external-deployment :not-established
                   :certificate :not-issued :admission :not-admitted
@@ -342,6 +344,10 @@
                    (assoc observed :checked-certified-route-ids
                           #{:request/claim :request/finish :request/extra})
                    (assoc observed :checked-route-ids #{:request/claim})
+                   ;; Missing original uncertified route is NOT a valid
+                   ;; current source-to-host inventory correspondence.
+                   (assoc observed :checked-route-ids
+                          #{:request/claim :request/finish :page/home})
                    (assoc observed :final-probe-handler-slot :untrusted-replacement)
                    (assoc observed :installed-handler-adoption
                           :not-established)
@@ -591,26 +597,34 @@
   ;; secondary shape/equality predicate, never evidence authenticity.
   (let [check! (var-get #'config/require-running-selected-route-continuity!)
         routes #{:request/claim :request/finish}
+        unselected #{:request/cancel}
         inventory {:checked-certified-route-ids routes
-                   :checked-route-ids (conj routes :page/home)}]
-    (is (true? (check! true routes inventory)))
-    (is (true? (check! false nil inventory)))
-    (doseq [[selected? saved current]
-            [[true routes (assoc inventory :checked-certified-route-ids
+                   :checked-route-ids (into routes (conj unselected :page/home))}]
+    (is (true? (check! true routes unselected inventory)))
+    (is (true? (check! false nil nil inventory)))
+    (doseq [[selected? saved excluded current]
+            [[true routes unselected
+              (assoc inventory :checked-certified-route-ids
                                  #{:request/claim})]
-             [true routes (assoc inventory :checked-certified-route-ids
+             [true routes unselected (assoc inventory :checked-certified-route-ids
                                  (conj routes :request/other))]
-             [true routes (assoc inventory :checked-route-ids
+             [true routes unselected (assoc inventory :checked-route-ids
                                  #{:request/claim :page/home})]
-             [true routes (dissoc inventory :checked-route-ids)]
-             [true routes (assoc inventory :checked-certified-route-ids
+             [true routes unselected (dissoc inventory :checked-route-ids)]
+             [true routes unselected
+              (assoc inventory :checked-route-ids
+                     (conj routes :page/home))]
+             [true routes #{:request/claim}
+              inventory]
+             [true routes :not-established inventory]
+             [true routes unselected (assoc inventory :checked-certified-route-ids
                                  [:request/claim :request/finish])]
-             [true nil inventory]
-             [true #{} inventory]
-             [true #{:request/claim "request/finish"} inventory]
-             [false routes inventory]]]
+             [true nil unselected inventory]
+             [true #{} unselected inventory]
+             [true #{:request/claim "request/finish"} unselected inventory]
+             [false routes unselected inventory]]]
       (is (= :configured-instance-selected-routes-not-current
-             (reason #(check! selected? saved current)))
+             (reason #(check! selected? saved excluded current)))
           (pr-str {:selected? selected? :saved saved :current current})))))
 
 (deftest current-instance-detects-out-of-band-listener-shutdown

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1844: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1845: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -138,7 +138,12 @@
 
    v1844: Also carry exact UNCERTIFIED semantic route IDs from the original
    contract. Distinct selected/uncertified routes remain a startup-scoped
-   partition, not an independently verified deployed route inventory."
+   partition, not an independently verified deployed route inventory.
+
+   v1845: Cross-check that the original host route inventory accounts for
+   uncertified application routes too, at selected startup and current local
+   inspection. An omitted unselected route cannot count as closed host route
+   adoption, though its dispatch and business semantics remain unproven."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -373,6 +378,14 @@
                     (:normal-http-route-inventory host-report))
                  (set? (:checked-certified-route-ids host-report))
                  (set? (:checked-route-ids host-report))
+                 (set? (:uncertified-application-route-ids selected))
+                 (empty? (set/intersection
+                          (:matched-certified-route-ids selected)
+                          (:uncertified-application-route-ids selected)))
+                 (set/subset?
+                  (set/union (:matched-certified-route-ids selected)
+                             (:uncertified-application-route-ids selected))
+                  (:checked-route-ids host-report))
                  (= (:matched-certified-route-ids selected)
                     (:checked-certified-route-ids host-report))
                  (set/subset? (:checked-certified-route-ids host-report)
@@ -424,17 +437,24 @@
 
    An application WITHOUT a selected typed catalog must not acquire
    selected-catalog correspondence by implication."
-  [typed-selected? startup-route-ids inventory]
+  [typed-selected? startup-route-ids startup-uncertified-route-ids inventory]
   (when-not
    (if typed-selected?
      (and (set? startup-route-ids)
           (seq startup-route-ids)
           (every? qualified-keyword? startup-route-ids)
+          (set? startup-uncertified-route-ids)
+          (every? qualified-keyword? startup-uncertified-route-ids)
+          (empty? (set/intersection startup-route-ids
+                                    startup-uncertified-route-ids))
           (set? (:checked-certified-route-ids inventory))
           (set? (:checked-route-ids inventory))
           (= startup-route-ids (:checked-certified-route-ids inventory))
-          (set/subset? startup-route-ids (:checked-route-ids inventory)))
-     (nil? startup-route-ids))
+          (set/subset? (set/union startup-route-ids
+                                  startup-uncertified-route-ids)
+                       (:checked-route-ids inventory)))
+     (and (nil? startup-route-ids)
+          (nil? startup-uncertified-route-ids)))
     (reject! :configured-instance-selected-routes-not-current))
   true)
 
@@ -619,7 +639,10 @@
                              ;; complete selected set must remain identical
                              ;; to the set checked before this startup.
                              (require-running-selected-route-continuity!
-                              (some? typed-trial) @selected-startup-routes inventory)
+                              (some? typed-trial) @selected-startup-routes
+                              (:uncertified-application-route-ids
+                               @selected-startup-evidence)
+                              inventory)
                              ;; A fresh original issued probe challenge is
                              ;; required for this exact local listener. The
                              ;; captured URL locator supplies the target only;
