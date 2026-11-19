@@ -37,7 +37,11 @@
 
    v1874: Distinguish a missing current-valid row from a present one, and
    visible history without an interval boundary from no history visible
-   at all. Neither absence is an ERASE or uninterrupted-history proof."
+   at all. Neither absence is an ERASE or uninterrupted-history proof.
+
+   v1875: Retain the bounded 33-record pinned visible history census as an
+   independent, redacted saturation status. Query-level non-saturation is
+   never promoted into database history retention or interval completeness."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -249,6 +253,14 @@
                     (into (sorted-map)
                           (for [[operation state] snapshot]
                             [operation (get qualified operation :not-observed)]))
+                    :per-operation-visible-history-inventory
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:visible-history-inventory state :not-checked)
+                                         :not-eligible)]))
+                    :visible-history-inventory-scope :bounded-33-record-pinned-query
+                    :visible-history-inventory-proves-complete-history? false
                     :per-operation-selected-row-current-visibility
                     (into (sorted-map)
                           (for [[operation state] snapshot]
@@ -368,7 +380,8 @@
                                :historical-prestate-recheck :not-checked
                                :reported-basis-relation :not-checked
                                :selected-row-history-boundary :not-checked
-                               :selected-row-current-visibility :not-checked})
+                               :selected-row-current-visibility :not-checked
+                               :visible-history-inventory :not-checked})
                        (summary!))
                      (catch Throwable failure
                        ;; Never convert an unsuccessful/ambiguous attempt
@@ -438,6 +451,16 @@
                                                    (:selected-row-system-history-boundary report))
                                                   (= :not-established
                                                      (:selected-row-history-completeness report))
+                                                  (= :bounded-33-record-pinned-query
+                                                     (:visible-row-history-inventory-scope report))
+                                                  (= false
+                                                     (:visible-row-history-inventory-proves-complete-history?
+                                                      report))
+                                                  (#{:visible-pinned-history-inventory-below-cap
+                                                     :visible-pinned-history-inventory-cap-reached
+                                                     :no-visible-pinned-history-records
+                                                     :not-comparable}
+                                                   (:visible-row-history-inventory report))
                                                   (= false
                                                      (:selected-row-history-proves-no-aba? report)
                                                      (:selected-row-history-absence-means-unchanged?
@@ -464,7 +487,9 @@
                                                          :selected-row-history-boundary
                                                          (:selected-row-system-history-boundary report)
                                                          :selected-row-current-visibility
-                                                         (:selected-row-current-visibility report))))
+                                                         (:selected-row-current-visibility report)
+                                                         :visible-history-inventory
+                                                         (:visible-row-history-inventory report))))
                                    (summary!))
                                  (catch Throwable failure
                                    (swap! states update operation
@@ -473,7 +498,8 @@
                                                          :historical-prestate-recheck :failed
                                                          :reported-basis-relation :failed
                                                          :selected-row-history-boundary :failed
-                                                         :selected-row-current-visibility :failed)))
+                                                         :selected-row-current-visibility :failed
+                                                         :visible-history-inventory :failed)))
                                    (throw failure)))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!

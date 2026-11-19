@@ -11,7 +11,12 @@
    v1874: When the bounded boundary query returns nothing, independently
    check whether ANY selected-row historical version remains visible at the
    same pinned snapshot. Never equate no history returned with no change:
-   ERASE, retention and incomplete visibility remain possible."
+   ERASE, retention and incomplete visibility remain possible.
+
+   v1875: Distinguish a bounded inventory of visible system/valid-time
+   version records that stays BELOW the query limit from one that reaches
+   the limit. This establishes ONLY whether this pinned, read-only query
+   saturated; it cannot attest that erased or unavailable history exists."
   (:require [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity
              :as snapshot]
             [xtdb.api :as xt])
@@ -104,3 +109,66 @@
       ;; Earlier, cross-database and partially decoded bases cannot be
       ;; interpreted as an ordered historical interval for this row.
       :not-comparable)))
+
+;; This bound constrains exposure and resource usage. LIMIT (inc max) lets a
+;; returned max+1 prove that a bounded visible query saturated. One visible
+;; row record is not necessarily one physical write or transaction (valid
+;; time slicing may produce multiple records per system-time transition).
+(def ^:private max-visible-records 32)
+
+(defn- valid-visible-record? [row]
+  (and (map? row)
+       (instance? ZonedDateTime (:xt/system-from row))
+       (instance? ZonedDateTime (:xt/valid-from row))
+       (or (not (contains? row :xt/system-to))
+           (instance? ZonedDateTime (:xt/system-to row)))
+       (or (not (contains? row :xt/valid-to))
+           (instance? ZonedDateTime (:xt/valid-to row)))))
+
+(defn- classify-bounded-visible-records! [rows]
+  (when-not (and (sequential? rows)
+                 (<= 0 (count rows) (inc max-visible-records))
+                 (every? valid-visible-record? rows))
+    (reject! :invalid-bounded-visible-row-history-inventory))
+  (cond
+    (empty? rows) :no-visible-pinned-history-records
+    (= (count rows) (inc max-visible-records))
+    :visible-pinned-history-inventory-cap-reached
+    :else :visible-pinned-history-inventory-below-cap))
+
+(defn observe-pinned-visible-row-inventory!
+  "Observe at most 33 selected-row valid/system-time version RECORDS from
+   the exact pinned snapshot used by the other two read-only queries.
+   Below-cap means the query did not hit its bound, NOT that historical
+   retention, no-ERASE, temporal continuity or complete row history is proven.
+
+   Reports only a redacted saturation class; no raw versions or timestamps."
+  [node target snapshot-token clock-time original-point later-point]
+  (pinned!)
+  (let [[table id :as locator] target
+        basis-relation (snapshot/reported-basis-relation
+                        original-point later-point)]
+    (when-not (and (some? node)
+                   (vector? locator) (= 2 (count locator))
+                   (keyword? table) (nil? (namespace table))
+                   (re-matches #"[a-z][a-z0-9_]*" (name table))
+                   (or (and (string? id) (seq id)) (instance? UUID id))
+                   (string? snapshot-token) (seq snapshot-token)
+                   (instance? Instant clock-time))
+      (reject! :invalid-pinned-visible-row-history-inventory-request))
+    (if-not (#{:same-reported-database-basis
+               :later-reported-database-basis} basis-relation)
+      :not-comparable
+      (let [sql (str "SELECT _system_from, _system_to, _valid_from, _valid_to"
+                     " FROM " (name table)
+                     " FOR VALID_TIME ALL FOR SYSTEM_TIME ALL"
+                     " WHERE _id = ? LIMIT " (inc max-visible-records))
+            rows (try
+                   (original-query node [sql id]
+                                   {:snapshot-token snapshot-token
+                                    :current-time clock-time})
+                   (catch Throwable _
+                     (reject! :pinned-visible-row-history-inventory-unavailable)))
+            result (classify-bounded-visible-records! rows)]
+        (pinned!)
+        result))))

@@ -703,12 +703,14 @@
                                   :per-operation-historical-prestate-rechecks
                                   :per-operation-reported-basis-relations
                                   :per-operation-selected-row-history-boundaries
-                                  :per-operation-selected-row-current-visibility)
+                                  :per-operation-selected-row-current-visibility
+                                  :per-operation-visible-history-inventory)
                      (dissoc (summary!) :per-operation-read-only-rechecks
                                         :per-operation-historical-prestate-rechecks
                                         :per-operation-reported-basis-relations
                                         :per-operation-selected-row-history-boundaries
-                                        :per-operation-selected-row-current-visibility)))
+                                        :per-operation-selected-row-current-visibility
+                                        :per-operation-visible-history-inventory)))
               (is (= {primary :visible-selected-row-system-boundary-observed
                       secondary :same-reported-basis-no-interval}
                      (:per-operation-selected-row-history-boundaries (summary!))))
@@ -879,6 +881,81 @@
                      :xt/system-to :before :target :node :executor
                      :original-context :original-invocation
                      :private-original-before])))))
+
+
+(deftest v1875-visible-pinned-history-inventory-saturation-is-not-history-proof
+  ;; The original checked plan's row can have many valid-time slices, even
+  ;; within ONE system-time transaction. Count of visible records is not the
+  ;; count of writes. A non-saturated query also cannot exclude ERASE.
+  (let [op :request/claim
+        {:keys [data environment] :as env} (v1867-alias-case-env)
+        observer (application-observation/issue-current-issued-application-observer!
+                  (:contract env) (:catalog-source env))
+        observe! (:observe! observer)
+        reread! (:read-only-recheck! observer)
+        request (:request data)
+        id (:xt/id request)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}
+        inventory #(get-in % [:per-operation-visible-history-inventory op])]
+    (is (= {op :not-eligible}
+           (:per-operation-visible-history-inventory ((:summary! observer)))))
+    (seed! [:requests request])
+    (is (= #{op} (:observed-operation-ids (observe! op ctx invocation))))
+    (is (= :not-checked (inventory ((:summary! observer)))))
+    (let [single (reread! op)]
+      (is (= :visible-pinned-history-inventory-below-cap (inventory single)))
+      (is (= :same-reported-basis-no-interval
+             (get-in single [:per-operation-selected-row-history-boundaries op])))
+      (is (= :bounded-33-record-pinned-query
+             (:visible-history-inventory-scope single)))
+      (is (false? (:visible-history-inventory-proves-complete-history? single))))
+    ;; 38 distinct PAST valid-time slices in one transaction force 33 visible
+    ;; records in the capped snapshot inventory while preserving the NOW row.
+    (xt/execute-tx
+     (db)
+     (mapv (fn [y]
+             [:put-docs {:into :requests
+                         :valid-from (java.time.Instant/parse
+                                      (str y "-01-01T00:00:00Z"))
+                         :valid-to (java.time.Instant/parse
+                                    (str (inc y) "-01-01T00:00:00Z"))}
+              (assoc request :owner (str "historical-" y))])
+           (range 1960 1998)))
+    (let [saturated (reread! op)]
+      (is (= :visible-pinned-history-inventory-cap-reached
+             (inventory saturated)))
+      (is (= :one-current-valid-row
+             (get-in saturated [:per-operation-selected-row-current-visibility op])))
+      (is (= :source-document-matched-at-read
+             (get-in saturated [:per-operation-read-only-rechecks op])))
+      (is (= :historical-prestate-matched-at-read
+             (get-in saturated [:per-operation-historical-prestate-rechecks op])))
+      (is (= :visible-selected-row-system-boundary-observed
+             (get-in saturated [:per-operation-selected-row-history-boundaries op])))
+      (is (false? (:visible-history-inventory-proves-complete-history? saturated)))
+      (is (= :not-established (:selected-row-history-completeness saturated)
+             (:physical-application-correspondence saturated))))
+    (xt/execute-tx (db) [[:erase-docs :requests id]])
+    (let [erased (reread! op)]
+      (is (= :no-visible-pinned-history-records (inventory erased)))
+      (is (= :no-visible-selected-row-system-history-returned
+             (get-in erased [:per-operation-selected-row-history-boundaries op])))
+      (is (= :no-current-valid-row
+             (get-in erased [:per-operation-selected-row-current-visibility op])))
+      (is (= :not-established (:selected-row-history-completeness erased)
+             (:joint-snapshot-basis erased)))
+      (is (false? (:visible-history-inventory-proves-complete-history? erased)))
+      (is (= :none (:transaction-authority erased) (:retry-authority erased)
+             (:authority erased)))
+      (is (= :not-issued (:certificate erased)))
+      (is (= #{op} (:observed-operation-ids erased)))
+      (is (= 1 (:observation-count erased)))
+      (is (= 1 @(:constructs environment)))
+      (is (nil? (read-command (resolution/record-id (:binding data)))))
+      (is (not-any? #(contains? erased %)
+                    [:snapshot-token :xt/system-from :xt/valid-from :xt/system-to
+                     :original-context :private-original-before :target :before])))))
 
 (deftest v1872-basis-relation-classification-is-not-an-aba-proof
   (let [t0 (java.time.Instant/parse "2026-01-01T00:00:00Z")

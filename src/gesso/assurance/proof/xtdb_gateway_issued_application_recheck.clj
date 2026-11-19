@@ -26,7 +26,11 @@
 
    v1874: Also disclose only whether this read saw a current-valid row at
    all. If no history is visible, distinguish that from visible history
-   without a boundary: neither observation proves row deletion or ERASE."
+   without a boundary: neither observation proves row deletion or ERASE.
+
+   v1875: Pin a bounded 33-record system/valid-time inventory to the SAME
+   snapshot. Saturation is visible-query scope only; no displayed record
+   inventory, erasure exclusion or complete historical interval is implied."
   (:require [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
             [xtdb.api :as xt]
@@ -45,6 +49,7 @@
 (def ^:private original-query xt/q)
 (def ^:private original-decode basis/<-time-basis-str)
 (def ^:private original-row-history history/observe-pinned-row-system-boundaries!)
+(def ^:private original-row-inventory history/observe-pinned-visible-row-inventory!)
 
 (defn- reject! [reason]
   (throw (ex-info "Read-only issued prestate comparison not established."
@@ -58,7 +63,9 @@
                  (identical? original-query (var-get #'xt/q))
                  (identical? original-decode (var-get #'basis/<-time-basis-str))
                  (identical? original-row-history
-                             (var-get #'history/observe-pinned-row-system-boundaries!)))
+                             (var-get #'history/observe-pinned-row-system-boundaries!))
+                 (identical? original-row-inventory
+                             (var-get #'history/observe-pinned-visible-row-inventory!)))
     (reject! :substituted-original-read-only-recheck-function)))
 
 (defn compare-original-acquired-prestate!
@@ -165,6 +172,25 @@
                                                    (:original-snapshot-point original-before)
                                                    later-point)
                              :not-compared)
+              visible-inventory (if original-before
+                                  (original-row-inventory node target token
+                                                          read-clock
+                                                          (:original-snapshot-point original-before)
+                                                          later-point)
+                                  :not-compared)
+              ;; These independent queries use the SAME token and clock.
+              ;; Contradictory evidence must fail rather than being summarized
+              ;; as history absence or an apparently complete inventory.
+              _ (when (or
+                       (and (= row-boundary
+                               :visible-selected-row-system-boundary-observed)
+                            (= visible-inventory :no-visible-pinned-history-records))
+                       (and (= row-boundary
+                               :no-visible-selected-row-system-history-returned)
+                            (not= visible-inventory :no-visible-pinned-history-records))
+                       (and (= visible-inventory :no-visible-pinned-history-records)
+                            (pos? (count rows))))
+                  (reject! :contradictory-pinned-row-history-visibility))
               historical (if original-before
                            (if (and (= 1 (count rows))
                                     (= (:before original-before) (first rows)))
@@ -183,6 +209,9 @@
              :not-compared)
            :reported-basis-scope :single-database-system-time-only
            :selected-row-system-history-boundary row-boundary
+           :visible-row-history-inventory visible-inventory
+           :visible-row-history-inventory-scope :bounded-33-record-pinned-query
+           :visible-row-history-inventory-proves-complete-history? false
            :selected-row-current-visibility current-row-visibility
            :selected-row-history-absence-means-unchanged? false
            :selected-row-history-scope
