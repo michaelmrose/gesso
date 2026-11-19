@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1816: Real JDK listener replacement, inspection, managed stop and startup
+  "v1817: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -528,4 +528,61 @@
               (deref starting 15000 :start-timed-out)))))
       (finally
         (deliver release-start true)
+        (cleanup! s issued)))))
+
+(deftest managed-stop-rejects-during-in-flight-physical-start
+  ;; Complement v1816's stop-before-state-transition race. Once the one-shot
+  ;; startup has advanced to :starting and the real listener is open, a
+  ;; competing managed stop must reject, NOT stop a partly initialized Biff
+  ;; application or mark the issuance stopped. After the original HTTP
+  ;; challenge finishes, its exact issued generation can be inspected and
+  ;; then stopped normally. This is local lifecycle ordering, not a guarantee
+  ;; about independent processes or out-of-band listener shutdown.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        challenge-entered (promise)
+        release-challenge (promise)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source :base-url!
+                       (fn [system]
+                         (deliver challenge-entered true)
+                         (when-not (deref release-challenge 15000 false)
+                           (throw (ex-info "Startup challenge fixture timed out" {})))
+                         (original-locator system))))
+        starting (future ((:start-once! issued) {}))]
+    (try
+      (is (true? (deref challenge-entered 15000 false)))
+      (let [{:keys [server executor port]} @(:server-state s)
+            stopping (future (reason #((:stop! issued))))]
+        (is (some? server) "Original physical listener has started")
+        (is (pos-int? port))
+        (is (not (.isShutdown executor)))
+        (is (= :starting (:status ((:summary! issued)))))
+        (is (= :configured-start-in-progress
+               (deref stopping 10000 :stop-timed-out))
+            "Managed stop must reject during incomplete startup")
+        (is (identical? server (:server @(:server-state s))))
+        (is (not (.isShutdown executor))
+            "Rejected managed stop must not close the listener")
+        (is (= :starting (:status ((:summary! issued)))))
+        (deliver release-challenge true)
+        (let [{:keys [system instance-generation report] :as result}
+              (deref starting 15000 :start-timed-out)]
+          (is (map? result))
+          (is (= :verified-configured-start (:status report)))
+          (is (= :current-at-inspection
+                 (:status ((:inspect-generation! issued)
+                           instance-generation system))))
+          (is (identical? server (:server @(:server-state s))))
+          (is (= :stopped (:status ((:stop! issued)))))
+          (is (.isShutdown executor))
+          (is (= :configured-instance-generation-not-current
+                 (reason #((:inspect-generation! issued)
+                           instance-generation system)))))
+        (is (= :configured-start-already-attempted
+               (reason #((:start-once! issued) {})))))
+      (finally
+        (deliver release-challenge true)
+        (deref starting 15000 :start-timed-out)
         (cleanup! s issued)))))
