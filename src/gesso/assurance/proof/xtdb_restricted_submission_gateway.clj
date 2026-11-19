@@ -73,6 +73,9 @@
 (def local-attempt-type
   :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-attempt)
 (def local-attempt-version 1)
+(def local-nonerase-type
+  :gesso.assurance.proof.xtdb-restricted-submission-gateway/owned-nonerase-write)
+(def local-nonerase-version 1)
 (def local-ledger-type
   :gesso.assurance.proof.xtdb-restricted-submission-gateway/local-ledger)
 (def local-ledger-version 1)
@@ -354,7 +357,8 @@
              :attempt-id attempt-id
              :source-binding source-binding
              :source input
-             :stats stats}))
+             :stats stats
+             :owned-operation-classes (:operation-classes footprint)}))
     {:type gateway-type
      :version gateway-version
      :submit! submit!
@@ -489,6 +493,71 @@
        :authority :none})))
 
 
+(defn require-local-nonerase-write-boundary!
+  "Correlate this gateway's ORIGINAL admitted write classes with its ONE
+   original, exact-return execute-tx invocation. Neither the caller nor an
+   external signed event supplies a replacement vector, result, or writer.
+
+   An accepted report establishes that this process-local gateway's single
+   submitted vector had canonical ASSERTs and PUTs, not an ERASE or DELETE.
+   It is NOT an audit event, proof of physical commit, erasure prevention,
+   a trusted log producer, or coverage of other XTDB call sites. In
+   particular, a concurrent direct ERASE may occur on the same node."
+  [gateway result]
+  (let [returned (require-local-return! gateway result)
+        attempt (require-local-attempt! gateway)
+        registration (locking local-gateways
+                       (.get local-gateways (:submit! gateway)))
+        classes (:owned-operation-classes registration)
+        assertions (:prewrite-assertion-count returned)
+        writes (:whole-document-replacement-count returned)]
+    (seams!)
+    (when-not (and (= :public-transaction-key
+                      (:observed-result-kind returned))
+                   (= :returned-transaction-key (:status attempt))
+                   (= [:prepared :checking :submitting :returned-transaction-key]
+                      (:observed-local-events attempt))
+                   (= 1 (:owned-execute-tx-call-entries returned)
+                      (:owned-execute-tx-call-entries attempt))
+                   (= (:process-local-attempt-id returned)
+                      (:process-local-attempt-id attempt))
+                   (= (:process-local-source-binding returned)
+                      (:process-local-source-binding attempt))
+                   (vector? classes)
+                   (pos? writes)
+                   (= (:candidate-operation-count returned)
+                      (+ assertions writes) (count classes))
+                   (= classes
+                      (into (vec (repeat assertions :canonical-sql-assertion))
+                            (repeat writes :whole-document-replacement))))
+      (reject! :incoherent-owned-nonerase-write-boundary []))
+    {:type local-nonerase-type
+     :version local-nonerase-version
+     :scope :this-one-source-derived-owned-xtdb-submission-only
+     :process-local-attempt-id (:process-local-attempt-id returned)
+     :process-local-source-binding (:process-local-source-binding returned)
+     :original-owned-call-entries 1
+     :source-derived-operation-count (count classes)
+     :source-derived-assertion-count assertions
+     :source-derived-put-count writes
+     :source-derived-erase-count 0
+     :source-derived-delete-count 0
+     :owned-submitted-operation-classes
+     :canonical-assertions-followed-by-whole-document-puts
+     :owned-erase-op-exclusion :established-for-this-owned-vector-only
+     :transaction-commit :not-established
+     :physical-erasure-event-producer :not-installed
+     :durable-audit-record :not-established
+     :outside-gateway-erase-coverage :not-established
+     :complete-deployment-writer-coverage :not-established
+     :history-erasure-exclusion :not-established
+     :independent-audit-discharge :none
+     :proof-status :process-local-owned-write-shape-only
+     :admission :not-admitted
+     :certificate :not-issued
+     :authority :none}))
+
+
 (defn- public-key-point [^TransactionKey key]
   (try
     (let [id (.getTxId key)
@@ -565,6 +634,14 @@
    An observed committed row corroborates the public return, not the
    submitted operation payload, transaction-internal prestate, causal
    poststate, outside-writer closure, or universal physical refinement.
+
+   v1886 adds a REDACTED, diagnostic-only classification of this gateway's
+   own source-derived submitted vector. The original footprint validator
+   admits only canonical ASSERT and whole-document PUT forms, so the one
+   owned call cannot contain a native XTDB ERASE. Its exact returned map
+   and process-local attempt are required. This is NOT a trusted audit
+   event producer, durable log, closed-world erasure exclusion, or evidence
+   about unregistered/direct/external XTDB writers.
 
    The report contains no raw tx id, timestamps, snapshot token, SQL result,
    operation vector, node, principal, or exception payload. This function

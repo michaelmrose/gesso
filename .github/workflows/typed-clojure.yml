@@ -121,6 +121,21 @@ jobs:
             -n gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-binding-test \
             -n gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-segment-test
 
+      # v1886: The real restricted one-shot gateway's admitted ASSERT/PUT
+      # vector contains no ERASE. Confirm this diagnostic is restricted to
+      # its exact returned call and does not hide a direct XTDB ERASE bypass.
+      - name: Verify guarded write boundary excludes local ERASE only
+        env:
+          JAVA_TOOL_OPTIONS: >-
+            -Xmx3g
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --enable-native-access=ALL-UNNAMED
+            -Dio.netty.tryReflectionSetAccessible=true
+            -Dio.netty.noUnsafe=false
+        run: |
+          clojure -M:test \
+            -n gesso.assurance.proof.xtdb-gateway-owned-nonerase-boundary-test
+
       - name: Record JVM sparse identity transition observations
         run: |
           mkdir -p target/typed-node
