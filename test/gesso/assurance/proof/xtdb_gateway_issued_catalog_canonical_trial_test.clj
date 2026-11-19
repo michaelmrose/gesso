@@ -452,3 +452,68 @@
     (is (= :document-target-mismatch
            (reason #(plan/check-candidate!
                      (assoc input :target [:requests "wrong-target"])))))))
+
+(deftest original-plan-operation-id-alias-is-not-physical-typed-correspondence
+  ;; The original certified plan legitimately accepts an interface operation
+  ;; specified by the certified operation ID, not only by the domain command.
+  (let [d (data)
+        e (environment d nil)
+        base (original-issued-source d e nil)
+        operation :request/claim
+        construction (assoc-in (:construction base)
+                               [:subject :interface :operation] operation)
+        subject (:subject construction)
+        transition (-> construction (dissoc :replacements :frame)
+                       (assoc :assignments (:replacements construction)))
+        proof {:transition transition
+               :steps [{:id :step/guard :rule :guard :conclusion [:guard]}]
+               :goal [:guard]}
+        graph {:roots #{operation}
+               :nodes [{:id operation :subject subject
+                        :subject-handle (admission/admit-subject! subject)
+                        :depends-on []}]}
+        certificate (certificate/admit-certificate!
+                     {:proof-kind :guarded-transition
+                      :proof-source proof
+                      :graph-handle (dependency/check-graph! graph)
+                      :current-graph graph
+                      :expected-open-premises
+                      #{:gesso.assurance.proof.derivation/abstract-relation-match}
+                      :expected-open-obligations
+                      #{:production-transition-correspondence
+                        :current-runtime-authorization
+                        :atomic-transaction-enforcement
+                        :checker-meta-soundness}})
+        source (-> base
+                   (assoc :construction construction)
+                   (assoc-in [:certified-source :certificate] certificate)
+                   (assoc-in [:certified-source :proof-source] proof)
+                   (assoc-in [:certified-source :current-graph] graph))
+        executor (plan/build-certified-plan-operation! source)
+        handler (certified/issue-certified-handler!
+                 {:executor executor :current-source source
+                  :request->input! (fn [_] {:binding (:binding d) :mode :submit})
+                  :result->response! (fn [_ result] {:status 200 :body result})})
+        contract {:application-assembly *assembly*
+                  :semantic-route-handlers {operation handler}
+                  :certified-operations {operation {:executor executor
+                                                   :current-source source}}}
+        catalog-source {:catalog (assoc-in (original-catalog)
+                                           [:operations 0 :construction] construction)
+                        :physical-field-map (physical-map)}
+        env {:data d :environment e :source source :executor executor
+             :handler handler :contract contract :catalog-source catalog-source}]
+    (is (= :claim (:command-operation (plan/describe-plan-operation executor))))
+    (is (= operation (get-in construction [:subject :interface :operation])))
+    (is (= #{operation} (set (keys (:certified-operations
+                                   (certified/check-certified-contracts! contract))))))
+    (seed! [:requests (:request d)])
+    ;; The original certified plan is valid, but the LOWER typed physical
+    ;; relation insists the actual command operation equal the interface op.
+    ;; Until an original source-bound alias relation reaches that interpreter,
+    ;; reject the physical trial before one-use issuance or any model write.
+    (is (= :typed-physical-command-interface-alias-not-established
+           (reason #(issued env))))
+    (is (= (:request d) (read-request (:xt/id (:request d)))))
+    (is (nil? (read-command
+               (resolution/record-id (:binding d)))))))

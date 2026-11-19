@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
-  "v1854: Bind the v1775 checked-catalog physical trial to the EXACT issued
+  "v1855: Bind the v1775 checked-catalog physical trial to the EXACT issued
    v1251 certified-plan executor and the CURRENT assembled application's
    certified route/operation table. An observed physical transaction comes
    from calling the registered executor, not an arbitrary invocation thunk.
@@ -40,7 +40,13 @@
 
    v1854: Include the selected original catalog, transition and proof source
    fingerprints in the bounded physical trial report. They are rechecked
-   source identifiers, not discharged proof or physical receipt authority."
+   source identifiers, not discharged proof or physical receipt authority.
+
+   v1855: Report the original plan's otherwise-valid operation-ID interface
+   alias as a specific unsupported typed-physical seam. The downstream typed
+   source-relative interpreter currently requires the concrete domain command
+   to equal the declared interface operation. Never broaden that equality
+   without an explicit original source-bound alias correspondence."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -186,6 +192,21 @@
                      [:catalog-operations :matched-certified-route-ids
                       :uncertified-application-operations
                       :uncertified-application-route-ids])]
+    ;; The original v1251 plan builder permits an interface operation to
+    ;; equal either the *domain command* or the certified operation ID. This
+    ;; upper binding cannot treat those forms as physically interchangeable:
+    ;; the current lower v1755 typed interpreter checks that the actual domain
+    ;; command is exactly the declaration's interface operation. Fail before
+    ;; issuing a one-shot physical trial, and distinguish this otherwise-valid
+    ;; original plan from an arbitrary malformed catalog.
+    (when (and (= operation (:operation description))
+               (= operation (get-in source [:certified-source :operation]))
+               (= operation (get-in (:construction source)
+                                    [:subject :interface :operation]))
+               (= (:command-operation source)
+                  (:command-operation description))
+               (not= operation (:command-operation source)))
+      (reject! :typed-physical-command-interface-alias-not-established))
     (when-not (and (= catalog/report-type (:type checked))
                    (= :checked (:exact-declared-operation-coverage checked))
                    (= certified/report-type (:type contracts))
