@@ -260,6 +260,7 @@
         original-operator-intake operator-claim/inspect-operator-history-claim!
         original-audit-cosign auditor/inspect-independent-auditor-cosign!
         original-audit-segment erase-segment/inspect-pinned-erase-audit-segment!
+        original-audit-range erase-segment/inspect-pinned-erase-audit-segment-range!
         original-operator-binding witness-binding/expected-private-operator-binding!
         states (atom (into (sorted-map)
                            (for [operation (:certified-operation-ids initial)]
@@ -685,8 +686,9 @@
                                   (inspect-operator* operation envelope :primary))
         inspect-auditor-cosign! (fn [operation envelope]
                                   (inspect-operator* operation envelope :auditor-cosign))
-        inspect-erasure-audit-segment!
-        (fn [operation envelope]
+        inspect-erasure* (fn [operation envelope kind]
+          (when-not (#{:single :range} kind)
+            (reject! :unsupported-erasure-audit-intake-kind))
           (when-not (contains? (:certified-operation-ids initial) operation)
             (reject! :operation-not-originally-certified))
           (recheck!)
@@ -719,6 +721,8 @@
             (try
               (when-not (and (identical? original-audit-segment
                                          (var-get #'erase-segment/inspect-pinned-erase-audit-segment!))
+                             (identical? original-audit-range
+                                         (var-get #'erase-segment/inspect-pinned-erase-audit-segment-range!))
                              (identical? original-operator-binding
                                          (var-get #'witness-binding/expected-private-operator-binding!)))
                 (reject! :substituted-original-erasure-audit-checker))
@@ -726,13 +730,22 @@
                     expected (original-operator-binding
                               operation origin (:private-original-before entry)
                               (:private-later-pinned-point entry))
-                    checked (original-audit-segment expected envelope)]
-                (when-not (and (= erase-segment/report-type (:type checked))
-                               (= erase-segment/report-version (:version checked))
-                               (= :valid-distinct-auditor-ed25519-checkpoint
-                                  (:signature-integrity checked))
-                               (= :complete-hash-links-in-supplied-signed-segment-only
-                                  (:segment-integrity checked))
+                    checked (if (= kind :range)
+                              (original-audit-range expected envelope)
+                              (original-audit-segment expected envelope))]
+                (when-not (and (if (= kind :range)
+                                 (and (= erase-segment/range-report-type (:type checked))
+                                      (= erase-segment/range-report-version (:version checked))
+                                      (= :valid-distinct-auditor-ed25519-checkpoints
+                                         (:signature-integrity checked))
+                                      (= :complete-hash-links-in-supplied-signed-range-only
+                                         (:range-integrity checked)))
+                                 (and (= erase-segment/report-type (:type checked))
+                                      (= erase-segment/report-version (:version checked))
+                                      (= :valid-distinct-auditor-ed25519-checkpoint
+                                         (:signature-integrity checked))
+                                      (= :complete-hash-links-in-supplied-signed-segment-only
+                                         (:segment-integrity checked))))
                                (#{:erase-commit-record-present-in-supplied-segment
                                   :no-erase-commit-record-in-supplied-segment}
                                 (:selected-row-erase-record checked))
@@ -755,10 +768,15 @@
                 (summary!))
               (catch Throwable failure
                 (swap! states assoc-in [operation :erasure-audit-intake] :failed)
-                (throw failure)))))]
+                (throw failure)))))
+        inspect-erasure-audit-segment! (fn [operation envelope]
+                                         (inspect-erasure* operation envelope :single))
+        inspect-erasure-audit-segment-range! (fn [operation envelopes]
+                                               (inspect-erasure* operation envelopes :range))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!
      :read-only-recheck! read-only-recheck!
      :inspect-operator-claim! inspect-operator-claim!
      :inspect-auditor-cosign! inspect-auditor-cosign!
-     :inspect-erasure-audit-segment! inspect-erasure-audit-segment!}))
+     :inspect-erasure-audit-segment! inspect-erasure-audit-segment!
+     :inspect-erasure-audit-segment-range! inspect-erasure-audit-segment-range!}))

@@ -6,8 +6,12 @@
    authenticated checkpoint, NOT independent capture at XTDB's erasure/write
    boundary, persistent storage, prevention, completeness of logging, absence
    of omitted segments, or proof that any reported event actually occurred.
-   The caller-supplied expected binding is source-relative unless obtained
-   by the original checked private witness collector (not wired here)."
+   The standalone caller-supplied expected binding is source-relative; only
+   the original checked private witness collector can bind it to XTDB.
+
+   v1883: A separately invoked bounded multi-segment verifier also checks
+   continuity between adjacent auditor-signed checkpoints. It cannot prove
+   that the provided range is all that existed, or that its events occurred."
   (:require [gesso.assurance.proof.xtdb-gateway-issued-operator-claim-intake :as intake]
             [gesso.assurance.proof.xtdb-gateway-issued-operator-audit-cosign :as auditor])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
@@ -247,3 +251,100 @@
          :discharged-conditions #{}
          :certificate :not-issued :transaction-authority :none
          :retry-authority :none :authority :none}))))
+
+(def range-report-type
+  :gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-segment/sealed-range-chain)
+(def range-report-version 1)
+(def max-segments 8)
+(def ^:private original-inspect-segment inspect-pinned-erase-audit-segment!)
+
+(defn inspect-pinned-erase-audit-segment-range!
+  "Verify between 1 and 8 consecutive, separately auditor-signed segments
+   bound to the SAME expected physical witness. Verify each original segment
+   first, then require exact sequence/head/stream continuity, monotonic event
+   times and uniqueness of event IDs ACROSS segment boundaries.
+
+   The beginning and end are still caller-selected signed checkpoints. A
+   verified contiguous supplied range is not a complete audit log, an actual
+   XTDB event producer, a persistent anchor or a discharge of history proof.
+   The range returns redacted integrity/classification only, never records."
+  [expected envelopes]
+  (when-not (and (vector? envelopes)
+                 (<= 1 (count envelopes) max-segments))
+    (reject! :invalid-audit-segment-range-request))
+  (when-not (identical? original-inspect-segment
+                         (var-get #'inspect-pinned-erase-audit-segment!))
+    (reject! :substituted-original-audit-segment-checker))
+  (let [verified (mapv #(original-inspect-segment expected %) envelopes)
+        checkpoints (mapv :checkpoint envelopes)
+        record-vectors (mapv :records envelopes)
+        ;; The original checker guarantees each envelope's schema, signature,
+        ;; record ordering, digest chain and exact expected witness binding.
+        [_ seen seen-time selected?]
+        (reduce (fn [[prior seen last-time selected?] [checkpoint records]]
+                  (when (and prior
+                             (not (and (= (:stream-id prior) (:stream-id checkpoint))
+                                       (= (:end-sequence prior)
+                                          (:start-sequence checkpoint))
+                                       (= (:head-sha256 prior)
+                                          (:start-sha256 checkpoint)))))
+                    (reject! :audit-segment-range-checkpoint-discontinuity))
+                  (let [[updated time]
+                        (reduce (fn [[ids prior-time] {:keys [event]}]
+                                  (when (contains? ids (:event-id event))
+                                    (reject! :audit-segment-range-duplicate-event-id))
+                                  (when (and prior-time
+                                             (neg? (compare (:recorded-at event)
+                                                            prior-time)))
+                                    (reject! :audit-segment-range-time-regression))
+                                  [(conj ids (:event-id event))
+                                   (:recorded-at event)])
+                                [seen last-time]
+                                records)]
+                    [checkpoint updated time
+                     (or selected?
+                         (some #(= :erase-commit-reported
+                                   (get-in % [:event :event-kind]))
+                               (filter #(and (= (:physical-table expected)
+                                                (get-in % [:event :physical-table]))
+                                             (= (:physical-row-id expected)
+                                                (get-in % [:event :physical-row-id])))
+                                       records)))]))
+                [nil #{} nil false]
+                (map vector checkpoints record-vectors))]
+    (when-not (every? (fn [r]
+                        (and (= report-type (:type r))
+                             (= report-version (:version r))
+                             (= :valid-distinct-auditor-ed25519-checkpoint
+                                (:signature-integrity r))
+                             (= :complete-hash-links-in-supplied-signed-segment-only
+                                (:segment-integrity r))
+                             (= :not-established (:audit-producer-authenticity r)
+                                (:actual-xtdb-erase-correspondence r)
+                                (:missing-segment-exclusion r)
+                                (:history-completeness r))
+                             (= #{} (:discharged-conditions r))
+                             (= :not-issued (:certificate r))
+                             (= :none (:authority r))))
+                      verified)
+      (reject! :unqualified-supplied-audit-segment))
+    {:type range-report-type :version range-report-version
+     :signature-integrity :valid-distinct-auditor-ed25519-checkpoints
+     :range-integrity :complete-hash-links-in-supplied-signed-range-only
+     :verified-segment-count (count envelopes)
+     :verified-record-count (reduce + 0 (map count record-vectors))
+     :selected-row-erase-record
+     (if selected?
+       :erase-commit-record-present-in-supplied-segment
+       :no-erase-commit-record-in-supplied-segment)
+     :audit-stream-start-anchor :caller-supplied-in-signed-checkpoint
+     :audit-producer-authenticity :not-established
+     :actual-xtdb-erase-correspondence :not-established
+     :log-ingestion-completeness :not-established
+     :missing-segment-exclusion :not-established
+     :retention-enforcement :not-established
+     :erasure-exclusion :not-established
+     :history-completeness :not-established
+     :discharged-conditions #{}
+     :certificate :not-issued :transaction-authority :none
+     :retry-authority :none :authority :none}))

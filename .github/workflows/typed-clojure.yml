@@ -93,6 +93,34 @@ jobs:
             -n gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test \
             -n gesso.assurance.proof.checked-biff-http-application-inspection-callback-race-test
 
+      # v1883: Exercise the private original-XTDB-witness binding of one
+      # bounded chain of auditor-sealed erase records. These tests explicitly
+      # manufacture a signed erase claim while the physical row survives:
+      # cryptographic integrity is not verified event capture or discharge.
+      - name: Verify signed erase-range binding against real XTDB
+        env:
+          JAVA_TOOL_OPTIONS: >-
+            -Xmx3g
+            --add-opens=java.base/java.nio=ALL-UNNAMED
+            --enable-native-access=ALL-UNNAMED
+            -Dio.netty.tryReflectionSetAccessible=true
+            -Dio.netty.noUnsafe=false
+        run: |
+          tmp_keys="$(mktemp -d)"
+          trap 'rm -rf "$tmp_keys"' EXIT
+          for role in OPERATOR AUDITOR; do
+            label="$(printf '%s' "$role" | tr '[:upper:]' '[:lower:]')"
+            openssl genpkey -algorithm ED25519 -outform DER \
+              -out "$tmp_keys/$label.key.der"
+            openssl pkey -inform DER -in "$tmp_keys/$label.key.der" \
+              -pubout -outform DER -out "$tmp_keys/$label.pub.der"
+            export "GESSO_TEST_${role}_PRIVATE_KEY_B64=$(base64 -w0 "$tmp_keys/$label.key.der")"
+            export "GESSO_XTDB_HISTORY_${role}_ED25519_PUBLIC_KEY_B64=$(base64 -w0 "$tmp_keys/$label.pub.der")"
+          done
+          clojure -M:test \
+            -n gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-binding-test \
+            -n gesso.assurance.proof.xtdb-gateway-issued-erasure-audit-segment-test
+
       - name: Record JVM sparse identity transition observations
         run: |
           mkdir -p target/typed-node
