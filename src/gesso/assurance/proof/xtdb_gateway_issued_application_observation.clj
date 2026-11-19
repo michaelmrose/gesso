@@ -19,7 +19,13 @@
    source document/target accessor against a NEW pinned XTDB snapshot. The
    original executor and constructor are never rerun. The result is a later
    point-in-time comparison, NOT equality to the historical candidate,
-   continuous freshness or transaction authority."
+   continuous freshness or transaction authority.
+
+   v1871: Retain the exact originally checked before-document and target
+   ONLY in a private qualified observation entry. The public summary exposes
+   two independent later read outcomes: new source document versus physical
+   row, and historical checked before-document versus that same physical row.
+   Witness contents are never published, replayed, or used for authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -230,6 +236,15 @@
                     (into (sorted-map)
                           (for [[operation state] snapshot]
                             [operation (get qualified operation :not-observed)]))
+                    :per-operation-historical-prestate-rechecks
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:historical-prestate-recheck
+                                          state :not-checked)
+                                         :not-eligible)]))
+                    :historical-prestate-recheck-meaning
+                    :original-checked-before-against-later-pinned-row
                     :per-operation-read-only-rechecks
                     (into (sorted-map)
                           (for [[operation state] snapshot]
@@ -283,16 +298,30 @@
                        (reject! :issued-application-observation-already-attempted)))
                    (try
                      (recheck!)
-                     (let [result (original-observe
+                     (let [captured-before (volatile! nil)
+                           result (original-observe
                                    contract-source catalog-source operation
-                                   ctx invocation nil :pinned-source-derived-premises)
-                           checked (qualified-observation! initial operation result)]
+                                   ctx invocation nil :pinned-source-derived-premises
+                                   (fn [witness] (vreset! captured-before witness)))
+                           checked (qualified-observation! initial operation result)
+                           original-before @captured-before]
+                       (when-not (and (map? original-before)
+                                      (= #{:operation-id :target :before
+                                           :source-identity}
+                                         (set (keys original-before)))
+                                      (= operation (:operation-id original-before))
+                                      (map? (:before original-before))
+                                      (= (:selected-operation-source-identity result)
+                                         (:source-identity original-before)))
+                         (reject! :original-private-prestate-witness-not-established))
                        (recheck!)
                        (swap! states assoc operation
                               {:evidence checked
+                               :private-original-before original-before
                                :original-context ctx
                                :original-invocation invocation
-                               :read-only-recheck :not-checked})
+                               :read-only-recheck :not-checked
+                               :historical-prestate-recheck :not-checked})
                        (summary!))
                      (catch Throwable failure
                        ;; Never convert an unsuccessful/ambiguous attempt
@@ -335,13 +364,19 @@
                                        report (original-recheck
                                                source executor operation
                                                (:original-context entry)
-                                               (:original-invocation entry))]
+                                               (:original-invocation entry)
+                                               (:private-original-before entry))]
                                    (when-not (and (= recheck/report-type (:type report))
                                                   (= recheck/report-version (:version report))
                                                   (= operation (:operation-id report))
                                                   (#{:source-document-matched-at-read
                                                      :source-document-differed-at-read}
                                                    (:comparison report))
+                                                  (#{:historical-prestate-matched-at-read
+                                                     :historical-prestate-differed-at-read}
+                                                   (:historical-prestate-at-read report))
+                                                  (= :same-original-execution-target
+                                                     (:historical-target report))
                                                   (= :not-established
                                                      (:historical-candidate-equality report)
                                                      (:currentness-after-read report))
@@ -349,13 +384,18 @@
                                                      (:authority report)))
                                      (reject! :unqualified-original-read-only-recheck))
                                    (recheck!)
-                                   (swap! states assoc-in
-                                          [operation :read-only-recheck]
-                                          (:comparison report))
+                                   (swap! states update operation
+                                          (fn [e] (assoc e
+                                                         :read-only-recheck
+                                                         (:comparison report)
+                                                         :historical-prestate-recheck
+                                                         (:historical-prestate-at-read report))))
                                    (summary!))
                                  (catch Throwable failure
-                                   (swap! states assoc-in [operation :read-only-recheck]
-                                          :failed)
+                                   (swap! states update operation
+                                          (fn [e] (assoc e
+                                                         :read-only-recheck :failed
+                                                         :historical-prestate-recheck :failed)))
                                    (throw failure)))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!

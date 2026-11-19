@@ -7,7 +7,13 @@
    The returned value is a point-in-time SOURCE-RELATIVE comparison, NOT an
    equality check against the candidate captured at the earlier observation:
    original acquisition callbacks may change their answers or cause effects.
-   The context node is untrusted, and the physical state may change again."
+   The context node is untrusted, and the physical state may change again.
+
+   v1871: An optional PRIVATE source-bound witness of the originally checked
+   target and complete before-document permits a second comparison against
+   the SAME later pinned row, without replaying a constructor. The accessor
+   target must still equal the original target. Neither comparison implies
+   freshness after the read, ABA exclusion, or transaction-time identity."
   (:require [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
             [xtdb.api :as xt]
@@ -47,7 +53,10 @@
    Application-owned acquisition callbacks may have effects. No side effects
    from them are excluded or undone, and this does not perform authentication,
    original command construction, XTDB submission or source proof discharge."
-  [source executor operation ctx invocation]
+  ([source executor operation ctx invocation]
+   (compare-original-acquired-prestate!
+    source executor operation ctx invocation nil))
+  ([source executor operation ctx invocation original-before]
   (pinned!)
   ;; Validate before invoking arbitrary application-owned callbacks.
   (when-not (and (map? source) (map? ctx)
@@ -82,6 +91,18 @@
                      (or (and (string? id) (seq id))
                          (instance? UUID id)))
         (reject! :invalid-original-read-only-recheck-target))
+      (when (and original-before
+                 (not (and (map? original-before)
+                           (nil? (meta original-before))
+                           (= #{:operation-id :target :before :source-identity}
+                              (set (keys original-before)))
+                           (= operation (:operation-id original-before))
+                           (= target (:target original-before))
+                           (map? (:before original-before))
+                           (nil? (meta (:before original-before)))
+                           (= id (get-in original-before [:before :xt/id]))
+                           (map? (:source-identity original-before)))))
+        (reject! :invalid-private-original-prestate-witness))
       (pinned!)
       (let [node (:biff.xtdb/node ctx)
             tokens (try (original-query node "SHOW SNAPSHOT_TOKEN")
@@ -109,11 +130,21 @@
                            (and (sequential? rows)
                                 (<= 0 (count rows) 2)
                                 (every? map? rows)) :source-document-differed-at-read
-                           :else (reject! :invalid-read-only-recheck-result))]
+                           :else (reject! :invalid-read-only-recheck-result))
+              historical (if original-before
+                           (if (and (= 1 (count rows))
+                                    (= (:before original-before) (first rows)))
+                             :historical-prestate-matched-at-read
+                             :historical-prestate-differed-at-read)
+                           :not-compared)]
           (pinned!)
           {:type report-type :version report-version
            :operation-id operation
            :comparison comparison
+           :historical-prestate-at-read historical
+           :historical-target (if original-before
+                                :same-original-execution-target
+                                :not-compared)
            :source :same-original-registered-read-accessors
            :read :independent-pinned-xtdb-on-caller-context-node
            :historical-candidate-equality :not-established
@@ -122,4 +153,4 @@
            :callback-purity :not-established
            :physical-submission :not-invoked-by-this-check
            :transaction-authority :none
-           :certificate :not-issued :authority :none})))))
+           :certificate :not-issued :authority :none}))))))

@@ -10,21 +10,10 @@
    does NOT independently attest the deployed Biff handler or prove that
    arbitrary registered callbacks implement business policy correctly.
 
-   v1848: One selected operation must own exactly its own routes; it must
-   NOT be required to own every certified route in a multi-operation app.
-   Independently verify that the disjoint certified operation route sets
-   form the complete original declared route inventory. Never relax exact
-   issued executor, construction, command identity or physical field checks.
-
-   v1849: Reuse the genuine catalog-wide original source/issued-handler
-   checker. Selected-operation checks alone do not establish full catalog
-   construction and route correspondence when other certified operations
-   coexist. Its report remains source-relative and non-authoritative.
-
-   v1851: Preserve the genuine full catalog's unresolved proof assumptions,
-   premises and per-operation obligations in issued physical trial reports.
-   Recheck this evidence with the original source before summarizing or
-   observing. A physical acknowledgment does NOT discharge proof obligations.
+   v1848–v1851: Enforce original complete, disjoint certified-route scope,
+   reuse genuine whole-catalog checkers, and preserve all unresolved proof
+   premises and obligations without treating a physical acknowledgment as
+   proof discharge.
 
    v1852: A physical trial scoped to one certified operation may coexist with
    unrelated uncertified application operations/routes. Check the ORIGINAL
@@ -33,10 +22,8 @@
    This does not grant the unselected routes certification or transaction
    authority.
 
-   v1853: Carry the original selected/uncertified operation and route scope
-   into the one-use trial identity and public reports. A source-relative
-   acknowledged Claim write must never hide an uncertified Cancel route or
-   promote it to certified or deployed transaction authority.
+   v1853: Preserve exact selected and uncertified route scopes without
+   promoting uncertified routes into transaction authority.
 
    v1854: Include the selected original catalog, transition and proof source
    fingerprints in the bounded physical trial report. They are rechecked
@@ -931,25 +918,30 @@
    evidence and exact selected operation evidence without claiming that a
    typed check, snapshot read or constructor capture discharged it.
 
-   v1864: Verify the original catalog proof ledger's exact global/set union,
-   and associate the selected operation's original proof source, subject and
-   dependency graph identities with the same physical-prestate diagnostic.
-   Global assumptions remain explicitly global, not selected-operation proofs.
+   Checks and provenance remain scoped to the selected operation; all other
+   certified operations remain unobserved. Even complete proof origins do not
+   discharge obligations or establish physical application correspondence.
 
-   v1865: Join the checked per-operation proof origins to the COMPLETE
-   selected certified operation set, its disjoint routes and the explicit
-   uncertified complement. Original global assumptions are never attributed
-   to an individual operation; no uncertified route gains proof identity.
-
-   v1866: Attribute checked candidate, typed semantics and optional pinned
-   XTDB read only to the selected operation. Every other certified operation
-   remains unobserved; uncertified routes gain no observations or proof."
+   v1871: The optional eighth argument is an internal process-local callback
+   to receive the exact checked target and prestate AFTER all typed and pinned
+   checks pass. It is allowed only for source-derived, pinned mode; its result
+   is never added to the copyable diagnostic report. Treat that data as
+   sensitive; it confers no transaction or retry authority."
   ([contract-source catalog-source operation ctx invocation proof-context]
    (check-current-issued-executor-typed-command-alias!
     contract-source catalog-source operation ctx invocation proof-context
     :no-external-read))
   ([contract-source catalog-source operation ctx invocation proof-context
     read-mode]
+   (check-current-issued-executor-typed-command-alias!
+    contract-source catalog-source operation ctx invocation proof-context
+    read-mode nil))
+  ([contract-source catalog-source operation ctx invocation proof-context
+    read-mode private-before!]
+  (when-not (or (nil? private-before!)
+                (and (= :pinned-source-derived-premises read-mode)
+                     (fn? private-before!)))
+    (reject! :invalid-private-checked-prestate-capture))
   (when-not (#{:no-external-read :pinned-external-before
                :pinned-source-derived-premises} read-mode)
     (reject! :unsupported-issued-executor-before-observation-mode))
@@ -1040,10 +1032,11 @@
         (when-not (= initial
                      (current-binding! contract-source catalog-source operation true))
           (reject! :original-executor-source-changed-after-capture))
-        (merge screen
-               (original-executor-open-proof-evidence! initial operation)
-               (original-executor-observation-scope! initial operation (boolean pinned-read?))
-               {:type issued-executor-candidate-alias-report-type
+        (let [report (merge screen
+                            (original-executor-open-proof-evidence! initial operation)
+                            (original-executor-observation-scope!
+                             initial operation (boolean pinned-read?))
+                            {:type issued-executor-candidate-alias-report-type
                :version issued-executor-candidate-alias-report-version
                :candidate-domain-source :original-executor-guarded-construct
                :candidate-input-source :original-executor-acquisition
@@ -1069,7 +1062,16 @@
                :transaction-time-prestate :not-established
                :prestate-aba-exclusion :not-established
                :certificate :not-issued :admission :not-admitted
-               :transaction-authority :none :authority :none})))))))
+               :transaction-authority :none :authority :none})]
+          ;; No witness is captured if ANY original/proof/physical check
+          ;; fails. The sink receives sensitive data, never public evidence.
+          (when private-before!
+            (private-before! {:operation-id operation
+                              :target (:target candidate)
+                              :before (:current-document candidate)
+                              :source-identity
+                              (:selected-operation-source-identity report)}))
+          report)))))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]

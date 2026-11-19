@@ -10,6 +10,8 @@
              :as application-observation]
             [gesso.assurance.proof.xtdb-gateway-issued-application-recheck
              :as read-only-recheck]
+            [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
+             :as issued]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test]
             [gesso.live.application-preflight.fixture :as app-fixture]
             [gesso.live.application-preflight :as application]
@@ -51,8 +53,9 @@
 (use-fixtures :once parent-fixture)
 
 (defn- v1867-alias-case-env
-  ([] (v1867-alias-case-env nil))
-  ([before-constructor!]
+  ([] (v1867-alias-case-env nil nil))
+  ([before-constructor!] (v1867-alias-case-env before-constructor! nil))
+  ([before-constructor! document-state]
   ;; The original certified plan expressly permits this operation-ID alias.
   ;; Rebuild its current certificate and exact registered executor as in v1861.
   (let [d (data)
@@ -95,6 +98,9 @@
                               (fn [ctx binding]
                                 (before-constructor!)
                                 (original ctx binding))))
+                 source)
+        source (if document-state
+                 (assoc source :current-document! (fn [_ _] @document-state))
                  source)
         executor (plan/build-certified-plan-operation! source)
         handler (certified/issue-certified-handler!
@@ -144,6 +150,8 @@
     (is (= :original-source-rechecked-at-summary
            (:source-stability initial)))
     (is (= {operation :not-eligible} (:per-operation-read-only-rechecks initial)))
+    (is (= {operation :not-eligible}
+           (:per-operation-historical-prestate-rechecks initial)))
     (is (= :original-observation-required-for-read-only-recheck
            (reason #((:read-only-recheck! observer) operation))))
     (is (false? (:all-certified-operations-individually-observed? initial)))
@@ -168,6 +176,11 @@
       (is (= #{} (:in-flight-observation-ids result)
              (:failed-observation-ids result)))
       (is (= :individually-pinned-prestate-matched (:physical-before selected)))
+      (is (= {operation :not-checked}
+             (:per-operation-historical-prestate-rechecks result)))
+      (is (not-any? #(contains? result %)
+                    [:private-original-before :historical-before :before
+                     :original-context :original-invocation :target]))
       (is (= :original-and-independent-source-relative
              (:typed-transition selected)))
       (is (= (get-in result [:certified-operation-proof-origins operation])
@@ -201,6 +214,11 @@
     (let [follow ((:read-only-recheck! observer) operation)]
       (is (= :source-document-matched-at-read
              (get-in follow [:per-operation-read-only-rechecks operation])))
+      (is (= :historical-prestate-matched-at-read
+             (get-in follow [:per-operation-historical-prestate-rechecks
+                             operation])))
+      (is (= :original-checked-before-against-later-pinned-row
+             (:historical-prestate-recheck-meaning follow)))
       (is (= 1 (:observation-count follow)))
       (is (= :not-established (:physical-prestate-currentness follow)))
       (is (= :later-source-accessor-against-new-pinned-read-not-historical-candidate
@@ -209,7 +227,9 @@
       (is (= 1 @(:constructs environment)))
       (is (not-any? #(contains? follow %)
                     [:original-context :original-invocation :before :target
-                     :node :snapshot-token :read-only-recheck! :executor])))
+                     :private-original-before :historical-before
+                     :node :snapshot-token :read-only-recheck! :executor]))
+      (is (not (.contains (pr-str follow) ":private-original-before"))))
     ;; Replacing the read-only verifier must fail closed without modifying
     ;; the historical candidate or invoking an application constructor.
     (with-redefs [read-only-recheck/compare-original-acquired-prestate!
@@ -219,20 +239,35 @@
     (is (= :failed
            (get-in ((:summary! observer))
                    [:per-operation-read-only-rechecks operation])))
+    (is (= :failed
+           (get-in ((:summary! observer))
+                   [:per-operation-historical-prestate-rechecks operation])))
     (is (= 1 @(:constructs environment)))
     (seed! [:requests (assoc (:request data) :owner "later-writer")])
     (let [changed ((:read-only-recheck! observer) operation)]
       (is (= :source-document-differed-at-read
              (get-in changed [:per-operation-read-only-rechecks operation])))
+      (is (= :historical-prestate-differed-at-read
+             (get-in changed [:per-operation-historical-prestate-rechecks
+                              operation])))
       (is (= #{operation} (:observed-operation-ids changed)))
       (is (= :not-established (:physical-prestate-currentness changed)))
       (is (= 1 @(:constructs environment)))
       (is (= "later-writer" (:owner (read-request (:xt/id (:request data))))))
       (is (nil? (read-command (resolution/record-id (:binding data))))))
     (seed! [:requests (:request data)])
-    (is (= :source-document-matched-at-read
-           (get-in ((:read-only-recheck! observer) operation)
-                   [:per-operation-read-only-rechecks operation])))
+    (let [restored ((:read-only-recheck! observer) operation)]
+      (is (= :source-document-matched-at-read
+             (get-in restored [:per-operation-read-only-rechecks operation])))
+      (is (= :historical-prestate-matched-at-read
+             (get-in restored [:per-operation-historical-prestate-rechecks
+                               operation])))
+      (is (= :not-established (:physical-prestate-currentness restored)
+             (:joint-snapshot-basis restored)))
+      (is (= :none (:transaction-authority restored)
+             (:retry-authority restored)))
+      (is (= 1 (:observation-count restored)))
+      (is (= :not-issued (:certificate restored))))
     (is (= 1 @(:constructs environment)))
     ;; Failed original attempts do not gain a fresh-read escape hatch.
     ;; Failed observation attempts are consumed and NEVER counted as evidence.
@@ -251,10 +286,101 @@
                (get-in summary [:per-operation-observations operation])))
         (is (= :original-observation-required-for-read-only-recheck
                (reason #((:read-only-recheck! failed) operation))))
+        (is (= {operation :not-eligible}
+               (:per-operation-historical-prestate-rechecks summary)))
         (is (= :issued-application-observation-already-attempted
                (reason #((:observe! failed) operation {:biff.xtdb/node (db)}
                          {:binding (:binding data) :mode :submit}))))))))
 
+
+
+(deftest v1871-historical-checked-prestate-versus-newly-acquired-physical-state
+  ;; Same original issued executor. Its source accessor is a stable function
+  ;; over mutable application state: later it can agree with a NEW physical
+  ;; document that is NOT the originally captured prestate. An independent
+  ;; historical witness must distinguish these two relations.
+  (let [op :request/claim
+        document-state (atom nil)
+        env (v1867-alias-case-env nil document-state)
+        actual (:data env)
+        observer (application-observation/issue-current-issued-application-observer!
+                  (:contract env) (:catalog-source env))
+        observe! (:observe! observer)
+        reread! (:read-only-recheck! observer)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding actual) :mode :submit}
+        original (:request actual)
+        revised (assoc original :owner "later-writer")
+        source (get-in env [:contract :certified-operations op :current-source])
+        executor (get-in env [:contract :certified-operations op :executor])]
+    (is (= :invalid-private-checked-prestate-capture
+           (reason #(issued/check-current-issued-executor-typed-command-alias!
+                     (:contract env) (:catalog-source env) op ctx invocation
+                     nil :no-external-read (fn [_] nil))))
+        "Cannot capture an original witness outside pinned source-derived mode")
+    (is (zero? @(:constructs (:environment env))))
+    (reset! document-state original)
+    (seed! [:requests original])
+    (let [historical (observe! op ctx invocation)]
+      (is (= #{op} (:observed-operation-ids historical)))
+      (is (= {op :not-checked}
+             (:per-operation-historical-prestate-rechecks historical)))
+      (is (= 1 @(:constructs (:environment env))))
+      (is (not-any? #(contains? historical %)
+                    [:private-original-before :before :target :snapshot-token
+                     :document-state :historical-prestate-witness])))
+    (let [same (reread! op)]
+      (is (= :source-document-matched-at-read
+             (get-in same [:per-operation-read-only-rechecks op])))
+      (is (= :historical-prestate-matched-at-read
+             (get-in same [:per-operation-historical-prestate-rechecks op]))))
+    (seed! [:requests revised])
+    ;; Original source accessor still gives original document; both differ.
+    (let [stale (reread! op)]
+      (is (= :source-document-differed-at-read
+             (get-in stale [:per-operation-read-only-rechecks op])))
+      (is (= :historical-prestate-differed-at-read
+             (get-in stale [:per-operation-historical-prestate-rechecks op]))))
+    ;; Change only mutable source DATA, not registered source/closure identity:
+    ;; it now agrees with the newer physical row. The original still differs.
+    (reset! document-state revised)
+    (let [newly-agreeing (reread! op)]
+      (is (= :source-document-matched-at-read
+             (get-in newly-agreeing [:per-operation-read-only-rechecks op])))
+      (is (= :historical-prestate-differed-at-read
+             (get-in newly-agreeing [:per-operation-historical-prestate-rechecks op])))
+      (is (= #{op} (:observed-operation-ids newly-agreeing)))
+      (is (= 1 (:observation-count newly-agreeing)))
+      (is (= :not-established (:joint-snapshot-basis newly-agreeing)
+             (:physical-prestate-currentness newly-agreeing))))
+    ;; Accessor now differs, while the physical row has returned to the
+    ;; original prestate: historical and current accessor comparisons diverge
+    ;; in the opposite direction. ABA history is NOT excluded by equality.
+    (seed! [:requests original])
+    (let [returned (reread! op)]
+      (is (= :source-document-differed-at-read
+             (get-in returned [:per-operation-read-only-rechecks op])))
+      (is (= :historical-prestate-matched-at-read
+             (get-in returned [:per-operation-historical-prestate-rechecks op]))))
+    (reset! document-state original)
+    (let [again (reread! op)]
+      (is (= :source-document-matched-at-read
+             (get-in again [:per-operation-read-only-rechecks op])))
+      (is (= :historical-prestate-matched-at-read
+             (get-in again [:per-operation-historical-prestate-rechecks op])))
+      (is (= :none (:transaction-authority again) (:retry-authority again)
+             (:authority again)))
+      (is (= :not-issued (:certificate again)))
+      (is (= 1 @(:constructs (:environment env))))
+      (is (nil? (read-command
+                 (resolution/record-id (:binding actual))))))
+    ;; Calling the low-level read-only verifier with a FORGED witness cannot
+    ;; make it compare a different original target or expose a privileged cmd.
+    (is (= :invalid-private-original-prestate-witness
+           (reason #(read-only-recheck/compare-original-acquired-prestate!
+                     source executor op ctx invocation
+                     {:operation-id op :target [:requests "other-row"]
+                      :before original :source-identity {}}))))))
 
 (deftest v1869-in-flight-and-failed-attempts-share-one-atomic-snapshot
   ;; Use the REAL registered executor, with a deliberately stalled original
@@ -303,6 +429,8 @@
                (:failed-observation-ids value)))
         (is (= :not-established (:physical-prestate-currentness value)))
         (is (= {op :not-checked} (:per-operation-read-only-rechecks value)))
+        (is (= {op :not-checked}
+               (:per-operation-historical-prestate-rechecks value)))
         (is (= value (summary!)))
         (is (= 1 @(:constructs (:environment env))))
         (is (nil? (read-command
@@ -474,9 +602,17 @@
                 (is (= :source-document-differed-at-read
                        (get-in first-refresh
                                [:per-operation-read-only-rechecks primary])))
+                (is (= :historical-prestate-differed-at-read
+                       (get-in first-refresh
+                               [:per-operation-historical-prestate-rechecks
+                                primary])))
                 (is (= :source-document-matched-at-read
                        (get-in second-refresh
                                [:per-operation-read-only-rechecks secondary])))
+                (is (= :historical-prestate-matched-at-read
+                       (get-in second-refresh
+                               [:per-operation-historical-prestate-rechecks
+                                secondary])))
                 (is (= :source-document-differed-at-read
                        (get-in second-refresh
                                [:per-operation-read-only-rechecks primary])))
@@ -524,8 +660,13 @@
                          (resolution/record-id (:binding second-row)))))
               (is (= :issued-application-observation-already-attempted
                      (reason #(observe! secondary ctx invoke-secondary))))
-              (is (= (dissoc after :per-operation-read-only-rechecks)
-                     (dissoc (summary!) :per-operation-read-only-rechecks)))
+              (is (= (dissoc after :per-operation-read-only-rechecks
+                                  :per-operation-historical-prestate-rechecks)
+                     (dissoc (summary!) :per-operation-read-only-rechecks
+                                        :per-operation-historical-prestate-rechecks)))
               (is (= {primary :source-document-differed-at-read
                       secondary :source-document-matched-at-read}
-                     (:per-operation-read-only-rechecks (summary!)))))))))))
+                     (:per-operation-read-only-rechecks (summary!))))
+              (is (= {primary :historical-prestate-differed-at-read
+                      secondary :historical-prestate-matched-at-read}
+                     (:per-operation-historical-prestate-rechecks (summary!)))))))))))
