@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1814: The actual application startup entrypoint owns module issuance,
+  "v1830: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -776,3 +776,59 @@
         (is (= :configured-start-already-attempted
                (reason #((:start-once! issued) {}))))
         (finally (cleanup! s issued))))))
+
+(deftest startup-listener-callback-substitution-blocks-verified-publication
+  ;; Startup may have checked every route and completed its real HTTP
+  ;; challenge before its last source-trusted listener-instance callback.
+  ;; A callback that replaces an ORIGINAL proof Var must not let the issued
+  ;; application publish :verified-configured-start. Reject that source
+  ;; substitution and clean the original physical Biff listener instead.
+  ;; Restoring the root cannot revive the consumed one-shot startup token.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-root (var-get #'probe/require-fresh-local-http-liveness!)
+        callback-count (atom 0)
+        listener-seen (atom nil)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_]
+                         (let [listener (:server @(:server-state s))]
+                           (swap! callback-count inc)
+                           (reset! listener-seen listener)
+                           (alter-var-root
+                            #'probe/require-fresh-local-http-liveness!
+                            (constantly
+                             (fn [& _]
+                               (throw (ex-info "Substituted startup proof root"
+                                               {:reason :fixture-substitution})))))
+                           listener))))]
+    (try
+      (is (= :substituted-original-configured-start-boundary
+             (reason #((:start-once! issued) {})))
+          "Final startup publication must reject the substituted proof root")
+      (is (= 1 @callback-count)
+          "Substitution happened at the final original listener capture")
+      (is (some? @listener-seen)
+          "The original physical HTTP listener had actually opened")
+      (is (identical? @listener-seen (:server @(:server-state s))))
+      (is (.isShutdown (:executor @(:server-state s)))
+          "Original Biff stop physically closes failed startup")
+      (finally
+        (alter-var-root #'probe/require-fresh-local-http-liveness!
+                        (constantly original-root))))
+    (try
+      (is (= :start-failed-physical-state-unknown
+             (:status ((:summary! issued))))
+          "Physical cleanup does not establish verified startup")
+      (is (= :not-established
+             (:real-http-consumption ((:summary! issued)))))
+      (is (= :start-failed-physical-state-unknown
+             (:status ((:stop! issued)))))
+      (is (= :configured-start-already-attempted
+             (reason #((:start-once! issued) {}))))
+      (is (= :configured-instance-not-current
+             (reason #((:inspect-running! issued) {}))))
+      (is (= :configured-instance-generation-not-current
+             (reason #((:inspect-generation! issued) nil {}))))
+      (finally (cleanup! s issued)))))

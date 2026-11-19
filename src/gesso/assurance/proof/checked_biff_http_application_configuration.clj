@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1829: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1830: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -95,7 +95,13 @@
    first source-integrity check and before inspection reports success. Recheck
    all original boundary Var roots after the final trusted listener callback.
    This is point-in-time source integrity, not a guarantee against future
-   mutation or hostile concurrent code."
+   mutation or hostile concurrent code.
+
+   v1830: Re-pin ORIGINAL proof roots after the last startup-side host
+   callback and before atomically publishing :verified-configured-start.
+   If source-owned code mutates a proof Var during the final listener
+   capture, fail startup and invoke existing physical cleanup rather than
+   returning a verified application with a substituted boundary."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -625,6 +631,13 @@
                        ;; current-instance inspection entry points. No stop
                        ;; may consume a verified state with a nil system.
                        (locking lifecycle-monitor
+                         ;; The last source-trusted listener callback above
+                         ;; may change a pinned original proof Var root after
+                         ;; all earlier startup checks succeeded. Never
+                         ;; publish verified startup from such a boundary.
+                         ;; Keep this inside the publication monitor and
+                         ;; BEFORE any started handle becomes visible.
+                         (pinned!)
                          (reset! selected-startup-routes
                                  (:matched-certified-route-ids selected-coverage))
                          (reset! started (:system result))
