@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1840: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1842: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -124,7 +124,12 @@
    Selected Biff stop callbacks are host code and may mutate original proof
    roots DURING cleanup. Even if the pre-stop pin passed and the physical
    listener closed, the managed result cannot claim verified clean shutdown
-   when original source integrity is no longer established at completion."
+   when original source integrity is no longer established at completion.
+
+   v1842: Retain the original selected contract's per-certified-operation
+   route/premise/obligation evidence through startup and current-instance
+   reports. Shared assumptions stay catalog-scoped. No operation-specific
+   evidence remains a current-instance assertion after managed stop."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -249,6 +254,28 @@
     (reject! :invalid-application-owned-http-configuration))
   config)
 
+(defn- valid-selected-operation-evidence? [checked]
+  ;; Preserve ONLY exact rows emitted by the original catalog checker. Verify
+  ;; they account for the same certified operations and entire selected route
+  ;; inventory; a partial or malformed operation attribution must fail BEFORE
+  ;; the physical HTTP listener starts. Never infer discharged obligations.
+  (let [rows (:certified-operation-open-evidence checked)]
+    (and (map? rows)
+         (= (set (keys rows)) (:catalog-operations checked))
+         (every? (fn [[operation row]]
+                   (and (qualified-keyword? operation)
+                        (map? row)
+                        (= #{:route-ids :open-premises :open-obligations}
+                           (set (keys row)))
+                        (set? (:route-ids row))
+                        (seq (:route-ids row))
+                        (every? qualified-keyword? (:route-ids row))
+                        (set? (:open-premises row))
+                        (set? (:open-obligations row))))
+                 rows)
+         (= (:matched-certified-route-ids checked)
+            (into #{} (mapcat :route-ids) (vals rows))))))
+
 (defn- require-selected-route-coverage! [contract-source typed-trial]
   ;; There is deliberately no caller-supplied checked report to trust. Only
   ;; selected typed execution requires this check. Run it BEFORE Biff init,
@@ -279,6 +306,7 @@
                      (set? (:open-obligations checked))
                      (set/subset? (:open-assumptions checked)
                                   (:open-obligations checked))
+                     (valid-selected-operation-evidence? checked)
                      (= :none (:transaction-authority checked)
                         (:authority checked))
                      (= :not-issued (:certificate checked))
@@ -408,10 +436,13 @@
     {:selected-catalog-open-assumptions (:open-assumptions selected)
      :selected-catalog-open-premises (:open-premises selected)
      :selected-catalog-open-obligations (:open-obligations selected)
+     :selected-catalog-operation-open-evidence
+     (:certified-operation-open-evidence selected)
      :selected-catalog-proof-evidence-scope :original-startup-source-only}
     {:selected-catalog-open-assumptions :not-established
      :selected-catalog-open-premises :not-established
      :selected-catalog-open-obligations :not-established
+     :selected-catalog-operation-open-evidence :not-established
      :selected-catalog-proof-evidence-scope :not-established}))
 
 (defn- report [state typed-selected? selected]

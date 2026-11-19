@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1834: The actual application startup entrypoint owns module issuance,
+  "v1842: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -38,6 +38,7 @@
         (is (= :not-established (:selected-catalog-open-assumptions report)
                (:selected-catalog-open-premises report)
                (:selected-catalog-open-obligations report)
+               (:selected-catalog-operation-open-evidence report)
                (:selected-catalog-proof-evidence-scope report)))
         (is (= :not-established (:external-deployment report)))
         (is (= :none (:authority report) (:retry-authority report)))
@@ -79,8 +80,9 @@
       (finally (cleanup! s issued)))))
 
 (deftest selected-catalog-open-evidence-survives-real-biff-start
-  ;; v1839 preserved the v1253 unresolved obligations in the selected catalog
-  ;; report. The actual Biff startup and inspection must not lose that evidence
+  ;; v1842 preserves v1841 per-operation attribution alongside the v1839
+  ;; global unresolved obligations in the selected catalog. Actual Biff
+  ;; startup and inspection must not lose that original-source evidence
   ;; while claiming successful route coverage. It remains STARTUP source-relative
   ;; evidence, not a current policy certificate or physical writer proof.
   (let [s (scenario :honest)
@@ -89,21 +91,31 @@
                   {:contract-source (:contract-source source)
                    :catalog-source (get-in source [:typed-trial :catalog-source])})
         issued (config/issue-configured-checked-http-application! source)
+        operation-evidence (:certified-operation-open-evidence selected)
         expected {:selected-catalog-open-assumptions (:open-assumptions selected)
                   :selected-catalog-open-premises (:open-premises selected)
                   :selected-catalog-open-obligations (:open-obligations selected)}]
     (try
       (is (every? set? (vals expected)))
+      (is (= #{:request/claim} (set (keys operation-evidence))))
+      (is (= (set (:matched-certified-route-ids selected))
+             (into #{} (mapcat :route-ids (vals operation-evidence)))))
       (is (contains? (:selected-catalog-open-obligations expected)
                      :source-to-production-execution-correspondence))
       (let [started ((:start-once! issued) {})
             report (:report started)
             summary ((:summary! issued))
-            inspected ((:inspect-running! issued) (:system started))]
-        (doseq [actual [report summary inspected]]
+            inspected ((:inspect-running! issued) (:system started))
+            inspected-generation ((:inspect-generation! issued)
+                                  (:instance-generation started)
+                                  (:system started))]
+        (doseq [actual [report summary inspected inspected-generation]]
           (is (= expected (select-keys actual (keys expected)))
               (pr-str (:type actual))))
-        (doseq [actual [report summary inspected]]
+        (doseq [actual [report summary inspected inspected-generation]]
+          (is (= operation-evidence
+                 (:selected-catalog-operation-open-evidence actual))
+              (pr-str (:type actual)))
           (is (= :original-startup-source-only
                  (:selected-catalog-proof-evidence-scope actual))))
         (is (= :not-established (:selected-catalog-business-policy-completeness
@@ -114,7 +126,9 @@
     ;; After stop there is no current checked instance; retain no live claim
     ;; based on a stale original startup source report.
     (is (= :not-established
-           (:selected-catalog-open-obligations ((:summary! issued)))))))
+           (:selected-catalog-open-obligations ((:summary! issued)))))
+    (is (= :not-established
+           (:selected-catalog-operation-open-evidence ((:summary! issued)))))))
 
 (deftest invalid-application-configuration-cannot-inject-module-var-or-order
   (let [s (scenario :honest)
