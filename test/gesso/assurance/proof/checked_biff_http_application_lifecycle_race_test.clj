@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1822: Real JDK listener replacement, inspection, managed stop and startup
+  "v1823: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -153,6 +153,7 @@
         inspection-in-locator (promise)
         release-inspection (promise)
         inspection-armed? (atom false)
+        locator-calls (atom 0)
         instrumented (cond-> source
                        trusted-listener-identity?
                        (assoc :listener-instance!
@@ -160,6 +161,7 @@
         source-with-pause (assoc instrumented :base-url!
                                  (fn [system]
                                    (when @inspection-armed?
+                                     (swap! locator-calls inc)
                                      (deliver inspection-in-locator true)
                                      (when-not (deref release-inspection 15000 false)
                                        (throw (ex-info "Inspection fixture timed out" {}))))
@@ -167,7 +169,8 @@
     {:issued (config/issue-configured-checked-http-application! source-with-pause)
      :inspection-in-locator inspection-in-locator
      :release-inspection release-inspection
-     :inspection-armed? inspection-armed?}))
+     :inspection-armed? inspection-armed?
+     :locator-calls locator-calls}))
 
 (deftest same-port-swap-during-inspection-rejects-even-after-fresh-http-response
   ;; The first source-trusted listener identity check happens BEFORE the
@@ -905,4 +908,72 @@
       (finally
         (deliver release-startup true)
         (deref started 15000 :startup-timed-out)
+        (cleanup! s issued)))))
+
+(deftest simultaneous-inspections-run-separate-fresh-http-challenges
+  ;; The original lifecycle monitor protects concurrent inspections as well
+  ;; as managed stop. Suspend a generation inspection in its original URL
+  ;; locator, then start a current-system inspection on another thread. The
+  ;; second must not enter the URL locator before the first finishes. Once
+  ;; released, BOTH inspections must independently perform their own fresh
+  ;; HTTP challenge; success for the first is not a reusable second report.
+  ;; This is point-in-time local observation, not a future liveness lease.
+  (let [s (scenario :honest)
+        {:keys [issued inspection-in-locator release-inspection
+                inspection-armed? locator-calls]}
+        (paused-generation-inspection s true)]
+    (try
+      (let [{:keys [system instance-generation]}
+            ((:start-once! issued) {})
+            original-server (:server @(:server-state s))]
+        (is (some? original-server))
+        (is (zero? @locator-calls))
+        (reset! inspection-armed? true)
+        (let [first (future ((:inspect-generation! issued)
+                             instance-generation system))]
+          (try
+            (is (true? (deref inspection-in-locator 10000 false)))
+            (is (= 1 @locator-calls))
+            (is (= :first-pending (deref first 200 :first-pending)))
+            (let [second-entered (promise)
+                  second (future
+                           (deliver second-entered true)
+                           ((:inspect-running! issued) system))]
+              (try
+                (is (true? (deref second-entered 5000 false)))
+                (is (= :second-pending (deref second 250 :second-pending)))
+                (is (= 1 @locator-calls)
+                    "Second inspection cannot enter the liveness locator yet")
+                (is (identical? original-server
+                                (:server @(:server-state s))))
+                (deliver release-inspection true)
+                (let [first-result (deref first 15000 :first-timed-out)
+                      second-result (deref second 15000 :second-timed-out)]
+                  (is (= :current-at-inspection (:status first-result)))
+                  (is (= :current-at-inspection (:status second-result)))
+                  (is (= :observed-at-current-inspection
+                         (:fresh-local-http-response first-result)))
+                  (is (= :observed-at-current-inspection
+                         (:fresh-local-http-response second-result)))
+                  (is (= :matches-original-host-reported-object
+                         (:physical-listener-instance first-result)))
+                  (is (= :matches-original-host-reported-object
+                         (:physical-listener-instance second-result)))
+                  (is (= 2 @locator-calls)
+                      "Each inspection required a distinct fresh HTTP challenge")
+                  (is (= :exact-original-issued-started-instance
+                         (:generation-binding first-result)))
+                  (is (not (contains? second-result :generation-binding))))
+                (finally
+                  (deliver release-inspection true)
+                  (deref second 15000 :second-timed-out))))
+            (finally
+              (deliver release-inspection true)
+              (deref first 15000 :first-timed-out))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason #((:inspect-generation! issued)
+                         instance-generation system)))))
+      (finally
+        (deliver release-inspection true)
         (cleanup! s issued)))))
