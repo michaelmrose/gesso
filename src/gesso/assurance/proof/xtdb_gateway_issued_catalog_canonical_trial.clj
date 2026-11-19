@@ -46,7 +46,13 @@
    alias as a specific unsupported typed-physical seam. The downstream typed
    source-relative interpreter currently requires the concrete domain command
    to equal the declared interface operation. Never broaden that equality
-   without an explicit original source-bound alias correspondence."
+   without an explicit original source-bound alias correspondence.
+
+   v1857: Derive a separate, read-only alias relation from the ORIGINAL
+   registered executor plus fully checked source/catalog/route inventory.
+   The alias is no longer merely caller-declared, but its report remains
+   local source-relative evidence. This does NOT opt the alias into the
+   original physical issuance or submit path, which remains fail-closed."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -62,6 +68,9 @@
 (def report-type
   :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/issued-executor)
 (def report-version 1)
+(def issued-alias-report-type
+  :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/issued-command-alias)
+(def issued-alias-report-version 1)
 
 (def ^:private original-contract-check certified/check-certified-contracts!)
 (def ^:private original-operation-summary application/operation-summary)
@@ -140,7 +149,10 @@
             (set/union complete-certified-route-ids uncertified-route-ids))
          (set/subset? selected-route-ids complete-certified-route-ids))))
 
-(defn- current-binding! [contract-source catalog-source operation]
+(defn- current-binding!
+  ([contract-source catalog-source operation]
+   (current-binding! contract-source catalog-source operation false))
+  ([contract-source catalog-source operation source-only-alias?]
   (pinned!)
   (when-not (and (plain-map? contract-source)
                  (plain-map? catalog-source)
@@ -199,7 +211,8 @@
     ;; command is exactly the declaration's interface operation. Fail before
     ;; issuing a one-shot physical trial, and distinguish this otherwise-valid
     ;; original plan from an arbitrary malformed catalog.
-    (when (and (= operation (:operation description))
+    (when (and (not source-only-alias?)
+               (= operation (:operation description))
                (= operation (get-in source [:certified-source :operation]))
                (= operation (get-in (:construction source)
                                     [:subject :interface :operation]))
@@ -278,8 +291,17 @@
                    (= (:transition-fingerprint transition)
                       (:transition-fingerprint description)
                       (:transition-fingerprint certified-row))
-                   (= (:command-operation source)
-                      (get-in (:construction source) [:subject :interface :operation]))
+                   (or (= (:command-operation source)
+                          (get-in (:construction source) [:subject :interface :operation]))
+                       (and source-only-alias?
+                            (= operation
+                               (get-in (:construction source)
+                                       [:subject :interface :operation]))
+                            (= (:command-operation source)
+                               (:command-operation description))
+                            (keyword? (:command-operation source))
+                            (not= :create (:command-operation source))
+                            (not= operation (:command-operation source))))
                    (vector? routes) (seq routes)
                    (= (count routes) (count route-ids))
                    (closed-selected-route-scope?
@@ -288,8 +310,20 @@
                     (:uncertified-application-route-ids full-coverage)
                     (:route-ids contracts)))
       (reject! :catalog-executor-or-assembled-operation-diverged))
+    ;; The alternate validation mode is ONLY for a read-only alias report:
+    ;; reject even an ordinary strict command/interface match here. It never
+    ;; reaches the canonical trial issuer or an executor invocation.
+    (when (and source-only-alias?
+               (not (and (= operation
+                            (get-in (:construction source)
+                                    [:subject :interface :operation]))
+                         (keyword? (:command-operation source))
+                         (not= :create (:command-operation source))
+                         (not= operation (:command-operation source)))))
+      (reject! :original-issued-command-alias-not-established))
     (pinned!)
     {:operation-id operation
+     :command-operation (:command-operation source)
      :catalog-fingerprint (:fingerprint checked)
      :transition-fingerprint (:transition-fingerprint transition)
      :proof-fingerprint (:proof-fingerprint certified-row)
@@ -301,7 +335,40 @@
      :catalog-route-scope route-scope
      ;; The issued callable is captured privately for invocation, never
      ;; included in a report or user-provided to the physical trial.
-     :executor executor}))
+     :executor executor})))
+
+(defn check-current-issued-command-alias!
+  "Read-only, source-relative check for a legitimate certified-plan interface
+   operation-ID alias. Derive the concrete domain command from the SAME
+   original registered plan executor, matched construction, certified
+   operation table and complete checked route catalog. No caller-supplied
+   alias map, transition replacement, executor, or invocation is accepted.
+
+   The result is COPYABLE local provenance, not an authenticated deployed
+   command, a checked physical transition, an issued transaction capability,
+   a proof certificate or admission. The existing physical trial MUST keep
+   rejecting this alias until its lower typed relation is separately bound."
+  [contract-source catalog-source operation]
+  (let [bound (current-binding! contract-source catalog-source operation true)]
+    {:type issued-alias-report-type
+     :version issued-alias-report-version
+     :operation-id operation
+     :command-binding {:operation-id operation
+                       :interface-operation operation
+                       :domain-command-operation (:command-operation bound)}
+     :command-binding-provenance :current-original-issued-plan-and-catalog
+     :scope :process-local-source-relative-only
+     :source-identity (select-keys bound
+                                   [:catalog-fingerprint
+                                    :transition-fingerprint
+                                    :proof-fingerprint :route-ids])
+     :complete-catalog-scope :original-checked-application-assembly
+     :deployed-source-authenticity :not-established
+     :typed-abstract-alias-correspondence :not-established
+     :canonical-physical-alias-execution :disabled
+     :original-business-policy-authenticity :not-established
+     :certificate :not-issued :admission :not-admitted
+     :transaction-authority :none :authority :none}))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]

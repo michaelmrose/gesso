@@ -453,6 +453,17 @@
            (reason #(plan/check-candidate!
                      (assoc input :target [:requests "wrong-target"])))))))
 
+(deftest v1857-source-bound-alias-check-requires-a-genuine-alias
+  (let [env (case-env)]
+    ;; A normal command/interface agreement is not an ID alias. The new
+    ;; read-only entry point must not silently label ordinary issuance as one.
+    (is (= :original-issued-command-alias-not-established
+           (reason #(bound/check-current-issued-command-alias!
+                     (:contract env) (:catalog-source env) :request/claim))))
+    (is (= :invalid-current-assembled-catalog-source
+           (reason #(bound/check-current-issued-command-alias!
+                     (:contract env) (:catalog-source env) :claim))))))
+
 (deftest original-plan-operation-id-alias-is-not-physical-typed-correspondence
   ;; The original certified plan legitimately accepts an interface operation
   ;; specified by the certified operation ID, not only by the domain command.
@@ -505,6 +516,41 @@
              :handler handler :contract contract :catalog-source catalog-source}]
     (is (= :claim (:command-operation (plan/describe-plan-operation executor))))
     (is (= operation (get-in construction [:subject :interface :operation])))
+    ;; Unlike v1856's caller-declared alias, this report is derived from the
+    ;; ORIGINAL currently issued plan and complete assembled catalog, before
+    ;; any executor invocation. It is still only copyable source evidence.
+    (let [alias (bound/check-current-issued-command-alias!
+                 contract catalog-source operation)]
+      (is (= bound/issued-alias-report-type (:type alias)))
+      (is (= bound/issued-alias-report-version (:version alias)))
+      (is (= operation (:operation-id alias)))
+      (is (= {:operation-id operation
+              :interface-operation operation
+              :domain-command-operation :claim}
+             (:command-binding alias)))
+      (is (= :current-original-issued-plan-and-catalog
+             (:command-binding-provenance alias)))
+      (is (= :original-checked-application-assembly
+             (:complete-catalog-scope alias)))
+      (is (every? some? (vals (:source-identity alias))))
+      (is (= :not-established (:typed-abstract-alias-correspondence alias)))
+      (is (= :disabled (:canonical-physical-alias-execution alias)))
+      (is (= :none (:transaction-authority alias) (:authority alias)))
+      (is (= :not-issued (:certificate alias)))
+      (is (= :not-admitted (:admission alias)))
+      (is (not-any? #(contains? alias %)
+                    [:executor :submit! :observe-once! :prepare!])))
+    ;; A changed copy of the source cannot impersonate the registered plan.
+    (is (= :invalid-current-certified-operation-table
+           (reason #(bound/check-current-issued-command-alias!
+                     (assoc-in contract
+                               [:certified-operations operation
+                                :current-source :command-operation]
+                               :cancel)
+                     catalog-source operation))))
+    ;; The source-relative alias screen MUST NOT issue the physically capable
+    ;; trial or weaken the original v1855 rejection.
+    (is (zero? @(:constructs e)))
     (is (= #{operation} (set (keys (:certified-operations
                                    (certified/check-certified-contracts! contract))))))
     (seed! [:requests (:request d)])
