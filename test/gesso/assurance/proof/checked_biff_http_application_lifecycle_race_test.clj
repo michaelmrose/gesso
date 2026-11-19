@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1815: Real JDK listener replacement, inspection, managed stop and startup
+  "v1816: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -481,4 +481,51 @@
       (finally
         (deliver release-first true)
         (deref first-start 15000 :first-start-timed-out)
+        (cleanup! s issued)))))
+
+(deftest stop-between-one-shot-claim-and-start-gate-prevents-physical-start
+  ;; The first start claims its one-shot AtomicBoolean before changing the
+  ;; issued state to :starting. Pause at that original state transition and
+  ;; let the managed stop close the unstarted issuance. The first caller must
+  ;; fail rather than resurrect a stopped application or bind an HTTP socket.
+  ;; The consumed one-shot also forbids attempting startup a second time.
+  (let [s (scenario :honest)
+        issued (config/issue-configured-checked-http-application!
+                (original-source s true))
+        original-cas clojure.core/compare-and-set!
+        start-at-gate (promise)
+        release-start (promise)]
+    (try
+      (with-redefs [clojure.core/compare-and-set!
+                    (fn [atm before after]
+                      (when (and (= :issued before) (= :starting after))
+                        (deliver start-at-gate true)
+                        (when-not (deref release-start 15000 false)
+                          (throw (ex-info "Start gate fixture timed out" {}))))
+                      (original-cas atm before after))]
+        (let [starting (future (reason #((:start-once! issued) {})))]
+          (try
+            (is (true? (deref start-at-gate 15000 false)))
+            (is (= :issued (:status ((:summary! issued)))))
+            (is (nil? @(:server-state s)))
+            (is (= :stopped-without-successful-start
+                   (:status ((:stop! issued)))))
+            (is (= :stopped-without-successful-start
+                   (:status ((:summary! issued)))))
+            (is (nil? @(:server-state s))
+                "Stop won before physical Biff startup")
+            (deliver release-start true)
+            (is (= :configured-start-stopped-before-use
+                   (deref starting 15000 :start-timed-out)))
+            (is (= :configured-start-already-attempted
+                   (reason #((:start-once! issued) {}))))
+            (is (= :stopped-without-successful-start
+                   (:status ((:stop! issued)))))
+            (is (nil? @(:server-state s))
+                "Rejected original/second callers did not open a listener")
+            (finally
+              (deliver release-start true)
+              (deref starting 15000 :start-timed-out)))))
+      (finally
+        (deliver release-start true)
         (cleanup! s issued)))))
