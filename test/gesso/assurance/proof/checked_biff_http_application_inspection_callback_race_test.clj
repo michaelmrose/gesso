@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-inspection-callback-race-test
-  "v1827: Callback-driven inspection races against the original Biff HTTP
+  "v1828: Callback-driven inspection races against the original Biff HTTP
    listener: failed URL lookup, second identity check, reentrant managed stop.
    These are in-process observations, never deployment certification."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -227,5 +227,106 @@
                (reason #((:start-once! issued) {}))))
         (is (= 1 @nested-stops)
             "Rejected subsequent checks must not run source callbacks"))
+      (finally
+        (cleanup! s issued)))))
+
+(deftest reentrant-url-locator-cannot-recursively-inspect-running-instance
+  ;; The source-owned URL locator runs during the outer generation inspection.
+  ;; It may attempt to inspect that very application again on the same JVM
+  ;; thread, where Java's lifecycle monitor is reentrant. The nested attempt
+  ;; must reject before issuing its own HTTP challenge. The original outer
+  ;; inspection can still succeed after the callback recovers normally.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-url (:base-url! source)
+        issued-holder (atom nil)
+        nested-on-next-inspection? (atom false)
+        locator-calls (atom 0)
+        nested-reasons (atom [])
+        issued (config/issue-configured-checked-http-application!
+                (assoc source :base-url!
+                       (fn [system]
+                         (swap! locator-calls inc)
+                         (when (compare-and-set! nested-on-next-inspection?
+                                                 true false)
+                           (swap! nested-reasons conj
+                                  (reason #((:inspect-running! @issued-holder)
+                                            system))))
+                         (original-url system))))]
+    (reset! issued-holder issued)
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            starting-urls @locator-calls
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))]
+        (is (pos? starting-urls))
+        (reset! nested-on-next-inspection? true)
+        (let [observation (inspect!)]
+          (is (= :current-at-inspection (:status observation)))
+          (is (= :observed-at-current-inspection
+                 (:fresh-local-http-response observation)))
+          (is (= :not-issued (:certificate observation)))
+          (is (= :not-admitted (:admission observation)))
+          (is (= :none (:authority observation))))
+        (is (= [:configured-instance-inspection-reentrant] @nested-reasons)
+            "Callback cannot recursively create a second inspection")
+        (is (= (inc starting-urls) @locator-calls)
+            "Nested inspection did not reach the original URL locator")
+        (is (= :current-at-inspection (:status (inspect!)))
+            "A later independent inspection is not blocked")
+        (is (= (+ starting-urls 2) @locator-calls))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (.isShutdown (:executor @(:server-state s)))))
+      (finally
+        (cleanup! s issued)))))
+
+(deftest reentrant-listener-callback-cannot-recursively-inspect-generation
+  ;; The optional source-trusted listener callback is also invoked under the
+  ;; same monitor and must not initiate a second generation inspection while
+  ;; the outer current-system inspection is unfinished. Object identity is
+  ;; still checked before and after the one fresh HTTP challenge.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        issued-holder (atom nil)
+        nested-on-next-inspection? (atom false)
+        listener-reads (atom 0)
+        nested-reasons (atom [])
+        issued (config/issue-configured-checked-http-application!
+                (assoc source :listener-instance!
+                       (fn [system]
+                         (swap! listener-reads inc)
+                         (when (compare-and-set! nested-on-next-inspection?
+                                                 true false)
+                           (swap! nested-reasons conj
+                                  (reason #((:inspect-generation! @issued-holder)
+                                            (:instance-generation @issued-holder)
+                                            system))))
+                         (:server @(:server-state s)))))]
+    (reset! issued-holder issued)
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            startup-reads @listener-reads
+            observed-generation (atom instance-generation)]
+        ;; Publish only the exact issued token into a test-local holder. Never
+        ;; derive or invent a generation from an HTTP status report.
+        (swap! issued-holder assoc :instance-generation @observed-generation)
+        (is (pos? startup-reads))
+        (reset! nested-on-next-inspection? true)
+        (let [observation ((:inspect-running! issued) system)]
+          (is (= :current-at-inspection (:status observation)))
+          (is (= :matches-original-host-reported-object
+                 (:physical-listener-instance observation)))
+          (is (= :trusted-host-callback-conditional
+                 (:physical-instance-provenance observation))))
+        (is (= [:configured-instance-inspection-reentrant] @nested-reasons)
+            "Trusted listener callback cannot recursively inspect generation")
+        (is (= (+ startup-reads 2) @listener-reads)
+            "Only the outer inspection performs the two identity checks")
+        (is (= :current-at-inspection
+               (:status ((:inspect-generation! issued)
+                         instance-generation system)))
+            "In-progress guard is released after the outer inspection")
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (.isShutdown (:executor @(:server-state s)))))
       (finally
         (cleanup! s issued)))))

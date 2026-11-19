@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1826: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1828: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -83,7 +83,13 @@
    callback. The monitor is reentrant: source-trusted host callbacks can
    synchronously call the managed stop closure on the SAME thread. Do not
    return a current-instance report after that stop invalidates the issued
-   generation. This is still only process-local, callback-conditional evidence."
+   generation. This is still only process-local, callback-conditional evidence.
+
+   v1828: Reject recursively invoked current-instance inspections from
+   source-owned callbacks. JVM locks are reentrant; a callback in a local
+   liveness challenge must not recursively perform additional inspections
+   or enter an unbounded recursion. Release the in-progress guard on every
+   failure without blocking later independent observations."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -396,12 +402,21 @@
         state (atom :issued)
         started (atom nil)
         lifecycle-monitor (Object.)
+        inspection-in-progress? (atom false)
         instance-generation (StartedInstanceGeneration.)
         selected-startup-routes (atom nil)
         original-listener-instance (atom nil)
         summary! (fn [] (pinned!) (report @state (some? typed-trial)))
         inspect-running! (fn [candidate-system]
                            (locking lifecycle-monitor
+                           ;; The monitor serializes OTHER threads, but not
+                           ;; recursive calls made by host callbacks on this
+                           ;; same thread. Never let one inspection spawn a
+                           ;; second fresh challenge inside the first.
+                           (when-not (compare-and-set! inspection-in-progress?
+                                                       false true)
+                             (reject! :configured-instance-inspection-reentrant))
+                           (try
                            ;; Historical startup success cannot be reused
                            ;; as present-tense local instance evidence.
                            (pinned!)
@@ -522,7 +537,9 @@
                               :future-local-listener-availability :not-established
                               :certificate :not-issued :admission :not-admitted
                               :retry-authority :none :transaction-authority :none
-                              :authority :none})))
+                              :authority :none})
+                             (finally
+                               (reset! inspection-in-progress? false)))))
         inspect-generation!
         (fn [candidate-generation candidate-system]
           ;; Keep the generation comparison and the fresh observation
