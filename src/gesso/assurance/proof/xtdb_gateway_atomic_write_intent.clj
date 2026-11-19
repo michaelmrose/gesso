@@ -133,7 +133,14 @@
    corroborate physical co-visibility. They cannot prove which transaction
    created the record, prevent later alteration, authenticate the supplied
    node, establish complete writer/audit capture, or authorize any effect.
-   No write, retry, independent audit discharge or certificate occurs."
+   No write, retry, independent audit discharge or certificate occurs.
+
+   v1889 additionally reads the generated row's bounded SYSTEM and VALID
+   time history on the SAME pinned snapshot. One open version beginning at
+   the returned transaction's system time adds temporal correspondence;
+   two or more visible version records (including a same-value overwrite)
+   are explicitly insufficient for a unique origin claim. These are row
+   observations, not independent transaction causality or writer closure."
   [g result]
   (let [local (original-local-return g result)
         private (locking private-intents
@@ -176,6 +183,53 @@
                                          (every? map? rows))
                             (reject! :ambiguous-private-intent-read))
                           (first rows)))
+            ;; Preserve the existing single pinned basis. A bounded history
+            ;; query cannot certify complete retention or immutable audit;
+            ;; two returned records already prevent unique visible-version
+            ;; correspondence (and valid-time splitting can yield several
+            ;; records for one physical transaction).
+            intent-history-sql
+            (str "SELECT _system_from, _system_to"
+                 " FROM gesso_guarded_write_intents"
+                 " FOR VALID_TIME ALL FOR SYSTEM_TIME ALL"
+                 " WHERE _id = ? LIMIT 2")
+            history-rows (try (original-query node
+                                              [intent-history-sql
+                                               (:xt/id record)]
+                                              read-basis)
+                              (catch Throwable _
+                                (reject! :pinned-intent-history-unavailable)))
+            _ (when-not (and (sequential? history-rows)
+                             (<= 0 (count history-rows) 2)
+                             (every? (fn [row]
+                                       (and (map? row)
+                                            (contains? row :xt/system-from)
+                                            (instance? ZonedDateTime
+                                                       (:xt/system-from row))
+                                            (every? #{:xt/system-from
+                                                      :xt/system-to}
+                                                    (keys row))
+                                            (or (not (contains? row
+                                                                :xt/system-to))
+                                                (instance? ZonedDateTime
+                                                           (:xt/system-to row)))))
+                                     history-rows))
+                (reject! :invalid-pinned-intent-history))
+            history-status
+            (cond
+              (empty? history-rows) :no-visible-pinned-intent-history
+              (= 2 (count history-rows))
+              :multiple-visible-pinned-intent-history-records-at-bound
+              :else
+              (let [row (first history-rows)
+                    from (observed-time (:xt/system-from row))]
+                (cond
+                  (not= tx-time from)
+                  :one-visible-history-version-start-differs-from-returned-tx
+                  (contains? row :xt/system-to)
+                  :one-visible-history-version-start-matches-but-is-closed
+                  :else
+                  :one-open-visible-history-version-starts-at-returned-tx)))
             intent-row (query-one
                         "SELECT * FROM gesso_guarded_write_intents WHERE _id = ? LIMIT 2"
                         (:xt/id record))
@@ -218,6 +272,15 @@
          :returned-ledger-status ledger-status
          :read-basis-order ordering
          :both-observations-share-pinned-basis? true
+         :intent-history-origin-status history-status
+         :returned-tx-time-intent-history-correlation
+         (if (and positive?
+                  (= :one-open-visible-history-version-starts-at-returned-tx
+                     history-status))
+           :bounded-same-pinned-basis-history-start-matches-returned-tx
+           :not-established)
+         :intent-history-observation-limit 2
+         :intent-history-completeness :not-established
          :expected-intent-origin :private-original-prepared-gateway
          :returned-key-origin :exact-one-shot-gateway-return
          :original-local-attempt-id (:process-local-attempt-id local)

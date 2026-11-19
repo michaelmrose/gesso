@@ -191,6 +191,12 @@
          (is (true? (:both-observations-share-pinned-basis? report)))
          (is (= :private-original-prepared-gateway
                 (:expected-intent-origin report)))
+         (is (= :one-open-visible-history-version-starts-at-returned-tx
+                (:intent-history-origin-status report)))
+         (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
+                (:returned-tx-time-intent-history-correlation report)))
+         (is (= 2 (:intent-history-observation-limit report)))
+         (is (= :not-established (:intent-history-completeness report)))
          (is (= :exact-one-shot-gateway-return (:returned-key-origin report)))
          (is (= :not-established (:transaction-causality report)
                 (:audit-event-producer report)
@@ -217,6 +223,8 @@
                     (:intent-record-status tampered)))
              (is (= :matches-original-returned-committed-row
                     (:returned-ledger-status tampered)))
+             (is (= :not-established
+                    (:returned-tx-time-intent-history-correlation tampered)))
              (is (= :none (:authority tampered))))
            ;; ERASE by an unrelated direct writer can remove the generated
            ;; record, while the original transaction's ledger row survives.
@@ -227,6 +235,10 @@
              (is (= :intent-or-ledger-correspondence-not-established
                     (:status absent)))
              (is (= :not-visible (:intent-record-status absent)))
+             (is (= :no-visible-pinned-intent-history
+                    (:intent-history-origin-status absent)))
+             (is (= :not-established
+                    (:returned-tx-time-intent-history-correlation absent)))
              (is (= :matches-original-returned-committed-row
                     (:returned-ledger-status absent)))
              (is (= :not-issued (:certificate absent))))))))))
@@ -239,3 +251,46 @@
            returned ((:submit! plain))]
        (is (= :not-original-generated-intent-descriptor
               (intent-reason #(intent/inspect-pinned-intent! plain returned))))))))
+
+(deftest v1889-same-value-external-put-invalidates-unique-history-origin
+  ;; Reading the unchanged current document PLUS the original committed
+  ;; xt.txs entry cannot establish that its current version still began at
+  ;; the guarded transaction. A same-value outside PUT leaves those two
+  ;; matches intact but creates additional bitemporal row history records.
+  (physical/with-proving-application!
+   (fn [app]
+     (let [g (intent/prepare-one-shot! (:node app)
+                                       (source ((:read! app))))
+           returned ((:submit! g))
+           first-read (intent/inspect-pinned-intent! g returned)
+           row (first (intent-rows (:node app)))]
+       (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
+              (:returned-tx-time-intent-history-correlation first-read)))
+       (is (= :bounded-private-intent-and-ledger-coobservation
+              (:status first-read)))
+       (is (map? row))
+       ;; An UNREGISTERED, unadmitted writer rewrites exactly the same value.
+       ;; Its different transaction changes system/valid-time history while
+       ;; the current generated fields stay equal to the original intent.
+       (xt/execute-tx (:node app)
+                      [[:put-docs intent/intent-table row]])
+       (let [later (intent/inspect-pinned-intent! g returned)]
+         (is (= :matches-private-generated-intent
+                (:intent-record-status later)))
+         (is (= :matches-original-returned-committed-row
+                (:returned-ledger-status later)))
+         (is (= :bounded-private-intent-and-ledger-coobservation
+                (:status later)))
+         (is (= :multiple-visible-pinned-intent-history-records-at-bound
+                (:intent-history-origin-status later)))
+         (is (= :not-established
+                (:returned-tx-time-intent-history-correlation later)
+                (:intent-history-completeness later)
+                (:transaction-causality later)
+                (:outside-gateway-writer-coverage later)))
+         (is (= :none (:transaction-authority later)
+                (:authority later)))
+         (is (= :not-issued (:certificate later)))
+         (is (not-any? #(contains? later %)
+                       [:xt/id :record :document :node :tx-key
+                        :snapshot-token :system-from :system-to])))))))
