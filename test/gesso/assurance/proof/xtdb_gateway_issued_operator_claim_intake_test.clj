@@ -1,7 +1,9 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-operator-claim-intake-test
   (:require [clojure.test :refer [deftest is testing]]
             [gesso.assurance.proof.xtdb-gateway-issued-operator-claim-intake
-             :as intake])
+             :as intake]
+            [gesso.assurance.proof.xtdb-gateway-issued-operator-witness-binding
+             :as witness-binding])
   (:import (java.security KeyPairGenerator Signature)
            (java.time Instant)
            (java.util Base64 UUID)))
@@ -128,3 +130,56 @@
       (when (nil? (System/getenv intake/operator-key-env))
         (is (= :independent-operator-trust-root-not-configured
                (reason #(intake/inspect-operator-history-claim! expected signed))))))))
+
+(deftest v1879-private-original-pinned-witness-binding-is-strictly-scoped
+  ;; This PURE helper is not an evidence authenticator; only the collector's
+  ;; completed original and later read callbacks are allowed to supply its
+  ;; arguments at the real signed-claim intake boundary.
+  (let [t0 (Instant/parse "2026-01-01T00:00:00Z")
+        t1 (.plusSeconds t0 5)
+        operation :request/claim
+        origin {:proof-fingerprint "fingerprint-a"
+                :proof-source-fingerprint "source-a"
+                :proof-subject-fingerprint "subject-a"
+                :dependency-graph-fingerprint "graph-a"
+                :transition-fingerprint "transition-a"
+                :route-ids #{:route/claim}}
+        original {:operation-id operation
+                  :target [:requests "request-a"]
+                  :before {:xt/id "request-a" :owner "before"}
+                  :original-snapshot-point {:database "reported-database" :system-time t0}
+                  :source-identity {:proof-fingerprint "fingerprint-a"
+                                    :transition-fingerprint "transition-a"
+                                    :route-ids #{:route/claim}}}
+        later {:target [:requests "request-a"]
+               :point {:database "reported-database" :system-time t1}}
+        derive! #(witness-binding/expected-private-operator-binding!
+                  operation %1 %2 %3)
+        expected (derive! origin original later)]
+    (is (= (set intake/binding-fields) (set (keys expected))))
+    (is (= "request-a" (:physical-row-id expected)))
+    (is (= :requests (:physical-table expected)))
+    (is (= "reported-database" (:database-instance expected)))
+    (is (= t0 (:system-from expected)))
+    (is (= t1 (:system-to expected)))
+    (is (= :incomplete-private-original-and-later-pinned-witness
+           (reason #(derive! origin (assoc original :target [:requests "other-row"])
+                             later))))
+    (is (= :incomplete-private-original-and-later-pinned-witness
+           (reason #(derive! origin original
+                             (assoc later :target [:requests "other-row"])))))
+    (is (= :incomplete-private-original-and-later-pinned-witness
+           (reason #(derive! (assoc origin :proof-fingerprint "other-proof")
+                             original later))))
+    (is (= :operator-claim-requires-advanced-same-database-pinned-interval
+           (reason #(derive! origin original
+                             (assoc-in later [:point :system-time] t0)))))
+    (is (= :operator-claim-requires-advanced-same-database-pinned-interval
+           (reason #(derive! origin original
+                             (assoc-in later [:point :system-time]
+                                       (.minusSeconds t0 1))))))
+    (is (= :operator-claim-requires-advanced-same-database-pinned-interval
+           (reason #(derive! origin original
+                             (assoc-in later [:point :database] "other-database")))))
+    (is (= :incomplete-private-original-and-later-pinned-witness
+           (reason #(derive! origin (assoc original :extra :forged) later))))))

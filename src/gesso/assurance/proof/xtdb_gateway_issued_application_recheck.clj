@@ -77,11 +77,21 @@
 
    Application-owned acquisition callbacks may have effects. No side effects
    from them are excluded or undone, and this does not perform authentication,
-   original command construction, XTDB submission or source proof discharge."
+   original command construction, XTDB submission or source proof discharge.
+
+   v1879: An optional PRIVATE sink receives this completed read's exact
+   selected target and reported pinned snapshot point AFTER all checks pass.
+   The sink and contents are never part of the public diagnostic report."
   ([source executor operation ctx invocation]
    (compare-original-acquired-prestate!
     source executor operation ctx invocation nil))
   ([source executor operation ctx invocation original-before]
+   (compare-original-acquired-prestate!
+    source executor operation ctx invocation original-before nil))
+  ([source executor operation ctx invocation original-before private-later!]
+  (when-not (or (nil? private-later!)
+                (and (fn? private-later!) (some? original-before)))
+    (reject! :invalid-private-later-pinned-read-capture))
   (pinned!)
   ;; Validate before invoking arbitrary application-owned callbacks.
   (when-not (and (map? source) (map? ctx)
@@ -198,6 +208,10 @@
                              :historical-prestate-differed-at-read)
                            :not-compared)]
           (pinned!)
+          (when private-later!
+            (when-not (snapshot/valid-private-point? later-point)
+              (reject! :private-later-pinned-point-not-comparable))
+            (private-later! {:target target :point later-point}))
           {:type report-type :version report-version
            :operation-id operation
            :comparison comparison

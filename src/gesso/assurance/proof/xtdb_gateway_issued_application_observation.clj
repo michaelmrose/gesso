@@ -49,7 +49,12 @@
 
    v1877: Describe future independently verified evidence required to close
    those conditions, without accepting caller-provided witnesses or treating
-   the public requirements report as a proof kernel or authority."
+   the public requirements report as a proof kernel or authority.
+
+   v1879: The optional signed-statement intake derives the EXPECTED identity
+   from private original executor and independently pinned later-read data.
+   Callers provide only a certified operation and a signed claim envelope;
+   signed integrity remains an unproven assertion, not history discharge."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -59,6 +64,10 @@
             [gesso.assurance.proof.xtdb-gateway-issued-history-discharge-boundary
              :as history-boundary]
             [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot]
+            [gesso.assurance.proof.xtdb-gateway-issued-operator-claim-intake
+             :as operator-claim]
+            [gesso.assurance.proof.xtdb-gateway-issued-operator-witness-binding
+             :as witness-binding]
             [gesso.live.application-preflight.certified-contract :as certified]))
 
 (def report-type
@@ -233,6 +242,8 @@
         (history-boundary/required-independent-evidence!
          initial open-history-conditions)
         original-recheck recheck/compare-original-acquired-prestate!
+        original-operator-intake operator-claim/inspect-operator-history-claim!
+        original-operator-binding witness-binding/expected-private-operator-binding!
         states (atom (into (sorted-map)
                            (for [operation (:certified-operation-ids initial)]
                              [operation :not-attempted])))
@@ -267,6 +278,14 @@
                     :diagnostic-open-history-conditions open-history-conditions
                     :diagnostic-required-independent-history-evidence
                     history-evidence-boundary
+                    :per-operation-operator-claim-intake
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:operator-claim-intake state :not-checked)
+                                         :not-eligible)]))
+                    :operator-claim-discharge :none
+                    :operator-claim-source :private-original-and-later-pinned-points
                     :per-operation-observations
                     (into (sorted-map)
                           (for [[operation state] snapshot]
@@ -392,6 +411,8 @@
                        (swap! states assoc operation
                               {:evidence checked
                                :private-original-before original-before
+                               :private-later-pinned-point nil
+                               :operator-claim-intake :not-checked
                                :original-context ctx
                                :original-invocation invocation
                                :read-only-recheck :not-checked
@@ -422,20 +443,27 @@
                                                 (let [entry (get current operation)]
                                                   (if (and (map? entry)
                                                            (not= :in-flight
-                                                                 (:read-only-recheck entry)))
-                                                    (assoc-in current [operation :read-only-recheck]
-                                                              :in-flight)
+                                                                 (:read-only-recheck entry))
+                                                           (not= :in-flight
+                                                                 (:operator-claim-intake entry)))
+                                                    (update current operation
+                                                            #(assoc %
+                                                                    :read-only-recheck :in-flight
+                                                                    :private-later-pinned-point nil))
                                                     current))))
                                    entry (get prior operation)]
                                (when-not (map? entry)
                                  (reject! :original-observation-required-for-read-only-recheck))
                                (when (= :in-flight (:read-only-recheck entry))
                                  (reject! :read-only-recheck-already-in-flight))
+                               (when (= :in-flight (:operator-claim-intake entry))
+                                 (reject! :operator-claim-intake-already-in-flight))
                                (try
                                  (when-not (identical? original-recheck
                                                        (var-get #'recheck/compare-original-acquired-prestate!))
                                    (reject! :substituted-original-read-only-recheck-function))
-                                 (let [source (get-in contract-source
+                                 (let [later-capture (volatile! nil)
+                                       source (get-in contract-source
                                                       [:certified-operations operation :current-source])
                                        executor (get-in contract-source
                                                         [:certified-operations operation :executor])
@@ -443,7 +471,8 @@
                                                source executor operation
                                                (:original-context entry)
                                                (:original-invocation entry)
-                                               (:private-original-before entry))]
+                                               (:private-original-before entry)
+                                               (fn [witness] (vreset! later-capture witness)))]
                                    (when-not (and (= recheck/report-type (:type report))
                                                   (= recheck/report-version (:version report))
                                                   (= operation (:operation-id report))
@@ -493,9 +522,19 @@
                                                   (= :none (:transaction-authority report)
                                                      (:authority report)))
                                      (reject! :unqualified-original-read-only-recheck))
+                                   (when-not (and (map? @later-capture)
+                                                  (= #{:target :point}
+                                                     (set (keys @later-capture)))
+                                                  (= (get-in entry [:private-original-before :target])
+                                                     (:target @later-capture))
+                                                  (snapshot/valid-private-point?
+                                                   (:point @later-capture)))
+                                     (reject! :private-later-pinned-read-not-established))
                                    (recheck!)
                                    (swap! states update operation
                                           (fn [e] (assoc e
+                                                         :private-later-pinned-point @later-capture
+                                                         :operator-claim-intake :not-checked
                                                          :read-only-recheck
                                                          (:comparison report)
                                                          :historical-prestate-recheck
@@ -512,13 +551,80 @@
                                  (catch Throwable failure
                                    (swap! states update operation
                                           (fn [e] (assoc e
+                                                         :private-later-pinned-point nil
+                                                         :operator-claim-intake :not-checked
                                                          :read-only-recheck :failed
                                                          :historical-prestate-recheck :failed
                                                          :reported-basis-relation :failed
                                                          :selected-row-history-boundary :failed
                                                          :selected-row-current-visibility :failed
                                                          :visible-history-inventory :failed)))
-                                   (throw failure)))))]
+                                   (throw failure)))))
+        inspect-operator-claim! (fn [operation envelope]
+                                  (when-not (contains? (:certified-operation-ids initial)
+                                                       operation)
+                                    (reject! :operation-not-originally-certified))
+                                  (recheck!)
+                                  (let [[prior _] (swap-vals!
+                                                   states
+                                                   (fn [current]
+                                                     (let [entry (get current operation)]
+                                                       (if (and (map? entry)
+                                                                (not= :in-flight
+                                                                      (:read-only-recheck entry))
+                                                                (not= :in-flight
+                                                                      (:operator-claim-intake entry))
+                                                                (map? (:private-later-pinned-point entry)))
+                                                         (assoc-in current [operation :operator-claim-intake]
+                                                                   :in-flight)
+                                                         current))))
+                                        entry (get prior operation)]
+                                    (when-not (map? entry)
+                                      (reject! :original-observation-required-for-operator-claim))
+                                    (when (= :in-flight (:read-only-recheck entry))
+                                      (reject! :read-only-recheck-already-in-flight))
+                                    (when (= :in-flight (:operator-claim-intake entry))
+                                      (reject! :operator-claim-intake-already-in-flight))
+                                    (when-not (map? (:private-later-pinned-point entry))
+                                      (reject! :completed-later-pinned-read-required-for-operator-claim))
+                                    (try
+                                      (when-not (and (identical? original-operator-intake
+                                                                  (var-get #'operator-claim/inspect-operator-history-claim!))
+                                                     (identical? original-operator-binding
+                                                                 (var-get #'witness-binding/expected-private-operator-binding!)))
+                                        (reject! :substituted-original-operator-claim-checker))
+                                      (let [origin (get-in initial [:certified-operation-proof-origins operation])
+                                            expected (original-operator-binding
+                                                      operation origin (:private-original-before entry)
+                                                      (:private-later-pinned-point entry))
+                                            signed (original-operator-intake expected envelope)]
+                                        (when-not (and (= operator-claim/report-type (:type signed))
+                                                       (= operator-claim/report-version (:version signed))
+                                                       (= :valid-ed25519-under-selected-key
+                                                          (:signature-integrity signed))
+                                                       (= :process-environment-operator-pinned-ed25519-key
+                                                          (:trust-root-source signed))
+                                                       (= #{} (:discharged-conditions signed))
+                                                       (= :not-issued (:certificate signed))
+                                                       (= :not-established
+                                                          (:retention-enforcement signed)
+                                                          (:erasure-exclusion signed)
+                                                          (:history-completeness signed))
+                                                       (= :none
+                                                          (:transaction-authority signed)
+                                                          (:retry-authority signed)
+                                                          (:authority signed)))
+                                          (reject! :unqualified-private-operator-claim-intake))
+                                        (recheck!)
+                                        (swap! states assoc-in
+                                               [operation :operator-claim-intake]
+                                               :valid-operator-signature-only)
+                                        (summary!))
+                                      (catch Throwable failure
+                                        (swap! states assoc-in
+                                               [operation :operator-claim-intake] :failed)
+                                        (throw failure)))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!
-     :read-only-recheck! read-only-recheck!}))
+     :read-only-recheck! read-only-recheck!
+     :inspect-operator-claim! inspect-operator-claim!}))
