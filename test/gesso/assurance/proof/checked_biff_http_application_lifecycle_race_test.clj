@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1825: Real JDK listener replacement, inspection, managed stop and startup
+  "v1826: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -1132,5 +1132,68 @@
         (is (identical? server (:server @(:server-state s))))
         (is (= :stopped (:status ((:stop! issued)))))
         (is (= :configured-instance-generation-not-current (reason inspect!))))
+      (finally
+        (cleanup! s issued)))))
+
+(deftest reentrant-managed-stop-in-listener-callback-cannot-return-current-report
+  ;; The monitor is reentrant: a host callback may stop the real listener
+  ;; after HTTP succeeds. Its stale object must not yield a current report.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-url (:base-url! source)
+        issued-holder (atom nil)
+        stop-during-postcheck? (atom false)
+        passed-locator? (atom false)
+        source-identity-reads (atom 0)
+        nested-stops (atom 0)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_]
+                         (swap! source-identity-reads inc)
+                         (when (and @stop-during-postcheck? @passed-locator?)
+                           (swap! nested-stops inc)
+                           (reset! stop-during-postcheck? false)
+                           (let [stopped ((:stop! @issued-holder))]
+                             (when-not (= :stopped (:status stopped))
+                               (throw (ex-info "Managed stop was not completed"
+                                               {:result stopped})))))
+                         (:server @(:server-state s)))
+                       :base-url!
+                       (fn [system]
+                         (when @stop-during-postcheck?
+                           (reset! passed-locator? true))
+                         (original-url system))))]
+    (reset! issued-holder issued)
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))
+            original-server (:server @(:server-state s))
+            reads-before @source-identity-reads]
+        (is (some? original-server))
+        (is (pos? reads-before) "Startup captured trusted listener identity")
+        (reset! stop-during-postcheck? true)
+        (is (= :configured-instance-not-current (reason inspect!))
+            "Reentrant managed stop invalidates inspection after challenge")
+        (is (true? @passed-locator?)
+            "Source locator executed between the two identity reads")
+        (is (= (+ reads-before 2) @source-identity-reads)
+            "Both physical listener identity checks occurred")
+        (is (= 1 @nested-stops)
+            "The post-challenge callback stopped the original application")
+        (is (= :stopped (:status ((:summary! issued)))))
+        (is (.isShutdown (:executor @(:server-state s)))
+            "The real HTTP listener closed in the reentrant stop")
+        (is (identical? original-server (:server @(:server-state s)))
+            "The source still returns the same, now stopped, server object")
+        (is (= :configured-instance-generation-not-current
+               (reason inspect!)))
+        (is (= :configured-instance-not-current
+               (reason #((:inspect-running! issued) system))))
+        (is (= :configured-start-already-attempted
+               (reason #((:start-once! issued) {}))))
+        (is (= 1 @nested-stops)
+            "Rejected subsequent checks must not run source callbacks"))
       (finally
         (cleanup! s issued)))))

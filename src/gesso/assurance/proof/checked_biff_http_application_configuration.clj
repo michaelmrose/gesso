@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1813: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1826: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -77,7 +77,13 @@
    :verified-configured-start atomically with respect to original managed
    stop/inspection. Previously the state could become verified while the
    returned system was still nil, letting a racing stop miss physical cleanup.
-   The monitor does not control out-of-band adapter stops or future liveness."
+   The monitor does not control out-of-band adapter stops or future liveness.
+
+   v1826: Re-check current state after the post-challenge listener identity
+   callback. The monitor is reentrant: source-trusted host callbacks can
+   synchronously call the managed stop closure on the SAME thread. Do not
+   return a current-instance report after that stop invalidates the issued
+   generation. This is still only process-local, callback-conditional evidence."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -477,6 +483,18 @@
                              (require-original-host-listener!
                               listener-instance! @original-listener-instance
                               candidate-system)
+                             ;; Java monitors are reentrant. Even though a
+                             ;; competing thread cannot stop this instance
+                             ;; during inspection, a trusted callback invoked
+                             ;; above can synchronously call the issued stop!
+                             ;; closure on THIS thread. That closes the real
+                             ;; listener before we return the current report.
+                             ;; Never publish a successful inspection after
+                             ;; reentrant managed shutdown has invalidated
+                             ;; its original state or returned system.
+                             (when-not (and (= :verified-configured-start @state)
+                                            (identical? candidate-system @started))
+                               (reject! :configured-instance-not-current))
                              {:type running-report-type :version report-version
                               :scope :one-original-managed-in-process-biff-instance
                               :status :current-at-inspection
