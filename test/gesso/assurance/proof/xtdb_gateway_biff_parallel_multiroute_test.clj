@@ -1,13 +1,15 @@
 (ns gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test
-  "v1570: real certified multi-route parallel Biff mediation, including two
+  "v1835: real certified multi-route parallel Biff mediation, including two
    independently checked operation/writer sources and physical XTDB guards.
-   Observed request-local callbacks do not establish exhaustive deployed
-   writer coverage, business-rule equivalence, or physical causality."
+   Catalog-wide coverage also checks both original constructions and issued
+   handlers in one assembled application; it does not establish deployment,
+   business-rule equivalence, or physical causality."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [clojure.string :as str]
             [gesso.assurance.admission :as admission]
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.certificate :as certificate]
+            [gesso.assurance.proof.checked-authorization-assembly :as catalog-coverage]
             [gesso.assurance.proof.operation-writer-coverage-soundness :as coverage]
             [gesso.model.inductive-plan :as inductive-plan]
             [gesso.model.certified-plan-test]
@@ -247,6 +249,48 @@
                    (coverage/derive-observed-writer-coverage!
                     (:writer-source *second*)))))
   (is (not= wc/*source* (:writer-source *second*))))
+
+(deftest two-independent-operations-require-source-complete-catalog-coverage
+  ;; This is an ORIGINAL-source and issued-handler check over the same real
+  ;; two-operation ApplicationAssembly used for the physical writer tests.
+  ;; It does not claim HTTP listener adoption, authorization, or a certificate.
+  (let [contract (:source *case*)
+        claim-construction (:construction (:plan-source ring/*case*))
+        cancel-construction (:construction (:plan-source *second*))
+        entries [{:id claim :construction claim-construction}
+                 {:id cancel :construction cancel-construction}]
+        selection {:contract-source contract
+                   :catalog-source {:catalog {:operations entries}
+                                    :physical-field-map {}}}
+        result (catalog-coverage/check-declared-route-coverage! selection)]
+    (is (= catalog-coverage/coverage-report-type (:type result)))
+    (is (= :all-declared-catalog-operations-and-issued-routes
+           (:checking result)))
+    (is (= #{claim cancel} (:catalog-operations result)))
+    (is (= #{claim-route cancel-route}
+           (:matched-certified-route-ids result)))
+    (is (= #{} (:uncertified-application-operations result)))
+    (is (= :source-relative-checked (:current-assembly-closure result)))
+    (is (= :not-established (:installed-handler-adoption result)
+           (:authorization-policy-provenance result)))
+    (is (= :not-issued (:certificate result)))
+    (is (= :not-admitted (:admission result)))
+    (is (= :none (:transaction-authority result) (:authority result)))
+    ;; Omitting one real operation, mismatching the independent construction,
+    ;; or substituting even another genuine issued handler must fail closed.
+    (doseq [bad [(assoc-in selection [:catalog-source :catalog :operations]
+                            [(first entries)])
+                 (assoc-in selection
+                           [:catalog-source :catalog :operations 1 :construction]
+                           claim-construction)
+                 (assoc-in selection [:contract-source :semantic-route-handlers
+                                      cancel-route]
+                           (get-in contract [:semantic-route-handlers claim-route]))
+                 (assoc-in selection [:catalog-source :catalog :operations]
+                           [(first entries) (first entries)])]]
+      (is (= :authorization-not-bound-to-original-assembly
+             (reason #(catalog-coverage/check-declared-route-coverage! bad)))
+          (pr-str bad)))))
 
 (deftest two-certified-operations-commit-with-distinct-writer-bindings
   (use-case
