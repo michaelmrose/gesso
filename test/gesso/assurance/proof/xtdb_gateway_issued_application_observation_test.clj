@@ -16,6 +16,8 @@
              :as snapshot]
             [gesso.assurance.proof.xtdb-gateway-issued-row-history
              :as row-history]
+            [gesso.assurance.proof.xtdb-gateway-issued-history-obligations
+             :as history-obligations]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test]
             [gesso.live.application-preflight.fixture :as app-fixture]
             [gesso.live.application-preflight :as application]
@@ -585,6 +587,14 @@
                       (:executor second-source)))
             (is (= #{primary secondary} (:certified-operation-ids before)))
             (is (= #{audit} (:uncertified-operation-ids before)))
+            (let [history (:diagnostic-open-history-conditions before)]
+              (is (= #{primary secondary}
+                     (set (keys (:certified-operation-open-conditions history)))))
+              (is (= #{audit} (:uncertified-operation-ids history)))
+              (is (= #{audit-route} (:uncertified-route-ids history)))
+              (is (= :none (:uncertified-history-proof-conditions history)))
+              (is (every? #(= #{} (:discharged-conditions %))
+                          (vals (:certified-operation-open-conditions history)))))
             (is (= #{audit-route} (:uncertified-route-ids before)))
             (is (= {:request/claim :not-observed
                     :request/claim-secondary :not-observed}
@@ -673,6 +683,8 @@
                      (get-in after [:per-operation-observations secondary :proof-origin])))
               (is (= (:original-open-proof-evidence before)
                      (:original-open-proof-evidence after)))
+              (is (= (:diagnostic-open-history-conditions before)
+                     (:diagnostic-open-history-conditions after)))
               (is (seq (get-in after [:original-open-proof-evidence :open-obligations])))
               (is (= #{audit} (:uncertified-operation-ids after)))
               (is (= #{audit-route} (:uncertified-route-ids after)))
@@ -956,6 +968,84 @@
       (is (not-any? #(contains? erased %)
                     [:snapshot-token :xt/system-from :xt/valid-from :xt/system-to
                      :original-context :private-original-before :target :before])))))
+
+(deftest v1876-history-proof-requirements-remain-open-after-pinned-evidence
+  ;; These conditions are generated from the genuinely checked original
+  ;; source, but are NEW diagnostic requirements, NOT original kernel proofs.
+  ;; Even a below-cap visible history, and especially a later ERASE, cannot
+  ;; discharge retention or erasure-exclusion by inspecting row records.
+  (let [op :request/claim
+        {:keys [data environment] :as env} (v1867-alias-case-env)
+        observer (application-observation/issue-current-issued-application-observer!
+                  (:contract env) (:catalog-source env))
+        summarize (:summary! observer)
+        original-summary (summarize)
+        ledger (:diagnostic-open-history-conditions original-summary)
+        open history-obligations/required-conditions
+        origin (get-in original-summary [:certified-operation-proof-origins op])
+        entry (get-in ledger [:certified-operation-open-conditions op])
+        invocation {:binding (:binding data) :mode :submit}
+        ctx {:biff.xtdb/node (db)}]
+    (is (= history-obligations/report-type (:type ledger)))
+    (is (= history-obligations/report-version (:version ledger)))
+    (is (= :new-diagnostic-conditions-not-original-kernel-obligations
+           (:provenance ledger)))
+    (is (= #{op} (set (keys (:certified-operation-open-conditions ledger)))))
+    (is (= origin (:original-certified-proof-origin entry)))
+    (is (= open (:required-conditions ledger) (:required-conditions entry)))
+    (is (= 4 (count open)))
+    (is (= #{} (:discharged-conditions ledger) (:discharged-conditions entry)))
+    (is (= :open-unproven (:disposition entry)))
+    (is (= :not-established (:history-retention ledger)
+           (:erasure-exclusion ledger) (:full-interval-coverage ledger)
+           (:snapshot-source-authenticity ledger)
+           (:historical-continuity ledger)
+           (:original-kernel-proof-discharge ledger)))
+    (is (= :not-issued (:certificate ledger)))
+    (is (= :none (:authority ledger) (:uncertified-history-proof-conditions ledger)))
+    (is (= #{} (:uncertified-operation-ids ledger)
+           (:uncertified-route-ids ledger)))
+    (is (= :incomplete-source-bound-history-obligation-scope
+           (reason #(history-obligations/derive-open-history-conditions!
+                     {:certified-operation-ids #{op}
+                      :certified-operation-proof-origins {op (dissoc origin :route-ids)}
+                      :certified-route-ids #{op}
+                      :uncertified-operation-ids #{}
+                      :uncertified-route-ids #{}}))))
+    (is (= :incomplete-source-bound-history-obligation-scope
+           (reason #(history-obligations/derive-open-history-conditions!
+                     {:certified-operation-ids #{op}
+                      :certified-operation-proof-origins {op origin}
+                      :certified-route-ids (:route-ids origin)
+                      :uncertified-operation-ids #{op}
+                      :uncertified-route-ids #{}}))))
+    (seed! [:requests (:request data)])
+    (let [first-observation ((:observe! observer) op ctx invocation)
+          same ((:read-only-recheck! observer) op)]
+      (is (= ledger (:diagnostic-open-history-conditions first-observation)
+             (:diagnostic-open-history-conditions same)))
+      (is (= :visible-pinned-history-inventory-below-cap
+             (get-in same [:per-operation-visible-history-inventory op])))
+      (is (= :not-established
+             (get-in same [:diagnostic-open-history-conditions
+                           :history-retention])))
+      (is (= (:original-open-proof-evidence original-summary)
+             (:original-open-proof-evidence same))))
+    (xt/execute-tx (db) [[:erase-docs :requests
+                           (:xt/id (:request data))]])
+    (let [after-erasure ((:read-only-recheck! observer) op)]
+      (is (= :no-visible-pinned-history-records
+             (get-in after-erasure [:per-operation-visible-history-inventory op])))
+      (is (= ledger (:diagnostic-open-history-conditions after-erasure)))
+      (is (= #{} (get-in after-erasure
+                         [:diagnostic-open-history-conditions
+                          :certified-operation-open-conditions op
+                          :discharged-conditions])))
+      (is (= :not-established
+             (get-in after-erasure
+                     [:diagnostic-open-history-conditions :historical-continuity])))
+      (is (= 1 @(:constructs environment)))
+      (is (nil? (read-command (resolution/record-id (:binding data))))))))
 
 (deftest v1872-basis-relation-classification-is-not-an-aba-proof
   (let [t0 (java.time.Instant/parse "2026-01-01T00:00:00Z")

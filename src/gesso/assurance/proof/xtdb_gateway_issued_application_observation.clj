@@ -41,12 +41,17 @@
 
    v1875: Retain the bounded 33-record pinned visible history census as an
    independent, redacted saturation status. Query-level non-saturation is
-   never promoted into database history retention or interval completeness."
+   never promoted into database history retention or interval completeness.
+
+   v1876: Derive, separately from the original proof kernel ledger, OPEN
+   per-certified-operation history retention/erasure/coverage/identity
+   conditions. Bounded observations do not discharge these conditions."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as issued]
             [gesso.assurance.proof.xtdb-gateway-issued-application-recheck :as recheck]
+            [gesso.assurance.proof.xtdb-gateway-issued-history-obligations :as history-obligations]
             [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot]
             [gesso.live.application-preflight.certified-contract :as certified]))
 
@@ -217,6 +222,7 @@
    atomic application-wide behavior or production adoption."
   [contract-source catalog-source]
   (let [initial (original-current-scope! contract-source catalog-source)
+        open-history-conditions (history-obligations/derive-open-history-conditions! initial)
         original-recheck recheck/compare-original-acquired-prestate!
         states (atom (into (sorted-map)
                            (for [operation (:certified-operation-ids initial)]
@@ -249,6 +255,7 @@
                     :uncertified-operation-ids (:uncertified-operation-ids initial)
                     :uncertified-route-ids (:uncertified-route-ids initial)
                     :original-open-proof-evidence (:original-open-proof-evidence initial)
+                    :diagnostic-open-history-conditions open-history-conditions
                     :per-operation-observations
                     (into (sorted-map)
                           (for [[operation state] snapshot]
