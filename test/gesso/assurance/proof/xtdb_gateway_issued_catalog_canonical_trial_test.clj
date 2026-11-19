@@ -581,6 +581,30 @@
             "A matching XTDB row must not discharge source obligations")
         (is (= expected (:catalog-open-evidence source-bound)))
         (is (= selected (:selected-operation-open-evidence source-bound)))
+        (let [current-proof (get-in
+                             (certified/check-certified-contracts! contract)
+                             [:certified-operations operation])]
+          (is (= (select-keys current-proof
+                              [:proof-source-fingerprint
+                               :proof-subject-fingerprint
+                               :dependency-graph-fingerprint])
+                 (:selected-operation-proof-source-identity source-bound)))
+          (is (every? some? (vals (:selected-operation-proof-source-identity
+                                   source-bound)))))
+        (is (= :whole-original-application-not-per-operation
+               (:catalog-global-assumptions-scope source-bound)))
+        (is (= :exact-original-selected-operation
+               (:selected-operation-obligations-scope source-bound)))
+        (is (= :original-global-union-of-selected-operation-rows
+               (:open-proof-ledger-composition source-bound)))
+        (is (= (:open-premises expected)
+               (into #{} (mapcat :open-premises)
+                     (vals (:certified-operation-open-evidence expected)))))
+        (is (= (:open-obligations expected)
+               (clojure.set/union
+                (:open-assumptions expected)
+                (into #{} (mapcat :open-obligations)
+                      (vals (:certified-operation-open-evidence expected))))))
         (is (= (get-in alias [:source-identity])
                (:selected-operation-source-identity source-bound)))
         (is (= :original-source-rechecked
@@ -637,6 +661,54 @@
         "A changed authoritative document must defeat the captured prestate")
     (is (nil? (read-command (resolution/record-id (:binding d)))))
     (is (= "other-writer" (:owner (read-request (:xt/id (:request d))))))))
+
+(deftest v1864-original-open-proof-ledger-rejects-misattribution
+  ;; This is a pure shape guard on the original *rechecked* issued binding.
+  ;; Malformed copies are rejected; none of this accepts proof as discharged.
+  (let [env (case-env)
+        operation :request/claim
+        bound-ns 'gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
+        source-check (var-get (ns-resolve bound-ns 'current-binding!))
+        ledger-check (var-get (ns-resolve bound-ns
+                                          'original-executor-open-proof-evidence!))
+        initial (source-check (:contract env) (:catalog-source env)
+                              operation false)
+        exact (ledger-check initial operation)
+        rows (get-in initial [:catalog-open-evidence
+                              :certified-operation-open-evidence])]
+    (is (= :original-global-union-of-selected-operation-rows
+           (:open-proof-ledger-composition exact)))
+    (is (= operation (first (keys rows))))
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (assoc-in initial [:catalog-open-evidence :open-premises]
+                               #{:invented-premise}) operation))))
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (assoc-in initial [:catalog-open-evidence :open-obligations]
+                               #{}) operation))))
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (assoc-in initial
+                               [:catalog-open-evidence
+                                :certified-operation-open-evidence operation
+                                :open-obligations]
+                               #{:invented-operation-obligation}) operation))))
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (assoc-in initial
+                               [:catalog-open-evidence
+                                :certified-operation-open-evidence operation
+                                :route-ids]
+                               #{:unlisted/route}) operation))))
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (dissoc initial :proof-subject-fingerprint)
+                     operation))))
+    (is (= :not-established (:original-kernel-proof-discharge exact)
+           (:physical-refinement-proof-discharge exact)))
+    (is (= :retained-open-not-discharged
+           (:proof-obligations-disposition exact)))))
 
 (deftest v1857-source-bound-alias-check-requires-a-genuine-alias
   (let [env (case-env)]

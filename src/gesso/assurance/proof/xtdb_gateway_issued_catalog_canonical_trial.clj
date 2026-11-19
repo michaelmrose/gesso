@@ -361,6 +361,13 @@
                    (= (:physical-field-map catalog-source) (:field-map source))
                    (= operation (:operation description)
                       (:operation certified-row))
+                   ;; The genuine v1253 checker also records the proof's
+                   ;; origin and dependency graph; keep those identities
+                   ;; together, not just the flattened proof fingerprint.
+                   (every? some? (map certified-row
+                                      [:proof-source-fingerprint
+                                       :proof-subject-fingerprint
+                                       :dependency-graph-fingerprint]))
                    (= (get-in source [:certified-source :proof-source :transition])
                       (:transition transition))
                    (= (:transition-fingerprint transition)
@@ -402,6 +409,9 @@
      :catalog-fingerprint (:fingerprint checked)
      :transition-fingerprint (:transition-fingerprint transition)
      :proof-fingerprint (:proof-fingerprint certified-row)
+     :proof-source-fingerprint (:proof-source-fingerprint certified-row)
+     :proof-subject-fingerprint (:proof-subject-fingerprint certified-row)
+     :dependency-graph-fingerprint (:dependency-graph-fingerprint certified-row)
      :route-ids route-ids
      ;; Include unresolved evidence in the binding identity checked at
      ;; issue, pre-observation, post-observation and every summary. It cannot
@@ -667,7 +677,16 @@
         rows (:certified-operation-open-evidence evidence)
         selected (get rows operation)
         catalog-operations (get-in initial [:catalog-route-scope
-                                            :catalog-operations])]
+                                            :catalog-operations])
+        complete-route-ids (get-in initial [:catalog-route-scope
+                                            :matched-certified-route-ids])
+        row-premises (into #{} (mapcat :open-premises) (vals rows))
+        row-obligations (into #{} (mapcat :open-obligations) (vals rows))
+        row-routes (vec (mapcat :route-ids (vals rows)))
+        proof-source-identity
+        (select-keys initial [:proof-source-fingerprint
+                              :proof-subject-fingerprint
+                              :dependency-graph-fingerprint])]
     (when-not (and (map? evidence)
                    (= #{:open-assumptions :open-premises :open-obligations
                         :certified-operation-open-evidence}
@@ -677,6 +696,27 @@
                    (map? rows)
                    (set? catalog-operations)
                    (= catalog-operations (set (keys rows)))
+                   (every? (fn [row]
+                             (and (map? row)
+                                  (= #{:route-ids :open-premises :open-obligations}
+                                     (set (keys row)))
+                                  (every? set? (map row
+                                                    [:route-ids :open-premises
+                                                     :open-obligations]))
+                                  (seq (:route-ids row))))
+                           (vals rows))
+                   (set? complete-route-ids)
+                   (= (count row-routes) (count (set row-routes)))
+                   (= complete-route-ids (set row-routes))
+                   (= (:open-premises evidence) row-premises)
+                   (= (:open-obligations evidence)
+                      (set/union (:open-assumptions evidence)
+                                 row-obligations))
+                   (= #{:proof-source-fingerprint
+                        :proof-subject-fingerprint
+                        :dependency-graph-fingerprint}
+                      (set (keys proof-source-identity)))
+                   (every? some? (vals proof-source-identity))
                    (map? selected)
                    (= #{:route-ids :open-premises :open-obligations}
                       (set (keys selected)))
@@ -686,6 +726,10 @@
       (reject! :original-issued-open-proof-evidence-not-established))
     {:catalog-open-evidence evidence
      :selected-operation-open-evidence selected
+     :selected-operation-proof-source-identity proof-source-identity
+     :catalog-global-assumptions-scope :whole-original-application-not-per-operation
+     :selected-operation-obligations-scope :exact-original-selected-operation
+     :open-proof-ledger-composition :original-global-union-of-selected-operation-rows
      :selected-operation-source-identity
      (select-keys initial [:catalog-fingerprint
                            :transition-fingerprint
@@ -719,7 +763,12 @@
 
    Any successful diagnostic retains the original whole-catalog open proof
    evidence and exact selected operation evidence without claiming that a
-   typed check, snapshot read or constructor capture discharged it."
+   typed check, snapshot read or constructor capture discharged it.
+
+   v1864: Verify the original catalog proof ledger's exact global/set union,
+   and associate the selected operation's original proof source, subject and
+   dependency graph identities with the same physical-prestate diagnostic.
+   Global assumptions remain explicitly global, not selected-operation proofs."
   ([contract-source catalog-source operation ctx invocation proof-context]
    (check-current-issued-executor-typed-command-alias!
     contract-source catalog-source operation ctx invocation proof-context
