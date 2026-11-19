@@ -134,7 +134,8 @@ jobs:
             -Dio.netty.noUnsafe=false
         run: |
           clojure -M:test \
-            -n gesso.assurance.proof.xtdb-gateway-owned-nonerase-boundary-test
+            -n gesso.assurance.proof.xtdb-gateway-owned-nonerase-boundary-test \
+            -n gesso.assurance.proof.xtdb-gateway-signed-policy-checkpoint-test
 
       - name: Record JVM sparse identity transition observations
         run: |

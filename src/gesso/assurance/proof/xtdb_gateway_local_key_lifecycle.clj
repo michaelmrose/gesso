@@ -22,11 +22,17 @@
    repeated rotations cannot strand one-use global challenge capacity.
    None of these facts proves independent signer identity or cross-process
    and durable revocation completeness.
+
+   v1901: Expose strictly read-only, canonicalizable checkpoint material
+   containing the ACTUAL local revision, generations and complete retirement
+   sets. It can be signed out-of-band and checked against the current policy;
+   exporting or signing it does not independently authenticate this process
+   or establish persistent revocation.
    The restricted controls govern ONLY this process-local wrapper; no
    certificate, witness admission, retry or transaction authority follows."
   (:require [gesso.assurance.proof.xtdb-gateway-delegated-candidate-key
              :as delegated])
-  (:import [java.util IdentityHashMap]))
+  (:import [java.util IdentityHashMap UUID]))
 
 (def lifecycle-type
   :gesso.assurance.proof.xtdb-gateway-local-key-lifecycle/local-root-policy)
@@ -84,7 +90,8 @@
         monitor (Object.)
         pending (IdentityHashMap.)
         first-root (:configured-root-spki-fingerprint initial)
-        state (atom {:policy-revision 1
+        state (atom {:policy-id (str (UUID/randomUUID))
+                     :policy-revision 1
                      :root-generation 1
                      :delegation-generation 1
                      :lifecycle :active
@@ -127,6 +134,24 @@
                      :transaction-authority :none
                      :retry-authority :none
                      :authority :none}))
+        checkpoint-material (fn []
+                              (let [st @state]
+                                ;; Portable content, not an authenticated log,
+                                ;; secret key, or independently verified source.
+                                {:type :gesso.assurance.proof.xtdb-gateway-local-key-lifecycle/checkpoint-material
+                                 :version 1
+                                 :policy-id (:policy-id st)
+                                 :policy-revision (:policy-revision st)
+                                 :root-generation (:root-generation st)
+                                 :delegation-generation (:delegation-generation st)
+                                 :root-lifecycle (:lifecycle st)
+                                 :delegation-lifecycle (:delegation-lifecycle st)
+                                 :root-fingerprint (:root-fingerprint st)
+                                 :delegate-fingerprint (:delegate-fingerprint st)
+                                 :delegation-id (:delegation-id st)
+                                 :seen-root-fingerprints (vec (sort (:previous-root-fingerprints st)))
+                                 :retired-delegate-fingerprints (vec (sort (:retired-delegate-fingerprints st)))
+                                 :retired-delegation-ids (vec (sort (:retired-delegation-ids st)))}))
         check-revision! (fn [expected]
                           (when-not (and (integer? expected)
                                          (= expected (:policy-revision @state)))
@@ -299,6 +324,7 @@
     {:type lifecycle-type
      :version 1
      :status! (fn [] (locking monitor (summary)))
+     :checkpoint-material! (fn [] (locking monitor (checkpoint-material)))
      :issue! issue!
      :inspect! inspect!
      :revoke! revoke!
