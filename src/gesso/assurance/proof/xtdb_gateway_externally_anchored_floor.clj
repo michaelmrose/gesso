@@ -14,7 +14,16 @@
    Neither the callbacks nor their public key are independently provisioned
    or authenticated HERE. The adapter does not ship a trusted register or
    rescue a split commit automatically. No two-resource atomicity, complete
-   revocation, physical XTDB causality, proof discharge or certificate exists."
+   revocation, physical XTDB causality, proof discharge or certificate exists.
+
+   v1908: After local commit, retain the verified client distinction between
+   a SIGNED, request-bound stale CAS rejection and a genuinely uncertain
+   external CAS outcome. Both irrevocably quarantine this adapter: a remote
+   rejection does NOT roll back the local signed checkpoint or permit retry.
+   Classification trusts only the explicitly configured client callback to
+   have performed the v1907 signature check; user-supplied callback exception
+   data alone is NOT an independently authenticated witness. A new adapter
+   and fresh signed read must still establish exact-head recovery."
   (:require [gesso.assurance.proof.xtdb-gateway-durable-checkpoint-store :as durable])
   (:import [java.io ByteArrayOutputStream DataOutputStream]
            [java.security KeyFactory MessageDigest PublicKey Signature]
@@ -243,8 +252,45 @@
                            :external-register-monotonicity :assumed-not-verified
                            :proof-discharge :none :certificate :not-issued
                            :authority :none})
-                        (catch Throwable _
-                          (reject! :external-floor-advance-unconfirmed))))))]
+                        (catch Throwable ex
+                          ;; A v1907 client can tell a signature-verified
+                          ;; stale CAS refusal from an unknown transport
+                          ;; outcome. The callback is configuration-supplied;
+                          ;; these are *reported* facts, not a second
+                          ;; independent check of its signature here.
+                          ;; The durable LOCAL append already happened.
+                          ;; Never reset poisoned, retry, roll back or
+                          ;; promote either outcome to checkpoint acceptance.
+                          (let [data (ex-data ex)
+                                client-reported-rejection?
+                                (and (= :register-client-authenticated-stale-cas
+                                        (:reason data))
+                                     (= :rejected-not-applied (:outcome data))
+                                     (true? (:signature-verified-for-pinned-register-key?
+                                             data))
+                                     (true? (:no-automatic-retry data)))]
+                            (throw
+                             (ex-info
+                              "External register update is not confirmed for the locally committed checkpoint."
+                              {:xtdb-external-floor/rejection true
+                               :reason (if client-reported-rejection?
+                                         :external-floor-advance-client-reported-verified-rejection
+                                         :external-floor-advance-unconfirmed)
+                               :local-checkpoint :already-committed
+                               :reported-external-advance-outcome
+                               (if client-reported-rejection?
+                                 :rejected-not-applied :unknown)
+                               :client-signature-check
+                               (if client-reported-rejection?
+                                 :reported-verified-by-configured-client
+                                 :not-established)
+                               :adapter-state :permanently-quarantined
+                               :recovery :new-adapter-requires-fresh-signed-exact-head
+                               :no-automatic-retry true
+                               :proof-discharge :none
+                               :certificate :not-issued
+                               :authority :none}
+                              ex))))))))]
     ;; Verify the external read and local head immediately, not merely on the
     ;; first status call; fail closed on split-brain during restart.
     (checked-local!)

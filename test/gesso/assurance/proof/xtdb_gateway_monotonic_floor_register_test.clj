@@ -582,3 +582,68 @@
             (is (= :none (:authority (register/prepare-durable-register!
                                       (config dir root false))))))
           (finally (stop-server! service)))))))
+
+(deftest v1908-signed-stale-cas-crosses-client-adapter-without-losing-quarantine
+  ;; A separate actor wins the CAS during the interval between the adapter's
+  ;; fresh read and its own signed advance. The real Unix client verifies the
+  ;; register's rejection signature; the adapter distinguishes the refusal
+  ;; from transport uncertainty WITHOUT claiming its local append rolled back.
+  (with-dir
+    (fn [dir]
+      (let [p (policy) cp (pair) rk (pair)
+            socket (.resolve ^Path dir "signed-advance-race.sock")
+            service (start-server! dir rk socket true)]
+        (try
+          (let [client (:client service)
+                won-race (atom nil)
+                calls (atom 0)
+                cfg {:directory dir :policy p
+                     :checkpoint-authority-ed25519-spki-base64 (spki cp)
+                     :external-floor-ed25519-spki-base64 (spki rk)
+                     :read-external-floor! (:read-external-floor! client)
+                     :advance-external-floor!
+                     (fn [request]
+                       (swap! calls inc)
+                       ;; Simulate a second authorized writer racing the
+                       ;; same desired floor. The first request commits; our
+                       ;; second request gets a genuine SIGNED stale CAS.
+                       (reset! won-race
+                               ((:advance-external-floor! client) request))
+                       ((:advance-external-floor! client) request))
+                     :initialize-empty? true}
+                adapter (floor/prepare-external-floor-adapter! cfg)
+                ex (try ((:append! adapter) (checkpoint p "genesis" cp)) nil
+                        (catch clojure.lang.ExceptionInfo caught caught))
+                details (ex-data ex)
+                cause (.getCause ^Throwable ex)]
+            (is (= 1 @calls) "Adapter requested one advance, without retry")
+            (is (signed-envelope? @won-race rk))
+            (is (= :register-client-authenticated-stale-cas
+                   (:reason (ex-data cause))))
+            (is (true? (:signature-verified-for-pinned-register-key?
+                        (ex-data cause))))
+            (is (= :external-floor-advance-client-reported-verified-rejection
+                   (:reason details)))
+            (is (= :rejected-not-applied
+                   (:reported-external-advance-outcome details)))
+            (is (= :already-committed (:local-checkpoint details)))
+            (is (= :permanently-quarantined (:adapter-state details)))
+            (is (= :none (:authority details) (:proof-discharge details)))
+            (is (= :not-issued (:certificate details)))
+            (is (= :unconfirmed-external-floor-advance
+                   (reason #((:status! adapter)))))
+            ;; The racing writer advanced to precisely our local head. Only
+            ;; a NEW adapter may freshly establish that agreement. It must
+            ;; not inherit the old adapter's uncertain or rejected result.
+            (let [reopened (floor/prepare-external-floor-adapter!
+                            (assoc cfg :initialize-empty? false
+                                   :advance-external-floor!
+                                   (:advance-external-floor! client)))]
+              (is (= 1 (:head-revision ((:status! reopened)))))
+              (is (= :matched-exact-external-high-water-mark
+                     (:local-chain ((:status! reopened)))))
+              (is (= :none (:authority reopened)
+                     (:proof-discharge reopened)))
+              (is (= :unconfirmed-external-floor-advance
+                     (reason #((:status! adapter)))))))
+          (finally (stop-server! service)))))))

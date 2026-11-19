@@ -290,3 +290,102 @@
                  (:durable-revocation-across-deployment reopened)))
           (is (= :not-issued (:certificate reopened)))
           (is (= :none (:authority reopened))))))))
+
+
+(deftest v1908-client-reported-signed-cas-rejection-keeps-local-commit-quarantined
+  ;; The v1907 Unix client, not THIS adapter, validates the signed rejection.
+  ;; This configured callback represents the verified client result.
+  ;; A stale CAS refusal cannot undo the original local checkpoint write.
+  (with-directory
+    (fn [dir]
+      (let [p (policy) cp (pair) ep (pair) ext (external-register ep)
+            verified-reject (fn [_]
+                              (throw (ex-info
+                                      "Verified stale CAS refusal from v1907 client"
+                                      {:reason :register-client-authenticated-stale-cas
+                                       :outcome :rejected-not-applied
+                                       :signature-verified-for-pinned-register-key? true
+                                       :no-automatic-retry true})))
+            cfg (assoc (config dir p cp ep ext true)
+                       :advance-external-floor! verified-reject)
+            adapter (floor/prepare-external-floor-adapter! cfg)
+            ex (try ((:append! adapter) (checkpoint p "genesis" cp)) nil
+                    (catch clojure.lang.ExceptionInfo e e))
+            details (ex-data ex)]
+        (is (instance? clojure.lang.ExceptionInfo ex))
+        (is (= :external-floor-advance-client-reported-verified-rejection
+               (:reason details)))
+        (is (= :rejected-not-applied
+               (:reported-external-advance-outcome details)))
+        (is (= :reported-verified-by-configured-client
+               (:client-signature-check details)))
+        (is (= :already-committed (:local-checkpoint details)))
+        (is (= :permanently-quarantined (:adapter-state details)))
+        (is (= :new-adapter-requires-fresh-signed-exact-head
+               (:recovery details)))
+        (is (true? (:no-automatic-retry details)))
+        (is (= :none (:authority details) (:proof-discharge details)))
+        (is (= :not-issued (:certificate details)))
+        (is (= :unconfirmed-external-floor-advance
+               (reason #((:status! adapter)))))
+        (is (= {:revision 0 :checkpoint-digest "genesis"}
+               @(:current ext)))
+        (is (= :external-floor-local-head-divergence
+               (reason #(open dir p cp ep ext false)))
+            "A new instance must not accept locally committed history while register is behind")
+        ;; The original instance remains quarantined after explicit operator
+        ;; repair. Only a NEW adapter with fresh signed reads may recover.
+        (let [local (store/prepare-local-durable-store!
+                     {:directory dir :policy p
+                      :authority-ed25519-spki-base64 (spki cp)
+                      :external-rollback-floor {:revision 0
+                                                :checkpoint-digest "genesis"}
+                      :initialize-empty? false})
+              head ((:status! local))]
+          (reset! (:current ext)
+                  {:revision (:head-revision head)
+                   :checkpoint-digest (:head-digest head)})
+          (is (= 1 (:head-revision ((:status! (open dir p cp ep ext false))))))
+          (is (= :unconfirmed-external-floor-advance
+                 (reason #((:status! adapter))))))))))
+
+(deftest v1908-unauthenticated-or-incomplete-rejection-is-not-definitive
+  ;; The configured callback is NOT a trust root. Incomplete, contradictory,
+  ;; forged, unsigned or generic failures always classify as UNKNOWN.
+  (doseq [reported
+          [{:reason :register-client-authenticated-stale-cas
+            :outcome :rejected-not-applied
+            :signature-verified-for-pinned-register-key? false
+            :no-automatic-retry true}
+           {:reason :register-client-authenticated-stale-cas
+            :outcome :rejected-not-applied
+            :signature-verified-for-pinned-register-key? true}
+           {:reason :register-client-authenticated-stale-cas
+            :outcome :unknown
+            :signature-verified-for-pinned-register-key? true
+            :no-automatic-retry true}
+           {:reason :register-client-advance-outcome-unknown
+            :outcome :unknown
+            :no-automatic-retry true}
+           {:reason :stale-compare-and-advance}]]
+    (with-directory
+      (fn [dir]
+        (let [p (policy) cp (pair) ep (pair) ext (external-register ep)
+              attempted (atom 0)
+              cfg (assoc (config dir p cp ep ext true)
+                         :advance-external-floor!
+                         (fn [_] (swap! attempted inc)
+                           (throw (ex-info "unverified external reply" reported))))
+              adapter (floor/prepare-external-floor-adapter! cfg)
+              ex (try ((:append! adapter) (checkpoint p "genesis" cp)) nil
+                      (catch clojure.lang.ExceptionInfo e e))
+              details (ex-data ex)]
+          (is (= 1 @attempted))
+          (is (= :external-floor-advance-unconfirmed (:reason details)))
+          (is (= :unknown (:reported-external-advance-outcome details)))
+          (is (= :not-established (:client-signature-check details)))
+          (is (= :already-committed (:local-checkpoint details)))
+          (is (= :permanently-quarantined (:adapter-state details)))
+          (is (true? (:no-automatic-retry details)))
+          (is (= :unconfirmed-external-floor-advance
+                 (reason #((:status! adapter))))))))))
