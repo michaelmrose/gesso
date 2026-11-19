@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1842: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1843: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -129,7 +129,12 @@
    v1842: Retain the original selected contract's per-certified-operation
    route/premise/obligation evidence through startup and current-instance
    reports. Shared assumptions stay catalog-scoped. No operation-specific
-   evidence remains a current-instance assertion after managed stop."
+   evidence remains a current-instance assertion after managed stop.
+
+   v1843: Publish original selected operation/route inventory AND the
+   separately identified uncertified application operations alongside the
+   unresolved source-relative evidence. Never imply catalog selection is
+   a complete business-policy inventory or current deployment certificate."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -276,6 +281,26 @@
          (= (:matched-certified-route-ids checked)
             (into #{} (mapcat :route-ids) (vals rows))))))
 
+(defn- valid-selected-catalog-inventory? [checked]
+  ;; Selection coverage must account explicitly for the original catalog and
+  ;; the application operations it leaves uncertified. A source-relative
+  ;; catalog cannot quietly become an all-application policy certificate.
+  (let [selected (:catalog-operations checked)
+        uncertified (:uncertified-application-operations checked)
+        routes (:matched-certified-route-ids checked)]
+    (and (set? selected)
+         (seq selected)
+         (every? qualified-keyword? selected)
+         (set? uncertified)
+         (every? qualified-keyword? uncertified)
+         (empty? (set/intersection selected uncertified))
+         (set? routes)
+         (seq routes)
+         (every? qualified-keyword? routes)
+         (= :selected-not-all-possible-application-policy
+            (:catalog-scope checked))
+         (= :not-established (:authorization-policy-provenance checked)))))
+
 (defn- require-selected-route-coverage! [contract-source typed-trial]
   ;; There is deliberately no caller-supplied checked report to trust. Only
   ;; selected typed execution requires this check. Run it BEFORE Biff init,
@@ -307,6 +332,7 @@
                      (set/subset? (:open-assumptions checked)
                                   (:open-obligations checked))
                      (valid-selected-operation-evidence? checked)
+                     (valid-selected-catalog-inventory? checked)
                      (= :none (:transaction-authority checked)
                         (:authority checked))
                      (= :not-issued (:certificate checked))
@@ -438,11 +464,18 @@
      :selected-catalog-open-obligations (:open-obligations selected)
      :selected-catalog-operation-open-evidence
      (:certified-operation-open-evidence selected)
+     :selected-catalog-operation-ids (:catalog-operations selected)
+     :selected-catalog-route-ids (:matched-certified-route-ids selected)
+     :selected-catalog-uncertified-operation-ids
+     (:uncertified-application-operations selected)
      :selected-catalog-proof-evidence-scope :original-startup-source-only}
     {:selected-catalog-open-assumptions :not-established
      :selected-catalog-open-premises :not-established
      :selected-catalog-open-obligations :not-established
      :selected-catalog-operation-open-evidence :not-established
+     :selected-catalog-operation-ids :not-established
+     :selected-catalog-route-ids :not-established
+     :selected-catalog-uncertified-operation-ids :not-established
      :selected-catalog-proof-evidence-scope :not-established}))
 
 (defn- report [state typed-selected? selected]

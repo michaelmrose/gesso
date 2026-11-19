@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1842: The actual application startup entrypoint owns module issuance,
+  "v1843: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -39,6 +39,9 @@
                (:selected-catalog-open-premises report)
                (:selected-catalog-open-obligations report)
                (:selected-catalog-operation-open-evidence report)
+               (:selected-catalog-operation-ids report)
+               (:selected-catalog-route-ids report)
+               (:selected-catalog-uncertified-operation-ids report)
                (:selected-catalog-proof-evidence-scope report)))
         (is (= :not-established (:external-deployment report)))
         (is (= :none (:authority report) (:retry-authority report)))
@@ -92,6 +95,11 @@
                    :catalog-source (get-in source [:typed-trial :catalog-source])})
         issued (config/issue-configured-checked-http-application! source)
         operation-evidence (:certified-operation-open-evidence selected)
+        selected-inventory
+        {:selected-catalog-operation-ids (:catalog-operations selected)
+         :selected-catalog-route-ids (:matched-certified-route-ids selected)
+         :selected-catalog-uncertified-operation-ids
+         (:uncertified-application-operations selected)}
         expected {:selected-catalog-open-assumptions (:open-assumptions selected)
                   :selected-catalog-open-premises (:open-premises selected)
                   :selected-catalog-open-obligations (:open-obligations selected)}]
@@ -112,7 +120,17 @@
         (doseq [actual [report summary inspected inspected-generation]]
           (is (= expected (select-keys actual (keys expected)))
               (pr-str (:type actual))))
+        ;; A selected catalog is not the whole application. Preserve the
+        ;; original certified/uncertified inventory explicitly, so a consumer
+        ;; can audit which application operations the selection did not cover.
+        (is (every? set? (vals selected-inventory)))
+        (is (empty? (clojure.set/intersection
+                     (:selected-catalog-operation-ids selected-inventory)
+                     (:selected-catalog-uncertified-operation-ids
+                      selected-inventory))))
         (doseq [actual [report summary inspected inspected-generation]]
+          (is (= selected-inventory (select-keys actual (keys selected-inventory)))
+              (pr-str (:type actual)))
           (is (= operation-evidence
                  (:selected-catalog-operation-open-evidence actual))
               (pr-str (:type actual)))
@@ -128,7 +146,11 @@
     (is (= :not-established
            (:selected-catalog-open-obligations ((:summary! issued)))))
     (is (= :not-established
-           (:selected-catalog-operation-open-evidence ((:summary! issued)))))))
+           (:selected-catalog-operation-open-evidence ((:summary! issued)))))
+    (is (= {:selected-catalog-operation-ids :not-established
+            :selected-catalog-route-ids :not-established
+            :selected-catalog-uncertified-operation-ids :not-established}
+           (select-keys ((:summary! issued)) (keys selected-inventory))))))
 
 (deftest invalid-application-configuration-cannot-inject-module-var-or-order
   (let [s (scenario :honest)
