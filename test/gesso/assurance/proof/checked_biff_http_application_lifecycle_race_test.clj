@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1814: Real JDK listener replacement, inspection, managed stop and startup
+  "v1815: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -431,4 +431,54 @@
               (deref starting 15000 :startup-timed-out)))))
       (finally
         (deliver release-publish true)
+        (cleanup! s issued)))))
+
+(deftest concurrent-start-cannot-issue-second-physical-adapter
+  ;; A previous test rejected a second start only AFTER the first finished.
+  ;; Block the first on its original post-listener loopback URL locator,
+  ;; then launch a competing start while the original adapter is still
+  ;; :starting. Only the first caller may consume this issued one-shot start.
+  ;; The competitor must not create another listener or advance the state.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        entered (promise)
+        release-first (promise)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source :base-url!
+                       (fn [system]
+                         (deliver entered true)
+                         (when-not (deref release-first 15000 false)
+                           (throw (ex-info "First startup challenge timed out" {})))
+                         (original-locator system))))
+        first-start (future ((:start-once! issued) {}))]
+    (try
+      (is (true? (deref entered 15000 false)))
+      (let [original-listener (:server @(:server-state s))
+            second-start (future
+                           (reason #((:start-once! issued) {})))]
+        (is (some? original-listener)
+            "Original Biff listener is already physically started")
+        (is (= :starting (:status ((:summary! issued)))))
+        (is (= :configured-start-already-attempted
+               (deref second-start 10000 :second-start-timed-out)))
+        (is (identical? original-listener
+                        (:server @(:server-state s)))
+            "Competing caller cannot replace the first listener")
+        (is (= :starting (:status ((:summary! issued)))))
+        (deliver release-first true)
+        (let [{:keys [system instance-generation report] :as result}
+              (deref first-start 15000 :first-start-timed-out)]
+          (is (map? result))
+          (is (= :verified-configured-start (:status report)))
+          (is (= :current-at-inspection
+                 (:status ((:inspect-generation! issued)
+                           instance-generation system))))
+          (is (identical? original-listener
+                          (:server @(:server-state s)))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (.isShutdown (:executor @(:server-state s)))))
+      (finally
+        (deliver release-first true)
+        (deref first-start 15000 :first-start-timed-out)
         (cleanup! s issued)))))
