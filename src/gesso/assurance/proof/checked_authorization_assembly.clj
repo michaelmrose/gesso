@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-authorization-assembly
-  "v1836: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
+  "v1837: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
 
    For any selected qualified operation and route ID, relate its declared
    catalog construction to the SAME current-source construction of an issued
@@ -15,8 +15,13 @@
 
    v1836: The catalog-wide checker also pins its own original selected-binding
    function. Replacing that public Var must not bypass the per-operation
-   construction/handler relation while the original contract check succeeds."
-  (:require [gesso.live.application-preflight.certified-contract :as certified]))
+   construction/handler relation while the original contract check succeeds.
+
+   v1837: Catalog-wide coverage also requires the original ApplicationAssembly
+   recognizer and operation-summary facade. A substituted verifier or invented
+   route inventory cannot establish current application closure."
+  (:require [gesso.live.application-preflight :as application]
+            [gesso.live.application-preflight.certified-contract :as certified]))
 
 (def report-type
   :gesso.assurance.proof.checked-authorization-assembly/selected-binding)
@@ -24,6 +29,14 @@
 
 (def ^:private original-issued-binding certified/issued-handler-binding?)
 (def ^:private original-contract-check certified/check-certified-contracts!)
+(def ^:private original-application-assembly? application/application-assembly?)
+(def ^:private original-operation-summary application/operation-summary)
+
+(defn- application-boundary-current? []
+  (and (identical? original-application-assembly?
+                   (var-get #'application/application-assembly?))
+       (identical? original-operation-summary
+                   (var-get #'application/operation-summary))))
 
 (defn- plain-map? [m]
   (and (or (instance? clojure.lang.PersistentArrayMap m)
@@ -116,6 +129,7 @@
                  (closed-map? catalog-source #{:catalog :physical-field-map})
                  (plain-map? (:catalog catalog-source))
                  (vector? (get-in catalog-source [:catalog :operations]))
+                 (application-boundary-current?)
                  (identical? original-contract-check
                              (var-get #'certified/check-certified-contracts!))
                  (identical? original-issued-binding
@@ -158,7 +172,8 @@
       ;; A trusted callback encountered during original contract validation
       ;; must not be allowed to replace a proof boundary before a successful
       ;; catalog report is returned. This is a point-in-time observation only.
-      (when-not (and (identical? original-contract-check
+      (when-not (and (application-boundary-current?)
+                     (identical? original-contract-check
                                  (var-get #'certified/check-certified-contracts!))
                      (identical? original-issued-binding
                                  (var-get #'certified/issued-handler-binding?))

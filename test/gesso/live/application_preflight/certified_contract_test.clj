@@ -1,12 +1,13 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1836: adversarial source-relative checks for issued Ring bindings.
+  "v1837: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
    to v1251 issued executors. Reports, copied metadata, and caller-supplied
    route maps cannot certify deployment or grant transaction authority.
    Catalog coverage must invoke the original per-route checker, not a
-   substituted public Var that simply reports success.
+   substituted public Var that simply reports success. It must also reject
+   substituted application-recognition and operation-summary entry points.
 
    These tests distinguish real ApplicationAssembly closure (no redefs) from
    a deliberately stubbed operation summary used solely to isolate malformed
@@ -487,60 +488,83 @@
                      (:reason ex)) (pr-str bad)))))))))
 
 
+(defn- with-genuine-catalog-selection [f]
+  ;; No stubs of the ApplicationAssembly recognizer or operation summary:
+  ;; both routes for Claim and the independent ordinary Cancel route come
+  ;; from a current, physically recorded application-preflight fixture.
+  (let [{:keys [source executor handler unrelated issue-source]} (environment)
+        operations {claim (fixture/trusted-operation claim
+                                                     {:published-change-topics #{}})
+                    cancel (fixture/trusted-operation cancel
+                                                      {:published-change-topics #{}})}
+        routes {route-1 {:operation claim :path "/claim"}
+                route-2 {:operation claim :path "/claim/alternate"}
+                route-3 {:operation cancel :path "/cancel"}}]
+    (fixture/with-surfaced-application
+      {:operations operations
+       :route-capabilities (fixture/custom-route-capabilities routes)
+       :rendered-surfaces {:proof [:div "safe"]}}
+      (fn [{:keys [assembly report]}]
+        (is (application/valid? report) (pr-str (:errors report)))
+        (is (some? assembly))
+        (when assembly
+          (let [base {:application-assembly assembly
+                      :semantic-route-handlers
+                      {route-1 handler route-2 handler route-3 unrelated}
+                      :certified-operations
+                      {claim {:executor executor :current-source source}}}
+                catalog-source
+                {:catalog {:operations [{:id claim
+                                        :construction (:construction source)}]}
+                 :physical-field-map {}}]
+            (f {:base base :source source :issue-source issue-source
+                :unrelated unrelated :catalog-source catalog-source
+                :input {:contract-source base
+                        :catalog-source catalog-source}})))))))
+
 (deftest catalog-wide-coverage-checks-every-issued-route
-  (let [{:keys [base source]} (environment)
-        catalog-source {:catalog {:operations [{:id claim
-                                                :construction (:construction source)}]}
-                        :physical-field-map {}}
-        input {:contract-source base :catalog-source catalog-source}]
-    (with-summary summary
-      (fn []
-        (let [report (authorization/check-declared-route-coverage! input)]
-          (is (= authorization/coverage-report-type (:type report)))
-          (is (= :all-declared-catalog-operations-and-issued-routes
-                 (:checking report)))
-          (is (= #{claim} (:catalog-operations report)))
-          (is (= #{route-1 route-2} (:matched-certified-route-ids report)))
-          (is (= #{cancel} (:uncertified-application-operations report)))
-          (is (= :selected-not-all-possible-application-policy
-                 (:catalog-scope report)))
-          (is (= :source-relative-checked (:current-assembly-closure report)))
-          (is (= :not-established (:installed-handler-adoption report)))
-          (is (= :not-established (:authorization-policy-provenance report)))
-          (is (= :none (:transaction-authority report)))
-          (is (= :not-issued (:certificate report))))))))
+  (with-genuine-catalog-selection
+    (fn [{:keys [input]}]
+      (let [report (authorization/check-declared-route-coverage! input)]
+        (is (= authorization/coverage-report-type (:type report)))
+        (is (= :all-declared-catalog-operations-and-issued-routes
+               (:checking report)))
+        (is (= #{claim} (:catalog-operations report)))
+        (is (= #{route-1 route-2} (:matched-certified-route-ids report)))
+        (is (= #{cancel} (:uncertified-application-operations report)))
+        (is (= :selected-not-all-possible-application-policy
+               (:catalog-scope report)))
+        (is (= :source-relative-checked (:current-assembly-closure report)))
+        (is (= :not-established (:installed-handler-adoption report)))
+        (is (= :not-established (:authorization-policy-provenance report)))
+        (is (= :none (:transaction-authority report)))
+        (is (= :not-issued (:certificate report)))))))
 
 (deftest catalog-wide-coverage-rejects-missing-replaced-or-undeclared-bindings
-  (let [{:keys [base source unrelated issue-source]} (environment)
-        second-executor (plan/build-certified-plan-operation! source)
-        second-handler (binding/issue-certified-handler!
-                        (assoc issue-source :executor second-executor))
-        catalog-source {:catalog {:operations [{:id claim
-                                                :construction (:construction source)}]}
-                        :physical-field-map {}}
-        input {:contract-source base :catalog-source catalog-source}
-        bad-catalog (fn [entries]
-                      (assoc-in input [:catalog-source :catalog :operations]
-                                entries))
-        entry {:id claim :construction (:construction source)}
-        mutations [(assoc-in input [:contract-source :semantic-route-handlers route-2]
-                             unrelated)
-                   (assoc-in input [:contract-source :semantic-route-handlers route-2]
-                             second-handler)
-                   (update-in input [:contract-source :semantic-route-handlers]
-                              dissoc route-2)
-                   (assoc-in input [:contract-source :certified-operations]
-                             {})
-                   (bad-catalog [])
-                   (bad-catalog [entry entry])
-                   (bad-catalog [{:id cancel :construction (:construction source)}])
-                   (bad-catalog [(assoc-in entry [:construction :subject :id]
-                                           cancel)])
-                   (assoc input :certified? true)
-                   (assoc input :catalog-source
-                          (with-meta catalog-source {:proof :forged}))]]
-    (with-summary summary
-      (fn []
+  (with-genuine-catalog-selection
+    (fn [{:keys [input source unrelated issue-source catalog-source]}]
+      (let [second-executor (plan/build-certified-plan-operation! source)
+            second-handler (binding/issue-certified-handler!
+                            (assoc issue-source :executor second-executor))
+            bad-catalog (fn [entries]
+                          (assoc-in input [:catalog-source :catalog :operations]
+                                    entries))
+            entry {:id claim :construction (:construction source)}
+            mutations [(assoc-in input [:contract-source :semantic-route-handlers route-2]
+                                 unrelated)
+                       (assoc-in input [:contract-source :semantic-route-handlers route-2]
+                                 second-handler)
+                       (update-in input [:contract-source :semantic-route-handlers]
+                                  dissoc route-2)
+                       (assoc-in input [:contract-source :certified-operations] {})
+                       (bad-catalog [])
+                       (bad-catalog [entry entry])
+                       (bad-catalog [{:id cancel :construction (:construction source)}])
+                       (bad-catalog [(assoc-in entry [:construction :subject :id]
+                                               cancel)])
+                       (assoc input :certified? true)
+                       (assoc input :catalog-source
+                              (with-meta catalog-source {:proof :forged}))]]
         (doseq [bad mutations]
           (let [data (failure #(authorization/check-declared-route-coverage!
                                bad))]
@@ -548,44 +572,60 @@
                    (:reason data)) (pr-str bad))))))))
 
 (deftest coverage-pins-original-contract-checker
-  (let [{:keys [base source]} (environment)
-        catalog-source {:catalog {:operations [{:id claim
-                                                :construction (:construction source)}]}
-                        :physical-field-map {}}
-        input {:contract-source base :catalog-source catalog-source}]
-    (with-summary summary
-      (fn []
-        (with-redefs [binding/check-certified-contracts!
-                      (fn [_] {:type binding/report-type
-                               :version binding/adapter-version
-                               :certified-operations {claim {:route-ids #{route-1 route-2}}}
-                               :matched-certified-route-ids #{route-1 route-2}})]
-          (is (= :authorization-not-bound-to-original-assembly
-                 (:reason (failure #(authorization/check-declared-route-coverage!
-                                    input))))))))))
+  (with-genuine-catalog-selection
+    (fn [{:keys [input]}]
+      (with-redefs [binding/check-certified-contracts!
+                    (fn [_] {:type binding/report-type
+                             :version binding/adapter-version
+                             :certified-operations {claim {:route-ids #{route-1 route-2}}}
+                             :matched-certified-route-ids #{route-1 route-2}})]
+        (is (= :authorization-not-bound-to-original-assembly
+               (:reason (failure #(authorization/check-declared-route-coverage!
+                                  input)))))))))
 
 (deftest catalog-coverage-refuses-substituted-selected-binding-checker
-  ;; A forged successful per-route relation must not turn a genuine
-  ;; ApplicationAssembly check into catalog construction/handler coverage.
-  ;; The exact public checker Var is itself a source-integrity boundary.
+  (with-genuine-catalog-selection
+    (fn [{:keys [input]}]
+      (with-redefs [authorization/check-selected-binding!
+                    (fn [_] {:checking :selected-original-construction-to-exact-issued-handler})]
+        (is (= :authorization-not-bound-to-original-assembly
+               (:reason (failure #(authorization/check-declared-route-coverage!
+                                  input)))))
+        (is (= :authorization-not-bound-to-original-assembly
+               (:reason (failure #(authorization/check-declared-route-coverage!
+                                  (assoc-in input
+                                            [:catalog-source :catalog :operations 0
+                                             :construction :subject :id]
+                                            cancel))))))))))
+
+(deftest catalog-coverage-pins-original-application-verifiers
+  (with-genuine-catalog-selection
+    (fn [{:keys [input]}]
+      (is (= authorization/coverage-report-type
+             (:type (authorization/check-declared-route-coverage! input))))
+      (with-redefs [application/application-assembly? (constantly true)]
+        (is (= :authorization-not-bound-to-original-assembly
+               (:reason (failure #(authorization/check-declared-route-coverage!
+                                  input))))))
+      (with-redefs [application/operation-summary (fn [_] summary)]
+        (is (= :authorization-not-bound-to-original-assembly
+               (:reason (failure #(authorization/check-declared-route-coverage!
+                                  input)))))))))
+
+(deftest fabricated-assembly-and-invented-routes-cannot-certify-catalog
   (let [{:keys [base source]} (environment)
-        catalog-source {:catalog {:operations [{:id claim
-                                                :construction (:construction source)}]}
-                        :physical-field-map {}}
-        input {:contract-source base :catalog-source catalog-source}]
+        input {:contract-source base
+               :catalog-source
+               {:catalog {:operations [{:id claim
+                                        :construction (:construction source)}]}
+                :physical-field-map {}}}]
+    ;; This exact fixture previously succeeded because both public application
+    ;; verification functions were replaced. Its catalog must never qualify.
     (with-summary summary
       (fn []
-        (with-redefs [authorization/check-selected-binding!
-                      (fn [_] {:checking :selected-original-construction-to-exact-issued-handler})]
-          (is (= :authorization-not-bound-to-original-assembly
-                 (:reason (failure #(authorization/check-declared-route-coverage!
-                                    input)))))
-          (is (= :authorization-not-bound-to-original-assembly
-                 (:reason (failure #(authorization/check-declared-route-coverage!
-                                    (assoc-in input
-                                              [:catalog-source :catalog :operations 0
-                                               :construction :subject :id]
-                                              cancel)))))))))))
+        (is (= :authorization-not-bound-to-original-assembly
+               (:reason (failure #(authorization/check-declared-route-coverage!
+                                  input)))))))))
 
 (deftest catalog-wide-coverage-uses-genuine-application-assembly
   (let [{:keys [source executor handler]} (environment)
