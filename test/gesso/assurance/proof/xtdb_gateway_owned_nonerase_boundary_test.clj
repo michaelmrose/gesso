@@ -954,3 +954,155 @@
                         (assoc ((:read! app)) :outside-write true)]])
        (is (= :incomplete-private-observational-premises
               (intent-reason #((:issue! v) g returned))))))))
+
+(defn- v1898-grant [delegate]
+  (let [now (java.time.Instant/now)]
+    {:version 1
+     :delegation-id (str (java.util.UUID/randomUUID))
+     :audience "gesso.xtdb.transaction-causality-candidate.v1"
+     :obligation :exclusive-transaction-causality
+     :witness-family :transaction-coupled-apply-provenance
+     :delegated-ed25519-spki-base64
+     (:ed25519-spki-base64 (v1897-key-config delegate))
+     :valid-from (str (.minusSeconds now 60))
+     :valid-until (str (.plusSeconds now 3600))}))
+
+(defn- v1898-delegation-config [root grant]
+  (let [signing-bytes
+        ((requiring-resolve
+          'gesso.assurance.proof.xtdb-gateway-delegated-candidate-key/delegation-signing-bytes)
+         grant)]
+    {:root-ed25519-spki-base64
+     (:ed25519-spki-base64 (v1897-key-config root))
+     :delegation grant
+     :root-signature-base64 (v1896-sign signing-bytes (.getPrivate root))}))
+
+(deftest v1898-role-scoped-signed-key-delegation-is-not-independent-trust
+  (let [prepare (requiring-resolve
+                 'gesso.assurance.proof.xtdb-gateway-delegated-candidate-key/prepare-delegated-candidate-verifier!)
+        generator (java.security.KeyPairGenerator/getInstance "Ed25519")
+        root (.generateKeyPair generator)
+        other-root (.generateKeyPair generator)
+        delegate (.generateKeyPair generator)
+        grant (v1898-grant delegate)
+        config (v1898-delegation-config root grant)
+        prepared (prepare config)
+        invalid (fn [x] (intent-reason #(prepare x)))]
+    (is (= :gesso.assurance.proof.xtdb-gateway-delegated-candidate-key/delegated-candidate-verifier
+           (:type prepared)))
+    (is (= :valid-for-configured-root-key
+           (:delegation-signature-check prepared)))
+    (is (= :exclusive-transaction-causality-candidate-only
+           (:delegation-scope prepared)))
+    (is (not= (:configured-root-spki-fingerprint prepared)
+              (:delegated-key-spki-fingerprint prepared)))
+    (is (= :process-supplied-not-authenticated
+           (:root-configuration-origin prepared)))
+    (is (= :not-established
+           (:root-independent-provisioning prepared)
+           (:delegate-independent-physical-observation prepared)
+           (:revocation-and-complete-issuance-inventory prepared)))
+    (is (= :none (:authority prepared) (:proof-discharge prepared)))
+    (is (= :not-issued (:certificate prepared)))
+    ;; A valid root signature proves possession of a process-chosen root
+    ;; key, NOT that its operator or custody is independent of the caller.
+    (is (= :root-signature-not-verified
+           (invalid (assoc config :root-ed25519-spki-base64
+                           (:ed25519-spki-base64
+                            (v1897-key-config other-root))))))
+    (is (= :root-signature-not-verified
+           (invalid (assoc-in config [:delegation :delegation-id]
+                              (str (java.util.UUID/randomUUID))))))
+    (is (= :root-signature-not-verified
+           (invalid (assoc-in config [:delegation :delegated-ed25519-spki-base64]
+                              (:ed25519-spki-base64
+                               (v1897-key-config other-root))))))
+    (is (= :invalid-delegation-scope
+           (invalid (assoc-in config [:delegation :audience] "another-app"))))
+    (is (= :invalid-delegation-scope
+           (invalid (assoc-in config [:delegation :witness-family]
+                              :unrelated-proof))))
+    (is (= :invalid-delegation-scope
+           (invalid (assoc-in config [:delegation :unreviewed] true))))
+    (is (= :invalid-delegation-configuration
+           (invalid (assoc config :admit-witness? true))))
+    (is (= :root-must-differ-from-delegate
+           (invalid (v1898-delegation-config root (v1898-grant root)))))
+    (let [now (java.time.Instant/now)
+          expired (assoc grant
+                         :valid-from (str (.minusSeconds now 7200))
+                         :valid-until (str (.minusSeconds now 3600)))
+          not-yet (assoc grant
+                         :valid-from (str (.plusSeconds now 3600))
+                         :valid-until (str (.plusSeconds now 7200)))
+          excessive (assoc grant
+                           :valid-from (str (.minusSeconds now 60))
+                           :valid-until (str (.plusSeconds now 90000)))]
+      (is (= :delegation-not-currently-valid
+             (invalid (v1898-delegation-config root expired))))
+      (is (= :delegation-not-currently-valid
+             (invalid (v1898-delegation-config root not-yet))))
+      (is (= :invalid-delegation-window-or-id
+             (intent-reason #(v1898-delegation-config root excessive))))
+      (is (= :invalid-delegation-window-or-id
+             (intent-reason #(v1898-delegation-config root
+                                                       (assoc grant :delegation-id
+                                                              "not-a-uuid"))))))))
+
+(deftest v1898-delegated-key-candidate-stays-untrusted-on-real-xtdb
+  (physical/with-proving-application!
+   (fn [app]
+     (let [prepare (requiring-resolve
+                    'gesso.assurance.proof.xtdb-gateway-delegated-candidate-key/prepare-delegated-candidate-verifier!)
+           generator (java.security.KeyPairGenerator/getInstance "Ed25519")
+           root (.generateKeyPair generator)
+           delegate (.generateKeyPair generator)
+           outside (.generateKeyPair generator)
+           pinned (prepare (v1898-delegation-config root
+                                                    (v1898-grant delegate)))
+           g (intent/prepare-one-shot! (:node app)
+                                       (source ((:read! app))))
+           returned ((:submit! g))
+           issued ((:issue! pinned) g returned)
+           bytes (.decode (java.util.Base64/getDecoder)
+                          ^String (:signing-bytes-base64 issued))
+           response {:signature-base64
+                     (v1896-sign bytes (.getPrivate delegate))}
+           checked ((:inspect! pinned) issued response)]
+       (is (= :gesso.assurance.proof.xtdb-gateway-delegated-candidate-key/delegated-candidate-check
+              (:type checked)))
+       (is (= :ed25519-valid-for-process-configured-key
+              (:cryptographic-check checked)))
+       (is (= :valid-for-configured-root-key
+              (:delegation-signature-check checked)))
+       (is (= :not-established
+              (:delegation-root-independent-provisioning checked)
+              (:delegate-key-custody checked)
+              (:physical-event-correspondence checked)
+              (:transaction-causality checked)
+              (:signer-observation-of-physical-event checked)))
+       (is (false? (:witness-checked-for-obligation? checked)))
+       (is (= :not-admitted (:witness-admission checked)))
+       (is (= :none (:authority checked) (:transaction-authority checked)
+              (:retry-authority checked) (:proof-discharge checked)))
+       (is (= :not-issued (:certificate checked)))
+       (is (not-any? #(contains? checked %)
+                     [:tx-key :node :snapshot-token :delegation-id
+                      :root-private-key :delegate-private-key :signed-event]))
+       (is (= :not-issued-by-this-pinned-verifier
+              (intent-reason #((:inspect! pinned) issued response))))
+       (let [fresh ((:issue! pinned) g returned)
+             fresh-bytes (.decode (java.util.Base64/getDecoder)
+                                  ^String (:signing-bytes-base64 fresh))]
+         (is (= :candidate-signature-not-verified
+                (intent-reason #((:inspect! pinned) fresh
+                                 {:signature-base64
+                                  (v1896-sign fresh-bytes
+                                              (.getPrivate outside))})))))
+       ;; A later physical change prevents a NEW challenge, independently
+       ;; of the correctness of the root-delegation signature.
+       (xt/execute-tx (:node app)
+                      [[:put-docs physical/table
+                        (assoc ((:read! app)) :external-change true)]])
+       (is (= :incomplete-private-observational-premises
+              (intent-reason #((:issue! pinned) g returned))))))))
