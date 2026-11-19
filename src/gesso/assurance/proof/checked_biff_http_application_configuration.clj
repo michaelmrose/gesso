@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1828: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1829: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -89,7 +89,13 @@
    source-owned callbacks. JVM locks are reentrant; a callback in a local
    liveness challenge must not recursively perform additional inspections
    or enter an unbounded recursion. Release the in-progress guard on every
-   failure without blocking later independent observations."
+   failure without blocking later independent observations.
+
+   v1829: A source callback can change a pinned original Var root after the
+   first source-integrity check and before inspection reports success. Recheck
+   all original boundary Var roots after the final trusted listener callback.
+   This is point-in-time source integrity, not a guarantee against future
+   mutation or hostile concurrent code."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -507,6 +513,10 @@
                              ;; Never publish a successful inspection after
                              ;; reentrant managed shutdown has invalidated
                              ;; its original state or returned system.
+                             ;; Source callbacks can also rebind an original
+                             ;; proof boundary Var after our entry pin. Re-pin
+                             ;; AFTER the final callback, before reporting.
+                             (pinned!)
                              (when-not (and (= :verified-configured-start @state)
                                             (identical? candidate-system @started))
                                (reject! :configured-instance-not-current))

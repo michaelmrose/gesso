@@ -1,9 +1,10 @@
 (ns gesso.assurance.proof.checked-biff-http-application-inspection-callback-race-test
-  "v1828: Callback-driven inspection races against the original Biff HTTP
+  "v1829: Callback-driven inspection races against the original Biff HTTP
    listener: failed URL lookup, second identity check, reentrant managed stop.
    These are in-process observations, never deployment certification."
   (:require [clojure.test :refer [deftest is use-fixtures]]
             [gesso.assurance.proof.checked-biff-http-application-configuration :as config]
+            [gesso.assurance.proof.checked-biff-http-consumption-probe :as probe]
             [gesso.assurance.proof.checked-biff-http-application-configuration-fixture
              :refer [scenario original-source reason cleanup!
                      with-real-application-fixture]]))
@@ -329,4 +330,80 @@
         (is (= :stopped (:status ((:stop! issued)))))
         (is (.isShutdown (:executor @(:server-state s)))))
       (finally
+        (cleanup! s issued)))))
+
+(deftest post-challenge-boundary-var-substitution-rejects-current-instance
+  ;; An app-owned callback invoked at the final listener identity check can
+  ;; replace an original proof function Var AFTER the entry-time pinned! check
+  ;; and the real HTTP challenge. Even though that original physical listener
+  ;; still responds, the current-instance report must reject the changed
+  ;; source boundary rather than silently accept success from a stale pin.
+  ;; The original root is restored before any further inspection or cleanup.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-url (:base-url! source)
+        original-live-root (var-get #'probe/require-fresh-local-http-liveness!)
+        mutate-postcheck? (atom false)
+        locator-completed? (atom false)
+        substitutions (atom 0)
+        locator-calls (atom 0)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_]
+                         (when (and @mutate-postcheck? @locator-completed?)
+                           (reset! mutate-postcheck? false)
+                           (swap! substitutions inc)
+                           (alter-var-root
+                            #'probe/require-fresh-local-http-liveness!
+                            (constantly (fn [& _]
+                                          (throw (ex-info "Substituted original liveness"
+                                                          {:reason :fixture-substitution}))))))
+                         (:server @(:server-state s)))
+                       :base-url!
+                       (fn [system]
+                         (swap! locator-calls inc)
+                         (when @mutate-postcheck?
+                           (reset! locator-completed? true))
+                         (original-url system))))]
+    (try
+      (let [{:keys [system instance-generation]}
+            ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))
+            initial-locator-count @locator-calls
+            original-server (:server @(:server-state s))]
+        (is (some? original-server))
+        (reset! mutate-postcheck? true)
+        (is (= :substituted-original-configured-start-boundary
+               (reason inspect!))
+            "A post-challenge original Var swap must invalidate inspection")
+        (is (true? @locator-completed?)
+            "Actual source-owned HTTP target lookup occurred before the swap")
+        (is (= 1 @substitutions)
+            "The final listener callback performed exactly one substitution")
+        (is (= (inc initial-locator-count) @locator-calls)
+            "The failed inspection issued its original HTTP challenge")
+        (is (not (identical? original-live-root
+                             (var-get #'probe/require-fresh-local-http-liveness!))))
+        (is (identical? original-server (:server @(:server-state s))))
+        (alter-var-root #'probe/require-fresh-local-http-liveness!
+                        (constantly original-live-root))
+        (is (= :verified-configured-start
+               (:status ((:summary! issued))))
+            "Historical startup status is independent of failed inspection")
+        (let [observed (inspect!)]
+          (is (= :current-at-inspection (:status observed)))
+          (is (= :observed-at-current-inspection
+                 (:fresh-local-http-response observed)))
+          (is (= :not-issued (:certificate observed)))
+          (is (= :not-admitted (:admission observed)))
+          (is (= :none (:authority observed))))
+        (is (= (+ initial-locator-count 2) @locator-calls)
+            "Recovered inspection must conduct its own fresh HTTP check")
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (.isShutdown (:executor @(:server-state s)))))
+      (finally
+        (alter-var-root #'probe/require-fresh-local-http-liveness!
+                        (constantly original-live-root))
         (cleanup! s issued)))))
