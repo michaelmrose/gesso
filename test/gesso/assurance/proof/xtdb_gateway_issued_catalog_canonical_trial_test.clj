@@ -6,6 +6,7 @@
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.certificate :as certificate]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as bound]
+            [gesso.assurance.proof.checked-authorization-assembly :as checked-assembly]
             [gesso.assurance.proof.xtdb-gateway-catalog-bound-atomic-canonical-trial-test]
             [gesso.assurance.proof.xtdb-gateway-full-atomic-typed-preparation-test]
             [gesso.live.application-preflight :as application]
@@ -164,6 +165,18 @@
                      :transaction :plan :tx-ops :execution :request :node]))
       (is (= :issued-executor-trial-already-attempted
              (reason #(invoke! trial env :submit)))))))
+
+(deftest issued-physical-trial-requires-original-full-catalog-closure
+  ;; The physical binder cannot attest whole-catalog construction/handler
+  ;; correspondence by inspecting only its selected operation. In particular,
+  ;; substituting the catalog-wide checked closure must be rejected before
+  ;; a one-use physical trial is issued, even if the selected source is real.
+  (let [env (case-env)]
+    (with-redefs [checked-assembly/check-declared-route-coverage!
+                  (constantly {:type checked-assembly/coverage-report-type
+                               :certificate :not-issued :authority :none})]
+      (is (= :substituted-original-assembly-or-issuer
+             (reason #(issued env)))))))
 
 (deftest unrelated-checked-catalog-cannot-impersonate-issued-executor
   (let [env (case-env)

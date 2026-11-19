@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
-  "v1848: Bind the v1775 checked-catalog physical trial to the EXACT issued
+  "v1849: Bind the v1775 checked-catalog physical trial to the EXACT issued
    v1251 certified-plan executor and the CURRENT assembled application's
    certified route/operation table. An observed physical transaction comes
    from calling the registered executor, not an arbitrary invocation thunk.
@@ -14,9 +14,16 @@
    NOT be required to own every certified route in a multi-operation app.
    Independently verify that the disjoint certified operation route sets
    form the complete original declared route inventory. Never relax exact
-   issued executor, construction, command identity or physical field checks."
+   issued executor, construction, command identity or physical field checks.
+
+   v1849: Reuse the genuine catalog-wide original source/issued-handler
+   checker. Selected-operation checks alone do not establish full catalog
+   construction and route correspondence when other certified operations
+   coexist. Its report remains source-relative and non-authoritative."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
+            [gesso.assurance.proof.checked-authorization-assembly
+             :as coverage]
             [gesso.assurance.proof.xtdb-gateway-catalog-bound-atomic-canonical-trial
              :as canonical]
             [gesso.assurance.transition :as constructor]
@@ -32,6 +39,8 @@
 (def ^:private original-contract-check certified/check-certified-contracts!)
 (def ^:private original-operation-summary application/operation-summary)
 (def ^:private original-catalog-check catalog/check-operation-set!)
+(def ^:private original-full-coverage-check
+  coverage/check-declared-route-coverage!)
 (def ^:private original-construct constructor/build-guarded-replacement!)
 (def ^:private original-plan-require plan/require-current-plan-operation!)
 (def ^:private original-plan-describe plan/describe-plan-operation)
@@ -50,6 +59,8 @@
                              (var-get #'application/operation-summary))
                  (identical? original-catalog-check
                              (var-get #'catalog/check-operation-set!))
+                 (identical? original-full-coverage-check
+                             (var-get #'coverage/check-declared-route-coverage!))
                  (identical? original-construct
                              (var-get #'constructor/build-guarded-replacement!))
                  (identical? original-plan-require
@@ -108,6 +119,12 @@
         contracts (try (original-contract-check contract-source)
                        (catch Exception _
                          (reject! :invalid-current-certified-operation-table)))
+        full-coverage
+        (try (original-full-coverage-check
+              {:contract-source contract-source
+               :catalog-source catalog-source})
+             (catch Exception _
+               (reject! :catalog-executor-or-assembled-operation-diverged)))
         summary (try (original-operation-summary
                       (get-in contract-source
                               [:application-assembly :operation-acquisition-assembly]))
@@ -135,6 +152,24 @@
                    (= :checked (:exact-declared-operation-coverage checked))
                    (= certified/report-type (:type contracts))
                    (= certified/adapter-version (:version contracts))
+                   ;; The genuine original catalog-scoped source check compares
+                   ;; EVERY declared construction to its issued plan source
+                   ;; and EVERY certified route to its exact issued handler.
+                   ;; This may contain other operations; it does not turn an
+                   ;; application into a business-policy certificate.
+                   (= coverage/coverage-report-type (:type full-coverage))
+                   (= coverage/report-version (:version full-coverage))
+                   (= :source-relative-checked
+                      (:current-assembly-closure full-coverage))
+                   (= :not-established
+                      (:installed-handler-adoption full-coverage))
+                   (= :not-issued (:certificate full-coverage))
+                   (= :none (:transaction-authority full-coverage))
+                   (= ids (:catalog-operations full-coverage))
+                   (= (:matched-certified-route-ids contracts)
+                      (:matched-certified-route-ids full-coverage))
+                   (empty? (:uncertified-application-operations full-coverage))
+                   (empty? (:uncertified-application-route-ids full-coverage))
                    (= ids (set (keys summary))
                       (set (keys (:certified-operations contract-source)))
                       (set (keys (:certified-operations contracts))))
