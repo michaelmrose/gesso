@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1821: Real JDK listener replacement, inspection, managed stop and startup
+  "v1822: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -841,4 +841,68 @@
             (deref stopping 15000 :stop-timed-out))))
       (finally
         (deliver release-cleanup true)
+        (cleanup! s issued)))))
+
+(deftest provisional-biff-system-cannot-pass-running-inspection-before-publication
+  ;; A host-owned URL locator may temporarily see a real Biff system after
+  ;; the physical listener has started but before the configured startup
+  ;; has qualified and published its original issued generation. Merely
+  ;; possessing that provisional system must not grant :inspect-running!
+  ;; or :inspect-generation! authority, nor issue an extra HTTP challenge.
+  ;; After real startup completes, the exact returned system and generation
+  ;; can be inspected; a separately created nominal generation still fails.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        provisional-system (promise)
+        release-startup (promise)
+        locator-calls (atom 0)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source :base-url!
+                       (fn [system]
+                         (swap! locator-calls inc)
+                         (deliver provisional-system system)
+                         (when-not (deref release-startup 15000 false)
+                           (throw (ex-info "Provisional inspection fixture timed out" {})))
+                         (original-locator system))))
+        started (future ((:start-once! issued) {}))]
+    (try
+      (let [candidate (deref provisional-system 15000 :startup-not-at-locator)
+            physical (:server @(:server-state s))
+            count-before @locator-calls
+            synthetic-generation (config/->StartedInstanceGeneration)]
+        (is (map? candidate) "URL locator has an actual provisional Biff system")
+        (is (fn? (:biff.ring/handler candidate))
+            "Biff has already installed its selected final Ring handler")
+        (is (some? physical) "Actual physical HTTP listener has started")
+        (is (= :starting (:status ((:summary! issued)))))
+        (is (= :not-established
+               (:real-http-consumption ((:summary! issued)))))
+        (is (= :configured-instance-not-current
+               (reason #((:inspect-running! issued) candidate))))
+        (is (= :configured-instance-generation-not-current
+               (reason #((:inspect-generation! issued)
+                         synthetic-generation candidate))))
+        (is (= count-before @locator-calls)
+            "Rejected provisional inspections did not request fresh HTTP")
+        (is (identical? physical (:server @(:server-state s))))
+        (deliver release-startup true)
+        (let [{:keys [system instance-generation report] :as result}
+              (deref started 15000 :startup-timed-out)]
+          (is (map? result))
+          (is (= :verified-configured-start (:status report)))
+          (is (= :current-at-inspection
+                 (:status ((:inspect-running! issued) system))))
+          (is (= :current-at-inspection
+                 (:status ((:inspect-generation! issued)
+                           instance-generation system))))
+          (is (not (identical? synthetic-generation instance-generation)))
+          (is (= :configured-instance-generation-not-current
+                 (reason #((:inspect-generation! issued)
+                           synthetic-generation system))))
+          (is (= :stopped (:status ((:stop! issued)))))
+          (is (.isShutdown (:executor @(:server-state s))))))
+      (finally
+        (deliver release-startup true)
+        (deref started 15000 :startup-timed-out)
         (cleanup! s issued)))))
