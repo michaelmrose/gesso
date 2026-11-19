@@ -178,6 +178,38 @@
       (is (= :substituted-original-assembly-or-issuer
              (reason #(issued env)))))))
 
+(deftest issued-physical-report-retains-original-open-catalog-obligations
+  ;; The source-relative full catalog check has unresolved proof premises.
+  ;; Even after a bounded physical XTDB acknowledgment the issued trial must
+  ;; not erase, synthesize or claim to discharge those outstanding premises.
+  (let [{:keys [data] :as env} (case-env)
+        catalog-report
+        (checked-assembly/check-declared-route-coverage!
+         {:contract-source (:contract env)
+          :catalog-source (:catalog-source env)})
+        expected (select-keys catalog-report
+                              [:open-assumptions :open-premises :open-obligations
+                               :certified-operation-open-evidence])
+        trial (issued env)
+        initial ((:summary! trial))]
+    (is (seq (:open-obligations catalog-report)))
+    (is (seq (:certified-operation-open-evidence catalog-report)))
+    (is (= expected (:catalog-open-evidence initial)))
+    (is (= :original-source-rechecked
+           (:catalog-proof-evidence-scope initial)))
+    (seed! [:requests (:request data)])
+    (let [observed (invoke! trial env :submit)
+          summary ((:summary! trial))]
+      (is (= :bounded-issued-executor-catalog-atomic-acknowledgment
+             (:status observed)))
+      (is (= expected (:catalog-open-evidence observed)
+             (:catalog-open-evidence summary)))
+      (is (= :original-source-rechecked
+             (:catalog-proof-evidence-scope observed)
+             (:catalog-proof-evidence-scope summary)))
+      (is (= :not-issued (:certificate observed)))
+      (is (= :none (:transaction-authority observed))))))
+
 (deftest unrelated-checked-catalog-cannot-impersonate-issued-executor
   (let [env (case-env)
         changed (assoc-in env [:catalog-source :catalog :operations 0
@@ -244,6 +276,7 @@
   (let [{:keys [data] :as env} (case-env)
         {:keys [request binding]} data
         issued (issued env)
+        open-evidence (:catalog-open-evidence ((:summary! issued)))
         original tx/transact!
         calls (atom 0)]
     (seed! [:requests request])
@@ -254,6 +287,8 @@
                            (throw (ex-info "ack lost" {})))]
               (invoke! issued env :submit))]
       (is (= :not-qualified-or-uncertain (:status r)))
+      (is (= open-evidence (:catalog-open-evidence r)))
+      (is (= :original-source-rechecked (:catalog-proof-evidence-scope r)))
       (is (= 1 @calls))
       (is (some? (read-command (resolution/record-id binding))))
       (is (= :none (:retry-authority r))))))

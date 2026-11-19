@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
-  "v1849: Bind the v1775 checked-catalog physical trial to the EXACT issued
+  "v1851: Bind the v1775 checked-catalog physical trial to the EXACT issued
    v1251 certified-plan executor and the CURRENT assembled application's
    certified route/operation table. An observed physical transaction comes
    from calling the registered executor, not an arbitrary invocation thunk.
@@ -19,7 +19,12 @@
    v1849: Reuse the genuine catalog-wide original source/issued-handler
    checker. Selected-operation checks alone do not establish full catalog
    construction and route correspondence when other certified operations
-   coexist. Its report remains source-relative and non-authoritative."
+   coexist. Its report remains source-relative and non-authoritative.
+
+   v1851: Preserve the genuine full catalog's unresolved proof assumptions,
+   premises and per-operation obligations in issued physical trial reports.
+   Recheck this evidence with the original source before summarizing or
+   observing. A physical acknowledgment does NOT discharge proof obligations."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -147,7 +152,11 @@
                             (reject! :invalid-original-catalog-construction))))
         routes (get operation-row :routes)
         route-ids (set (map :route-id routes))
-        certified-row (get-in contracts [:certified-operations operation])]
+        certified-row (get-in contracts [:certified-operations operation])
+        open-evidence
+        (select-keys full-coverage
+                     [:open-assumptions :open-premises :open-obligations
+                      :certified-operation-open-evidence])]
     (when-not (and (= catalog/report-type (:type checked))
                    (= :checked (:exact-declared-operation-coverage checked))
                    (= certified/report-type (:type contracts))
@@ -165,6 +174,20 @@
                       (:installed-handler-adoption full-coverage))
                    (= :not-issued (:certificate full-coverage))
                    (= :none (:transaction-authority full-coverage))
+                   (set? (:open-assumptions open-evidence))
+                   (set? (:open-premises open-evidence))
+                   (set? (:open-obligations open-evidence))
+                   (map? (:certified-operation-open-evidence open-evidence))
+                   (= ids (set (keys (:certified-operation-open-evidence
+                                       open-evidence))))
+                   (every?
+                    (fn [[_ row]]
+                      (and (= #{:route-ids :open-premises :open-obligations}
+                              (set (keys row)))
+                           (set? (:route-ids row))
+                           (set? (:open-premises row))
+                           (set? (:open-obligations row))))
+                    (:certified-operation-open-evidence open-evidence))
                    (= ids (:catalog-operations full-coverage))
                    (= (:matched-certified-route-ids contracts)
                       (:matched-certified-route-ids full-coverage))
@@ -201,13 +224,19 @@
      :transition-fingerprint (:transition-fingerprint transition)
      :proof-fingerprint (:proof-fingerprint certified-row)
      :route-ids route-ids
+     ;; Include unresolved evidence in the binding identity checked at
+     ;; issue, pre-observation, post-observation and every summary. It cannot
+     ;; silently change while the trial still reports the original source.
+     :catalog-open-evidence open-evidence
      ;; The issued callable is captured privately for invocation, never
      ;; included in a report or user-provided to the physical trial.
      :executor executor}))
 
-(defn- report [operation status invoked?]
+(defn- report [operation status invoked? catalog-open-evidence]
   {:type report-type :version report-version :operation-id operation
    :status status
+   :catalog-open-evidence catalog-open-evidence
+   :catalog-proof-evidence-scope :original-source-rechecked
    :catalog-to-checked-assembly :exact-closed-operation-coverage
    :catalog-to-issued-executor :exact-original-construction-and-field-map
    :certified-routes :current-issued-handlers-in-assembly
@@ -258,7 +287,9 @@
                                     (= :none (:authority s)))
                        (reject! :unqualified-original-catalog-trial)))
                    true)
-        summary! (fn [] (recheck!) (report operation @status @returned?))
+        summary! (fn [] (recheck!)
+                   (report operation @status @returned?
+                           (:catalog-open-evidence initial)))
         observe! (fn [ctx invocation]
                    (when-not (.compareAndSet permit false true)
                      (reject! :issued-executor-trial-already-attempted))
@@ -300,7 +331,8 @@
                                      :no-canonical-submission-observed
                                      :else :not-qualified-or-uncertain)]
                        (reset! status outcome)
-                       (report operation outcome @returned?))))]
+                       (report operation outcome @returned?
+                               (:catalog-open-evidence initial)))))]
     (recheck!)
     {:type report-type :version report-version
      :summary! summary! :observe-once! observe!}))
