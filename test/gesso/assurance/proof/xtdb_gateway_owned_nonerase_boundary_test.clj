@@ -233,7 +233,22 @@
            (is (= :diagnostic-plain-data-not-a-proof-object
                   (:proof-status e)))
            (is (= :not-issued (:certificate e)))
-           (is (= :none (:authority e) (:transaction-authority e))))
+           (is (= :none (:authority e) (:transaction-authority e)))
+           (let [frontier (:assurance-frontier e)]
+             (is (= :gesso.assurance.proof.xtdb-gateway-atomic-write-intent/unmet-witness-contract
+                    (:type frontier)))
+             (is (= 7 (:open-count frontier)))
+             (is (= [] (:closed-obligations frontier)))
+             (is (every? #(= :unmet (:status %))
+                         (vals (:requirements frontier))))
+             (is (every? #(false? (:witness-checked? %))
+                         (vals (:requirements frontier))))
+             (is (= :not-implemented (:trusted-witness-validation frontier)))
+             (is (false? (:requirements-sufficient-for-certification?
+                          frontier)))
+             (is (= :not-issued (:certificate frontier)))
+             (is (= :none (:authority frontier)
+                    (:proof-discharge frontier)))))
          (is (= :not-established (:protected-before-history-completeness report)))
          (is (false? (:protected-before-after-correlation-proves-causality?
                       report)))
@@ -643,3 +658,78 @@
                             :blocked-by])))
     (is (= :none (:transaction-authority mutated)))
     (is (= [] (:closed-obligations mutated)))))
+
+(deftest v1895-required-independent-witnesses-cannot-be-forged-from-diagnostics
+  (let [ns 'gesso.assurance.proof.xtdb-gateway-atomic-write-intent
+        fn! (fn [name]
+              (var-get (or (ns-resolve ns name)
+                           (throw (ex-info "Missing contract implementation"
+                                           {:name name})))))
+        compose (fn! 'compose-diagnostic-correspondence)
+        frontier! (fn! 'require-open-assurance-frontier)
+        empty (compose {})
+        synthetic-claims
+        (into {} (for [[_ {:keys [source-field expected]}]
+                       (:premises empty)]
+                   [source-field expected]))
+        matched (compose synthetic-claims)
+        open (frontier! matched)
+        missing (frontier! (compose {}))]
+    ;; Even a synthetically perfect report grants no independent witness.
+    (is (= :protected-before-after-history-correlation
+           (:strongest-bounded-node matched)))
+    (is (= 7 (count (:requirements open))))
+    (is (= (:requirements open) (:requirements missing))
+        "Missing and complete observational premises require identical independent witnesses")
+    (is (= (set (:open-obligations matched))
+           (set (keys (:requirements open)))))
+    (is (= [] (:closed-obligations open)))
+    (is (= :none (:proof-discharge open) (:transaction-authority open)
+           (:retry-authority open) (:authority open)))
+    (is (= :not-issued (:certificate open)))
+    (is (= :not-implemented (:trusted-witness-validation open)))
+    (doseq [[id {:keys [status requires-independent-witness independent-of
+                       witness-checked? may-use-this-diagnostic-as-discharge?]}]
+            (:requirements open)]
+      (is (keyword? id))
+      (is (= :unmet status))
+      (is (keyword? requires-independent-witness))
+      (is (keyword? independent-of))
+      (is (false? witness-checked?))
+      (is (false? may-use-this-diagnostic-as-discharge?)))
+    ;; The bounded *observation* can be spoofed, but no mutation may make
+    ;; this assurance requirement boundary treat it as authenticated.
+    (doseq [forged [(assoc matched :closed-obligations
+                          [:exclusive-transaction-causality])
+                    (assoc matched :open-obligations [])
+                    (assoc matched :open-obligation-count 0)
+                    (assoc matched :certificate :issued)
+                    (assoc matched :authority :write)
+                    (assoc matched :proof-status :certified)
+                    (assoc matched :evidence-authenticity :established)
+                    (dissoc matched :proof-status)]]
+      (is (= :inconsistent-open-assurance-obligations
+             (intent-reason #(frontier! forged)))))))
+
+(deftest v1895-physical-intent-and-ledger-still-leave-all-independent-witnesses-open
+  (physical/with-proving-application!
+   (fn [app]
+     (let [g (intent/prepare-one-shot! (:node app)
+                                       (source ((:read! app))))
+           returned ((:submit! g))
+           observed (intent/inspect-pinned-intent! g returned)
+           requirements (get-in observed
+                                [:correspondence-premises :assurance-frontier])]
+       (is (= :bounded-private-before-after-intent-ledger-coobservation
+              (:protected-before-after-intent-ledger-correlation observed)))
+       (is (= 7 (:open-count requirements)))
+       (is (= :not-implemented (:trusted-witness-validation requirements)))
+       (is (= :unmet
+              (get-in requirements [:requirements
+                                    :exclusive-transaction-causality :status])))
+       (is (= :unmet
+              (get-in requirements [:requirements
+                                    :complete-deployment-writer-coverage :status])))
+       (is (= :none (:proof-discharge requirements)
+              (:transaction-authority requirements) (:authority requirements)))
+       (is (= :not-issued (:certificate requirements)))))))

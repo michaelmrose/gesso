@@ -243,6 +243,85 @@
    :retention-and-physical-erasure-completeness
    :independent-executable-refinement-proof])
 
+(def ^:private independent-witness-contract
+  ;; These are *required evidence families*, not available witnesses and
+  ;; not sufficient proof rules. No input to the redacted diagnostic composer
+  ;; can produce or satisfy any requirement in this catalog. In particular,
+  ;; the same untrusted XTDB node or self-signed producer cannot independently
+  ;; attest its own completeness, exclusion of other writers, or ERASE.
+  (array-map
+   :authenticated-node-and-execution-identity
+   {:witness-family :externally-authenticated-node-and-executor
+    :independence-boundary :not-the-caller-supplied-xtdb-node}
+   :exclusive-transaction-causality
+   {:witness-family :transaction-coupled-apply-provenance
+    :independence-boundary :not-row-timestamps-or-returned-key-alone}
+   :durable-authenticated-audit-event-producer
+   {:witness-family :transaction-bound-durable-authenticated-producer
+    :independence-boundary :not-the-generated-intent-or-operator-claim}
+   :complete-audit-event-ingestion
+   {:witness-family :gap-detecting-ordered-audit-stream
+    :independence-boundary :not-a-bounded-supplied-signed-segment}
+   :complete-deployment-writer-coverage
+   {:witness-family :enforced-complete-writer-inventory
+    :independence-boundary :not-one-registered-gateway-call}
+   :retention-and-physical-erasure-completeness
+   {:witness-family :independent-physical-history-retention-and-erase-audit
+    :independence-boundary :not-the-visible-history-at-one-snapshot}
+   :independent-executable-refinement-proof
+   {:witness-family :independently-checked-executable-refinement
+    :independence-boundary :not-a-self-reported-diagnostic-node}))
+
+(defn- require-open-assurance-frontier
+  "Turn a closed and wholly OPEN obligation inventory into a concrete
+   missing-witness specification. Reject inconsistent, prematurely closed,
+   or 'certifying' diagnostic objects rather than attempting to reconcile
+   them. This is NOT a witness verifier, proof rule, trusted capability,
+   admission API or future promise that the listed witnesses suffice."
+  [diagnostic]
+  (when-not
+   (and (map? diagnostic)
+        (= :gesso.assurance.proof.xtdb-gateway-atomic-write-intent/diagnostic-premises
+           (:type diagnostic))
+        (= 1 (:version diagnostic))
+        (= (vec (keys independent-witness-contract))
+           (:open-obligations diagnostic))
+        (= (count independent-witness-contract)
+           (:open-obligation-count diagnostic))
+        (= [] (:closed-obligations diagnostic))
+        (= :not-established (:evidence-authenticity diagnostic)
+           (:record-execution-causality diagnostic)
+           (:history-completeness diagnostic)
+           (:audit-producer-completeness diagnostic))
+        (= :diagnostic-plain-data-not-a-proof-object
+           (:proof-status diagnostic))
+        (= :not-admitted (:admission diagnostic))
+        (= :not-issued (:certificate diagnostic))
+        (= :none (:transaction-authority diagnostic)
+           (:retry-authority diagnostic) (:authority diagnostic)))
+    (reject! :inconsistent-open-assurance-obligations))
+  {:type :gesso.assurance.proof.xtdb-gateway-atomic-write-intent/unmet-witness-contract
+   :version 1
+   :source :bounded-diagnostic-observation-only
+   :requirements
+   (into (sorted-map)
+         (for [[obligation {:keys [witness-family independence-boundary]}]
+               independent-witness-contract]
+           [obligation {:status :unmet
+                        :requires-independent-witness witness-family
+                        :independent-of independence-boundary
+                        :witness-checked? false
+                        :may-use-this-diagnostic-as-discharge? false}]))
+   :open-count (count independent-witness-contract)
+   :closed-obligations []
+   :requirements-sufficient-for-certification? false
+   :trusted-witness-validation :not-implemented
+   :proof-discharge :none
+   :certificate :not-issued
+   :transaction-authority :none
+   :retry-authority :none
+   :authority :none})
+
 (defn- compose-diagnostic-correspondence
   "Compose ONLY redacted observations from this same private pinned read.
    This internal, pure function also permits adversarial unit tests; neither
@@ -312,6 +391,12 @@
    list of still-open physical and audit obligations. Every node fails
    closed if any supporting field is absent or disagrees; even fully matched
    nodes never become proofs, write authority or certificates.
+
+   v1895: Attach a strictly OPEN witness-requirement frontier to this
+   diagnostic. The seven independent-witness families are obligations for
+   later assurance machinery, never evidence produced by this readback.
+   An inconsistent or accidentally discharged diagnostic inventory is a
+   rejection, not an opportunity for this collector to issue authority.
 
    v1889 additionally reads the generated row's bounded SYSTEM and VALID
    time history on the SAME pinned snapshot. One open version beginning at
@@ -679,5 +764,7 @@
          :admission :not-admitted
          :certificate :not-issued
          :authority :none}]
-          (assoc report :correspondence-premises
-                 (compose-diagnostic-correspondence report)))))))
+          (let [diagnostic (compose-diagnostic-correspondence report)]
+            (assoc report :correspondence-premises
+                   (assoc diagnostic :assurance-frontier
+                          (require-open-assurance-frontier diagnostic)))))))))
