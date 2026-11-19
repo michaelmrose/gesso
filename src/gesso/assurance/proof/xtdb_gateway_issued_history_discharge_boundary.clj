@@ -4,7 +4,10 @@
 
    This is a requirements interface, NOT that checker. No evidence producer,
    verification trust root, history-completeness checker, admission path or
-   discharge operation is installed here. The source-bound report is copyable
+   discharge operation is installed here. v1878 adds a separately configured
+   detached Ed25519 operator-claim intake, but verifying that a key signed a
+   statement is NOT verification of policy enforcement or complete audit.
+   The source-bound report is copyable
    diagnostic data and grants no authority. Original kernel proof obligations
    are not rewritten or discharged."
   (:require [gesso.assurance.proof.xtdb-gateway-issued-history-obligations
@@ -62,7 +65,9 @@
     :visible-system-time-row-boundary
     :bounded-selected-row-history-inventory
     :apparently-complete-current-query-result
-    :source-declared-retention-or-no-erase-policy})
+    :source-declared-retention-or-no-erase-policy
+    :operator-signed-retention-policy-assertion-without-enforcement-proof
+    :operator-signed-erase-audit-assertion-without-audit-completeness-proof})
 
 (defn- reject! [reason]
   (throw (ex-info "Independent XTDB history-discharge boundary not established."
@@ -122,6 +127,8 @@
      :source-relative-report-authenticates-deployment? false
      :trusted-evidence-producer :not-established
      :independent-evidence-verifier :not-installed
+     :operator-signed-claim-intake :available-only-with-externally-pinned-key
+     :operator-claim-is-independently-verified-control? false
      :trusted-snapshot-target-binding :not-established
      :history-retention-enforcement :not-established
      :complete-erasure-audit-or-prevention :not-established
