@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
-  "v1853: Bind the v1775 checked-catalog physical trial to the EXACT issued
+  "v1854: Bind the v1775 checked-catalog physical trial to the EXACT issued
    v1251 certified-plan executor and the CURRENT assembled application's
    certified route/operation table. An observed physical transaction comes
    from calling the registered executor, not an arbitrary invocation thunk.
@@ -36,7 +36,11 @@
    v1853: Carry the original selected/uncertified operation and route scope
    into the one-use trial identity and public reports. A source-relative
    acknowledged Claim write must never hide an uncertified Cancel route or
-   promote it to certified or deployed transaction authority."
+   promote it to certified or deployed transaction authority.
+
+   v1854: Include the selected original catalog, transition and proof source
+   fingerprints in the bounded physical trial report. They are rechecked
+   source identifiers, not discharged proof or physical receipt authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -279,13 +283,19 @@
      :executor executor}))
 
 (defn- report [operation status invoked? catalog-open-evidence
-               catalog-route-scope]
+               catalog-route-scope selected-operation-source-identity]
   {:type report-type :version report-version :operation-id operation
    :status status
    :catalog-open-evidence catalog-open-evidence
    :catalog-proof-evidence-scope :original-source-rechecked
    :catalog-route-scope catalog-route-scope
    :catalog-route-scope-evidence :original-source-rechecked
+   ;; These original source fingerprints are checked in current-binding! at
+   ;; issue, before/after the one-use observation and every later summary.
+   ;; They identify which source-level proof/transition the trial relates to;
+   ;; they are not a proof of physical effect or authorization.
+   :selected-operation-source-identity selected-operation-source-identity
+   :selected-operation-identity-scope :original-source-rechecked
    :catalog-to-checked-assembly :exact-closed-operation-coverage
    :catalog-to-issued-executor :exact-original-construction-and-field-map
    :certified-routes :current-issued-handlers-in-assembly
@@ -339,7 +349,12 @@
         summary! (fn [] (recheck!)
                    (report operation @status @returned?
                            (:catalog-open-evidence initial)
-                           (:catalog-route-scope initial)))
+                           (:catalog-route-scope initial)
+                           (select-keys initial
+                                        [:catalog-fingerprint
+                                         :transition-fingerprint
+                                         :proof-fingerprint
+                                         :route-ids])))
         observe! (fn [ctx invocation]
                    (when-not (.compareAndSet permit false true)
                      (reject! :issued-executor-trial-already-attempted))
@@ -383,7 +398,12 @@
                        (reset! status outcome)
                        (report operation outcome @returned?
                                (:catalog-open-evidence initial)
-                               (:catalog-route-scope initial)))))]
+                               (:catalog-route-scope initial)
+                               (select-keys initial
+                                            [:catalog-fingerprint
+                                             :transition-fingerprint
+                                             :proof-fingerprint
+                                             :route-ids])))))]
     (recheck!)
     {:type report-type :version report-version
      :summary! summary! :observe-once! observe!}))

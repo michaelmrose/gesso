@@ -7,6 +7,7 @@
             [gesso.assurance.proof.certificate :as certificate]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as bound]
             [gesso.assurance.proof.checked-authorization-assembly :as checked-assembly]
+            [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.xtdb-gateway-catalog-bound-atomic-canonical-trial-test]
             [gesso.assurance.proof.xtdb-gateway-full-atomic-typed-preparation-test]
             [gesso.live.application-preflight :as application]
@@ -165,6 +166,40 @@
                      :transaction :plan :tx-ops :execution :request :node]))
       (is (= :issued-executor-trial-already-attempted
              (reason #(invoke! trial env :submit)))))))
+
+(deftest v1854-selected-operation-identity-persists-through-physical-ack
+  ;; The original binding rechecks all three fingerprints already. Preserve
+  ;; their exact origin in public execution evidence without issuing a proof
+  ;; certificate or pretending the observed physical receipt discharges it.
+  (let [{:keys [data] :as env} (case-env)
+        operation :request/claim
+        catalog-report (operation-set/check-operation-set!
+                        (get-in env [:catalog-source :catalog]))
+        contract-report (certified/check-certified-contracts! (:contract env))
+        op-row (get-in contract-report [:certified-operations operation])
+        expected {:catalog-fingerprint (:fingerprint catalog-report)
+                  :transition-fingerprint (:transition-fingerprint op-row)
+                  :proof-fingerprint (:proof-fingerprint op-row)
+                  :route-ids (:route-ids op-row)}
+        trial (issued env)
+        before ((:summary! trial))]
+    (is (every? some? (vals expected)))
+    (is (= expected (:selected-operation-source-identity before)))
+    (is (= :original-source-rechecked
+           (:selected-operation-identity-scope before)))
+    (seed! [:requests (:request data)])
+    (let [observed (invoke! trial env :submit)
+          after ((:summary! trial))]
+      (is (= :bounded-issued-executor-catalog-atomic-acknowledgment
+             (:status observed)))
+      (is (= expected (:selected-operation-source-identity observed)
+             (:selected-operation-source-identity after)))
+      (is (= :original-source-rechecked
+             (:selected-operation-identity-scope observed)
+             (:selected-operation-identity-scope after)))
+      (is (= :not-issued (:certificate observed)))
+      (is (= :none (:authority observed)
+             (:transaction-authority observed))))))
 
 (deftest issued-physical-trial-requires-original-full-catalog-closure
   ;; The physical binder cannot attest whole-catalog construction/handler
