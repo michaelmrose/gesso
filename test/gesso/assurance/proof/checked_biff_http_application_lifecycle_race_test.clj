@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1820: Real JDK listener replacement, inspection, managed stop and startup
+  "v1821: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -766,6 +766,79 @@
           (finally
             (deliver release-cleanup true)
             (deref first-stop 15000 :first-stop-timed-out))))
+      (finally
+        (deliver release-cleanup true)
+        (cleanup! s issued)))))
+
+(deftest inspections-wait-for-failed-managed-stop-and-cannot-requalify-instance
+  ;; The original lifecycle monitor must serialize both inspection entry
+  ;; points behind an already in-flight physical stop. When the selected
+  ;; adapter closed its HTTP listener but subsequently reports uncertain
+  ;; cleanup, neither an old generation nor an old system handle may be
+  ;; requalified after the monitor is released. Fresh HTTP probing must not
+  ;; be attempted for the no-longer-managed instance.
+  (let [s (scenario :honest)
+        original-stop (get-in s [:raw :biff.core/stop])
+        cleanup-in-progress (promise)
+        release-cleanup (promise)
+        stop-calls (atom 0)
+        adapter (assoc (:raw s) :biff.core/stop
+                       (fn [system]
+                         (swap! stop-calls inc)
+                         (original-stop system)
+                         (deliver cleanup-in-progress true)
+                         (when-not (deref release-cleanup 15000 false)
+                           (throw (ex-info "Inspection race fixture timed out" {})))
+                         (throw (ex-info "Stop reported uncertain completion" {}))))
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true) :adapter-module adapter))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            executor (:executor @(:server-state s))
+            stopping (future ((:stop! issued)))]
+        (try
+          (is (true? (deref cleanup-in-progress 15000 false)))
+          (is (= :stopping (:status ((:summary! issued)))))
+          (is (.isShutdown executor)
+              "Physical listener has closed while managed stop is pending")
+          (let [inspect-generation-entered (promise)
+                inspect-running-entered (promise)
+                inspecting-generation (future
+                                        (deliver inspect-generation-entered true)
+                                        (reason #((:inspect-generation! issued)
+                                                  instance-generation system)))
+                inspecting-running (future
+                                     (deliver inspect-running-entered true)
+                                     (reason #((:inspect-running! issued) system)))]
+            (try
+              (is (true? (deref inspect-generation-entered 5000 false)))
+              (is (true? (deref inspect-running-entered 5000 false)))
+              (is (= :inspection-pending
+                     (deref inspecting-generation 250 :inspection-pending))
+                  "Generation inspection waits behind managed cleanup")
+              (is (= :inspection-pending
+                     (deref inspecting-running 250 :inspection-pending))
+                  "Current-system inspection also waits behind cleanup")
+              (is (= 1 @stop-calls))
+              (deliver release-cleanup true)
+              (is (= :stop-cleanup-not-established
+                     (:status (deref stopping 15000 :stop-timed-out))))
+              (is (= :configured-instance-generation-not-current
+                     (deref inspecting-generation 15000 :inspection-timed-out)))
+              (is (= :configured-instance-not-current
+                     (deref inspecting-running 15000 :inspection-timed-out)))
+              (is (= 1 @stop-calls)
+                  "A failed stop and rejected inspections never retry cleanup")
+              (is (= :stop-cleanup-not-established
+                     (:status ((:summary! issued)))))
+              (is (.isShutdown executor))
+              (finally
+                (deliver release-cleanup true)
+                (deref inspecting-generation 15000 :inspection-timed-out)
+                (deref inspecting-running 15000 :inspection-timed-out))))
+          (finally
+            (deliver release-cleanup true)
+            (deref stopping 15000 :stop-timed-out))))
       (finally
         (deliver release-cleanup true)
         (cleanup! s issued)))))
