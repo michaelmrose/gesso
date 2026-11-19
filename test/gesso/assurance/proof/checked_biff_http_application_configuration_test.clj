@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1810: The actual application startup entrypoint owns module issuance,
+  "v1811: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -1168,4 +1168,68 @@
               (deref inspecting 15000 :inspection-timed-out)))))
       (finally
         (deliver release-inspection true)
+        (cleanup! s issued)))))
+
+(deftest uninstrumented-inflight-listener-replacement-remains-unproven
+  ;; Complement v1808: without a trusted :listener-instance! callback,
+  ;; the same-port replacement is NOT identified by the original probe's
+  ;; fresh nonce. A successful HTTP response must retain explicitly unknown
+  ;; physical identity, even though an independent actor replaced the real
+  ;; JDK HttpServer while this inspection was waiting for its URL locator.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        inspector-in-locator (promise)
+        release-inspector (promise)
+        armed? (atom false)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source :base-url!
+                       (fn [system]
+                         (when @armed?
+                           (deliver inspector-in-locator true)
+                           (when-not (deref release-inspector 15000 false)
+                             (throw (ex-info "Inspection fixture timed out" {}))))
+                         (original-locator system))))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))
+            original-server (:server @(:server-state s))
+            original-port (:port @(:server-state s))]
+        (is (= :not-established (:physical-listener-instance (inspect!))))
+        (reset! armed? true)
+        (let [inspecting (future (inspect!))]
+          (try
+            (is (true? (deref inspector-in-locator 10000 false)))
+            (is (= :inspection-pending
+                   (deref inspecting 200 :inspection-pending)))
+            (let [{:keys [new]} (replace-actual-listener-at-same-port! s system)
+                  before @(:hits new)]
+              (is (= original-port (:port new)))
+              (is (not (identical? original-server (:server new))))
+              (is (= :verified-configured-start
+                     (:status ((:summary! issued)))))
+              (deliver release-inspector true)
+              (let [observed (deref inspecting 15000 :inspection-timed-out)]
+                (is (= :current-at-inspection (:status observed)))
+                (is (< before @(:hits new))
+                    "A replacement physical server answered the fresh challenge")
+                (is (= :observed-at-current-inspection
+                       (:fresh-local-http-response observed)))
+                (is (= :matches-startup-verified-loopback-port
+                       (:original-local-listener-endpoint observed)))
+                (is (= :not-established (:physical-listener-instance observed)))
+                (is (= :not-established (:physical-instance-provenance observed)))
+                (is (= :not-established (:future-local-listener-availability observed)))
+                (is (= :not-issued (:certificate observed)))
+                (is (= :not-admitted (:admission observed)))
+                (is (= :none (:authority observed)))))
+            (finally
+              (deliver release-inspector true)
+              (deref inspecting 15000 :inspection-timed-out))))
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (= :configured-instance-generation-not-current
+               (reason inspect!))))
+      (finally
+        (deliver release-inspector true)
         (cleanup! s issued)))))
