@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1834: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1840: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -272,6 +272,13 @@
                      (set? (:matched-certified-route-ids checked))
                      (seq (:matched-certified-route-ids checked))
                      (= :not-established (:installed-handler-adoption checked))
+                     ;; Source-relative qualification must not silently erase
+                     ;; the original certified contract's unresolved proof.
+                     (set? (:open-assumptions checked))
+                     (set? (:open-premises checked))
+                     (set? (:open-obligations checked))
+                     (set/subset? (:open-assumptions checked)
+                                  (:open-obligations checked))
                      (= :none (:transaction-authority checked)
                         (:authority checked))
                      (= :not-issued (:certificate checked))
@@ -393,8 +400,23 @@
           (:transaction-authority fresh)
           (:retry-authority fresh))))
 
-(defn- report [state typed-selected?]
-  {:type report-type :version report-version
+(defn- selected-open-evidence [selected]
+  ;; These are unresolved obligations of the ORIGINAL checked catalog source.
+  ;; They are carried as STARTUP evidence, never reclassified as proof of
+  ;; current authorization, installed adoption or physical XTDB authority.
+  (if selected
+    {:selected-catalog-open-assumptions (:open-assumptions selected)
+     :selected-catalog-open-premises (:open-premises selected)
+     :selected-catalog-open-obligations (:open-obligations selected)
+     :selected-catalog-proof-evidence-scope :original-startup-source-only}
+    {:selected-catalog-open-assumptions :not-established
+     :selected-catalog-open-premises :not-established
+     :selected-catalog-open-obligations :not-established
+     :selected-catalog-proof-evidence-scope :not-established}))
+
+(defn- report [state typed-selected? selected]
+  (merge
+   {:type report-type :version report-version
    :scope :one-application-owned-closed-biff-http-start
    :status state
    :startup-configuration :one-contract-and-selected-adapter
@@ -429,7 +451,9 @@
    :xtdb-physical-receipt :not-established
    :actual-live-delivery :not-established
    :retry-authority :none :transaction-authority :none
-   :certificate :not-issued :admission :not-admitted :authority :none})
+   :certificate :not-issued :admission :not-admitted :authority :none}
+   (selected-open-evidence
+    (when (= state :verified-configured-start) selected))))
 
 (defn issue-configured-checked-http-application!
   "Issue a one-use, application-owned startup from exactly a checked
@@ -464,8 +488,11 @@
         inspection-in-progress? (atom false)
         instance-generation (StartedInstanceGeneration.)
         selected-startup-routes (atom nil)
+        selected-startup-evidence (atom nil)
         original-listener-instance (atom nil)
-        summary! (fn [] (pinned!) (report @state (some? typed-trial)))
+        summary! (fn [] (pinned!)
+                   (report @state (some? typed-trial)
+                           @selected-startup-evidence))
         inspect-running! (fn [candidate-system]
                            (locking lifecycle-monitor
                            ;; The monitor serializes OTHER threads, but not
@@ -550,7 +577,8 @@
                              (when-not (and (= :verified-configured-start @state)
                                             (identical? candidate-system @started))
                                (reject! :configured-instance-not-current))
-                             {:type running-report-type :version report-version
+                             (merge
+                              {:type running-report-type :version report-version
                               :scope :one-original-managed-in-process-biff-instance
                               :status :current-at-inspection
                               :returned-system :exact-identity
@@ -577,7 +605,8 @@
                               :future-local-listener-availability :not-established
                               :certificate :not-issued :admission :not-admitted
                               :retry-authority :none :transaction-authority :none
-                              :authority :none})
+                              :authority :none}
+                              (selected-open-evidence @selected-startup-evidence)))
                              (finally
                                (reset! inspection-in-progress? false)))))
         inspect-generation!
@@ -696,13 +725,17 @@
                          (pinned!)
                          (reset! selected-startup-routes
                                  (:matched-certified-route-ids selected-coverage))
+                         ;; Retain unresolved source assumptions only after
+                         ;; all original route/host/HTTP checks have passed.
+                         (reset! selected-startup-evidence selected-coverage)
                          (reset! started (:system result))
                          (when-not (compare-and-set! state :starting
                                                       :verified-configured-start)
                            (reject! :configured-start-state-diverged))
                          {:system (:system result)
                           :instance-generation instance-generation
-                          :report (report @state (some? typed-trial))})
+                          :report (report @state (some? typed-trial)
+                                          @selected-startup-evidence)})
                        (catch Throwable error
                          ;; The adapter has already started. Any failed
                          ;; post-start coverage check MUST stop it before

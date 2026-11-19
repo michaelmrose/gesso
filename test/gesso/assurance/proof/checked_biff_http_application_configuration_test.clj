@@ -35,6 +35,10 @@
         (is (= :not-established (:declared-route-coverage-at-start report)))
         (is (= :not-established (:returned-host-selected-route-inventory report)))
         (is (= :not-established (:selected-catalog-read-only-http-dispatch report)))
+        (is (= :not-established (:selected-catalog-open-assumptions report)
+               (:selected-catalog-open-premises report)
+               (:selected-catalog-open-obligations report)
+               (:selected-catalog-proof-evidence-scope report)))
         (is (= :not-established (:external-deployment report)))
         (is (= :none (:authority report) (:retry-authority report)))
         (is (not-any? #(contains? report %)
@@ -73,6 +77,44 @@
       (is (= 500 (post! s)))
       (is (= 1 @(get-in s [:env :environment :constructs])))
       (finally (cleanup! s issued)))))
+
+(deftest selected-catalog-open-evidence-survives-real-biff-start
+  ;; v1839 preserved the v1253 unresolved obligations in the selected catalog
+  ;; report. The actual Biff startup and inspection must not lose that evidence
+  ;; while claiming successful route coverage. It remains STARTUP source-relative
+  ;; evidence, not a current policy certificate or physical writer proof.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        selected (coverage/check-declared-route-coverage!
+                  {:contract-source (:contract-source source)
+                   :catalog-source (get-in source [:typed-trial :catalog-source])})
+        issued (config/issue-configured-checked-http-application! source)
+        expected {:selected-catalog-open-assumptions (:open-assumptions selected)
+                  :selected-catalog-open-premises (:open-premises selected)
+                  :selected-catalog-open-obligations (:open-obligations selected)}]
+    (try
+      (is (every? set? (vals expected)))
+      (is (contains? (:selected-catalog-open-obligations expected)
+                     :source-to-production-execution-correspondence))
+      (let [started ((:start-once! issued) {})
+            report (:report started)
+            summary ((:summary! issued))
+            inspected ((:inspect-running! issued) (:system started))]
+        (doseq [actual [report summary inspected]]
+          (is (= expected (select-keys actual (keys expected)))
+              (pr-str (:type actual))))
+        (doseq [actual [report summary inspected]]
+          (is (= :original-startup-source-only
+                 (:selected-catalog-proof-evidence-scope actual))))
+        (is (= :not-established (:selected-catalog-business-policy-completeness
+                                report)))
+        (is (= :none (:transaction-authority report)
+               (:transaction-authority inspected))))
+      (finally (cleanup! s issued)))
+    ;; After stop there is no current checked instance; retain no live claim
+    ;; based on a stale original startup source report.
+    (is (= :not-established
+           (:selected-catalog-open-obligations ((:summary! issued)))))))
 
 (deftest invalid-application-configuration-cannot-inject-module-var-or-order
   (let [s (scenario :honest)
