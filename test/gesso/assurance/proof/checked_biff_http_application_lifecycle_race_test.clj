@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1818: Real JDK listener replacement, inspection, managed stop and startup
+  "v1819: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -638,4 +638,67 @@
       (finally
         (deliver release-start true)
         (deref starting 15000 :start-timed-out)
+        (cleanup! s issued)))))
+
+(deftest concurrent-managed-stops-run-physical-cleanup-once
+  ;; Two independent callers race a real managed stop while its original
+  ;; selected adapter stop callback is suspended. Only one thread may enter
+  ;; the physical cleanup path; the second waits on the issued lifecycle
+  ;; monitor and subsequently observes the same completed terminal state.
+  ;; A running inspection/generation must not survive that terminal state.
+  (let [s (scenario :honest)
+        original-stop (get-in s [:raw :biff.core/stop])
+        physical-stop-calls (atom 0)
+        physical-stop-entered (promise)
+        release-physical-stop (promise)
+        adapter (assoc (:raw s) :biff.core/stop
+                       (fn [system]
+                         (swap! physical-stop-calls inc)
+                         (deliver physical-stop-entered true)
+                         (when-not (deref release-physical-stop 15000 false)
+                           (throw (ex-info "Physical stop fixture timed out" {})))
+                         (original-stop system)))
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true) :adapter-module adapter))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            executor (:executor @(:server-state s))
+            first-stop (future ((:stop! issued)))]
+        (try
+          (is (true? (deref physical-stop-entered 15000 false)))
+          (is (= :stopping (:status ((:summary! issued)))))
+          (is (= 1 @physical-stop-calls))
+          (is (not (.isShutdown executor)))
+          (let [second-entered (promise)
+                second-stop (future
+                              (deliver second-entered true)
+                              ((:stop! issued)))]
+            (try
+              (is (true? (deref second-entered 5000 false)))
+              (is (= :second-stop-pending
+                     (deref second-stop 250 :second-stop-pending))
+                  "Second managed stop must wait for physical cleanup")
+              (is (= 1 @physical-stop-calls)
+                  "Second caller cannot enter the physical stop callback")
+              (deliver release-physical-stop true)
+              (is (= :stopped
+                     (:status (deref first-stop 15000 :first-stop-timed-out))))
+              (is (= :stopped
+                     (:status (deref second-stop 15000 :second-stop-timed-out))))
+              (is (= 1 @physical-stop-calls)
+                  "Exactly one physical adapter cleanup is attempted")
+              (is (.isShutdown executor))
+              (is (= :configured-instance-generation-not-current
+                     (reason #((:inspect-generation! issued)
+                               instance-generation system))))
+              (is (= :configured-start-already-attempted
+                     (reason #((:start-once! issued) {}))))
+              (finally
+                (deliver release-physical-stop true)
+                (deref second-stop 15000 :second-stop-timed-out))))
+          (finally
+            (deliver release-physical-stop true)
+            (deref first-stop 15000 :first-stop-timed-out))))
+      (finally
+        (deliver release-physical-stop true)
         (cleanup! s issued)))))
