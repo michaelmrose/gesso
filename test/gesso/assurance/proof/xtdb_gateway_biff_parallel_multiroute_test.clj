@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test
-  "v1841: real certified multi-route parallel Biff mediation, including two
+  "v1844: real certified multi-route parallel Biff mediation, including two
    independently checked operation/writer sources and physical XTDB guards.
    Catalog-wide coverage also checks both original constructions and issued
    handlers in one assembled application; it does not establish deployment,
@@ -284,6 +284,10 @@
     (is (= #{claim-route cancel-route}
            (:matched-certified-route-ids result)))
     (is (= #{} (:uncertified-application-operations result)))
+    (is (= #{} (:uncertified-application-route-ids result)))
+    (is (= (:route-ids contract-report)
+           (clojure.set/union (:matched-certified-route-ids result)
+                              (:uncertified-application-route-ids result))))
     (is (= :source-relative-checked (:current-assembly-closure result)))
     (is (= :not-established (:installed-handler-adoption result)
            (:authorization-policy-provenance result)))

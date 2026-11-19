@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1843: The actual application startup entrypoint owns module issuance,
+  "v1844: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -42,6 +42,7 @@
                (:selected-catalog-operation-ids report)
                (:selected-catalog-route-ids report)
                (:selected-catalog-uncertified-operation-ids report)
+               (:selected-catalog-uncertified-route-ids report)
                (:selected-catalog-proof-evidence-scope report)))
         (is (= :not-established (:external-deployment report)))
         (is (= :none (:authority report) (:retry-authority report)))
@@ -99,7 +100,9 @@
         {:selected-catalog-operation-ids (:catalog-operations selected)
          :selected-catalog-route-ids (:matched-certified-route-ids selected)
          :selected-catalog-uncertified-operation-ids
-         (:uncertified-application-operations selected)}
+         (:uncertified-application-operations selected)
+         :selected-catalog-uncertified-route-ids
+         (:uncertified-application-route-ids selected)}
         expected {:selected-catalog-open-assumptions (:open-assumptions selected)
                   :selected-catalog-open-premises (:open-premises selected)
                   :selected-catalog-open-obligations (:open-obligations selected)}]
@@ -125,6 +128,10 @@
         ;; can audit which application operations the selection did not cover.
         (is (every? set? (vals selected-inventory)))
         (is (empty? (clojure.set/intersection
+                     (:selected-catalog-route-ids selected-inventory)
+                     (:selected-catalog-uncertified-route-ids
+                      selected-inventory))))
+        (is (empty? (clojure.set/intersection
                      (:selected-catalog-operation-ids selected-inventory)
                      (:selected-catalog-uncertified-operation-ids
                       selected-inventory))))
@@ -149,7 +156,8 @@
            (:selected-catalog-operation-open-evidence ((:summary! issued)))))
     (is (= {:selected-catalog-operation-ids :not-established
             :selected-catalog-route-ids :not-established
-            :selected-catalog-uncertified-operation-ids :not-established}
+            :selected-catalog-uncertified-operation-ids :not-established
+            :selected-catalog-uncertified-route-ids :not-established}
            (select-keys ((:summary! issued)) (keys selected-inventory))))))
 
 (deftest invalid-application-configuration-cannot-inject-module-var-or-order

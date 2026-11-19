@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-authorization-assembly
-  "v1841: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
+  "v1844: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
 
    For any selected qualified operation and route ID, relate its declared
    catalog construction to the SAME current-source construction of an issued
@@ -32,8 +32,14 @@
    v1841: Preserve each certified operation's ORIGINAL route IDs and open
    proof premises/obligations separately, so distinct operations cannot have
    their unresolved requirements flattened beyond attribution. Shared
-   assumptions remain separately identified and are never discharged."
-  (:require [gesso.live.application-preflight :as application]
+   assumptions remain separately identified and are never discharged.
+
+   v1844: Include the original contract's exact UNCERTIFIED route complement,
+   not merely unselected operation IDs. The selected/uncertified route split
+   must cover the closed original application route inventory, without
+   becoming installed policy or transaction authority."
+  (:require [clojure.set :as set]
+            [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.model.certified-operation :as certified-operation]
             [gesso.model.certified-plan :as plan]))
@@ -188,6 +194,8 @@
                      (= certified/adapter-version (:version checked))
                      (= selected (set (keys certified-rows)))
                      (= route-ids (:matched-certified-route-ids checked))
+                     (set? (:route-ids checked))
+                     (set/subset? route-ids (:route-ids checked))
                      (every? (fn [operation]
                                (seq (get-in certified-rows [operation :route-ids])))
                              operation-ids))
@@ -219,6 +227,11 @@
        :catalog-operations selected
        :matched-certified-route-ids route-ids
        :uncertified-application-operations (:uncertified-operations checked)
+       ;; The checked contract enumerates ALL declared semantic routes;
+       ;; preserve exactly which routes were not in the certified selection.
+       ;; This complement is source-relative, not deployed-router adoption.
+       :uncertified-application-route-ids
+       (set/difference (:route-ids checked) route-ids)
        ;; Do not hide obligations already reported by the genuine v1253
        ;; contract verification. Catalog coverage does not resolve any of them.
        :open-assumptions (:open-assumptions checked)

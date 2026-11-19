@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1843: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1844: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -134,7 +134,11 @@
    v1843: Publish original selected operation/route inventory AND the
    separately identified uncertified application operations alongside the
    unresolved source-relative evidence. Never imply catalog selection is
-   a complete business-policy inventory or current deployment certificate."
+   a complete business-policy inventory or current deployment certificate.
+
+   v1844: Also carry exact UNCERTIFIED semantic route IDs from the original
+   contract. Distinct selected/uncertified routes remain a startup-scoped
+   partition, not an independently verified deployed route inventory."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -287,7 +291,8 @@
   ;; catalog cannot quietly become an all-application policy certificate.
   (let [selected (:catalog-operations checked)
         uncertified (:uncertified-application-operations checked)
-        routes (:matched-certified-route-ids checked)]
+        routes (:matched-certified-route-ids checked)
+        uncertified-routes (:uncertified-application-route-ids checked)]
     (and (set? selected)
          (seq selected)
          (every? qualified-keyword? selected)
@@ -297,6 +302,9 @@
          (set? routes)
          (seq routes)
          (every? qualified-keyword? routes)
+         (set? uncertified-routes)
+         (every? qualified-keyword? uncertified-routes)
+         (empty? (set/intersection routes uncertified-routes))
          (= :selected-not-all-possible-application-policy
             (:catalog-scope checked))
          (= :not-established (:authorization-policy-provenance checked)))))
@@ -468,6 +476,8 @@
      :selected-catalog-route-ids (:matched-certified-route-ids selected)
      :selected-catalog-uncertified-operation-ids
      (:uncertified-application-operations selected)
+     :selected-catalog-uncertified-route-ids
+     (:uncertified-application-route-ids selected)
      :selected-catalog-proof-evidence-scope :original-startup-source-only}
     {:selected-catalog-open-assumptions :not-established
      :selected-catalog-open-premises :not-established
@@ -476,6 +486,7 @@
      :selected-catalog-operation-ids :not-established
      :selected-catalog-route-ids :not-established
      :selected-catalog-uncertified-operation-ids :not-established
+     :selected-catalog-uncertified-route-ids :not-established
      :selected-catalog-proof-evidence-scope :not-established}))
 
 (defn- report [state typed-selected? selected]

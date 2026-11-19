@@ -1,5 +1,5 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1841: adversarial source-relative checks for issued Ring bindings.
+  "v1844: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
@@ -560,6 +560,12 @@
         (is (= #{claim} (:catalog-operations report)))
         (is (= #{route-1 route-2} (:matched-certified-route-ids report)))
         (is (= #{cancel} (:uncertified-application-operations report)))
+        ;; The original closed route table also knows the uncertified routes;
+        ;; a catalog cannot imply it covers them merely by omitting their IDs.
+        (is (= #{route-3} (:uncertified-application-route-ids report)))
+        (is (= (:route-ids contract-report)
+               (clojure.set/union (:matched-certified-route-ids report)
+                                  (:uncertified-application-route-ids report))))
         (is (= :selected-not-all-possible-application-policy
                (:catalog-scope report)))
         (is (= :source-relative-checked (:current-assembly-closure report)))
@@ -698,4 +704,5 @@
           (is (= #{claim} (:catalog-operations report)))
           (is (= #{claim} (:matched-certified-route-ids report)))
           (is (= #{} (:uncertified-application-operations report)))
+          (is (= #{} (:uncertified-application-route-ids report)))
           (is (= :not-established (:installed-handler-adoption report))))))))
