@@ -359,6 +359,87 @@
              (reason #(catalog-coverage/check-declared-route-coverage! bad)))
           (pr-str bad)))))
 
+(deftest v1865-proof-origins-separate-two-certified-and-uncertified-routes
+  ;; Reuse both independently issued certified executors and checkers, but
+  ;; create a fresh current ApplicationAssembly with an additional UNCERTIFIED
+  ;; semantic route. That route must never acquire proof/source attribution.
+  (let [audit :example/audit
+        audit-route :route/audit
+        extended-routes (assoc routes audit-route
+                               {:operation audit :path "/operations/example/audit"})]
+    (fixture/with-surfaced-application
+      {:operations {claim (fixture/trusted-operation claim {:published-change-topics #{}})
+                    cancel (fixture/trusted-operation cancel {:published-change-topics #{}})
+                    audit (fixture/trusted-operation audit {:published-change-topics #{}})}
+       :route-capabilities (fixture/custom-route-capabilities extended-routes)
+       :rendered-surfaces {:proof [:div "safe"]}}
+      (fn [{:keys [assembly report]}]
+        (is (app/valid? report) (pr-str (:errors report)))
+        (when assembly
+          (let [contract-source (-> (:source *case*)
+                                    (assoc :application-assembly assembly)
+                                    (update :semantic-route-handlers assoc
+                                            audit-route (fn [_]
+                                                          {:status 202 :body "uncertified"})))
+                catalog-source {:catalog {:operations
+                                          [{:id claim :construction
+                                            (:construction (:plan-source ring/*case*))}
+                                           {:id cancel :construction
+                                            (:construction (:plan-source *second*))}]}
+                                :physical-field-map {}}
+                contracts (certified/check-certified-contracts! contract-source)
+                coverage (catalog-coverage/check-declared-route-coverage!
+                          {:contract-source contract-source
+                           :catalog-source catalog-source})
+                check-ledger (var-get
+                              (ns-resolve
+                               'gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
+                               'checked-catalog-proof-attribution!))
+                result (check-ledger contracts coverage claim)
+                origins (:certified-operation-proof-origins result)]
+            (is (= #{claim cancel} (set (keys origins))))
+            (is (= #{claim-route} (get-in origins [claim :route-ids])))
+            (is (= #{cancel-route} (get-in origins [cancel :route-ids])))
+            (is (= (select-keys (get-in contracts [:certified-operations claim])
+                                [:proof-fingerprint :proof-source-fingerprint
+                                 :proof-subject-fingerprint
+                                 :dependency-graph-fingerprint
+                                 :transition-fingerprint :route-ids])
+                   (:selected-operation-proof-origin result)))
+            (is (= #{audit} (:uncertified-application-operations result)))
+            (is (= #{audit-route} (:uncertified-application-route-ids result)))
+            (is (not (contains? origins audit)))
+            (is (= :none (:uncertified-proof-origins result)
+                   (:authority result)))
+            (is (= :not-issued (:certificate result)))
+            (is (= (:open-assumptions coverage) (:global-open-assumptions result)))
+            (is (= :original-catalog-proof-origin-attribution-diverged
+                   (reason #(check-ledger
+                             (assoc-in contracts
+                                       [:certified-operations cancel
+                                        :proof-subject-fingerprint]
+                                       nil)
+                             coverage claim))))
+            (is (= :original-catalog-proof-origin-attribution-diverged
+                   (reason #(check-ledger
+                             contracts
+                             (assoc coverage
+                                    :uncertified-application-route-ids #{})
+                             claim))))
+            (is (= :original-catalog-proof-origin-attribution-diverged
+                   (reason #(check-ledger
+                             contracts
+                             (assoc-in coverage
+                                       [:certified-operation-open-evidence cancel
+                                        :route-ids]
+                                       #{claim-route})
+                             claim))))
+            (is (= :original-catalog-proof-origin-attribution-diverged
+                   (reason #(check-ledger
+                             contracts
+                             (assoc coverage :catalog-operations #{claim})
+                             claim))))))))))
+
 (deftest two-certified-operations-commit-with-distinct-writer-bindings
   (use-case
    (fn [c final]

@@ -224,6 +224,75 @@
             (set/union complete-certified-route-ids uncertified-route-ids))
          (set/subset? selected-route-ids complete-certified-route-ids))))
 
+(defn- checked-catalog-proof-attribution!
+  "Reconcile one pair of ORIGINAL current contract/whole-catalog reports.
+   The caller MUST already have obtained them through the pinned original
+   checkers; this private structural verifier does not authenticate a caller
+   report by itself. Retain every certified operation's original proof origin
+   and exact route set, and enumerate uncertified routes WITHOUT inventing
+   proof evidence or authorization for them."
+  [contracts coverage selected-operation]
+  (let [rows (:certified-operations contracts)
+        open-rows (:certified-operation-open-evidence coverage)
+        certified-ids (:catalog-operations coverage)
+        certified-routes (:matched-certified-route-ids coverage)
+        unqualified-ops (:uncertified-application-operations coverage)
+        unqualified-routes (:uncertified-application-route-ids coverage)
+        row-routes (vec (mapcat :route-ids (vals rows)))
+        origins (into (sorted-map)
+                      (for [[operation row] rows]
+                        [operation (select-keys row
+                                                [:proof-fingerprint
+                                                 :proof-source-fingerprint
+                                                 :proof-subject-fingerprint
+                                                 :dependency-graph-fingerprint
+                                                 :transition-fingerprint
+                                                 :route-ids])]))
+        required-origin-keys #{:proof-fingerprint
+                               :proof-source-fingerprint
+                               :proof-subject-fingerprint
+                               :dependency-graph-fingerprint
+                               :transition-fingerprint :route-ids}]
+    (when-not (and (map? rows) (seq rows) (map? open-rows)
+                   (set? certified-ids) (contains? certified-ids selected-operation)
+                   (= certified-ids (set (keys rows)) (set (keys open-rows)))
+                   (every? (fn [[operation origin]]
+                             (and (qualified-keyword? operation)
+                                  (= required-origin-keys (set (keys origin)))
+                                  (every? some? (vals origin))
+                                  (set? (:route-ids origin))
+                                  (seq (:route-ids origin))
+                                  (= (:route-ids origin)
+                                     (get-in open-rows [operation :route-ids]))
+                                  (= operation (get-in rows [operation :operation]))))
+                           origins)
+                   (set? certified-routes)
+                   (= (count row-routes) (count (set row-routes)))
+                   (= certified-routes (set row-routes)
+                      (:matched-certified-route-ids contracts))
+                   (set? unqualified-ops) (set? unqualified-routes)
+                   (= unqualified-ops (:uncertified-operations contracts))
+                   (empty? (set/intersection certified-ids unqualified-ops))
+                   (empty? (set/intersection certified-routes unqualified-routes))
+                   (= (:route-ids contracts)
+                      (set/union certified-routes unqualified-routes))
+                   (= (:open-assumptions contracts) (:open-assumptions coverage))
+                   (= (:open-premises contracts) (:open-premises coverage)
+                      (into #{} (mapcat :open-premises) (vals open-rows)))
+                   (= (:open-obligations contracts) (:open-obligations coverage)
+                      (set/union (:open-assumptions coverage)
+                                 (into #{} (mapcat :open-obligations)
+                                                (vals open-rows)))))
+      (reject! :original-catalog-proof-origin-attribution-diverged))
+    {:certified-operation-proof-origins origins
+     :selected-operation-proof-origin (get origins selected-operation)
+     :uncertified-application-operations unqualified-ops
+     :uncertified-application-route-ids unqualified-routes
+     :global-open-assumptions (:open-assumptions coverage)
+     :attribution :all-original-certified-operations-only
+     :uncertified-proof-origins :none
+     :certificate :not-issued :authority :none}))
+
 (defn- current-binding!
   ([contract-source catalog-source operation]
    (current-binding! contract-source catalog-source operation false))
@@ -417,6 +486,8 @@
      ;; issue, pre-observation, post-observation and every summary. It cannot
      ;; silently change while the trial still reports the original source.
      :catalog-open-evidence open-evidence
+     :catalog-proof-attribution
+     (checked-catalog-proof-attribution! contracts full-coverage operation)
      :catalog-route-scope route-scope
      ;; The issued callable is captured privately for invocation, never
      ;; included in a report or user-provided to the physical trial.
@@ -683,6 +754,8 @@
         row-premises (into #{} (mapcat :open-premises) (vals rows))
         row-obligations (into #{} (mapcat :open-obligations) (vals rows))
         row-routes (vec (mapcat :route-ids (vals rows)))
+        attribution (:catalog-proof-attribution initial)
+        selected-origin (:selected-operation-proof-origin attribution)
         proof-source-identity
         (select-keys initial [:proof-source-fingerprint
                               :proof-subject-fingerprint
@@ -717,6 +790,39 @@
                         :dependency-graph-fingerprint}
                       (set (keys proof-source-identity)))
                    (every? some? (vals proof-source-identity))
+                   (= #{:certified-operation-proof-origins
+                        :selected-operation-proof-origin
+                        :uncertified-application-operations
+                        :uncertified-application-route-ids
+                        :global-open-assumptions :attribution
+                        :uncertified-proof-origins :certificate :authority}
+                      (set (keys attribution)))
+                   (= :all-original-certified-operations-only
+                      (:attribution attribution))
+                   (= :none (:uncertified-proof-origins attribution)
+                      (:authority attribution))
+                   (= :not-issued (:certificate attribution))
+                   (= catalog-operations
+                      (set (keys (:certified-operation-proof-origins attribution))))
+                   (= (:open-assumptions evidence)
+                      (:global-open-assumptions attribution))
+                   (= (get-in initial [:catalog-route-scope
+                                       :uncertified-application-operations])
+                      (:uncertified-application-operations attribution))
+                   (= (get-in initial [:catalog-route-scope
+                                       :uncertified-application-route-ids])
+                      (:uncertified-application-route-ids attribution))
+                   (= selected-origin
+                      (get-in attribution
+                              [:certified-operation-proof-origins operation]))
+                   (= (:route-ids initial) (:route-ids selected-origin))
+                   (= (:proof-fingerprint initial)
+                      (:proof-fingerprint selected-origin))
+                   (= proof-source-identity
+                      (select-keys selected-origin
+                                   [:proof-source-fingerprint
+                                    :proof-subject-fingerprint
+                                    :dependency-graph-fingerprint]))
                    (map? selected)
                    (= #{:route-ids :open-premises :open-obligations}
                       (set (keys selected)))
@@ -727,6 +833,14 @@
     {:catalog-open-evidence evidence
      :selected-operation-open-evidence selected
      :selected-operation-proof-source-identity proof-source-identity
+     :catalog-certified-operation-proof-origins
+     (:certified-operation-proof-origins attribution)
+     :catalog-uncertified-application-operations
+     (:uncertified-application-operations attribution)
+     :catalog-uncertified-application-route-ids
+     (:uncertified-application-route-ids attribution)
+     :proof-origin-attribution :all-original-certified-operations-only
+     :uncertified-proof-origins :none
      :catalog-global-assumptions-scope :whole-original-application-not-per-operation
      :selected-operation-obligations-scope :exact-original-selected-operation
      :open-proof-ledger-composition :original-global-union-of-selected-operation-rows
@@ -768,7 +882,12 @@
    v1864: Verify the original catalog proof ledger's exact global/set union,
    and associate the selected operation's original proof source, subject and
    dependency graph identities with the same physical-prestate diagnostic.
-   Global assumptions remain explicitly global, not selected-operation proofs."
+   Global assumptions remain explicitly global, not selected-operation proofs.
+
+   v1865: Join the checked per-operation proof origins to the COMPLETE
+   selected certified operation set, its disjoint routes and the explicit
+   uncertified complement. Original global assumptions are never attributed
+   to an individual operation; no uncertified route gains proof identity."
   ([contract-source catalog-source operation ctx invocation proof-context]
    (check-current-issued-executor-typed-command-alias!
     contract-source catalog-source operation ctx invocation proof-context

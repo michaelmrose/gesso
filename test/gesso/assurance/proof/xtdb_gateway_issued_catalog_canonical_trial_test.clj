@@ -284,6 +284,24 @@
        (is (= extra-routes (:uncertified-application-route-ids
                             selection-report)))
        (is (= #{:request/claim} (:catalog-operations selection-report)))
+       ;; Even the one-certified/one-uncertified application must retain the
+       ;; exact complement in the ORIGINAL pinned attribution check.
+       (let [binding-check (var-get
+                            (ns-resolve
+                             'gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
+                             'current-binding!))
+             initial (binding-check (:contract full) (:catalog-source full)
+                                    :request/claim false)
+             attributed (:catalog-proof-attribution initial)]
+         (is (= #{:request/claim}
+                (set (keys (:certified-operation-proof-origins attributed)))))
+         (is (= #{:request/cancel}
+                (:uncertified-application-operations attributed)))
+         (is (= extra-routes
+                (:uncertified-application-route-ids attributed)))
+         (is (= :none (:uncertified-proof-origins attributed)))
+         (is (= :none (:authority attributed)))
+         (is (= :not-issued (:certificate attributed))))
        (is (= #{:request/claim}
               (set (keys (:certified-operation-open-evidence selection-report)))))
        ;; Even a route which is explicitly UNCERTIFIED is part of the closed
@@ -581,6 +599,20 @@
             "A matching XTDB row must not discharge source obligations")
         (is (= expected (:catalog-open-evidence source-bound)))
         (is (= selected (:selected-operation-open-evidence source-bound)))
+        (is (= #{operation}
+               (set (keys (:catalog-certified-operation-proof-origins
+                           source-bound)))))
+        (is (= (:selected-operation-proof-source-identity source-bound)
+               (select-keys (get-in source-bound
+                                     [:catalog-certified-operation-proof-origins
+                                      operation])
+                            [:proof-source-fingerprint
+                             :proof-subject-fingerprint
+                             :dependency-graph-fingerprint])))
+        (is (= :all-original-certified-operations-only
+               (:proof-origin-attribution source-bound)))
+        (is (= :none (:uncertified-proof-origins source-bound)))
+        (is (= #{} (:catalog-uncertified-application-route-ids source-bound)))
         (let [current-proof (get-in
                              (certified/check-certified-contracts! contract)
                              [:certified-operations operation])]
@@ -704,6 +736,34 @@
     (is (= :original-issued-open-proof-evidence-not-established
            (reason #(ledger-check
                      (dissoc initial :proof-subject-fingerprint)
+                     operation))))
+    ;; v1865: A source-relative copy of the selected proof identity, even
+    ;; when the per-operation obligation ledger is unchanged, must not be
+    ;; accepted as a checked original catalog attribution.
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (assoc-in initial
+                               [:catalog-proof-attribution
+                                :certified-operation-proof-origins
+                                operation :proof-subject-fingerprint]
+                               :substituted-proof-subject)
+                     operation))))
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (assoc-in initial
+                               [:catalog-proof-attribution
+                                :uncertified-application-operations]
+                               #{operation})
+                     operation))))
+    (is (= :original-issued-open-proof-evidence-not-established
+           (reason #(ledger-check
+                     (assoc-in initial
+                               [:catalog-proof-attribution
+                                :certified-operation-proof-origins
+                                :invented/certification]
+                               (get-in initial
+                                       [:catalog-proof-attribution
+                                        :selected-operation-proof-origin]))
                      operation))))
     (is (= :not-established (:original-kernel-proof-discharge exact)
            (:physical-refinement-proof-discharge exact)))
