@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1808: The actual application startup entrypoint owns module issuance,
+  "v1809: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -1033,6 +1033,74 @@
         (is (= :stopped (:status ((:stop! issued)))))
         (is (= :configured-instance-generation-not-current
                (reason inspect!))))
+      (finally
+        (deliver release-inspection true)
+        (cleanup! s issued)))))
+
+(deftest managed-stop-waits-for-fresh-generation-inspection-to-complete
+  ;; Complement the v1801 stop-first race: a real fresh HTTP inspection that
+  ;; already owns the managed lifecycle monitor must finish BEFORE a managed
+  ;; stop can begin cleanup. The successful point-in-time inspection must not
+  ;; become a lease or allow its generation to be reused after that stop.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        inspection-in-locator (promise)
+        release-inspection (promise)
+        inspection-armed? (atom false)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_] (:server @(:server-state s)))
+                       :base-url!
+                       (fn [system]
+                         (when @inspection-armed?
+                           (deliver inspection-in-locator true)
+                           (when-not (deref release-inspection 15000 false)
+                             (throw (ex-info "Inspection fixture timed out" {}))))
+                         (original-locator system))))]
+    (try
+      (let [{:keys [system instance-generation]}
+            ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))]
+        (is (= :current-at-inspection (:status (inspect!))))
+        (reset! inspection-armed? true)
+        (let [inspecting (future (inspect!))]
+          (try
+            (is (true? (deref inspection-in-locator 10000 false)))
+            (let [stop-entered (promise)
+                  stopping (future
+                             (deliver stop-entered true)
+                             ((:stop! issued)))]
+              (try
+                (is (true? (deref stop-entered 5000 false)))
+                ;; The inspector is blocked in the URL locator while holding
+                ;; the monitor. Managed stop must wait, not close the listener.
+                (is (= :inspection-still-pending
+                       (deref inspecting 200 :inspection-still-pending)))
+                (is (= :stop-still-pending
+                       (deref stopping 200 :stop-still-pending)))
+                (is (= :verified-configured-start
+                       (:status ((:summary! issued)))))
+                (is (not (.isShutdown (:executor @(:server-state s)))))
+                (deliver release-inspection true)
+                (let [observed (deref inspecting 15000 :inspection-timed-out)
+                      stopped (deref stopping 15000 :stop-timed-out)]
+                  (is (= :current-at-inspection (:status observed)))
+                  (is (= :observed-at-current-inspection
+                         (:fresh-local-http-response observed)))
+                  (is (= :matches-original-host-reported-object
+                         (:physical-listener-instance observed)))
+                  (is (= :stopped (:status stopped))))
+                (is (= :configured-instance-generation-not-current
+                       (reason inspect!)))
+                (finally
+                  (deliver release-inspection true)
+                  (deref stopping 15000 :stop-timed-out))))
+            (finally
+              (deliver release-inspection true)
+              (deref inspecting 15000 :inspection-timed-out)))))
       (finally
         (deliver release-inspection true)
         (cleanup! s issued)))))
