@@ -15,6 +15,7 @@
            [java.util.concurrent TimeUnit]))
 
 (defn- pair [] (.generateKeyPair (KeyPairGenerator/getInstance "Ed25519")))
+(defonce ^:private authorized-client-pair (pair))
 (defn- b64 [data] (.encodeToString (Base64/getEncoder) data))
 (defn- spki [p] (b64 (.getEncoded (.getPublic p))))
 (defn- pkcs8 [p] (b64 (.getEncoded (.getPrivate p))))
@@ -34,7 +35,9 @@
              (Files/deleteIfExists (.toPath file)))))))
 (defn- config [dir pair init?]
   {:directory dir :signing-private-pkcs8-base64 (pkcs8 pair)
-   :signing-public-spki-base64 (spki pair) :initialize-empty? init?})
+   :signing-public-spki-base64 (spki pair)
+   :authorized-client-spki-base64 (spki authorized-client-pair)
+   :initialize-empty? init?})
 (defn- genesis [] {:revision 0 :checkpoint-digest "genesis"})
 (defn- f1 [] {:revision 1 :checkpoint-digest (str "sha256:" (apply str (repeat 64 "a")))})
 (defn- f2 [] {:revision 2 :checkpoint-digest (str "sha256:" (apply str (repeat 64 "b")))})
@@ -128,11 +131,14 @@
         env (.environment pb)]
     (.put env "GESSO_FLOOR_PKCS8" (pkcs8 key))
     (.put env "GESSO_FLOOR_SPKI" (spki key))
+    (.put env "GESSO_FLOOR_CLIENT_SPKI" (spki authorized-client-pair))
     (.redirectErrorStream pb true)
     (.redirectOutput pb (.toFile (.resolve ^Path dir
                                            (str ".server-" (UUID/randomUUID) ".log"))))
     (let [process (.start pb)
-          client (register/prepare-unix-client socket-path)]
+          client (register/prepare-unix-client
+                  socket-path {:client-signing-private-pkcs8-base64
+                               (pkcs8 authorized-client-pair)})]
       (loop [attempt 0]
         (when (>= attempt 160)
           (.destroyForcibly process)
@@ -269,3 +275,98 @@
                          ((:status! (floor/prepare-external-floor-adapter!
                                      (assoc cfg :initialize-empty? false))))))))
              (finally (stop-server! s)))))))))
+
+
+(deftest v1905-server-refuses-unsigned-or-foreign-signed-clients
+  (with-dir
+    (fn [dir]
+      (let [root (pair)
+            socket (.resolve ^Path dir "authenticated.sock")
+            server (start-server! dir root socket true)]
+        (try
+          (let [good (:client server)
+                unauthorized (register/prepare-unix-client
+                              socket {:client-signing-private-pkcs8-base64
+                                      (pkcs8 (pair))})
+                invalid (fn [f] (reason f))
+                floor-before (get-in ((:read-external-floor! good)
+                                      (read-request)) [:statement :floor])]
+            (is (= (genesis) floor-before))
+            (is (= :external-register-refused-request
+                   (invalid #((:read-external-floor! unauthorized)
+                              (read-request)))))
+            (is (= :external-register-refused-request
+                   (invalid #((:advance-external-floor! unauthorized)
+                              (advance-request (genesis) (f1))))))
+            ;; Raw local clients can reach a socket with their UID, but an
+            ;; unsigned old-style v1904 frame has no authority to READ/CAS.
+            (with-open [raw (java.nio.channels.SocketChannel/open
+                             java.net.StandardProtocolFamily/UNIX)]
+              (.connect raw (java.net.UnixDomainSocketAddress/of socket))
+              (let [out (java.io.DataOutputStream.
+                         (java.nio.channels.Channels/newOutputStream raw))
+                    in (java.io.DataInputStream.
+                        (java.nio.channels.Channels/newInputStream raw))
+                    bytes (.getBytes (str (pr-str (read-request)) "\n")
+                                     java.nio.charset.StandardCharsets/UTF_8)]
+                (.writeInt out (alength bytes))
+                (.write out bytes)
+                (.flush out)
+                (let [len (.readInt in) answer (byte-array len)]
+                  (is (<= 1 len 4096))
+                  (.readFully in answer)
+                  (is (= :unauthenticated-client-request
+                         (:register-error (edn/read-string
+                           (String. answer
+                            java.nio.charset.StandardCharsets/UTF_8))))))))
+            (is (= (genesis) (get-in ((:read-external-floor! good)
+                                     (read-request)) [:statement :floor])))
+            (is (= :invalid-client-configuration
+                   (invalid #(register/prepare-unix-client
+                              socket {:client-signing-private-pkcs8-base64
+                                      (pkcs8 authorized-client-pair)
+                                      :claim-independent true}))))
+            (is (= :invalid-register-configuration
+                   (invalid #(register/prepare-durable-register!
+                              (dissoc (config dir root false)
+                                      :authorized-client-spki-base64)))))
+            (is (= :none (:authority (register/prepare-durable-register!
+                                      (config dir root false)))))
+            ;; A legitimate signer still advances after invalid attempts.
+            (is (signed-envelope?
+                 ((:advance-external-floor! good)
+                  (advance-request (genesis) (f1))) root)))
+          (finally (stop-server! server)))))))
+
+(deftest v1905-connected-silent-client-cannot-block-register-forever
+  (with-dir
+    (fn [dir]
+      (let [root (pair)
+            socket (.resolve ^Path dir "bounded.sock")
+            server (start-server! dir root socket true)]
+        (try
+          ;; This unauthenticated connection sends NO frame bytes. A
+          ;; blocking read would permanently starve the single accept loop.
+          (with-open [silent (java.nio.channels.SocketChannel/open
+                             java.net.StandardProtocolFamily/UNIX)]
+            (.connect silent (java.net.UnixDomainSocketAddress/of socket))
+            (Thread/sleep 150)
+            (let [started (System/nanoTime)]
+              (is (= (genesis)
+                     (get-in ((:read-external-floor! (:client server))
+                              (read-request)) [:statement :floor])))
+              (is (< (/ (- (System/nanoTime) started) 1000000.0)
+                     4500.0)
+                  "A silent connection is terminated by the bounded receive deadline")))
+          ;; Reject an oversized, partially sent message at the HEADER.
+          (with-open [raw (java.nio.channels.SocketChannel/open
+                           java.net.StandardProtocolFamily/UNIX)]
+            (.connect raw (java.net.UnixDomainSocketAddress/of socket))
+            (let [out (java.io.DataOutputStream.
+                       (java.nio.channels.Channels/newOutputStream raw))]
+              (.writeInt out 4097)
+              (.flush out)))
+          (is (= (genesis)
+                 (get-in ((:read-external-floor! (:client server))
+                          (read-request)) [:statement :floor])))
+          (finally (stop-server! server)))))))

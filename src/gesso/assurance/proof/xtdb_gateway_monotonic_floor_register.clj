@@ -10,13 +10,22 @@
    This is a process and persistence boundary, not a separately administered
    trust authority or a rollback-proof hardware monotonic register. Operators
    must guard the directory, socket and private key. No remote-network API,
-   proof discharge, witness admission or certificate is provided."
+   proof discharge, witness admission or certificate is provided.
+
+   v1905: Authenticate EACH Unix client request with an Ed25519 key pinned
+   from register-process configuration. No unauthenticated socket request
+   can reach read or compare-and-advance; the private caller signing key is
+   never sent over the socket. A fixed total receive deadline also prevents
+   one connected but silent client from indefinitely blocking this serial
+   service. Client-key provisioning, UID compromise, replay after a register
+   storage rollback and service independence are NOT established here."
   (:require [clojure.edn :as edn]
             [gesso.assurance.proof.xtdb-gateway-externally-anchored-floor :as floor])
   (:import [java.io ByteArrayOutputStream DataOutputStream DataInputStream
             PushbackReader StringReader]
            [java.nio ByteBuffer]
-           [java.nio.channels Channels FileChannel ServerSocketChannel SocketChannel]
+           [java.nio.channels Channels FileChannel ServerSocketChannel SocketChannel
+            Selector SelectionKey]
            [java.net StandardProtocolFamily UnixDomainSocketAddress]
            [java.nio.charset StandardCharsets]
            [java.nio.file Files Path LinkOption StandardCopyOption StandardOpenOption]
@@ -28,6 +37,10 @@
 (def register-type
   :gesso.assurance.proof.xtdb-gateway-monotonic-floor-register/persisted-floor)
 (def ^:private max-payload 4096)
+(def ^:private request-auth-type
+  :gesso.assurance.proof.xtdb-gateway-monotonic-floor-register/signed-client-request)
+(def ^:private client-request-domain "gesso/xtdb/monotonic-register/client-request/v1")
+(def ^:private server-receive-timeout-ms 1500)
 (def ^:private no-links (into-array LinkOption [LinkOption/NOFOLLOW_LINKS]))
 (def ^:private read-options (into-array java.nio.file.OpenOption
                                          [StandardOpenOption/READ]))
@@ -86,6 +99,60 @@
     (.initSign signer key)
     (.update signer data)
     (.encodeToString (Base64/getEncoder) (.sign signer))))
+
+(defn- request-signing-bytes [request]
+  ;; Canonical wire request, separate from the signed floor response and from
+  ;; the payload-carrying EDN. For reads, the floor field is deliberately the
+  ;; fixed genesis value; the only variable request field is its UUID nonce.
+  (let [statement
+        (case (:kind request)
+          :read (do
+                  (when-not (and (map? request)
+                                 (= #{:kind :nonce} (set (keys request))))
+                    (reject! :invalid-authenticated-request))
+                  {:type floor/statement-type :version 1 :kind :read
+                   :nonce (:nonce request) :floor zero-floor})
+          :advance request
+          (reject! :invalid-authenticated-request))
+        signed-data (floor/floor-signing-bytes statement)
+        out (ByteArrayOutputStream.)]
+    (with-open [writer (DataOutputStream. out)]
+      (.writeUTF writer client-request-domain)
+      (.writeInt writer (alength ^bytes signed-data))
+      (.write writer ^bytes signed-data))
+    (.toByteArray out)))
+
+(defn- authenticated-request [request ^PrivateKey client-private-key]
+  {:type request-auth-type
+   :version 1
+   :request request
+   :signature-base64 (signature (request-signing-bytes request)
+                                client-private-key)})
+
+(defn- require-authenticated-request!
+  [envelope ^PublicKey authorized-client-key]
+  (when-not (and (map? envelope)
+                 (= #{:type :version :request :signature-base64}
+                    (set (keys envelope)))
+                 (= request-auth-type (:type envelope))
+                 (= 1 (:version envelope))
+                 (string? (:signature-base64 envelope))
+                 (<= 1 (count (:signature-base64 envelope)) 128))
+    (reject! :unauthenticated-client-request))
+  (let [bytes (request-signing-bytes (:request envelope))
+        encoded (:signature-base64 envelope)
+        raw (try (.decode (Base64/getDecoder) ^String encoded)
+                 (catch IllegalArgumentException _ nil))]
+    (when-not (and raw (= 64 (alength ^bytes raw))
+                   (= encoded (.encodeToString (Base64/getEncoder) raw))
+                   (try
+                     (let [verifier (Signature/getInstance "Ed25519")]
+                       (.initVerify verifier authorized-client-key)
+                       (.update verifier ^bytes bytes)
+                       (.verify verifier ^bytes raw))
+                     (catch java.security.GeneralSecurityException _ false)))
+      (reject! :client-request-signature-not-verified)))
+  (:request envelope))
 
 (defn- signed! [statement key]
   {:statement statement
@@ -186,7 +253,8 @@
 (defn prepare-durable-register!
   "Create a durable, signed, monotonic register with strict CAS.
    Exact config {:directory Path :signing-private-pkcs8-base64 str
-    :signing-public-spki-base64 str :initialize-empty? bool}.
+    :signing-public-spki-base64 str :authorized-client-spki-base64 str
+    :initialize-empty? bool}.
    All reads and CAS acquire an OS file lock. No automatic repair or
    initialization when the persisted state is missing or corrupt.
    Neither configured key ownership nor external administrative control
@@ -194,7 +262,8 @@
   [config]
   (when-not (and (map? config)
                  (= #{:directory :signing-private-pkcs8-base64
-                      :signing-public-spki-base64 :initialize-empty?}
+                      :signing-public-spki-base64 :authorized-client-spki-base64
+                      :initialize-empty?}
                     (set (keys config)))
                  (instance? Path (:directory config))
                  (boolean? (:initialize-empty? config)))
@@ -206,6 +275,8 @@
             (reject! :register-directory-unavailable))
         ^PrivateKey private-key (private-key! (:signing-private-pkcs8-base64 config))
         ^PublicKey public-key (public-key! (:signing-public-spki-base64 config))
+        ^PublicKey authorized-client-key
+        (public-key! (:authorized-client-spki-base64 config))
         _ (let [bytes (.getBytes "gesso-monotonic-register-self-test"
                                  StandardCharsets/UTF_8)
                 sig (.decode (Base64/getDecoder) (signature bytes private-key))
@@ -261,7 +332,12 @@
                          (write-floor! dir target (:next-floor request) private-key)
                          (signed! request private-key)))))]
     {:type register-type :read! read! :advance! advance!
+     :require-authenticated-request!
+     (fn [envelope]
+       (require-authenticated-request! envelope authorized-client-key))
      :directory dir
+     :client-authentication :ed25519-process-configured-key-only
+     :client-key-provisioning-independence :not-established
      :config-trust :process-configured-not-authenticated
      :persistence :atomic-file-and-directory-forced
      :independent-rollback-prevention :not-established
@@ -281,26 +357,79 @@
       (.readFully ^DataInputStream in bytes)
       (strict-edn! bytes))))
 
+(defn- read-client-frame-before-deadline!
+  "Read exactly one framed message from a client with a SINGLE wall-clock
+   deadline covering both the header and body. Incomplete bytes, slow
+   trickles and oversize frames never block the serial accept loop forever."
+  [^SocketChannel client]
+  (let [deadline (+ (System/nanoTime)
+                    (* 1000000 server-receive-timeout-ms))]
+    (.configureBlocking client false)
+    (try
+      (with-open [selector (Selector/open)]
+        (.register client selector SelectionKey/OP_READ)
+        (letfn [(fill! [^ByteBuffer buffer]
+                  (while (.hasRemaining buffer)
+                    ;; Enforce a total deadline even when bytes trickle in.
+                    (when (<= (- deadline (System/nanoTime)) 0)
+                      (reject! :register-client-frame-deadline-exceeded))
+                    (let [n (.read client buffer)]
+                      (cond
+                        (neg? n) (reject! :client-closed-before-frame-complete)
+                        (pos? n) nil
+                        :else
+                        (let [remaining (- deadline (System/nanoTime))]
+                          (when (<= remaining 0)
+                            (reject! :register-client-frame-deadline-exceeded))
+                          (.select selector
+                                   (long (max 1 (quot (+ remaining 999999)
+                                                      1000000))))
+                          (.clear (.selectedKeys selector)))))))]
+          (let [header (ByteBuffer/allocate 4)]
+            (fill! header)
+            (.flip header)
+            (let [size (.getInt header)]
+              (when-not (<= 1 size max-payload)
+                (reject! :register-frame-size-out-of-bounds))
+              (let [body (ByteBuffer/allocate size)]
+                (fill! body)
+                (strict-edn! (.array body)))))))
+      (finally
+        ;; The selector is closed before switching back to blocking mode.
+        ;; The caller only writes its bounded response after this point.
+        (.configureBlocking client true)))))
+
 (defn prepare-unix-client
-  "Provide the exact v1903 callback keys over a Unix socket. The returned
-   callbacks do NOT authenticate the socket pathname or process; v1903
+  "Provide the exact v1903 callback keys over a Unix socket. Each request
+   is signed with the independently configured CLIENT private key before
+   sending. The private key is NOT transmitted. A caller controlling both
+   the server's authorized public key and this private key can authenticate
+   itself: no deployment independence or trusted key custody is implied.
+   The callbacks do NOT authenticate the socket pathname or process; v1903
    verifies all response signatures and fresh read nonces separately."
-  [^Path socket]
+  [^Path socket config]
   (when-not (instance? Path socket)
     (reject! :invalid-socket-path))
-  (let [request! (fn [message]
-                   (with-open [client (SocketChannel/open StandardProtocolFamily/UNIX)]
-                     (.connect client (UnixDomainSocketAddress/of socket))
-                     (let [out (DataOutputStream. (Channels/newOutputStream client))
-                           in (DataInputStream. (Channels/newInputStream client))]
-                       (send-frame! out message)
-                       (let [answer (read-frame! in)]
-                         (when (and (map? answer)
-                                    (contains? answer :register-error))
-                           (reject! :external-register-refused-request))
-                         answer))))]
+  (when-not (and (map? config)
+                 (= #{:client-signing-private-pkcs8-base64} (set (keys config))))
+    (reject! :invalid-client-configuration))
+  (let [^PrivateKey client-key (private-key!
+                                (:client-signing-private-pkcs8-base64 config))
+        request! (fn [message]
+                   (let [envelope (authenticated-request message client-key)]
+                     (with-open [client (SocketChannel/open StandardProtocolFamily/UNIX)]
+                       (.connect client (UnixDomainSocketAddress/of socket))
+                       (let [out (DataOutputStream. (Channels/newOutputStream client))
+                             in (DataInputStream. (Channels/newInputStream client))]
+                         (send-frame! out envelope)
+                         (let [answer (read-frame! in)]
+                           (when (and (map? answer)
+                                      (contains? answer :register-error))
+                             (reject! :external-register-refused-request))
+                           answer)))))]
     {:read-external-floor! request!
      :advance-external-floor! request!
+     :client-authentication :ed25519-process-configured-key-only
      :transport :local-unix-socket-not-an-independent-authority}))
 
 (defn serve-unix!
@@ -312,6 +441,7 @@
   (when-not (and (instance? Path socket)
                  (map? register) (fn? (:read! register))
                  (fn? (:advance! register))
+                 (fn? (:require-authenticated-request! register))
                  (= (.normalize (.toAbsolutePath (.getParent socket)))
                     (.normalize ^Path (:directory register)))
                  (not (Files/exists socket no-links))
@@ -327,9 +457,9 @@
       (loop []
         (with-open [client (.accept server)]
           (try
-            (let [in (DataInputStream. (Channels/newInputStream client))
-                  out (DataOutputStream. (Channels/newOutputStream client))
-                  request (read-frame! in)
+            (let [out (DataOutputStream. (Channels/newOutputStream client))
+                  envelope (read-client-frame-before-deadline! client)
+                  request ((:require-authenticated-request! register) envelope)
                   result (case (:kind request)
                            :read ((:read! register) request)
                            :advance ((:advance! register) request)
@@ -347,7 +477,8 @@
 (defn -main
   "Run a dedicated register process. Usage:
      -m ...xtdb-gateway-monotonic-floor-register DIR SOCKET init|existing
-   Environment must set GESSO_FLOOR_PKCS8 and GESSO_FLOOR_SPKI (base64 DER).
+   Environment must set GESSO_FLOOR_PKCS8 and GESSO_FLOOR_SPKI
+   (base64 DER) plus GESSO_FLOOR_CLIENT_SPKI (authorized CLIENT public key).
    Both are intentionally not passed as argv. Process/network independence,
    secure provisioning and storage administrator are deployment concerns."
   [& argv]
@@ -361,5 +492,6 @@
       {:directory (Path/of directory (make-array String 0))
        :signing-private-pkcs8-base64 (System/getenv "GESSO_FLOOR_PKCS8")
        :signing-public-spki-base64 (System/getenv "GESSO_FLOOR_SPKI")
+       :authorized-client-spki-base64 (System/getenv "GESSO_FLOOR_CLIENT_SPKI")
        :initialize-empty? (= "init" init)})
      (Path/of socket (make-array String 0)))))
