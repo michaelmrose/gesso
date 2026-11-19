@@ -52,13 +52,22 @@
    registered executor plus fully checked source/catalog/route inventory.
    The alias is no longer merely caller-declared, but its report remains
    local source-relative evidence. This does NOT opt the alias into the
-   original physical issuance or submit path, which remains fail-closed."
+   original physical issuance or submit path, which remains fail-closed.
+
+   v1858: Check the SAME issued-plan alias against original and independent
+   abstract interpreters, using the source's own transition and field map and
+   requiring the full original invariant inventory. A candidate domain plan,
+   input values and read-premise pairs are still caller supplied; they are
+   screened, NOT authenticated or physically adopted. No original physical
+   issuance or submit path changes."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
              :as coverage]
             [gesso.assurance.proof.xtdb-gateway-catalog-bound-atomic-canonical-trial
              :as canonical]
+            [gesso.assurance.proof.xtdb-gateway-typed-transition-seam
+             :as typed-seam]
             [gesso.assurance.transition :as constructor]
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
@@ -71,6 +80,9 @@
 (def issued-alias-report-type
   :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/issued-command-alias)
 (def issued-alias-report-version 1)
+(def issued-typed-alias-report-type
+  :gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial/issued-typed-command-alias)
+(def issued-typed-alias-report-version 1)
 
 (def ^:private original-contract-check certified/check-certified-contracts!)
 (def ^:private original-operation-summary application/operation-summary)
@@ -82,6 +94,8 @@
 (def ^:private original-plan-describe plan/describe-plan-operation)
 (def ^:private original-canonical-issuer
   canonical/issue-catalog-bound-canonical-trial!)
+(def ^:private original-typed-alias-screen
+  typed-seam/check-source-relative-typed-domain-with-command-binding!)
 
 (defn- reject! [reason]
   (throw (ex-info "Issued catalog/canonical executor binding is not established."
@@ -369,6 +383,78 @@
      :original-business-policy-authenticity :not-established
      :certificate :not-issued :admission :not-admitted
      :transaction-authority :none :authority :none}))
+
+(defn check-current-issued-typed-command-alias!
+  "Extend the read-only ORIGINAL issued-plan alias check through the original
+   and independent typed abstract interpreters. The declaration, command
+   binding, and physical field map are derived from the checked issued plan,
+   never provided as caller-replaceable arguments. The supplied invariant
+   inventory MUST equal the checked original catalog inventory; the original
+   typed checker derives and screens every read-premise value.
+
+   The candidate domain plan and transition inputs are still caller supplied.
+   The result establishes only conditional abstract source correspondence,
+   NOT issuer-produced candidate authenticity, physical writer adoption,
+   business-policy authentication, kernel proof, admission or transaction
+   authority. All physical issuance paths remain strict and unchanged."
+  [contract-source catalog-source operation domain-source inputs proof-context]
+  (let [initial (current-binding! contract-source catalog-source operation true)
+        original-source (get-in contract-source
+                                [:certified-operations operation :current-source])
+        construction (:construction original-source)
+        original-invariants (get-in catalog-source [:catalog :invariants])
+        binding {:operation-id operation
+                 :interface-operation operation
+                 :domain-command-operation (:command-operation initial)}]
+    (when-not (and (plain-map? proof-context)
+                   (plain-map? original-invariants)
+                   (seq original-invariants)
+                   (= original-invariants (:invariants proof-context)))
+      (reject! :issued-typed-read-invariants-not-original))
+    (when-not (identical? original-typed-alias-screen
+                          (var-get #'typed-seam/check-source-relative-typed-domain-with-command-binding!))
+      (reject! :substituted-original-typed-alias-screen))
+    ;; This constructor is the original checked semantic projection of the
+    ;; issued plan's construction, not a caller supplied declaration.
+    (let [declaration (:transition (original-construct construction))
+          screening (original-typed-alias-screen
+                     operation domain-source declaration inputs
+                     (:field-map original-source) proof-context binding)]
+      (when-not (and (= typed-seam/source-check-type (:type screening))
+                     (= typed-seam/source-check-version (:version screening))
+                     (= operation (:operation-id screening))
+                     (= :original-and-independent-agree
+                        (:abstract-interpreters screening))
+                     (= :source-relative-values-screened
+                        (:original-read-premises screening))
+                     (= :bijective (:complete-domain-field-projection screening))
+                     (= :explicit-domain-command-operation-id-alias
+                        (:command-interface-relation screening))
+                     (= :caller-declared-not-authenticated
+                        (:command-binding-provenance screening))
+                     (= :disabled (:physical-submission screening))
+                     (= :not-issued (:certificate screening))
+                     (= :not-admitted (:admission screening))
+                     (= :none (:authority screening)))
+        (reject! :original-typed-alias-source-relation-not-established))
+      (when-not (and (identical? original-typed-alias-screen
+                                (var-get #'typed-seam/check-source-relative-typed-domain-with-command-binding!))
+                     (= initial (current-binding! contract-source catalog-source
+                                                  operation true)))
+        (reject! :current-issued-typed-alias-source-changed))
+      (assoc (check-current-issued-command-alias!
+              contract-source catalog-source operation)
+             :type issued-typed-alias-report-type
+             :version issued-typed-alias-report-version
+             :typed-abstract-alias-correspondence
+             :original-and-independent-source-relative
+             :typed-declaration-source :original-issued-plan-construction
+             :typed-field-map-source :original-issued-plan-field-map
+             :typed-invariant-inventory :entire-original-checked-catalog
+             :typed-read-premises :source-relative-values-screened
+             :candidate-domain-source :caller-supplied-not-authenticated
+             :physical-submission :disabled
+             :typed-screening-physical-submission :disabled))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]

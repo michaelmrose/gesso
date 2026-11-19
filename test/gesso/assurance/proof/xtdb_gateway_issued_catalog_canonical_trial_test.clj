@@ -6,6 +6,7 @@
             [gesso.assurance.dependency :as dependency]
             [gesso.assurance.proof.certificate :as certificate]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as bound]
+            [gesso.assurance.proof.xtdb-gateway-typed-transition-seam :as typed-seam]
             [gesso.assurance.proof.checked-authorization-assembly :as checked-assembly]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.xtdb-gateway-catalog-bound-atomic-canonical-trial-test]
@@ -540,6 +541,65 @@
       (is (= :not-admitted (:admission alias)))
       (is (not-any? #(contains? alias %)
                     [:executor :submit! :observe-once! :prepare!])))
+    ;; The new v1858 check derives the declaration, field projection and
+    ;; alias from the ORIGINAL issued source, not a caller-supplied binding.
+    (let [candidate {:plan ((test-helper model-ns 'domain-plan) (:request d))}
+          inputs {:input/owner "helper-a"}
+          proof (test-helper typed-ns 'premises)
+          check! (fn [domain ctx]
+                   (bound/check-current-issued-typed-command-alias!
+                    contract catalog-source operation domain inputs ctx))
+          checked (check! candidate proof)]
+      (is (= bound/issued-typed-alias-report-type (:type checked)))
+      (is (= bound/issued-typed-alias-report-version (:version checked)))
+      (is (= operation (:operation-id checked)))
+      (is (= {:operation-id operation
+              :interface-operation operation
+              :domain-command-operation :claim}
+             (:command-binding checked)))
+      (is (= :original-and-independent-source-relative
+             (:typed-abstract-alias-correspondence checked)))
+      (is (= :original-issued-plan-construction
+             (:typed-declaration-source checked)))
+      (is (= :original-issued-plan-field-map
+             (:typed-field-map-source checked)))
+      (is (= :entire-original-checked-catalog
+             (:typed-invariant-inventory checked)))
+      (is (= :source-relative-values-screened
+             (:typed-read-premises checked)))
+      (is (= :caller-supplied-not-authenticated
+             (:candidate-domain-source checked)))
+      (is (= :disabled (:physical-submission checked)
+             (:typed-screening-physical-submission checked)
+             (:canonical-physical-alias-execution checked)))
+      (is (= :none (:transaction-authority checked) (:authority checked)))
+      (is (= :not-issued (:certificate checked)))
+      (is (= :not-admitted (:admission checked)))
+      (is (not-any? #(contains? checked %)
+                    [:executor :submit! :observe-once! :prepare!
+                     :plan :domain-source :declaration :field-map]))
+      (is (= :issued-typed-read-invariants-not-original
+             (reason #(check! candidate
+                              (assoc-in proof [:invariants :doc/owner-not-blank
+                                               :expression]
+                                        [:not= [:read :doc/owner]
+                                         [:literal "different-policy"]])))))
+      (is (= :invalid-source-relative-command-binding
+             (reason #(check!
+                       (assoc-in candidate [:plan :commands 0 :model/operation]
+                                 :cancel)
+                       proof))))
+      (is (= :original-and-independent-abstract-relation-not-established
+             (reason #(check!
+                       (assoc-in candidate [:plan :commands 0 :model/after :owner]
+                                 "unrelated-owner")
+                       proof))))
+      (with-redefs [typed-seam/check-source-relative-typed-domain-with-command-binding!
+                    (fn [& _] {:type typed-seam/source-check-type})]
+        (is (= :substituted-original-typed-alias-screen
+               (reason #(check! candidate proof)))))
+      (is (zero? @(:constructs e))
+          "Source-relative checks must not execute the issued plan"))
     ;; A changed copy of the source cannot impersonate the registered plan.
     (is (= :invalid-current-certified-operation-table
            (reason #(bound/check-current-issued-command-alias!
