@@ -178,6 +178,123 @@
       :else
       :private-after-matches-latest-historical-version)))
 
+(def ^:private diagnostic-premise-definitions
+  ;; An ordered, finite vocabulary of RAW redacted findings from the one
+  ;; original private readback. Never trust a caller-supplied claim or an
+  ;; already-composed aggregate as a premise. These equality checks state
+  ;; observational agreement, NOT an independently justified proof rule.
+  [[:exact-original-return :returned-key-origin
+    :exact-one-shot-gateway-return]
+   [:private-intent-origin :expected-intent-origin
+    :private-original-prepared-gateway]
+   [:one-pinned-snapshot :both-observations-share-pinned-basis? true]
+   [:basis-after-return :read-basis-order
+    :pinned-basis-not-before-original-return]
+   [:committed-ledger :returned-ledger-status
+    :matches-original-returned-committed-row]
+   [:generated-intent :intent-record-status
+    :matches-private-generated-intent]
+   [:generated-intent-history :intent-history-origin-status
+    :one-open-visible-history-version-starts-at-returned-tx]
+   [:protected-current-after :protected-original-poststate-status
+    :matches-private-original-protected-after]
+   [:protected-latest-origin :protected-original-history-origin-status
+    :latest-open-protected-version-starts-at-returned-tx]
+   [:protected-historical-after :protected-original-after-history-status
+    :private-after-matches-latest-historical-version]
+   [:protected-historical-before :protected-original-before-history-status
+    :private-original-before-matches-immediate-predecessor]])
+
+(def ^:private diagnostic-claim-dependencies
+  ;; Explicit monotonic dependency DAG, from the least constrained to the
+  ;; most constrained observation. Only SAME-BASIS comparison findings are
+  ;; eligible; no dependent claim can bypass a missing earlier premise.
+  (array-map
+   :intent-ledger-coobservation
+   [:exact-original-return :private-intent-origin :one-pinned-snapshot
+    :basis-after-return :committed-ledger :generated-intent]
+   :intent-temporal-correlation
+   [:exact-original-return :private-intent-origin :one-pinned-snapshot
+    :basis-after-return :committed-ledger :generated-intent
+    :generated-intent-history]
+   :protected-current-coobservation
+   [:exact-original-return :private-intent-origin :one-pinned-snapshot
+    :basis-after-return :committed-ledger :generated-intent
+    :generated-intent-history :protected-current-after]
+   :protected-dual-history-correlation
+   [:exact-original-return :private-intent-origin :one-pinned-snapshot
+    :basis-after-return :committed-ledger :generated-intent
+    :generated-intent-history :protected-current-after
+    :protected-latest-origin]
+   :protected-before-after-history-correlation
+   [:exact-original-return :private-intent-origin :one-pinned-snapshot
+    :basis-after-return :committed-ledger :generated-intent
+    :generated-intent-history :protected-current-after
+    :protected-latest-origin :protected-historical-after
+    :protected-historical-before]))
+
+(def ^:private diagnostic-open-obligations
+  ;; No ordering of bounded observations can close these by itself.
+  [:authenticated-node-and-execution-identity
+   :exclusive-transaction-causality
+   :durable-authenticated-audit-event-producer
+   :complete-audit-event-ingestion
+   :complete-deployment-writer-coverage
+   :retention-and-physical-erasure-completeness
+   :independent-executable-refinement-proof])
+
+(defn- compose-diagnostic-correspondence
+  "Compose ONLY redacted observations from this same private pinned read.
+   This internal, pure function also permits adversarial unit tests; neither
+   a caller-constructed map nor this returned plain-data structure is a
+   trusted proof object, cryptographic attestation, admission or certificate."
+  [observed]
+  (let [premises
+        (into (sorted-map)
+              (for [[name field required] diagnostic-premise-definitions
+                    :let [found (get observed field ::unavailable)]]
+                [name {:status (if (= required found)
+                                 :observational-match :unestablished)
+                       :source-field field
+                       :expected required
+                       :observed (if (= ::unavailable found)
+                                   :missing-observation found)}]))
+        nodes
+        (into (sorted-map)
+              (for [[name deps] diagnostic-claim-dependencies
+                    :let [blocked (->> deps
+                                       (remove #(= :observational-match
+                                                   (get-in premises [% :status])))
+                                       vec)]]
+                [name {:depends-on deps
+                       :status (if (empty? blocked)
+                                 :bounded-premises-present :blocked)
+                       :blocked-by blocked}]))
+        strongest (->> diagnostic-claim-dependencies
+                       keys
+                       (filter #(= :bounded-premises-present
+                                   (get-in nodes [% :status])))
+                       last)]
+    {:type :gesso.assurance.proof.xtdb-gateway-atomic-write-intent/diagnostic-premises
+     :version 1
+     :scope :one-original-gateway-return-and-one-independent-pinned-read
+     :premises premises
+     :dependency-nodes nodes
+     :strongest-bounded-node (or strongest :none)
+     :open-obligations diagnostic-open-obligations
+     :open-obligation-count (count diagnostic-open-obligations)
+     :closed-obligations []
+     :evidence-authenticity :not-established
+     :record-execution-causality :not-established
+     :history-completeness :not-established
+     :audit-producer-completeness :not-established
+     :proof-status :diagnostic-plain-data-not-a-proof-object
+     :admission :not-admitted
+     :certificate :not-issued
+     :transaction-authority :none
+     :retry-authority :none
+     :authority :none}))
+
 (defn inspect-pinned-intent!
   "Read back the PRIVATE v1887 generated intent and original returned-key
    ledger row at ONE independent, pinned XTDB basis. Accept ONLY the original
@@ -189,6 +306,12 @@
    created the record, prevent later alteration, authenticate the supplied
    node, establish complete writer/audit capture, or authorize any effect.
    No write, retry, independent audit discharge or certificate occurs.
+
+   v1894: Compose the already-observed redacted premises into an explicit
+   closed dependency DAG of BOUNDED diagnostics and a separate invariant
+   list of still-open physical and audit obligations. Every node fails
+   closed if any supporting field is absent or disagrees; even fully matched
+   nodes never become proofs, write authority or certificates.
 
    v1889 additionally reads the generated row's bounded SYSTEM and VALID
    time history on the SAME pinned snapshot. One open version beginning at
@@ -474,7 +597,7 @@
                        (identical? original-decode
                                    (var-get #'basis/<-time-basis-str)))
           (reject! :substituted-readback-seam))
-        {:type readback-type
+        (let [report {:type readback-type
          :version readback-version
          :status (if positive?
                    :bounded-private-intent-and-ledger-coobservation
@@ -555,4 +678,6 @@
          :transaction-authority :none
          :admission :not-admitted
          :certificate :not-issued
-         :authority :none}))))
+         :authority :none}]
+          (assoc report :correspondence-premises
+                 (compose-diagnostic-correspondence report)))))))

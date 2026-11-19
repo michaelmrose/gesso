@@ -213,6 +213,27 @@
                 (:protected-historical-after-completeness report)))
          (is (= :bounded-private-before-after-intent-ledger-coobservation
                 (:protected-before-after-intent-ledger-correlation report)))
+         (let [e (:correspondence-premises report)]
+           (is (= :gesso.assurance.proof.xtdb-gateway-atomic-write-intent/diagnostic-premises
+                  (:type e)))
+           (is (= 1 (:version e)))
+           (is (= :protected-before-after-history-correlation
+                  (:strongest-bounded-node e)))
+           (is (= 11 (count (:premises e))))
+           (is (= 5 (count (:dependency-nodes e))))
+           (is (every? #(= :observational-match (:status %))
+                       (vals (:premises e))))
+           (is (every? #(= :bounded-premises-present (:status %))
+                       (vals (:dependency-nodes e))))
+           (is (= 7 (:open-obligation-count e)))
+           (is (= [] (:closed-obligations e)))
+           (is (= :not-established (:record-execution-causality e)
+                  (:audit-producer-completeness e)
+                  (:history-completeness e)))
+           (is (= :diagnostic-plain-data-not-a-proof-object
+                  (:proof-status e)))
+           (is (= :not-issued (:certificate e)))
+           (is (= :none (:authority e) (:transaction-authority e))))
          (is (= :not-established (:protected-before-history-completeness report)))
          (is (false? (:protected-before-after-correlation-proves-causality?
                       report)))
@@ -404,6 +425,20 @@
                 (:protected-original-poststate-status replayed)))
          (is (= :newer-protected-system-version-than-returned-tx
                 (:protected-original-history-origin-status replayed)))
+         (let [e (:correspondence-premises replayed)]
+           (is (= :protected-current-coobservation (:strongest-bounded-node e)))
+           (is (= :observational-match
+                  (get-in e [:premises :protected-current-after :status])))
+           (is (= :unestablished
+                  (get-in e [:premises :protected-latest-origin :status])))
+           (is (= :blocked
+                  (get-in e [:dependency-nodes
+                             :protected-before-after-history-correlation :status])))
+           (is (some #{:protected-latest-origin}
+                     (get-in e [:dependency-nodes
+                                :protected-before-after-history-correlation
+                                :blocked-by])))
+           (is (= [] (:closed-obligations e))))
          (is (= :bounded-three-way-physical-coobservation
                 (:protected-intent-ledger-coobservation replayed)))
          (is (= :not-established
@@ -490,6 +525,17 @@
               (:protected-original-history-origin-status report)))
        (is (= :immediate-predecessor-diverges-from-private-before
               (:protected-original-before-history-status report)))
+       (let [e (:correspondence-premises report)]
+         (is (= :protected-dual-history-correlation
+                (:strongest-bounded-node e)))
+         (is (= [:protected-historical-before]
+                (get-in e [:dependency-nodes
+                           :protected-before-after-history-correlation
+                           :blocked-by])))
+         (is (= :unestablished
+                (get-in e [:premises :protected-historical-before :status])))
+         (is (= 7 (:open-obligation-count e)))
+         (is (= :not-issued (:certificate e))))
        (is (= :not-established
               (:protected-before-after-intent-ledger-correlation report)
               (:protected-before-history-completeness report)
@@ -554,3 +600,46 @@
                       later)))
          (is (= :none (:transaction-authority later) (:authority later)))
          (is (= :not-issued (:certificate later))))))))
+
+(deftest v1894-composed-premises-fail-closed-and-never-certify
+  (let [compose (var-get (or (ns-resolve
+                              'gesso.assurance.proof.xtdb-gateway-atomic-write-intent
+                              'compose-diagnostic-correspondence)
+                            (throw (ex-info "Missing diagnostic composer" {}))))
+        empty (compose {})
+        observed (into {}
+                       (for [[_ {:keys [source-field expected]}]
+                             (:premises empty)]
+                         [source-field expected]))
+        spoofed (compose observed)
+        missing (compose (dissoc observed :intent-record-status))
+        mutated (compose (assoc observed :protected-original-after-history-status
+                                :latest-historical-after-diverges-from-private-after))]
+    (is (= :none (:strongest-bounded-node empty)))
+    (is (= :missing-observation
+           (get-in empty [:premises :committed-ledger :observed])))
+    (is (= :blocked
+           (get-in empty [:dependency-nodes :intent-ledger-coobservation :status])))
+    (is (= :protected-before-after-history-correlation
+           (:strongest-bounded-node spoofed))
+        "Synthetic input can mimic all redacted observations, so the composer is not an attestor")
+    (is (= :diagnostic-plain-data-not-a-proof-object (:proof-status spoofed)))
+    (is (= :not-established (:evidence-authenticity spoofed)
+           (:record-execution-causality spoofed)))
+    (is (= :none (:authority spoofed) (:transaction-authority spoofed)))
+    (is (= :not-issued (:certificate spoofed)))
+    (is (= [] (:closed-obligations spoofed)))
+    (is (= 7 (:open-obligation-count spoofed)))
+    (is (= :none (:strongest-bounded-node missing)))
+    (is (some #{:generated-intent}
+              (get-in missing [:dependency-nodes
+                               :protected-before-after-history-correlation
+                               :blocked-by])))
+    (is (= :protected-dual-history-correlation
+           (:strongest-bounded-node mutated)))
+    (is (= [:protected-historical-after]
+           (get-in mutated [:dependency-nodes
+                            :protected-before-after-history-correlation
+                            :blocked-by])))
+    (is (= :none (:transaction-authority mutated)))
+    (is (= [] (:closed-obligations mutated)))))
