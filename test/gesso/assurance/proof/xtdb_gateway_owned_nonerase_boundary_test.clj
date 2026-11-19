@@ -838,3 +838,119 @@
                 (try (issue g returned) nil
                      (catch clojure.lang.ExceptionInfo ex
                        (:reason (ex-data ex)))))))))))
+
+(defn- v1897-key-config [pair]
+  {:ed25519-spki-base64
+   (.encodeToString (java.util.Base64/getEncoder)
+                    (.getEncoded (.getPublic pair)))})
+
+(deftest v1897-configured-key-must-be-canonical-ed25519-spki
+  (let [prepare (requiring-resolve
+                 'gesso.assurance.proof.xtdb-gateway-pinned-candidate-key/prepare-process-pinned-verifier!)
+        generator (java.security.KeyPairGenerator/getInstance "Ed25519")
+        pair (.generateKeyPair generator)
+        config (v1897-key-config pair)
+        rsa (.generateKeyPair (doto (java.security.KeyPairGenerator/getInstance "RSA")
+                                 (.initialize 2048)))
+        failed (fn [cfg] (try (prepare cfg) nil
+                              (catch clojure.lang.ExceptionInfo ex
+                                (:reason (ex-data ex)))))
+        pinned (prepare config)]
+    (is (= :gesso.assurance.proof.xtdb-gateway-pinned-candidate-key/process-pinned-verifier
+           (:type pinned)))
+    (is (= 16 (:challenge-cap pinned)))
+    (is (re-matches #"sha256:[0-9a-f]{64}" (:pinned-spki-fingerprint pinned)))
+    (is (= :not-established (:trusted-key-provisioning pinned)
+           (:signer-independence pinned) (:physical-execution-causality pinned)))
+    (is (= :not-admitted (:witness-admission pinned)))
+    (is (= :not-issued (:certificate pinned)))
+    (is (= :none (:authority pinned)))
+    (is (= :invalid-pinned-key-configuration (failed {})))
+    (is (= :invalid-pinned-key-configuration
+           (failed (assoc config :claim-independent true))))
+    (is (= :invalid-pinned-ed25519-spki (failed {:ed25519-spki-base64 "@"})))
+    (is (= :invalid-pinned-ed25519-spki
+           (failed {:ed25519-spki-base64
+                    (:ed25519-spki-base64 (v1897-key-config rsa))})))
+    (is (= (:pinned-spki-fingerprint pinned)
+           (:pinned-spki-fingerprint (prepare config))))))
+
+(deftest v1897-pinned-verifier-rejects-swapped-and-foreign-challenges
+  (physical/with-proving-application!
+   (fn [app]
+     (let [prepare (requiring-resolve
+                    'gesso.assurance.proof.xtdb-gateway-pinned-candidate-key/prepare-process-pinned-verifier!)
+           generator (java.security.KeyPairGenerator/getInstance "Ed25519")
+           own (.generateKeyPair generator)
+           other (.generateKeyPair generator)
+           v (prepare (v1897-key-config own))
+           foreign (prepare (v1897-key-config other))
+           g (intent/prepare-one-shot! (:node app)
+                                       (source ((:read! app))))
+           returned ((:submit! g))
+           issued ((:issue! v) g returned)
+           bytes (.decode (java.util.Base64/getDecoder)
+                          ^String (:signing-bytes-base64 issued))
+           own-signature {:signature-base64
+                          (v1896-sign bytes (.getPrivate own))}]
+       (is (= :not-issued-by-this-pinned-verifier
+              (intent-reason #((:inspect! foreign) issued own-signature))))
+       (is (= :not-issued-by-this-pinned-verifier
+              (intent-reason #((:inspect! v) (into {} issued) own-signature))))
+       (let [verified ((:inspect! v) issued own-signature)]
+         (is (= :ed25519-valid-for-process-configured-key
+                (:cryptographic-check verified)))
+         (is (= (:pinned-spki-fingerprint v)
+                (:pinned-spki-fingerprint verified)))
+         (is (= :excluded (:per-inspection-public-key-substitution verified)))
+         (is (= :process-configuration-not-authenticated
+                (:key-configuration-origin verified)))
+         (is (= :not-established (:key-custody verified)
+                (:key-provisioning-independence verified)
+                (:signer-observation-of-physical-event verified)
+                (:transaction-causality verified)
+                (:separately-attested-witness-identity verified)))
+         (is (false? (:witness-checked-for-obligation? verified)))
+         (is (= :not-admitted (:witness-admission verified)))
+         (is (= :none (:authority verified) (:transaction-authority verified)
+                (:proof-discharge verified)))
+         (is (= :not-issued (:certificate verified)))
+         (is (not-any? #(contains? verified %)
+                       [:public-key :private-key :tx-key :document :node
+                        :snapshot-token :signed-payload :physical-row-id])))
+       (is (= :not-issued-by-this-pinned-verifier
+              (intent-reason #((:inspect! v) issued own-signature))))
+       (let [fresh ((:issue! v) g returned)
+             new-bytes (.decode (java.util.Base64/getDecoder)
+                                ^String (:signing-bytes-base64 fresh))]
+         (is (= :candidate-signature-not-verified
+                (intent-reason #((:inspect! v) fresh
+                                  {:signature-base64
+                                   (v1896-sign new-bytes (.getPrivate other))}))))
+         (is (= :not-issued-by-this-pinned-verifier
+                (intent-reason #((:inspect! v) fresh own-signature)))))
+       (let [fresh ((:issue! v) g returned)]
+         (is (= :invalid-candidate-response
+                (intent-reason #((:inspect! v) fresh
+                                 {:signature-base64 "bogus" :certificate :issued})))))
+       ;; The signer can configure its OWN key, so even correct verification
+       ;; must not claim custody, identity, physical observation or discharge.
+       (let [own-configured (prepare (v1897-key-config other))
+             self-issued ((:issue! own-configured) g returned)
+             self-bytes (.decode (java.util.Base64/getDecoder)
+                                 ^String (:signing-bytes-base64 self-issued))
+             self-verified ((:inspect! own-configured) self-issued
+                            {:signature-base64
+                             (v1896-sign self-bytes (.getPrivate other))})]
+         (is (= :ed25519-valid-for-process-configured-key
+                (:cryptographic-check self-verified)))
+         (is (= :not-established (:key-provisioning-independence self-verified)))
+         (is (= :none (:proof-discharge self-verified)))
+         (is (= :not-issued (:certificate self-verified))))
+       ;; An outside writer changes pinned correspondence: no new witness
+       ;; challenges may be issued by this preconfigured key verifier.
+       (xt/execute-tx (:node app)
+                      [[:put-docs physical/table
+                        (assoc ((:read! app)) :outside-write true)]])
+       (is (= :incomplete-private-observational-premises
+              (intent-reason #((:issue! v) g returned))))))))
