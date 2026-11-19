@@ -199,6 +199,15 @@
                 (:protected-original-poststate-scope report)))
          (is (false? (:protected-original-poststate-proves-transaction-causality?
                       report)))
+         (is (= :latest-open-protected-version-starts-at-returned-tx
+                (:protected-original-history-origin-status report)))
+         (is (= :bounded-dual-row-history-and-ledger-coobservation
+                (:protected-intent-ledger-temporal-correlation report)))
+         (is (= 2 (:protected-original-history-observation-limit report)))
+         (is (= :not-established
+                (:protected-original-history-completeness report)))
+         (is (false? (:protected-temporal-correlation-proves-transaction-causality?
+                      report)))
          (is (= :one-open-visible-history-version-starts-at-returned-tx
                 (:intent-history-origin-status report)))
          (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
@@ -341,6 +350,10 @@
                   (:returned-tx-time-intent-history-correlation later)))
            (is (= :diverges-from-private-original-after
                   (:protected-original-poststate-status later)))
+           (is (= :newer-protected-system-version-than-returned-tx
+                  (:protected-original-history-origin-status later)))
+           (is (= :not-established
+                  (:protected-intent-ledger-temporal-correlation later)))
            (is (= :not-established
                   (:protected-intent-ledger-coobservation later)
                   (:transaction-causality later)
@@ -376,6 +389,14 @@
                 (:protected-intent-ledger-coobservation replayed)))
          (is (= :matches-private-original-protected-after
                 (:protected-original-poststate-status replayed)))
+         (is (= :newer-protected-system-version-than-returned-tx
+                (:protected-original-history-origin-status replayed)))
+         (is (= :bounded-three-way-physical-coobservation
+                (:protected-intent-ledger-coobservation replayed)))
+         (is (= :not-established
+                (:protected-intent-ledger-temporal-correlation replayed)))
+         (is (false? (:protected-temporal-correlation-proves-transaction-causality?
+                      replayed)))
          (is (= :bounded-same-pinned-basis-history-start-matches-returned-tx
                 (:returned-tx-time-intent-history-correlation replayed)))
          (is (= :not-established
@@ -387,3 +408,36 @@
                replayed)))
          (is (= :none (:transaction-authority replayed) (:authority replayed)))
          (is (= :not-issued (:certificate replayed))))))))
+
+(deftest v1891-external-erase-removes-protected-history-but-not-private-intent
+  ;; The positive baseline is observational only. An OUTSIDE writer can
+  ;; ERASE the application row and its visible history, while the generated
+  ;; intent and original transaction ledger remain visible and unchanged.
+  (physical/with-proving-application!
+   (fn [app]
+     (let [before ((:read! app))
+           g (intent/prepare-one-shot! (:node app) (source before))
+           returned ((:submit! g))
+           original (intent/inspect-pinned-intent! g returned)]
+       (is (= :bounded-dual-row-history-and-ledger-coobservation
+              (:protected-intent-ledger-temporal-correlation original)))
+       (xt/execute-tx (:node app)
+                      [[:erase-docs physical/table (:xt/id before)]])
+       (let [after (intent/inspect-pinned-intent! g returned)]
+         (is (= :matches-private-generated-intent
+                (:intent-record-status after)))
+         (is (= :matches-original-returned-committed-row
+                (:returned-ledger-status after)))
+         (is (= :not-visible
+                (:protected-original-poststate-status after)))
+         (is (= :no-visible-pinned-protected-history
+                (:protected-original-history-origin-status after)))
+         (is (= :not-established
+                (:protected-intent-ledger-temporal-correlation after)
+                (:protected-original-history-completeness after)
+                (:transaction-causality after)
+                (:outside-gateway-writer-coverage after)))
+         (is (= :none (:transaction-authority after) (:authority after)))
+         (is (= :not-issued (:certificate after)))
+         (is (false? (:protected-temporal-correlation-proves-transaction-causality?
+                      after))))))))
