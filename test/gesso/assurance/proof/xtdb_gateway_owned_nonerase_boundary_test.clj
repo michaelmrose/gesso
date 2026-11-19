@@ -733,3 +733,108 @@
        (is (= :none (:proof-discharge requirements)
               (:transaction-authority requirements) (:authority requirements)))
        (is (= :not-issued (:certificate requirements)))))))
+
+(defn- v1896-sign [bytes private-key]
+  (let [signer (java.security.Signature/getInstance "Ed25519")]
+    (.initSign signer private-key)
+    (.update signer ^bytes bytes)
+    (.encodeToString (java.util.Base64/getEncoder) (.sign signer))))
+
+(deftest v1896-signed-candidate-is-bound-to-real-gateway-but-not-a-proof
+  (physical/with-proving-application!
+   (fn [app]
+     (let [issue (requiring-resolve
+                  'gesso.assurance.proof.xtdb-gateway-witness-candidate/issue-candidate-challenge!)
+           verify! (requiring-resolve
+                    'gesso.assurance.proof.xtdb-gateway-witness-candidate/inspect-signed-candidate!)
+           key-generator (java.security.KeyPairGenerator/getInstance "Ed25519")
+           kp (.generateKeyPair key-generator)
+           other (.generateKeyPair key-generator)
+           g (intent/prepare-one-shot! (:node app) (source ((:read! app))))
+           returned ((:submit! g))
+           challenge (issue g returned)
+           payload (.decode (java.util.Base64/getDecoder)
+                            ^String (:signing-bytes-base64 challenge))
+           signed {:signature-base64 (v1896-sign payload (.getPrivate kp))}]
+       (is (= :exclusive-transaction-causality (:obligation challenge)))
+       (is (= :transaction-coupled-apply-provenance (:witness-family challenge)))
+       (is (= :none (:proof-discharge challenge) (:authority challenge)))
+       (is (= :not-issued (:certificate challenge)))
+       (is (= :not-an-original-outstanding-challenge
+              (try (verify! (into {} challenge) signed (.getPublic kp))
+                   nil
+                   (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex))))))
+       (let [checked (verify! challenge signed (.getPublic kp))]
+         (is (= :ed25519-valid-for-caller-supplied-public-key
+                (:cryptographic-check checked)))
+         (is (= :not-established
+                (:public-key-trust checked)
+                (:signer-independence checked)
+                (:physical-event-production checked)
+                (:transaction-causality checked)))
+         (is (false? (:witness-checked-for-obligation? checked)))
+         (is (true? (:open-obligations-remain-open? checked)))
+         (is (= :not-admitted (:witness-admission checked)))
+         (is (= :none (:authority checked) (:proof-discharge checked)
+                (:retry-authority checked) (:transaction-authority checked)))
+         (is (= :not-issued (:certificate checked)))
+         (is (not-any? #(contains? checked %)
+                       [:tx-key :snapshot-token :original-document :private-key
+                        :signed-payload :row-id :node :intent-id])))
+       (is (= :not-an-original-outstanding-challenge
+              (try (verify! challenge signed (.getPublic kp)) nil
+                   (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex))))))
+       (let [fresh (issue g returned)]
+         (is (= :candidate-signature-not-verified
+                (try (verify! fresh signed (.getPublic kp)) nil
+                     (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex)))))))
+       (let [fresh (issue g returned)
+             bytes (.decode (java.util.Base64/getDecoder)
+                            ^String (:signing-bytes-base64 fresh))]
+         (is (= :candidate-signature-not-verified
+                (try (verify! fresh
+                              {:signature-base64 (v1896-sign bytes (.getPrivate kp))}
+                              (.getPublic other))
+                     nil
+                     (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex)))))))
+       (let [fresh (issue g returned)]
+         (is (= :invalid-candidate-response
+                (try (verify! fresh (assoc signed :certificate :issued)
+                              (.getPublic kp)) nil
+                     (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex)))))))
+       (let [fresh (issue g returned)]
+         (is (= :invalid-candidate-signature
+                (try (verify! fresh {:signature-base64 "not_base64$"}
+                              (.getPublic kp)) nil
+                     (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex)))))))
+       (let [fresh (issue g returned)]
+         (is (= :not-an-original-outstanding-challenge
+                (try (verify! (assoc fresh :authority :write) signed
+                              (.getPublic kp)) nil
+                     (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex)))))))
+       ;; The caller could generate both keys and signatures, so a valid
+       ;; signature cannot independently attest transaction causality.
+       (let [report (intent/inspect-pinned-intent! g returned)]
+         (is (= 7 (get-in report
+                         [:correspondence-premises :assurance-frontier :open-count])))
+         (is (= :none (get-in report
+                             [:correspondence-premises :assurance-frontier
+                              :proof-discharge]))))))))
+
+(deftest v1896-genuine-observation-required-to-issue-challenge
+  (physical/with-proving-application!
+   (fn [app]
+     (let [issue (requiring-resolve
+                  'gesso.assurance.proof.xtdb-gateway-witness-candidate/issue-candidate-challenge!)
+           before ((:read! app))
+           g (intent/prepare-one-shot! (:node app) (source before))]
+       (is (= :not-this-gateway-local-return
+              (reason #(issue g {}))))
+       (let [returned ((:submit! g))]
+         (xt/execute-tx (:node app)
+                        [[:put-docs physical/table
+                          (assoc ((:read! app)) :changed-by "external")]])
+         (is (= :incomplete-private-observational-premises
+                (try (issue g returned) nil
+                     (catch clojure.lang.ExceptionInfo ex
+                       (:reason (ex-data ex)))))))))))
