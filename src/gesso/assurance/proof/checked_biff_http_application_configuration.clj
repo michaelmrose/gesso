@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1832: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1833: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -113,7 +113,12 @@
    the exact original source-reported physical listener object. A second
    server on the SAME port may answer the original issued Ring wrapper while
    the captured listener has been stopped; successful HTTP alone must not
-   allow that replacement to qualify as the original configured startup."
+   allow that replacement to qualify as the original configured startup.
+
+   v1833: A drifted original proof Var must not prevent managed shutdown from
+   attempting the ORIGINAL captured physical Biff stop. Preserve the uncertain
+   cleanup outcome rather than claiming clean stop when the source-integrity
+   check failed. A proof-source substitution must not strand a live listener."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -721,7 +726,14 @@
                                             :stopping)
                         (do
                           (try
-                            (pinned!)
+                            ;; Source integrity may drift while the real
+                            ;; listener is running. Still attempt the ORIGINAL
+                            ;; captured physical stop: pin failure must not
+                            ;; strand a live listener. Never claim a clean
+                            ;; shutdown if the pinned boundary was altered.
+                            (let [source-pinned?
+                                  (try (pinned!) true
+                                       (catch Throwable _ false))]
                             (original-biff-stop @started)
                             ;; A returned stop call is not enough: require
                             ;; original guarded adapter and probe cleanup.
@@ -730,12 +742,13 @@
                                   probe-status (try ((:summary! issued-probe))
                                                     (catch Throwable _ nil))]
                               (reset! state
-                                      (if (and (= :stopped (:status guard-status))
+                                      (if (and source-pinned?
+                                               (= :stopped (:status guard-status))
                                                (= :completed
                                                   (:selected-adapter-cleanup guard-status))
                                                (= :stopped (:module-state probe-status)))
                                         :stopped
-                                        :stop-cleanup-not-established)))
+                                        :stop-cleanup-not-established))))
                             (catch Throwable _
                               (reset! state :stop-cleanup-not-established)))
                           (summary!))

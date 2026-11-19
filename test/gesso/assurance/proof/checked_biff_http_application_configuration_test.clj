@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1831: The actual application startup entrypoint owns module issuance,
+  "v1833: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -875,3 +875,60 @@
       (is (= :configured-instance-generation-not-current
              (reason #((:inspect-generation! issued) nil {}))))
       (finally (cleanup! s issued)))))
+
+(deftest managed-stop-attempts-original-physical-cleanup-despite-proof-var-drift
+  ;; The original proof boundary may be substituted AFTER a verified physical
+  ;; HTTP listener has started. The managed stop must still invoke the pinned
+  ;; ORIGINAL Biff stop, rather than leaving a live listener open merely
+  ;; because its integrity precheck now fails. The original source is restored
+  ;; only to inspect the terminal result: cleanup cannot be called verified
+  ;; when source integrity was not established at shutdown.
+  (let [s (scenario :honest)
+        original-root (var-get #'probe/require-fresh-local-http-liveness!)
+        physical-stop (get-in s [:raw :biff.core/stop])
+        physical-stop-calls (atom 0)
+        adapter (assoc (:raw s) :biff.core/stop
+                       (fn [system]
+                         (swap! physical-stop-calls inc)
+                         (physical-stop system)))
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true) :adapter-module adapter))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            executor (:executor @(:server-state s))]
+        (is (= :current-at-inspection
+               (:status ((:inspect-generation! issued)
+                         instance-generation system))))
+        (is (not (.isShutdown executor)))
+        (alter-var-root #'probe/require-fresh-local-http-liveness!
+                        (constantly (fn [& _]
+                                      (throw (ex-info "Drifted proof source" {})))))
+        (try
+          (is (= :substituted-original-configured-start-boundary
+                 (reason #((:stop! issued))))
+              "No trusted stop summary can be issued while proof roots drift")
+          (is (= 1 @physical-stop-calls)
+              "The original physical adapter stop must still be attempted")
+          (is (.isShutdown executor)
+              "Proof integrity drift must not leave the real listener open")
+          (finally
+            (alter-var-root #'probe/require-fresh-local-http-liveness!
+                            (constantly original-root))))
+        (is (= :stop-cleanup-not-established
+               (:status ((:summary! issued))))
+            "Stop success must remain uncertain after proof-source drift")
+        (is (= :stop-cleanup-not-established
+               (:status ((:stop! issued)))))
+        (is (= 1 @physical-stop-calls)
+            "A second managed stop must not retry physical cleanup")
+        (is (= :configured-instance-not-current
+               (reason #((:inspect-running! issued) system))))
+        (is (= :configured-instance-generation-not-current
+               (reason #((:inspect-generation! issued)
+                         instance-generation system))))
+        (is (= :configured-start-already-attempted
+               (reason #((:start-once! issued) {})))))
+      (finally
+        (alter-var-root #'probe/require-fresh-local-http-liveness!
+                        (constantly original-root))
+        (cleanup! s issued)))))
