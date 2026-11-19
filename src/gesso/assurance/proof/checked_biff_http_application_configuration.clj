@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1830: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1831: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -101,7 +101,13 @@
    callback and before atomically publishing :verified-configured-start.
    If source-owned code mutates a proof Var during the final listener
    capture, fail startup and invoke existing physical cleanup rather than
-   returning a verified application with a substituted boundary."
+   returning a verified application with a substituted boundary.
+
+   v1831: The final trusted listener capture itself may close the physical
+   listener AFTER the earlier startup HTTP consumption challenge. When that
+   optional callback is present, require one additional original issued,
+   read-only fresh HTTP response after capture before publishing verified
+   startup. This is a final bounded local observation, not a liveness lease."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -346,6 +352,30 @@
     (reject! :configured-instance-selected-routes-not-current))
   true)
 
+(defn- fresh-original-http-report?
+  "Validate the original issued read-only loopback challenge. Used for
+   both current inspection and final post-capture startup verification;
+   the report alone never certifies future liveness or external deployment."
+  [fresh]
+  (and (= probe/fresh-local-http-liveness-report-type (:type fresh))
+       (= probe/report-version (:version fresh))
+       (= :responded-to-current-inspection-challenge (:status fresh))
+       (= :one-fresh-local-loopback-response-on-original-issued-wrapper
+          (:scope fresh))
+       (= :exact-issued-wrapper (:original-final-handler-slot fresh))
+       (= :same-verified-loopback-port
+          (:original-start-listener-endpoint fresh))
+       (= :not-forwarded-to-business-router (:read-only-request fresh))
+       (= :observed-at-inspection-only (:selected-local-listener fresh))
+       (= :not-established
+          (:external-listener-liveness fresh)
+          (:future-liveness fresh))
+       (= :not-issued (:certificate fresh))
+       (= :not-admitted (:admission fresh))
+       (= :none (:authority fresh)
+          (:transaction-authority fresh)
+          (:retry-authority fresh))))
+
 (defn- report [state typed-selected?]
   {:type report-type :version report-version
    :scope :one-application-owned-closed-biff-http-start
@@ -482,30 +512,7 @@
                                             candidate-system (base-url! candidate-system))
                                            (catch Throwable _
                                              (reject! :configured-instance-http-liveness-not-observed)))]
-                               (when-not (and
-                                          (= probe/fresh-local-http-liveness-report-type
-                                             (:type fresh))
-                                          (= probe/report-version (:version fresh))
-                                          (= :responded-to-current-inspection-challenge
-                                             (:status fresh))
-                                          (= :one-fresh-local-loopback-response-on-original-issued-wrapper
-                                             (:scope fresh))
-                                          (= :exact-issued-wrapper
-                                             (:original-final-handler-slot fresh))
-                                          (= :same-verified-loopback-port
-                                             (:original-start-listener-endpoint fresh))
-                                          (= :not-forwarded-to-business-router
-                                             (:read-only-request fresh))
-                                          (= :observed-at-inspection-only
-                                             (:selected-local-listener fresh))
-                                          (= :not-established
-                                             (:external-listener-liveness fresh)
-                                             (:future-liveness fresh))
-                                          (= :not-issued (:certificate fresh))
-                                          (= :not-admitted (:admission fresh))
-                                          (= :none (:authority fresh)
-                                             (:transaction-authority fresh)
-                                             (:retry-authority fresh)))
+                               (when-not (fresh-original-http-report? fresh)
                                  (reject! :configured-instance-http-liveness-not-observed)))
                              (require-original-host-listener!
                               listener-instance! @original-listener-instance
@@ -624,7 +631,29 @@
                        (when listener-instance!
                          (reset! original-listener-instance
                                  (host-listener-instance!
-                                  listener-instance! (:system result))))
+                                  listener-instance! (:system result)))
+                         ;; The trusted capture callback is app-owned: it can
+                         ;; stop the real adapter AFTER the earlier startup
+                         ;; HTTP proof. Require another original read-only
+                         ;; loopback challenge after it completes. A closed
+                         ;; listener must not be published as verified merely
+                         ;; because the older consumption challenge succeeded.
+                         (pinned!)
+                         (let [fresh (try
+                                       (original-probe-live
+                                        issued-probe contract-source
+                                        (:system result)
+                                        (base-url! (:system result)))
+                                       (catch Throwable _
+                                         ;; Do not erase an original proof-root
+                                         ;; substitution by reclassifying it as
+                                         ;; a mere local HTTP reachability loss.
+                                         (pinned!)
+                                         (reject!
+                                          :configured-start-post-capture-http-liveness-not-observed)))]
+                           (when-not (fresh-original-http-report? fresh)
+                             (reject!
+                              :configured-start-post-capture-http-liveness-not-observed))))
                        ;; Publish all original issued startup handles
                        ;; before the verified state is externally visible.
                        ;; The same monitor serializes managed stop and both

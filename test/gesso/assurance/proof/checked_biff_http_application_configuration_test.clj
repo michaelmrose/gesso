@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1830: The actual application startup entrypoint owns module issuance,
+  "v1831: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -825,6 +825,49 @@
              (:real-http-consumption ((:summary! issued)))))
       (is (= :start-failed-physical-state-unknown
              (:status ((:stop! issued)))))
+      (is (= :configured-start-already-attempted
+             (reason #((:start-once! issued) {}))))
+      (is (= :configured-instance-not-current
+             (reason #((:inspect-running! issued) {}))))
+      (is (= :configured-instance-generation-not-current
+             (reason #((:inspect-generation! issued) nil {}))))
+      (finally (cleanup! s issued)))))
+
+(deftest startup-listener-capture-out-of-band-stop-blocks-publication
+  ;; The original guarded startup HTTP challenge succeeded BEFORE the final
+  ;; source-trusted listener capture. That callback can independently stop
+  ;; the original physical adapter while returning the SAME server object.
+  ;; The original startup's verified status must not be published from stale
+  ;; liveness evidence. A new post-capture read-only HTTP challenge detects
+  ;; the already closed listener, then failure consumes the one-shot token.
+  (let [s (scenario :honest)
+        callback-count (atom 0)
+        original-server (atom nil)
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true)
+                       :listener-instance!
+                       (fn [system]
+                         (swap! callback-count inc)
+                         (let [server (:server @(:server-state s))]
+                           (reset! original-server server)
+                           ((get-in s [:raw :biff.core/stop]) system)
+                           server))))]
+    (try
+      (is (= :configured-start-post-capture-http-liveness-not-observed
+             (reason #((:start-once! issued) {})))
+          "A stopped physical listener cannot pass final startup publication")
+      (is (= 1 @callback-count)
+          "Original listener was captured only once, after initial HTTP proof")
+      (is (some? @original-server)
+          "Original HTTP listener was physically installed before callback")
+      (is (identical? @original-server (:server @(:server-state s)))
+          "Identity alone still matches the stopped listener object")
+      (is (.isShutdown (:executor @(:server-state s)))
+          "Out-of-band adapter stop has physically closed the listener")
+      (is (= :start-failed-physical-state-unknown
+             (:status ((:summary! issued)))))
+      (is (= :not-established
+             (:real-http-consumption ((:summary! issued)))))
       (is (= :configured-start-already-attempted
              (reason #((:start-once! issued) {}))))
       (is (= :configured-instance-not-current
