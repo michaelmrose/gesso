@@ -81,6 +81,10 @@
        (is (= 0 (:source-derived-erase-count
                  (gate/require-local-nonerase-write-boundary! a r))))))))
 
+(defn- intent-reason [f]
+  (try (f) nil
+       (catch clojure.lang.ExceptionInfo ex (:reason (ex-data ex)))))
+
 (defn- intent-rows [node]
   (xt/q node "SELECT * FROM gesso_guarded_write_intents"))
 
@@ -163,3 +167,75 @@
                                         :created-at-key :created-at
                                         :updated-at-key :updated-at}))))))
        (is (empty? (intent-rows (:node app)))))))
+
+(deftest v1888-original-generated-intent-and-own-key-share-pinned-readback
+  (physical/with-proving-application!
+   (fn [app]
+     (let [before ((:read! app))
+           g (intent/prepare-one-shot! (:node app) (source before))
+           inspect! intent/inspect-pinned-intent!]
+       (is (= :not-this-gateway-local-return
+              (reason #(inspect! g nil))))
+       (let [returned ((:submit! g))
+             report (inspect! g returned)]
+         (is (= intent/readback-type (:type report)))
+         (is (= intent/readback-version (:version report)))
+         (is (= :bounded-private-intent-and-ledger-coobservation
+                (:status report)))
+         (is (= :matches-private-generated-intent
+                (:intent-record-status report)))
+         (is (= :matches-original-returned-committed-row
+                (:returned-ledger-status report)))
+         (is (= :pinned-basis-not-before-original-return
+                (:read-basis-order report)))
+         (is (true? (:both-observations-share-pinned-basis? report)))
+         (is (= :private-original-prepared-gateway
+                (:expected-intent-origin report)))
+         (is (= :exact-one-shot-gateway-return (:returned-key-origin report)))
+         (is (= :not-established (:transaction-causality report)
+                (:audit-event-producer report)
+                (:outside-gateway-writer-coverage report)
+                (:record-immutability report)))
+         (is (= :none (:physical-erasure-proof report)
+                (:transaction-authority report) (:retry-authority report)))
+         (is (= :not-issued (:certificate report)))
+         (is (= :not-this-gateway-local-return
+                (reason #(inspect! g (into {} returned)))))
+         (doseq [field [:xt/id :record :document :node :tx-key :snapshot-token
+                        :physical-table :source :principal :intent-id]]
+           (is (not (contains? report field))))
+         (is (= report (inspect! g returned)))
+         (let [row (first (intent-rows (:node app)))]
+           (is (map? row))
+           (xt/execute-tx (:node app)
+                          [[:put-docs intent/intent-table
+                            (assoc row :intent-kind "forged-intent-value")]])
+           (let [tampered (inspect! g returned)]
+             (is (= :intent-or-ledger-correspondence-not-established
+                    (:status tampered)))
+             (is (= :diverges-from-private-generated-intent
+                    (:intent-record-status tampered)))
+             (is (= :matches-original-returned-committed-row
+                    (:returned-ledger-status tampered)))
+             (is (= :none (:authority tampered))))
+           ;; ERASE by an unrelated direct writer can remove the generated
+           ;; record, while the original transaction's ledger row survives.
+           ;; Absence at this later basis is not proof of original noncommit.
+           (xt/execute-tx (:node app)
+                          [[:erase-docs intent/intent-table (:xt/id row)]])
+           (let [absent (inspect! g returned)]
+             (is (= :intent-or-ledger-correspondence-not-established
+                    (:status absent)))
+             (is (= :not-visible (:intent-record-status absent)))
+             (is (= :matches-original-returned-committed-row
+                    (:returned-ledger-status absent)))
+             (is (= :not-issued (:certificate absent))))))))))
+
+(deftest v1888-foreign-valid-gateway-has-no-private-generated-intent
+  (physical/with-proving-application!
+   (fn [app]
+     (let [before ((:read! app))
+           plain (gate/prepare-one-shot! (:node app) (source before))
+           returned ((:submit! plain))]
+       (is (= :not-original-generated-intent-descriptor
+              (intent-reason #(intent/inspect-pinned-intent! plain returned))))))))

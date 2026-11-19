@@ -17,12 +17,26 @@
    Its per-call local evidence remains subject to all v1886 restrictions."
   (:require [gesso.assurance.proof.xtdb-restricted-submission-gateway :as gateway]
             [gesso.model.command :as command]
-            [gesso.model.tx-model :as tx-model])
-  (:import [java.time Instant]
-           [java.util UUID]))
+            [gesso.model.tx-model :as tx-model]
+            [xtdb.api :as xt]
+            [xtdb.basis :as basis])
+  (:import [java.time Instant ZonedDateTime]
+           [java.time.temporal ChronoUnit]
+           [java.util UUID WeakHashMap]
+           [xtdb.api TransactionKey]))
 
 (def intent-table :gesso_guarded_write_intents)
 (def intent-kind "owned-guarded-nonerase-write-intent")
+(def readback-type :gesso.assurance.proof.xtdb-gateway-atomic-write-intent/readback)
+(def readback-version 1)
+
+;; Weakly keyed by the ORIGINAL one-shot submission closure; no caller can
+;; replace the private generated document, observed node, or source identity.
+;; Not a durable log or authenticated process trust root.
+(defonce ^:private ^WeakHashMap private-intents (WeakHashMap.))
+(def ^:private original-query xt/q)
+(def ^:private original-decode basis/<-time-basis-str)
+(def ^:private original-local-return gateway/require-local-return!)
 (def ^:private version-keys
   {:revision-key :revision
    :created-at-key :created-at
@@ -86,4 +100,136 @@
       ;; The ORIGINAL gateway re-admits the entire enlarged plan, including
       ;; the generated intent PUT. It alone owns the physical execute-tx.
       ;; No gateway callback or second transaction may produce this record.
-      (gateway/prepare-one-shot! node complete-source))))
+      (let [g (gateway/prepare-one-shot! node complete-source)]
+        (locking private-intents
+          (.put private-intents (:submit! g)
+                {:summary! (:summary! g) :node node :record record}))
+        g))))
+
+(defn- observed-time [v]
+  (cond
+    (instance? Instant v) v
+    (instance? ZonedDateTime v) (.toInstant ^ZonedDateTime v)
+    :else nil))
+
+(defn- private-record-matches? [record found]
+  (and (map? found)
+       (= (set (keys record)) (set (keys found)))
+       (= (dissoc record :created-at :updated-at)
+          (dissoc found :created-at :updated-at))
+       ;; XTDB's TIMESTAMP preserves microseconds, not Instant nanos.
+       (= (.truncatedTo ^Instant (:created-at record) ChronoUnit/MICROS)
+          (observed-time (:created-at found)))
+       (= (.truncatedTo ^Instant (:updated-at record) ChronoUnit/MICROS)
+          (observed-time (:updated-at found)))))
+
+(defn inspect-pinned-intent!
+  "Read back the PRIVATE v1887 generated intent and original returned-key
+   ledger row at ONE independent, pinned XTDB basis. Accept ONLY the original
+   gateway descriptor and the exact object returned by its one-shot submit!;
+   no caller supplies an expected intent, ID, ledger key, basis or node.
+
+   A matching generated document and committed xt.txs row at a later basis
+   corroborate physical co-visibility. They cannot prove which transaction
+   created the record, prevent later alteration, authenticate the supplied
+   node, establish complete writer/audit capture, or authorize any effect.
+   No write, retry, independent audit discharge or certificate occurs."
+  [g result]
+  (let [local (original-local-return g result)
+        private (locking private-intents
+                  (.get private-intents (:submit! g)))
+        {:keys [summary! node record]} private]
+    (when-not (and private
+                   (identical? summary! (:summary! g))
+                   (= :public-transaction-key (:observed-result-kind local))
+                   (= 1 (:owned-execute-tx-call-entries local)))
+      (reject! :not-original-generated-intent-descriptor))
+    (when-not (and (identical? original-query (var-get #'xt/q))
+                   (identical? original-decode
+                               (var-get #'basis/<-time-basis-str))
+                   (identical? original-local-return
+                               (var-get #'gateway/require-local-return!)))
+      (reject! :substituted-readback-seam))
+    (let [^TransactionKey key (:tx-key result)
+          tx-id (.getTxId key)
+          tx-time (.getSystemTime key)
+          token-rows (try (original-query node "SHOW SNAPSHOT_TOKEN")
+                          (catch Throwable _ (reject! :snapshot-unavailable)))
+          token (when (and (sequential? token-rows)
+                           (= 1 (count token-rows))
+                           (= #{:snapshot-token} (set (keys (first token-rows)))))
+                  (:snapshot-token (first token-rows)))
+          decoded (try (when (and (string? token) (seq token))
+                         (original-decode token))
+                       (catch Throwable _ nil))]
+      (when-not (and (map? decoded) (= 1 (count decoded))
+                     (= 1 (count (val (first decoded))))
+                     (instance? Instant (first (val (first decoded)))))
+        (reject! :invalid-private-intent-snapshot))
+      (let [point (first (val (first decoded)))
+            read-basis {:snapshot-token token :current-time (Instant/now)}
+            query-one (fn [sql param]
+                        (let [rows (try (original-query node [sql param] read-basis)
+                                        (catch Throwable _
+                                          (reject! :pinned-intent-read-unavailable)))]
+                          (when-not (and (sequential? rows) (<= (count rows) 1)
+                                         (every? map? rows))
+                            (reject! :ambiguous-private-intent-read))
+                          (first rows)))
+            intent-row (query-one
+                        "SELECT * FROM gesso_guarded_write_intents WHERE _id = ? LIMIT 2"
+                        (:xt/id record))
+            ledger-row (query-one
+                        "SELECT _id, committed, system_time FROM xt.txs WHERE _id = ? LIMIT 2"
+                        tx-id)
+            intent-status (cond
+                            (nil? intent-row) :not-visible
+                            (private-record-matches? record intent-row)
+                            :matches-private-generated-intent
+                            :else :diverges-from-private-generated-intent)
+            ledger-status (cond
+                            (nil? ledger-row) :not-visible
+                            (not= #{:xt/id :committed :system-time}
+                                  (set (keys ledger-row))) :invalid-ledger-row
+                            (and (= tx-id (:xt/id ledger-row))
+                                 (true? (:committed ledger-row))
+                                 (= tx-time (observed-time
+                                              (:system-time ledger-row))))
+                            :matches-original-returned-committed-row
+                            :else :diverges-from-original-return)
+            ordering (if (neg? (compare point tx-time))
+                       :pinned-basis-precedes-original-return
+                       :pinned-basis-not-before-original-return)
+            positive? (and (= :matches-private-generated-intent intent-status)
+                           (= :matches-original-returned-committed-row
+                              ledger-status)
+                           (= :pinned-basis-not-before-original-return ordering))]
+        ;; Protect the read-only seam from mid-observation replacement, too.
+        (when-not (and (identical? original-query (var-get #'xt/q))
+                       (identical? original-decode
+                                   (var-get #'basis/<-time-basis-str)))
+          (reject! :substituted-readback-seam))
+        {:type readback-type
+         :version readback-version
+         :status (if positive?
+                   :bounded-private-intent-and-ledger-coobservation
+                   :intent-or-ledger-correspondence-not-established)
+         :intent-record-status intent-status
+         :returned-ledger-status ledger-status
+         :read-basis-order ordering
+         :both-observations-share-pinned-basis? true
+         :expected-intent-origin :private-original-prepared-gateway
+         :returned-key-origin :exact-one-shot-gateway-return
+         :original-local-attempt-id (:process-local-attempt-id local)
+         :transaction-causality :not-established
+         :audit-event-producer :not-established
+         :caller-node-authenticity :not-established
+         :outside-gateway-writer-coverage :not-established
+         :complete-history :not-established
+         :record-immutability :not-established
+         :physical-erasure-proof :none
+         :retry-authority :none
+         :transaction-authority :none
+         :admission :not-admitted
+         :certificate :not-issued
+         :authority :none}))))
