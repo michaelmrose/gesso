@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-authorization-assembly
-  "v1792: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
+  "v1836: Reusable operation/route-scoped ORIGINAL source-to-handler relation.
 
    For any selected qualified operation and route ID, relate its declared
    catalog construction to the SAME current-source construction of an issued
@@ -11,7 +11,11 @@
    for current ApplicationAssembly closure, original catalog admission,
    authentication, authorization-policy provenance, or physical deployment.
    Its caller MUST separately perform those full original checks before
-   startup/adoption. A report is never a certificate or transaction authority."
+   startup/adoption. A report is never a certificate or transaction authority.
+
+   v1836: The catalog-wide checker also pins its own original selected-binding
+   function. Replacing that public Var must not bypass the per-operation
+   construction/handler relation while the original contract check succeeds."
   (:require [gesso.live.application-preflight.certified-contract :as certified]))
 
 (def report-type
@@ -86,6 +90,8 @@
      :transaction-authority :none
      :authority :none}))
 
+(def ^:private original-selected-binding check-selected-binding!)
+
 ;; v1792: This is an opt-in *catalog-scoped* assembly coverage check. The
 ;; catalog is the declared selection, NOT a proof that every business action
 ;; in a deployment belongs to it. The original certified-contract checker
@@ -113,7 +119,9 @@
                  (identical? original-contract-check
                              (var-get #'certified/check-certified-contracts!))
                  (identical? original-issued-binding
-                             (var-get #'certified/issued-handler-binding?)))
+                             (var-get #'certified/issued-handler-binding?))
+                 (identical? original-selected-binding
+                             (var-get #'check-selected-binding!)))
     (reject!))
   (let [entries (get-in catalog-source [:catalog :operations])
         operation-ids (mapv :id entries)
@@ -142,11 +150,21 @@
               route-id (get-in certified-rows [operation :route-ids])]
         ;; Keep this relation source-relative: no per-route proof or
         ;; transaction capability is produced or cached for later requests.
-        (check-selected-binding!
+        (original-selected-binding
          {:contract-source contract-source
           :catalog-source catalog-source
           :operation operation
           :route-id route-id}))
+      ;; A trusted callback encountered during original contract validation
+      ;; must not be allowed to replace a proof boundary before a successful
+      ;; catalog report is returned. This is a point-in-time observation only.
+      (when-not (and (identical? original-contract-check
+                                 (var-get #'certified/check-certified-contracts!))
+                     (identical? original-issued-binding
+                                 (var-get #'certified/issued-handler-binding?))
+                     (identical? original-selected-binding
+                                 (var-get #'check-selected-binding!)))
+        (reject!))
       {:type coverage-report-type
        :version report-version
        :checking :all-declared-catalog-operations-and-issued-routes

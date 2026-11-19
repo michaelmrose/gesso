@@ -1,10 +1,12 @@
 (ns gesso.live.application-preflight.certified-contract-test
-  "v1792: adversarial source-relative checks for issued Ring bindings.
+  "v1836: adversarial source-relative checks for issued Ring bindings.
 
    The ordinary operation-acquisition ApplicationAssembly is the authority for
    semantic routes; the checked handler registry is an exact, in-process link
    to v1251 issued executors. Reports, copied metadata, and caller-supplied
    route maps cannot certify deployment or grant transaction authority.
+   Catalog coverage must invoke the original per-route checker, not a
+   substituted public Var that simply reports success.
 
    These tests distinguish real ApplicationAssembly closure (no redefs) from
    a deliberately stubbed operation summary used solely to isolate malformed
@@ -561,6 +563,29 @@
           (is (= :authorization-not-bound-to-original-assembly
                  (:reason (failure #(authorization/check-declared-route-coverage!
                                     input))))))))))
+
+(deftest catalog-coverage-refuses-substituted-selected-binding-checker
+  ;; A forged successful per-route relation must not turn a genuine
+  ;; ApplicationAssembly check into catalog construction/handler coverage.
+  ;; The exact public checker Var is itself a source-integrity boundary.
+  (let [{:keys [base source]} (environment)
+        catalog-source {:catalog {:operations [{:id claim
+                                                :construction (:construction source)}]}
+                        :physical-field-map {}}
+        input {:contract-source base :catalog-source catalog-source}]
+    (with-summary summary
+      (fn []
+        (with-redefs [authorization/check-selected-binding!
+                      (fn [_] {:checking :selected-original-construction-to-exact-issued-handler})]
+          (is (= :authorization-not-bound-to-original-assembly
+                 (:reason (failure #(authorization/check-declared-route-coverage!
+                                    input)))))
+          (is (= :authorization-not-bound-to-original-assembly
+                 (:reason (failure #(authorization/check-declared-route-coverage!
+                                    (assoc-in input
+                                              [:catalog-source :catalog :operations 0
+                                               :construction :subject :id]
+                                              cancel)))))))))))
 
 (deftest catalog-wide-coverage-uses-genuine-application-assembly
   (let [{:keys [source executor handler]} (environment)
