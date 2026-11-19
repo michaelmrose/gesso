@@ -515,6 +515,31 @@
        :proof-context {:invariants invariants :read-premises required}
        :report report})))
 
+(def source-bound-read-premises-type
+  :gesso.assurance.proof.xtdb-gateway-typed-transition-seam/source-bound-read-premises)
+(def source-bound-read-premises-version 1)
+
+(defn check-source-bound-typed-read-premises!
+  "Read-only rederivation of a checked original catalog's complete typed
+   transition and required invariant-read premise inventory for ONE declared
+   operation. Uses the SAME original closed-catalog checker as the existing
+   source-bound typed gateway, but issues no preparer or writer. The returned
+   data are source-relative, copyable and not evidence of kernel proof,
+   application source authenticity, physical authority or admission."
+  [catalog selected-operation]
+  (let [{:keys [declaration proof-context report]}
+        (check-bound-source! catalog selected-operation)]
+    {:type source-bound-read-premises-type
+     :version source-bound-read-premises-version
+     :operation-id selected-operation
+     :declaration declaration
+     :proof-context proof-context
+     :catalog-fingerprint (:fingerprint report)
+     :scope :closed-declared-source-relative
+     :certificate :not-issued
+     :admission :not-admitted
+     :authority :none}))
+
 (defn issue-source-bound-typed-transition-gateway!
   "Issue a process-local, source-relative physical gateway PREPARER for one
    operation of an exact, rederived CLOSED DECLARED catalog. The resulting

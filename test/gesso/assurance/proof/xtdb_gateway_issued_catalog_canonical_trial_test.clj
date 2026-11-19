@@ -519,7 +519,69 @@
     (is (= :issued-executor-external-before-missing-or-ambiguous
            (reason #(check! ctx :pinned-external-before)))
         "An internally checked candidate is NOT proof the physical row exists")
+    ;; The proof inventory is derived from the original closed catalog's
+    ;; COMPLETE original declaration, not invented by the diagnostic.
+    (let [derived (typed-seam/check-source-bound-typed-read-premises!
+                   (:catalog catalog-source) operation)]
+      (is (= typed-seam/source-bound-read-premises-type (:type derived)))
+      (is (= typed-seam/source-bound-read-premises-version (:version derived)))
+      (is (= operation (:operation-id derived)
+             (get-in (:declaration derived) [:subject :id])))
+      (is (= (:invariants (:catalog catalog-source))
+             (get-in derived [:proof-context :invariants])))
+      (is (seq (get-in derived [:proof-context :read-premises])))
+      (is (every? #(= operation (:operation-id %))
+                  (get-in derived [:proof-context :read-premises])))
+      (is (= :none (:authority derived)))
+      (is (= :not-issued (:certificate derived)))
+      (is (= :not-admitted (:admission derived)))
+      (is (not-any? #(contains? derived %)
+                    [:prepare! :submit! :executor :node])))
+    (is (= :issued-executor-external-before-missing-or-ambiguous
+           (reason #(bound/check-current-issued-executor-typed-command-alias!
+                     contract catalog-source operation ctx invocation nil
+                     :pinned-source-derived-premises)))
+        "A derived read-invariant inventory is not a substitute for XTDB")
     (seed! [:requests (:request d)])
+    ;; v1862: Only the original declared operation/canonical catalog can
+    ;; select the invariant/read-premise set; no caller map is accepted.
+    (let [before @(:constructs e)]
+      (is (= :caller-supplied-executor-premises-not-accepted
+             (reason #(bound/check-current-issued-executor-typed-command-alias!
+                       contract catalog-source operation ctx invocation
+                       premises :pinned-source-derived-premises))))
+      (is (= before @(:constructs e))
+          "Rejected caller premises must not invoke the executor"))
+    (let [source-bound
+          (bound/check-current-issued-executor-typed-command-alias!
+           contract catalog-source operation ctx invocation nil
+           :pinned-source-derived-premises)]
+      (is (= bound/issued-executor-candidate-alias-report-type
+             (:type source-bound)))
+      (is (= :original-checked-catalog-derived
+             (:typed-read-premise-provenance source-bound)))
+      (is (= :original-issued-operation-id
+             (:typed-read-premise-subject source-bound)))
+      (is (= :pinned-same-node-document-match
+             (:external-before source-bound)))
+      (is (= :original-and-independent-source-relative
+             (:typed-abstract-alias-correspondence source-bound)))
+      (is (= :disabled (:canonical-physical-alias-execution source-bound)))
+      (is (= :none (:authority source-bound)
+             (:transaction-authority source-bound)))
+      (is (not-any? #(contains? source-bound %)
+                    [:proof-context :invariants :read-premises
+                     :snapshot-token :candidate :plan :current-document
+                     :node :target :sql :executor :submit! :prepare!])))
+    (let [before @(:constructs e)]
+      (with-redefs [typed-seam/check-source-bound-typed-read-premises!
+                    (fn [& _] {:type typed-seam/source-bound-read-premises-type})]
+        (is (= :substituted-original-assembly-or-issuer
+               (reason #(bound/check-current-issued-executor-typed-command-alias!
+                         contract catalog-source operation ctx invocation nil
+                         :pinned-source-derived-premises)))))
+      (is (= before @(:constructs e))
+          "Substituted premise derivation must be rejected before callbacks"))
     (let [result (check! ctx :pinned-external-before)]
       (is (= bound/issued-executor-candidate-alias-report-type (:type result)))
       (is (= :pinned-same-node-document-match (:external-before result)))
@@ -533,6 +595,11 @@
                     [:snapshot-token :candidate :plan :current-document
                      :node :target :sql :executor :submit! :prepare!])))
     (seed! [:requests (assoc (:request d) :owner "other-writer")])
+    (is (= :issued-executor-external-before-mismatch
+           (reason #(bound/check-current-issued-executor-typed-command-alias!
+                     contract catalog-source operation ctx invocation nil
+                     :pinned-source-derived-premises)))
+        "Derived premises cannot overcome a conflicting physical prestate")
     (is (= :issued-executor-external-before-mismatch
            (reason #(check! ctx :pinned-external-before)))
         "A changed authoritative document must defeat the captured prestate")

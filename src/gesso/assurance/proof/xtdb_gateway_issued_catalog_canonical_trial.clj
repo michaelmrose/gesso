@@ -78,7 +78,14 @@
    SAME acquired complete prestate to a parameterized, pinned XTDB snapshot
    on the request-context node. Mismatches and absent documents fail closed;
    this is a point-in-time external read, not a transaction-time assertion,
-   authenticated node, callback-purity theorem, or history/ABA proof."
+   authenticated node, callback-purity theorem, or history/ABA proof.
+
+   v1862: A stronger explicit pinned mode derives EVERY typed read premise
+   from the ORIGINAL fully checked catalog and selected operation instead of
+   accepting a caller-produced proof-context map. It checks the derivation's
+   declaration against this same issued executor, then tests the captured
+   prestate and inputs. This is still source-relative, not persistent custody
+   of the physical read, transaction-time freshness or proof admission."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -132,6 +139,8 @@
   canonical/issue-catalog-bound-canonical-trial!)
 (def ^:private original-typed-alias-screen
   typed-seam/check-source-relative-typed-domain-with-command-binding!)
+(def ^:private original-source-premises
+  typed-seam/check-source-bound-typed-read-premises!)
 
 (defn- reject! [reason]
   (throw (ex-info "Issued catalog/canonical executor binding is not established."
@@ -163,7 +172,9 @@
                  (identical? original-snapshot-decode
                              (var-get #'basis/<-time-basis-str))
                  (identical? original-canonical-issuer
-                             (var-get #'canonical/issue-catalog-bound-canonical-trial!)))
+                             (var-get #'canonical/issue-catalog-bound-canonical-trial!))
+                 (identical? original-source-premises
+                             (var-get #'typed-seam/check-source-bound-typed-read-premises!)))
     (reject! :substituted-original-assembly-or-issuer)))
 
 (defn- plain-map? [x]
@@ -653,20 +664,62 @@
    With a seventh argument :pinned-external-before, additionally require an
    exact physical document match at ONE independent, pinned XTDB read on the
    caller's original context node. This observation occurs after the guarded
-   constructor capture, so application callbacks may already have effects."
+   constructor capture, so application callbacks may already have effects.
+
+   The opt-in mode :pinned-source-derived-premises requires a NIL caller
+   proof-context and derives the exact invariant/read-premise inventory from
+   the fully checked original catalog. It also compares the derived semantic
+   declaration to the original issued construction BEFORE calling any
+   application callbacks. Its physical read remains only point-in-time."
   ([contract-source catalog-source operation ctx invocation proof-context]
    (check-current-issued-executor-typed-command-alias!
     contract-source catalog-source operation ctx invocation proof-context
     :no-external-read))
   ([contract-source catalog-source operation ctx invocation proof-context
     read-mode]
-  (when-not (#{:no-external-read :pinned-external-before} read-mode)
+  (when-not (#{:no-external-read :pinned-external-before
+               :pinned-source-derived-premises} read-mode)
     (reject! :unsupported-issued-executor-before-observation-mode))
-  (when (and (= :pinned-external-before read-mode)
-             (nil? (:biff.xtdb/node ctx)))
+  (let [source-derived? (= :pinned-source-derived-premises read-mode)
+        pinned-read? (#{:pinned-external-before
+                        :pinned-source-derived-premises} read-mode)]
+  (when (and pinned-read? (nil? (:biff.xtdb/node ctx)))
     (reject! :missing-issued-executor-external-before-node))
+  ;; Under source-derived mode, caller-supplied proof data are forbidden, not
+  ;; silently ignored. Reject before any application-owned callback is run.
+  (when (and source-derived? (some? proof-context))
+    (reject! :caller-supplied-executor-premises-not-accepted))
   (let [initial (current-binding! contract-source catalog-source operation true)
+        source (get-in contract-source
+                       [:certified-operations operation :current-source])
         original-invariants (get-in catalog-source [:catalog :invariants])
+        derived (when source-derived?
+                  (let [provenance (original-source-premises
+                                    (:catalog catalog-source) operation)
+                        current-transition
+                        (:transition (original-construct (:construction source)))]
+                    (when-not (and (= typed-seam/source-bound-read-premises-type
+                                      (:type provenance))
+                                   (= typed-seam/source-bound-read-premises-version
+                                      (:version provenance))
+                                   (= operation (:operation-id provenance)
+                                      (get-in (:declaration provenance)
+                                              [:subject :id]))
+                                   (= current-transition (:declaration provenance))
+                                   (= (:catalog-fingerprint initial)
+                                      (:catalog-fingerprint provenance))
+                                   (= original-invariants
+                                      (get-in provenance [:proof-context :invariants]))
+                                   (= :closed-declared-source-relative
+                                      (:scope provenance))
+                                   (= :not-issued (:certificate provenance))
+                                   (= :not-admitted (:admission provenance))
+                                   (= :none (:authority provenance)))
+                      (reject! :source-derived-executor-premises-not-established))
+                    provenance))
+        proof-context (if source-derived?
+                        (:proof-context derived)
+                        proof-context)
         binding (:binding invocation)]
     ;; Fail before calling any application-owned callback on bad input.
     (when-not (and (map? ctx)
@@ -706,7 +759,7 @@
                      (= (:field-map source) (:field-map candidate))
                      (= (:command-operation source) (:command-operation candidate)))
         (reject! :original-executor-checked-candidate-not-qualified))
-      (when (= :pinned-external-before read-mode)
+      (when pinned-read?
         (pinned-executor-before! (:biff.xtdb/node ctx) candidate))
       (let [screen (check-current-issued-typed-command-alias!
                     contract-source catalog-source operation
@@ -726,14 +779,22 @@
                :canonical-physical-alias-execution :disabled
                :physical-submission :blocked-before-canonical-writer
                :installed-handler-execution :not-established
-               :external-before (if (= :pinned-external-before read-mode)
+               :external-before (if pinned-read?
                                   :pinned-same-node-document-match
                                   :not-observed)
+               :typed-read-premise-provenance
+               (if source-derived?
+                 :original-checked-catalog-derived
+                 :caller-declared-original-validated)
+               :typed-read-premise-subject
+               (if source-derived?
+                 :original-issued-operation-id
+                 :caller-context-checked)
                :external-basis-authenticity :caller-context-node-unattested
                :transaction-time-prestate :not-established
                :prestate-aba-exclusion :not-established
                :certificate :not-issued :admission :not-admitted
-               :transaction-authority :none :authority :none))))))
+               :transaction-authority :none :authority :none)))))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]
