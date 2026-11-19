@@ -412,6 +412,62 @@
             (is (= :none (:uncertified-proof-origins result)
                    (:authority result)))
             (is (= :not-issued (:certificate result)))
+            (let [observe-scopes!
+                  (var-get (ns-resolve
+                            'gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
+                            'original-executor-observation-scope!))
+                  ;; Structural-only test: the mixed route fixture has no
+                  ;; full typed catalog or real candidate capture. Its two
+                  ;; ORIGINAL checked source reports supply an attribution
+                  ;; to verify shape; physical observation happens elsewhere.
+                  initial {:operation-id claim
+                           :catalog-route-scope
+                           (select-keys coverage
+                                        [:catalog-operations
+                                         :uncertified-application-operations
+                                         :uncertified-application-route-ids])
+                           :catalog-proof-attribution result
+                           :route-ids (get-in result
+                                              [:selected-operation-proof-origin
+                                               :route-ids])
+                           :proof-fingerprint
+                           (get-in result [:selected-operation-proof-origin
+                                           :proof-fingerprint])}
+                  scoped (observe-scopes! initial claim false)
+                  statuses (:certified-operation-observations scoped)]
+              ;; Scope mapping on the ORIGINAL complete application source.
+              ;; The actual pinned physical probe is tested separately: this
+              ;; pure helper alone must never claim to have observed XTDB.
+              (is (= #{claim cancel} (set (keys statuses))))
+              (is (= {:candidate :original-executor-guarded-candidate-checked
+                      :typed-transition :original-and-independent-source-relative
+                      :physical-before :not-observed}
+                     (get statuses claim)))
+              (is (= {:candidate :not-observed
+                      :typed-transition :not-observed
+                      :physical-before :not-observed}
+                     (get statuses cancel)))
+              (is (= #{cancel} (:other-certified-operations-unobserved scoped)))
+              (is (= :none (:uncertified-operation-observations scoped)
+                     (:uncertified-route-observations scoped)))
+              (is (= :not-established (:whole-catalog-physical-observation scoped)))
+              (is (= :original-catalog-proof-origin-attribution-diverged
+                     (reason #(check-ledger
+                               (assoc-in contracts
+                                         [:certified-operations cancel :route-ids]
+                                         #{claim-route})
+                               coverage claim))))
+              (is (= :issued-executor-observation-attribution-not-established
+                     (reason #(observe-scopes!
+                               (assoc-in initial [:catalog-proof-attribution
+                                                  :selected-operation-proof-origin
+                                                  :proof-fingerprint]
+                                         :forged-proof)
+                               claim false))))
+              (is (= :issued-executor-observation-attribution-not-established
+                     (reason #(observe-scopes! initial audit false))))
+              (is (= :issued-executor-observation-attribution-not-established
+                     (reason #(observe-scopes! initial claim :unsupported-mode)))))
             (is (= (:open-assumptions coverage) (:global-open-assumptions result)))
             (is (= :original-catalog-proof-origin-attribution-diverged
                    (reason #(check-ledger

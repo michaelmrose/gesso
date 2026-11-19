@@ -582,6 +582,22 @@
              (:typed-read-premise-subject source-bound)))
       (is (= :pinned-same-node-document-match
              (:external-before source-bound)))
+      (is (= {:candidate :original-executor-guarded-candidate-checked
+              :typed-transition :original-and-independent-source-relative
+              :physical-before :pinned-same-node-document-match}
+             (get-in source-bound [:certified-operation-observations operation])
+             (:selected-operation-observation source-bound)))
+      (is (= #{operation}
+             (set (keys (:certified-operation-observations source-bound)))))
+      (is (= #{} (:other-certified-operations-unobserved source-bound)))
+      (is (= :one-original-issued-operation-only
+             (:observation-attribution source-bound)))
+      (is (= :point-in-time-prestate-only
+             (:physical-observation-temporality source-bound)))
+      (is (= :none (:uncertified-operation-observations source-bound)
+             (:uncertified-route-observations source-bound)))
+      (is (= :not-established
+             (:whole-catalog-physical-observation source-bound)))
       (is (= :original-and-independent-source-relative
              (:typed-abstract-alias-correspondence source-bound)))
       (let [original (checked-assembly/check-declared-route-coverage!
@@ -670,6 +686,11 @@
       (is (= :pinned-same-node-document-match (:external-before result)))
       (is (= :caller-context-node-unattested
              (:external-basis-authenticity result)))
+      (is (= :pinned-same-node-document-match
+             (get-in result [:certified-operation-observations operation
+                             :physical-before])))
+      (is (= :one-original-issued-operation-only
+             (:observation-attribution result)))
       (is (= :retained-open-not-discharged
              (:proof-obligations-disposition result)))
       (is (= :not-established
@@ -1014,6 +1035,13 @@
                (:candidate-prestate-check checked)))
         (is (= :original-and-independent-source-relative
                (:typed-abstract-alias-correspondence checked)))
+        (is (= :not-observed
+               (get-in checked [:certified-operation-observations operation
+                                :physical-before])))
+        (is (= :original-and-independent-source-relative
+               (get-in checked [:certified-operation-observations operation
+                                :typed-transition])))
+        (is (= :not-established (:whole-catalog-physical-observation checked)))
         (is (= :aborted-after-checked-candidate
                (:registered-executor-invocation checked)))
         (is (= :blocked-before-canonical-writer (:physical-submission checked)))

@@ -853,6 +853,58 @@
      :original-kernel-proof-discharge :not-established
      :physical-refinement-proof-discharge :not-established}))
 
+(defn- original-executor-observation-scope!
+  "Attribute checks to ONE original executor after candidate capture and
+   typed screening. A pinned read counts only after its successful return.
+   This private mapper does not itself observe or authenticate execution;
+   its caller supplies the original checked binding and completed read."
+  [initial operation pinned-read?]
+  (let [attribution (:catalog-proof-attribution initial)
+        origins (:certified-operation-proof-origins attribution)
+        scope (:catalog-route-scope initial)
+        ids (:catalog-operations scope)
+        uncertified (:uncertified-application-operations scope)
+        uncertified-routes (:uncertified-application-route-ids scope)
+        selected-origin (get origins operation)
+        not-observed {:candidate :not-observed
+                      :typed-transition :not-observed
+                      :physical-before :not-observed}
+        selected-observation
+        {:candidate :original-executor-guarded-candidate-checked
+         :typed-transition :original-and-independent-source-relative
+         :physical-before (if pinned-read?
+                            :pinned-same-node-document-match
+                            :not-observed)}]
+    (when-not (and (boolean? pinned-read?)
+                   (= operation (:operation-id initial))
+                   (qualified-keyword? operation)
+                   (set? ids) (contains? ids operation)
+                   (map? origins) (= ids (set (keys origins)))
+                   (map? selected-origin)
+                   (= selected-origin (:selected-operation-proof-origin attribution))
+                   (= (:route-ids initial) (:route-ids selected-origin))
+                   (= (:proof-fingerprint initial) (:proof-fingerprint selected-origin))
+                   (set? uncertified) (set? uncertified-routes)
+                   (= uncertified (:uncertified-application-operations attribution))
+                   (= uncertified-routes (:uncertified-application-route-ids attribution))
+                   (empty? (set/intersection ids uncertified))
+                   (= :all-original-certified-operations-only (:attribution attribution))
+                   (= :none (:uncertified-proof-origins attribution)))
+      (reject! :issued-executor-observation-attribution-not-established))
+    {:certified-operation-observations
+     (into (sorted-map)
+           (for [certified-id ids]
+             [certified-id (if (= certified-id operation) selected-observation
+                               not-observed)]))
+     :selected-operation-observation selected-observation
+     :other-certified-operations-unobserved (disj ids operation)
+     :uncertified-operation-observations :none
+     :uncertified-route-observations :none
+     :whole-catalog-physical-observation :not-established
+     :observation-attribution :one-original-issued-operation-only
+     :physical-observation-temporality :point-in-time-prestate-only
+     :authority :none}))
+
 (defn check-current-issued-executor-typed-command-alias!
   "Run the EXACT original registered executor as far as its guarded, checked
    candidate boundary, and abort BEFORE the canonical Gesso transaction
@@ -887,7 +939,11 @@
    v1865: Join the checked per-operation proof origins to the COMPLETE
    selected certified operation set, its disjoint routes and the explicit
    uncertified complement. Original global assumptions are never attributed
-   to an individual operation; no uncertified route gains proof identity."
+   to an individual operation; no uncertified route gains proof identity.
+
+   v1866: Attribute checked candidate, typed semantics and optional pinned
+   XTDB read only to the selected operation. Every other certified operation
+   remains unobserved; uncertified routes gain no observations or proof."
   ([contract-source catalog-source operation ctx invocation proof-context]
    (check-current-issued-executor-typed-command-alias!
     contract-source catalog-source operation ctx invocation proof-context
@@ -986,6 +1042,7 @@
           (reject! :original-executor-source-changed-after-capture))
         (merge screen
                (original-executor-open-proof-evidence! initial operation)
+               (original-executor-observation-scope! initial operation (boolean pinned-read?))
                {:type issued-executor-candidate-alias-report-type
                :version issued-executor-candidate-alias-report-version
                :candidate-domain-source :original-executor-guarded-construct
