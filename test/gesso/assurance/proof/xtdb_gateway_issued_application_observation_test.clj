@@ -48,7 +48,9 @@
           (run)))))))
 (use-fixtures :once parent-fixture)
 
-(defn- v1867-alias-case-env []
+(defn- v1867-alias-case-env
+  ([] (v1867-alias-case-env nil))
+  ([before-constructor!]
   ;; The original certified plan expressly permits this operation-ID alias.
   ;; Rebuild its current certificate and exact registered executor as in v1861.
   (let [d (data)
@@ -84,6 +86,14 @@
                    (assoc-in [:certified-source :certificate] certificate)
                    (assoc-in [:certified-source :proof-source] proof)
                    (assoc-in [:certified-source :current-graph] graph))
+        source (if before-constructor!
+                 (update-in source
+                            [:certified-source :resolved-configuration :construct!]
+                            (fn [original]
+                              (fn [ctx binding]
+                                (before-constructor!)
+                                (original ctx binding))))
+                 source)
         executor (plan/build-certified-plan-operation! source)
         handler (certified/issue-certified-handler!
                  {:executor executor :current-source source
@@ -97,7 +107,7 @@
                                            [:operations 0 :construction] construction)
                         :physical-field-map (physical-map)}
         ]
-    {:data d :environment e :contract contract :catalog-source catalog-source}))
+    {:data d :environment e :contract contract :catalog-source catalog-source})))
 
 (deftest v1867-collected-original-executor-candidate-with-physical-read
   ;; The collector receives an operation+canonical invocation, NEVER a
@@ -121,6 +131,16 @@
     (is (= :not-observed (get-in initial [:per-operation-observations operation])))
     (is (= #{} (:observed-operation-ids initial)))
     (is (= 0 (:observation-count initial)))
+    (is (= {operation :not-attempted}
+           (:per-operation-attempt-status initial)))
+    (is (= #{} (:in-flight-observation-ids initial)
+           (:failed-observation-ids initial)))
+    (is (= :not-established (:physical-prestate-currentness initial)))
+    (is (= :historical-individual-pinned-reads
+           (:physical-observation-temporality initial)))
+    (is (false? (:physical-state-rechecked-at-summary? initial)))
+    (is (= :original-source-rechecked-at-summary
+           (:source-stability initial)))
     (is (false? (:all-certified-operations-individually-observed? initial)))
     (with-redefs [checked-assembly/check-declared-route-coverage!
                   (fn [& _] {:type checked-assembly/coverage-report-type})]
@@ -139,6 +159,9 @@
           selected (get-in result [:per-operation-observations operation])]
       (is (= #{operation} (:observed-operation-ids result)))
       (is (= 1 (:observation-count result)))
+      (is (= {operation :qualified} (:per-operation-attempt-status result)))
+      (is (= #{} (:in-flight-observation-ids result)
+             (:failed-observation-ids result)))
       (is (= :individually-pinned-prestate-matched (:physical-before selected)))
       (is (= :original-and-independent-source-relative
              (:typed-transition selected)))
@@ -177,12 +200,66 @@
       (let [summary ((:summary! failed))]
         (is (= #{} (:observed-operation-ids summary)))
         (is (= #{operation} (:attempted-without-qualified-evidence summary)))
+        (is (= {operation :failed} (:per-operation-attempt-status summary)))
+        (is (= #{operation} (:failed-observation-ids summary)))
+        (is (= #{} (:in-flight-observation-ids summary)))
         (is (= :not-observed
                (get-in summary [:per-operation-observations operation])))
         (is (= :issued-application-observation-already-attempted
                (reason #((:observe! failed) operation {:biff.xtdb/node (db)}
                          {:binding (:binding data) :mode :submit}))))))))
 
+
+(deftest v1869-in-flight-and-failed-attempts-share-one-atomic-snapshot
+  ;; Use the REAL registered executor, with a deliberately stalled original
+  ;; application constructor. The permit is consumed before the constructor
+  ;; callback starts, and summary must expose the in-flight operation.
+  (let [entered (promise)
+        release (promise)
+        op :request/claim
+        env (v1867-alias-case-env
+             (fn []
+               (deliver entered true)
+               (when-not (= :released (deref release 20000 :timeout))
+                 (throw (ex-info "Timed-out test constructor" {})))))
+        d (:data env)
+        observer (application-observation/issue-current-issued-application-observer!
+                  (:contract env) (:catalog-source env))
+        observe! (:observe! observer)
+        summary! (:summary! observer)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding d) :mode :submit}]
+    (seed! [:requests (:request d)])
+    (let [result (future
+                   (try {:value (observe! op ctx invocation)}
+                        (catch Throwable failure {:failure failure})))]
+      (try
+        (is (= true (deref entered 20000 :timeout))
+            "Original checked executor must enter the controlled constructor")
+        (let [during (summary!)]
+          (is (= {op :in-flight} (:per-operation-attempt-status during)))
+          (is (= #{op} (:in-flight-observation-ids during)))
+          (is (= #{op} (:attempted-without-qualified-evidence during)))
+          (is (= #{} (:observed-operation-ids during)))
+          (is (= 0 (:observation-count during)))
+          (is (= :not-observed (get-in during [:per-operation-observations op])))
+          (is (false? (:all-certified-operations-individually-observed? during)))
+          (is (= :not-established (:physical-prestate-currentness during))))
+        (is (= :issued-application-observation-already-attempted
+               (reason #(observe! op ctx invocation)))
+            "Concurrent duplicate must not start another constructor")
+        (finally (deliver release :released)))
+      (let [{:keys [value failure] :as outcome} (deref result 30000 :timeout)]
+        (is (map? outcome))
+        (is (nil? failure) (some-> failure .getMessage))
+        (is (= {op :qualified} (:per-operation-attempt-status value)))
+        (is (= #{} (:in-flight-observation-ids value)
+               (:failed-observation-ids value)))
+        (is (= :not-established (:physical-prestate-currentness value)))
+        (is (= value (summary!)))
+        (is (= 1 @(:constructs (:environment env))))
+        (is (nil? (read-command
+                   (resolution/record-id (:binding d)))))))))
 
 (defn- second-original-issued-alias [operation d]
   ;; An independently issued and admitted source, not a copied executor or
@@ -303,10 +380,15 @@
                    (:per-operation-observations before)))
             (is (= :operation-not-originally-certified
                    (reason #(observe! audit ctx invoke-primary))))
+            (is (= {primary :not-attempted
+                    secondary :not-attempted}
+                   (:per-operation-attempt-status before)))
             (seed! [:requests (:request first-row)]
                    [:requests (:request second-row)])
             (let [first-result (observe! primary ctx invoke-primary)]
               (is (= #{primary} (:observed-operation-ids first-result)))
+              (is (= {primary :qualified secondary :not-attempted}
+                     (:per-operation-attempt-status first-result)))
               (is (= #{secondary}
                      (set (for [[operation status]
                                 (:per-operation-observations first-result)
@@ -330,6 +412,16 @@
             (let [after (observe! secondary ctx invoke-secondary)]
               (is (= #{primary secondary} (:observed-operation-ids after)))
               (is (= 2 (:observation-count after)))
+              (is (= {primary :qualified secondary :qualified}
+                     (:per-operation-attempt-status after)))
+              ;; The first row has CHANGED physically. The qualified entry
+              ;; stays historical and cannot assert current-row freshness.
+              (is (= :not-established (:physical-prestate-currentness after)))
+              (is (= :historical-individual-pinned-reads
+                     (:physical-observation-temporality after)))
+              (is (false? (:physical-state-rechecked-at-summary? after)))
+              (is (= :original-source-rechecked-at-summary
+                     (:source-stability after)))
               (is (true? (:all-certified-operations-individually-observed? after)))
               (is (= #{} (:attempted-without-qualified-evidence after)))
               (is (= :individually-pinned-prestate-matched

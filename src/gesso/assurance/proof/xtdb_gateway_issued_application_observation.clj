@@ -7,13 +7,18 @@
    Observations are independent and potentially occur at different XTDB
    bases. No common snapshot, historical consistency, callback purity,
    deployment adoption, physical alias submission, proof discharge, or
-   application certification follows from collecting every operation."
+   application certification follows from collecting every operation.
+
+   v1869: Store one-use attempt states and qualified observations in ONE
+   atomically updated, per-operation ledger. Concurrent summaries distinguish
+   in-flight, failed, and completed probes without mixing consumed-attempt
+   and qualified-evidence snapshots. Historical pinned reads are never
+   represented as current physical prestate guarantees."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as issued]
-            [gesso.live.application-preflight.certified-contract :as certified])
-  (:import [java.util.concurrent.atomic AtomicBoolean]))
+            [gesso.live.application-preflight.certified-contract :as certified]))
 
 (def report-type
   :gesso.assurance.proof.xtdb-gateway-issued-application-observation/collection)
@@ -182,10 +187,9 @@
    atomic application-wide behavior or production adoption."
   [contract-source catalog-source]
   (let [initial (original-current-scope! contract-source catalog-source)
-        permits (into {} (for [operation (:certified-operation-ids initial)]
-                           [operation (AtomicBoolean. false)]))
-        observations (atom {})
-        consumed (atom #{})
+        states (atom (into (sorted-map)
+                           (for [operation (:certified-operation-ids initial)]
+                             [operation :not-attempted])))
         recheck! (fn []
                    (when-not (= initial
                                 (original-current-scope! contract-source catalog-source))
@@ -193,6 +197,19 @@
                    true)
         summary! (fn []
                    (recheck!)
+                   ;; Take ONE immutable snapshot: attempts, pending work and
+                   ;; qualified evidence must never be read from separate
+                   ;; mutable structures under concurrent observation.
+                   (let [snapshot @states
+                         qualified (into (sorted-map)
+                                         (for [[op entry] snapshot
+                                               :when (map? entry)]
+                                           [op (:evidence entry)]))
+                         completed (set (keys qualified))
+                         in-flight (into #{} (for [[op v] snapshot
+                                                   :when (= v :in-flight)] op))
+                         failed (into #{} (for [[op v] snapshot
+                                                :when (= v :failed)] op))]
                    {:type report-type :version report-version
                     :scope :process-local-original-issued-executor-observations
                     :certified-operation-proof-origins
@@ -203,15 +220,25 @@
                     :original-open-proof-evidence (:original-open-proof-evidence initial)
                     :per-operation-observations
                     (into (sorted-map)
-                          (for [operation (:certified-operation-ids initial)]
-                            [operation (get @observations operation :not-observed)]))
-                    :observed-operation-ids (set (keys @observations))
+                          (for [[operation state] snapshot]
+                            [operation (get qualified operation :not-observed)]))
+                    :per-operation-attempt-status
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state) :qualified state)]))
+                    :observed-operation-ids completed
+                    :in-flight-observation-ids in-flight
+                    :failed-observation-ids failed
                     :attempted-without-qualified-evidence
-                    (set/difference @consumed (set (keys @observations)))
-                    :observation-count (count @observations)
+                    (set/union in-flight failed)
+                    :observation-count (count qualified)
                     :all-certified-operations-individually-observed?
-                    (= (:certified-operation-ids initial)
-                       (set (keys @observations)))
+                    (= (:certified-operation-ids initial) completed)
+                    :physical-prestate-currentness :not-established
+                    :physical-observation-temporality
+                    :historical-individual-pinned-reads
+                    :physical-state-rechecked-at-summary? false
+                    :source-stability :original-source-rechecked-at-summary
                     :joint-snapshot-basis :not-established
                     :physical-application-correspondence :not-established
                     :deployed-handler-adoption :not-established
@@ -220,21 +247,41 @@
                     :physical-refinement-proof-discharge :not-established
                     :certificate :not-issued :admission :not-admitted
                     :transaction-authority :none :retry-authority :none
-                    :authority :none})
+                    :authority :none}))
         observe! (fn [operation ctx invocation]
-                   (let [permit (get permits operation)]
-                     (when-not permit
-                       (reject! :operation-not-originally-certified))
-                     (when-not (.compareAndSet permit false true)
-                       (reject! :issued-application-observation-already-attempted))
-                     (swap! consumed conj operation)
+                   (when-not (contains? (:certified-operation-ids initial)
+                                        operation)
+                     (reject! :operation-not-originally-certified))
+                   ;; swap-vals! reserves one permit and records :in-flight in
+                   ;; the SAME atomic ledger. There is no window where the
+                   ;; permit is consumed but a summary says not attempted.
+                   (let [[prior _] (swap-vals!
+                                    states
+                                    (fn [current]
+                                      (if (= :not-attempted
+                                             (get current operation))
+                                        (assoc current operation :in-flight)
+                                        current)))]
+                     (when-not (= :not-attempted (get prior operation))
+                       (reject! :issued-application-observation-already-attempted)))
+                   (try
                      (recheck!)
                      (let [result (original-observe
                                    contract-source catalog-source operation
                                    ctx invocation nil :pinned-source-derived-premises)
                            checked (qualified-observation! initial operation result)]
                        (recheck!)
-                       (swap! observations assoc operation checked)
-                       (summary!))))]
+                       (swap! states assoc operation {:evidence checked})
+                       (summary!))
+                     (catch Throwable failure
+                       ;; Never convert an unsuccessful/ambiguous attempt
+                       ;; into evidence. A completed probe remains consumed.
+                       ;; Caller callbacks may already have caused effects.
+                       (swap! states
+                              (fn [current]
+                                (if (= :in-flight (get current operation))
+                                  (assoc current operation :failed)
+                                  current)))
+                       (throw failure))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!}))
