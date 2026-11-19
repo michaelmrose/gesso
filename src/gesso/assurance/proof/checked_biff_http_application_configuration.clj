@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1833: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1834: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -118,7 +118,13 @@
    v1833: A drifted original proof Var must not prevent managed shutdown from
    attempting the ORIGINAL captured physical Biff stop. Preserve the uncertain
    cleanup outcome rather than claiming clean stop when the source-integrity
-   check failed. A proof-source substitution must not strand a live listener."
+   check failed. A proof-source substitution must not strand a live listener.
+
+   v1834: Also re-pin the original proof roots after physical shutdown.
+   Selected Biff stop callbacks are host code and may mutate original proof
+   roots DURING cleanup. Even if the pre-stop pin passed and the physical
+   listener closed, the managed result cannot claim verified clean shutdown
+   when original source integrity is no longer established at completion."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -740,9 +746,19 @@
                             (let [guard-status (try ((:summary! issued-guarded))
                                                     (catch Throwable _ nil))
                                   probe-status (try ((:summary! issued-probe))
-                                                    (catch Throwable _ nil))]
+                                                    (catch Throwable _ nil))
+                                  ;; Biff's selected stop callbacks may mutate
+                                  ;; original proof Var roots AFTER the entry
+                                  ;; check. Re-pin after physical cleanup too;
+                                  ;; neither clean listener closure nor stale
+                                  ;; entry integrity proves source identity at
+                                  ;; the time we publish the stop report.
+                                  source-pinned-after-stop?
+                                  (try (pinned!) true
+                                       (catch Throwable _ false))]
                               (reset! state
                                       (if (and source-pinned?
+                                               source-pinned-after-stop?
                                                (= :stopped (:status guard-status))
                                                (= :completed
                                                   (:selected-adapter-cleanup guard-status))

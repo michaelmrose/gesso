@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1833: The actual application startup entrypoint owns module issuance,
+  "v1834: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -921,6 +921,71 @@
                (:status ((:stop! issued)))))
         (is (= 1 @physical-stop-calls)
             "A second managed stop must not retry physical cleanup")
+        (is (= :configured-instance-not-current
+               (reason #((:inspect-running! issued) system))))
+        (is (= :configured-instance-generation-not-current
+               (reason #((:inspect-generation! issued)
+                         instance-generation system))))
+        (is (= :configured-start-already-attempted
+               (reason #((:start-once! issued) {})))))
+      (finally
+        (alter-var-root #'probe/require-fresh-local-http-liveness!
+                        (constantly original-root))
+        (cleanup! s issued)))))
+
+(deftest managed-stop-downgrades-cleanup-if-proof-source-drifts-during-stop
+  ;; The pre-stop pin can pass, but Biff's host-owned stop callback may mutate
+  ;; an original pinned proof Var AFTER it physically closes the real HTTP
+  ;; listener. Do not publish a clean :stopped result based only on the stale
+  ;; pre-stop pin. The source is restored solely to inspect the terminal
+  ;; outcome, which must remain conservatively uncertain and non-retryable.
+  (let [s (scenario :honest)
+        original-root (var-get #'probe/require-fresh-local-http-liveness!)
+        physical-stop (get-in s [:raw :biff.core/stop])
+        physical-stop-calls (atom 0)
+        mutate-after-physical-stop? (atom false)
+        adapter (assoc (:raw s) :biff.core/stop
+                       (fn [system]
+                         (swap! physical-stop-calls inc)
+                         (let [result (physical-stop system)]
+                           (when @mutate-after-physical-stop?
+                             (alter-var-root
+                              #'probe/require-fresh-local-http-liveness!
+                              (constantly
+                               (fn [& _]
+                                 (throw (ex-info "Changed by Biff stop" {})))))
+                             (reset! mutate-after-physical-stop? false))
+                           result)))
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true) :adapter-module adapter))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            executor (:executor @(:server-state s))]
+        (is (= :current-at-inspection
+               (:status ((:inspect-generation! issued)
+                         instance-generation system))))
+        (is (not (.isShutdown executor)))
+        (reset! mutate-after-physical-stop? true)
+        (try
+          (is (= :substituted-original-configured-start-boundary
+                 (reason #((:stop! issued))))
+              "The changed proof root cannot issue an authenticated summary")
+          (is (= 1 @physical-stop-calls)
+              "The original physical adapter stop must still be attempted")
+          (is (.isShutdown executor)
+              "The real listener was closed before proof-root substitution")
+          (is (not @mutate-after-physical-stop?)
+              "Host callback performed exactly one deliberate substitution")
+          (finally
+            (alter-var-root #'probe/require-fresh-local-http-liveness!
+                            (constantly original-root))))
+        (is (= :stop-cleanup-not-established
+               (:status ((:summary! issued))))
+            "The pre-stop pin cannot certify a later changed proof boundary")
+        (is (= :stop-cleanup-not-established
+               (:status ((:stop! issued)))))
+        (is (= 1 @physical-stop-calls)
+            "Uncertain terminal state does not retry stop")
         (is (= :configured-instance-not-current
                (reason #((:inspect-running! issued) system))))
         (is (= :configured-instance-generation-not-current
