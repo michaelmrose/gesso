@@ -71,7 +71,8 @@ jobs:
         run: |
           clojure -M:test \
             -n gesso.assurance.proof.checked-biff-http-consumption-probe-test \
-            -n gesso.assurance.proof.checked-biff-http-application-configuration-test
+            -n gesso.assurance.proof.checked-biff-http-application-configuration-test \
+            -n gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
 
       - name: Record JVM sparse identity transition observations
         run: |
