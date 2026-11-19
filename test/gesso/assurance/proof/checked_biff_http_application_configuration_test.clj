@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1845: The actual application startup entrypoint owns module issuance,
+  "v1846: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    The replacement/listener lifecycle races are in a separate test namespace."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -468,6 +468,8 @@
         (is (= :exact-issued-wrapper (:original-probe-handler-slot observed)))
         (is (= :matches-current-original-host-route-set
                (:selected-catalog-route-continuity observed)))
+        (is (= :matches-original-startup-probe-route-ids
+               (:original-host-route-inventory-continuity observed)))
         (is (= :not-established (:external-listener-liveness observed)))
         (is (= :not-established (:out-of-band-adapter-stops observed)))
         (is (= :observed-at-current-inspection
@@ -508,6 +510,9 @@
                (:status ((:inspect-running! issued) system))))
         (is (= :not-selected
                (:selected-catalog-source ((:inspect-running! issued) system))))
+        (is (= :not-selected
+               (:original-host-route-inventory-continuity
+                ((:inspect-running! issued) system))))
         (is (= :not-selected
                (:selected-catalog-route-continuity
                 ((:inspect-running! issued) system))))
@@ -599,9 +604,10 @@
         routes #{:request/claim :request/finish}
         unselected #{:request/cancel}
         inventory {:checked-certified-route-ids routes
-                   :checked-route-ids (into routes (conj unselected :page/home))}]
-    (is (true? (check! true routes unselected inventory)))
-    (is (true? (check! false nil nil inventory)))
+                   :checked-route-ids (into routes (conj unselected :page/home))}
+        original-host-routes (:checked-route-ids inventory)]
+    (is (true? (check! true routes unselected original-host-routes inventory)))
+    (is (true? (check! false nil nil nil inventory)))
     (doseq [[selected? saved excluded current]
             [[true routes unselected
               (assoc inventory :checked-certified-route-ids
@@ -624,8 +630,30 @@
              [true #{:request/claim "request/finish"} unselected inventory]
              [false routes unselected inventory]]]
       (is (= :configured-instance-selected-routes-not-current
-             (reason #(check! selected? saved excluded current)))
+             (reason #(check! selected? saved excluded original-host-routes current)))
           (pr-str {:selected? selected? :saved saved :current current})))))
+
+(deftest current-host-inventory-must-preserve-nonsemantic-routes
+  ;; v1845 preserved the selected and uncertified SEMANTIC routes only.
+  ;; Replacing an independent host route without changing those sets must
+  ;; not count as unchanged original host inventory at inspection time.
+  (let [check! (var-get #'config/require-running-selected-route-continuity!)
+        certified #{:request/claim :request/finish}
+        uncertified #{:request/cancel}
+        original #{:request/claim :request/finish :request/cancel :page/home}
+        inventory {:checked-certified-route-ids certified
+                   :checked-route-ids original}]
+    (is (true? (check! true certified uncertified original inventory)))
+    (doseq [changed [(assoc inventory :checked-route-ids
+                                  (disj original :page/home))
+                     (assoc inventory :checked-route-ids
+                                  (conj original :page/unexpected))
+                     (assoc inventory :checked-route-ids
+                                  (conj (disj original :page/home)
+                                        :page/replacement))]]
+      (is (= :configured-instance-selected-routes-not-current
+             (reason #(check! true certified uncertified original changed)))
+          (pr-str changed)))))
 
 (deftest current-instance-detects-out-of-band-listener-shutdown
   ;; An out-of-band raw adapter stop is not tracked by the managed state,

@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1845: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1846: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -143,7 +143,14 @@
    v1845: Cross-check that the original host route inventory accounts for
    uncertified application routes too, at selected startup and current local
    inspection. An omitted unselected route cannot count as closed host route
-   adoption, though its dispatch and business semantics remain unproven."
+   adoption, though its dispatch and business semantics remain unproven.
+
+   v1846: Preserve the entire ORIGINAL observed host route-ID inventory, not
+   only the subset of selected and uncertified semantic routes. A current
+   inspection must match that original startup observation exactly, rejecting
+   even unselected nonsemantic host-route removals or insertions. This is
+   point-in-time, in-process inventory correspondence, NOT complete handler
+   identity or externally deployed router authority."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -378,6 +385,7 @@
                     (:normal-http-route-inventory host-report))
                  (set? (:checked-certified-route-ids host-report))
                  (set? (:checked-route-ids host-report))
+                 (every? qualified-keyword? (:checked-route-ids host-report))
                  (set? (:uncertified-application-route-ids selected))
                  (empty? (set/intersection
                           (:matched-certified-route-ids selected)
@@ -431,13 +439,15 @@
 
 (defn- require-running-selected-route-continuity!
   "Require the CURRENT original host route inventory to equal the saved
-   startup-selected certified catalog route set. This predicate accepts
+   startup-selected certified catalog route set AND the complete ORIGINAL
+   observed host route-ID set. This predicate accepts
    inventory evidence ONLY from the original issued probe inspection done
    by its caller, never as an independently issued certificate.
 
    An application WITHOUT a selected typed catalog must not acquire
    selected-catalog correspondence by implication."
-  [typed-selected? startup-route-ids startup-uncertified-route-ids inventory]
+  [typed-selected? startup-route-ids startup-uncertified-route-ids
+   startup-host-route-ids inventory]
   (when-not
    (if typed-selected?
      (and (set? startup-route-ids)
@@ -447,14 +457,22 @@
           (every? qualified-keyword? startup-uncertified-route-ids)
           (empty? (set/intersection startup-route-ids
                                     startup-uncertified-route-ids))
+          (set? startup-host-route-ids)
+          (seq startup-host-route-ids)
+          (every? qualified-keyword? startup-host-route-ids)
           (set? (:checked-certified-route-ids inventory))
           (set? (:checked-route-ids inventory))
+          ;; A selected semantic route-only subset check misses insertion or
+          ;; removal of unrelated physical host routes. Preserve the entire
+          ;; source-verified host inventory, without claiming handler bodies.
+          (= startup-host-route-ids (:checked-route-ids inventory))
           (= startup-route-ids (:checked-certified-route-ids inventory))
           (set/subset? (set/union startup-route-ids
                                   startup-uncertified-route-ids)
                        (:checked-route-ids inventory)))
      (and (nil? startup-route-ids)
-          (nil? startup-uncertified-route-ids)))
+          (nil? startup-uncertified-route-ids)
+          (nil? startup-host-route-ids)))
     (reject! :configured-instance-selected-routes-not-current))
   true)
 
@@ -583,6 +601,7 @@
         inspection-in-progress? (atom false)
         instance-generation (StartedInstanceGeneration.)
         selected-startup-routes (atom nil)
+        selected-startup-host-route-ids (atom nil)
         selected-startup-evidence (atom nil)
         original-listener-instance (atom nil)
         summary! (fn [] (pinned!)
@@ -642,7 +661,7 @@
                               (some? typed-trial) @selected-startup-routes
                               (:uncertified-application-route-ids
                                @selected-startup-evidence)
-                              inventory)
+                              @selected-startup-host-route-ids inventory)
                              ;; A fresh original issued probe challenge is
                              ;; required for this exact local listener. The
                              ;; captured URL locator supplies the target only;
@@ -687,6 +706,10 @@
                               :selected-catalog-route-continuity
                               (if typed-trial :matches-current-original-host-route-set
                                   :not-selected)
+                              :original-host-route-inventory-continuity
+                              (if typed-trial
+                                :matches-original-startup-probe-route-ids
+                                :not-selected)
                               :external-listener-liveness :not-established
                               :out-of-band-adapter-stops :not-established
                               :fresh-local-http-response :observed-at-current-inspection
@@ -769,7 +792,13 @@
                            ;; per-route HTTP response and exact router match.
                            ;; Missing even one route prevents startup success.
                            (require-selected-catalog-dispatch!
-                            selected-coverage observed)))
+                            selected-coverage observed)
+                           ;; Preserve the FULL authentic original host route
+                           ;; snapshot before any application-owned callback
+                           ;; can run. Current inspection must match it, not
+                           ;; only a selected semantic subset.
+                           (reset! selected-startup-host-route-ids
+                                   (:checked-route-ids observed))))
                        ;; Capture after the real HTTP startup checks. Failure
                        ;; here is handled by the existing adapter cleanup.
                        (when listener-instance!
