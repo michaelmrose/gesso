@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration-test
-  "v1809: The actual application startup entrypoint owns module issuance,
+  "v1810: The actual application startup entrypoint owns module issuance,
    inventory and order; users configure only contract and a selected adapter.
    All passing claims remain bounded to a real local Biff HTTP adapter."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -1093,6 +1093,71 @@
                   (is (= :matches-original-host-reported-object
                          (:physical-listener-instance observed)))
                   (is (= :stopped (:status stopped))))
+                (is (= :configured-instance-generation-not-current
+                       (reason inspect!)))
+                (finally
+                  (deliver release-inspection true)
+                  (deref stopping 15000 :stop-timed-out))))
+            (finally
+              (deliver release-inspection true)
+              (deref inspecting 15000 :inspection-timed-out)))))
+      (finally
+        (deliver release-inspection true)
+        (cleanup! s issued)))))
+
+(deftest failed-inflight-inspection-releases-managed-stop
+  ;; Complement v1809's successful inspection: a REAL listener disappears
+  ;; out of band while the current-generation inspection owns the managed
+  ;; lifecycle monitor. The pending managed stop must not pass the inspection,
+  ;; and it must still finish after the failed fresh HTTP challenge. Never
+  ;; turn the historical successful-start report into present-tense liveness.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        inspection-in-locator (promise)
+        release-inspection (promise)
+        inspection-armed? (atom false)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_] (:server @(:server-state s)))
+                       :base-url!
+                       (fn [system]
+                         (when @inspection-armed?
+                           (deliver inspection-in-locator true)
+                           (when-not (deref release-inspection 15000 false)
+                             (throw (ex-info "Inspection fixture timed out" {}))))
+                         (original-locator system))))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            inspect! (fn [] ((:inspect-generation! issued)
+                             instance-generation system))]
+        (is (= :current-at-inspection (:status (inspect!))))
+        (reset! inspection-armed? true)
+        (let [inspecting (future (reason inspect!))]
+          (try
+            (is (true? (deref inspection-in-locator 10000 false)))
+            (let [stop-entered (promise)
+                  stopping (future
+                             (deliver stop-entered true)
+                             ((:stop! issued)))]
+              (try
+                (is (true? (deref stop-entered 5000 false)))
+                (is (= :inspection-pending
+                       (deref inspecting 200 :inspection-pending)))
+                (is (= :stop-pending
+                       (deref stopping 200 :stop-pending)))
+                ;; This physical stop deliberately bypasses managed lifecycle
+                ;; synchronization; the managed status remains historical.
+                ((get-in s [:raw :biff.core/stop]) system)
+                (is (.isShutdown (:executor @(:server-state s))))
+                (is (= :verified-configured-start
+                       (:status ((:summary! issued)))))
+                (deliver release-inspection true)
+                (is (= :configured-instance-http-liveness-not-observed
+                       (deref inspecting 15000 :inspection-timed-out)))
+                (is (= :stopped
+                       (:status (deref stopping 15000 :stop-timed-out))))
                 (is (= :configured-instance-generation-not-current
                        (reason inspect!)))
                 (finally
