@@ -1253,3 +1253,138 @@
          (is (not-any? #(contains? checked %)
                        [:node :tx-key :snapshot-token :document
                         :root-private-key :delegate-private-key :signed-event])))))))
+
+(deftest v1900-delegate-revocation-preserves-root-with-monotonic-retirement
+  (let [generator (java.security.KeyPairGenerator/getInstance "Ed25519")
+        root (.generateKeyPair generator)
+        other-root (.generateKeyPair generator)
+        a (.generateKeyPair generator)
+        b (.generateKeyPair generator)
+        c (.generateKeyPair generator)
+        initial (v1898-delegation-config root (v1898-grant a))
+        p ((requiring-resolve
+            'gesso.assurance.proof.xtdb-gateway-local-key-lifecycle/prepare-process-local-root-policy!)
+           initial)
+        state! (:status! p)
+        revoke-delegation! (:revoke-delegation! p)
+        replace! (:replace-delegation! p)
+        revoke-root! (:revoke! p)
+        rotated-config (v1898-delegation-config root (v1898-grant b))
+        newer-root-config (v1898-delegation-config other-root (v1898-grant c))]
+    (is (= 1 (:policy-revision (state!))
+           (:delegation-generation (state!))))
+    (is (= :active (:delegation-lifecycle (state!))))
+    (is (= :stale-local-policy-revision
+           (intent-reason #(revoke-delegation! 0))))
+    (let [revoked (revoke-delegation! 1)]
+      (is (= 2 (:policy-revision revoked)))
+      (is (= :active (:lifecycle revoked)))
+      (is (= :revoked (:delegation-lifecycle revoked)))
+      (is (= 1 (:root-generation revoked)))
+      (is (= 1 (:retired-delegation-count revoked)
+             (:retired-delegate-key-count revoked)))
+      (is (= :local-delegation-revoked
+             (intent-reason #((:issue! p) nil nil))))
+      (is (= :local-delegation-already-revoked
+             (intent-reason #(revoke-delegation! 2))))
+      (is (= :stale-local-policy-revision
+             (intent-reason #(replace! 1 rotated-config))))
+      (is (= :previously-retired-delegation-not-reusable
+             (intent-reason #(replace! 2 initial))))
+      (is (= :previously-retired-delegate-key-not-reusable
+             (intent-reason #(replace! 2
+                               (v1898-delegation-config root (v1898-grant a))))))
+      (is (= :replacement-must-use-current-root
+             (intent-reason #(replace! 2 newer-root-config)))))
+    (let [replaced (replace! 2 rotated-config)]
+      (is (= 3 (:policy-revision replaced)))
+      (is (= 1 (:root-generation replaced)))
+      (is (= 2 (:delegation-generation replaced)))
+      (is (= :active (:delegation-lifecycle replaced)))
+      (is (= 1 (:retired-delegation-count replaced)
+             (:retired-delegate-key-count replaced))))
+    ;; The active delegate cannot be re-used under a different grant ID.
+    (is (= :previously-retired-delegate-key-not-reusable
+           (intent-reason #(replace! 3
+                             (v1898-delegation-config root (v1898-grant b))))))
+    (is (= :replacement-must-use-current-root
+           (intent-reason #(replace! 3 newer-root-config)))
+        "Root changes must use the root-rotation API")
+    (is (= :stale-local-policy-revision
+           (intent-reason #(replace! 2
+                             (v1898-delegation-config root (v1898-grant c))))))
+    (let [revoked-root (revoke-root! 3)]
+      (is (= :revoked (:lifecycle revoked-root)))
+      (is (= :revoked (:delegation-lifecycle revoked-root)))
+      (is (= :local-root-revoked
+             (intent-reason #(replace! 4
+                               (v1898-delegation-config root (v1898-grant c))))))
+      (is (= 4 (:policy-revision revoked-root)))
+      (is (= 2 (:retired-delegation-count revoked-root)
+             (:retired-delegate-key-count revoked-root)))
+      (is (= :not-established (:root-provisioning-independence revoked-root)
+             (:cross-process-revocation revoked-root)
+             (:durable-revocation-history revoked-root))))))
+
+(deftest v1900-delegate-transition-consumes-pending-and-retains-real-xtdb-boundary
+  (physical/with-proving-application!
+   (fn [app]
+     (let [generator (java.security.KeyPairGenerator/getInstance "Ed25519")
+           root (.generateKeyPair generator)
+           a (.generateKeyPair generator)
+           b (.generateKeyPair generator)
+           config-a (v1898-delegation-config root (v1898-grant a))
+           config-b (v1898-delegation-config root (v1898-grant b))
+           p ((requiring-resolve
+               'gesso.assurance.proof.xtdb-gateway-local-key-lifecycle/prepare-process-local-root-policy!)
+              config-a)
+           g (intent/prepare-one-shot! (:node app) (source ((:read! app))))
+           returned ((:submit! g))
+           issued-a ((:issue! p) g returned)
+           signed-a {:signature-base64
+                     (v1896-sign
+                      (.decode (java.util.Base64/getDecoder)
+                               ^String (:signing-bytes-base64 issued-a))
+                      (.getPrivate a))}]
+       (is (= 1 (:outstanding-challenge-count ((:status! p)))))
+       ;; Grant revoke consumes the lower-level challenge even if the
+       ;; caller already prepared a valid signature for it.
+       (let [revoked ((:revoke-delegation! p) 1)]
+         (is (= :active (:lifecycle revoked)))
+         (is (= :revoked (:delegation-lifecycle revoked)))
+         (is (= 0 (:outstanding-challenge-count revoked))))
+       (is (= :not-a-current-local-challenge
+              (intent-reason #((:inspect! p) issued-a signed-a))))
+       (is (= :local-delegation-revoked
+              (intent-reason #((:issue! p) g returned))))
+       (let [restored ((:replace-delegation! p) 2 config-b)
+             issued-b ((:issue! p) g returned)
+             signed-b {:signature-base64
+                       (v1896-sign
+                        (.decode (java.util.Base64/getDecoder)
+                                 ^String (:signing-bytes-base64 issued-b))
+                        (.getPrivate b))}
+             checked ((:inspect! p) issued-b signed-b)]
+         (is (= 3 (:policy-revision restored)))
+         (is (= 2 (:delegation-generation restored)))
+         (is (= 1 (:root-generation restored)))
+         (is (= :active (:delegation-lifecycle restored)))
+         (is (= :active-at-local-inspection
+                (:local-delegation-revocation checked)))
+         (is (= 2 (:local-delegation-generation checked)))
+         (is (= :not-established
+                (:independent-revocation checked)
+                (:independent-root-provisioning checked)
+                (:physical-event-correspondence checked)))
+         (is (= :none (:authority checked)
+                (:transaction-authority checked)
+                (:proof-discharge checked)))
+         (is (= :not-issued (:certificate checked)))
+         (is (= :not-a-current-local-challenge
+                (intent-reason #((:inspect! p) issued-b signed-b))))
+         (is (= 0 (:outstanding-challenge-count ((:status! p)))))
+         (is (= 7 (get-in (intent/inspect-pinned-intent! g returned)
+                         [:correspondence-premises :assurance-frontier :open-count])))
+         (is (not-any? #(contains? checked %)
+                       [:node :tx-key :snapshot-token :document
+                        :root-private-key :delegate-private-key :signed-event])))))))
