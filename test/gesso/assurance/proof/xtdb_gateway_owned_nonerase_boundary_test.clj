@@ -1106,3 +1106,150 @@
                         (assoc ((:read! app)) :external-change true)]])
        (is (= :incomplete-private-observational-premises
               (intent-reason #((:issue! pinned) g returned))))))))
+
+(defn- v1899-policy [root delegate]
+  ((requiring-resolve
+    'gesso.assurance.proof.xtdb-gateway-local-key-lifecycle/prepare-process-local-root-policy!)
+   (v1898-delegation-config root (v1898-grant delegate))))
+
+(deftest v1899-local-revocation-and-root-rotation-require-fresh-revision
+  (let [keygen (java.security.KeyPairGenerator/getInstance "Ed25519")
+        root-a (.generateKeyPair keygen)
+        delegate-a (.generateKeyPair keygen)
+        root-b (.generateKeyPair keygen)
+        delegate-b (.generateKeyPair keygen)
+        root-c (.generateKeyPair keygen)
+        delegate-c (.generateKeyPair keygen)
+        p (v1899-policy root-a delegate-a)
+        status! (:status! p)
+        rotate! (:rotate! p)
+        revoke! (:revoke! p)
+        before (status!)
+        config-b (v1898-delegation-config root-b (v1898-grant delegate-b))]
+    (is (= 1 (:policy-revision before) (:root-generation before)))
+    (is (= :active (:lifecycle before)))
+    (is (= 0 (:outstanding-challenge-count before)))
+    (is (= :this-wrapper-and-process-only (:revocation-scope before)))
+    (is (= :not-established (:root-provisioning-independence before)
+           (:cross-process-revocation before)
+           (:durable-revocation-history before)))
+    (is (= :not-admitted (:witness-admission before)))
+    (is (= :none (:authority before) (:proof-discharge before)))
+    (is (= :not-issued (:certificate before)))
+    (is (= :stale-local-policy-revision
+           (intent-reason #(rotate! 0 config-b))))
+    (is (= :stale-local-policy-revision
+           (intent-reason #(revoke! 0))))
+    (let [revoked (revoke! 1)]
+      (is (= 2 (:policy-revision revoked)))
+      (is (= 1 (:root-generation revoked)))
+      (is (= :revoked (:lifecycle revoked)))
+      (is (= :local-root-revoked
+             (intent-reason #((:issue! p) nil nil))))
+      (is (= :local-root-already-revoked
+             (intent-reason #(revoke! 2))))
+      (is (= :stale-local-policy-revision
+             (intent-reason #(rotate! 1 config-b)))))
+    (let [rotated (rotate! 2 config-b)]
+      (is (= 3 (:policy-revision rotated)))
+      (is (= 2 (:root-generation rotated)))
+      (is (= :active (:lifecycle rotated)))
+      (is (not= (:configured-root-spki-fingerprint before)
+                (:configured-root-spki-fingerprint rotated)))
+      (is (= :stale-local-policy-revision
+             (intent-reason #(rotate! 2 config-b))))
+      (is (= :previously-configured-root-not-reusable
+             (intent-reason #(rotate! 3 config-b))))
+      (is (= :previously-configured-root-not-reusable
+             (intent-reason #(rotate! 3 (v1898-delegation-config
+                                         root-a (v1898-grant delegate-a))))))
+      (is (= 3 (:policy-revision (status!)))))
+    (let [bad (assoc (v1898-delegation-config root-c (v1898-grant delegate-c))
+                     :root-signature-base64 "wrong")]
+      (is (= :root-signature-not-verified
+             (intent-reason #(rotate! 3 bad))))
+      (is (= 3 (:policy-revision (status!)))))
+    (is (= 4 (:policy-revision
+              (rotate! 3 (v1898-delegation-config
+                          root-c (v1898-grant delegate-c))))))
+    (is (= 3 (:root-generation (status!))))
+    (is (= :not-established (:root-provisioning-independence (status!))))))
+
+(deftest v1899-rotation-and-revocation-invalidate-previous-challenges
+  (physical/with-proving-application!
+   (fn [app]
+     (let [keygen (java.security.KeyPairGenerator/getInstance "Ed25519")
+           root-a (.generateKeyPair keygen)
+           delegate-a (.generateKeyPair keygen)
+           root-b (.generateKeyPair keygen)
+           delegate-b (.generateKeyPair keygen)
+           root-c (.generateKeyPair keygen)
+           delegate-c (.generateKeyPair keygen)
+           p (v1899-policy root-a delegate-a)
+           g (intent/prepare-one-shot! (:node app) (source ((:read! app))))
+           returned ((:submit! g))
+           issued-a ((:issue! p) g returned)
+           signed (fn [challenge key]
+                    {:signature-base64
+                     (v1896-sign (.decode (java.util.Base64/getDecoder)
+                                               ^String (:signing-bytes-base64 challenge))
+                                 (.getPrivate key))})]
+       (is (= 1 (:outstanding-challenge-count ((:status! p)))))
+       (let [rotated ((:rotate! p) 1
+                      (v1898-delegation-config root-b (v1898-grant delegate-b)))]
+         (is (= 0 (:outstanding-challenge-count rotated)))
+         (is (= 2 (:policy-revision rotated)))
+         (is (= 2 (:root-generation rotated)))
+         (is (= :not-a-current-local-challenge
+                (intent-reason #((:inspect! p) issued-a
+                                  (signed issued-a delegate-a))))))
+       (let [issued-b ((:issue! p) g returned)
+             checked ((:inspect! p) issued-b (signed issued-b delegate-b))]
+         (is (= :gesso.assurance.proof.xtdb-gateway-local-key-lifecycle/local-checked-candidate
+                (:type checked)))
+         (is (= 2 (:local-policy-revision checked)
+                (:local-root-generation checked)))
+         (is (= :active-at-local-inspection (:revocation-check checked)))
+         (is (= :not-established (:independent-revocation checked)
+                (:independent-root-provisioning checked)
+                (:physical-event-correspondence checked)
+                (:transaction-causality checked)))
+         (is (= :not-admitted (:witness-admission checked)))
+         (is (= :none (:authority checked) (:proof-discharge checked)
+                (:transaction-authority checked)))
+         (is (= :not-issued (:certificate checked)))
+         (is (= :not-a-current-local-challenge
+                (intent-reason #((:inspect! p) issued-b
+                                  (signed issued-b delegate-b))))))
+       (let [issued-b ((:issue! p) g returned)]
+         (is (= :candidate-signature-not-verified
+                (intent-reason #((:inspect! p) issued-b
+                                  (signed issued-b delegate-a)))))
+         (is (= :not-a-current-local-challenge
+                (intent-reason #((:inspect! p) issued-b
+                                  (signed issued-b delegate-b))))))
+       (let [issued-b ((:issue! p) g returned)
+             revoked ((:revoke! p) 2)]
+         (is (= :revoked (:lifecycle revoked)))
+         (is (= 3 (:policy-revision revoked)))
+         (is (= 0 (:outstanding-challenge-count revoked)))
+         (is (= :not-a-current-local-challenge
+                (intent-reason #((:inspect! p) issued-b
+                                  (signed issued-b delegate-b)))))
+         (is (= :local-root-revoked
+                (intent-reason #((:issue! p) g returned)))))
+       (let [rotated ((:rotate! p) 3
+                      (v1898-delegation-config root-c (v1898-grant delegate-c)))
+             issued-c ((:issue! p) g returned)
+             checked ((:inspect! p) issued-c (signed issued-c delegate-c))]
+         (is (= 4 (:policy-revision rotated)))
+         (is (= 3 (:root-generation rotated)))
+         (is (= :active (:lifecycle rotated)))
+         (is (= 4 (:local-policy-revision checked)))
+         (is (= :none (:authority checked) (:proof-discharge checked)))
+         (is (= :not-issued (:certificate checked)))
+         (is (= 7 (get-in (intent/inspect-pinned-intent! g returned)
+                          [:correspondence-premises :assurance-frontier :open-count])))
+         (is (not-any? #(contains? checked %)
+                       [:node :tx-key :snapshot-token :document
+                        :root-private-key :delegate-private-key :signed-event])))))))
