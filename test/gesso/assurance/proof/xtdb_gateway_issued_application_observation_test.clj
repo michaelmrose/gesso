@@ -18,6 +18,8 @@
              :as row-history]
             [gesso.assurance.proof.xtdb-gateway-issued-history-obligations
              :as history-obligations]
+            [gesso.assurance.proof.xtdb-gateway-issued-history-discharge-boundary
+             :as history-boundary]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test]
             [gesso.live.application-preflight.fixture :as app-fixture]
             [gesso.live.application-preflight :as application]
@@ -592,6 +594,14 @@
                      (set (keys (:certified-operation-open-conditions history)))))
               (is (= #{audit} (:uncertified-operation-ids history)))
               (is (= #{audit-route} (:uncertified-route-ids history)))
+              (let [boundary (:diagnostic-required-independent-history-evidence before)]
+                (is (= #{primary secondary}
+                       (set (keys (:certified-operation-required-evidence boundary)))))
+                (is (= #{audit} (:uncertified-operation-ids boundary)))
+                (is (= #{audit-route} (:uncertified-route-ids boundary)))
+                (is (= :none (:uncertified-history-evidence-claims boundary)))
+                (is (every? #(= #{} (:discharged-conditions %))
+                            (vals (:certified-operation-required-evidence boundary)))))
               (is (= :none (:uncertified-history-proof-conditions history)))
               (is (every? #(= #{} (:discharged-conditions %))
                           (vals (:certified-operation-open-conditions history)))))
@@ -685,6 +695,8 @@
                      (:original-open-proof-evidence after)))
               (is (= (:diagnostic-open-history-conditions before)
                      (:diagnostic-open-history-conditions after)))
+              (is (= (:diagnostic-required-independent-history-evidence before)
+                     (:diagnostic-required-independent-history-evidence after)))
               (is (seq (get-in after [:original-open-proof-evidence :open-obligations])))
               (is (= #{audit} (:uncertified-operation-ids after)))
               (is (= #{audit-route} (:uncertified-route-ids after)))
@@ -1044,6 +1056,110 @@
       (is (= :not-established
              (get-in after-erasure
                      [:diagnostic-open-history-conditions :historical-continuity])))
+      (is (= 1 @(:constructs environment)))
+      (is (nil? (read-command (resolution/record-id (:binding data))))))))
+
+(deftest v1877-independent-history-discharge-requirements-are-not-proof
+  ;; Only the ORIGINAL collector supplies the current checked source scope.
+  ;; This boundary publishes future independent witness REQUIREMENTS; no
+  ;; proposal, successful bounded query or copied map may discharge anything.
+  (let [op :request/claim
+        {:keys [data environment] :as env} (v1867-alias-case-env)
+        collector (application-observation/issue-current-issued-application-observer!
+                   (:contract env) (:catalog-source env))
+        summary! (:summary! collector)
+        initial (summary!)
+        open (:diagnostic-open-history-conditions initial)
+        boundary (:diagnostic-required-independent-history-evidence initial)
+        requirements history-boundary/independent-evidence-requirements
+        source-scope ((var-get (ns-resolve
+                               'gesso.assurance.proof.xtdb-gateway-issued-application-observation
+                               'original-current-scope!))
+                      (:contract env) (:catalog-source env))
+        original-origin (get-in initial [:certified-operation-proof-origins op])
+        entry (get-in boundary [:certified-operation-required-evidence op])
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}]
+    (is (= history-boundary/report-type (:type boundary)))
+    (is (= history-boundary/report-version (:version boundary)))
+    (is (= #{op} (set (keys (:certified-operation-required-evidence boundary)))))
+    (is (= history-obligations/required-conditions (set (keys requirements))))
+    (is (= original-origin (:original-certified-proof-origin entry)))
+    (is (= requirements (:required-evidence-by-condition entry)
+           (:independent-evidence-by-condition boundary)))
+    (is (= history-boundary/required-witness-bindings
+           (:required-witness-bindings boundary)))
+    (is (every? (fn [[_ requirement]]
+                  (and (keyword? (:independent-verifier requirement))
+                       (= 3 (count (:must-establish requirement)))
+                       (every? keyword? (:must-establish requirement))))
+                requirements))
+    (is (contains? (:insufficient-observations boundary)
+                   :bounded-selected-row-history-inventory))
+    (is (contains? (:insufficient-observations boundary)
+                   :copyable-caller-supplied-assertions))
+    (is (= #{} (:discharged-conditions boundary)
+           (:discharged-conditions entry)))
+    (is (= :independent-verifier-not-installed (:verification entry)))
+    (is (= :not-installed (:independent-evidence-verifier boundary)))
+    (is (= :not-established (:trusted-evidence-producer boundary)
+           (:trusted-snapshot-target-binding boundary)
+           (:history-retention-enforcement boundary)
+           (:complete-erasure-audit-or-prevention boundary)
+           (:full-bitemporal-interval-proof boundary)
+           (:history-continuity boundary)
+           (:original-kernel-proof-discharge boundary)))
+    (is (= :none (:discharge-authority boundary)
+           (:transaction-authority boundary)
+           (:retry-authority boundary) (:authority boundary)))
+    (is (= :not-issued (:certificate boundary)))
+    (is (= false (:source-relative-report-authenticates-deployment? boundary)))
+    (is (= boundary
+           (history-boundary/required-independent-evidence! source-scope open)))
+    (is (= :altered-or-incomplete-original-history-obligation-ledger
+           (reason #(history-boundary/required-independent-evidence!
+                     source-scope (assoc open :discharged-conditions
+                                         history-obligations/required-conditions)))))
+    (is (= :altered-or-incomplete-original-history-obligation-ledger
+           (reason #(history-boundary/required-independent-evidence!
+                     source-scope (assoc-in open
+                                           [:certified-operation-open-conditions op
+                                            :disposition] :proved)))))
+    (is (= :altered-or-incomplete-original-history-obligation-ledger
+           (reason #(history-boundary/required-independent-evidence!
+                     source-scope (assoc open :caller-proof "trusted")))))
+    (is (= :incomplete-source-bound-history-obligation-scope
+           (reason #(history-boundary/required-independent-evidence!
+                     (assoc source-scope :uncertified-operation-ids #{op}) open))))
+    (with-redefs [history-obligations/derive-open-history-conditions!
+                  (fn [_] {:all-conditions :discharged})]
+      (is (= :substituted-original-history-obligation-checker
+             (reason #(history-boundary/required-independent-evidence!
+                       source-scope open)))))
+    (seed! [:requests (:request data)])
+    (let [observed ((:observe! collector) op ctx invocation)
+          pinned ((:read-only-recheck! collector) op)]
+      (is (= boundary (:diagnostic-required-independent-history-evidence
+                       observed)
+             (:diagnostic-required-independent-history-evidence pinned)))
+      (is (= :visible-pinned-history-inventory-below-cap
+             (get-in pinned [:per-operation-visible-history-inventory op])))
+      (is (= #{} (get-in pinned
+                         [:diagnostic-required-independent-history-evidence
+                          :discharged-conditions]))))
+    (xt/execute-tx (db) [[:erase-docs :requests
+                           (:xt/id (:request data))]])
+    (let [erased ((:read-only-recheck! collector) op)]
+      (is (= :no-visible-pinned-history-records
+             (get-in erased [:per-operation-visible-history-inventory op])))
+      (is (= boundary (:diagnostic-required-independent-history-evidence erased)))
+      (is (= #{} (get-in erased
+                         [:diagnostic-required-independent-history-evidence
+                          :certified-operation-required-evidence op
+                          :discharged-conditions])))
+      (is (= :not-established
+             (get-in erased [:diagnostic-open-history-conditions
+                             :historical-continuity])))
       (is (= 1 @(:constructs environment)))
       (is (nil? (read-command (resolution/record-id (:binding data))))))))
 

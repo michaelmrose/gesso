@@ -45,13 +45,19 @@
 
    v1876: Derive, separately from the original proof kernel ledger, OPEN
    per-certified-operation history retention/erasure/coverage/identity
-   conditions. Bounded observations do not discharge these conditions."
+   conditions. Bounded observations do not discharge these conditions.
+
+   v1877: Describe future independently verified evidence required to close
+   those conditions, without accepting caller-provided witnesses or treating
+   the public requirements report as a proof kernel or authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as issued]
             [gesso.assurance.proof.xtdb-gateway-issued-application-recheck :as recheck]
             [gesso.assurance.proof.xtdb-gateway-issued-history-obligations :as history-obligations]
+            [gesso.assurance.proof.xtdb-gateway-issued-history-discharge-boundary
+             :as history-boundary]
             [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot]
             [gesso.live.application-preflight.certified-contract :as certified]))
 
@@ -223,6 +229,9 @@
   [contract-source catalog-source]
   (let [initial (original-current-scope! contract-source catalog-source)
         open-history-conditions (history-obligations/derive-open-history-conditions! initial)
+        history-evidence-boundary
+        (history-boundary/required-independent-evidence!
+         initial open-history-conditions)
         original-recheck recheck/compare-original-acquired-prestate!
         states (atom (into (sorted-map)
                            (for [operation (:certified-operation-ids initial)]
@@ -256,6 +265,8 @@
                     :uncertified-route-ids (:uncertified-route-ids initial)
                     :original-open-proof-evidence (:original-open-proof-evidence initial)
                     :diagnostic-open-history-conditions open-history-conditions
+                    :diagnostic-required-independent-history-evidence
+                    history-evidence-boundary
                     :per-operation-observations
                     (into (sorted-map)
                           (for [[operation state] snapshot]
