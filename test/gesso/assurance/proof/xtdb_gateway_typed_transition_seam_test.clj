@@ -826,3 +826,53 @@
              (:status report)))
       (is (= :not-established (:source-bound-gateway-return report)))
       (is (= (after b) (physical))))))
+
+(deftest v1856-declared-command-alias-screening
+  ;; The original v1251 plan permits an operation-ID alias for the abstract
+  ;; subject interface, but the lower typed interpreter remains strict by
+  ;; default. This extra, SOURCE-RELATIVE screen validates an explicitly
+  ;; declared correspondence without issuing a physical XTDB capability.
+  (let [b (before)
+        domain (candidate b)
+        alias-declaration (assoc-in source [:subject :interface :operation]
+                                    :example/claim)
+        binding {:operation-id :example/claim
+                 :domain-command-operation :claim
+                 :interface-operation :example/claim}
+        check! seam/check-source-relative-typed-domain-with-command-binding!]
+    (is (= :canonical-command-or-source-interface-mismatch
+           (reason #(seam/check-source-relative-typed-domain!
+                     :example/claim domain alias-declaration
+                     {:input/owner "claimed"} mapping proof-context))))
+    (is (some? check!) "Named source-relative alias checker must exist")
+    (when check!
+      (let [checked (check! :example/claim domain alias-declaration
+                            {:input/owner "claimed"} mapping proof-context
+                            binding)]
+        (is (= seam/source-check-type (:type checked)))
+        (is (= :original-and-independent-agree
+               (:abstract-interpreters checked)))
+        (is (= :source-relative-values-screened
+               (:original-read-premises checked)))
+        (is (= :explicit-domain-command-operation-id-alias
+               (:command-interface-relation checked)))
+        (is (= :caller-declared-not-authenticated
+               (:command-binding-provenance checked)))
+        (is (= :disabled (:physical-submission checked)))
+        (is (= :not-issued (:certificate checked)))
+        (is (= :none (:authority checked))))
+      (doseq [[label invalid]
+              [[:wrong-command (assoc binding :domain-command-operation
+                                      :cancel)]
+               [:wrong-operation (assoc binding :operation-id
+                                        :example/cancel)]
+               [:wrong-interface (assoc binding :interface-operation :cancel)]
+               [:unexpected-key (assoc binding :certificate :forged)]
+               [:missing-key (dissoc binding :domain-command-operation)]
+               [:metadata (with-meta binding {:trusted true})]
+               [:no-alias (assoc binding :interface-operation :claim)]]]
+        (is (= :invalid-source-relative-command-binding
+               (reason #(check! :example/claim domain alias-declaration
+                                {:input/owner "claimed"} mapping proof-context
+                                invalid)))
+            (pr-str label))))))

@@ -57,12 +57,10 @@ jobs:
             -n gesso.choreo.typed-nominal-transition-boundary-test \
             -n gesso.script.repo-integrity-metadata-test
 
-      # v1850: In addition to v1847 catalog closure and parallel Biff/XTDB
-      # correspondence, run the actual issued physical-catalog trial. This
-      # guards the v1849 dependency on the original whole-catalog verifier,
-      # not merely the selected executor or a source-only route predicate.
-      # These remain bounded local checks, not deployed business authority.
-      - name: Verify catalog closure, independent routes and issued XTDB trial
+      # v1856: Also run the original typed transition seam, including the
+      # explicit caller-declared command-alias screen. Physical preparation
+      # remains strict; this is not authenticated issued-plan correspondence.
+      - name: Verify typed seam, catalog closure and issued XTDB trial
         env:
           JAVA_TOOL_OPTIONS: >-
             -Xmx3g
@@ -74,7 +72,8 @@ jobs:
           clojure -M:test \
             -n gesso.live.application-preflight.certified-contract-test \
             -n gesso.assurance.proof.xtdb-gateway-biff-parallel-multiroute-test \
-            -n gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test
+            -n gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test \
+            -n gesso.assurance.proof.xtdb-gateway-typed-transition-seam-test
 
       # v1800: Exercise the actual local Biff lifecycle and read-only
       # HTTP dispatch gate, including managed stop and uncertain cleanup.

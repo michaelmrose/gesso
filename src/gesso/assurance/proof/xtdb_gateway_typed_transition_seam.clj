@@ -25,7 +25,12 @@
    reevaluates their values at preparation and submission, but does NOT
    authenticate the original invariant inventory or its kernel proof. A forged declaration can describe
    a different business policy. No certificate or application admission is
-   issued. A submitted result is not automatically a committed result."
+   issued.
+
+   v1856 provides a SEPARATE source-relative check for an explicit
+   domain-command/operation-ID alias. Its caller-supplied binding is NOT
+   authenticated as an original issued plan. The established physical
+   preparation and submit entry points remain strict and unchanged."
   (:require [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.transition :as constructor]
             [gesso.assurance.rule-eval :as rule-eval]
@@ -73,63 +78,87 @@
        (nil? (meta m))))
 
 (defn- source-relation!
-  [selected-operation candidate-source declaration inputs field-map]
-  (seams!)
-  (when-not (and (keyword? selected-operation) (namespace selected-operation)
-                 (plain-map? declaration)
-                 (plain-map? inputs)
-                 (plain-map? field-map)
-                 (= selected-operation (get-in declaration [:subject :id]))
-                 (plain-map? candidate-source)
-                 (plain-map? (:plan candidate-source))
-                 (= 1 (count (get-in candidate-source [:plan :commands])))
-                 (false? (get-in candidate-source [:plan :emit])))
-    (reject! :operation-or-candidate-source-mismatch))
-  (let [cmd (first (get-in candidate-source [:plan :commands]))
-        before (:model/before cmd)
-        after (:model/after cmd)]
-    (when-not (and (plain-map? before) (plain-map? after)
-                   (keyword? (:model/operation cmd))
-                   (= (:model/operation cmd)
-                      (get-in declaration [:subject :interface :operation])))
-      (reject! :canonical-command-or-source-interface-mismatch))
-    (let [state-ids (set (keys (:state-types declaration)))
-          physical-ids (set (keys before))
-          mapped (vals field-map)
-          _ (when-not (and (= state-ids (set (keys field-map)))
-                           (= (count mapped) (count (set mapped)))
-                           (= physical-ids (set mapped))
-                           (= physical-ids (set (keys after)))
-                           (every? keyword? mapped))
-              (reject! :incomplete-or-nonbijective-physical-field-map))
-          abstract-before (into {} (map (fn [[field physical-id]]
-                                          [field (get before physical-id)])) field-map)
-          abstract-after (into {} (map (fn [[field physical-id]]
-                                         [field (get after physical-id)])) field-map)
-          description (try (original-describe declaration)
-                           (catch Exception _
-                             (reject! :unsupported-abstract-declaration)))
-          observed (try (original-observe declaration abstract-before inputs abstract-after)
-                        (catch Exception _
-                          (reject! :invalid-abstract-transition-values)))
-          independent (try (independent-observe declaration abstract-before inputs abstract-after)
-                           (catch Exception _
-                             (reject! :invalid-independent-transition-values)))]
-      (when-not (and (= transition/description-type (:type description))
-                     (= transition/observation-type (:type observed))
-                     (= independent/report-type (:type independent))
-                     (= (:fingerprint description) (:transition-fingerprint observed))
-                     (true? (:matches? observed))
-                     (true? (:matches? independent))
-                     (= (mapv #(get observed %) [:guard-holds? :assignments-hold? :frame-holds?])
-                        (mapv #(get independent %) [:guard-holds? :assignments-hold? :frame-holds?]))
-                     (= :none (:authority description) (:authority observed)
-                        (:authority independent))
-                     (= :not-admitted (:admission description) (:admission observed)
-                        (:admission independent)))
-        (reject! :original-and-independent-abstract-relation-not-established))
-      (seams!)
-      true)))
+  ([selected-operation candidate-source declaration inputs field-map]
+   (source-relation! selected-operation candidate-source declaration
+                     inputs field-map nil))
+  ([selected-operation candidate-source declaration inputs field-map
+    declared-command-binding]
+    (seams!)
+    (when-not (and (keyword? selected-operation) (namespace selected-operation)
+                   (plain-map? declaration)
+                   (plain-map? inputs)
+                   (plain-map? field-map)
+                   (= selected-operation (get-in declaration [:subject :id]))
+                   (plain-map? candidate-source)
+                   (plain-map? (:plan candidate-source))
+                   (= 1 (count (get-in candidate-source [:plan :commands])))
+                   (false? (get-in candidate-source [:plan :emit])))
+      (reject! :operation-or-candidate-source-mismatch))
+    (let [cmd (first (get-in candidate-source [:plan :commands]))
+          domain-command (:model/operation cmd)
+          interface-command (get-in declaration [:subject :interface :operation])
+          before (:model/before cmd)
+          after (:model/after cmd)]
+      ;; An explicit command alias is only permitted in this SOURCE-RELATIVE
+      ;; semantic screen. The original 5-argument path used by physical
+      ;; submission stays strict. A caller can copy or forge this binding;
+      ;; the higher issued-plan boundary must establish its true provenance.
+      (when (some? declared-command-binding)
+        (when-not (and (plain-map? declared-command-binding)
+                       (= #{:operation-id :domain-command-operation
+                            :interface-operation}
+                          (set (keys declared-command-binding)))
+                       (= selected-operation (:operation-id declared-command-binding))
+                       (= domain-command (:domain-command-operation
+                                          declared-command-binding))
+                       (keyword? domain-command)
+                       (not= :create domain-command)
+                       (not= domain-command selected-operation)
+                       (= selected-operation interface-command
+                          (:interface-operation declared-command-binding)))
+          (reject! :invalid-source-relative-command-binding)))
+      (when-not (and (plain-map? before) (plain-map? after)
+                     (keyword? domain-command)
+                     (or (= domain-command interface-command)
+                         (some? declared-command-binding)))
+        (reject! :canonical-command-or-source-interface-mismatch))
+      (let [state-ids (set (keys (:state-types declaration)))
+            physical-ids (set (keys before))
+            mapped (vals field-map)
+            _ (when-not (and (= state-ids (set (keys field-map)))
+                             (= (count mapped) (count (set mapped)))
+                             (= physical-ids (set mapped))
+                             (= physical-ids (set (keys after)))
+                             (every? keyword? mapped))
+                (reject! :incomplete-or-nonbijective-physical-field-map))
+            abstract-before (into {} (map (fn [[field physical-id]]
+                                            [field (get before physical-id)])) field-map)
+            abstract-after (into {} (map (fn [[field physical-id]]
+                                           [field (get after physical-id)])) field-map)
+            description (try (original-describe declaration)
+                             (catch Exception _
+                               (reject! :unsupported-abstract-declaration)))
+            observed (try (original-observe declaration abstract-before inputs abstract-after)
+                          (catch Exception _
+                            (reject! :invalid-abstract-transition-values)))
+            independent (try (independent-observe declaration abstract-before inputs abstract-after)
+                             (catch Exception _
+                               (reject! :invalid-independent-transition-values)))]
+        (when-not (and (= transition/description-type (:type description))
+                       (= transition/observation-type (:type observed))
+                       (= independent/report-type (:type independent))
+                       (= (:fingerprint description) (:transition-fingerprint observed))
+                       (true? (:matches? observed))
+                       (true? (:matches? independent))
+                       (= (mapv #(get observed %) [:guard-holds? :assignments-hold? :frame-holds?])
+                          (mapv #(get independent %) [:guard-holds? :assignments-hold? :frame-holds?]))
+                       (= :none (:authority description) (:authority observed)
+                          (:authority independent))
+                       (= :not-admitted (:admission description) (:admission observed)
+                          (:admission independent)))
+          (reject! :original-and-independent-abstract-relation-not-established))
+        (seams!)
+        true))))
 
 (defn- screened-read-premises!
   "Reconstruct every claimed read obligation from ALL declared invariant rules
@@ -233,6 +262,16 @@
   :gesso.assurance.proof.xtdb-gateway-typed-transition-seam/domain-source-check)
 (def source-check-version 1)
 
+(defn- source-check-report [selected-operation]
+  {:type source-check-type :version source-check-version
+   :operation-id selected-operation
+   :abstract-interpreters :original-and-independent-agree
+   :original-read-premises :source-relative-values-screened
+   :complete-domain-field-projection :bijective
+   :source-policy-authenticity :not-established
+   :physical-submission :disabled
+   :certificate :not-issued :admission :not-admitted :authority :none})
+
 (defn check-source-relative-typed-domain!
   "Check the EXACT one-domain-command source against the original AND
    independent typed transition interpreters and original declared read
@@ -244,14 +283,29 @@
   (screened-read-premises! selected-operation domain-source declaration inputs
                            field-map proof-context)
   (seams!)
-  {:type source-check-type :version source-check-version
-   :operation-id selected-operation
-   :abstract-interpreters :original-and-independent-agree
-   :original-read-premises :source-relative-values-screened
-   :complete-domain-field-projection :bijective
-   :source-policy-authenticity :not-established
-   :physical-submission :disabled
-   :certificate :not-issued :admission :not-admitted :authority :none})
+  (source-check-report selected-operation))
+
+(defn check-source-relative-typed-domain-with-command-binding!
+  "Screen an EXPLICIT, caller-declared operation-ID/actual-domain-command
+   alias against the original and independent guarded transition interpreters
+   and all source-relative read premises. The binding's exact keys must agree
+   with the selected operation, declared interface, and actual domain command.
+   This is NOT an authenticated issued-plan binding, not a physical gateway,
+   and not an admission of the alias into canonical transaction execution.
+   The original strict checker and the physical submit path remain unchanged."
+  [selected-operation domain-source declaration inputs field-map proof-context
+   declared-command-binding]
+  (when-not (some? declared-command-binding)
+    (reject! :invalid-source-relative-command-binding))
+  (source-relation! selected-operation domain-source declaration inputs field-map
+                    declared-command-binding)
+  (screened-read-premises! selected-operation domain-source declaration inputs
+                           field-map proof-context)
+  (seams!)
+  (assoc (source-check-report selected-operation)
+         :command-interface-relation
+         :explicit-domain-command-operation-id-alias
+         :command-binding-provenance :caller-declared-not-authenticated))
 
 (defn- prepare-typed-transition-one-shot!
   "Join the original abstract guarded transition to an actual plan-bound,
