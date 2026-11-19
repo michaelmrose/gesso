@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1817: Real JDK listener replacement, inspection, managed stop and startup
+  "v1818: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -584,5 +584,58 @@
                (reason #((:start-once! issued) {})))))
       (finally
         (deliver release-challenge true)
+        (deref starting 15000 :start-timed-out)
+        (cleanup! s issued)))))
+
+(deftest rejected-stop-does-not-hide-failed-start-cleanup
+  ;; The successful-start race in v1817 is not sufficient to establish the
+  ;; failure path. A managed stop must reject a :starting application, while
+  ;; the original guarded adapter must still clean its PHYSICAL listener if
+  ;; that startup's local HTTP locator subsequently fails. Neither a prior
+  ;; stop rejection nor observed physical cleanup permits a successful-start
+  ;; report, retry, generation inspection, or release admission.
+  (let [s (scenario :honest)
+        entered (promise)
+        release-start (promise)
+        issued (config/issue-configured-checked-http-application!
+                (assoc (original-source s true)
+                       :base-url!
+                       (fn [_]
+                         (deliver entered true)
+                         (when-not (deref release-start 15000 false)
+                           (throw (ex-info "Failed startup fixture timed out"
+                                           {:reason :fixture-timeout})))
+                         (throw (ex-info "Original startup URL locator failed"
+                                         {:reason :fixture-start-locator-failed})))) )
+        starting (future (reason #((:start-once! issued) {})))]
+    (try
+      (is (true? (deref entered 15000 false)))
+      (let [{:keys [server executor]} @(:server-state s)]
+        (is (some? server) "Original physical listener opened before failure")
+        (is (not (.isShutdown executor)))
+        (is (= :starting (:status ((:summary! issued)))))
+        (is (= :configured-start-in-progress
+               (reason #((:stop! issued)))))
+        (is (not (.isShutdown executor))
+            "Rejected managed stop did not prematurely close the adapter")
+        (deliver release-start true)
+        (is (= :fixture-start-locator-failed
+               (deref starting 15000 :start-timed-out)))
+        (is (.isShutdown executor)
+            "Original guarded adapter cleans the failed physical listener")
+        (is (= :start-failed-physical-state-unknown
+               (:status ((:summary! issued)))))
+        (is (= :start-failed-physical-state-unknown
+               (:status ((:stop! issued)))))
+        (is (= :configured-start-already-attempted
+               (reason #((:start-once! issued) {}))))
+        (is (= :configured-instance-not-current
+               (reason #((:inspect-running! issued) {}))))
+        (is (= :configured-instance-generation-not-current
+               (reason #((:inspect-generation! issued) nil {}))))
+        (is (= :start-failed-physical-state-unknown
+               (:status ((:summary! issued))))))
+      (finally
+        (deliver release-start true)
         (deref starting 15000 :start-timed-out)
         (cleanup! s issued)))))
