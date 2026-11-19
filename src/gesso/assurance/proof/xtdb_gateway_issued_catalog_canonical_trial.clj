@@ -85,7 +85,12 @@
    accepting a caller-produced proof-context map. It checks the derivation's
    declaration against this same issued executor, then tests the captured
    prestate and inputs. This is still source-relative, not persistent custody
-   of the physical read, transaction-time freshness or proof admission."
+   of the physical read, transaction-time freshness or proof admission.
+
+   v1863: Retain the EXACT original checked full-catalog open assumptions,
+   premises, per-operation obligations and selected source identity in the
+   source-derived/pinned executor observation. A successful abstract or
+   physical prestate check neither closes nor discharges any obligation."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -650,6 +655,46 @@
         (pinned!)
         true))))
 
+(defn- original-executor-open-proof-evidence!
+  "Select original, already-checked, UNRESOLVED proof evidence from the
+   same issued-plan binding as the candidate. The source check in
+   current-binding! already rejects incomplete catalog/route coverage; this
+   secondary shape/selected-row check prevents diagnostic reports from
+   silently omitting the selected operation or presenting copied proof
+   evidence as discharge. No proof kernel or receipt is invoked here."
+  [initial operation]
+  (let [evidence (:catalog-open-evidence initial)
+        rows (:certified-operation-open-evidence evidence)
+        selected (get rows operation)
+        catalog-operations (get-in initial [:catalog-route-scope
+                                            :catalog-operations])]
+    (when-not (and (map? evidence)
+                   (= #{:open-assumptions :open-premises :open-obligations
+                        :certified-operation-open-evidence}
+                      (set (keys evidence)))
+                   (every? set? ((juxt :open-assumptions :open-premises
+                                       :open-obligations) evidence))
+                   (map? rows)
+                   (set? catalog-operations)
+                   (= catalog-operations (set (keys rows)))
+                   (map? selected)
+                   (= #{:route-ids :open-premises :open-obligations}
+                      (set (keys selected)))
+                   (= (:route-ids initial) (:route-ids selected))
+                   (every? set? ((juxt :route-ids :open-premises
+                                       :open-obligations) selected)))
+      (reject! :original-issued-open-proof-evidence-not-established))
+    {:catalog-open-evidence evidence
+     :selected-operation-open-evidence selected
+     :selected-operation-source-identity
+     (select-keys initial [:catalog-fingerprint
+                           :transition-fingerprint
+                           :proof-fingerprint :route-ids])
+     :catalog-proof-evidence-scope :original-source-rechecked
+     :proof-obligations-disposition :retained-open-not-discharged
+     :original-kernel-proof-discharge :not-established
+     :physical-refinement-proof-discharge :not-established}))
+
 (defn check-current-issued-executor-typed-command-alias!
   "Run the EXACT original registered executor as far as its guarded, checked
    candidate boundary, and abort BEFORE the canonical Gesso transaction
@@ -670,7 +715,11 @@
    proof-context and derives the exact invariant/read-premise inventory from
    the fully checked original catalog. It also compares the derived semantic
    declaration to the original issued construction BEFORE calling any
-   application callbacks. Its physical read remains only point-in-time."
+   application callbacks. Its physical read remains only point-in-time.
+
+   Any successful diagnostic retains the original whole-catalog open proof
+   evidence and exact selected operation evidence without claiming that a
+   typed check, snapshot read or constructor capture discharged it."
   ([contract-source catalog-source operation ctx invocation proof-context]
    (check-current-issued-executor-typed-command-alias!
     contract-source catalog-source operation ctx invocation proof-context
@@ -767,8 +816,9 @@
         (when-not (= initial
                      (current-binding! contract-source catalog-source operation true))
           (reject! :original-executor-source-changed-after-capture))
-        (assoc screen
-               :type issued-executor-candidate-alias-report-type
+        (merge screen
+               (original-executor-open-proof-evidence! initial operation)
+               {:type issued-executor-candidate-alias-report-type
                :version issued-executor-candidate-alias-report-version
                :candidate-domain-source :original-executor-guarded-construct
                :candidate-input-source :original-executor-acquisition
@@ -794,7 +844,7 @@
                :transaction-time-prestate :not-established
                :prestate-aba-exclusion :not-established
                :certificate :not-issued :admission :not-admitted
-               :transaction-authority :none :authority :none)))))))
+               :transaction-authority :none :authority :none})))))))
 
 (defn- report [operation status invoked? catalog-open-evidence
                catalog-route-scope selected-operation-source-identity]

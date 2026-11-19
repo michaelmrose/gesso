@@ -566,6 +566,33 @@
              (:external-before source-bound)))
       (is (= :original-and-independent-source-relative
              (:typed-abstract-alias-correspondence source-bound)))
+      (let [original (checked-assembly/check-declared-route-coverage!
+                      {:contract-source contract
+                       :catalog-source catalog-source})
+            expected (select-keys original
+                                  [:open-assumptions :open-premises
+                                   :open-obligations
+                                   :certified-operation-open-evidence])
+            selected (get-in expected
+                             [:certified-operation-open-evidence operation])
+            alias (bound/check-current-issued-command-alias!
+                   contract catalog-source operation)]
+        (is (seq (:open-obligations expected))
+            "A matching XTDB row must not discharge source obligations")
+        (is (= expected (:catalog-open-evidence source-bound)))
+        (is (= selected (:selected-operation-open-evidence source-bound)))
+        (is (= (get-in alias [:source-identity])
+               (:selected-operation-source-identity source-bound)))
+        (is (= :original-source-rechecked
+               (:catalog-proof-evidence-scope source-bound)))
+        (is (= :retained-open-not-discharged
+               (:proof-obligations-disposition source-bound)))
+        (is (= :not-established
+               (:original-kernel-proof-discharge source-bound)
+               (:physical-refinement-proof-discharge source-bound)))
+        (is (= (set (keys (:certified-operation-open-evidence expected)))
+               (get-in original [:catalog-operations]))
+            "Do not collapse full catalog proof evidence to selected row"))
       (is (= :disabled (:canonical-physical-alias-execution source-bound)))
       (is (= :none (:authority source-bound)
              (:transaction-authority source-bound)))
@@ -587,6 +614,11 @@
       (is (= :pinned-same-node-document-match (:external-before result)))
       (is (= :caller-context-node-unattested
              (:external-basis-authenticity result)))
+      (is (= :retained-open-not-discharged
+             (:proof-obligations-disposition result)))
+      (is (= :not-established
+             (:original-kernel-proof-discharge result)
+             (:physical-refinement-proof-discharge result)))
       (is (= :not-established (:transaction-time-prestate result)
              (:prestate-aba-exclusion result)))
       (is (= :blocked-before-canonical-writer (:physical-submission result)))
