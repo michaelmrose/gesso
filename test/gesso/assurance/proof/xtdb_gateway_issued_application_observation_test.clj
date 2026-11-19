@@ -8,6 +8,8 @@
             [gesso.assurance.proof.checked-authorization-assembly :as checked-assembly]
             [gesso.assurance.proof.xtdb-gateway-issued-application-observation
              :as application-observation]
+            [gesso.assurance.proof.xtdb-gateway-issued-application-recheck
+             :as read-only-recheck]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test]
             [gesso.live.application-preflight.fixture :as app-fixture]
             [gesso.live.application-preflight :as application]
@@ -141,6 +143,9 @@
     (is (false? (:physical-state-rechecked-at-summary? initial)))
     (is (= :original-source-rechecked-at-summary
            (:source-stability initial)))
+    (is (= {operation :not-eligible} (:per-operation-read-only-rechecks initial)))
+    (is (= :original-observation-required-for-read-only-recheck
+           (reason #((:read-only-recheck! observer) operation))))
     (is (false? (:all-certified-operations-individually-observed? initial)))
     (with-redefs [checked-assembly/check-declared-route-coverage!
                   (fn [& _] {:type checked-assembly/coverage-report-type})]
@@ -191,6 +196,45 @@
                        {:biff.xtdb/node (db)}
                        {:binding (:binding data) :mode :submit}))))
       (is (= result ((:summary! observer)))))
+    ;; New pinned follow-up reads must neither rerun the original command
+    ;; constructor nor replace the historical checked observation.
+    (let [follow ((:read-only-recheck! observer) operation)]
+      (is (= :source-document-matched-at-read
+             (get-in follow [:per-operation-read-only-rechecks operation])))
+      (is (= 1 (:observation-count follow)))
+      (is (= :not-established (:physical-prestate-currentness follow)))
+      (is (= :later-source-accessor-against-new-pinned-read-not-historical-candidate
+             (:read-only-recheck-meaning follow)))
+      (is (= :none (:read-only-recheck-transaction-authority follow)))
+      (is (= 1 @(:constructs environment)))
+      (is (not-any? #(contains? follow %)
+                    [:original-context :original-invocation :before :target
+                     :node :snapshot-token :read-only-recheck! :executor])))
+    ;; Replacing the read-only verifier must fail closed without modifying
+    ;; the historical candidate or invoking an application constructor.
+    (with-redefs [read-only-recheck/compare-original-acquired-prestate!
+                  (fn [& _] {:comparison :source-document-matched-at-read})]
+      (is (= :substituted-original-read-only-recheck-function
+             (reason #((:read-only-recheck! observer) operation)))))
+    (is (= :failed
+           (get-in ((:summary! observer))
+                   [:per-operation-read-only-rechecks operation])))
+    (is (= 1 @(:constructs environment)))
+    (seed! [:requests (assoc (:request data) :owner "later-writer")])
+    (let [changed ((:read-only-recheck! observer) operation)]
+      (is (= :source-document-differed-at-read
+             (get-in changed [:per-operation-read-only-rechecks operation])))
+      (is (= #{operation} (:observed-operation-ids changed)))
+      (is (= :not-established (:physical-prestate-currentness changed)))
+      (is (= 1 @(:constructs environment)))
+      (is (= "later-writer" (:owner (read-request (:xt/id (:request data))))))
+      (is (nil? (read-command (resolution/record-id (:binding data))))))
+    (seed! [:requests (:request data)])
+    (is (= :source-document-matched-at-read
+           (get-in ((:read-only-recheck! observer) operation)
+                   [:per-operation-read-only-rechecks operation])))
+    (is (= 1 @(:constructs environment)))
+    ;; Failed original attempts do not gain a fresh-read escape hatch.
     ;; Failed observation attempts are consumed and NEVER counted as evidence.
     (let [failed (application-observation/issue-current-issued-application-observer!
                   (:contract env) (:catalog-source env))]
@@ -205,6 +249,8 @@
         (is (= #{} (:in-flight-observation-ids summary)))
         (is (= :not-observed
                (get-in summary [:per-operation-observations operation])))
+        (is (= :original-observation-required-for-read-only-recheck
+               (reason #((:read-only-recheck! failed) operation))))
         (is (= :issued-application-observation-already-attempted
                (reason #((:observe! failed) operation {:biff.xtdb/node (db)}
                          {:binding (:binding data) :mode :submit}))))))))
@@ -256,6 +302,7 @@
         (is (= #{} (:in-flight-observation-ids value)
                (:failed-observation-ids value)))
         (is (= :not-established (:physical-prestate-currentness value)))
+        (is (= {op :not-checked} (:per-operation-read-only-rechecks value)))
         (is (= value (summary!)))
         (is (= 1 @(:constructs (:environment env))))
         (is (nil? (read-command
@@ -419,6 +466,24 @@
               (is (= :not-established (:physical-prestate-currentness after)))
               (is (= :historical-individual-pinned-reads
                      (:physical-observation-temporality after)))
+              ;; Later independent reads of each ORIGINAL source do not
+              ;; replay either executor and do not make their two snapshots
+              ;; a shared or transaction-authoritative basis.
+              (let [first-refresh ((:read-only-recheck! observer) primary)
+                    second-refresh ((:read-only-recheck! observer) secondary)]
+                (is (= :source-document-differed-at-read
+                       (get-in first-refresh
+                               [:per-operation-read-only-rechecks primary])))
+                (is (= :source-document-matched-at-read
+                       (get-in second-refresh
+                               [:per-operation-read-only-rechecks secondary])))
+                (is (= :source-document-differed-at-read
+                       (get-in second-refresh
+                               [:per-operation-read-only-rechecks primary])))
+                (is (= 2 (:observation-count second-refresh)))
+                (is (= :not-established
+                       (:joint-snapshot-basis second-refresh)
+                       (:physical-prestate-currentness second-refresh))))
               (is (false? (:physical-state-rechecked-at-summary? after)))
               (is (= :original-source-rechecked-at-summary
                      (:source-stability after)))
@@ -459,4 +524,8 @@
                          (resolution/record-id (:binding second-row)))))
               (is (= :issued-application-observation-already-attempted
                      (reason #(observe! secondary ctx invoke-secondary))))
-              (is (= after (summary!))))))))))
+              (is (= (dissoc after :per-operation-read-only-rechecks)
+                     (dissoc (summary!) :per-operation-read-only-rechecks)))
+              (is (= {primary :source-document-differed-at-read
+                      secondary :source-document-matched-at-read}
+                     (:per-operation-read-only-rechecks (summary!)))))))))))

@@ -13,11 +13,18 @@
    atomically updated, per-operation ledger. Concurrent summaries distinguish
    in-flight, failed, and completed probes without mixing consumed-attempt
    and qualified-evidence snapshots. Historical pinned reads are never
-   represented as current physical prestate guarantees."
+   represented as current physical prestate guarantees.
+
+   v1870: A separately requested follow-up read rechecks ONLY the original
+   source document/target accessor against a NEW pinned XTDB snapshot. The
+   original executor and constructor are never rerun. The result is a later
+   point-in-time comparison, NOT equality to the historical candidate,
+   continuous freshness or transaction authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
             [gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial :as issued]
+            [gesso.assurance.proof.xtdb-gateway-issued-application-recheck :as recheck]
             [gesso.live.application-preflight.certified-contract :as certified]))
 
 (def report-type
@@ -187,6 +194,7 @@
    atomic application-wide behavior or production adoption."
   [contract-source catalog-source]
   (let [initial (original-current-scope! contract-source catalog-source)
+        original-recheck recheck/compare-original-acquired-prestate!
         states (atom (into (sorted-map)
                            (for [operation (:certified-operation-ids initial)]
                              [operation :not-attempted])))
@@ -222,6 +230,15 @@
                     (into (sorted-map)
                           (for [[operation state] snapshot]
                             [operation (get qualified operation :not-observed)]))
+                    :per-operation-read-only-rechecks
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:read-only-recheck state :not-checked)
+                                         :not-eligible)]))
+                    :read-only-recheck-meaning
+                    :later-source-accessor-against-new-pinned-read-not-historical-candidate
+                    :read-only-recheck-transaction-authority :none
                     :per-operation-attempt-status
                     (into (sorted-map)
                           (for [[operation state] snapshot]
@@ -271,7 +288,11 @@
                                    ctx invocation nil :pinned-source-derived-premises)
                            checked (qualified-observation! initial operation result)]
                        (recheck!)
-                       (swap! states assoc operation {:evidence checked})
+                       (swap! states assoc operation
+                              {:evidence checked
+                               :original-context ctx
+                               :original-invocation invocation
+                               :read-only-recheck :not-checked})
                        (summary!))
                      (catch Throwable failure
                        ;; Never convert an unsuccessful/ambiguous attempt
@@ -282,6 +303,60 @@
                                 (if (= :in-flight (get current operation))
                                   (assoc current operation :failed)
                                   current)))
-                       (throw failure))))]
+                       (throw failure))))
+        read-only-recheck! (fn [operation]
+                             (when-not (contains? (:certified-operation-ids initial)
+                                                  operation)
+                               (reject! :operation-not-originally-certified))
+                             (recheck!)
+                             (let [[prior _] (swap-vals!
+                                              states
+                                              (fn [current]
+                                                (let [entry (get current operation)]
+                                                  (if (and (map? entry)
+                                                           (not= :in-flight
+                                                                 (:read-only-recheck entry)))
+                                                    (assoc-in current [operation :read-only-recheck]
+                                                              :in-flight)
+                                                    current))))
+                                   entry (get prior operation)]
+                               (when-not (map? entry)
+                                 (reject! :original-observation-required-for-read-only-recheck))
+                               (when (= :in-flight (:read-only-recheck entry))
+                                 (reject! :read-only-recheck-already-in-flight))
+                               (try
+                                 (when-not (identical? original-recheck
+                                                       (var-get #'recheck/compare-original-acquired-prestate!))
+                                   (reject! :substituted-original-read-only-recheck-function))
+                                 (let [source (get-in contract-source
+                                                      [:certified-operations operation :current-source])
+                                       executor (get-in contract-source
+                                                        [:certified-operations operation :executor])
+                                       report (original-recheck
+                                               source executor operation
+                                               (:original-context entry)
+                                               (:original-invocation entry))]
+                                   (when-not (and (= recheck/report-type (:type report))
+                                                  (= recheck/report-version (:version report))
+                                                  (= operation (:operation-id report))
+                                                  (#{:source-document-matched-at-read
+                                                     :source-document-differed-at-read}
+                                                   (:comparison report))
+                                                  (= :not-established
+                                                     (:historical-candidate-equality report)
+                                                     (:currentness-after-read report))
+                                                  (= :none (:transaction-authority report)
+                                                     (:authority report)))
+                                     (reject! :unqualified-original-read-only-recheck))
+                                   (recheck!)
+                                   (swap! states assoc-in
+                                          [operation :read-only-recheck]
+                                          (:comparison report))
+                                   (summary!))
+                                 (catch Throwable failure
+                                   (swap! states assoc-in [operation :read-only-recheck]
+                                          :failed)
+                                   (throw failure)))))]
     {:type report-type :version report-version
-     :observe! observe! :summary! summary!}))
+     :observe! observe! :summary! summary!
+     :read-only-recheck! read-only-recheck!}))
