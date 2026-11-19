@@ -85,6 +85,8 @@
     (is (fn? inspect!))
     (is (= {operation :not-eligible}
            (:per-operation-erasure-audit-intake (summary!))))
+    (is (= {operation :not-eligible}
+           (:per-operation-signed-erasure-claim-pinned-visibility (summary!))))
     (is (= :original-observation-required-for-erasure-audit
            (reason #(inspect! operation {}))))
     (is (= :operation-not-originally-certified
@@ -123,6 +125,13 @@
         (let [accepted (inspect! operation signed)]
           (is (= :erase-commit-record-present-in-supplied-segment
                  (get-in accepted [:per-operation-erasure-audit-intake operation])))
+          (is (= :signed-erase-claim-with-current-valid-row-at-pinned-read
+                 (get-in accepted
+                         [:per-operation-signed-erasure-claim-pinned-visibility
+                          operation])))
+          (is (= :diagnostic-point-in-time-comparison-not-erase-causality
+                 (:signed-erasure-claim-pinned-visibility-meaning accepted)))
+          (is (false? (:signed-erasure-claim-proves-physical-erase? accepted)))
           (is (= :private-original-and-later-pinned-binding-only
                  (:erasure-audit-intake-scope accepted)))
           (is (= :not-established (:erasure-audit-producer-completeness accepted)))
@@ -167,6 +176,10 @@
         (let [next-read ((:read-only-recheck! collector) operation)]
           (is (= :not-checked
                  (get-in next-read [:per-operation-erasure-audit-intake operation])))
+          (is (= :not-checked
+                 (get-in next-read
+                         [:per-operation-signed-erasure-claim-pinned-visibility
+                          operation])))
           (is (= :audit-segment-source-binding-mismatch
                  (reason #(inspect! operation signed)))))
         (is (= 1 @(:constructs (:environment env))))
@@ -266,6 +279,10 @@
                        :head-sha256 :start-sha256 :system-from]))
         (is (= :erase-commit-record-present-in-supplied-segment
                (get-in summary [:per-operation-erasure-audit-intake op])))
+        (is (= :signed-erase-claim-with-current-valid-row-at-pinned-read
+               (get-in summary
+                       [:per-operation-signed-erasure-claim-pinned-visibility op])))
+        (is (false? (:signed-erasure-claim-proves-physical-erase? summary)))
         (is (= :private-original-and-later-pinned-binding-only
                (:erasure-audit-intake-scope summary)))
         (is (= :not-established (:erasure-audit-producer-completeness summary)
@@ -335,10 +352,63 @@
                  (reason #(inspect! op signed-range)))))
         (seed! [:requests {:xt/id (str "later-range-" (random-uuid))
                            :owner "basis-advanced-again"}])
-        (is (= :not-checked
-               (get-in ((:read-only-recheck! collector) op)
-                       [:per-operation-erasure-audit-intake op])))
+        (let [newer ((:read-only-recheck! collector) op)]
+          (is (= :not-checked
+                 (get-in newer [:per-operation-erasure-audit-intake op])))
+          (is (= :not-checked
+                 (get-in newer
+                         [:per-operation-signed-erasure-claim-pinned-visibility op]))))
         (is (= :audit-segment-source-binding-mismatch
                (reason #(inspect! op signed-range))))
         (is (= 1 @(:constructs (:environment env))))
         (is (nil? (read-command (resolution/record-id (:binding data)))))))))
+
+(deftest v1884-signed-erase-claim-with-absent-row-still-does-not-prove-erase
+  ;; The REAL physical transition here is DELETE, not ERASE. The independently
+  ;; signed event lies about an ERASE; an absent row after this transaction
+  ;; therefore cannot be elevated into erase-correspondence evidence.
+  (let [op :request/claim
+        {:keys [data] :as env} (environment)
+        collector (observation/issue-current-issued-application-observer!
+                   (:contract env) (:catalog-source env))
+        inspect! (:inspect-erasure-audit-segment! collector)
+        row (:request data)
+        id (:xt/id row)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}]
+    (seed! [:requests row])
+    (let [start (test-point)]
+      ((:observe! collector) op ctx invocation)
+      (is (= :not-checked
+             (get-in ((:summary! collector))
+                     [:per-operation-signed-erasure-claim-pinned-visibility op])))
+      (xt/execute-tx (db) [[:delete-docs :requests id]])
+      (let [end (test-point)
+            reread ((:read-only-recheck! collector) op)
+            origin (get-in reread [:certified-operation-proof-origins op])
+            expected (merge
+                      {:operation-id op
+                       :database-instance (:database start)
+                       :physical-table :requests
+                       :physical-row-id id
+                       :system-from (:system-time start)
+                       :system-to (:system-time end)}
+                      (select-keys origin
+                                   [:proof-fingerprint :proof-source-fingerprint
+                                    :proof-subject-fingerprint
+                                    :dependency-graph-fingerprint
+                                    :transition-fingerprint]))
+            signed (sealed-segment expected)]
+        (is (= :no-current-valid-row
+               (get-in reread [:per-operation-selected-row-current-visibility op])))
+        (is (nil? ((original 'read-request) id)))
+        (let [summary (inspect! op signed)]
+          (is (= :signed-erase-claim-with-no-current-valid-row-at-pinned-read
+                 (get-in summary
+                         [:per-operation-signed-erasure-claim-pinned-visibility op])))
+          (is (false? (:signed-erasure-claim-proves-physical-erase? summary)))
+          (is (= :not-established (:physical-application-correspondence summary)
+                 (:erasure-audit-producer-completeness summary)))
+          (is (= :none (:erasure-audit-discharge summary)
+                 (:transaction-authority summary) (:authority summary)))
+          (is (= :not-issued (:certificate summary))))))))

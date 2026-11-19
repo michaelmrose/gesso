@@ -65,7 +65,13 @@
    checkpoint to the original checked source, target, and both actual pinned
    XTDB observations. No caller-controlled expected binding is accepted.
    The segment is still NOT evidence of complete audit ingestion or actual
-   XTDB erase operations."
+   XTDB erase operations.
+
+   v1884: Combine the signed selected-row erase claim with the CURRENT-VALID
+   row visibility captured by the same later pinned read. It is a diagnostic
+   comparison of two independent reports, not erase causality, completeness,
+   prevention, or admission: ERASE followed by reinsert may show a row, and
+   DELETE or prior absence may leave no row without an ERASE."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -308,6 +314,40 @@
                             [operation (if (map? state)
                                          (:erasure-audit-intake state :not-checked)
                                          :not-eligible)]))
+                    ;; Read ONLY from the same immutable ledger snapshot.
+                    ;; The independently pinned visibility was captured before
+                    ;; audit verification. Signed claim and current presence
+                    ;; are correlated by ORIGINAL private operation/row/basis
+                    ;; identity, but cannot establish erase causality or rule
+                    ;; out intervening delete, erase, or reinsert operations.
+                    :per-operation-signed-erasure-claim-pinned-visibility
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation
+                             (if-not (map? state)
+                               :not-eligible
+                               (let [claim (:erasure-audit-intake state :not-checked)
+                                     visibility (:selected-row-current-visibility
+                                                 state :not-checked)]
+                                 (case claim
+                                   :erase-commit-record-present-in-supplied-segment
+                                   (case visibility
+                                     :no-current-valid-row
+                                     :signed-erase-claim-with-no-current-valid-row-at-pinned-read
+                                     :one-current-valid-row
+                                     :signed-erase-claim-with-current-valid-row-at-pinned-read
+                                     :multiple-current-valid-rows
+                                     :signed-erase-claim-with-multiple-current-valid-rows-at-pinned-read
+                                     :inconsistent-private-visibility-status)
+                                   :no-erase-commit-record-in-supplied-segment
+                                   :no-selected-erase-claim-in-supplied-range
+                                   :not-checked :not-checked
+                                   :in-flight :in-flight
+                                   :failed :failed
+                                   :inconsistent-private-audit-status)))]))
+                    :signed-erasure-claim-pinned-visibility-meaning
+                    :diagnostic-point-in-time-comparison-not-erase-causality
+                    :signed-erasure-claim-proves-physical-erase? false
                     :erasure-audit-intake-scope
                     :private-original-and-later-pinned-binding-only
                     :erasure-audit-producer-completeness :not-established
