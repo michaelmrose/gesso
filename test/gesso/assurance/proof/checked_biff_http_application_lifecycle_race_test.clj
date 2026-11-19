@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1823: Real JDK listener replacement, inspection, managed stop and startup
+  "v1824: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -976,4 +976,90 @@
                          instance-generation system)))))
       (finally
         (deliver release-inspection true)
+        (cleanup! s issued)))))
+
+(deftest failed-inspection-releases-waiting-fresh-inspection
+  ;; One original current-generation inspection can fail because its
+  ;; application-owned HTTP locator fails. A second original current-system
+  ;; inspection, already waiting on the managed lifecycle monitor, must not
+  ;; inherit that failed observation or pretend it is a fresh HTTP proof.
+  ;; The running application is unchanged; the second check must independently
+  ;; contact the original real local listener once the monitor is released.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-locator (:base-url! source)
+        first-at-locator (promise)
+        release-first (promise)
+        inspect-armed? (atom false)
+        locator-calls (atom 0)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_] (:server @(:server-state s)))
+                       :base-url!
+                       (fn [system]
+                         (when @inspect-armed?
+                           (when (= 1 (swap! locator-calls inc))
+                             (deliver first-at-locator true)
+                             (when-not (deref release-first 15000 false)
+                               (throw (ex-info "Locator fixture timed out" {})))
+                             (throw (ex-info "First inspection locator failed" {}))))
+                         (original-locator system))))]
+    (try
+      (let [{:keys [system instance-generation]} ((:start-once! issued) {})
+            listener (:server @(:server-state s))]
+        (is (some? listener))
+        (reset! inspect-armed? true)
+        (let [first (future (reason #((:inspect-generation! issued)
+                                       instance-generation system)))]
+          (try
+            (is (true? (deref first-at-locator 10000 false)))
+            (is (= 1 @locator-calls))
+            (is (= :first-inspection-pending
+                   (deref first 200 :first-inspection-pending)))
+            (let [second-entered (promise)
+                  second (future
+                           (deliver second-entered true)
+                           ((:inspect-running! issued) system))]
+              (try
+                (is (true? (deref second-entered 5000 false)))
+                (is (= :second-inspection-pending
+                       (deref second 250 :second-inspection-pending)))
+                (is (= 1 @locator-calls)
+                    "Waiting inspection cannot bypass the lifecycle monitor")
+                (deliver release-first true)
+                (is (= :configured-instance-http-liveness-not-observed
+                       (deref first 15000 :first-inspection-timed-out)))
+                (let [observed (deref second 15000 :second-inspection-timed-out)]
+                  (is (= :current-at-inspection (:status observed)))
+                  (is (= :observed-at-current-inspection
+                         (:fresh-local-http-response observed)))
+                  (is (= :matches-original-host-reported-object
+                         (:physical-listener-instance observed)))
+                  (is (= :not-issued (:certificate observed)))
+                  (is (= :not-admitted (:admission observed)))
+                  (is (= :none (:authority observed))))
+                (is (= 2 @locator-calls)
+                    "Second inspection performed a new HTTP challenge")
+                (is (= :verified-configured-start
+                       (:status ((:summary! issued)))))
+                (is (identical? listener (:server @(:server-state s))))
+                (finally
+                  (deliver release-first true)
+                  (deref second 15000 :second-inspection-timed-out))))
+            (finally
+              (deliver release-first true)
+              (deref first 15000 :first-inspection-timed-out))))
+        (is (= :current-at-inspection
+               (:status ((:inspect-generation! issued)
+                         instance-generation system))))
+        (is (= 3 @locator-calls)
+            "The issued generation remains eligible for a fresh reinspection")
+        (is (= :stopped (:status ((:stop! issued)))))
+        (is (.isShutdown (:executor @(:server-state s))))
+        (is (= :configured-instance-generation-not-current
+               (reason #((:inspect-generation! issued)
+                         instance-generation system)))))
+      (finally
+        (deliver release-first true)
         (cleanup! s issued)))))
