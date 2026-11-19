@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-lifecycle-race-test
-  "v1827: Real JDK listener replacement, inspection, managed stop and startup
+  "v1832: Real JDK listener replacement, inspection, managed stop and startup
    publication races for one issued Biff HTTP application. Identity claims
    remain local and conditional on trusted listener instrumentation."
   (:require [clojure.test :refer [deftest is use-fixtures]]
@@ -976,4 +976,66 @@
                          instance-generation system)))))
       (finally
         (deliver release-inspection true)
+        (cleanup! s issued)))))
+
+(deftest startup-post-capture-http-cannot-adopt-same-port-replacement
+  ;; The post-capture startup HTTP challenge must not silently adopt a
+  ;; DIFFERENT real listener at the same URL. The source-owned URL locator
+  ;; swaps the physical listener after the trusted startup capture, then the
+  ;; replacement serves the exact issued Ring wrapper on the old port. A
+  ;; successful fresh response alone would approve a stopped original server.
+  ;; Require the final trusted identity read to reject the substitution.
+  (let [s (scenario :honest)
+        source (original-source s true)
+        original-url (:base-url! source)
+        original-capture (atom nil)
+        replacement (atom nil)
+        listener-reads (atom 0)
+        issued (config/issue-configured-checked-http-application!
+                (assoc source
+                       :listener-instance!
+                       (fn [_]
+                         (swap! listener-reads inc)
+                         (let [physical @(:server-state s)]
+                           (when-not @original-capture
+                             (reset! original-capture physical))
+                           (:server physical)))
+                       :base-url!
+                       (fn [system]
+                         (when (and @original-capture (nil? @replacement))
+                           (reset! replacement
+                                   (replace-actual-listener-at-same-port! s
+                                                                          system)))
+                         (original-url system))))]
+    (try
+      (is (= :configured-physical-listener-not-current
+             (reason #((:start-once! issued) {})))
+          "Post-capture HTTP success cannot verify a replacement listener")
+      (let [{:keys [old new]} @replacement]
+        (is (some? @original-capture)
+            "Original listener object was captured before replacement")
+        (is (some? new) "A second real listener was created")
+        (is (identical? (:server @original-capture) (:server old)))
+        (is (= (:port old) (:port new))
+            "Replacement server bound the original exact local port")
+        (is (not (identical? (:server old) (:server new)))
+            "Physical server object differs despite identical endpoint")
+        (is (.isShutdown (:executor old))
+            "Original listener was physically stopped")
+        (is (pos? @(:hits new))
+            "Replacement answered a real post-capture HTTP challenge")
+        (is (>= @listener-reads 2)
+            "Original listener identity was read after the challenge")
+        (is (.isShutdown (:executor new))
+            "Failed startup cleanup closed the replacement listener"))
+      (is (= :start-failed-physical-state-unknown
+             (:status ((:summary! issued))))
+          "No verified startup is published from the replacement response")
+      (is (= :configured-start-already-attempted
+             (reason #((:start-once! issued) {}))))
+      (is (= :configured-instance-not-current
+             (reason #((:inspect-running! issued) {}))))
+      (is (= :configured-instance-generation-not-current
+             (reason #((:inspect-generation! issued) nil {}))))
+      (finally
         (cleanup! s issued)))))

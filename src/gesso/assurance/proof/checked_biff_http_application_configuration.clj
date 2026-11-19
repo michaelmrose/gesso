@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.checked-biff-http-application-configuration
-  "v1831: Application-owned entry point for one selected CLOSED Biff HTTP
+  "v1832: Application-owned entry point for one selected CLOSED Biff HTTP
    startup. One declared contract source and selected adapter are enough:
    issue the ORIGINAL host, consumption probe and guarded adapter internally,
    derive the canonical module Var/order, and execute v1783's pre-init sealed
@@ -107,7 +107,13 @@
    listener AFTER the earlier startup HTTP consumption challenge. When that
    optional callback is present, require one additional original issued,
    read-only fresh HTTP response after capture before publishing verified
-   startup. This is a final bounded local observation, not a liveness lease."
+   startup. This is a final bounded local observation, not a liveness lease.
+
+   v1832: After the final post-capture read-only HTTP challenge, recheck
+   the exact original source-reported physical listener object. A second
+   server on the SAME port may answer the original issued Ring wrapper while
+   the captured listener has been stopped; successful HTTP alone must not
+   allow that replacement to qualify as the original configured startup."
   (:require [clojure.set :as set]
             [com.biffweb.core :as biff]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -653,7 +659,17 @@
                                           :configured-start-post-capture-http-liveness-not-observed)))]
                            (when-not (fresh-original-http-report? fresh)
                              (reject!
-                              :configured-start-post-capture-http-liveness-not-observed))))
+                              :configured-start-post-capture-http-liveness-not-observed)))
+                         ;; An app-owned URL locator may replace the original
+                         ;; physical listener with another server on the SAME
+                         ;; port before the fresh challenge. That replacement
+                         ;; can reuse the issued Ring wrapper and answer the
+                         ;; nonce, yet it is not the captured original server.
+                         ;; Compare exact trusted object identity AFTER the
+                         ;; final HTTP response, as current inspection does.
+                         (require-original-host-listener!
+                          listener-instance! @original-listener-instance
+                          (:system result)))
                        ;; Publish all original issued startup handles
                        ;; before the verified state is externally visible.
                        ;; The same monitor serializes managed stop and both
