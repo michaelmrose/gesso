@@ -54,7 +54,12 @@
    v1879: The optional signed-statement intake derives the EXPECTED identity
    from private original executor and independently pinned later-read data.
    Callers provide only a certified operation and a signed claim envelope;
-   signed integrity remains an unproven assertion, not history discharge."
+   signed integrity remains an unproven assertion, not history discharge.
+
+   v1880: An OPT-IN audit countersignature from a DISTINCT operator-pinned
+   Ed25519 key additionally authenticates the exact primary signature and
+   statement under an auditor-only domain. Distinct signing keys are not
+   independently verified evidence producers or history proof."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -66,6 +71,8 @@
             [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot]
             [gesso.assurance.proof.xtdb-gateway-issued-operator-claim-intake
              :as operator-claim]
+            [gesso.assurance.proof.xtdb-gateway-issued-operator-audit-cosign
+             :as auditor]
             [gesso.assurance.proof.xtdb-gateway-issued-operator-witness-binding
              :as witness-binding]
             [gesso.live.application-preflight.certified-contract :as certified]))
@@ -243,6 +250,7 @@
          initial open-history-conditions)
         original-recheck recheck/compare-original-acquired-prestate!
         original-operator-intake operator-claim/inspect-operator-history-claim!
+        original-audit-cosign auditor/inspect-independent-auditor-cosign!
         original-operator-binding witness-binding/expected-private-operator-binding!
         states (atom (into (sorted-map)
                            (for [operation (:certified-operation-ids initial)]
@@ -560,7 +568,9 @@
                                                          :selected-row-current-visibility :failed
                                                          :visible-history-inventory :failed)))
                                    (throw failure)))))
-        inspect-operator-claim! (fn [operation envelope]
+        inspect-operator* (fn [operation envelope kind]
+                            (when-not (#{:primary :auditor-cosign} kind)
+                              (reject! :unsupported-operator-intake-kind))
                                   (when-not (contains? (:certified-operation-ids initial)
                                                        operation)
                                     (reject! :operation-not-originally-certified))
@@ -591,13 +601,18 @@
                                       (when-not (and (identical? original-operator-intake
                                                                   (var-get #'operator-claim/inspect-operator-history-claim!))
                                                      (identical? original-operator-binding
-                                                                 (var-get #'witness-binding/expected-private-operator-binding!)))
+                                                                 (var-get #'witness-binding/expected-private-operator-binding!))
+                                                     (or (= kind :primary)
+                                                         (identical? original-audit-cosign
+                                                                     (var-get #'auditor/inspect-independent-auditor-cosign!))))
                                         (reject! :substituted-original-operator-claim-checker))
                                       (let [origin (get-in initial [:certified-operation-proof-origins operation])
                                             expected (original-operator-binding
                                                       operation origin (:private-original-before entry)
                                                       (:private-later-pinned-point entry))
-                                            signed (original-operator-intake expected envelope)]
+                                            signed (if (= kind :auditor-cosign)
+                                                     (original-audit-cosign expected envelope)
+                                                     (original-operator-intake expected envelope))]
                                         (when-not (and (= operator-claim/report-type (:type signed))
                                                        (= operator-claim/report-version (:version signed))
                                                        (= :valid-ed25519-under-selected-key
@@ -610,6 +625,16 @@
                                                           (:retention-enforcement signed)
                                                           (:erasure-exclusion signed)
                                                           (:history-completeness signed))
+                                                       (or (= kind :primary)
+                                                           (and (= :distinct-pinned-ed25519-public-keys
+                                                                   (:operator-and-auditor-key-separation signed))
+                                                                (= :valid-domain-separated-ed25519-cosignature
+                                                                   (:auditor-cosignature signed))
+                                                                (= :exact-primary-signature-and-claim
+                                                                   (:audit-cosignature-binds signed))
+                                                                (= :not-established
+                                                                   (:independent-key-custody signed)
+                                                                   (:independent-evidence-production signed))))
                                                        (= :none
                                                           (:transaction-authority signed)
                                                           (:retry-authority signed)
@@ -618,13 +643,20 @@
                                         (recheck!)
                                         (swap! states assoc-in
                                                [operation :operator-claim-intake]
-                                               :valid-operator-signature-only)
+                                               (if (= kind :auditor-cosign)
+                                                 :valid-distinct-operator-and-auditor-signatures-only
+                                                 :valid-operator-signature-only))
                                         (summary!))
                                       (catch Throwable failure
                                         (swap! states assoc-in
                                                [operation :operator-claim-intake] :failed)
-                                        (throw failure)))))]
+                                        (throw failure)))))
+        inspect-operator-claim! (fn [operation envelope]
+                                  (inspect-operator* operation envelope :primary))
+        inspect-auditor-cosign! (fn [operation envelope]
+                                  (inspect-operator* operation envelope :auditor-cosign))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!
      :read-only-recheck! read-only-recheck!
-     :inspect-operator-claim! inspect-operator-claim!}))
+     :inspect-operator-claim! inspect-operator-claim!
+     :inspect-auditor-cosign! inspect-auditor-cosign!}))

@@ -67,7 +67,8 @@
     :apparently-complete-current-query-result
     :source-declared-retention-or-no-erase-policy
     :operator-signed-retention-policy-assertion-without-enforcement-proof
-    :operator-signed-erase-audit-assertion-without-audit-completeness-proof})
+    :operator-signed-erase-audit-assertion-without-audit-completeness-proof
+    :dual-operator-and-auditor-signatures-without-verified-control-enforcement})
 
 (defn- reject! [reason]
   (throw (ex-info "Independent XTDB history-discharge boundary not established."

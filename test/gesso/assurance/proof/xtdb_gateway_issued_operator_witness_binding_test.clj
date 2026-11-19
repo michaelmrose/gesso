@@ -7,6 +7,8 @@
             [gesso.assurance.proof.xtdb-gateway-issued-application-observation-test]
             [gesso.assurance.proof.xtdb-gateway-issued-operator-claim-intake
              :as operator-claim]
+            [gesso.assurance.proof.xtdb-gateway-issued-operator-audit-cosign
+             :as audit-cosign]
             [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity :as snapshot]
             [gesso.model.command-resolution :as resolution]
             [xtdb.api :as xt]
@@ -168,3 +170,114 @@
         (is (nil? (read-command (resolution/record-id (:binding data)))))
         (is (= #{op} (:observed-operation-ids (summarize))))))))
 
+
+(defn- test-cosigned-envelope [claim]
+  (let [primary (test-signed-envelope claim)
+        encoded (System/getenv "GESSO_TEST_AUDITOR_PRIVATE_KEY_B64")
+        private (.generatePrivate
+                 (KeyFactory/getInstance "Ed25519")
+                 (PKCS8EncodedKeySpec.
+                  (.decode (Base64/getDecoder) ^String encoded)))
+        signer (Signature/getInstance "Ed25519")]
+    (.initSign signer private)
+    (.update signer (audit-cosign/canonical-auditor-cosign-bytes!
+                     claim (:signature-base64 primary)))
+    (assoc primary
+           :auditor-signature-base64
+           (.encodeToString (Base64/getEncoder) (.sign signer)))))
+
+(deftest v1880-collector-binds-two-signers-to-private-original-and-later-xtdb
+  ;; The caller supplies only the operation ID and dual-signed envelope;
+  ;; the collector creates the expected source/row/basis internally from the
+  ;; original checked executor and a separate actual pinned XTDB read.
+  (let [op :request/claim
+        {:keys [data environment] :as env} (v1867-alias-case-env)
+        observer (application-observation/issue-current-issued-application-observer!
+                  (:contract env) (:catalog-source env))
+        original (:request data)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}
+        inspect! (:inspect-auditor-cosign! observer)
+        summary! (:summary! observer)]
+    (is (fn? inspect!))
+    (is (= :original-observation-required-for-operator-claim
+           (reason #(inspect! op {}))))
+    (is (= :operation-not-originally-certified
+           (reason #(inspect! :request/audit {}))))
+    (seed! [:requests original])
+    (let [start (pinned-test-point)]
+      (is (snapshot/valid-private-point? start))
+      (is (= #{op} (:observed-operation-ids
+                      ((:observe! observer) op ctx invocation))))
+      (is (= :completed-later-pinned-read-required-for-operator-claim
+             (reason #(inspect! op {}))))
+      (seed! [:requests {:xt/id (str "unrelated-" (random-uuid))
+                         :owner "auditor-cosign-base"}])
+      (let [later-point (pinned-test-point)
+            read-result ((:read-only-recheck! observer) op)
+            origin (get-in read-result [:certified-operation-proof-origins op])
+            expected (merge {:operation-id op
+                             :database-instance (:database start)
+                             :physical-table :requests
+                             :physical-row-id (:xt/id original)
+                             :system-from (:system-time start)
+                             :system-to (:system-time later-point)}
+                            (select-keys origin
+                                         [:proof-fingerprint :proof-source-fingerprint
+                                          :proof-subject-fingerprint
+                                          :dependency-graph-fingerprint
+                                          :transition-fingerprint]))
+            now (Instant/now)
+            claim (merge expected
+                         {:format operator-claim/envelope-format
+                          :retention-policy-reference "test-retention-policy"
+                          :retention-assertion :operator-asserts-retention-enforced
+                          :erasure-audit-reference "test-auditor-event-root"
+                          :erasure-audit-assertion :operator-asserts-no-erasure
+                          :signed-at now :expires-at (.plusSeconds now 600)
+                          :nonce (UUID/randomUUID)})
+            cosigned (test-cosigned-envelope claim)]
+        (is (= :later-reported-database-basis
+               (snapshot/reported-basis-relation start later-point)))
+        (is (= :not-checked
+               (get-in read-result [:per-operation-operator-claim-intake op])))
+        (let [accepted (inspect! op cosigned)]
+          (is (= :valid-distinct-operator-and-auditor-signatures-only
+                 (get-in accepted [:per-operation-operator-claim-intake op])))
+          (is (= :none (:operator-claim-discharge accepted)
+                 (:transaction-authority accepted) (:retry-authority accepted)
+                 (:authority accepted)))
+          (is (= :not-issued (:certificate accepted)))
+          (is (= #{} (get-in accepted
+                             [:diagnostic-open-history-conditions
+                              :discharged-conditions])))
+          (is (= :not-established
+                 (get-in accepted
+                         [:diagnostic-required-independent-history-evidence
+                          :history-continuity])))
+          (is (not-any? #(contains? accepted %)
+                        [:claim :signature-base64 :auditor-signature-base64
+                         :target :before :snapshot-token :private-original-before
+                         :private-later-pinned-point :system-from :system-to
+                         :physical-row-id :database-instance]))
+          (is (= 1 @(:constructs environment))))
+        (is (= :operator-claim-source-binding-mismatch
+               (reason #(inspect! op
+                                  (test-cosigned-envelope
+                                   (assoc claim :physical-row-id "another-row"))))))
+        (is (= :failed
+               (get-in (summary!) [:per-operation-operator-claim-intake op])))
+        (is (= :valid-distinct-operator-and-auditor-signatures-only
+               (get-in (inspect! op cosigned)
+                       [:per-operation-operator-claim-intake op])))
+        ;; A later read replaces the private point and invalidates previous
+        ;; signed intervals, regardless of BOTH signatures being correct.
+        (seed! [:requests {:xt/id (str "unrelated-" (random-uuid))
+                           :owner "later-cosign-base"}])
+        (is (= :not-checked
+               (get-in ((:read-only-recheck! observer) op)
+                       [:per-operation-operator-claim-intake op])))
+        (is (= :operator-claim-source-binding-mismatch
+               (reason #(inspect! op cosigned))))
+        (is (= 1 @(:constructs environment)))
+        (is (nil? (read-command (resolution/record-id (:binding data)))))))))
