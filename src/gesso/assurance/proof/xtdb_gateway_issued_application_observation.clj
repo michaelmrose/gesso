@@ -33,7 +33,11 @@
 
    v1873: Also carry the selected row's visible, bounded system-time boundary
    presence, separately from whole-database progression. Absence is not
-   evidence of no change; neither status is continuous history certification."
+   evidence of no change; neither status is continuous history certification.
+
+   v1874: Distinguish a missing current-valid row from a present one, and
+   visible history without an interval boundary from no history visible
+   at all. Neither absence is an ERASE or uninterrupted-history proof."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as operation-set]
             [gesso.assurance.proof.checked-authorization-assembly :as coverage]
@@ -245,6 +249,13 @@
                     (into (sorted-map)
                           (for [[operation state] snapshot]
                             [operation (get qualified operation :not-observed)]))
+                    :per-operation-selected-row-current-visibility
+                    (into (sorted-map)
+                          (for [[operation state] snapshot]
+                            [operation (if (map? state)
+                                         (:selected-row-current-visibility
+                                          state :not-checked)
+                                         :not-eligible)]))
                     :per-operation-selected-row-history-boundaries
                     (into (sorted-map)
                           (for [[operation state] snapshot]
@@ -255,6 +266,7 @@
                     :selected-row-history-meaning
                     :visible-pinned-system-time-boundary-presence-only
                     :selected-row-history-completeness :not-established
+                    :selected-row-history-absence-means-unchanged? false
                     :selected-row-history-proves-no-aba? false
                     :per-operation-reported-basis-relations
                     (into (sorted-map)
@@ -355,7 +367,8 @@
                                :read-only-recheck :not-checked
                                :historical-prestate-recheck :not-checked
                                :reported-basis-relation :not-checked
-                               :selected-row-history-boundary :not-checked})
+                               :selected-row-history-boundary :not-checked
+                               :selected-row-current-visibility :not-checked})
                        (summary!))
                      (catch Throwable failure
                        ;; Never convert an unsuccessful/ambiguous attempt
@@ -419,13 +432,20 @@
                                                    (:reported-basis-relation report))
                                                   (#{:visible-selected-row-system-boundary-observed
                                                      :no-visible-selected-row-system-boundary-returned
+                                                     :no-visible-selected-row-system-history-returned
                                                      :same-reported-basis-no-interval
                                                      :not-comparable}
                                                    (:selected-row-system-history-boundary report))
                                                   (= :not-established
                                                      (:selected-row-history-completeness report))
                                                   (= false
-                                                     (:selected-row-history-proves-no-aba? report))
+                                                     (:selected-row-history-proves-no-aba? report)
+                                                     (:selected-row-history-absence-means-unchanged?
+                                                      report))
+                                                  (#{:no-current-valid-row
+                                                     :one-current-valid-row
+                                                     :multiple-current-valid-rows}
+                                                   (:selected-row-current-visibility report))
                                                   (= :not-established
                                                      (:historical-candidate-equality report)
                                                      (:currentness-after-read report))
@@ -442,7 +462,9 @@
                                                          :reported-basis-relation
                                                          (:reported-basis-relation report)
                                                          :selected-row-history-boundary
-                                                         (:selected-row-system-history-boundary report))))
+                                                         (:selected-row-system-history-boundary report)
+                                                         :selected-row-current-visibility
+                                                         (:selected-row-current-visibility report))))
                                    (summary!))
                                  (catch Throwable failure
                                    (swap! states update operation
@@ -450,7 +472,8 @@
                                                          :read-only-recheck :failed
                                                          :historical-prestate-recheck :failed
                                                          :reported-basis-relation :failed
-                                                         :selected-row-history-boundary :failed)))
+                                                         :selected-row-history-boundary :failed
+                                                         :selected-row-current-visibility :failed)))
                                    (throw failure)))))]
     {:type report-type :version report-version
      :observe! observe! :summary! summary!

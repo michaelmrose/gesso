@@ -21,7 +21,8 @@
             [gesso.live.application-preflight :as application]
             [gesso.live.application-preflight.certified-contract :as certified]
             [gesso.model.certified-plan :as plan]
-            [gesso.model.command-resolution :as resolution]))
+            [gesso.model.command-resolution :as resolution]
+            [xtdb.api :as xt]))
 
 (def ^:private parent-ns
   'gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial-test)
@@ -701,11 +702,13 @@
               (is (= (dissoc after :per-operation-read-only-rechecks
                                   :per-operation-historical-prestate-rechecks
                                   :per-operation-reported-basis-relations
-                                  :per-operation-selected-row-history-boundaries)
+                                  :per-operation-selected-row-history-boundaries
+                                  :per-operation-selected-row-current-visibility)
                      (dissoc (summary!) :per-operation-read-only-rechecks
                                         :per-operation-historical-prestate-rechecks
                                         :per-operation-reported-basis-relations
-                                        :per-operation-selected-row-history-boundaries)))
+                                        :per-operation-selected-row-history-boundaries
+                                        :per-operation-selected-row-current-visibility)))
               (is (= {primary :visible-selected-row-system-boundary-observed
                       secondary :same-reported-basis-no-interval}
                      (:per-operation-selected-row-history-boundaries (summary!))))
@@ -797,6 +800,85 @@
       (is (= #{op} (:observed-operation-ids failed)))
       (is (= 1 (:observation-count failed)))
       (is (= 1 @(:constructs environment))))))
+
+
+(deftest v1874-deletion-temporal-correction-and-erased-history-are-distinct
+  ;; Real XTDB: DELETE leaves system-time closing boundaries; a retroactive
+  ;; valid-time correction is a new system-time version but can leave the
+  ;; current-valid document unchanged; ERASE removes visible row history.
+  ;; None of these source-relative observations is an ERASE attestation.
+  (let [op :request/claim
+        {:keys [data environment] :as env} (v1867-alias-case-env)
+        obs (application-observation/issue-current-issued-application-observer!
+             (:contract env) (:catalog-source env))
+        observe! (:observe! obs)
+        reread! (:read-only-recheck! obs)
+        request (:request data)
+        id (:xt/id request)
+        ctx {:biff.xtdb/node (db)}
+        invocation {:binding (:binding data) :mode :submit}
+        boundary #(get-in % [:per-operation-selected-row-history-boundaries op])
+        visibility #(get-in % [:per-operation-selected-row-current-visibility op])]
+    (is (= {op :not-eligible}
+           (:per-operation-selected-row-current-visibility ((:summary! obs)))))
+    (seed! [:requests request])
+    (is (= #{op} (:observed-operation-ids (observe! op ctx invocation))))
+    (is (= :not-checked (visibility ((:summary! obs)))))
+    (is (= :one-current-valid-row (visibility (reread! op))))
+    (xt/execute-tx (db) [[:delete-docs :requests id]])
+    (let [deleted (reread! op)]
+      (is (= :no-current-valid-row (visibility deleted)))
+      (is (= :visible-selected-row-system-boundary-observed (boundary deleted))
+          "DELETE closes a visible old row's system/valid-time interval")
+      (is (= :historical-prestate-differed-at-read
+             (get-in deleted [:per-operation-historical-prestate-rechecks op])))
+      (is (= :source-document-differed-at-read
+             (get-in deleted [:per-operation-read-only-rechecks op])))
+      (is (false? (:selected-row-history-absence-means-unchanged? deleted))))
+    (seed! [:requests request])
+    (let [restored (reread! op)]
+      (is (= :one-current-valid-row (visibility restored)))
+      (is (= :historical-prestate-matched-at-read
+             (get-in restored [:per-operation-historical-prestate-rechecks op])))
+      (is (= :visible-selected-row-system-boundary-observed (boundary restored))))
+    (xt/execute-tx (db)
+                   [[:put-docs {:into :requests
+                                :valid-from (java.time.Instant/parse "2020-01-01T00:00:00Z")
+                                :valid-to (java.time.Instant/parse "2021-01-01T00:00:00Z")}
+                     (assoc request :owner "corrected-previous-valid-time")]])
+    (let [corrected (reread! op)]
+      (is (= :one-current-valid-row (visibility corrected)))
+      (is (= :visible-selected-row-system-boundary-observed (boundary corrected))
+          "Past valid-time correction writes a new selected-row system version")
+      (is (= :historical-prestate-matched-at-read
+             (get-in corrected [:per-operation-historical-prestate-rechecks op])))
+      (is (= :source-document-matched-at-read
+             (get-in corrected [:per-operation-read-only-rechecks op]))))
+    ;; ERASE intentionally destroys every system/valid-time version. The
+    ;; diagnostic cannot tell this apart from other history unavailability.
+    (xt/execute-tx (db) [[:erase-docs :requests id]])
+    (let [erased (reread! op)]
+      (is (= :no-current-valid-row (visibility erased)))
+      (is (= :no-visible-selected-row-system-history-returned (boundary erased)))
+      (is (= :later-reported-database-basis
+             (get-in erased [:per-operation-reported-basis-relations op])))
+      (is (= :not-established (:selected-row-history-completeness erased)
+             (:physical-prestate-currentness erased)
+             (:joint-snapshot-basis erased)))
+      (is (= false (:selected-row-history-proves-no-aba? erased)
+             (:selected-row-history-absence-means-unchanged? erased)))
+      (is (= :not-issued (:certificate erased)))
+      (is (= :none (:transaction-authority erased)
+             (:retry-authority erased) (:authority erased)))
+      (is (= #{op} (:observed-operation-ids erased)))
+      (is (= 1 (:observation-count erased)))
+      (is (= 1 @(:constructs environment)))
+      (is (nil? (read-command (resolution/record-id (:binding data)))))
+      (is (not-any? #(contains? erased %)
+                    [:snapshot-token :original-snapshot-point :xt/system-from
+                     :xt/system-to :before :target :node :executor
+                     :original-context :original-invocation
+                     :private-original-before])))))
 
 (deftest v1872-basis-relation-classification-is-not-an-aba-proof
   (let [t0 (java.time.Instant/parse "2026-01-01T00:00:00Z")

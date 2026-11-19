@@ -6,7 +6,12 @@
    pinned snapshot. No returned boundaries is NOT proof that a row never
    changed: erasure, availability, or visibility may prevent such inference.
    This module neither authenticates the node nor provides CAS, proof
-   discharge, replay authority or transaction-time enforcement."
+   discharge, replay authority or transaction-time enforcement.
+
+   v1874: When the bounded boundary query returns nothing, independently
+   check whether ANY selected-row historical version remains visible at the
+   same pinned snapshot. Never equate no history returned with no change:
+   ERASE, retention and incomplete visibility remain possible."
   (:require [gesso.assurance.proof.xtdb-gateway-issued-snapshot-identity
              :as snapshot]
             [xtdb.api :as xt])
@@ -30,7 +35,9 @@
 
    The bounded query is a presence test, not a complete history export.
    No boundaries returned is intentionally inconclusive about intervening
-   changes, especially in the presence of erasure or history limitations."
+   changes, especially in the presence of erasure or history limitations.
+   If no history record is visible at all, report that separately: this does
+   NOT assert that an ERASE occurred or a row never existed."
   [node target snapshot-token clock-time original-point later-point]
   (pinned!)
   (let [[table id :as locator] target
@@ -74,7 +81,26 @@
         (pinned!)
         (if (seq rows)
           :visible-selected-row-system-boundary-observed
-          :no-visible-selected-row-system-boundary-returned))
+          (let [history-sql (str "SELECT _system_from FROM " (name table)
+                                 " FOR VALID_TIME ALL FOR SYSTEM_TIME ALL"
+                                 " WHERE _id = ? LIMIT 1")
+                visible (try
+                          (original-query node [history-sql id]
+                                          {:snapshot-token snapshot-token
+                                           :current-time clock-time})
+                          (catch Throwable _
+                            (reject! :pinned-selected-row-history-visibility-unavailable)))]
+            (when-not (and (sequential? visible) (<= 0 (count visible) 1)
+                           (every? (fn [row]
+                                     (and (map? row)
+                                          (instance? ZonedDateTime
+                                                     (:xt/system-from row))))
+                                   visible))
+              (reject! :invalid-pinned-selected-row-history-visibility))
+            (pinned!)
+            (if (seq visible)
+              :no-visible-selected-row-system-boundary-returned
+              :no-visible-selected-row-system-history-returned))))
       ;; Earlier, cross-database and partially decoded bases cannot be
       ;; interpreted as an ordered historical interval for this row.
       :not-comparable)))

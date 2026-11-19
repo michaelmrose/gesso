@@ -22,7 +22,11 @@
    v1873: An extra bounded row-specific XTDB system-history query, pinned to
    that very same later snapshot, checks whether a visible system-version
    boundary occurred between the two basis points. No visible boundary is
-   inconclusive; neither case grants continuous history or CAS authority."
+   inconclusive; neither case grants continuous history or CAS authority.
+
+   v1874: Also disclose only whether this read saw a current-valid row at
+   all. If no history is visible, distinguish that from visible history
+   without a boundary: neither observation proves row deletion or ERASE."
   (:require [gesso.model.certified-plan :as plan]
             [gesso.model.command-resolution :as resolution]
             [xtdb.api :as xt]
@@ -150,6 +154,11 @@
                                 (<= 0 (count rows) 2)
                                 (every? map? rows)) :source-document-differed-at-read
                            :else (reject! :invalid-read-only-recheck-result))
+              current-row-visibility
+              (case (count rows)
+                0 :no-current-valid-row
+                1 :one-current-valid-row
+                :multiple-current-valid-rows)
               row-boundary (if original-before
                              (original-row-history node target token
                                                    read-clock
@@ -174,6 +183,8 @@
              :not-compared)
            :reported-basis-scope :single-database-system-time-only
            :selected-row-system-history-boundary row-boundary
+           :selected-row-current-visibility current-row-visibility
+           :selected-row-history-absence-means-unchanged? false
            :selected-row-history-scope
            :visible-bounded-pinned-system-time-boundaries-only
            :selected-row-history-completeness :not-established
