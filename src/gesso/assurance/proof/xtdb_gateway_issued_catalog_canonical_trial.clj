@@ -1,5 +1,5 @@
 (ns gesso.assurance.proof.xtdb-gateway-issued-catalog-canonical-trial
-  "v1851: Bind the v1775 checked-catalog physical trial to the EXACT issued
+  "v1852: Bind the v1775 checked-catalog physical trial to the EXACT issued
    v1251 certified-plan executor and the CURRENT assembled application's
    certified route/operation table. An observed physical transaction comes
    from calling the registered executor, not an arbitrary invocation thunk.
@@ -24,7 +24,14 @@
    v1851: Preserve the genuine full catalog's unresolved proof assumptions,
    premises and per-operation obligations in issued physical trial reports.
    Recheck this evidence with the original source before summarizing or
-   observing. A physical acknowledgment does NOT discharge proof obligations."
+   observing. A physical acknowledgment does NOT discharge proof obligations.
+
+   v1852: A physical trial scoped to one certified operation may coexist with
+   unrelated uncertified application operations/routes. Check the ORIGINAL
+   contract's complete semantic route inventory and the exact certified /
+   uncertified partition rather than requiring every app route to be certified.
+   This does not grant the unselected routes certification or transaction
+   authority."
   (:require [clojure.set :as set]
             [gesso.assurance.proof.operation-set :as catalog]
             [gesso.assurance.proof.checked-authorization-assembly
@@ -87,7 +94,7 @@
    The original certified-contract check authenticates the report; this
    predicate does not authenticate an independent deployment or handler."
   [selected-operation selected-route-ids certified-rows
-   complete-certified-route-ids declared-route-ids]
+   complete-certified-route-ids uncertified-route-ids declared-route-ids]
   (let [route-sets (when (map? certified-rows)
                      (mapv :route-ids (vals certified-rows)))
         flattened (vec (mapcat identity route-sets))]
@@ -103,11 +110,19 @@
          (= selected-route-ids
             (get-in certified-rows [selected-operation :route-ids]))
          (set? complete-certified-route-ids)
+         (set? uncertified-route-ids)
+         (every? qualified-keyword? uncertified-route-ids)
          (set? declared-route-ids)
          (seq complete-certified-route-ids)
          (= (count flattened) (count (set flattened)))
-         (= (set flattened) complete-certified-route-ids
-            declared-route-ids)
+         (= (set flattened) complete-certified-route-ids)
+         ;; The exact complement must be reported by the genuine original
+         ;; catalog closure. Missing, duplicated and invented semantic route
+         ;; coordinates cannot be excused as unrelated uncertified operations.
+         (empty? (set/intersection complete-certified-route-ids
+                                   uncertified-route-ids))
+         (= declared-route-ids
+            (set/union complete-certified-route-ids uncertified-route-ids))
          (set/subset? selected-route-ids complete-certified-route-ids))))
 
 (defn- current-binding! [contract-source catalog-source operation]
@@ -191,12 +206,24 @@
                    (= ids (:catalog-operations full-coverage))
                    (= (:matched-certified-route-ids contracts)
                       (:matched-certified-route-ids full-coverage))
-                   (empty? (:uncertified-application-operations full-coverage))
-                   (empty? (:uncertified-application-route-ids full-coverage))
-                   (= ids (set (keys summary))
-                      (set (keys (:certified-operations contract-source)))
+                   ;; The genuine original contract enumerates the FULL app
+                   ;; route table, while this trial binds one selected
+                   ;; certified catalog only. Recheck the complement, never
+                   ;; silently invent certification for unrelated operations.
+                   (= (:uncertified-operations contracts)
+                      (:uncertified-application-operations full-coverage)
+                      (set/difference (set (keys summary)) ids))
+                   (= (set/difference (:route-ids contracts)
+                                      (:matched-certified-route-ids contracts))
+                      (:uncertified-application-route-ids full-coverage))
+                   (empty? (set/intersection
+                            (:matched-certified-route-ids contracts)
+                            (:uncertified-application-route-ids full-coverage)))
+                   (= (:route-ids contracts)
+                      (set/union (:matched-certified-route-ids contracts)
+                                 (:uncertified-application-route-ids full-coverage)))
+                   (= ids (set (keys (:certified-operations contract-source)))
                       (set (keys (:certified-operations contracts))))
-                   (empty? (:uncertified-operations contracts))
                    (= :none (:transaction-authority contracts))
                    (= :none (:certificate contracts))
                    (contains? ids operation)
@@ -216,6 +243,7 @@
                    (closed-selected-route-scope?
                     operation route-ids (:certified-operations contracts)
                     (:matched-certified-route-ids contracts)
+                    (:uncertified-application-route-ids full-coverage)
                     (:route-ids contracts)))
       (reject! :catalog-executor-or-assembled-operation-diverged))
     (pinned!)

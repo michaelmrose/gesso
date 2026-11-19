@@ -268,26 +268,35 @@
     (is (= #{claim-route cancel-route} declared complete))
     (is (= #{claim-route} (get-in rows [claim :route-ids])))
     (is (= #{cancel-route} (get-in rows [cancel :route-ids])))
-    (is (true? (scope? claim #{claim-route} rows complete declared)))
-    (is (true? (scope? cancel #{cancel-route} rows complete declared)))
+    (is (true? (scope? claim #{claim-route} rows complete #{} declared)))
+    (is (true? (scope? cancel #{cancel-route} rows complete #{} declared)))
+    ;; A genuine original catalog can include unrelated UNCERTIFIED semantic
+    ;; routes, but only when its explicitly known complement completes the
+    ;; declared inventory without overlap or invented route IDs.
+    (is (true? (scope? claim #{claim-route} rows complete
+                        #{:route/uncertified}
+                        (conj declared :route/uncertified))))
     ;; A one-operation view must not drop another operation, duplicate the
     ;; route in a different row, or admit an unaccounted physical route ID.
-    (doseq [[operation selected checked all-certified all-declared]
-            [[claim #{cancel-route} rows complete declared]
-             [claim #{claim-route cancel-route} rows complete declared]
-             [claim #{claim-route} rows #{claim-route} declared]
-             [claim #{claim-route} rows complete #{claim-route}]
-             [claim #{claim-route} rows complete (conj declared :route/unknown)]
-             [claim #{claim-route} (dissoc rows cancel) complete declared]
+    (doseq [[operation selected checked all-certified unselected all-declared]
+            [[claim #{cancel-route} rows complete #{} declared]
+             [claim #{claim-route cancel-route} rows complete #{} declared]
+             [claim #{claim-route} rows #{claim-route} #{} declared]
+             [claim #{claim-route} rows complete #{} #{claim-route}]
+             [claim #{claim-route} rows complete #{}
+              (conj declared :route/unknown)]
+             [claim #{claim-route} rows complete #{claim-route} declared]
+             [claim #{claim-route} rows complete #{:route/invented} declared]
+             [claim #{claim-route} (dissoc rows cancel) complete #{} declared]
              [claim #{claim-route}
               (assoc-in rows [cancel :route-ids] #{claim-route})
-              complete declared]
+              complete #{} declared]
              [cancel #{cancel-route}
               (assoc-in rows [claim :route-ids] #{})
-              complete declared]
-             [:example/unissued #{claim-route} rows complete declared]]]
+              complete #{} declared]
+             [:example/unissued #{claim-route} rows complete #{} declared]]]
       (is (false? (scope? operation selected checked
-                          all-certified all-declared))
+                          all-certified unselected all-declared))
           (str "Unsafe source route scope accepted: " operation)))))
 
 (deftest two-independent-operations-require-source-complete-catalog-coverage

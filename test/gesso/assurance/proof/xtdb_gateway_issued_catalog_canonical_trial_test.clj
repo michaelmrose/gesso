@@ -210,6 +210,61 @@
       (is (= :not-issued (:certificate observed)))
       (is (= :none (:transaction-authority observed))))))
 
+(deftest selected-physical-trial-allows-explicitly-uncertified-application-route
+  ;; The v1253 contract allows a certified Claim operation alongside an
+  ;; unrelated uncertified Cancel route. The original selected catalog must
+  ;; remain complete for Claim, while the full source route table contains
+  ;; BOTH and the unselected route never acquires certified authority.
+  (app-fixture/with-closed-application
+   {:operations {:request/claim
+                 (app-fixture/trusted-operation
+                  :request/claim {:published-change-topics #{}})
+                 :request/cancel
+                 (app-fixture/trusted-operation
+                  :request/cancel {:published-change-topics #{}})}}
+   (fn [{:keys [assembly]}]
+     (let [summary (application/operation-summary
+                    (:operation-acquisition-assembly assembly))
+           extra-routes (into #{}
+                              (map :route-id)
+                              (get-in summary [:request/cancel :routes]))
+           extra-handler (fn [_] {:status 202 :body "uncertified"})
+           env (binding [*assembly* assembly] (case-env))
+           full (update-in env [:contract :semantic-route-handlers]
+                           merge (zipmap extra-routes (repeat extra-handler)))
+           contract-report (certified/check-certified-contracts!
+                            (:contract full))
+           selection-report
+           (checked-assembly/check-declared-route-coverage!
+            {:contract-source (:contract full)
+             :catalog-source (:catalog-source full)})]
+       (is (seq extra-routes))
+       (is (= #{:request/cancel} (:uncertified-operations contract-report)))
+       (is (= extra-routes (:uncertified-application-route-ids
+                            selection-report)))
+       (is (= #{:request/claim} (:catalog-operations selection-report)))
+       (is (= #{:request/claim}
+              (set (keys (:certified-operation-open-evidence selection-report)))))
+       ;; Even a route which is explicitly UNCERTIFIED is part of the closed
+       ;; current application route table. Its disappearance cannot be hidden
+       ;; by the correct selected Claim source and executor.
+       (is (= :invalid-current-certified-operation-table
+              (reason #(issued
+                        (update-in full [:contract :semantic-route-handlers]
+                                   dissoc (first extra-routes))))))
+       (is (= :invalid-current-certified-operation-table
+              (reason #(issued
+                        (assoc-in full [:contract :semantic-route-handlers
+                                        :route/invented]
+                                  (fn [_] {:status 200}))))))
+       (let [trial (issued full)]
+         (seed! [:requests (get-in full [:data :request])])
+         (let [result (invoke! trial full :submit)]
+           (is (= :bounded-issued-executor-catalog-atomic-acknowledgment
+                  (:status result)))
+           (is (= :none (:transaction-authority result)))
+           (is (= :not-established (:deployed-biff-handler-adoption result)))))))))
+
 (deftest unrelated-checked-catalog-cannot-impersonate-issued-executor
   (let [env (case-env)
         changed (assoc-in env [:catalog-source :catalog :operations 0
