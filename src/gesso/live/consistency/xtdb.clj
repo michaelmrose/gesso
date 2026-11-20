@@ -956,11 +956,25 @@
     x
 
     (map? x)
-    ;; Only nil allows the fallback. false must fail node admission before
-    ;; status I/O instead of selecting a different node behind the request.
-    (if-some [node (:xtdb/node x)]
-      node
-      (:biff.xtdb/node x))
+    ;; The two supported node keys are aliases for the same status authority,
+    ;; not independent node selections. If both contain different concrete
+    ;; nodes, Biff could execute using the legacy node while Gesso publishes
+    ;; the primary node's transaction frontier. Reject before status I/O.
+    ;; An explicitly false primary key retains its existing fail-closed path;
+    ;; it must not silently fall back to the legacy node.
+    (let [primary (:xtdb/node x)
+          legacy (:biff.xtdb/node x)]
+      (when (and primary
+                 (some? legacy)
+                 (not (identical? primary legacy)))
+        (throw
+         (ex "Conflicting XTDB node identities cannot establish one authoritative request frontier."
+             {:reason :conflicting-admitted-xtdb-nodes
+              :xtdb-node primary
+              :biff-xtdb-node legacy})))
+      (if-some [node primary]
+        node
+        legacy))
 
     :else
     nil))

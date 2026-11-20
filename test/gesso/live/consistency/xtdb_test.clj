@@ -1461,6 +1461,45 @@
      (invoke [_ _ _ _]
        nil))))
 
+(deftest conflicting-admitted-xtdb-node-identities-fail-before-status-test
+  ;; The status frontier belongs to a particular XTDB node. A binding context
+  ;; with distinct primary and Biff node objects must not advertise a
+  ;; trustworthy snapshot from the first while exposing the second to Biff.
+  ;; Reject the ambiguity at node selection, before any status observation.
+  (let [primary (Object.)
+        biff-node (Object.)
+        status-calls (atom 0)
+        conflicting {:xtdb/node primary :biff.xtdb/node biff-node}
+        observed (Instant/parse "2026-11-20T23:55:00Z")]
+    (with-xtdb-stub '*status*
+      (fn [_]
+        (swap! status-calls inc)
+        {:latest-completed-txs
+         {"xtdb" [{:tx-id 2040 :system-time observed}]}})
+      (fn []
+        (doseq [operation [#(xtdb-live/node-from conflicting)
+                           #(xtdb-live/latest-completed-basis conflicting)
+                           #(xtdb-live/bind-request-frontier conflicting)]]
+          (let [failure (try (operation)
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo failure)
+                "Two different explicit XTDB nodes must not share an admitted frontier")
+            (when (instance? clojure.lang.ExceptionInfo failure)
+              (is (= :conflicting-admitted-xtdb-nodes
+                     (:reason (ex-data failure)))))
+            (is (zero? @status-calls)
+                "Conflicting node identities must fail before any XTDB status call")))
+        ;; Both names may legitimately refer to the exact same node.
+        (is (identical? primary
+                        (xtdb-live/node-from
+                         {:xtdb/node primary :biff.xtdb/node primary})))
+        (is (identical? biff-node
+                        (xtdb-live/node-from
+                         {:xtdb/node nil :biff.xtdb/node biff-node})))
+        (is (identical? primary
+                        (xtdb-live/node-from {:xtdb/node primary})))))))
+
 (deftest node-from-accepts-only-authoritative-node-sources-test
   (let [raw-data-source (data-source-stub)]
     (is (= :xtdb-node
