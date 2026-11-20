@@ -49,11 +49,12 @@
   [debug-fn event data]
   ;; Diagnostic callbacks are observational. A failing tracing hook must
   ;; never suppress rendering, poison the cache, strand a singleflight owner,
-  ;; or replace a genuine renderer exception.
+  ;; or replace a genuine renderer exception. Application assertions can
+  ;; throw Error rather than Exception.
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Exception _#
+       (catch Throwable _#
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -602,7 +603,9 @@
   [manager key flight]
   (try
     (cancel-flight! flight)
-    (catch Exception e
+    ;; Physical cancellation is external cleanup, so Error subtypes must not
+    ;; retract an already committed logical invalidation result.
+    (catch Throwable e
       (when (instance? InterruptedException e)
         (.interrupt (Thread/currentThread)))
       (debug!

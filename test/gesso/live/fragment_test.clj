@@ -928,6 +928,83 @@
 ;; Diagnostic callback failures must not change fragment delivery
 ;; -----------------------------------------------------------------------------
 
+(deftest assertion-error-in-fragment-tracing-preserves-render-cache-test
+  ;; Optional instrumentation must not stop rendering or prevent cache reuse.
+  ;; AssertionError is not caught by an Exception-only diagnostic boundary.
+  (let [events (atom [])
+        renders (atom 0)
+        manager (fragment/create
+                 {:ttl-ms 1000
+                  :clock (constantly 10)
+                  :debug-fn (fn [event]
+                              (swap! events conj (:event event))
+                              (throw (AssertionError. "trace assertion failed")))})
+        renderer (fn []
+                   (swap! renders inc)
+                   :html)]
+    (is (= {:status :success :value :html}
+           (run-task (fragment/render-task manager fragment-key renderer))))
+    (is (= {:status :success :value :html}
+           (run-task (fragment/render-task manager fragment-key renderer))))
+    (is (= 1 @renders) "Tracing errors must not disable TTL reuse")
+    (is (= 1 (:cache-count (fragment/stats manager))))
+    (is (some #{:gesso.live.fragment/cache-hit} @events))))
+
+(deftest assertion-error-in-fragment-owner-trace-does-not-strand-flight-test
+  ;; The singleflight slot has been reserved before the owner debug event.
+  ;; A failing trace must not abandon it or strand subsequent requests.
+  (let [manager (fragment/create
+                 {:debug-fn (fn [event]
+                              (when (= :gesso.live.fragment/singleflight-owner
+                                       (:event event))
+                                (throw (AssertionError. "owner trace failed"))))})]
+    (try
+      (is (= {:status :success :value :html}
+             (run-task (fragment/render-task manager fragment-key
+                                             (constantly :html)))))
+      (is (eventually #(zero? (:inflight-count (fragment/stats manager)))))
+      (is (= {:status :success :value :fresh}
+             (run-task (fragment/render-task manager fragment-key
+                                             (constantly :fresh)))))
+      (finally
+        (fragment/clear-key! manager fragment-key)))))
+
+(deftest assertion-error-in-fragment-canceller-does-not-retract-invalidation-test
+  ;; Logical invalidation and waiter failure are committed before invoking
+  ;; the physical canceller. A callback Error must not escape clear-key!.
+  (let [events (atom [])
+        manager (fragment/create {:debug-fn #(swap! events conj %)})
+        started (promise)
+        release (promise)
+        cancelled (promise)
+        calls (atom 0)
+        owner (start-task
+               (fragment/protect-task
+                manager fragment-key
+                (controlled-success-task started release :obsolete calls cancelled)))]
+    (try
+      (is (= :started (deref started timeout-ms ::timeout)))
+      (let [flight (get @(:inflight manager) fragment-key)]
+        (is (some? flight))
+        (reset! (:cancel-ref flight)
+                #(throw (AssertionError. "physical cancel failed")))
+        (is (identical? manager
+                        (try
+                          (fragment/clear-key! manager fragment-key)
+                          (catch Throwable error error)))
+            "External cancellation errors cannot alter clear-key! result")
+        (is (= :fragment-invalidated
+               (:reason (ex-data (:error (task-result owner))))))
+        (is (zero? (:inflight-count (fragment/stats manager))))
+        (is (some #(= :gesso.live.fragment/physical-cancel-failed (:event %))
+                  @events))
+        (is (= {:status :success :value :fresh}
+               (run-task (fragment/render-task manager fragment-key
+                                               (constantly :fresh))))))
+      (finally
+        (deliver release true)
+        (cancel-runner! owner)))))
+
 (deftest throwing-debug-hook-does-not-break-cache-hit-or-render-test
   (let [attempts (atom [])
         renders (atom 0)
