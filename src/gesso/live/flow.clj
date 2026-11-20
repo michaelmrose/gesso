@@ -41,11 +41,12 @@
    evaluated."
   [debug-fn event data]
   ;; Optional diagnostic callbacks must not alter Live delivery, stream
-  ;; progress, or subscription construction when user tracing fails.
+  ;; progress, or subscription construction when user tracing fails. This
+  ;; includes Error subtypes thrown by application assertions.
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Exception _#
+       (catch Throwable _#
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -188,7 +189,9 @@
   (when f
     (try
       (apply f args)
-      (catch Exception _
+      ;; Terminal cleanup must not be interrupted by application hooks that
+      ;; throw Error rather than Exception.
+      (catch Throwable _
         nil))))
 
 (defn- data-value

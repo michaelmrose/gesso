@@ -1166,6 +1166,78 @@
       (finally
         (s/close! stream)))))
 
+(deftest assertion-error-in-stream-trace-does-not-strand-completion-pump-test
+  ;; Optional tracing must never strand a Manifold -> Missionary pull when
+  ;; application diagnostics throw an Error instead of an Exception.
+  (let [stream (s/stream 4)
+        seen (promise)
+        values [:first :second]]
+    (try
+      (doseq [value values]
+        (is (true? (put-value stream value))))
+      (s/close! stream)
+      (let [runner (collect-runner
+                    (flow/stream-flow
+                     stream
+                     {:debug-fn (fn [event]
+                                  (when (= :gesso.live.flow/stream-value
+                                           (:event event))
+                                    (deliver seen :traced)
+                                    (throw (AssertionError. "trace failure"))))}))]
+        (is (= :traced (deref seen timeout-ms ::timeout)))
+        (is (= {:status :success :value values}
+               (task-result runner))
+            "A broken trace cannot prevent ordinary values and terminal close"))
+      (finally
+        (s/close! stream)))))
+
+(deftest assertion-error-in-flow-close-hook-still-emits-terminal-diagnostic-test
+  ;; Physical stream closure precedes the hook, but a failing close hook must
+  ;; not suppress the terminal diagnostic or corrupt the collector's outcome.
+  (let [stream (s/stream 4)
+        events (atom [])
+        hook-called (promise)
+        runner (collect-runner
+                (flow/stream-flow
+                 stream
+                 {:on-close (fn []
+                              (deliver hook-called :closed)
+                              (throw (AssertionError. "close hook failure")))
+                  :debug-fn #(swap! events conj %)}))]
+    (try
+      (is (true? (put-value stream :value)))
+      (s/close! stream)
+      (is (= :closed (deref hook-called timeout-ms ::timeout)))
+      (is (= {:status :success :value [:value]} (task-result runner)))
+      (is (eventually
+           #(contains? (event-names @events)
+                       :gesso.live.flow/stream-flow-closed))
+          "A failing close hook cannot suppress final diagnostics")
+      (finally (s/close! stream)))))
+
+(deftest assertion-error-in-source-trace-does-not-prevent-open-test
+  ;; Source tracing runs after an eager broadcast tap was registered. A broken
+  ;; diagnostic callback must not abort otherwise healthy flow construction.
+  (let [src (source/create)
+        trace-attempted (promise)]
+    (try
+      (let [f (flow/flow-for-source
+               src
+               {:subscription request-sub
+                :relieve? false
+                :debug-fn (fn [event]
+                            (deliver trace-attempted (:event event))
+                            (throw (AssertionError. "trace failure")))})
+            runner (collect-runner f)]
+        (is (= :gesso.live.flow/source-tap-opened
+               (deref trace-attempted timeout-ms ::timeout)))
+        (source/emit! src request-invalidation)
+        (source/close! src)
+        (is (= {:status :success
+                :value [(flow/invalidation-event request-invalidation)]}
+               (task-result runner))))
+      (finally (source/close! src)))))
+
 (deftest stream-flow-debug-callback-failure-does-not-stop-delivery-test
   ;; A faulty optional diagnostic hook must not strand the bridge's serialized
   ;; completion pump or suppress ordinary values and terminal close.
