@@ -462,6 +462,11 @@
    (= xtdb-basis-version
       (:gesso.live.consistency.xtdb/version value))
    (string? (:database value))
+   ;; A browser-supplied closed basis must obey the same nonblank database
+   ;; identity contract as basis construction. XTDB can serialize an empty
+   ;; database key in a snapshot token, so token roundtripping alone is not
+   ;; sufficient to validate this identity.
+   (not (str/blank? (:database value)))
    (try
      (wire->tx-id (:tx-id value))
      (snapshot-token-system-time

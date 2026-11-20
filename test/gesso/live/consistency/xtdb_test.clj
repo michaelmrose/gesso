@@ -373,6 +373,40 @@
   (is (= {:tx-id 100}
          (xtdb-live/tx-consistency {:tx-id 100}))))
 
+(deftest portable-xtdb-basis-rejects-blank-database-identities-test
+  ;; Browser-carried bases must satisfy the same database naming invariant as
+  ;; server-constructed bases. The XTDB snapshot-token encoder itself allows
+  ;; an empty database string, and older admission accidentally trusted it.
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")
+        valid (xtdb-live/basis :xtdb 19 t)]
+    (doseq [database ["" " " "\t" " \n " "\r\n"]]
+      (let [forged (assoc valid
+                          :database database
+                          :snapshot-token
+                          (xt.basis/->time-basis-str {database [t]}))]
+        (is (false? (xtdb-live/xtdb-basis? forged))
+            (str "Reject empty/blank browser-carried database: " (pr-str database)))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/require-xtdb-basis! forged)))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/compare-bases forged forged)))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/strongest-required-basis
+              (progression/requirement forged))))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"non-blank string"
+             (xtdb-live/basis database 19 t)))))
+    (is (xtdb-live/xtdb-basis? valid))
+    (is (= "xtdb" (xtdb-live/basis-database valid)))
+    (is (xtdb-live/xtdb-basis? (xtdb-live/basis "tenant/a" 19 t)))))
+
 (deftest database-identity-rejects-qualified-keyword-aliases-test
   ;; Qualified keywords are normal Clojure data, but `name` drops their
   ;; namespace. The two tenant-scoped identifiers would otherwise construct
