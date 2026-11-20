@@ -624,9 +624,12 @@
     comparison))
 
 (defn basis-advances?
-  "True when right is strictly later than left in the same XTDB transaction log."
+  "True when right strictly advances left's transaction id without regressing
+   its authoritative snapshot time. Different databases are incomparable."
   [left right]
-  (neg? (compare-bases left right)))
+  (and (neg? (compare-bases left right))
+       (not (.isBefore ^Instant (basis-system-time right)
+                       ^Instant (basis-system-time left)))))
 
 (defn progression-witness
   "Return trusted generic :advances evidence for left -> right.

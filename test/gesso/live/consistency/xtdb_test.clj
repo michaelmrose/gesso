@@ -939,6 +939,32 @@
          #"cannot witness a backward"
          (xtdb-live/progression-witness b2 b1)))))
 
+(deftest basis-advances-predicate-rejects-regressing-snapshot-test
+  ;; This public storage-specific predicate must agree with trusted witness
+  ;; issuance: a greater tx-id is not sufficient when system-time regresses.
+  ;; A false result prevents callers from mistaking the transaction-id
+  ;; comparator for proof that an earlier required snapshot is satisfied.
+  (let [time (Instant/parse "2026-11-20T18:10:00Z")
+        earlier (.minusSeconds time 60)
+        later (.plusSeconds time 60)
+        from (xtdb-live/basis :xtdb 70 time)
+        backward-time (xtdb-live/basis :xtdb 71 earlier)
+        same-time (xtdb-live/basis :xtdb 71 time)
+        forward-time (xtdb-live/basis :xtdb 71 later)]
+    (is (neg? (xtdb-live/compare-bases from backward-time))
+        "Transaction id alone still orders the two records")
+    (is (false? (xtdb-live/basis-advances? from backward-time))
+        "Regression cannot be reported as an authoritative advance")
+    (is (xtdb-live/basis-advances? from same-time))
+    (is (xtdb-live/basis-advances? from forward-time))
+    (is (false? (xtdb-live/basis-advances? from from)))
+    (is (false? (xtdb-live/basis-advances? forward-time from)))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (xtdb-live/progression-witness from backward-time)))
+    (is (progression/advances?
+         from forward-time
+         (xtdb-live/progression-witness from forward-time)))))
+
 (deftest progression-witness-must-not-assert-a-regressing-snapshot-test
   ;; A newer transaction id alone does not establish that the next basis
   ;; satisfies an already installed later system-time. The generic progression
