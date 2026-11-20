@@ -62,7 +62,8 @@
    :take! s/take!})
 
 (def closed-sentinel
-  ::closed)
+  ;; Keep stream control distinct from all ordinary user values.
+  (Object.))
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -285,19 +286,21 @@
 ;; Manifold stream -> Missionary flow
 ;; -----------------------------------------------------------------------------
 
+;; Internal failure envelopes must never be confused with application maps.
+(deftype ^:private StreamFailure [error])
+
 (defn- stream-error-value
   [error]
-  {::stream-error error})
+  (StreamFailure. error))
 
 (defn- stream-error-value?
   [value]
-  (and (map? value)
-       (contains? value ::stream-error)))
+  (instance? StreamFailure value))
 
 (defn- unwrap-stream-value
   [value]
   (if (stream-error-value? value)
-    (throw (::stream-error value))
+    (throw (.-error ^StreamFailure value))
     value))
 
 (defn- stream-terminal-xf
@@ -312,7 +315,7 @@
   []
   (comp
    (map unwrap-stream-value)
-   (take-while #(not= closed-sentinel %))))
+   (take-while #(not (identical? closed-sentinel %)))))
 
 (defn- emit-safely!
   "Emit a value into m/observe.
@@ -419,7 +422,7 @@
                      (when-not @stopped?
                        (case kind
                          :error (emit-error-and-stop! payload)
-                         :value (if (= closed-sentinel payload)
+                         :value (if (identical? closed-sentinel payload)
                                   (do
                                     (debug!
                                      debug-fn

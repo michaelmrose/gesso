@@ -1045,3 +1045,33 @@
         (is (eventually #(s/closed? stream))))
       (finally
         (s/close! stream)))))
+
+(deftest stream-flow-treats-former-close-keyword-as-ordinary-data-test
+  ;; A stream is allowed to carry the namespaced keyword that previously
+  ;; served as a structural close marker. Data must never terminate the flow.
+  (let [stream (s/stream 4)
+        values [:gesso.live.flow/closed :after-close-keyword]]
+    (try
+      (doseq [value values]
+        (is (true? (put-value stream value))))
+      (s/close! stream)
+      (is (= {:status :success :value values}
+             (task-result (collect-runner (flow/stream-flow stream)))))
+      (finally
+        (s/close! stream)))))
+
+(deftest stream-flow-treats-former-error-key-as-ordinary-data-test
+  ;; A valid event map may contain the namespaced key formerly used for
+  ;; an internal failure envelope. It is caller data, not an exception.
+  (let [stream (s/stream 4)
+        values [{:topic :request :id "req-1"
+                 :gesso.live.flow/stream-error :caller-metadata}
+                {:topic :request :id "req-2"}]]
+    (try
+      (doseq [value values]
+        (is (true? (put-value stream value))))
+      (s/close! stream)
+      (is (= {:status :success :value values}
+             (task-result (collect-runner (flow/stream-flow stream)))))
+      (finally
+        (s/close! stream)))))
