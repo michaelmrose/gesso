@@ -1150,6 +1150,40 @@
           (existing-wrapper fixed-body))
         fixed-body))))
 
+(defn- guarded-empty-biff-snapshot-wrapper
+  "Preserve a Biff wrapper without letting it introduce a fabricated frontier.
+
+   The empty-node path has no selected-database transaction to pin. A prior
+   Biff wrapper may supply a snapshot only *after* frontier binding has
+   returned, so validating the initial context token alone is insufficient.
+   Check the wrapped request immediately before delegating to the body."
+  [existing-wrapper database-name]
+  (when-not (ifn? existing-wrapper)
+    (throw
+     (ex "Existing Biff request snapshot wrapper must be callable."
+         {:wrapper existing-wrapper})))
+  (fn [body]
+    (when-not (ifn? body)
+      (throw
+       (ex "Biff request snapshot wrapper requires a callable body."
+           {:body body})))
+    (existing-wrapper
+     (fn [wrapped-ctx]
+       (when-not (map? wrapped-ctx)
+         (throw
+          (ex "Existing Biff wrapper must supply a request context map."
+              {:ctx wrapped-ctx})))
+       (when-some [snapshot-token (:biff.xtdb/snapshot-token wrapped-ctx)]
+         (let [decoded (decode-canonical-biff-snapshot!
+                        database-name snapshot-token)]
+           (when (contains? decoded database-name)
+             (throw
+              (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
+                  {:database database-name
+                   :snapshot-token snapshot-token
+                   :reason :unobserved-selected-database})))))
+       (body wrapped-ctx)))))
+
 (defn- frontier-xtdb-required-bases
   "Validate every basis that explicitly claims XTDB authority.
 
@@ -1299,7 +1333,14 @@
                     {:database database-name
                      :snapshot-token snapshot-token
                      :reason :unobserved-selected-database})))))
-         ctx)))))
+         ;; The existing Biff wrapper may assign its own snapshot token only
+         ;; when the request body is invoked. Guard that second admission
+         ;; boundary as well; checking ctx above cannot see later mutation.
+         (if-some [existing-wrapper (:biff.core/wrap-db-snapshot ctx)]
+           (assoc ctx :biff.core/wrap-db-snapshot
+                  (guarded-empty-biff-snapshot-wrapper
+                   existing-wrapper database-name))
+           ctx))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options

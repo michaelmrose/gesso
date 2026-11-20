@@ -2136,6 +2136,52 @@
           (is (identical? foreign (xtdb-live/bind-request-frontier foreign))))
         (is (= 6 @observations))))))
 
+(deftest empty-frontier-guards-existing-biff-wrapper-snapshots-test
+  ;; Empty-database admission must continue to hold after a pre-existing Biff
+  ;; wrapper runs. Checking only the token already in the binding context
+  ;; misses a selected-database or malformed token installed by that wrapper.
+  (let [time (Instant/parse "2026-11-20T20:30:00Z")
+        selected-token (xtdb-live/basis-snapshot-token
+                        (xtdb-live/basis :xtdb 1 time))
+        foreign-token (xtdb-live/basis-snapshot-token
+                       (xtdb-live/basis :analytics 1 time))
+        called (atom 0)
+        base {:xtdb/node :authority-node :request/id :new-database}
+        wrap (fn [token]
+               (fn [body]
+                 (fn [request]
+                   (swap! called inc)
+                   (body (if (nil? token)
+                           request
+                           (assoc request :biff.xtdb/snapshot-token token))))))]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (doseq [invalid [selected-token false "invalid-protobuf"]]
+          (let [ctx (assoc base :biff.core/wrap-db-snapshot (wrap invalid))
+                bound (xtdb-live/bind-request-frontier ctx)
+                handler ((:biff.core/wrap-db-snapshot bound)
+                         (fn [_] :unsafe-read))
+                result (try (handler {:request/id :new-database})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo result)
+                (str "Biff wrapper must not inject an unobserved snapshot: "
+                     (pr-str invalid)))
+            (when (instance? clojure.lang.ExceptionInfo result)
+              (is (= "xtdb" (:database (ex-data result))))
+              (is (= invalid (:snapshot-token (ex-data result)))))))
+        ;; Legitimate empty startup and independent database snapshots remain
+        ;; usable; the existing Biff wrapper must still execute exactly once.
+        (doseq [token [nil foreign-token]]
+          (let [ctx (assoc base :biff.core/wrap-db-snapshot (wrap token))
+                bound (xtdb-live/bind-request-frontier ctx)
+                handler ((:biff.core/wrap-db-snapshot bound)
+                         (fn [request]
+                           (:biff.xtdb/snapshot-token request)))]
+            (is (= token (handler {:request/id :new-database})))))
+        (is (= 5 @called))))))
+
 (deftest bind-request-frontier-does-not-fabricate-initial-basis-test
   (let [ctx {:xtdb/node :authority-node
              :request/id :request-2}
