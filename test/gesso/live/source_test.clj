@@ -575,3 +575,44 @@
                 (deliver resume :resume))))))
       (finally
         (source/close! src)))))
+
+(deftest emission-paused-in-validation-cannot-reopen-closed-source-test
+  ;; Force close! after emit!'s initial open check but before validation
+  ;; returns. An invalidation must not be accepted or recreate cooldown state
+  ;; after shutdown has already discarded every pending source value.
+  (doseq [window-ms [nil 500]]
+    (let [src (source/create {:coalesce-window-ms window-ms})
+          validation-entered (promise)
+          resume-validation (promise)
+          original (var-get #'gesso.live.source/validate-invalidation!)]
+      (try
+        (with-redefs-fn
+          {#'gesso.live.source/validate-invalidation!
+           (fn [value]
+             (deliver validation-entered :entered)
+             (deref resume-validation 2000 ::timeout)
+             (original value))}
+          (fn []
+            (let [attempt (future
+                            (try
+                              (source/emit! src invalidation-1)
+                              (catch clojure.lang.ExceptionInfo e e)))]
+              (try
+                (is (= :entered (deref validation-entered 2000 ::timeout)))
+                (is (= :closed (source/close! src)))
+                (deliver resume-validation :continue)
+                (let [outcome (deref attempt 2000 ::timeout)
+                      stats (source/stats src)]
+                  (is (instance? clojure.lang.ExceptionInfo outcome)
+                      (str "closed source must reject in-flight validation, window=" window-ms))
+                  (is (= "gesso.live source is closed."
+                         (when (instance? clojure.lang.ExceptionInfo outcome)
+                           (ex-message outcome))))
+                  (is (zero? (:accepted-count stats)))
+                  (is (zero? (:pending-count stats)))
+                  (is (zero? (:scheduled-count stats))))
+                (finally
+                  (deliver resume-validation :continue))))))
+        (finally
+          (deliver resume-validation :continue)
+          (source/close! src))))))

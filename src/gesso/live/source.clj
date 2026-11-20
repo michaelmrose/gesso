@@ -592,6 +592,10 @@
   (let [k (scope-key invalidation)
         action
         (locking (:coalesce-lock source)
+          ;; Acceptance and coalescing must be atomic with close!'s cleanup.
+          ;; The initial open check in emit! alone can race with validation.
+          (ensure-open! source)
+          (.increment ^LongAdder (:accepted-count source))
           (if (nil? (.putIfAbsent ^ConcurrentHashMap (:cooldowns source) k Boolean/TRUE))
             :leading
             (do
@@ -656,10 +660,16 @@
   [source invalidation]
   (ensure-open! source)
   (let [invalidation' (validate-invalidation! invalidation)]
-    (.increment ^LongAdder (:accepted-count source))
     (if-let [window-ms (positive-coalesce-window-ms source)]
       (throttle-coalesced! source invalidation' window-ms)
-      (assoc (deliver-now! source invalidation') :status :emitted))))
+      (do
+        ;; Do not hold the lifecycle lock across consumer fanout. But the
+        ;; transition to accepted must serialize with close!, otherwise a
+        ;; paused validation can accept work after shutdown completes.
+        (locking (:coalesce-lock source)
+          (ensure-open! source)
+          (.increment ^LongAdder (:accepted-count source)))
+        (assoc (deliver-now! source invalidation') :status :emitted)))))
 
 (defn emit-many!
   "Emit many already-expanded invalidations into source.
