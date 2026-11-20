@@ -706,3 +706,63 @@
           (is (= 1 @cancelled) "late physical canceller runs at most once")
           (is (some #(= :gesso.live.sse/physical-cancel-failed (:event %))
                     @debug-events)))))))
+
+(deftest terminal-keepalive-start-skips-event-source-start-test
+  ;; A keepalive may fail synchronously during task installation. Terminal
+  ;; shutdown already owns the stream before the event source is started;
+  ;; starting it afterward could create an unnecessary upstream subscription.
+  (let [error (ex-info "keepalive failed during start" {:kind :keepalive})
+        errors (atom [])
+        event-starts (atom 0)
+        keepalive-cancels (atom 0)]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success failure]
+           (failure error)
+           (fn [] (swap! keepalive-cancels inc))))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success _failure]
+           (swap! event-starts inc)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start! (never-flow)
+                                  {:keepalive-ms 1000
+                                   :on-error (fn [e _entry] (swap! errors conj e))})]
+          (is (map? started))
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (is (= [error] @errors))
+          (is (= 1 @keepalive-cancels)
+              "late installed keepalive canceller must be retired")
+          (is (zero? @event-starts)
+              "an already-closed SSE stream must not start an upstream source")
+          (sse/cancel! started)
+          (is (= 1 @keepalive-cancels)))))))
+
+(deftest terminal-stream-closed-during-keepalive-start-skips-event-source-test
+  ;; The downstream may disconnect synchronously during keepalive task
+  ;; registration; no event producer should be launched on that closed stream.
+  (let [event-starts (atom 0)
+        keepalive-cancels (atom 0)]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [out _options]
+         (fn [_success _failure]
+           (s/close! out)
+           (fn [] (swap! keepalive-cancels inc))))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success _failure]
+           (swap! event-starts inc)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start! (never-flow) {:keepalive-ms 1000})]
+          (is (map? started))
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (is (= 1 @keepalive-cancels))
+          (is (zero? @event-starts))
+          (sse/cancel! started)
+          (is (= 1 @keepalive-cancels)))))))

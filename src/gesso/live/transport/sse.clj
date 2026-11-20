@@ -533,28 +533,33 @@
         :keepalive
         debug-fn))
 
-     (let [events-task (write-events-task out live-events options')
-           cancel-events!
-           (events-task
-            (fn [_]
-              (debug!
-               debug-fn
-               :gesso.live.sse/flow-completed
-               {:at (now-ms)})
-              (when (:close-on-complete? options')
-                (close-once! :completed {})
-                (cancel-running!)))
-            (fn [error]
-              (if @cancelling?
-                (debug!
-                 debug-fn
-                 :gesso.live.sse/task-cancelled
-                 {:error error
-                  :at (now-ms)})
-                (do
-                  (fail! error)
-                  (close-once! :error {:error error})
-                  (cancel-running!)))))
+     (let [cancel-events!
+           ;; A synchronous keepalive failure or downstream disconnect may
+           ;; terminate the stream before event source registration.
+           ;; An in-progress installation remains protected by the late
+           ;; cancellation handoff below.
+           (when-not (or @cancelling? @closed? (s/closed? out))
+             (let [events-task (write-events-task out live-events options')]
+               (events-task
+                (fn [_]
+                  (debug!
+                   debug-fn
+                   :gesso.live.sse/flow-completed
+                   {:at (now-ms)})
+                  (when (:close-on-complete? options')
+                    (close-once! :completed {})
+                    (cancel-running!)))
+                (fn [error]
+                  (if @cancelling?
+                    (debug!
+                     debug-fn
+                     :gesso.live.sse/task-cancelled
+                     {:error error
+                      :at (now-ms)})
+                    (do
+                      (fail! error)
+                      (close-once! :error {:error error})
+                      (cancel-running!)))))))
 
            cancel!
            (once
@@ -562,8 +567,9 @@
               (close-once! :cancelled {})
               (cancel-running!)))]
 
-       (install-canceller! cancel-events-ref cancelling? cancel-events!
-                           :events debug-fn)
+       (when cancel-events!
+         (install-canceller! cancel-events-ref cancelling? cancel-events!
+                             :events debug-fn))
 
        {:stream out
         :response (response* out options')
