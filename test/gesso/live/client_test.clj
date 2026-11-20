@@ -802,6 +802,63 @@
         (close-response!
          response)))))
 
+(deftest stream-response-initial-wake-failure-retires-registration-test
+  ;; Stream registration precedes the initial wake. If the physical wake
+  ;; fails synchronously, the Ring response is never returned, so nobody
+  ;; else can close the newly registered stream.
+  (let [channel (test-channel)
+        bad-stream (atom nil)
+        failure (ex-info "initial wake failure" {:kind :test})]
+    (with-redefs-fn
+      {#'gesso.live.client/wake-client-stream!
+       (fn [_channel _client-id stream]
+         (reset! bad-stream stream)
+         (throw failure))}
+      (fn []
+        (is (identical? failure
+                        (try
+                          (connect! channel "client-1")
+                          (catch Throwable error error))))))
+    (is (some? @bad-stream))
+    (is (s/closed? @bad-stream)
+        "A failed stream response must retire its physical stream")
+    (is (empty? (client/connected-clients channel))
+        "Failed registration cannot remain visible as connected")
+    (is (= 0 (:connected-count (client/state-summary channel))))))
+
+(deftest failed-wake-cleanup-does-not-retire-newer-client-test
+  ;; Another same-id connection may replace the failing stream before its
+  ;; failure cleanup runs. Cleanup must be conditional on stream identity.
+  (let [channel (test-channel)
+        failed-stream (atom nil)
+        replacement (atom nil)
+        attempts (atom 0)
+        failure (ex-info "old initial wake failure" {:kind :test})
+        real-wake (var-get #'gesso.live.client/wake-client-stream!)]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.client/wake-client-stream!
+         (fn [ch client-id stream]
+           (if (= 1 (swap! attempts inc))
+             (do
+               (reset! failed-stream stream)
+               (reset! replacement (connect! ch client-id))
+               (throw failure))
+             (real-wake ch client-id stream)))}
+        (fn []
+          (is (identical? failure
+                          (try
+                            (connect! channel "client-1")
+                            (catch Throwable error error))))))
+      (is (s/closed? @failed-stream))
+      (is (not (s/closed? (:body @replacement))))
+      (is (= #{"client-1"}
+             (set (client/connected-client-ids channel))))
+      (is (= (:body @replacement)
+             (get-in @(:state channel) [:clients "client-1" :stream])))
+      (finally
+        (close-response! @replacement)))))
+
 (deftest stream-response-emits-initial-wake-test
   (let [channel
         (test-channel)

@@ -607,19 +607,30 @@
   (let [client-id (or (client-id-from-ctx channel ctx)
                       (new-client-id))
         stream    (s/stream 32)]
-    (register-client! channel ctx client-id stream)
-    (s/on-closed stream
-                 #(remove-client-if-same-stream! channel client-id stream))
+    (try
+      (register-client! channel ctx client-id stream)
+      (s/on-closed stream
+                   #(remove-client-if-same-stream! channel client-id stream))
 
-    ;; Initial wake is harmless when pending is empty and useful after reconnect.
-    (wake-client-stream! channel client-id stream)
+      ;; Initial wake is harmless when pending is empty and useful after reconnect.
+      (wake-client-stream! channel client-id stream)
 
-    {:status 200
-     :headers {"content-type" "text/event-stream; charset=utf-8"
-               "cache-control" "no-cache, no-transform"
-               "connection" "keep-alive"
-               "x-accel-buffering" "no"}
-     :body stream}))
+      {:status 200
+       :headers {"content-type" "text/event-stream; charset=utf-8"
+                 "cache-control" "no-cache, no-transform"
+                 "connection" "keep-alive"
+                 "x-accel-buffering" "no"}
+       :body stream}
+      (catch Throwable error
+        ;; If registration or the initial wake fails, no Ring response hands
+        ;; ownership of this stream to the server. Retire it here instead of
+        ;; leaving a connected phantom client and an unowned live producer.
+        (close-stream! stream)
+        ;; The on-closed hook may not have been installed yet. This removal
+        ;; must also be identity-guarded: another same-id connection can have
+        ;; replaced this stream before the failing wake returns.
+        (remove-client-if-same-stream! channel client-id stream)
+        (throw error)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Pending OOB fragments
