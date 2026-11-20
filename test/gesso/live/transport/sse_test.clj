@@ -646,3 +646,63 @@
                 "terminal event failure must cancel the keepalive immediately")
             (finally
               (sse/cancel! started))))))))
+
+
+(deftest sse-cancellation-failure-still-stops-keepalive-test
+  ;; A throwing upstream cancellation callback must not skip cancellation of
+  ;; a separate keepalive task or make an already closed connection throw.
+  (let [cancelled (atom [])
+        debug-events (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success _failure]
+           (fn []
+             (swap! cancelled conj :events)
+             (throw (ex-info "upstream canceller failed" {:source :events})))))
+       #'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success _failure]
+           (fn [] (swap! cancelled conj :keepalive))))}
+      (fn []
+        (let [started (sse/start! (m/seed [])
+                                  {:keepalive-ms 1000
+                                   :debug-fn #(swap! debug-events conj %)})]
+          (is (nil? (try (sse/cancel! started) nil
+                         (catch Exception e e)))
+              "cancellation is cleanup, not a new SSE failure")
+          (is (sse/closed? started))
+          (is (= [:events :keepalive] @cancelled)
+              "both resources must be cancelled independently")
+          (is (= [:events]
+                 (mapv :task (filter #(= :gesso.live.sse/physical-cancel-failed
+                                             (:event %)) @debug-events))))
+          (sse/cancel! started)
+          (is (= [:events :keepalive] @cancelled)
+              "repeated close must not recancel resources"))))))
+
+(deftest sse-late-cancellation-failure-does-not-abort-start-test
+  ;; A stream may close while a producer's physical cancellation handle is
+  ;; being returned. Its failure must not escape start! after terminal close.
+  (let [cancelled (atom 0)
+        debug-events (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [out _events _options]
+         (fn [_success _failure]
+           (s/close! out)
+           (fn []
+             (swap! cancelled inc)
+             (throw (ex-info "late upstream canceller failed" {})))))}
+      (fn []
+        (let [started (try (sse/start! (m/seed [])
+                                       {:debug-fn #(swap! debug-events conj %)})
+                           (catch Exception e e))]
+          (is (map? started) "start! must return its already-closed handle")
+          (when (map? started)
+            (is (sse/closed? started))
+            (is (s/closed? (:stream started)))
+            (sse/cancel! started))
+          (is (= 1 @cancelled) "late physical canceller runs at most once")
+          (is (some #(= :gesso.live.sse/physical-cancel-failed (:event %))
+                    @debug-events)))))))

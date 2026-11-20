@@ -150,17 +150,35 @@
       (when (compare-and-set! called? false true)
         (apply f args)))))
 
+(defn- cancel-task-safely!
+  "Cancellation is best-effort cleanup after SSE termination. A failing
+   producer canceller must not block cancellation of the other producer or
+   replace the already chosen terminal outcome."
+  [cancel! task debug-fn]
+  (when cancel!
+    (try
+      (cancel!)
+      (catch Exception e
+        (when (instance? InterruptedException e)
+          (.interrupt (Thread/currentThread)))
+        (debug!
+         debug-fn
+         :gesso.live.sse/physical-cancel-failed
+         {:task task
+          :error e
+          :at (now-ms)})))))
+
 (defn- install-canceller!
   "Publish a task cancellation handle despite concurrent terminal shutdown.
 
    If shutdown wins before the task returns its handle, invoke the handle
    immediately after installation. If shutdown races the install, both paths
    may try to cancel, so the installed handle must run exactly once."
-  [cancel-ref cancelling? cancel-fn]
+  [cancel-ref cancelling? cancel-fn task debug-fn]
   (let [cancel-once! (once cancel-fn)]
     (reset! cancel-ref cancel-once!)
     (when @cancelling?
-      (cancel-once!))
+      (cancel-task-safely! cancel-once! task debug-fn))
     cancel-once!))
 
 (defn- deferred-task
@@ -484,10 +502,10 @@
          cancel-running!
          (fn []
            (reset! cancelling? true)
-           (when-let [cancel! @cancel-events-ref]
-             (cancel!))
-           (when-let [cancel! @cancel-keepalive-ref]
-             (cancel!)))]
+           ;; Both producers must be retired independently. A physical
+           ;; cancellation callback is user/executor code and may throw.
+           (cancel-task-safely! @cancel-events-ref :events debug-fn)
+           (cancel-task-safely! @cancel-keepalive-ref :keepalive debug-fn))]
 
      (debug!
       debug-fn
@@ -511,7 +529,9 @@
            (when-not @cancelling?
              (fail! error)
              (close-once! :keepalive-error {:error error})
-             (cancel-running!))))))
+             (cancel-running!))))
+        :keepalive
+        debug-fn))
 
      (let [events-task (write-events-task out live-events options')
            cancel-events!
@@ -542,7 +562,8 @@
               (close-once! :cancelled {})
               (cancel-running!)))]
 
-       (install-canceller! cancel-events-ref cancelling? cancel-events!)
+       (install-canceller! cancel-events-ref cancelling? cancel-events!
+                           :events debug-fn)
 
        {:stream out
         :response (response* out options')
