@@ -1059,6 +1059,13 @@
    :tx-id and :system-time are preserved as metadata, but only
    query-consistency keys are passed to XTDB query opts."
   [consistency]
+  ;; A malformed supplied constraint must not silently turn into an empty
+  ;; query basis. nil alone denotes absent optional read consistency.
+  (when-not (or (nil? consistency)
+                (map? consistency))
+    (throw
+     (ex "XTDB consistency must be a map or nil."
+         {:consistency consistency})))
   (select-compact consistency tx-consistency-keys))
 
 (defn consistency-from
@@ -1076,10 +1083,15 @@
   [x]
   (normalize-consistency
    (when (map? x)
-     (or (:gesso.live/consistency x)
-         (:gesso.live.xtdb/consistency x)
-         (:xtdb/consistency x)
-         (:consistency x)))))
+     ;; A present false value is invalid rather than missing. Truthiness-based
+     ;; precedence would silently replace it with a weaker legacy constraint.
+     (first
+      (filter some?
+              (map #(get x %)
+                   [:gesso.live/consistency
+                    :gesso.live.xtdb/consistency
+                    :xtdb/consistency
+                    :consistency]))))))
 
 (defn query-consistency
   "Return only consistency fields that XTDB2 query opts can use."

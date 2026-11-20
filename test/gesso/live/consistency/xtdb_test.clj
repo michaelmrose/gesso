@@ -139,6 +139,58 @@
              :system-time t
              :ignored true})))))
 
+(deftest malformed-explicit-read-consistency-fails-before-xtdb-io-test
+  ;; An explicitly supplied malformed read constraint is not absence. In
+  ;; particular, false must not select a weaker legacy value and an empty
+  ;; vector must not silently normalize into an unconstrained query.
+  (doseq [invalid [false []]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"XTDB consistency must be a map"
+         (xtdb-live/normalize-consistency invalid))))
+  (let [legacy {:snapshot-token "legacy"}
+        contexts [{:xtdb/read-connectable :read
+                   :gesso.live/consistency false
+                   :gesso.live.xtdb/consistency legacy}
+                  {:xtdb/read-connectable :read
+                   :gesso.live.xtdb/consistency false
+                   :xtdb/consistency legacy}
+                  {:xtdb/read-connectable :read
+                   :xtdb/consistency false
+                   :consistency legacy}
+                  {:xtdb/read-connectable :read
+                   :consistency false}
+                  {:xtdb/read-connectable :read
+                   :gesso.live/consistency []
+                   :xtdb/consistency legacy}]
+        external-calls (atom 0)
+        unexpected-api (fn [& _]
+                         (swap! external-calls inc)
+                         :unexpected)]
+    (with-redefs-fn
+      {(xtdb-var '*q*) unexpected-api
+       (xtdb-var '*plan-q*) unexpected-api}
+      (fn []
+        (doseq [ctx contexts]
+          (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo
+               #"XTDB consistency must be a map"
+               (xtdb-live/consistency-from ctx)))
+          (doseq [invoke [#(xtdb-live/q-consistent-from ctx sample-query)
+                          #(xtdb-live/plan-q-consistent-from ctx sample-query)]]
+            (is (thrown-with-msg?
+                 clojure.lang.ExceptionInfo
+                 #"XTDB consistency must be a map"
+                 (invoke)))
+            (is (zero? @external-calls)
+                "Malformed read consistency must not reach XTDB I/O")))))
+    ;; nil is the only absent value; preserve fallback and optional defaults.
+    (is (= legacy
+           (xtdb-live/consistency-from
+            {:gesso.live/consistency nil :xtdb/consistency legacy})))
+    (is (= {} (xtdb-live/normalize-consistency nil)))
+    (is (= {} (xtdb-live/consistency-from {:xtdb/node :node})))))
+
 (deftest consistency-from-uses-only-explicit-consistency-test
   (is (= {:await-token "tok-1"}
          (xtdb-live/consistency-from
