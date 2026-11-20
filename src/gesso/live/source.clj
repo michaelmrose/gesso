@@ -245,11 +245,22 @@
    (fn [accepted?]
      (when-not accepted?
        (remove-tap-if-same! source tap-id stream)
+       ;; A retired consumer cannot receive future invalidations. Close its
+       ;; stream so Live/SSE observers see termination rather than hang.
+       (s/close! stream)
        (record-put-rejected! source :broadcast-tap tap-id invalidation)))
    (fn [error]
      (remove-tap-if-same! source tap-id stream)
+     (s/close! stream)
      (record-put-error! source :broadcast-tap tap-id invalidation error)))
   nil)
+
+(defn- put-consumer!
+  "Place an invalidation onto one Manifold consumer. Kept as a small
+   boundary so rejected and failed physical puts can be tested reliably:
+   manifold.stream/put! is compiler-inlined and cannot be with-redefs'd."
+  [stream invalidation]
+  (s/put! stream invalidation))
 
 (defn- put-tap!
   [source tap-id stream invalidation]
@@ -261,11 +272,12 @@
 
     :else
     (try
-      (let [put-result (s/put! stream invalidation)]
+      (let [put-result (put-consumer! stream invalidation)]
         (track-tap-put-result! source tap-id stream invalidation put-result)
         true)
       (catch Throwable e
         (remove-tap-if-same! source tap-id stream)
+        (s/close! stream)
         (record-put-error! source :broadcast-tap tap-id invalidation e)
         false))))
 
@@ -308,9 +320,11 @@
    (fn [accepted?]
      (when-not accepted?
        (remove-subscription-if-same! source subscription-id stream)
+       (s/close! stream)
        (record-put-rejected! source :indexed-subscription subscription-id invalidation)))
    (fn [error]
      (remove-subscription-if-same! source subscription-id stream)
+     (s/close! stream)
      (record-put-error! source :indexed-subscription subscription-id invalidation error)))
   nil)
 
@@ -324,11 +338,12 @@
 
     :else
     (try
-      (let [put-result (s/put! stream invalidation)]
+      (let [put-result (put-consumer! stream invalidation)]
         (track-subscription-put-result! source subscription-id stream invalidation put-result)
         true)
       (catch Throwable e
         (remove-subscription-if-same! source subscription-id stream)
+        (s/close! stream)
         (record-put-error! source :indexed-subscription subscription-id invalidation e)
         false))))
 

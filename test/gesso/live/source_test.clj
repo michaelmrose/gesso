@@ -3,6 +3,7 @@
    [clojure.test :refer [deftest is]]
    [gesso.live.progression :as progression]
    [gesso.live.source :as source]
+   [manifold.deferred :as d]
    [manifold.stream :as s]))
 
 ;; -----------------------------------------------------------------------------
@@ -688,3 +689,65 @@
       (is (= :lock-available (deref acquired 1000 ::timeout))
           (str consumer " on-closed callbacks must not hold the source lock"))
       (is (= 0 (:tap-count (source/stats src)))))))
+
+(deftest rejected-or-failed-source-put-closes-consumer-stream-test
+  ;; Removing a failed consumer from routing maps without closing its stream
+  ;; strands its Live flow: the transport keeps waiting for a wakeup it will
+  ;; never receive. Both indexed subscriptions and broadcast taps must receive
+  ;; a physical terminal close on rejected and failed asynchronous puts.
+  (doseq [[kind subscribe!]
+          [[:indexed #(source/subscribe % {:topic :request :id "req-1"})]
+           [:broadcast source/changes]]
+          outcome [:rejected :failed]]
+    (let [src (source/create)
+          stream (subscribe! src)
+          pending (d/deferred)
+          original-put @#'gesso.live.source/put-consumer!
+          close-called (promise)]
+      (s/on-closed stream #(deliver close-called :closed))
+      (try
+        (with-redefs-fn {#'gesso.live.source/put-consumer!
+                         (fn [target value]
+                               (if (identical? stream target)
+                                 pending
+                                 (original-put target value)))}
+          (fn []
+            (is (= 1 (:attempted (source/emit! src invalidation-1)))
+                (str kind " must attempt delivery before " outcome))))
+        (is (not (s/closed? stream)))
+        (case outcome
+          :rejected (d/success! pending false)
+          :failed (d/error! pending (ex-info "put failed" {:kind kind})))
+        (is (= :closed (deref close-called timeout-ms ::timeout))
+            (str kind " " outcome " must close the consumer stream"))
+        (is (s/closed? stream))
+        (is (zero? (:tap-count (source/stats src))))
+        (is (= (if (= outcome :rejected) :put-rejected :put-error)
+               (:kind (last (source/errors src)))))
+        (finally
+          (source/close! src))))))
+
+(deftest synchronous-source-put-error-closes-consumer-stream-test
+  ;; A thrown put! call must use the same terminal cleanup as an asynchronously
+  ;; rejected or failed put. No abandoned open stream may outlive registration.
+  (doseq [[kind subscribe!]
+          [[:indexed #(source/subscribe % {:topic :request :id "req-1"})]
+           [:broadcast source/changes]]]
+    (let [src (source/create)
+          stream (subscribe! src)
+          original-put @#'gesso.live.source/put-consumer!
+          boom (ex-info "put threw" {:consumer kind})]
+      (try
+        (with-redefs-fn {#'gesso.live.source/put-consumer!
+                         (fn [target value]
+                               (if (identical? stream target)
+                                 (throw boom)
+                                 (original-put target value)))}
+          (fn []
+            (is (= 0 (:attempted (source/emit! src invalidation-1))))))
+        (is (s/closed? stream)
+            (str kind " must close when put! throws synchronously"))
+        (is (zero? (:tap-count (source/stats src))))
+        (is (= :put-error (:kind (last (source/errors src)))))
+        (finally
+          (source/close! src))))))
