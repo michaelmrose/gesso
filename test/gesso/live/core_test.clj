@@ -1185,6 +1185,106 @@
 
             (is (= :async (:emit result)))))))))
 
+(deftest transact-and-notify-rejects-invalid-async-dispatch-config-before-write-test
+  ;; :entry and :entry-fn describe async dispatch, and their shape is fully
+  ;; knowable before an XTDB commit. Previously malformed values failed only
+  ;; during post-commit job construction (or were silently ignored when false).
+  (doseq [invalid-options [{:entry 42}
+                           {:entry "not-a-map"}
+                           {:entry false}
+                           {:entry-fn 42}
+                           {:entry-fn "not-a-function"}
+                           {:entry-fn false}]
+          changes [[request-change]
+                   [request-change other-request-change]]]
+    (let [writes (atom 0)
+          submitted (atom 0)]
+      (with-redefs [live/submit-expanded! (fn [& _]
+                                           (swap! submitted inc)
+                                           {:status :submitted})]
+        (with-xtdb-stub
+          'execute-tx-from!
+          (fn [& _]
+            (swap! writes inc)
+            {:tx-result {:tx-id 42}
+             :consistency sample-consistency})
+          (fn []
+            (let [error (try
+                          (live/transact-and-notify!
+                           {:options {}}
+                           {:xtdb/connectable :write-node}
+                           (merge {:tx-ops sample-tx
+                                   :changes changes
+                                   :emit :async}
+                                  invalid-options))
+                          nil
+                          (catch Throwable e e))]
+              (is (instance? clojure.lang.ExceptionInfo error)
+                  (str "Invalid async options must be rejected: "
+                       (pr-str invalid-options)))
+              (is (= :gesso.live.core/invalid-async-dispatch-options
+                     (:error/type (ex-data error)))
+                  "Reject at the explicit async admission boundary")
+              (is (zero? @writes)
+                  "Invalid async job metadata cannot commit a mutation")
+              (is (zero? @submitted)
+                  "No partial notification should be scheduled"))))))))
+
+(deftest malformed-async-entry-with-real-dispatcher-does-not-commit-test
+  ;; This uses the real submit-expanded!/dispatch entry construction path:
+  ;; on v1992, assoc on the scalar :entry threw after execute-tx! succeeded.
+  ;; Rejecting the bad job metadata before XTDB is the real protection.
+  (let [writes (atom 0)
+        system (live/create {:dispatch-options {:threads 1 :queue-size 4}})]
+    (try
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [& _]
+          (swap! writes inc)
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency})
+        (fn []
+          (let [error (try
+                        (live/transact-and-notify!
+                         system {:xtdb/connectable :write-node}
+                         {:tx-ops sample-tx
+                          :change request-change
+                          :entry 42
+                          :emit :async})
+                        nil
+                        (catch Throwable e e))]
+            (is (= :gesso.live.core/invalid-async-dispatch-options
+                   (:error/type (ex-data error))))
+            (is (= :entry (:option (ex-data error))))
+            (is (zero? @writes)
+                "A real invalid dispatcher entry cannot commit first")
+            (is (zero? (:queue-size (dispatch/stats (:dispatcher system))))))))
+      (finally
+        (live/close! system)))))
+
+(deftest transact-and-notify-ignores-dispatch-metadata-when-emit-disabled-test
+  ;; Dispatch metadata is irrelevant when notification is disabled, so avoid
+  ;; a new restriction on deliberately transaction-only writes.
+  (let [writes (atom 0)]
+    (with-xtdb-stub
+      'execute-tx-from!
+      (fn [& _]
+        (swap! writes inc)
+        {:tx-result {:tx-id 42}
+         :consistency sample-consistency})
+      (fn []
+        (let [result (live/transact-and-notify!
+                      {:options {}}
+                      {:xtdb/connectable :write-node}
+                      {:tx-ops sample-tx
+                       :change request-change
+                       :emit false
+                       :entry 42
+                       :entry-fn false})]
+          (is (= 1 @writes))
+          (is (= false (:emit result)))
+          (is (= [] (:emit-results result))))))))
+
 (deftest transact-and-notify-async-supports-entry-fn-test
   (let [seen-submits (atom [])
         system {:options {}}

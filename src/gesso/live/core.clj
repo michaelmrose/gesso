@@ -224,6 +224,29 @@
             :valid valid-emit-modes})))
     emit'))
 
+(defn- require-async-dispatch-options!
+  "Validate job metadata that will be used for async delivery before commit.
+
+   The actual entry-fn result depends on the authoritative transaction's
+   attached change and can only be checked after commit. But an invalid
+   entry map or non-callable entry-fn is known before XTDB execution; neither
+   should be allowed to fail only after the mutation becomes authoritative."
+  [emit-mode changes {:keys [entry entry-fn]}]
+  (when (and (= :async emit-mode) (seq changes))
+    (when-not (or (nil? entry) (map? entry))
+      (throw
+       (ex "gesso.live async :entry must be a map or nil."
+           {:error/type :gesso.live.core/invalid-async-dispatch-options
+            :option :entry
+            :value entry})))
+    (when-not (or (nil? entry-fn) (fn? entry-fn))
+      (throw
+       (ex "gesso.live async :entry-fn must be a function or nil."
+           {:error/type :gesso.live.core/invalid-async-dispatch-options
+            :option :entry-fn
+            :value entry-fn}))))
+  nil)
+
 (defn- normalize-changes
   [{:keys [change changes]}]
   ;; A malformed app-supplied change is knowable before the XTDB write.
@@ -1242,6 +1265,7 @@
   (let [debug-fn (get-in system [:options :debug-fn])
         emit-mode (normalize-emit-mode emit)
         changes (normalize-changes options)
+        _ (require-async-dispatch-options! emit-mode changes options)
         tx-result-map (execute-tx! ctx tx-ops tx-options)
         consistency' (:consistency tx-result-map)
         transaction-progression (:progression tx-result-map)
