@@ -480,8 +480,19 @@
   (reset! (:cache manager) {})
   manager)
 
+(defn- cancel-once
+  "Wrap an in-flight task canceller so competing shutdown paths call it once."
+  [cancel!]
+  (let [called? (atom false)]
+    (fn []
+      (when (compare-and-set! called? false true)
+        (cancel!)))))
+
 (defn- cancel-flight!
   [flight]
+  ;; An owner can acquire its slot before it publishes the underlying task's
+  ;; canceller. Remember the request, then allow the installer to honor it.
+  (reset! (:cancel-requested? flight) true)
   (when-let [cancel! @(:cancel-ref flight)]
     (cancel!)))
 
@@ -527,7 +538,8 @@
 (defn- new-flight
   []
   {:cell (m/dfv)
-   :cancel-ref (atom nil)})
+   :cancel-ref (atom nil)
+   :cancel-requested? (atom false)})
 
 (defn- acquire-flight!
   [manager key flight]
@@ -625,7 +637,10 @@
              :status :failure
              :error error
              :at (clock)})))]
-    (reset! (:cancel-ref flight) cancel!)
+    (let [cancel-once! (cancel-once cancel!)]
+      (reset! (:cancel-ref flight) cancel-once!)
+      (when @(:cancel-requested? flight)
+        (cancel-once!)))
     flight))
 
 (defn- protect-task*

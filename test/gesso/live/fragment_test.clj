@@ -1038,3 +1038,48 @@
         (when-let [runner @replacement]
           (cancel-runner! runner))
         (fragment/clear-key! manager fragment-key)))))
+
+(deftest clear-key-cancels-flight-when-canceller-published-after-invalidation-test
+  ;; The owner registers an in-flight key before start-flight! has installed
+  ;; the task's canceller. Invalidating that key must remember cancellation
+  ;; and apply it when the task startup publishes its cancellation handle.
+  (let [manager (fragment/create)
+        acquired (promise)
+        continue-start (promise)
+        cancel-count (atom 0)
+        render-starts (atom 0)
+        original-start @#'gesso.live.fragment/start-flight!
+        render (fn [_success _failure]
+                 (swap! render-starts inc)
+                 (fn [] (swap! cancel-count inc)))]
+    (with-redefs-fn
+      {#'gesso.live.fragment/start-flight!
+       (fn [m k task options flight]
+         (deliver acquired flight)
+         @continue-start
+         (original-start m k task options flight))}
+      (fn []
+        (let [runner-future
+              (future (start-task (fragment/protect-task manager fragment-key render)))]
+          (try
+            (let [flight (deref acquired timeout-ms ::timeout)]
+              (is (map? flight) "owner should have acquired a flight")
+              (when (map? flight)
+                (is (nil? @(:cancel-ref flight)) "canceller has not yet been registered")
+                (is (= 1 (:inflight-count (fragment/stats manager))))
+                (fragment/clear-key! manager fragment-key)
+                (is (= 0 (:inflight-count (fragment/stats manager))))
+                (deliver continue-start true)
+                (is (eventually #(= 1 @render-starts)))
+                (is (eventually #(= 1 @cancel-count))
+                    "late-published cancellation handle must be called")
+                (is (= 1 @cancel-count)
+                    "the same task cancellation must happen exactly once")
+                (@#'gesso.live.fragment/cancel-flight! flight)
+                (is (= 1 @cancel-count)
+                    "a second cancellation request must not invoke the handle twice")))
+            (finally
+              (deliver continue-start true)
+              (when-let [runner (deref runner-future timeout-ms nil)]
+                (cancel-runner! runner))
+              (fragment/clear-key! manager fragment-key))))))))
