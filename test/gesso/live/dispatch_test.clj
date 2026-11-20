@@ -449,3 +449,31 @@
         (finally
           (release resume)
           (close d))))))
+
+(deftest public-job-cannot-spoof-internal-coalesce-slot-test
+  ;; Ordinary caller metadata must not be interpreted as an internal queue
+  ;; slot. Previously this valid :run job killed a worker via (deref nil),
+  ;; leaving subsequently submitted work stranded on that dispatcher.
+  (doseq [policy [:throw :block :drop :coalesce]]
+    (let [first-done (promise)
+          second-done (promise)
+          d (dispatch/create {:threads 1
+                              :queue-size 4
+                              :on-overflow policy})]
+      (try
+        (is (= :submitted
+               (:status (dispatch/submit!
+                         d {:dispatch/type :coalesce-slot
+                            :coalesce-key :caller-metadata
+                            :run #(deliver first-done :first-ran)})))
+            (str policy " should accept a valid user job"))
+        (is (= :first-ran (promise-value first-done))
+            (str policy " must run caller job, not treat it as an internal slot"))
+        (is (= :submitted
+               (:status (dispatch/submit!
+                         d {:coalesce-key :follow-up
+                            :run #(deliver second-done :second-ran)}))))
+        (is (= :second-ran (promise-value second-done))
+            (str policy " worker must remain healthy"))
+        (finally
+          (close d))))))

@@ -154,15 +154,20 @@
 ;; Coalesce slots
 ;; -----------------------------------------------------------------------------
 
+;; An unforgeable-by-value marker separates internal queue slots from user
+;; job maps. A public job may legitimately carry :dispatch/type metadata;
+;; recognizing the keyword :coalesce-slot as internal killed worker threads.
+(def ^:private coalesce-slot-token (Object.))
+
 (defn- coalesce-slot
   [key job]
-  {:dispatch/type :coalesce-slot
+  {:dispatch/type coalesce-slot-token
    :coalesce-key key
    :job* (atom job)})
 
 (defn- coalesce-slot?
   [x]
-  (= :coalesce-slot (:dispatch/type x)))
+  (identical? coalesce-slot-token (:dispatch/type x)))
 
 (defn- slot-job
   [slot]
