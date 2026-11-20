@@ -1607,7 +1607,10 @@
       (fn [_] {:latest-completed-txs {"analytics" completed}})
       (fn []
         (is (nil? (xtdb-live/latest-completed-basis ctx)))
-        (is (identical? ctx (xtdb-live/bind-request-frontier ctx)))))))
+        (let [bound (xtdb-live/bind-request-frontier ctx)]
+          (is (ifn? (:biff.core/wrap-db-snapshot bound)))
+          (is (nil? (:biff.xtdb/snapshot-token bound)))
+          (is (nil? (:gesso.live/progression bound))))))))
 
 (deftest bind-request-frontier-never-mistakes-missing-status-for-empty-database-test
   ;; The invalid observation is dangerous even with no preexisting browser
@@ -1630,8 +1633,10 @@
       '*status*
       (fn [_] {:latest-completed-txs {"xtdb" []}})
       (fn []
-        (is (identical? ctx (xtdb-live/bind-request-frontier ctx))
-            "Legitimate empty-database startup must remain supported")))))
+        (let [bound (xtdb-live/bind-request-frontier ctx)]
+          (is (ifn? (:biff.core/wrap-db-snapshot bound))
+              "Even empty startup guards fresh requests")
+          (is (nil? (:biff.xtdb/snapshot-token bound))))))))
 
 (deftest latest-completed-basis-returns-nil-when-no-transaction-completed-test
   (let [calls (atom 0)]
@@ -2245,12 +2250,14 @@
               (is (re-find #"preexisting Biff snapshot token" (.getMessage result)))
               (is (= "xtdb" (:database (ex-data result))))
               (is (= token (:snapshot-token (ex-data result)))))))
-        ;; No Biff token, including explicit nil, is the legitimate untouched
-        ;; database case and must remain non-mutating.
-        (is (identical? base (xtdb-live/bind-request-frontier base)))
-        (let [without-token (assoc base :biff.xtdb/snapshot-token nil)]
-          (is (identical? without-token
-                          (xtdb-live/bind-request-frontier without-token))))
+        ;; No token (including explicit nil) remains a legitimate startup.
+        ;; Both now receive a guard against later fabricated runtime state.
+        (is (ifn? (:biff.core/wrap-db-snapshot
+                   (xtdb-live/bind-request-frontier base))))
+        (let [without-token (assoc base :biff.xtdb/snapshot-token nil)
+              bound (xtdb-live/bind-request-frontier without-token)]
+          (is (ifn? (:biff.core/wrap-db-snapshot bound)))
+          (is (nil? (:biff.xtdb/snapshot-token bound))))
         ;; A valid token for an independent database must not be rejected or
         ;; stripped simply because the selected default database is empty.
         (let [foreign (assoc base :biff.xtdb/snapshot-token foreign-token)
@@ -2485,6 +2492,60 @@
             (is (= token (handler {:request/id :new-database})))))
         (is (= 5 @called))))))
 
+(deftest empty-frontier-without-admitted-obligations-guards-later-request-test
+  ;; The empty XTDB node cannot prove even its first completed transaction.
+  ;; A request without an outer wrapper or admitted constraints nevertheless
+  ;; needs a guard: a subsequent fresh Ring request can bring a selected-db
+  ;; snapshot token or progression that was not present at binding time.
+  (let [t (Instant/parse "2026-11-20T23:30:00Z")
+        selected (xtdb-live/basis :xtdb 2036 t)
+        foreign (xtdb-live/basis :analytics 7 t)
+        selected-token (xtdb-live/basis-snapshot-token selected)
+        foreign-token (xtdb-live/basis-snapshot-token foreign)
+        selected-requirement (progression/requirement selected)
+        body-calls (atom 0)
+        body (fn [request]
+               (swap! body-calls inc)
+               request)
+        ctx {:xtdb/node :authority-node :request/id :initial-empty}]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (let [bound (xtdb-live/bind-request-frontier ctx)
+              wrapper (:biff.core/wrap-db-snapshot bound)
+              handler ((or wrapper identity) body)]
+          (is (ifn? wrapper)
+              "Empty startup must guard even when no obligation was admitted")
+          (is (nil? (:biff.xtdb/snapshot-token bound))
+              "No completed transaction means no manufactured snapshot")
+          (is (nil? (:gesso.live/progression bound))
+              "No completed transaction means no manufactured progression")
+          (is (= {:request/id :ordinary}
+                 (handler {:request/id :ordinary}))
+              "An ordinary fresh empty request must remain usable")
+          (is (= foreign-token
+                 (:biff.xtdb/snapshot-token
+                  (handler {:biff.xtdb/snapshot-token foreign-token})))
+              "A real independent database token remains usable")
+          (doseq [[request expected-reason]
+                  [[{:biff.xtdb/snapshot-token selected-token}
+                    :unobserved-selected-database]
+                   [{:biff.xtdb/snapshot-token false}
+                    :invalid-snapshot-token]
+                   [{:gesso.live/progression selected-requirement} nil]
+                   [{:gesso.live/progression false} nil]]]
+            (let [before @body-calls
+                  outcome (try (handler request)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo outcome)
+                  "A fabricated or malformed read obligation must fail closed")
+              (when (and expected-reason
+                         (instance? clojure.lang.ExceptionInfo outcome))
+                (is (= expected-reason (:reason (ex-data outcome)))))
+              (is (= before @body-calls)
+                  "Unsafe runtime obligations must not reach the request body"))))))))
+
 (deftest bind-request-frontier-does-not-fabricate-initial-basis-test
   (let [ctx {:xtdb/node :authority-node
              :request/id :request-2}
@@ -2497,10 +2558,13 @@
       (fn []
         (let [bound (xtdb-live/bind-request-frontier ctx)]
           (is (= 1 @calls))
-          (is (identical? ctx bound))
+          (is (ifn? (:biff.core/wrap-db-snapshot bound))
+              "Empty startup guards request execution without creating a basis")
           (is (nil? (:biff.xtdb/snapshot-token bound)))
           (is (nil? (:gesso.live/progression bound)))
-          (is (nil? (:biff.core/wrap-db-snapshot bound))))))))
+          (is (= {:request/id :fresh}
+                 (((:biff.core/wrap-db-snapshot bound)
+                    (fn [request] request)) {:request/id :fresh}))))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Transaction wrappers

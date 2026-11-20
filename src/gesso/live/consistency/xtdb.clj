@@ -1360,8 +1360,9 @@
 
    If XTDB has no completed transaction for the selected database, the
    helper preserves existing foreign read obligations with a guarded wrapper
-   even when Biff had no prior wrapper. When neither a snapshot nor progression
-   nor an outer wrapper exists, untouched startup keeps the original ctx.
+   even when Biff had no prior wrapper. Even unconstrained empty startup
+   receives a guard against snapshot/progression claims introduced only when
+   a fresh request reaches the handler; it fabricates no selected-db basis.
    An existing same-database requirement fails closed:
    without a completed frontier, ordinary Biff reads cannot be pinned to a
    snapshot satisfying that requirement. It never fabricates an initial basis.
@@ -1462,27 +1463,16 @@
                     {:database database-name
                      :snapshot-token snapshot-token
                      :reason :unobserved-selected-database})))))
-         ;; The existing Biff wrapper may assign its own snapshot token only
-         ;; when the request body is invoked. Guard that second admission
-         ;; boundary as well; checking ctx above cannot see later mutation.
-         (if-some [existing-wrapper (:biff.core/wrap-db-snapshot ctx)]
-           (assoc ctx :biff.core/wrap-db-snapshot
-                  (guarded-empty-biff-snapshot-wrapper
-                   existing-wrapper database-name
-                   (:biff.xtdb/snapshot-token ctx)
-                   existing-requirement))
-           ;; No existing outer wrapper does not mean no admitted read
-           ;; constraints: install the same guarded execution boundary if
-           ;; foreign snapshots or progression must survive fresh requests.
-           ;; Truly empty startup remains unchanged and allocates no wrapper.
-           (if (or existing-requirement
-                   (some? (:biff.xtdb/snapshot-token ctx)))
-             (assoc ctx :biff.core/wrap-db-snapshot
-                    (guarded-empty-biff-snapshot-wrapper
-                     nil database-name
-                     (:biff.xtdb/snapshot-token ctx)
-                     existing-requirement))
-             ctx)))))))
+         ;; Even with no admitted constraint or existing Biff wrapper, a
+         ;; fresh handler request can introduce a fabricated selected-db token
+         ;; or progression after binding. Guard that execution boundary for
+         ;; every empty database while leaving its snapshot/progression unset.
+         (assoc ctx :biff.core/wrap-db-snapshot
+                (guarded-empty-biff-snapshot-wrapper
+                 (:biff.core/wrap-db-snapshot ctx)
+                 database-name
+                 (:biff.xtdb/snapshot-token ctx)
+                 existing-requirement)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options

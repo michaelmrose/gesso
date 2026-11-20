@@ -133,8 +133,27 @@
         (is (nil? (:system-time placeholder)))
         (is (nil? (xtdb-live/latest-completed-basis ctx))
             "Fresh node has no completed frontier yet")
-        (is (identical? ctx (xtdb-live/bind-request-frontier ctx))
-            "First request should remain valid before any write")
+        (let [bound (xtdb-live/bind-request-frontier ctx)
+              wrapper (:biff.core/wrap-db-snapshot bound)
+              calls (atom 0)
+              body (fn [request] (swap! calls inc) request)
+              handler (wrapper body)
+              fabricated (xtdb-live/basis-snapshot-token
+                          (xtdb-live/basis :xtdb 1
+                           (Instant/parse "2026-01-01T00:00:00Z")))]
+          (is (ifn? wrapper)
+              "First request must have a guard even before any write")
+          (is (nil? (:biff.xtdb/snapshot-token bound)))
+          (is (nil? (:gesso.live/progression bound)))
+          (is (= {:request/id :first-read}
+                 (handler {:request/id :first-read}))
+              "Ordinary startup remains usable without fabricating a basis")
+          (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo
+               #"no completed transaction"
+               (handler {:biff.xtdb/snapshot-token fabricated})))
+          (is (= 1 @calls)
+              "Fabricated runtime state must not reach the handler"))
         ;; The sentinel says "empty," not "every requirement is satisfied."
         (let [required (xtdb-live/tx-result-progression
                         {:tx-id 1
