@@ -482,3 +482,96 @@
       (is (= [] (source/errors src)))
       (finally
         (source/close! src)))))
+
+;; -----------------------------------------------------------------------------
+;; Source lifecycle and indexed-bucket races
+;; -----------------------------------------------------------------------------
+
+(defn await-closed-briefly
+  [source]
+  ;; In the broken implementation close can finish while registration is
+  ;; paused between its open check and insertion. In the corrected version
+  ;; close waits on the registration lock. Neither case blocks the test.
+  (loop [remaining 35]
+    (when (and (pos? remaining) (not (source/closed? source)))
+      (Thread/sleep 5)
+      (recur (dec remaining)))))
+
+(deftest closing-while-registering-closes-every-new-stream-test
+  (doseq [[kind counter-var register]
+          [[:broadcast #'gesso.live.source/next-tap-id!
+            (fn [src] (source/changes src))]
+           [:indexed #'gesso.live.source/next-subscription-id!
+            (fn [src] (source/subscribe src {:topic :request :id "req-1"}))]]]
+    (let [src (source/create)
+          entered (promise)
+          resume (promise)
+          original (var-get counter-var)]
+      (try
+        (with-redefs-fn
+          {counter-var
+           (fn [value]
+             (deliver entered :entered)
+             (deref resume 2000 ::timeout)
+             (original value))}
+          (fn []
+            (let [registration (future (register src))]
+              (try
+                (is (= :entered (deref entered 2000 ::timeout))
+                    (str kind " entered registration"))
+                (let [shutdown (future (source/close! src))]
+                  (await-closed-briefly src)
+                  (deliver resume :resume)
+                  (let [stream (deref registration 2000 ::timeout)]
+                    (is (not= ::timeout stream))
+                    (is (= :closed (deref shutdown 2000 ::timeout)))
+                    (is (s/closed? stream)
+                        (str kind " subscription must not survive shutdown"))
+                    (is (zero? (:tap-count (source/stats src))))
+                    (is (zero? (:indexed-scope-count (source/stats src))))))
+                (finally
+                  (deliver resume :resume))))))
+        (finally
+          (source/close! src))))))
+
+(deftest replacing-last-scope-subscriber-does-not-retire-live-bucket-test
+  (let [src (source/create)
+        scope {:topic :request :id "req-1"}
+        original-stream (source/subscribe src scope)
+        entered (promise)
+        resume (promise)
+        original-bucket (var-get #'gesso.live.source/scope-bucket)]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.source/scope-bucket
+         (fn [s k]
+           (let [bucket (original-bucket s k)]
+             (deliver entered :entered)
+             (deref resume 2000 ::timeout)
+             bucket))}
+        (fn []
+          (let [registration (future (source/subscribe src scope))]
+            (try
+              (is (= :entered (deref entered 2000 ::timeout)))
+              (let [retirement (future (s/close! original-stream))]
+                ;; Without lifecycle synchronization, retirement detaches the
+                ;; bucket returned to the paused registration.
+                (loop [remaining 35]
+                  (when (and (pos? remaining)
+                             (not (zero? (:indexed-scope-count (source/stats src)))))
+                    (Thread/sleep 5)
+                    (recur (dec remaining))))
+                (deliver resume :resume)
+                (let [replacement (deref registration 2000 ::timeout)]
+                  (is (not= ::timeout replacement))
+                  (is (not= ::timeout (deref retirement 2000 ::timeout)))
+                  (is (= 1 (:subscription-count (source/stats src))))
+                  (is (= 1 (:indexed-scope-count (source/stats src))))
+                  (source/emit! src invalidation-1)
+                  (is (= invalidation-1 (take-value replacement))
+                      "a replacement subscriber must remain in the scope index")
+                  (s/close! replacement)))
+              (finally
+                (deliver resume :resume))))))
+      (finally
+        (source/close! src)))))

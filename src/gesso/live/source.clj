@@ -288,14 +288,18 @@
 
 (defn- remove-subscription-if-same!
   [source subscription-id stream]
-  (when (.remove ^ConcurrentHashMap (:subscriptions source) subscription-id stream)
-    (when-let [k (.remove ^ConcurrentHashMap (:subscription-keys source)
-                          subscription-id)]
-      (when-let [bucket (.get ^ConcurrentHashMap (:by-scope source) k)]
-        (.remove ^ConcurrentHashMap bucket subscription-id stream)
-        (when (zero? (.size ^ConcurrentHashMap bucket))
-          (.remove ^ConcurrentHashMap (:by-scope source) k bucket)))))
-  nil)
+  ;; Registration and bucket retirement must share a lifecycle lock. Otherwise
+  ;; a new subscriber can insert into a bucket after the last old subscriber
+  ;; tests it empty but before that bucket is removed from :by-scope.
+  (locking (:coalesce-lock source)
+    (when (.remove ^ConcurrentHashMap (:subscriptions source) subscription-id stream)
+      (when-let [k (.remove ^ConcurrentHashMap (:subscription-keys source)
+                            subscription-id)]
+        (when-let [bucket (.get ^ConcurrentHashMap (:by-scope source) k)]
+          (.remove ^ConcurrentHashMap bucket subscription-id stream)
+          (when (zero? (.size ^ConcurrentHashMap bucket))
+            (.remove ^ConcurrentHashMap (:by-scope source) k bucket)))))
+    nil))
 
 (defn- track-subscription-put-result!
   [source subscription-id stream invalidation put-result]
@@ -397,21 +401,24 @@
 
    Idempotent."
   [source]
-  (when (compare-and-set! (:closed? source) false true)
-    (let [taps ^ConcurrentHashMap (:taps source)
-          subscriptions ^ConcurrentHashMap (:subscriptions source)
-          scheduler ^ScheduledThreadPoolExecutor (:scheduler source)]
-      (doseq [stream (.values taps)]
-        (s/close! stream))
-      (doseq [stream (.values subscriptions)]
-        (s/close! stream))
-      (.clear taps)
-      (.clear subscriptions)
-      (.clear ^ConcurrentHashMap (:subscription-keys source))
-      (.clear ^ConcurrentHashMap (:by-scope source))
-      (.clear ^ConcurrentHashMap (:pending source))
-      (.clear ^ConcurrentHashMap (:cooldowns source))
-      (.shutdownNow scheduler)))
+  ;; Close and registration share the same lock. A stream either registers
+  ;; while open and is closed here, or cannot register after shutdown begins.
+  (locking (:coalesce-lock source)
+    (when (compare-and-set! (:closed? source) false true)
+      (let [taps ^ConcurrentHashMap (:taps source)
+            subscriptions ^ConcurrentHashMap (:subscriptions source)
+            scheduler ^ScheduledThreadPoolExecutor (:scheduler source)]
+        (doseq [stream (.values taps)]
+          (s/close! stream))
+        (doseq [stream (.values subscriptions)]
+          (s/close! stream))
+        (.clear taps)
+        (.clear subscriptions)
+        (.clear ^ConcurrentHashMap (:subscription-keys source))
+        (.clear ^ConcurrentHashMap (:by-scope source))
+        (.clear ^ConcurrentHashMap (:pending source))
+        (.clear ^ConcurrentHashMap (:cooldowns source))
+        (.shutdownNow scheduler))))
   :closed)
 
 (defn stats
@@ -456,13 +463,14 @@
    subscribe for ordinary topic/id subscriptions so unrelated invalidations are
    never sent to uninterested client flows."
   [source]
-  (ensure-open! source)
-  (let [tap-id (next-tap-id! source)
-        stream (s/stream)
-        taps ^ConcurrentHashMap (:taps source)]
-    (.put taps tap-id stream)
-    (s/on-closed stream #(remove-tap-if-same! source tap-id stream))
-    stream))
+  (locking (:coalesce-lock source)
+    (ensure-open! source)
+    (let [tap-id (next-tap-id! source)
+          stream (s/stream)
+          taps ^ConcurrentHashMap (:taps source)]
+      (.put taps tap-id stream)
+      (s/on-closed stream #(remove-tap-if-same! source tap-id stream))
+      stream)))
 
 (defn subscribe
   "Create an indexed Manifold stream for a topic/id subscription.
@@ -472,16 +480,17 @@
 
    This is the normal handoff point from source.clj to gesso.live.flow."
   [source subscription]
-  (ensure-open! source)
-  (let [k (scope-key subscription)
-        subscription-id (next-subscription-id! source)
-        stream (s/stream)
-        bucket (scope-bucket source k)]
-    (.put ^ConcurrentHashMap (:subscriptions source) subscription-id stream)
-    (.put ^ConcurrentHashMap (:subscription-keys source) subscription-id k)
-    (.put ^ConcurrentHashMap bucket subscription-id stream)
-    (s/on-closed stream #(remove-subscription-if-same! source subscription-id stream))
-    stream))
+  (locking (:coalesce-lock source)
+    (ensure-open! source)
+    (let [k (scope-key subscription)
+          subscription-id (next-subscription-id! source)
+          stream (s/stream)
+          bucket (scope-bucket source k)]
+      (.put ^ConcurrentHashMap (:subscriptions source) subscription-id stream)
+      (.put ^ConcurrentHashMap (:subscription-keys source) subscription-id k)
+      (.put ^ConcurrentHashMap bucket subscription-id stream)
+      (s/on-closed stream #(remove-subscription-if-same! source subscription-id stream))
+      stream)))
 
 ;; -----------------------------------------------------------------------------
 ;; Delivery
