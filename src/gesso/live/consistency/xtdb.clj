@@ -948,6 +948,35 @@
                       tx-id
                       (status-system-time->instant system-time))))))))))
 
+(defn- decode-canonical-biff-snapshot!
+  "Validate the existing Biff token before preserving any of its database bases.
+
+   On a populated selected database, the selected coordinate is replaced by
+   the authoritative status frontier. Other databases' valid time bases are
+   independent and must not be silently discarded. This validation also
+   serves the empty-selected-database path, which must fail closed when a
+   token claims a snapshot for a database that has no completed transaction."
+  [database-name snapshot-token]
+  (try
+    (when-not (and (string? snapshot-token)
+                   (not (str/blank? snapshot-token)))
+      (throw (ex "Invalid Biff snapshot token."
+                 {:snapshot-token snapshot-token})))
+    (let [decoded (xt.basis/<-time-basis-str snapshot-token)]
+      (when-not (and (map? decoded)
+                     (= snapshot-token
+                        (xt.basis/->time-basis-str decoded)))
+        (throw (ex "Noncanonical Biff snapshot token."
+                   {:snapshot-token snapshot-token})))
+      decoded)
+    (catch Throwable cause
+      (throw
+       (ex "XTDB request frontier cannot preserve a preexisting Biff snapshot token."
+           {:database database-name
+            :snapshot-token snapshot-token
+            :reason :invalid-snapshot-token}
+           cause)))))
+
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper snapshot-token]
   (fn [f]
@@ -1044,7 +1073,19 @@
        (let [_ (require-frontier-satisfies-existing-xtdb!
                 basis-value
                 xtdb-required-bases)
-             snapshot-token (basis-snapshot-token basis-value)
+             ;; Preserve time bases for unrelated databases in the existing
+             ;; Biff snapshot token, while replacing only this database with
+             ;; the node-observed authoritative frontier. A malformed token
+             ;; must not be silently discarded when a frontier is present.
+             snapshot-token
+             (if-some [existing-token (:biff.xtdb/snapshot-token ctx)]
+               (xt.basis/->time-basis-str
+                (assoc (decode-canonical-biff-snapshot!
+                        (basis-database basis-value)
+                        existing-token)
+                       (basis-database basis-value)
+                       [(basis-system-time basis-value)]))
+               (basis-snapshot-token basis-value))
              current-requirement (progression/requirement basis-value)
              combined-requirement
              (progression/compose
@@ -1080,24 +1121,8 @@
          ;; treating them as foreign, which would silently trust bad state.
          (when-some [snapshot-token (:biff.xtdb/snapshot-token ctx)]
            (let [token-databases
-                 (try
-                   (when-not (and (string? snapshot-token)
-                                  (not (str/blank? snapshot-token)))
-                     (throw (ex "Invalid Biff snapshot token."
-                                {:snapshot-token snapshot-token})))
-                   (let [decoded (xt.basis/<-time-basis-str snapshot-token)]
-                     (when-not (= snapshot-token
-                                  (xt.basis/->time-basis-str decoded))
-                       (throw (ex "Noncanonical Biff snapshot token."
-                                  {:snapshot-token snapshot-token})))
-                     (set (keys decoded)))
-                   (catch Throwable cause
-                     (throw
-                      (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
-                          {:database database-name
-                           :snapshot-token snapshot-token
-                           :reason :invalid-snapshot-token}
-                          cause))))]
+                 (set (keys (decode-canonical-biff-snapshot!
+                             database-name snapshot-token)))]
              (when (contains? token-databases database-name)
                (throw
                 (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."

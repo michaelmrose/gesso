@@ -1340,6 +1340,60 @@
                       (:gesso.live/progression bound))))
               (is (identical? ctx bound)))))))))
 
+(deftest bind-request-frontier-preserves-independent-biff-database-snapshots-test
+  ;; A Biff snapshot token can represent more than one XTDB database. Binding
+  ;; the current database's frontier must replace that database's coordinate
+  ;; without erasing independently established time bases for other databases.
+  (let [current (Instant/parse "2026-11-20T18:00:00Z")
+        old (Instant/parse "2026-11-19T18:00:00Z")
+        analytics (Instant/parse "2026-11-20T17:00:00Z")
+        reports (Instant/parse "2026-11-20T16:00:00Z")
+        foreign {"analytics" [analytics]
+                 "reports" [reports]}
+        foreign-token (xt.basis/->time-basis-str foreign)
+        with-selected (xt.basis/->time-basis-str
+                       (assoc foreign "xtdb" [old]))
+        expected (xt.basis/->time-basis-str
+                  (assoc foreign "xtdb" [current]))
+        status {:latest-completed-txs
+                {"xtdb" [{:tx-id 202 :system-time current}]
+                 "analytics" [{:tx-id 89 :system-time analytics}]}}
+        base {:xtdb/node :authority-node :request/id :multiple-databases}]
+    (with-xtdb-stub
+      '*status*
+      (fn [_] status)
+      (fn []
+        (doseq [existing-token [foreign-token with-selected]]
+          (let [bound (xtdb-live/bind-request-frontier
+                       (assoc base :biff.xtdb/snapshot-token existing-token))
+                wrapped ((:biff.core/wrap-db-snapshot bound)
+                         (fn [ctx] (:biff.xtdb/snapshot-token ctx)))]
+            (is (= expected (:biff.xtdb/snapshot-token bound)))
+            (is (= expected (wrapped {}))
+                "Biff's request wrapper must preserve the composed time basis")
+            (is (= (assoc foreign "xtdb" [current])
+                   (xt.basis/<-time-basis-str
+                    (:biff.xtdb/snapshot-token bound))))))
+        ;; Bind a non-default selected database without losing xtdb's basis.
+        (let [default-token (xt.basis/->time-basis-str {"xtdb" [old]})
+              bound (xtdb-live/bind-request-frontier
+                     (assoc base :biff.xtdb/snapshot-token default-token)
+                     :analytics)]
+          (is (= {"xtdb" [old] "analytics" [analytics]}
+                 (xt.basis/<-time-basis-str
+                  (:biff.xtdb/snapshot-token bound)))))
+        ;; Invalid existing tokens are not silently dropped just because the
+        ;; selected database has a valid current frontier.
+        (doseq [token [false "not-a-valid-token"]]
+          (let [result (try
+                         (xtdb-live/bind-request-frontier
+                          (assoc base :biff.xtdb/snapshot-token token))
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo result))
+            (when (instance? clojure.lang.ExceptionInfo result)
+              (is (= token (:snapshot-token (ex-data result)))))))))))
+
 (deftest bind-request-frontier-binds-matching-biff-and-gesso-frontier-test
   (let [calls (atom 0)
         instant (Instant/parse "2026-09-10T18:34:00Z")
