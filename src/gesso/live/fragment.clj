@@ -350,6 +350,7 @@
   ([] (create nil))
   ([options]
    {:cache (atom {})
+    :cache-generation (atom 0)
     :inflight (atom {})
     :options (prepare-options! options)}))
 
@@ -475,8 +476,10 @@
 
 (defn- cache-store!
   ([manager key value options]
-   (cache-store! manager key value options nil))
+   (cache-store! manager key value options nil nil))
   ([manager key value options flight]
+   (cache-store! manager key value options flight nil))
+  ([manager key value options flight generation]
    (when (cache-enabled? options)
      (let [{:keys [clock ttl-ms max-cache-entries debug-fn]} options
            now (clock)
@@ -493,15 +496,21 @@
                                                        now max-cache-entries)]
                                (reset! prune-result result)
                                (:cache result)))))]
-       ;; clear-key! and singleflight cache publication share the cache lock.
-       ;; If a flight was invalidated during rendering, it cannot publish
-       ;; obsolete markup after clear-key! has removed the old cache entry.
-       ;; Unprotected non-singleflight writes retain their existing behavior.
-       (let [stored? (if flight
+       ;; Publication and clear-cache! share this lock. A render started in
+       ;; an earlier cache generation cannot repopulate a cleared cache,
+       ;; even if singleflight is disabled. For clear-key!, a cancelled
+       ;; singleflight owner must likewise never publish obsolete markup.
+       (let [stored? (if (or flight (some? generation))
                        (locking (:cache manager)
-                         (when-not @(:cancel-requested? flight)
+                         (when (and (or (nil? generation)
+                                        (= generation @(:cache-generation manager)))
+                                    (or (nil? flight)
+                                        (not @(:cancel-requested? flight))))
                            (store!)
                            true))
+                       ;; Trusted direct cache-store! calls have no render
+                       ;; generation and retain their original nonblocking
+                       ;; atom-only publication behavior.
                        (do (store!) true))]
          (when stored?
            (debug!
@@ -518,9 +527,14 @@
    value))
 
 (defn clear-cache!
-  "Clear all cached fragment values."
+  "Clear all cached fragments and invalidate publication from running renders.
+
+   In-flight tasks may finish for their already-waiting callers, but results
+   begun before this clear cannot repopulate the cache."
   [manager]
-  (reset! (:cache manager) {})
+  (locking (:cache manager)
+    (swap! (:cache-generation manager) inc)
+    (reset! (:cache manager) {}))
   manager)
 
 (defn- cancel-once
@@ -637,30 +651,33 @@
   ([manager key task options]
    (render-store-task manager key task options nil))
   ([manager key task options flight]
-    (let [{:keys [clock debug-fn]} options]
-      (m/sp
-        (debug!
-         debug-fn
-         :gesso.live.fragment/render-started
-         {:key key
-          :at (clock)})
-        (try
-          (let [value (m/? task)]
-            (cache-store! manager key value options flight)
-            (debug!
-             debug-fn
-             :gesso.live.fragment/render-succeeded
-             {:key key
-              :at (clock)})
-            value)
-          (catch Throwable e
-            (debug!
-             debug-fn
-             :gesso.live.fragment/render-failed
-             {:key key
-              :error e
-              :at (clock)})
-            (throw e)))))))
+   (let [{:keys [clock debug-fn]} options]
+     (m/sp
+       ;; Capture generation when the task starts, not when a reusable
+       ;; Missionary task value is first constructed.
+       (let [generation @(:cache-generation manager)]
+         (debug!
+          debug-fn
+          :gesso.live.fragment/render-started
+          {:key key
+           :at (clock)})
+         (try
+           (let [value (m/? task)]
+             (cache-store! manager key value options flight generation)
+             (debug!
+              debug-fn
+              :gesso.live.fragment/render-succeeded
+              {:key key
+               :at (clock)})
+             value)
+           (catch Throwable e
+             (debug!
+              debug-fn
+              :gesso.live.fragment/render-failed
+              {:key key
+               :error e
+               :at (clock)})
+             (throw e))))))))
 
 (defn- start-flight!
   [manager key task options flight]

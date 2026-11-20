@@ -1303,3 +1303,43 @@
            (run-task (fragment/render-task manager fragment-key original-render))))
     (is (= 2 @broad-renders)
         "the original entry must still expire under its own stored TTL")))
+
+(deftest clear-cache-does-not-repopulate-from-inflight-render-test
+  ;; A render can finish its work before an explicit cache clear but pause
+  ;; immediately before publishing. A cache clear must not be undone by a
+  ;; late publication, regardless of whether singleflight is enabled.
+  (doseq [singleflight? [true false]]
+    (let [manager (fragment/create {:ttl-ms 1000
+                                    :clock (constantly 0)
+                                    :singleflight? singleflight?})
+          reached-store (promise)
+          resume-store (promise)
+          original-store @#'gesso.live.fragment/cache-store!]
+      (with-redefs-fn
+        {#'gesso.live.fragment/cache-store!
+         (fn [& args]
+           (deliver reached-store true)
+           @resume-store
+           (apply original-store args))}
+        (fn []
+          (let [runner-future
+                (future (start-task (fragment/render-task
+                                    manager fragment-key (fn [] :obsolete))))]
+            (try
+              (is (= true (deref reached-store timeout-ms ::timeout))
+                  (str "render reached publication: " singleflight?))
+              (fragment/clear-cache! manager)
+              (is (= {} @(:cache manager)))
+              (deliver resume-store true)
+              (is (not= ::timeout (deref runner-future timeout-ms ::timeout)))
+              (is (eventually #(zero? (:inflight-count (fragment/stats manager)))))
+              (is (= {} @(:cache manager))
+                  (str "an old render must not resurrect cached HTML: " singleflight?))
+              (is (= {:status :success :value :current}
+                     (run-task (fragment/render-task manager fragment-key
+                                                     (fn [] :current))))
+                  "a new render must work after clear-cache!")
+              (finally
+                (deliver resume-store true)
+                (when-let [runner (deref runner-future timeout-ms nil)]
+                  (cancel-runner! runner))))))))))
