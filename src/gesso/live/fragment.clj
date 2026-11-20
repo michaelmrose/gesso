@@ -394,7 +394,12 @@
       (let [evict-count (- (count without-expired) max-cache-entries)
             kept (->> without-expired
                       (sort-by (fn [[_ entry]]
-                                 (:stored-at entry)))
+                                 ;; Multiple renders can complete within one
+                                 ;; millisecond. Break timestamp ties by
+                                 ;; actual cache publication order, not map
+                                 ;; iteration order.
+                                 [(:stored-at entry)
+                                  (or (:write-order entry) 0)]))
                       (drop evict-count)
                       (into {}))]
         {:cache kept
@@ -471,7 +476,14 @@
           prune-result (atom nil)]
       (swap! (:cache manager)
              (fn [cache]
-               (let [result (prune-cache (assoc cache key entry)
+               (let [;; Compute order from the current cache inside swap!
+                     ;; so a CAS retry also refreshes publication order.
+                     ;; This keeps equal-millisecond eviction deterministic
+                     ;; without a separate mutable counter.
+                     next-order (inc (reduce max 0
+                                             (keep :write-order (vals cache))))
+                     entry' (assoc entry :write-order next-order)
+                     result (prune-cache (assoc cache key entry')
                                          now
                                          max-cache-entries)]
                  (reset! prune-result result)

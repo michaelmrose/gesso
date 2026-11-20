@@ -1171,3 +1171,20 @@
     (is (= {:status :success :value 4} (run {:ttl-ms 100}))
         "a longer request TTL cannot resurrect a previously expired entry")
     (is (= 4 @renders))))
+
+(deftest max-cache-entries-evicts-earliest-write-with-tied-clock-test
+  ;; Fixed millisecond clocks are normal for bursty concurrent fragment writes.
+  ;; Eviction must never discard the freshly stored value merely because
+  ;; several entries have the same :stored-at and hash-map order is arbitrary.
+  (let [manager (fragment/create {:ttl-ms 1000
+                                  :max-cache-entries 8
+                                  :clock (constantly 0)})
+        cache (:cache manager)
+        options (:options manager)]
+    (doseq [key (range 30)]
+      (@#'fragment/cache-store! manager key [:rendered key] options)
+      (is (contains? @cache key)
+          (str "the newly rendered fragment " key " must survive its own store")))
+    (is (= 8 (:cache-count (fragment/stats manager))))
+    (is (= (set (range 22 30)) (set (keys @cache)))
+        "bounded cache must retain the latest eight writes at a tied clock")))
