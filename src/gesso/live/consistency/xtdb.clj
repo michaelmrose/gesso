@@ -345,7 +345,15 @@
         (throw
          (ex "XTDB progression database identity must be an unqualified keyword or exact string."
              {:database database})))
-      (name database))
+      ;; Clojure permits (keyword "") and whitespace-only keyword names.
+      ;; Keyword names must satisfy the same nonblank identity invariant,
+      ;; or construction can produce a basis that xtdb-basis? later rejects.
+      (let [database-name (name database)]
+        (when (str/blank? database-name)
+          (throw
+           (ex "XTDB progression database keyword name must be non-blank."
+               {:database database})))
+        database-name))
 
     (and (string? database)
          (not (str/blank? database)))

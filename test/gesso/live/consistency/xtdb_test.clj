@@ -491,6 +491,66 @@
     (is (= "xtdb" (xtdb-live/basis-database valid)))
     (is (xtdb-live/xtdb-basis? (xtdb-live/basis "tenant/a" 19 t)))))
 
+(deftest blank-keyword-database-identities-rejected-at-admission-test
+  ;; Clojure permits (keyword "") and whitespace-named keywords. Their
+  ;; unqualified names must obey exactly the same nonblank contract as string
+  ;; database names. Otherwise basis constructs malformed portable evidence,
+  ;; and the read/write options admit databases closed-basis validation rejects.
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")]
+    (doseq [value ["" " " "  " "\t" "\n "]
+            :let [db (keyword value)]]
+      (is (= value (name db)) "Control: keyword preserves the blank name")
+      (doseq [[op f] [[:basis #(xtdb-live/basis db 17 t)]
+                      [:query #(xtdb-live/query-opts {:database db})]
+                      [:write #(xtdb-live/tx-opts {:database db})]]]
+        (let [error (try (f) nil (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo error)
+              (str "Reject blank keyword from " op ": " (pr-str db)))
+          (when error
+            (is (= db (:database (ex-data error))))))))
+    ;; Ordinary keywords and explicit nonblank strings remain unchanged.
+    (is (xtdb-live/xtdb-basis? (xtdb-live/basis :shared 17 t)))
+    (is (= {:database :shared} (xtdb-live/query-opts {:database :shared})))
+    (is (= {:database "tenant-a/shared"}
+           (xtdb-live/tx-opts {:database "tenant-a/shared"})))))
+
+(deftest blank-keyword-database-cannot-reach-xtdb-adapter-apis-test
+  ;; A malformed database identifier must be rejected before status, reads,
+  ;; writes or submissions. On the old path it was passed to XTDB unexamined;
+  ;; execute-tx could even complete before progression projection failed.
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")]
+    (doseq [db [(keyword "") (keyword "  ")]
+            api [:q :plan-q :submit-tx :execute-tx :frontier]]
+      (let [calls (atom 0)
+            run (case api
+                  :q #(xtdb-live/q :conn sample-query {:database db})
+                  :plan-q #(xtdb-live/plan-q :conn sample-query {:database db})
+                  :submit-tx #(xtdb-live/submit-tx! :conn sample-tx {:database db})
+                  :execute-tx #(xtdb-live/execute-tx! :conn sample-tx {:database db})
+                  :frontier #(xtdb-live/latest-completed-basis
+                              {:xtdb/node :node} db))
+            observed (fn [& _]
+                       (swap! calls inc)
+                       (if (= api :execute-tx)
+                         (tx-key 45 t)
+                         (if (= api :submit-tx)
+                           {:tx-id 45}
+                           {:latest-completed-txs {"xtdb" []}})))]
+        (with-redefs-fn
+          {(xtdb-var '*q*) observed
+           (xtdb-var '*plan-q*) observed
+           (xtdb-var '*submit-tx*) observed
+           (xtdb-var '*execute-tx*) observed
+           (xtdb-var '*status*) observed}
+          (fn []
+            (let [error (try (run) nil (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo error)
+                  (str "Blank keyword must fail before " api))
+              (when error
+                (is (= db (:database (ex-data error)))))
+              (is (zero? @calls)
+                  (str "Invalid database passed through to XTDB " api)))))))))
+
 (deftest database-identity-rejects-qualified-keyword-aliases-test
   ;; Qualified keywords are normal Clojure data, but `name` drops their
   ;; namespace. The two tenant-scoped identifiers would otherwise construct
