@@ -399,13 +399,21 @@
 
                    (pull! []
                      (when-not @stopped?
-                       (let [deferred (take! stream closed-sentinel)]
-                         (d/on-realized
-                          deferred
-                          (fn [value]
-                            (enqueue! :value value))
-                          (fn [cause]
-                            (enqueue! :error cause))))))
+                       ;; A stream adapter may throw before returning a
+                       ;; deferred. Report it through the same finite-flow
+                       ;; failure path as an asynchronously failed take!.
+                       ;; Otherwise a pull can disappear on the initial
+                       ;; executor or leave the completion pump stranded.
+                       (try
+                         (let [deferred (take! stream closed-sentinel)]
+                           (d/on-realized
+                            deferred
+                            (fn [value]
+                              (enqueue! :value value))
+                            (fn [cause]
+                              (enqueue! :error cause))))
+                         (catch Throwable cause
+                           (enqueue! :error cause)))))
 
                    (process-completion! [kind payload]
                      (when-not @stopped?

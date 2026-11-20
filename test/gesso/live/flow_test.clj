@@ -999,3 +999,49 @@
             (future-cancel started))))
       (finally
         (s/close! stream)))))
+
+(deftest stream-flow-synchronous-first-take-failure-closes-with-error-test
+  ;; take! may throw before returning a deferred. The bridge must terminate
+  ;; with a wrapped failure instead of silently abandoning its first pull.
+  (let [stream (s/stream)
+        cause (ex-info "first take failed" {:stage :initial})
+        close-count (atom 0)
+        f (flow/stream-flow
+           stream
+           {:take! (fn [_ _] (throw cause))
+            :on-close #(swap! close-count inc)})
+        runner (collect-runner f)
+        result (task-result runner)]
+    (is (= :failure (:status result)))
+    (is (= "gesso.live stream failed." (some-> result :error ex-message)))
+    (is (identical? cause (some-> result :error ex-cause)))
+    (is (eventually #(s/closed? stream)))
+    (is (eventually #(= 1 @close-count)))))
+
+(deftest stream-flow-synchronous-later-take-failure-closes-with-error-test
+  ;; After emitting a buffered value, a synchronous take! failure must
+  ;; propagate through the same finite-flow failure path as a failed deferred.
+  (let [stream (s/stream 4)
+        cause (ex-info "later take failed" {:stage :subsequent})
+        calls (atom 0)
+        seen (atom [])
+        f (flow/stream-flow
+           stream
+           {:take! (fn [s closed]
+                     (if (= 1 (swap! calls inc))
+                       (s/take! s closed)
+                       (throw cause)))
+            :debug-fn (fn [event]
+                        (when (= :gesso.live.flow/stream-value (:event event))
+                          (swap! seen conj (:value event))))})]
+    (try
+      (is (true? (put-value stream :first)))
+      (let [runner (collect-runner f)
+            result (task-result runner)]
+        (is (= :failure (:status result)))
+        (is (identical? cause (some-> result :error ex-cause)))
+        (is (= [:first] @seen))
+        (is (= 2 @calls))
+        (is (eventually #(s/closed? stream))))
+      (finally
+        (s/close! stream)))))
