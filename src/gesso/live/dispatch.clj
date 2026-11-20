@@ -354,10 +354,16 @@
   [dispatcher]
   (when (compare-and-set! (:closed? dispatcher) false true)
     (drain-queued-jobs! dispatcher :dispatcher-closed)
-    (doseq [^Thread worker (:workers dispatcher)]
-      (.interrupt worker))
-    (doseq [^Thread worker (:workers dispatcher)]
-      (.join worker close-timeout-ms)))
+    ;; A job can close its own dispatcher. The caller is already running and
+    ;; exits its worker loop after returning; interrupting/joining that same
+    ;; thread would turn a valid close! into InterruptedException.
+    (let [caller (Thread/currentThread)]
+      (doseq [^Thread worker (:workers dispatcher)]
+        (when-not (identical? caller worker)
+          (.interrupt worker)))
+      (doseq [^Thread worker (:workers dispatcher)]
+        (when-not (identical? caller worker)
+          (.join worker close-timeout-ms)))))
   :closed)
 
 (defn stats

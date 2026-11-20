@@ -477,3 +477,21 @@
             (str policy " worker must remain healthy"))
         (finally
           (close d))))))
+
+(deftest worker-can-close-own-dispatcher-without-error-test
+  ;; A legitimate job may initiate shutdown. close! must not interrupt or
+  ;; join the current worker, otherwise the call raises InterruptedException
+  ;; and is incorrectly recorded as an async job failure.
+  (let [result (promise)
+        d (dispatch/create {:threads 2 :queue-size 4})]
+    (try
+      (is (= :submitted
+             (:status (dispatch/submit! d
+                                        {:run #(deliver result (dispatch/close! d))}))))
+      (is (= :closed (promise-value result))
+          "worker-initiated close! should return normally")
+      (is (dispatch/closed? d))
+      (is (empty? (dispatch/errors d))
+          "shutdown is not an async job failure")
+      (finally
+        (dispatch/close! d)))))
