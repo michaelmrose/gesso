@@ -42,8 +42,13 @@
    The data expression is inside the guard, so with debugging off it is not
    evaluated."
   [debug-fn event data]
+  ;; Debugging is observational: user-provided tracing failures must not
+  ;; alter stream startup, framing, delivery, or error/close handling.
   `(when-let [f# ~debug-fn]
-     (f# (assoc ~data :event ~event))))
+     (try
+       (f# (assoc ~data :event ~event))
+       (catch Exception _#
+         nil))))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults

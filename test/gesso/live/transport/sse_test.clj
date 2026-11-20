@@ -515,3 +515,76 @@
         (is (contains? names :gesso.live.sse/closed)))
       (finally
         (sse/cancel! started)))))
+
+;; -----------------------------------------------------------------------------
+;; Diagnostic callback isolation
+;; -----------------------------------------------------------------------------
+
+(deftest throwing-debug-hook-does-not-turn-valid-frame-into-error-test
+  (let [debug-attempts (atom 0)
+        frames (sse/frames-flow
+                (m/seed [live-event])
+                {:encoder (constantly "encoded")
+                 :debug-fn (fn [_]
+                             (swap! debug-attempts inc)
+                             (throw (ex-info "trace failed" {})))})
+        runner (start-task (m/reduce conj [] frames))]
+    (is (= {:status :success
+            :value ["event: live-update\ndata: encoded\n\n"]}
+           (task-result runner))
+        "a faulty debug callback must not change valid event framing")
+    (is (pos? @debug-attempts))))
+
+(deftest throwing-debug-hook-does-not-prevent-frame-write-test
+  (let [out (s/stream)
+        runner (start-task
+                (sse/put-frame-task
+                 out "frame\n\n"
+                 {:debug-fn (fn [_]
+                              (throw (ex-info "trace failed" {})))}))]
+    (try
+      (is (= "frame\n\n" (take-value out))
+          "diagnostics must not suppress accepted frames")
+      (is (= {:status :success :value true}
+             (task-result runner)))
+      (finally
+        (s/close! out)))))
+
+(deftest throwing-debug-hook-does-not-interrupt-sse-lifecycle-test
+  (let [attempts (atom #{})
+        started (sse/start!
+                 (m/seed [live-event])
+                 {:encoder (constantly "encoded")
+                  :debug-fn (fn [entry]
+                              (swap! attempts conj (:event entry))
+                              (throw (ex-info "trace failed" {})))})]
+    (try
+      (is (= "event: live-update\ndata: encoded\n\n"
+             (take-value (:stream started))))
+      (is (eventually #(sse/closed? started)))
+      (is (s/closed? (:stream started)))
+      (is (contains? @attempts :gesso.live.sse/started))
+      (is (contains? @attempts :gesso.live.sse/closed))
+      (finally
+        (sse/cancel! started)))))
+
+(deftest throwing-debug-hook-does-not-hide-real-frame-error-test
+  (let [cause (ex-info "real encoder failed" {:kind :encoder})
+        seen-error (promise)
+        started (sse/start!
+                 (m/seed [live-event])
+                 {:encoder (fn [_] (throw cause))
+                  :on-error (fn [error _entry] (deliver seen-error error))
+                  :debug-fn (fn [_] (throw (ex-info "trace failed" {})))})]
+    (try
+      (let [error (deref seen-error timeout-ms ::timeout)]
+        (is (instance? clojure.lang.ExceptionInfo error))
+        (is (= "gesso.live SSE failed to build frame."
+               (when (instance? clojure.lang.ExceptionInfo error)
+                 (ex-message error))))
+        (is (identical? cause
+                        (when (instance? clojure.lang.ExceptionInfo error)
+                          (ex-cause error))))
+        (is (eventually #(sse/closed? started))))
+      (finally
+        (sse/cancel! started)))))
