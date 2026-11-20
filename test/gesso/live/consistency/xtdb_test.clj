@@ -533,7 +533,9 @@
         t (Instant/parse "2026-01-03T00:00:00Z")
         required-basis (xtdb-live/basis :analytics 80 t)
         ctx {:xtdb/read-connectable :read
-             :consistency {:snapshot-token "ordinary-token"
+             :consistency {:snapshot-token (xtdb-live/basis-snapshot-token
+                                            (xtdb-live/basis :analytics 1
+                                            (Instant/parse "2025-01-01T00:00:00Z")))
                            :await-token "await"}
              :gesso.live/progression (progression/requirement required-basis)}]
     (with-xtdb-stub
@@ -546,7 +548,9 @@
                (xtdb-live/q-consistent-from
                 ctx
                 sample-query
-                {:snapshot-token "caller-token"
+                {:snapshot-token (xtdb-live/basis-snapshot-token
+                                  (xtdb-live/basis :analytics 2
+                                  (Instant/parse "2025-01-01T00:00:00Z")))
                  :snapshot-time (Instant/parse "2025-01-01T00:00:00Z")
                  :database :analytics
                  :key-fn :kebab-case-keyword})))
@@ -991,11 +995,13 @@
             :snapshot-token (xtdb-live/basis-snapshot-token required-basis)}
            (xtdb-live/read-query-opts
             {:snapshot-time old-time
-             :snapshot-token "old-token"
+             :snapshot-token (xtdb-live/basis-snapshot-token
+                              (xtdb-live/basis :analytics 1 old-time))
              :await-token "await"}
             requirement
             {:snapshot-time caller-time
-             :snapshot-token "caller-token"
+             :snapshot-token (xtdb-live/basis-snapshot-token
+                              (xtdb-live/basis :analytics 2 caller-time))
              :database :analytics
              :key-fn :kebab-case-keyword})))
     (is (thrown-with-msg?
@@ -1005,6 +1011,73 @@
           {}
           requirement
           {:database :xtdb})))))
+
+(deftest read-progression-preserves-explicit-multi-db-snapshot-token-test
+  ;; The caller's explicit XTDB snapshot-token is independently meaningful.
+  ;; Installing the progression token must neither discard foreign database
+  ;; bases nor overwrite a stronger selected-database time without rejection.
+  (let [frontier (Instant/parse "2026-11-20T18:00:00Z")
+        earlier (.minusSeconds frontier 60)
+        later (.plusSeconds frontier 60)
+        archive (.minusSeconds frontier 120)
+        required-basis (xtdb-live/basis :analytics 2024 frontier)
+        required (progression/requirement required-basis)
+        context {:xtdb/read-connectable :read :gesso.live/progression required}
+        opts-token (fn [times] (xt.basis/->time-basis-str
+                                (cond-> {"archive" [archive]}
+                                  times (assoc "analytics" times))))
+        expected (xt.basis/->time-basis-str
+                  {"archive" [archive] "analytics" [frontier]})]
+    (doseq [token [(opts-token [earlier])
+                   (opts-token nil)
+                   (opts-token [earlier frontier])]]
+      (let [actual (:snapshot-token
+                    (xtdb-live/read-query-opts
+                     {:snapshot-token token} required))]
+        (is (= expected actual)
+            "Composed query token must preserve the independent archive basis")
+        (is (= {"archive" [archive] "analytics" [frontier]}
+               (xt.basis/<-time-basis-str actual)))))
+    (doseq [token [(opts-token [later])
+                   (opts-token [earlier later])]]
+      (let [outcome (try (xtdb-live/read-query-opts
+                          {:snapshot-token token} required)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo outcome)
+            "Later explicit token cannot be replaced by an older progression")
+        (when (instance? clojure.lang.ExceptionInfo outcome)
+          (is (= :explicit-snapshot-token-ahead-of-progression
+                 (:reason (ex-data outcome)))))))
+    (doseq [invalid-token [false "not-a-valid-xtdb-token"]]
+      (let [outcome (try (xtdb-live/read-query-opts
+                          {:snapshot-token invalid-token} required)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo outcome)
+            "A malformed explicit snapshot token must not disappear")
+        (when (instance? clojure.lang.ExceptionInfo outcome)
+          (is (= :invalid-snapshot-token (:reason (ex-data outcome)))))))
+    (let [calls (atom [])
+          attempted (fn [& args]
+                      (swap! calls conj args)
+                      :unexpected)]
+      (with-redefs-fn {(xtdb-var '*q*) attempted
+                       (xtdb-var '*plan-q*) attempted}
+        (fn []
+          (doseq [bad [(opts-token [later])
+                       "not-a-valid-xtdb-token"]]
+            (doseq [invoke [#(xtdb-live/q-consistent-from
+                               context sample-query {:snapshot-token bad})
+                            #(xtdb-live/plan-q-consistent-from
+                               context sample-query {:snapshot-token bad})]]
+              (is (thrown? clojure.lang.ExceptionInfo (invoke)))
+              (is (empty? @calls)
+                  "An invalid explicit token must fail before XTDB I/O")))
+          (let [result (xtdb-live/q-consistent-from
+                        context sample-query {:snapshot-token (opts-token nil)})]
+            (is (= :unexpected result))
+            (is (= expected (:snapshot-token (nth (first @calls) 2))))))))))
 
 (deftest read-progression-rejects-later-explicit-snapshot-time-before-io-test
   ;; A progression is a minimum authoritative read frontier. Installing its

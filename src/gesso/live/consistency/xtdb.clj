@@ -242,7 +242,8 @@
     :tx-id
     :snapshot-token})
 
-(declare normalize-consistency tx-result-consistency consistent-query-opts)
+(declare normalize-consistency tx-result-consistency consistent-query-opts
+         decode-canonical-biff-snapshot!)
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -728,15 +729,33 @@
              {:explicit-database (:database opts)
               :required-database required-db})))
       ;; Progression is a correctness requirement, not an ordinary preference.
-      ;; Remove caller snapshot coordinates and install the exact required XTDB
-      ;; token. Preserve a compatible explicit database representation; otherwise
-      ;; add the required non-default database.
-      (cond-> (-> opts
-                  (dissoc :snapshot-time :snapshot-token)
-                  (assoc :snapshot-token (basis-snapshot-token required)))
+      ;; An explicit snapshot-token can contain independently established time
+      ;; bases for other databases. Keep those bases, reject any selected-db
+      ;; coordinate later than the trusted progression frontier, and replace
+      ;; only the selected database's coordinate. Malformed supplied tokens
+      ;; must not be silently erased to manufacture an apparently valid read.
+      (let [snapshot-token
+            (if-some [explicit-token (:snapshot-token opts)]
+              (let [existing-bases (decode-canonical-biff-snapshot!
+                                    required-db explicit-token)
+                    observed-time (basis-system-time required)]
+                (when (some #(.isAfter ^Instant % observed-time)
+                            (get existing-bases required-db))
+                  (throw
+                   (ex "Explicit XTDB snapshot token is ahead of authoritative progression."
+                       {:snapshot-token explicit-token
+                        :required-basis required
+                        :database required-db
+                        :reason :explicit-snapshot-token-ahead-of-progression})))
+                (xt.basis/->time-basis-str
+                 (assoc existing-bases required-db [observed-time])))
+              (basis-snapshot-token required))]
+        (cond-> (-> opts
+                    (dissoc :snapshot-time :snapshot-token)
+                    (assoc :snapshot-token snapshot-token))
         (and (not explicit-db)
              (not= default-database-name required-db))
-        (assoc :database required-db)))
+          (assoc :database required-db))))
     opts))
 
 (defn progression-from

@@ -816,7 +816,9 @@
 
             ctx
             {:biff.xtdb/node :node
-             :biff.xtdb/snapshot-token "stale-token"
+             :biff.xtdb/snapshot-token (live.xtdb/basis-snapshot-token
+                                       (live.xtdb/basis 55
+                                        (.minusSeconds required-time 60)))
              :gesso.live/progression requirement}
 
             calls
@@ -859,14 +861,17 @@
 
             ctx
             {:biff.xtdb/node :node
-             :biff.xtdb/snapshot-token "request-token"
+             :biff.xtdb/snapshot-token (live.xtdb/basis-snapshot-token
+                                       (live.xtdb/basis :analytics 40 caller-time))
              :gesso.live/consistency
-             {:snapshot-token "consistency-token"
+             {:snapshot-token (live.xtdb/basis-snapshot-token
+                              (live.xtdb/basis :analytics 41 caller-time))
               :await-token "await"}
              :gesso.live/progression requirement}
 
             opts
-            {:snapshot-token "caller-token"
+            {:snapshot-token (live.xtdb/basis-snapshot-token
+                               (live.xtdb/basis :analytics 42 caller-time))
              :snapshot-time caller-time
              :database :analytics
              :key-fn :kebab-case-keyword}
