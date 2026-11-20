@@ -1128,27 +1128,74 @@
             :reason :invalid-snapshot-token}
            cause)))))
 
+(defn- compose-fixed-biff-snapshot!
+  "Preserve deferred Biff snapshot obligations without weakening the frontier.
+
+   The fixed token was admitted from the node status and original request
+   context. Another Biff wrapper (or the request itself) may provide an
+   independent token only when the body executes. Its selected-database
+   coordinates must not exceed the observed frontier; foreign coordinates
+   cannot conflict with an already preserved fixed snapshot."
+  [database-name fixed-bases snapshot-token]
+  (if-some [incoming-token snapshot-token]
+    (let [incoming (decode-canonical-biff-snapshot!
+                    database-name incoming-token)
+          frontier-time (first (get fixed-bases database-name))]
+      (when (some #(.isAfter ^Instant % frontier-time)
+                  (get incoming database-name))
+        (throw
+         (ex "Deferred Biff snapshot is ahead of the observed XTDB request frontier."
+             {:database database-name
+              :snapshot-token incoming-token
+              :observed-snapshot-time frontier-time
+              :reason :selected-snapshot-ahead-of-frontier})))
+      (doseq [[other-database times] incoming
+              :when (and (not= database-name other-database)
+                         (contains? fixed-bases other-database)
+                         (not= (get fixed-bases other-database) times))]
+        (throw
+         (ex "Deferred Biff snapshot conflicts with an independent database frontier."
+             {:database other-database
+              :selected-database database-name
+              :snapshot-token incoming-token
+              :existing-times (get fixed-bases other-database)
+              :incoming-times times
+              :reason :conflicting-independent-snapshot-bases})))
+      ;; Preserve both sets of independent database constraints. The selected
+      ;; database always remains pinned to Gesso's server-observed frontier.
+      (xt.basis/->time-basis-str
+       (merge fixed-bases (dissoc incoming database-name))))
+    (xt.basis/->time-basis-str fixed-bases)))
+
 (defn- fixed-biff-snapshot-wrapper
-  [existing-wrapper snapshot-token]
-  (fn [f]
-    (when-not (ifn? f)
-      (throw
-       (ex "Biff request snapshot wrapper requires a callable body."
-           {:body f})))
-    (let [fixed-body
-          (fn [ctx]
-            (f
-             (assoc ctx
-                    :biff.xtdb/snapshot-token
-                    snapshot-token)))]
-      (if existing-wrapper
-        (do
-          (when-not (ifn? existing-wrapper)
-            (throw
-             (ex "Existing Biff request snapshot wrapper must be callable."
-                 {:wrapper existing-wrapper})))
-          (existing-wrapper fixed-body))
-        fixed-body))))
+  [existing-wrapper database-name snapshot-token]
+  (let [fixed-bases (decode-canonical-biff-snapshot!
+                     database-name snapshot-token)]
+    (fn [f]
+      (when-not (ifn? f)
+        (throw
+         (ex "Biff request snapshot wrapper requires a callable body."
+             {:body f})))
+      (let [fixed-body
+            (fn [ctx]
+              (when-not (map? ctx)
+                (throw
+                 (ex "Existing Biff wrapper must supply a request context map."
+                     {:ctx ctx})))
+              (f
+               (assoc ctx
+                      :biff.xtdb/snapshot-token
+                      (compose-fixed-biff-snapshot!
+                       database-name fixed-bases
+                       (:biff.xtdb/snapshot-token ctx)))))]
+        (if existing-wrapper
+          (do
+            (when-not (ifn? existing-wrapper)
+              (throw
+               (ex "Existing Biff request snapshot wrapper must be callable."
+                   {:wrapper existing-wrapper})))
+            (existing-wrapper fixed-body))
+          fixed-body)))))
 
 (defn- guarded-empty-biff-snapshot-wrapper
   "Preserve a Biff wrapper without letting it introduce a fabricated frontier.
@@ -1301,6 +1348,7 @@
                 :biff.core/wrap-db-snapshot
                 (fixed-biff-snapshot-wrapper
                  (:biff.core/wrap-db-snapshot ctx)
+                 (basis-database basis-value)
                  snapshot-token)))
        ;; With no completed selected-database transaction, an existing browser
        ;; minimum for that database cannot be satisfied by any Biff snapshot.

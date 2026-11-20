@@ -1928,6 +1928,81 @@
             (when (instance? clojure.lang.ExceptionInfo result)
               (is (= token (:snapshot-token (ex-data result)))))))))))
 
+(deftest populated-frontier-guards-deferred-biff-wrapper-snapshots-test
+  ;; A previous Biff wrapper can inject its own time-basis token after Gesso
+  ;; binds an authoritative selected-database frontier. A fixed wrapper must
+  ;; preserve independent coordinates and reject stronger selected-database
+  ;; or contradictory foreign constraints, rather than erase them at runtime.
+  (let [observed (Instant/parse "2026-11-20T20:00:00Z")
+        earlier (.minusSeconds observed 60)
+        later (.plusSeconds observed 60)
+        archive (.minusSeconds observed 120)
+        reports (.minusSeconds observed 180)
+        bound-foreign {"archive" [archive]}
+        initial-token (xt.basis/->time-basis-str bound-foreign)
+        token (fn [bases] (xt.basis/->time-basis-str bases))
+        expected (assoc bound-foreign "xtdb" [observed] "reports" [reports])
+        base {:xtdb/node :authority-node :request/id :wrapped-frontier
+              :biff.xtdb/snapshot-token initial-token}
+        injected-wrapper (fn [injected]
+                           (fn [body]
+                             (fn [request]
+                               (body (assoc request :biff.xtdb/snapshot-token injected)))))
+        body-calls (atom 0)
+        body (fn [request]
+               (swap! body-calls inc)
+               (:biff.xtdb/snapshot-token request))
+        bind (fn [wrapper]
+               (xtdb-live/bind-request-frontier
+                (cond-> base wrapper
+                  (assoc :biff.core/wrap-db-snapshot wrapper))))]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" [{:tx-id 2031
+                                              :system-time observed}]}})
+      (fn []
+        ;; A deferred wrapper's independent database must survive composition.
+        (let [bound (bind (injected-wrapper (token {"reports" [reports]})))
+              wrapped ((:biff.core/wrap-db-snapshot bound) body)]
+          (is (= expected (xt.basis/<-time-basis-str (wrapped {}))))
+          (is (= {"archive" [archive] "xtdb" [observed]}
+                 (xt.basis/<-time-basis-str
+                  (:biff.xtdb/snapshot-token bound)))))
+        ;; Earlier selected-db snapshots may advance to the observed basis.
+        (let [wrapped ((:biff.core/wrap-db-snapshot
+                        (bind (injected-wrapper (token {"xtdb" [earlier]})))) body)]
+          (is (= {"archive" [archive] "xtdb" [observed]}
+                 (xt.basis/<-time-basis-str (wrapped {})))))
+        (doseq [[injected expected-reason]
+                [[(token {"xtdb" [later]})
+                  :selected-snapshot-ahead-of-frontier]
+                 [(token {"archive" [later]})
+                  :conflicting-independent-snapshot-bases]
+                 ["not-a-protobuf-token" :invalid-snapshot-token]
+                 [false :invalid-snapshot-token]]]
+          (let [wrapped ((:biff.core/wrap-db-snapshot
+                          (bind (injected-wrapper injected))) body)
+                before @body-calls
+                outcome (try (wrapped {}) nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo outcome)
+                "Deferred unsafe Biff token must not be silently overwritten")
+            (when (instance? clojure.lang.ExceptionInfo outcome)
+              (is (= expected-reason (:reason (ex-data outcome)))))
+            (is (= before @body-calls)
+                "Unsafe tokens must be rejected before invoking the body")))
+        ;; Even with no outer Biff wrapper, a request-supplied token must not
+        ;; be lost when the already-bound wrapper is applied to that request.
+        (let [wrapped ((:biff.core/wrap-db-snapshot (bind nil)) body)
+              before @body-calls
+              outcome (try (wrapped {:biff.xtdb/snapshot-token
+                                    (token {"xtdb" [later]})})
+                           nil
+                           (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo outcome))
+          (is (= :selected-snapshot-ahead-of-frontier
+                 (:reason (ex-data outcome))))
+          (is (= before @body-calls)))))))
+
 (deftest bind-request-frontier-binds-matching-biff-and-gesso-frontier-test
   (let [calls (atom 0)
         instant (Instant/parse "2026-09-10T18:34:00Z")
