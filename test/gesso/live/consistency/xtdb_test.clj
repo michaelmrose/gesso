@@ -1087,6 +1087,118 @@
 ;; XTDB diagnostics must not change authoritative write outcomes
 ;; -----------------------------------------------------------------------------
 
+(deftest assertion-in-execute-success-trace-preserves-completed-result-test
+  ;; A successful execute-tx has already completed authoritatively when the
+  ;; successful-result debug event is observed. Failing instrumentation cannot
+  ;; turn that completed mutation into an apparent execution failure.
+  (let [calls (atom 0)
+        observed (atom [])
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        committed (tx-key 220 t)
+        diagnostic (AssertionError. "post-execution trace failed")]
+    (with-xtdb-stub
+      '*execute-tx*
+      (fn [& _] (swap! calls inc) committed)
+      (fn []
+        (let [outcome (try
+                        (xtdb-live/execute-tx!
+                         :conn sample-tx
+                         {:debug-fn (fn [{:keys [event]}]
+                                      (swap! observed conj event)
+                                      (when (= event :gesso.live.xtdb/execute-tx-succeeded)
+                                        (throw diagnostic)))})
+                        (catch Throwable error error))]
+          (is (map? outcome) "A completed write must return normally")
+          (is (and (map? outcome)
+                   (identical? committed (:tx-result outcome))))
+          (is (= 1 @calls))
+          (is (= [:gesso.live.xtdb/execute-tx-started
+                  :gesso.live.xtdb/execute-tx-succeeded]
+                 @observed)
+              "No spurious execute-tx-failed event after successful execution"))))))
+
+(deftest assertion-in-execute-error-trace-preserves-original-error-test
+  ;; Reporting an XTDB API error is observational. An AssertionError in its
+  ;; diagnostic hook must not replace the authoritative API error.
+  (let [original (ex-info "XTDB really failed" {:xtdb.error/code :xtdb/assert-failed})
+        diagnostic (AssertionError. "failure trace failed")
+        observed (atom [])
+        calls (atom 0)]
+    (with-xtdb-stub
+      '*execute-tx*
+      (fn [& _] (swap! calls inc) (throw original))
+      (fn []
+        (let [caught (try
+                       (xtdb-live/execute-tx!
+                        :conn sample-tx
+                        {:debug-fn (fn [{:keys [event]}]
+                                     (swap! observed conj event)
+                                     (when (= event :gesso.live.xtdb/execute-tx-failed)
+                                       (throw diagnostic)))})
+                       nil
+                       (catch Throwable e e))]
+          (is (identical? original caught))
+          (is (= 1 @calls))
+          (is (= [:gesso.live.xtdb/execute-tx-started
+                  :gesso.live.xtdb/execute-tx-failed]
+                 @observed)))))))
+
+(deftest assertion-in-submit-success-trace-preserves-submission-result-test
+  ;; submit-tx is not a confirmed commit, but its returned acceptance result
+  ;; must not be replaced by a debug hook's failure either.
+  (let [submitted {:tx-id 221}
+        calls (atom 0)
+        diagnostic (AssertionError. "submit trace failed")]
+    (with-xtdb-stub
+      '*submit-tx*
+      (fn [& _] (swap! calls inc) submitted)
+      (fn []
+        (let [outcome (try
+                        (xtdb-live/submit-tx!
+                         :conn sample-tx
+                         {:debug-fn (fn [{:keys [event]}]
+                                      (when (= event :gesso.live.xtdb/submit-tx-succeeded)
+                                        (throw diagnostic)))})
+                        (catch Throwable e e))]
+          (is (= {:tx-result submitted :consistency {:tx-id 221}} outcome))
+          (is (= 1 @calls)))))))
+
+(deftest assertion-in-submit-failure-trace-preserves-original-error-test
+  (let [original (ex-info "submit really failed" {:reason :storage})
+        diagnostic (AssertionError. "submit failure trace failed")]
+    (with-xtdb-stub
+      '*submit-tx*
+      (fn [& _] (throw original))
+      (fn []
+        (is (identical? original
+                        (try
+                          (xtdb-live/submit-tx!
+                           :conn sample-tx
+                           {:debug-fn (fn [{:keys [event]}]
+                                        (when (= event :gesso.live.xtdb/submit-tx-failed)
+                                          (throw diagnostic)))})
+                          (catch Throwable e e))))))))
+
+(deftest assertion-in-execute-start-trace-cannot-suppress-write-test
+  ;; A tracing problem before executing must not suppress the real operation.
+  (let [calls (atom 0)
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        committed (tx-key 222 t)]
+    (with-xtdb-stub
+      '*execute-tx*
+      (fn [& _] (swap! calls inc) committed)
+      (fn []
+        (let [outcome (try
+                        (xtdb-live/execute-tx!
+                         :conn sample-tx
+                         {:debug-fn (fn [{:keys [event]}]
+                                      (when (= event :gesso.live.xtdb/execute-tx-started)
+                                        (throw (AssertionError. "startup trace failed"))))})
+                        (catch Throwable e e))]
+          (is (and (map? outcome)
+                   (identical? committed (:tx-result outcome))))
+          (is (= 1 @calls)))))))
+
 (deftest submit-tx-debug-failure-after-success-preserves-commit-result-test
   (let [calls (atom 0)
         observed (atom [])

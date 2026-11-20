@@ -337,7 +337,10 @@
         (is (= :none (:authority forged)))
         (is (= :not-issued (:certificate forged)))))))
 
-(deftest debug-hook-exception-after-api-return-does-not-relabel-api-event-test
+(deftest debug-hook-error-after-api-return-preserves-captured-submission-test
+  ;; Submission capture observes the adapter call, not the optional tracing
+  ;; hook. An Error in diagnostics after a returned API result must not make
+  ;; the report claim the submitting thunk failed.
   (with-seams
     {'*submit-tx* (fn [_ _ _] {:tx-id 88})}
     (fn []
@@ -345,25 +348,30 @@
             report (capture #(live/submit-tx! :connection source-ops
                                               {:debug-fn (fn [_]
                                                            (when (= 2 (swap! count-debug inc))
-                                                             (throw (ex-info "debug post-return" {}))))}))
+                                                             (throw (AssertionError. "debug post-return"))))}))
             [_ finished] (pair report)]
-        (is (= 3 @count-debug))
-        ;; Started, successful return, and failed debug handling. The
-        ;; post-return hook exception does not rewrite the XTDB API event.
-        (is (= :threw (:outcome report)))
+        (is (= 2 @count-debug) "No spurious submission-failed trace")
+        (is (= :returned (:outcome report)))
         (is (= :returned (:phase finished)))
         (is (= {:tx-id 88} (:tx-result finished)))
+        (is (= {:tx-id 88} (get-in report [:result :tx-result])))
         (is (= :submission-diagnostic-only (:proof-status report)))))))
 
-(deftest debug-hook-before-api-invocation-does-not-invent-event-test
+(deftest debug-hook-error-before-api-invocation-preserves-real-capture-test
+  ;; A broken observational hook cannot prevent a real XTDB invocation.
+  ;; Once invoked, the submission capture must show exactly that call.
   (with-seams
-    {'*submit-tx* (fn [_ _ _] (throw (AssertionError. "should not run")))}
+    {'*submit-tx* (fn [_ _ _] {:tx-id 89})}
     (fn []
       (let [report (capture #(live/submit-tx! :connection source-ops
-                                              {:debug-fn (fn [_] (throw (ex-info "debug before" {}))) }))]
-        (is (= :threw (:outcome report)))
-        (is (= [] (:events report)))
-        (is (= "debug before" (.getMessage ^Throwable (:error report))))))))
+                                              {:debug-fn (fn [_]
+                                                           (throw (AssertionError. "debug before")))}))
+            [started finished] (pair report)]
+        (is (= :returned (:outcome report)))
+        (is (= :invoked (:phase started)))
+        (is (= :returned (:phase finished)))
+        (is (= {:tx-id 89} (:tx-result finished)))
+        (is (= {:tx-id 89} (get-in report [:result :tx-result])))))))
 
 (deftest real-embedded-xtdb-submission-remains-diagnostic-test
   (with-open [node (xtn/start-node {})]

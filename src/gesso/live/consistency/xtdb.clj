@@ -170,12 +170,13 @@
    evaluated."
   [debug-fn event data]
   ;; Diagnostic hooks are observational. A broken trace callback must not
-  ;; suppress submission, misreport an already committed transaction, or
+  ;; suppress submission, misreport an already completed transaction, or
   ;; replace an authoritative XTDB failure with a diagnostic exception.
+  ;; Application assertions may throw Error rather than Exception.
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Exception _#
+       (catch Throwable _#
          nil))))
 
 ;; -----------------------------------------------------------------------------
