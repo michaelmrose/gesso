@@ -1197,39 +1197,70 @@
             (existing-wrapper fixed-body))
           fixed-body)))))
 
-(defn- guarded-empty-biff-snapshot-wrapper
-  "Preserve a Biff wrapper without letting it introduce a fabricated frontier.
+(defn- compose-empty-biff-snapshot!
+  "Compose foreign snapshot bases across an empty selected database boundary.
 
-   The empty-node path has no selected-database transaction to pin. A prior
-   Biff wrapper may supply a snapshot only *after* frontier binding has
-   returned, so validating the initial context token alone is insufficient.
-   Check the wrapped request immediately before delegating to the body."
-  [existing-wrapper database-name]
+   The selected database has no observed transaction, so it must never be
+   assigned a snapshot. Independent databases can already have fixed time
+   bases at request admission or gain them from a deferred Biff wrapper;
+   neither source may silently discard or contradict the other."
+  [database-name admitted-bases deferred-token]
+  (let [deferred-bases (if-some [token deferred-token]
+                         (decode-canonical-biff-snapshot! database-name token)
+                         {})]
+    (when (contains? deferred-bases database-name)
+      (throw
+       (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
+           {:database database-name
+            :snapshot-token deferred-token
+            :reason :unobserved-selected-database})))
+    (doseq [[foreign-database times] deferred-bases
+            :when (and (contains? admitted-bases foreign-database)
+                       (not= (get admitted-bases foreign-database) times))]
+      (throw
+       (ex "Deferred Biff snapshot conflicts with an admitted independent database frontier."
+           {:database foreign-database
+            :selected-database database-name
+            :snapshot-token deferred-token
+            :existing-times (get admitted-bases foreign-database)
+            :incoming-times times
+            :reason :conflicting-independent-snapshot-bases})))
+    (let [combined (merge admitted-bases deferred-bases)]
+      (when (seq combined)
+        (xt.basis/->time-basis-str combined)))))
+
+(defn- guarded-empty-biff-snapshot-wrapper
+  "Preserve admitted foreign snapshots while guarding deferred Biff execution.
+
+   The selected database has no completed transaction. An existing Biff
+   wrapper may introduce or replace a token after initial frontier binding.
+   Recheck its snapshot at execution time and retain admitted independent
+   database bases instead of silently losing them."
+  [existing-wrapper database-name admitted-token]
   (when-not (ifn? existing-wrapper)
     (throw
      (ex "Existing Biff request snapshot wrapper must be callable."
          {:wrapper existing-wrapper})))
-  (fn [body]
-    (when-not (ifn? body)
-      (throw
-       (ex "Biff request snapshot wrapper requires a callable body."
-           {:body body})))
-    (existing-wrapper
-     (fn [wrapped-ctx]
-       (when-not (map? wrapped-ctx)
-         (throw
-          (ex "Existing Biff wrapper must supply a request context map."
-              {:ctx wrapped-ctx})))
-       (when-some [snapshot-token (:biff.xtdb/snapshot-token wrapped-ctx)]
-         (let [decoded (decode-canonical-biff-snapshot!
-                        database-name snapshot-token)]
-           (when (contains? decoded database-name)
-             (throw
-              (ex "XTDB has no completed transaction and cannot preserve a preexisting Biff snapshot token."
-                  {:database database-name
-                   :snapshot-token snapshot-token
-                   :reason :unobserved-selected-database})))))
-       (body wrapped-ctx)))))
+  (let [admitted-bases (if-some [token admitted-token]
+                         (decode-canonical-biff-snapshot! database-name token)
+                         {})]
+    (fn [body]
+      (when-not (ifn? body)
+        (throw
+         (ex "Biff request snapshot wrapper requires a callable body."
+             {:body body})))
+      (existing-wrapper
+       (fn [wrapped-ctx]
+         (when-not (map? wrapped-ctx)
+           (throw
+            (ex "Existing Biff wrapper must supply a request context map."
+                {:ctx wrapped-ctx})))
+         (let [composed-token (compose-empty-biff-snapshot!
+                               database-name admitted-bases
+                               (:biff.xtdb/snapshot-token wrapped-ctx))]
+           (body (cond-> wrapped-ctx
+                   composed-token
+                   (assoc :biff.xtdb/snapshot-token composed-token)))))))))
 
 (defn- frontier-xtdb-required-bases
   "Validate every basis that explicitly claims XTDB authority.
@@ -1387,7 +1418,8 @@
          (if-some [existing-wrapper (:biff.core/wrap-db-snapshot ctx)]
            (assoc ctx :biff.core/wrap-db-snapshot
                   (guarded-empty-biff-snapshot-wrapper
-                   existing-wrapper database-name))
+                   existing-wrapper database-name
+                   (:biff.xtdb/snapshot-token ctx)))
            ctx))))))
 
 ;; -----------------------------------------------------------------------------

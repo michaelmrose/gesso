@@ -2211,6 +2211,64 @@
           (is (identical? foreign (xtdb-live/bind-request-frontier foreign))))
         (is (= 6 @observations))))))
 
+(deftest empty-frontier-preserves-bound-and-deferred-foreign-snapshots-test
+  ;; No selected-database completion means no basis for "xtdb". But a Biff
+  ;; snapshot for an independent database already admitted at binding time is
+  ;; a read constraint, not an optional hint: an outer wrapper must not erase
+  ;; it when installing another token only during request execution.
+  (let [time (Instant/parse "2026-11-20T20:45:00Z")
+        older (.minusSeconds time 60)
+        archive-time (.minusSeconds time 120)
+        bound-token (xt.basis/->time-basis-str {"analytics" [time]})
+        reports-token (xt.basis/->time-basis-str {"reports" [older]})
+        same-token (xt.basis/->time-basis-str {"analytics" [time]})
+        conflicting-token (xt.basis/->time-basis-str {"analytics" [archive-time]})
+        selected-token (xt.basis/->time-basis-str {"xtdb" [time]})
+        expected {"analytics" [time] "reports" [older]}
+        body-calls (atom 0)
+        body (fn [request]
+               (swap! body-calls inc)
+               (:biff.xtdb/snapshot-token request))
+        outer (fn [token]
+                (fn [handler]
+                  (fn [request]
+                    (handler (if (nil? token)
+                               request
+                               (assoc request :biff.xtdb/snapshot-token token))))))
+        bind (fn [token]
+               (xtdb-live/bind-request-frontier
+                {:xtdb/node :authority-node
+                 :biff.xtdb/snapshot-token bound-token
+                 :biff.core/wrap-db-snapshot (outer token)}))]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        ;; A wrapper with no new token must retain the already-bound archive.
+        (let [handler ((:biff.core/wrap-db-snapshot (bind nil)) body)]
+          (is (= {"analytics" [time]}
+                 (xt.basis/<-time-basis-str (handler {})))))
+        ;; Distinct foreign snapshots should be composed, not selected by
+        ;; whichever wrapper happens to execute last.
+        (let [handler ((:biff.core/wrap-db-snapshot (bind reports-token)) body)]
+          (is (= expected (xt.basis/<-time-basis-str (handler {})))))
+        (let [handler ((:biff.core/wrap-db-snapshot (bind same-token)) body)]
+          (is (= {"analytics" [time]}
+                 (xt.basis/<-time-basis-str (handler {})))))
+        ;; No basis exists to reconcile contradictory foreign snapshots, and
+        ;; a selected-database snapshot remains fabricated at this boundary.
+        (doseq [[token reason] [[conflicting-token :conflicting-independent-snapshot-bases]
+                                [selected-token :unobserved-selected-database]
+                                ["not-a-valid-token" :invalid-snapshot-token]]]
+          (let [before @body-calls
+                handler ((:biff.core/wrap-db-snapshot (bind token)) body)
+                result (try (handler {}) nil
+                            (catch clojure.lang.ExceptionInfo ex ex))]
+            (is (instance? clojure.lang.ExceptionInfo result))
+            (when (instance? clojure.lang.ExceptionInfo result)
+              (is (= reason (:reason (ex-data result)))))
+            (is (= before @body-calls)
+                "Unsafe deferred snapshot must fail before request execution")))))))
+
 (deftest empty-frontier-guards-existing-biff-wrapper-snapshots-test
   ;; Empty-database admission must continue to hold after a pre-existing Biff
   ;; wrapper runs. Checking only the token already in the binding context
