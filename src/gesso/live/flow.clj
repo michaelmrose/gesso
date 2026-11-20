@@ -372,8 +372,12 @@
          (once
           (fn []
             (reset! stopped? true)
-            (call-safely on-close)
+            ;; An application callback may block. Release the underlying
+            ;; Manifold stream (and its source registration) first so a
+            ;; terminated flow cannot retain a live subscription while the
+            ;; observer runs.
             (s/close! stream)
+            (call-safely on-close)
             (debug!
              debug-fn
              :gesso.live.flow/stream-flow-closed

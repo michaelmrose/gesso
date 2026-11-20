@@ -279,6 +279,38 @@
     (is (eventually #(s/closed? stream)))
     (is (eventually #(= 1 @close-count)))))
 
+
+(deftest stream-flow-releases-stream-before-blocked-close-hook-test
+  ;; Flow cancellation is a terminal action. An application on-close hook
+  ;; may block waiting for another component; that must not keep the source
+  ;; subscription open or retain its stream during the callback.
+  (let [src (source/create)
+        stream (source/subscribe src request-sub)
+        hook-entered (promise)
+        release-hook (promise)
+        close-count (atom 0)
+        runner (collect-runner
+                (flow/stream-flow
+                 stream
+                 {:on-close (fn []
+                              (swap! close-count inc)
+                              (deliver hook-entered :entered)
+                              @release-hook)}))
+        cancelled (future (cancel-runner! runner))]
+    (try
+      (is (= :entered (deref hook-entered 2000 ::timeout))
+          "cancellation should reach the application hook")
+      (is (s/closed? stream)
+          "physical stream must close before application on-close")
+      (is (= 0 (:subscription-count (source/stats src)))
+          "source registration must be retired before application on-close")
+      (finally
+        (deliver release-hook :released)
+        (deref cancelled 2000 ::timeout)
+        (source/close! src)))
+    (is (= 1 @close-count)
+        "the close hook remains at-most-once")))
+
 (deftest stream-flow-emits-debug-events-when-enabled-test
   (let [events (atom [])
         stream (s/stream)
