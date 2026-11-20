@@ -366,12 +366,10 @@
    (let [;; Each flow owns its terminal token. Even the formerly public
          ;; flow/closed-sentinel must now be treated as ordinary stream data.
          closed-sentinel (Object.)
-         stopped? (atom false)
 
          close-once!
          (once
           (fn []
-            (reset! stopped? true)
             ;; An application callback may block. Release the underlying
             ;; Manifold stream (and its source registration) first so a
             ;; terminated flow cannot retain a live subscription while the
@@ -394,7 +392,11 @@
          ;; The wip counter trampolines completions without changing the
          ;; one-outstanding-take invariant or introducing a worker pool.
          (let [ready (java.util.concurrent.ConcurrentLinkedQueue.)
-               wip (java.util.concurrent.atomic.AtomicInteger. 0)]
+               wip (java.util.concurrent.atomic.AtomicInteger. 0)
+               ;; An m/observe recipe can be subscribed more than once. Each
+               ;; collector owns its own stopped state; only the underlying
+               ;; Manifold stream and its physical close are shared.
+               stopped? (atom false)]
            (letfn [(stop! []
                      (reset! stopped? true)
                      (close-once!))

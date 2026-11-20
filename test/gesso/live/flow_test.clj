@@ -1169,6 +1169,23 @@
       (finally
         (s/close! stream)))))
 
+(deftest stream-flow-reused-after-first-collection-terminates-test
+  ;; A Missionary flow can be started more than once. A prior observer's
+  ;; stopped state must not suppress completion for a later observer of an
+  ;; already-closed Manifold stream.
+  (let [stream (s/stream 4)
+        f (flow/stream-flow stream)]
+    (try
+      (is (true? (put-value stream :first)))
+      (s/close! stream)
+      (is (= {:status :success :value [:first]}
+             (task-result (collect-runner f))))
+      (is (= {:status :success :value []}
+             (task-result (collect-runner f)))
+          "a second observer must complete, not hang on shared stopped state")
+      (finally
+        (s/close! stream)))))
+
 (deftest stream-flow-distinguishes-terminal-tokens-between-flows-test
   ;; The close marker supplied to each take! adapter must be owned by that
   ;; flow. A marker from another flow is valid data here, not termination.
