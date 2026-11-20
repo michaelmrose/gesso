@@ -169,8 +169,14 @@
    The data expression is inside the guard, so with debugging off it is not
    evaluated."
   [debug-fn event data]
+  ;; Diagnostic hooks are observational. A broken trace callback must not
+  ;; suppress submission, misreport an already committed transaction, or
+  ;; replace an authoritative XTDB failure with a diagnostic exception.
   `(when-let [f# ~debug-fn]
-     (f# (assoc ~data :event ~event))))
+     (try
+       (f# (assoc ~data :event ~event))
+       (catch Exception _#
+         nil))))
 
 ;; -----------------------------------------------------------------------------
 ;; Constants/defaults

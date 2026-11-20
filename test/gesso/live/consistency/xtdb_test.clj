@@ -1031,3 +1031,83 @@
                 {:database :xtdb})))
         (is (= [[:connectable [[:put-docs :users {:xt/id "u1"}]] {:database :xtdb}]]
                @calls))))))
+
+;; -----------------------------------------------------------------------------
+;; XTDB diagnostics must not change authoritative write outcomes
+;; -----------------------------------------------------------------------------
+
+(deftest submit-tx-debug-failure-after-success-preserves-commit-result-test
+  (let [calls (atom 0)
+        observed (atom [])
+        committed {:tx-id 211}]
+    (with-xtdb-stub
+      '*submit-tx*
+      (fn [_ _ _]
+        (swap! calls inc)
+        committed)
+      (fn []
+        (let [result (xtdb-live/submit-tx!
+                      :conn sample-tx
+                      {:debug-fn (fn [entry]
+                                   (swap! observed conj (:event entry))
+                                   (when (= :gesso.live.xtdb/submit-tx-succeeded
+                                            (:event entry))
+                                     (throw (ex-info "diagnostic failed" {}))))})]
+          (is (= {:tx-result committed
+                  :consistency {:tx-id 211}}
+                 result))
+          (is (= 1 @calls)
+              "a committed write must not be retried or misreported")
+          (is (= [:gesso.live.xtdb/submit-tx-started
+                  :gesso.live.xtdb/submit-tx-succeeded]
+                 @observed)))))))
+
+(deftest execute-tx-debug-failure-before-start-does-not-prevent-write-test
+  (let [calls (atom 0)
+        t (Instant/parse "2026-01-01T00:00:00Z")
+        committed (tx-key 212 t)]
+    (with-xtdb-stub
+      '*execute-tx*
+      (fn [_ _ _]
+        (swap! calls inc)
+        committed)
+      (fn []
+        (let [result (xtdb-live/execute-tx!
+                      :conn sample-tx
+                      {:debug-fn (fn [entry]
+                                   (when (= :gesso.live.xtdb/execute-tx-started
+                                            (:event entry))
+                                     (throw (ex-info "diagnostic failed" {}))))})]
+          (is (= committed (:tx-result result)))
+          (is (= {:tx-id 212 :system-time t :snapshot-time t}
+                 (:consistency result)))
+          (is (= 1 @calls)
+              "a debug exception must not suppress authoritative execution"))))))
+
+(deftest execute-tx-debug-failure-does-not-mask-original-xtdb-error-test
+  (let [cause (ex-info "actual XTDB execution failed" {:reason :storage})
+        diagnostic (ex-info "diagnostic failed" {})
+        calls (atom 0)
+        observations (atom [])]
+    (with-xtdb-stub
+      '*execute-tx*
+      (fn [_ _ _]
+        (swap! calls inc)
+        (throw cause))
+      (fn []
+        (let [caught (try
+                       (xtdb-live/execute-tx!
+                        :conn sample-tx
+                        {:debug-fn (fn [entry]
+                                     (swap! observations conj (:event entry))
+                                     (when (= :gesso.live.xtdb/execute-tx-failed
+                                              (:event entry))
+                                       (throw diagnostic)))})
+                       nil
+                       (catch Throwable e e))]
+          (is (identical? cause caught)
+              "the original XTDB exception must survive failed tracing")
+          (is (= 1 @calls))
+          (is (= [:gesso.live.xtdb/execute-tx-started
+                  :gesso.live.xtdb/execute-tx-failed]
+                 @observations)))))))
