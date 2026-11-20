@@ -981,3 +981,60 @@
     (is (identical? cause (:error result))
         "the real renderer exception must not be replaced by debug failure")
     (is (= 1 @attempts))))
+
+(deftest clear-key-does-not-unregister-replacement-flight-after-cancel-test
+  ;; A canceller may release the previous flight synchronously. Force a new
+  ;; owner to register before clear-key! resumes after cancelling the old one.
+  ;; Clearing by key alone would delete that *new* owner's registration,
+  ;; allowing another request to start a duplicate render of the same key.
+  (let [manager (fragment/create)
+        first-started (promise)
+        first-release (promise)
+        first-cancelled (promise)
+        first-count (atom 0)
+        first-task (controlled-success-task first-started first-release
+                                            :obsolete first-count first-cancelled)
+        first-runner (start-task (fragment/protect-task manager fragment-key first-task))
+        second-started (promise)
+        second-release (promise)
+        second-cancelled (promise)
+        second-count (atom 0)
+        second-task (controlled-success-task second-started second-release
+                                             :fresh second-count second-cancelled)
+        replacement (atom nil)
+        original-cancel @#'gesso.live.fragment/cancel-flight!]
+    (try
+      (is (= :started (deref first-started timeout-ms ::timeout)))
+      (is (= 1 (:inflight-count (fragment/stats manager))))
+      (with-redefs-fn
+        {#'gesso.live.fragment/cancel-flight!
+         (fn [flight]
+           (original-cancel flight)
+           ;; Reproduce an old-flight completion removing its own identity
+           ;; before clear-key! has performed its final map update.
+           (swap! (:inflight manager)
+                  (fn [flights]
+                    (if (identical? flight (get flights fragment-key))
+                      (dissoc flights fragment-key)
+                      flights)))
+           (reset! replacement
+                   (start-task (fragment/protect-task manager fragment-key second-task)))
+           (is (= :started (deref second-started timeout-ms ::timeout))))}
+        #(fragment/clear-key! manager fragment-key))
+      (is (= 1 (:inflight-count (fragment/stats manager)))
+          "clear-key must not remove a newer flight installed during cancellation")
+      (let [joining (start-task (fragment/protect-task manager fragment-key second-task))]
+        (is (eventually #(= 1 @second-count))
+            "a joining request must share the new owner's render")
+        (deliver second-release :go)
+        (is (= {:status :success :value :fresh} (task-result @replacement)))
+        (is (= {:status :success :value :fresh} (task-result joining)))
+        (is (= 1 @second-count)
+            "a replacement flight must still coalesce subsequent requests"))
+      (finally
+        (deliver first-release :go)
+        (deliver second-release :go)
+        (cancel-runner! first-runner)
+        (when-let [runner @replacement]
+          (cancel-runner! runner))
+        (fragment/clear-key! manager fragment-key)))))

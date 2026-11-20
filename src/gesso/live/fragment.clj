@@ -494,9 +494,17 @@
    paths usually rely on short TTLs and progression-aware keys instead."
   [manager key]
   (swap! (:cache manager) dissoc key)
-  (when-let [flight (get @(:inflight manager) key)]
-    (cancel-flight! flight))
-  (swap! (:inflight manager) dissoc key)
+  (let [inflight (:inflight manager)]
+    (when-let [flight (get @inflight key)]
+      (cancel-flight! flight)
+      ;; Cancellation may synchronously release this flight. Another caller
+      ;; can install a replacement before the clear operation completes. Do
+      ;; not remove that newer owner's singleflight registration.
+      (swap! inflight
+             (fn [flights]
+               (if (identical? flight (get flights key))
+                 (dissoc flights key)
+                 flights)))))
   manager)
 
 (defn purge-expired!
