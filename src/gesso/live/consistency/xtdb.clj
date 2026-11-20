@@ -1152,6 +1152,30 @@
 ;; Transaction wrappers
 ;; -----------------------------------------------------------------------------
 
+(def post-execute-result-failure-type
+  "An XTDB execute-tx call returned successfully, but deriving Gesso's
+   consistency/progression metadata from its result failed. The authoritative
+   transaction is already complete; consumers must not retry the mutation."
+  ::post-execute-result-failure)
+
+(defn post-execute-result-failure?
+  "True if an XTDB execute-tx result could not be converted after execution."
+  [error]
+  (and (instance? Throwable error)
+       (= post-execute-result-failure-type (:error/type (ex-data error)))
+       (= :post-execute-result (:failure/stage (ex-data error)))
+       (= :committed (:commit/status (ex-data error)))))
+
+(defn- post-execute-result-error
+  [cause tx-result]
+  (ex-info
+   "XTDB execution returned a committed transaction, but result metadata derivation failed."
+   {:error/type post-execute-result-failure-type
+    :failure/stage :post-execute-result
+    :commit/status :committed
+    :tx-result tx-result}
+   cause))
+
 (defn submit-tx!
   "Submit XTDB2 tx ops.
 
@@ -1259,11 +1283,17 @@
       {:tx-opts tx-options
        :at (now-ms)})
      (try
-       (let [tx-result   (invoke-xtdb-api! :execute-tx *execute-tx*
-                                            connectable' tx-ops tx-options)
-             consistency (tx-consistency tx-result)
-             progression-value
-             (tx-result-progression tx-result (:database tx-options))]
+       (let [tx-result (invoke-xtdb-api! :execute-tx *execute-tx*
+                                         connectable' tx-ops tx-options)
+             ;; The XTDB call has returned: any failure deriving its public
+             ;; result metadata is post-execution, not an ASSERT conflict.
+             {:keys [consistency progression-value]}
+             (try
+               {:consistency (tx-consistency tx-result)
+                :progression-value
+                (tx-result-progression tx-result (:database tx-options))}
+               (catch Throwable cause
+                 (throw (post-execute-result-error cause tx-result))))]
          (debug!
           debug-fn
           :gesso.live.xtdb/execute-tx-succeeded
@@ -1279,7 +1309,9 @@
        (catch Throwable e
          (debug!
           debug-fn
-          :gesso.live.xtdb/execute-tx-failed
+          (if (post-execute-result-failure? e)
+            :gesso.live.xtdb/execute-tx-result-failed
+            :gesso.live.xtdb/execute-tx-failed)
           {:error e
            :at (now-ms)})
          (throw e))))))

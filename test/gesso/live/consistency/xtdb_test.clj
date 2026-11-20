@@ -903,6 +903,57 @@
              #"submit boom"
              (xtdb-live/submit-tx! :conn sample-tx)))))))
 
+(deftest execute-tx-classifies-failed-result-derivation-after-commit-test
+  ;; The bound XTDB API has returned a transaction key, so a failure while
+  ;; converting it must not look like the underlying transaction aborted.
+  (let [commits (atom 0)
+        events (atom [])
+        tx-result (tx-key 52 (Instant/parse "2026-01-01T00:00:00Z"))
+        cause (ex-info "result projection failed"
+                       {:xtdb.error/code :xtdb/assert-failed})]
+    (with-redefs-fn
+      {(xtdb-var '*execute-tx*)
+       (fn [_connectable _ops _opts]
+         (swap! commits inc)
+         tx-result)
+       (xtdb-var 'tx-result-progression)
+       (fn [& _] (throw cause))}
+      (fn []
+        (let [error (try
+                      (xtdb-live/execute-tx! :conn sample-tx
+                                             {:database :xtdb
+                                              :debug-fn #(swap! events conj (:event %))})
+                      nil
+                      (catch Throwable e e))]
+          (is (if-let [predicate (ns-resolve 'gesso.live.consistency.xtdb
+                                            'post-execute-result-failure?)]
+                (predicate error)
+                false)
+              "Post-result derivation errors must be classified as committed")
+          (is (= :committed (:commit/status (ex-data error))))
+          (is (= :post-execute-result (:failure/stage (ex-data error))))
+          (is (identical? tx-result (:tx-result (ex-data error))))
+          (is (identical? cause (.getCause ^Throwable error)))
+          (is (= 1 @commits) "The authoritative call must occur exactly once")
+          (is (= [:gesso.live.xtdb/execute-tx-started
+                  :gesso.live.xtdb/execute-tx-result-failed]
+                 @events)))))))
+
+(deftest execute-tx-actual-xtdb-failure-is-not-classified-as-committed-test
+  (let [error (ex-info "real ASSERT failure"
+                       {:xtdb.error/code :xtdb/assert-failed})]
+    (with-xtdb-stub
+      '*execute-tx*
+      (fn [& _] (throw error))
+      (fn []
+        (let [caught (try (xtdb-live/execute-tx! :conn sample-tx)
+                          (catch Throwable e e))]
+          (is (identical? error caught))
+          (is (false? (if-let [predicate (ns-resolve 'gesso.live.consistency.xtdb
+                                            'post-execute-result-failure?)]
+                        (predicate caught)
+                        false))))))))
+
 (deftest execute-tx-propagates-failure-test
   (let [boom (ex-info "execute boom" {})]
     (with-xtdb-stub

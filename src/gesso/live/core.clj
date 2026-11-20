@@ -1460,7 +1460,11 @@
       ;; explicit post-commit boundary always wins over deeper cause codes;
       ;; otherwise a guarded swap could repeat a successfully committed write.
       (or (post-commit-delivery-failure? cause)
-          (post-commit-preparation-failure? cause))
+          (post-commit-preparation-failure? cause)
+          ;; XTDB execute-tx can return successfully before its public
+          ;; result metadata is converted into a progression requirement.
+          ;; Once returned, this too is no longer a retryable ASSERT loss.
+          (live.xtdb/post-execute-result-failure? cause))
       false
 
       (= :xtdb/assert-failed

@@ -1919,6 +1919,48 @@
             (is (= 1 @transforms)
                 "Never reapply a swap transform after commit")))))))
 
+(deftest live-swap-does-not-retry-xtdb-result-derivation-assert-test
+  ;; Exercise the real XTDB execute-tx adapter through the public guarded
+  ;; swap. Its underlying API returns a committed key before derivation fails
+  ;; with an ASSERT-shaped error. Retrying that write duplicates the mutation.
+  (let [reads (atom 0)
+        commits (atom 0)
+        transforms (atom 0)
+        tx-result {:tx-id 42 :system-time :time-42}
+        cause (ex-info "XTDB-shaped metadata failure"
+                       {:xtdb.error/code :xtdb/assert-failed})]
+    (with-redefs-fn
+      {#'synced/live-read
+       (fn [& _]
+         (when (> (swap! reads inc) 1)
+           (throw (ex-info "committed swap retried" {:unsafe true})))
+         1)
+       #'synced/guarded-tx-ops
+       (fn [& _] [[:guard]])
+       (xtdb-var '*execute-tx*)
+       (fn [& _] (swap! commits inc) tx-result)
+       (xtdb-var 'tx-result-progression)
+       (fn [& _] (throw cause))}
+      (fn []
+        (let [error (try
+                      (live/live-swap!
+                       {:xtdb/connectable :write-node}
+                       atomic-swap-counter
+                       (fn [n] (swap! transforms inc) (inc n))
+                       {:system {:options {}} :emit false})
+                      nil
+                      (catch Throwable e e))]
+          (is (if-let [predicate (ns-resolve 'gesso.live.consistency.xtdb
+                                            'post-execute-result-failure?)]
+                (predicate error)
+                false)
+              "An adapter metadata failure cannot become a retryable ASSERT")
+          (is (identical? cause (.getCause ^Throwable error)))
+          (is (= :committed (:commit/status (ex-data error))))
+          (is (= 1 @commits) "An already-completed XTDB call cannot repeat")
+          (is (= 1 @reads))
+          (is (= 1 @transforms)))))))
+
 (deftest live-swap-never-retries-assert-shaped-post-commit-error-test
   ;; An ASSERT-shaped failure in an app delivery callback does not mean the
   ;; authoritative XTDB write failed. transact-and-notify! has already
