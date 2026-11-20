@@ -849,6 +849,48 @@
     (is (nil? (xtdb-live/progression-from :not-a-context)))))
 
 
+(deftest progression-from-rejects-false-canonical-requirement-test
+  ;; Only nil denotes an absent progression requirement. A false canonical
+  ;; value must not be replaced by the legacy convenience key or silently
+  ;; become no requirement: either path could weaken authoritative reads.
+  (let [required-basis (xtdb-live/basis 72
+                                        (Instant/parse "2026-11-20T00:00:00Z"))
+        legacy (progression/requirement required-basis)
+        invalid-ctx {:gesso.live/progression false
+                     :progression legacy
+                     :xtdb/read-connectable :request-conn
+                     :xtdb/node :authority-node}]
+    (doseq [ctx [(dissoc invalid-ctx :progression)
+                 invalid-ctx]]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Expected a normalized non-empty Gesso Live progression requirement"
+           (xtdb-live/progression-from ctx))))
+    ;; An explicitly nil canonical requirement retains the existing migration
+    ;; behavior: a well-formed legacy convenience requirement is used.
+    (is (= legacy
+           (xtdb-live/progression-from
+            {:gesso.live/progression nil
+             :progression legacy})))
+    (let [external-calls (atom 0)
+          unexpected-api (fn [& _]
+                           (swap! external-calls inc)
+                           :unexpected)]
+      (with-redefs-fn
+        {(xtdb-var '*q*) unexpected-api
+         (xtdb-var '*plan-q*) unexpected-api
+         (xtdb-var '*status*) unexpected-api}
+        (fn []
+          (doseq [invoke [#(xtdb-live/q-consistent-from invalid-ctx sample-query)
+                          #(xtdb-live/plan-q-consistent-from invalid-ctx sample-query)
+                          #(xtdb-live/bind-request-frontier invalid-ctx)]]
+            (is (thrown-with-msg?
+                 clojure.lang.ExceptionInfo
+                 #"Expected a normalized non-empty Gesso Live progression requirement"
+                 (invoke)))
+            (is (zero? @external-calls)
+                "Malformed canonical progression must fail before XTDB I/O")))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Authoritative request frontier
 ;; -----------------------------------------------------------------------------

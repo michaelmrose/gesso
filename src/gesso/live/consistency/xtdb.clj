@@ -694,9 +694,13 @@
    request-local convenience while the public Live facade is migrated."
   [x]
   (when (map? x)
+    ;; A supplied false value is malformed, not an absent requirement. Using
+    ;; `or` would silently erase it (or replace it with a legacy value), so
+    ;; use nil-only fallback before enforcing the canonical requirement shape.
     (progression/normalize-requirement
-     (or (:gesso.live/progression x)
-         (:progression x)))))
+     (if-some [canonical (:gesso.live/progression x)]
+       canonical
+       (:progression x)))))
 
 (defn read-query-opts
   "Build query opts from explicit consistency, optional authoritative progression,
