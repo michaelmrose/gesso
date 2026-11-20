@@ -89,11 +89,12 @@
    evaluated."
   [debug-fn event data]
   ;; Diagnostic hooks are observational: their failures must not interfere
-  ;; with owned-resource lifecycle or committed mutation delivery.
+  ;; with owned-resource lifecycle or committed mutation delivery. Application
+  ;; assertions can throw Error, not merely Exception.
   `(when-let [f# ~debug-fn]
      (try
        (f# (assoc ~data :event ~event))
-       (catch Exception _#
+       (catch Throwable _#
          nil))))
 
 ;; -----------------------------------------------------------------------------
@@ -177,7 +178,9 @@
   (when f
     (try
       (apply f args)
-      (catch Exception _
+      ;; Optional hooks and cleanup calls must not prevent later owned
+      ;; resources from closing or falsify a committed delivery outcome.
+      (catch Throwable _
         nil))))
 
 (defn- with-inherited-debug

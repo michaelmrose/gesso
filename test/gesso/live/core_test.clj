@@ -1641,6 +1641,127 @@
 ;; Optional core diagnostics must not control owned resources or commit delivery
 ;; -----------------------------------------------------------------------------
 
+(deftest core-assertion-debug-during-create-retains-usable-owner-test
+  ;; The ownership handoff precedes :created tracing. If tracing throws an
+  ;; Error, callers must still receive the system and be able to close it.
+  ;; Capture raw allocations so a failing baseline cannot leak test workers.
+  (let [allocated-source (atom nil)
+        allocated-dispatcher (atom nil)
+        source-create (var-get #'source/create)
+        dispatch-create (var-get #'dispatch/create)
+        observed (atom [])]
+    (try
+      (with-redefs [source/create (fn [options]
+                                   (let [resource (source-create options)]
+                                     (reset! allocated-source resource)
+                                     resource))
+                    dispatch/create (fn [options]
+                                      (let [resource (dispatch-create options)]
+                                        (reset! allocated-dispatcher resource)
+                                        resource))]
+        (let [result (try
+                       (live/create
+                        {:dispatch-options {:threads 1 :queue-size 2}
+                         :debug-fn (fn [{:keys [event]}]
+                                     (swap! observed conj event)
+                                     (throw (AssertionError. "creation trace failed")))})
+                       (catch Throwable error error))]
+          (is (map? result)
+              "The debug hook must not make a fully created system disappear")
+          (when (map? result)
+            (is (false? (live/closed? result)))
+            (live/close! result))))
+      (is (= :gesso.live.core/created (first @observed)))
+      (is (some? @allocated-source))
+      (is (some? @allocated-dispatcher))
+      (is (source/closed? @allocated-source)
+          "Returned systems must retain shutdown ownership of the source")
+      (is (dispatch/closed? @allocated-dispatcher)
+          "Returned systems must retain shutdown ownership of the dispatcher")
+      (finally
+        (when @allocated-dispatcher (dispatch/close! @allocated-dispatcher))
+        (when @allocated-source (source/close! @allocated-source))))))
+
+(deftest core-assertion-debug-during-close-still-closes-owned-resources-test
+  (let [system (live/create {:dispatch-options {:threads 1 :queue-size 2}})
+        seen (atom [])
+        noisy (assoc-in system [:options :debug-fn]
+                        (fn [{:keys [event]}]
+                          (swap! seen conj event)
+                          (throw (AssertionError. "shutdown trace failed"))))]
+    (try
+      (let [result (try (live/close! noisy) (catch Throwable error error))]
+        (is (identical? noisy result)
+            "A failed diagnostic callback must not throw from close!"))
+      (is (live/closed? noisy))
+      (is (source/closed? (:source noisy)))
+      (is (dispatch/closed? (:dispatcher noisy)))
+      (is (= [:gesso.live.core/closing :gesso.live.core/closed] @seen))
+      (finally
+        (dispatch/close! (:dispatcher system))
+        (source/close! (:source system))))))
+
+(deftest core-assertion-debug-after-commit-does-not-report-delivery-failure-test
+  ;; Delivery is post-commit; a broken observer must not be classified as a
+  ;; delivery failure or stop an otherwise valid source invalidation.
+  (let [base (live/create {:rules (request-rules)
+                           :dispatch-options {:threads 1 :queue-size 4}})
+        seen (atom [])
+        noisy (assoc-in base [:options :debug-fn]
+                        (fn [{:keys [event]}]
+                          (swap! seen conj event)
+                          (throw (AssertionError. "commit tracing failed"))))
+        tap (source/subscribe (:source base) {:topic :request :id "req-1"})]
+    (try
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _ops _opts]
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [outcome (try
+                          (live/transact-and-notify!
+                           noisy {:xtdb/connectable :write-node}
+                           {:tx-ops sample-tx :change request-change :emit :sync})
+                          (catch Throwable error error))]
+            (is (map? outcome)
+                "Tracing cannot turn a committed write into delivery failure")
+            (when (map? outcome)
+              (is (= {:tx-id 42} (:tx-result outcome)))
+              (is (= :emitted-many
+                     (get-in outcome [:emit-results 0 :status]))))
+            (is (= "req-1" (:id (deref (s/take! tap) 300 ::timeout)))
+                "Tracing cannot prevent source delivery")
+            (is (some #{:gesso.live.core/emit-expanded} @seen)))))
+      (finally
+        (live/close! base)))))
+
+(deftest core-assertion-in-post-commit-result-hook-is-observational-test
+  (let [seen (atom [])
+        system {:options
+                {:debug-fn (fn [{:keys [event]}]
+                             (swap! seen conj event)
+                             (throw (AssertionError. "result trace failed")))}}]
+    (with-xtdb-stub
+      'execute-tx-from!
+      (fn [_ctx _ops _opts]
+        {:tx-result {:tx-id 42}
+         :consistency sample-consistency
+         :progression sample-commit-progression})
+      (fn []
+        (let [result (try
+                       (live/transact-and-notify!
+                        system {:xtdb/connectable :write-node}
+                        {:tx-ops sample-tx :emit false})
+                       (catch Throwable error error))]
+          (is (map? result)
+              "Committed transactions cannot fail in result debug callbacks")
+          (when (map? result)
+            (is (= {:tx-id 42} (:tx-result result)))
+            (is (false? (:emit result))))
+          (is (= [:gesso.live.core/transact-and-notify] @seen)))))))
+
 (deftest core-debug-failure-does-not-abort-system-creation-test
   (let [seen (atom [])
         system (live/create
