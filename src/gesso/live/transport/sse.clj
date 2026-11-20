@@ -122,9 +122,13 @@
 (defn- require-positive-int-option!
   [options k]
   (when-let [v (get options k)]
-    (when-not (and (integer? v) (pos? v))
+    ;; Missionary m/sleep and the underlying JVM timer consume a signed long.
+    ;; A positive Clojure BigInt outside that range fails only after an SSE
+    ;; source subscription has been allocated, potentially orphaning it.
+    (when-not (and (integer? v) (pos? v) (<= v Long/MAX_VALUE))
       (throw
-       (ex (str "gesso.live SSE " k " must be a positive integer.")
+       (ex (str "gesso.live SSE " k
+                " must be a positive integer within signed 64-bit range.")
            {k v}))))
   options)
 

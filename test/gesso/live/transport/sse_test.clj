@@ -1101,3 +1101,44 @@
   (is (nil? (:headers (sse/prepare-options! nil))))
   (is (= {"x-test" "ok"}
          (:headers (sse/prepare-options! {:headers {"x-test" "ok"}})))))
+
+(deftest fragment-rejects-unrepresentable-keepalive-before-source-subscription-test
+  ;; The model-backed entry point must reject timer values that cannot reach
+  ;; the timer without accidentally retaining an authorized source interest.
+  (let [src (source/create)
+        system {:source src :options {}}
+        authorized (atom 0)
+        overflow-ms (inc (bigint Long/MAX_VALUE))]
+    (try
+      (with-redefs [model/fragment-scope-name (fn [_ _] :request)
+                    model/fragment-scope-instance
+                    (fn [_ _ _] {:topic :request :id "req-1"})
+                    model/require-scope-authorized!
+                    (fn [_ _ _ _] (swap! authorized inc))]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #":keepalive-ms must be a positive integer"
+             (sse/start-fragment-stream!
+              system {} {} :request-panel "req-1"
+              {:sse-options {:keepalive-ms overflow-ms}})))
+        (is (= 1 @authorized))
+        (is (zero? (:subscription-count (source/stats src)))
+            "a rejected timer cannot retain a model-authorized interest")
+        (is (zero? (:tap-count (source/stats src)))))
+      (finally
+        (source/close! src)))))
+
+(deftest prepare-options-requires-representable-keepalive-duration-test
+  ;; The API accepts Clojure integral types but the runtime scheduler has
+  ;; signed 64-bit millisecond range. Retain both the upper bound and the
+  ;; existing positive-integer lower-bound contract.
+  (is (= Long/MAX_VALUE
+         (:keepalive-ms (sse/prepare-options! {:keepalive-ms Long/MAX_VALUE}))))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #":keepalive-ms must be a positive integer"
+       (sse/prepare-options! {:keepalive-ms (inc (bigint Long/MAX_VALUE))})))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #":keepalive-ms must be a positive integer"
+       (sse/prepare-options! {:keepalive-ms -1}))))

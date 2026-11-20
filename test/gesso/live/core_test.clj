@@ -1738,3 +1738,22 @@
       (is (not (source/closed? (:source system))))
       (finally
         (live/close! system)))))
+
+(deftest core-rejects-unrepresentable-keepalive-before-source-subscription-test
+  ;; A positive Clojure BigInt can exceed the signed long consumed by
+  ;; Missionary's timer. Startup then fails after an eager source subscription
+  ;; is opened, but before the event consumer can close that subscription.
+  (let [system (live/create)
+        overflow-ms (inc (bigint Long/MAX_VALUE))]
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #":keepalive-ms must be a positive integer"
+           (live/start-sse! system {:topic :request :id "req-1"}
+                            {:sse-options {:keepalive-ms overflow-ms}})))
+      (is (zero? (:subscription-count (source/stats (:source system))))
+          "reject an unrepresentable timer before opening the source tap")
+      (is (zero? (:tap-count (source/stats (:source system)))))
+      (is (not (source/closed? (:source system))))
+      (finally
+        (live/close! system)))))
