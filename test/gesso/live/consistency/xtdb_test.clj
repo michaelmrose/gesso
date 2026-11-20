@@ -2492,6 +2492,54 @@
             (is (= token (handler {:request/id :new-database})))))
         (is (= 5 @called))))))
 
+(deftest deferred-biff-requests-must-not-switch-authoritative-xtdb-node-test
+  ;; The observed transaction and snapshot come from exactly one node. A
+  ;; deferred outer Biff wrapper may send a different :xtdb/node or
+  ;; :biff.xtdb/node to the handler; it must not inherit the first node's
+  ;; authoritative frontier and then query a second node under that basis.
+  (let [authority (Object.)
+        other-node (Object.)
+        t (Instant/parse "2026-11-20T23:40:00Z")
+        body-calls (atom 0)
+        query-calls (atom [])
+        body (fn [request]
+               (swap! body-calls inc)
+               (xtdb-live/q-consistent-from request sample-query))]
+    (doseq [completed? [true false]]
+      (with-redefs-fn {(xtdb-var '*status*)
+                       (fn [node]
+                         (is (identical? authority node))
+                         {:latest-completed-txs
+                          {"xtdb" (if completed?
+                                    [{:tx-id 2037 :system-time t}]
+                                    [])}})
+                       (xtdb-var '*q*)
+                       (fn [connectable _query opts]
+                         (swap! query-calls conj [connectable opts])
+                         :queried)}
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node authority})
+                handler ((:biff.core/wrap-db-snapshot bound) body)]
+            (is (= :queried (handler {:xtdb/node authority}))
+                "The bound node remains an allowed request authority")
+            (is (identical? authority (first (last @query-calls))))
+            (doseq [key [:xtdb/node :biff.xtdb/node]]
+              (let [before @body-calls
+                    calls-before (count @query-calls)
+                    result (try (handler {key other-node})
+                                nil
+                                (catch clojure.lang.ExceptionInfo e e))]
+                (is (instance? clojure.lang.ExceptionInfo result)
+                    "A different XTDB node cannot inherit the admitted frontier")
+                (when (instance? clojure.lang.ExceptionInfo result)
+                  (is (= :conflicting-runtime-xtdb-node
+                         (:reason (ex-data result)))))
+                (is (= before @body-calls)
+                    "Conflicting node must fail before the handler")
+                (is (= calls-before (count @query-calls))
+                    "Conflicting node must fail before XTDB I/O")))))))))
+
 (deftest empty-frontier-without-admitted-obligations-guards-later-request-test
   ;; The empty XTDB node cannot prove even its first completed transaction.
   ;; A request without an outer wrapper or admitted constraints nevertheless

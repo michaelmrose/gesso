@@ -1128,6 +1128,27 @@
             :reason :invalid-snapshot-token}
            cause)))))
 
+(defn- require-wrapped-xtdb-node!
+  "Reject an execution-time node that differs from frontier observation.
+
+   The binding's transaction ID and system-time describe one specific XTDB
+   node. An outer Biff wrapper or later Ring request may supply its own node
+   keys. It cannot use that different node with the first node's authoritative
+   snapshot and progression. Connection pools and other connectables are not
+   authenticated by this narrow node-identity check."
+  [bound-node wrapped-ctx]
+  (doseq [node-key [:xtdb/node :biff.xtdb/node]
+          :let [runtime-node (get wrapped-ctx node-key)]
+          :when (some? runtime-node)]
+    (when-not (identical? bound-node runtime-node)
+      (throw
+       (ex "Deferred XTDB request node differs from the node that established the authoritative frontier."
+           {:reason :conflicting-runtime-xtdb-node
+            :node-key node-key
+            :bound-node bound-node
+            :runtime-node runtime-node}))))
+  wrapped-ctx)
+
 (declare frontier-xtdb-required-bases
          require-frontier-satisfies-existing-xtdb!)
 
@@ -1195,7 +1216,7 @@
     (xt.basis/->time-basis-str fixed-bases)))
 
 (defn- fixed-biff-snapshot-wrapper
-  [existing-wrapper database-name snapshot-token frontier admitted-requirement]
+  [existing-wrapper database-name snapshot-token frontier admitted-requirement bound-node]
   ;; Validate the outer Biff wrapper at request-frontier admission. In
   ;; particular, an explicitly supplied false must not be treated like nil
   ;; and silently bypass the wrapper whose behavior the caller relies on.
@@ -1217,6 +1238,7 @@
                 (throw
                  (ex "Existing Biff wrapper must supply a request context map."
                      {:ctx ctx})))
+              (require-wrapped-xtdb-node! bound-node ctx)
               (let [combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name frontier admitted-requirement ctx)
@@ -1270,7 +1292,7 @@
    wrapper may introduce or replace a token after initial frontier binding.
    Recheck its snapshot at execution time and retain admitted independent
    database bases instead of silently losing them."
-  [existing-wrapper database-name admitted-token admitted-requirement]
+  [existing-wrapper database-name admitted-token admitted-requirement bound-node]
   ;; A request may have admitted foreign snapshots/progression even when Biff
   ;; has no preexisting wrapper. Install the same execution-time guard for
   ;; those obligations instead of letting a fresh handler request erase them.
@@ -1293,6 +1315,7 @@
                 (throw
                  (ex "Existing Biff wrapper must supply a request context map."
                      {:ctx wrapped-ctx})))
+              (require-wrapped-xtdb-node! bound-node wrapped-ctx)
               (let [combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name nil admitted-requirement wrapped-ctx)
@@ -1384,7 +1407,8 @@
      (throw
       (ex "XTDB request frontier binding requires a context map."
           {:ctx ctx})))
-   (let [existing-requirement (progression-from ctx)
+   (let [bound-node (node-from ctx)
+         existing-requirement (progression-from ctx)
          xtdb-required-bases (frontier-xtdb-required-bases existing-requirement)]
      (if-some [basis-value (latest-completed-basis ctx database)]
        (let [_ (require-frontier-satisfies-existing-xtdb!
@@ -1431,7 +1455,8 @@
                  (basis-database basis-value)
                  snapshot-token
                  basis-value
-                 combined-requirement)))
+                 combined-requirement
+                 bound-node)))
        ;; With no completed selected-database transaction, an existing browser
        ;; minimum for that database cannot be satisfied by any Biff snapshot.
        ;; Returning an unchanged context would silently permit unconstrained
@@ -1472,7 +1497,8 @@
                  (:biff.core/wrap-db-snapshot ctx)
                  database-name
                  (:biff.xtdb/snapshot-token ctx)
-                 existing-requirement)))))))
+                 existing-requirement
+                 bound-node)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options
