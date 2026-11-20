@@ -68,7 +68,10 @@
   (when f
     (try
       (apply f args)
-      (catch Exception _
+      ;; External error/drop hooks must never kill a worker or turn an
+      ;; already-accepted submission into an apparent failure. Application
+      ;; assertions may throw Error rather than Exception.
+      (catch Throwable _
         nil))))
 
 (defn- normalize-job

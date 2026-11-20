@@ -143,6 +143,74 @@
 ;; Async errors
 ;; -----------------------------------------------------------------------------
 
+(deftest throwing-dispatcher-error-hook-does-not-kill-worker-test
+  ;; Error reporting is application-supplied code. An AssertionError in that
+  ;; callback must not kill the only dispatcher worker and strand queued work.
+  (let [hook-called (promise)
+        follow-up (promise)
+        d (dispatch/create {:threads 1 :queue-size 4
+                            :on-error (fn [_ _]
+                                        (deliver hook-called :called)
+                                        (throw (AssertionError. "hook failure")))})]
+    (try
+      (is (= :submitted (:status
+                         (dispatch/submit! d
+                           {:run #(throw (RuntimeException. "job failure"))}))))
+      (is (= :called (promise-value hook-called)))
+      (is (= :submitted (:status
+                         (dispatch/submit! d {:run #(deliver follow-up :ran)}))))
+      (is (= :ran (promise-value follow-up))
+          "Subsequent work must not be stranded by callback failure")
+      (is (= 1 (count (dispatch/errors d))))
+      (finally (close d)))))
+
+(deftest throwing-job-error-hook-does-not-kill-worker-test
+  (let [hook-called (promise)
+        follow-up (promise)
+        d (dispatch/create {:threads 1 :queue-size 4})]
+    (try
+      (dispatch/submit! d
+        {:run #(throw (RuntimeException. "job failure"))
+         :on-error (fn [_ _]
+                     (deliver hook-called :called)
+                     (throw (AssertionError. "job callback failure")))})
+      (is (= :called (promise-value hook-called)))
+      (dispatch/submit! d {:run #(deliver follow-up :ran)})
+      (is (= :ran (promise-value follow-up))
+          "A failing job hook must not retire a healthy worker")
+      (finally (close d)))))
+
+(deftest throwing-coalesce-drop-hook-does-not-obscure-accepted-submission-test
+  ;; The replacement is already published before on-drop runs. A callback
+  ;; failure cannot turn a committed submission into a misleading exception.
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        replacement-ran (promise)
+        drop-called (promise)
+        d (dispatch/create {:threads 1 :queue-size 2
+                            :on-overflow :coalesce})]
+    (try
+      (dispatch/submit! d {:coalesce-key :busy
+                           :run #(do (release started)
+                                     (await-latch release-running))})
+      (is (await-latch started))
+      (dispatch/submit! d {:coalesce-key :pending
+                           :run (fn [] :old)
+                           :on-drop (fn [_]
+                                      (deliver drop-called :called)
+                                      (throw (AssertionError. "drop hook failure")))})
+      (is (= :submitted
+             (:status (dispatch/submit! d
+                         {:coalesce-key :pending
+                          :run #(deliver replacement-ran :ran)})))
+          "A committed replacement must return :submitted despite a bad hook")
+      (is (= :called (promise-value drop-called)))
+      (release release-running)
+      (is (= :ran (promise-value replacement-ran)))
+      (finally
+        (release release-running)
+        (close d)))))
+
 (deftest async-job-errors-are-recorded-test
   (let [p (promise)
         d (dispatch/create {:threads 1
