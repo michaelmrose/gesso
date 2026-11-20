@@ -1666,3 +1666,75 @@
         (cancel-runner! owner)
         (when-let [runner @joiner]
           (cancel-runner! runner))))))
+
+(deftest clear-key-prevents-obsolete-non-singleflight-cache-publication-test
+  ;; A render with singleflight disabled is not registered in :inflight.
+  ;; It can finish after clear-key!, but must not install obsolete markup
+  ;; over a fresh render started after that invalidation.
+  (let [manager (fragment/create {:ttl-ms 1000
+                                  :singleflight? false
+                                  :clock (constantly 0)})
+        reached-old-store (promise)
+        resume-old-store (promise)
+        original-store @#'gesso.live.fragment/cache-store!]
+    (with-redefs-fn
+      {#'gesso.live.fragment/cache-store!
+       (fn [m k value & args]
+         (when (= :old value)
+           (deliver reached-old-store true)
+           @resume-old-store)
+         (apply original-store m k value args))}
+      (fn []
+        (let [old (start-task (fragment/render-task
+                               manager fragment-key (constantly :old)))]
+          (try
+            (is (= true (deref reached-old-store timeout-ms ::timeout)))
+            (fragment/clear-key! manager fragment-key)
+            (is (empty? @(:cache manager)))
+            (is (= {:status :success :value :fresh}
+                   (run-task (fragment/render-task manager fragment-key
+                                                   (constantly :fresh)))))
+            (is (= :fresh (get-in @(:cache manager)
+                                 [fragment-key :value])))
+            (deliver resume-old-store true)
+            (is (= {:status :success :value :old} (task-result old))
+                "existing non-singleflight caller may finish its original work")
+            (is (= :fresh (get-in @(:cache manager)
+                                 [fragment-key :value]))
+                "obsolete completion must not replace current cache entry")
+            (is (empty? @(:active-key-renders manager))
+                "key epoch records must be released after completion")
+            (finally
+              (deliver resume-old-store true)
+              (cancel-runner! old))))))))
+
+(deftest clear-key-retains-unrelated-non-singleflight-publication-test
+  ;; A scoped invalidation must not suppress caching for other keys that
+  ;; were already rendering when clear-key! ran.
+  (let [manager (fragment/create {:ttl-ms 1000
+                                  :singleflight? false
+                                  :clock (constantly 0)})
+        reached-store (promise)
+        resume-store (promise)
+        original-store @#'gesso.live.fragment/cache-store!]
+    (with-redefs-fn
+      {#'gesso.live.fragment/cache-store!
+       (fn [m k value & args]
+         (when (= other-fragment-key k)
+           (deliver reached-store true)
+           @resume-store)
+         (apply original-store m k value args))}
+      (fn []
+        (let [other (start-task (fragment/render-task
+                                 manager other-fragment-key (constantly :other)))]
+          (try
+            (is (= true (deref reached-store timeout-ms ::timeout)))
+            (fragment/clear-key! manager fragment-key)
+            (deliver resume-store true)
+            (is (= {:status :success :value :other} (task-result other)))
+            (is (= :other (get-in @(:cache manager)
+                                 [other-fragment-key :value])))
+            (is (empty? @(:active-key-renders manager)))
+            (finally
+              (deliver resume-store true)
+              (cancel-runner! other))))))))

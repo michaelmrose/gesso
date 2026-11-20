@@ -351,6 +351,10 @@
   ([options]
    {:cache (atom {})
     :cache-generation (atom 0)
+    ;; Track key-specific invalidations only while renders are active.
+    ;; A permanent per-key epoch map would grow without bound for long-lived
+    ;; managers that invalidate many distinct fragment keys.
+    :active-key-renders (atom {})
     :inflight (atom {})
     :options (prepare-options! options)}))
 
@@ -476,10 +480,12 @@
 
 (defn- cache-store!
   ([manager key value options]
-   (cache-store! manager key value options nil nil))
+   (cache-store! manager key value options nil nil nil))
   ([manager key value options flight]
-   (cache-store! manager key value options flight nil))
+   (cache-store! manager key value options flight nil nil))
   ([manager key value options flight generation]
+   (cache-store! manager key value options flight generation nil))
+  ([manager key value options flight generation key-generation]
    (when (cache-enabled? options)
      (let [{:keys [clock ttl-ms max-cache-entries debug-fn]} options
            now (clock)
@@ -500,10 +506,14 @@
        ;; an earlier cache generation cannot repopulate a cleared cache,
        ;; even if singleflight is disabled. For clear-key!, a cancelled
        ;; singleflight owner must likewise never publish obsolete markup.
-       (let [stored? (if (or flight (some? generation))
+       (let [stored? (if (or flight (some? generation) (some? key-generation))
                        (locking (:cache manager)
                          (when (and (or (nil? generation)
                                         (= generation @(:cache-generation manager)))
+                                    (or (nil? key-generation)
+                                        (= key-generation
+                                           (get-in @(:active-key-renders manager)
+                                                   [key :generation])))
                                     (or (nil? flight)
                                         (not @(:cancel-requested? flight))))
                            (store!)
@@ -525,6 +535,32 @@
              :cache-count (count @(:cache manager))
              :at now})))))
    value))
+
+(defn- begin-key-render!
+  "Capture both cache generations and register an active render atomically
+   with clear-key! and clear-cache!. The key epoch is retained only until
+   the last render for that key finishes or is cancelled."
+  [manager key]
+  (locking (:cache manager)
+    (let [[_ active] (swap-vals! (:active-key-renders manager)
+                                 update key
+                                 (fn [state]
+                                   (update (or state {:generation 0 :count 0})
+                                           :count inc)))]
+      [@(:cache-generation manager) (get-in active [key :generation])])))
+
+(defn- end-key-render!
+  [manager key]
+  ;; Completion must not wait for the invalidation lock: a render that has
+  ;; already attempted publication should be able to notify its old caller
+  ;; while clear-key! holds that lock (including a paused cancel hook).
+  ;; CAS cleanup cannot race with a later cache write from this task.
+  (swap! (:active-key-renders manager)
+         (fn [entries]
+           (let [state (get entries key)]
+             (if (= 1 (:count state))
+               (dissoc entries key)
+               (update-in entries [key :count] dec))))))
 
 (defn clear-cache!
   "Clear all cached fragments and invalidate publication from running renders.
@@ -574,7 +610,9 @@
 (defn clear-key!
   "Clear cached and in-flight state for one key.
 
-   If an in-flight render exists, its running process is cancelled.
+   If a singleflight render exists, its running process is cancelled.
+   Non-singleflight renders may finish for their existing callers, but
+   cannot restore an invalidated cache entry after this boundary.
 
    This is mostly useful for tests or explicit invalidation. Normal live refresh
    paths usually rely on short TTLs and progression-aware keys instead."
@@ -596,6 +634,14 @@
                                           (if (identical? flight (get flights key))
                                             (dissoc flights key)
                                             flights))))
+                               ;; A non-singleflight render also needs a
+                               ;; key-scoped publication fence. Keep its epoch
+                               ;; only while such renders are outstanding.
+                               (swap! (:active-key-renders manager)
+                                      (fn [entries]
+                                        (if (contains? entries key)
+                                          (update-in entries [key :generation] inc)
+                                          entries)))
                                (swap! (:cache manager) dissoc key)
                                [flight reserved?]))]
     ;; Deliver outside the cache lock: resuming waiting tasks can trigger
@@ -687,34 +733,40 @@
   ([manager key task options flight]
    (let [{:keys [clock debug-fn]} options]
      (m/sp
-       ;; Capture generation when the task starts, not when a reusable
-       ;; Missionary task value is first constructed.
-       (let [generation (if flight
+       ;; A per-key epoch is needed even without singleflight: clear-key!
+       ;; cannot cancel unregistered renders, but it can prevent obsolete
+       ;; cache publication. Register under the same lock as invalidation.
+       (let [[current-generation key-generation]
+             (begin-key-render! manager key)
+             generation (if flight
                           (:cache-generation flight)
-                          @(:cache-generation manager))]
-         (debug!
-          debug-fn
-          :gesso.live.fragment/render-started
-          {:key key
-           :at (clock)})
+                          current-generation)]
          (try
-           (let [value (m/? task)]
-             (cache-store! manager key value options flight generation)
-             (debug!
-              debug-fn
-              :gesso.live.fragment/render-succeeded
-              {:key key
-               :at (clock)})
-             value)
-           (catch Throwable e
-             (debug!
-              debug-fn
-              :gesso.live.fragment/render-failed
-              {:key key
-               :error e
-               :at (clock)})
-             (throw e))))))))
-
+           (debug!
+            debug-fn
+            :gesso.live.fragment/render-started
+            {:key key
+             :at (clock)})
+           (try
+             (let [value (m/? task)]
+               (cache-store! manager key value options flight generation
+                             key-generation)
+               (debug!
+                debug-fn
+                :gesso.live.fragment/render-succeeded
+                {:key key
+                 :at (clock)})
+               value)
+             (catch Throwable e
+               (debug!
+                debug-fn
+                :gesso.live.fragment/render-failed
+                {:key key
+                 :error e
+                 :at (clock)})
+               (throw e)))
+           (finally
+             (end-key-render! manager key))))))))
 (defn- start-flight!
   [manager key task options flight]
   (let [{:keys [clock debug-fn]} options
