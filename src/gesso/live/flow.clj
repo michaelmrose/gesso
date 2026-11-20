@@ -162,7 +162,11 @@
    manifold.stream/take! globally."
   [options]
   (let [options'  (opts options)
-        options'' (update options' :interested? #(or % default-interested?))]
+        ;; Only omission requests the default matcher. An explicit nil/false
+        ;; policy is invalid and must not silently become an active interest.
+        options'' (if (contains? options' :interested?)
+                    options'
+                    (assoc options' :interested? default-interested?))]
     (schema/validate! :gesso.live/flow-for-subscription-options
                       (flow-option-contract options''))
     (schema/validate! :gesso.live/invalidation-event-options

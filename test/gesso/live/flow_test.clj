@@ -199,6 +199,31 @@
        (flow/prepare-options! {:subscription request-sub
                                :interested? :not-a-function}))))
 
+(deftest explicit-missing-interested-predicate-is-not-defaulted-test
+  ;; An explicitly supplied false/nil matcher is not an omitted option.
+  ;; Silently replacing it can enable an unwanted default interest policy.
+  (doseq [interested? [nil false]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid gesso.live value"
+         (flow/prepare-options!
+          {:subscription request-sub :interested? interested?}))
+        (str "Explicit predicate " (pr-str interested?) " must be rejected"))))
+
+(deftest rejected-interested-predicate-opens-no-source-registration-test
+  (doseq [interested? [nil false]]
+    (let [src (source/create)]
+      (try
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"Invalid gesso.live value"
+             (flow/open-source-flow!
+              src {:subscription request-sub :interested? interested?})))
+        (is (zero? (:tap-count (source/stats src)))
+            "Rejected interest policy must not install a source consumer")
+        (finally
+          (source/close! src))))))
+
 (deftest prepare-options-rejects-invalid-debug-fn-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
