@@ -978,6 +978,19 @@
         (throw (ex "Biff snapshot token contains an invalid database identity."
                    {:snapshot-token snapshot-token
                     :databases (keys decoded)})))
+      ;; XTDB also roundtrips a canonical database entry with no timestamps.
+      ;; Such an entry cannot pin a read to any snapshot. Do not preserve it
+      ;; as though it were an independently established Biff time basis.
+      ;; Keep nonempty multi-timestamp entries: XTDB can represent attached
+      ;; database state with multiple coordinates for a single database.
+      (when-not (every? (fn [[_ times]]
+                          (and (sequential? times)
+                               (seq times)
+                               (every? #(instance? Instant %) times)))
+                        decoded)
+        (throw (ex "Biff snapshot token contains a database without a usable time basis."
+                   {:snapshot-token snapshot-token
+                    :databases (keys decoded)})))
       decoded)
     (catch Throwable cause
       (throw

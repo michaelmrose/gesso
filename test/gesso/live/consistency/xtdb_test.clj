@@ -1340,6 +1340,52 @@
                       (:gesso.live/progression bound))))
               (is (identical? ctx bound)))))))))
 
+(deftest bind-request-frontier-rejects-database-without-snapshot-time-test
+  ;; The XTDB basis codec accepts and roundtrips a database entry with zero
+  ;; snapshot coordinates, but that is not a pinned database snapshot.
+  ;; Neither populated nor fresh selected databases should carry it onward.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        statuses [{:latest-completed-txs
+                   {"xtdb" [{:tx-id 2020 :system-time t}]}}
+                  {:latest-completed-txs {"xtdb" []}}]
+        ctx {:xtdb/node :authority-node :request/id :missing-foreign-time}]
+    (doseq [db ["analytics" "archive"]
+            :let [token (xt.basis/->time-basis-str
+                         {db [] "reports" [t]})]]
+      (is (= {db [] "reports" [t]}
+             (xt.basis/<-time-basis-str token)))
+      (is (= token
+             (xt.basis/->time-basis-str
+              (xt.basis/<-time-basis-str token)))
+          "XTDB's canonical codec does not enforce a nonempty time basis")
+      (doseq [status statuses]
+        (with-xtdb-stub
+          '*status*
+          (fn [_] status)
+          (fn []
+            (let [outcome (try
+                            (xtdb-live/bind-request-frontier
+                             (assoc ctx :biff.xtdb/snapshot-token token))
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo outcome)
+                  "Empty database time-basis entry must fail closed")
+              (when (instance? clojure.lang.ExceptionInfo outcome)
+                (is (= :invalid-snapshot-token (:reason (ex-data outcome))))
+                (is (= token (:snapshot-token (ex-data outcome))))))))))
+    ;; Valid nonempty vector entries are retained, including XTDB's more
+    ;; general multiple-coordinate snapshot representation.
+    (let [t2 (Instant/parse "2026-11-19T18:00:00Z")
+          token (xt.basis/->time-basis-str {"analytics" [t t2]})]
+      (with-xtdb-stub
+        '*status*
+        (fn [_] (first statuses))
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier
+                       (assoc ctx :biff.xtdb/snapshot-token token))]
+            (is (= [t t2]
+                   (get (xt.basis/<-time-basis-str
+                         (:biff.xtdb/snapshot-token bound)) "analytics")))))))))
+
 (deftest bind-request-frontier-rejects-blank-database-ids-in-biff-token-test
   ;; XTDB's protobuf time-basis codec can canonically roundtrip blank
   ;; database names. Canonical encoding alone cannot admit an authoritative
