@@ -825,3 +825,65 @@
           (is (= :cancelled (:reason (first @completed))))
           (is (empty? @errors)
               "a keepalive failure after terminal close cannot become on-error"))))))
+
+(deftest throwing-synchronous-event-start-closes-and-retires-keepalive-test
+  ;; Task construction can throw before it returns a physical cancel handle.
+  ;; An already-installed keepalive must not be orphaned by that exception.
+  (let [boom (ex-info "event startup failed" {:phase :start})
+        cancellations (atom 0)
+        failures (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success _failure]
+           (fn [] (swap! cancellations inc))))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (throw boom))}
+      (fn []
+        (let [result (try
+                       (sse/start! (never-flow)
+                                   {:keepalive-ms 1000
+                                    :on-error (fn [e _] (swap! failures conj e))
+                                    :on-close (fn [entry] (swap! closes conj entry))})
+                       (catch Exception e e))]
+          (is (map? result) "start! should return its terminal response handle")
+          (when (map? result)
+            (is (sse/closed? result))
+            (is (s/closed? (:stream result)))
+            (sse/cancel! result))
+          (is (= 1 @cancellations) "keepalive must be retired exactly once")
+          (is (= [boom] @failures))
+          (is (= [:startup-error] (mapv :reason @closes))))))))
+
+(deftest throwing-synchronous-keepalive-start-does-not-start-events-test
+  ;; A synchronous keepalive constructor failure must also fail closed,
+  ;; before the event producer is started or exposed to a dead stream.
+  (let [boom (ex-info "keepalive startup failed" {:phase :start})
+        event-starts (atom 0)
+        failures (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options] (throw boom))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success _failure]
+           (swap! event-starts inc)
+           (fn [] nil)))}
+      (fn []
+        (let [result (try
+                       (sse/start! (never-flow)
+                                   {:keepalive-ms 1000
+                                    :on-error (fn [e _] (swap! failures conj e))
+                                    :on-close (fn [entry] (swap! closes conj entry))})
+                       (catch Exception e e))]
+          (is (map? result) "start! should return its terminal response handle")
+          (when (map? result)
+            (is (sse/closed? result))
+            (is (s/closed? (:stream result)))
+            (sse/cancel! result))
+          (is (zero? @event-starts))
+          (is (= [boom] @failures))
+          (is (= [:startup-error] (mapv :reason @closes))))))))

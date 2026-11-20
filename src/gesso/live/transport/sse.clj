@@ -505,7 +505,19 @@
            ;; Both producers must be retired independently. A physical
            ;; cancellation callback is user/executor code and may throw.
            (cancel-task-safely! @cancel-events-ref :events debug-fn)
-           (cancel-task-safely! @cancel-keepalive-ref :keepalive debug-fn))]
+           (cancel-task-safely! @cancel-keepalive-ref :keepalive debug-fn))
+
+         fail-startup!
+         (fn [error]
+           ;; The producer may fail synchronously before returning a
+           ;; cancellation handle. Start still owns the output stream and any
+           ;; producer already installed, so retire both and return a closed
+           ;; response rather than throwing away the only cleanup handle.
+           ;; Do not report a second error after an earlier terminal event.
+           (when-not @closed?
+             (fail! error)
+             (close-once! :startup-error {:error error}))
+           (cancel-running!))]
 
      (debug!
       debug-fn
@@ -519,8 +531,9 @@
           (close-once! :stream-closed {})
           (cancel-running!))))
 
-     (when-let [keepalive-task (keepalive-task* out options')]
-       (install-canceller!
+     (try
+       (when-let [keepalive-task (keepalive-task* out options')]
+         (install-canceller!
         cancel-keepalive-ref
         cancelling?
         (keepalive-task
@@ -535,14 +548,17 @@
              (cancel-running!))))
         :keepalive
         debug-fn))
+       (catch Exception e
+         (fail-startup! e)))
 
      (let [cancel-events!
            ;; A synchronous keepalive failure or downstream disconnect may
            ;; terminate the stream before event source registration.
            ;; An in-progress installation remains protected by the late
            ;; cancellation handoff below.
-           (when-not (or @cancelling? @closed? (s/closed? out))
-             (let [events-task (write-events-task out live-events options')]
+           (try
+             (when-not (or @cancelling? @closed? (s/closed? out))
+               (let [events-task (write-events-task out live-events options')]
                (events-task
                 (fn [_]
                   (debug!
@@ -563,6 +579,9 @@
                       (fail! error)
                       (close-once! :error {:error error})
                       (cancel-running!)))))))
+             (catch Exception e
+               (fail-startup! e)
+               nil))
 
            cancel!
            (once
