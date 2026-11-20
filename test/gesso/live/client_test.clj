@@ -1641,7 +1641,9 @@
       (let [rendered
             (client/drain-fragment!
              channel
-             {:query-params
+             {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
               {:client-id
                "client-1"}})]
 
@@ -1707,7 +1709,9 @@
       (let [rendered
             (client/drain-fragment!
              channel
-             {:query-params
+             {:test/user-id "user-7"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
               {:client-id
                "client-1"}
 
@@ -1783,7 +1787,9 @@
       (let [rendered
             (client/drain-fragment!
              channel
-             {:query-params
+             {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
               {:client-id
                "client-1"}})]
 
@@ -1818,7 +1824,9 @@
       (let [rendered
             (client/drain-fragment!
              channel
-             {:query-params
+             {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
               {:client-id
                "client-1"}})]
 
@@ -1851,7 +1859,9 @@
       (is (nil?
            (client/drain-fragment!
             channel
-            {:query-params
+            {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
              {:client-id
               "client-1"}})))
 
@@ -1925,7 +1935,9 @@
     (let [rendered
           (client/drain-fragment!
            channel
-           {:query-params
+           {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
             {:client-id
              "client-1"}
 
@@ -2546,7 +2558,9 @@ data: client-1
         (let [rendered
               (client/drain-fragment!
                channel
-               {:query-params
+               {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
                 {:client-id
                  "client-1"}
 
@@ -2642,7 +2656,9 @@ data: client-1
                 fragment-a]
                (client/drain-fragment!
                 channel
-                {:query-params
+                {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
                  {:client-id
                   "client-1"}})))
 
@@ -2841,7 +2857,9 @@ data: client-1
            (try
              (client/drain-fragment!
               channel
-              {:query-params
+              {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
                {:client-id
                 "client-1"}})
 
@@ -2862,7 +2880,9 @@ data: client-1
       (is (nil?
            (client/drain-fragment!
             channel
-            {:query-params
+            {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
              {:client-id
               "client-1"}}))
           "A failed render is not silently replayed on the next pending fetch.")
@@ -3062,7 +3082,9 @@ data: client-1
        (future
          (client/drain-fragment!
           channel
-          {:query-params
+          {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
            {:client-id
             "client-1"}})))
 
@@ -3167,7 +3189,9 @@ data: client-1
        (future
          (client/drain-fragment!
           channel
-          {:query-params
+          {:test/user-id "user-1"
+               :test/scopes #{[:store "store-1"]}
+               :query-params
            {:client-id
             "client-1"}})))
 
@@ -3722,3 +3746,43 @@ data: client-1
       (finally
         (doseq [response [anonymous blank-id alice]]
           (close-response! response))))))
+
+(deftest pending-http-fetch-rejects-other-users-without-consuming-mailbox-test
+  (let [channel (test-channel)
+        alice (connect! channel "shared" {:user-id "alice"
+                                           :scopes #{[:store "s1"]}})]
+    (try
+      (client/send-to-client! channel "shared" fragment-a)
+      (let [bob-ctx (client-ctx "shared" {:user-id "bob"
+                                          :scopes #{[:store "s1"]}})
+            alice-ctx (client-ctx "shared" {:user-id "alice"
+                                            :scopes #{[:store "s1"]}})]
+        (is (nil? (client/drain-fragment! channel bob-ctx))
+            "another authenticated user must not fetch Alice's pending OOB")
+        (is (= {"shared" 1} (client/pending-counts channel))
+            "unauthorized fetch must not consume the owner's mailbox")
+        (is (= fragment-a
+               (nth (client/drain-fragment! channel alice-ctx) 2))
+            "the owner must still be able to retrieve pending presentation"))
+      (finally
+        (close-response! alice)))))
+
+(deftest pending-http-fetch-rejects-reduced-scopes-even-while-disconnected-test
+  (let [channel (test-channel)
+        alice (connect! channel "shared" {:user-id "alice"
+                                           :scopes #{[:store "s1"]}})]
+    (try
+      (client/send-to-client! channel "shared" fragment-a)
+      (close-response! alice)
+      (is (eventually #(empty? (client/connected-client-ids channel))))
+      (let [reduced (client-ctx "shared" {:user-id "alice" :scopes #{}})
+            original (client-ctx "shared" {:user-id "alice"
+                                            :scopes #{[:store "s1"]}})]
+        (is (nil? (client/drain-fragment! channel reduced))
+            "reduced authorization cannot claim prior scoped presentation")
+        (is (= {"shared" 1} (client/pending-counts channel)))
+        (is (= fragment-a
+               (nth (client/drain-fragment! channel original) 2))
+            "the original audience retains disconnected recovery"))
+      (finally
+        (close-response! alice)))))

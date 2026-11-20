@@ -744,15 +744,44 @@
     (when (seq @drained)
       (vec @drained))))
 
+(defn- drain-for-audience!
+  "Claim pending presentation only for the current request audience.
+
+   The audience check and at-most-once claim share a single atomic state
+   transition, so a denied request does not consume another user's mailbox.
+   This is the HTTP-facing claim; the lower-level drain-fragments! remains an
+   explicit internal/client-id-only operation for trusted callers."
+  [channel client-id audience]
+  (let [outcome (volatile! nil)]
+    (swap! (:state channel)
+           (fn [state]
+             (let [fragments (get-in state [:pending client-id])]
+               (if (and (seq fragments)
+                        (= audience
+                           (get-in state [:pending-owners client-id] ::unknown)))
+                 (do
+                   (vreset! outcome {:fragments (vec fragments)
+                                     :client (get-in state [:clients client-id])})
+                   (-> state
+                       (update :pending dissoc client-id)
+                       (update :pending-owners dissoc client-id)
+                       (update :disconnected-pending-order
+                               without-client-id client-id)))
+                 (do
+                   (vreset! outcome nil)
+                   state)))))
+    @outcome))
+
 (defn- pending-render-ctx
-  [channel ctx client-id]
-  (let [client (get-in @(:state channel) [:clients client-id])]
-    (cond-> (assoc ctx
-                   :gesso.live.client/client-id client-id
-                   :gesso.live.client/channel-id (:id channel))
-      client
-      (assoc :gesso.live.client/client
-             (strip-runtime-fields client)))))
+  [channel ctx client-id client-at-claim]
+  ;; Do not re-read a physical connection after claiming the mailbox: it can
+  ;; be replaced by another user while receiver-specific rendering runs.
+  (cond-> (assoc ctx
+                 :gesso.live.client/client-id client-id
+                 :gesso.live.client/channel-id (:id channel))
+    client-at-claim
+    (assoc :gesso.live.client/client
+           (strip-runtime-fields client-at-claim))))
 
 (defn- hiccup-node?
   [x]
@@ -809,13 +838,18 @@
    ctx. Function entries are rendered after drain using the pending request ctx."
   [channel ctx]
   (when-let [client-id (client-id-from-ctx channel ctx)]
-    (when-let [fragments (drain-fragments! channel client-id)]
-      (let [ctx'     (pending-render-ctx channel ctx client-id)
-            rendered (render-pending-fragments ctx' fragments)]
-        (when (seq rendered)
-          (into [:div {:data-gesso-live-client-pending true
-                       :data-gesso-live-client-id client-id}]
-                rendered))))))
+    (let [app-client (call-client-fn (:client channel) ctx)
+          request-client (assoc app-client
+                                :client/scopes (set (:client/scopes app-client)))
+          audience (client-audience request-client)]
+      (when-let [{:keys [fragments client]}
+                 (drain-for-audience! channel client-id audience)]
+        (let [ctx' (pending-render-ctx channel ctx client-id client)
+              rendered (render-pending-fragments ctx' fragments)]
+          (when (seq rendered)
+            (into [:div {:data-gesso-live-client-pending true
+                         :data-gesso-live-client-id client-id}]
+                  rendered)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Targeting
