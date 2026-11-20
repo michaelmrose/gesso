@@ -1083,3 +1083,50 @@
               (when-let [runner (deref runner-future timeout-ms nil)]
                 (cancel-runner! runner))
               (fragment/clear-key! manager fragment-key))))))))
+
+(deftest expired-cache-lookup-preserves-concurrent-fresh-store-test
+  ;; Expiration checks run outside the cache atom's update. While an expired
+  ;; lookup is paused after reading the old entry, another successful render
+  ;; can replace it with a fresh entry. The old lookup must not evict the
+  ;; replacement just because it occupies the same key.
+  (let [now (atom 0)
+        manager (fragment/create {:ttl-ms 10 :clock #(deref now)})
+        cache (:cache manager)
+        old-entry {:value :old :stored-at 0 :expires-at 10 :ttl-ms 10}
+        observed (promise)
+        proceed (promise)
+        render-count (atom 0)
+        original-valid? @#'gesso.live.fragment/cache-entry-valid?]
+    (swap! cache assoc fragment-key old-entry)
+    (reset! now 11)
+    (with-redefs-fn
+      {#'gesso.live.fragment/cache-entry-valid?
+       (fn [t entry]
+         (when (identical? old-entry entry)
+           (deliver observed :expired-read)
+           @proceed)
+         (original-valid? t entry))}
+      (fn []
+        (let [lookup (future
+                       (@#'gesso.live.fragment/cache-lookup
+                        manager fragment-key (:options manager)))]
+          (try
+            (is (= :expired-read (deref observed timeout-ms ::timeout))
+                "expired lookup must have read its old entry")
+            ;; This is the same cache-store path used by a concurrent render.
+            (@#'gesso.live.fragment/cache-store!
+             manager fragment-key :fresh (:options manager))
+            (is (= :fresh (get-in @cache [fragment-key :value])))
+            (deliver proceed true)
+            (is (= fragment/miss (deref lookup timeout-ms ::timeout)))
+            (is (= :fresh (get-in @cache [fragment-key :value]))
+                "expired lookup must preserve newer cached fragment")
+            (is (= {:status :success :value :fresh}
+                   (run-task (fragment/render-task
+                              manager fragment-key
+                              (fn [] (swap! render-count inc) :unneeded)))))
+            (is (zero? @render-count)
+                "subsequent request should reuse newly rendered fragment")
+            (finally
+              (deliver proceed true)
+              (deref lookup timeout-ms ::timeout))))))))

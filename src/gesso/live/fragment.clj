@@ -437,7 +437,14 @@
 
           :else
           (do
-            (swap! (:cache manager) dissoc key)
+            ;; Another render may have stored a fresh entry since this
+            ;; lookup read the expired one. Expire only the observed entry;
+            ;; never evict its replacement from a concurrent render.
+            (swap! (:cache manager)
+                   (fn [cache]
+                     (if (identical? entry (get cache key))
+                       (dissoc cache key)
+                       cache)))
             (debug!
              debug-fn
              :gesso.live.fragment/cache-expired
