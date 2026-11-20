@@ -88,8 +88,13 @@
    The data expression is inside the guard, so with debugging off it is not
    evaluated."
   [debug-fn event data]
+  ;; Diagnostic hooks are observational: their failures must not interfere
+  ;; with owned-resource lifecycle or committed mutation delivery.
   `(when-let [f# ~debug-fn]
-     (f# (assoc ~data :event ~event))))
+     (try
+       (f# (assoc ~data :event ~event))
+       (catch Exception _#
+         nil))))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults

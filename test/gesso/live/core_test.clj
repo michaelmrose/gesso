@@ -6,6 +6,7 @@
    [gesso.choreo.project :as project]
    [gesso.live.consistency.xtdb :as xtdb-live]
    [gesso.live.core :as live]
+   [gesso.live.dispatch :as dispatch]
    [gesso.live.fragment :as fragment]
    [gesso.live.htmx :as htmx]
    [gesso.live.optimistic.capability :as optimistic.capability]
@@ -13,7 +14,8 @@
    [gesso.live.progression :as progression]
    [gesso.live.progression.http :as progression.http]
    [gesso.live.source :as source]
-   [gesso.live.synced :as synced]))
+   [gesso.live.synced :as synced]
+   [manifold.stream :as s]))
 
 ;; -----------------------------------------------------------------------------
 ;; Helpers
@@ -1633,3 +1635,69 @@
         (is (= [[:guard 4 5]]
                (get-in @tx-calls [0 2 :tx-ops])))))))
 
+
+;; -----------------------------------------------------------------------------
+;; Optional core diagnostics must not control owned resources or commit delivery
+;; -----------------------------------------------------------------------------
+
+(deftest core-debug-failure-does-not-abort-system-creation-test
+  (let [seen (atom [])
+        system (live/create
+                {:rules (request-rules)
+                 :dispatch-options {:threads 1 :queue-size 2}
+                 :debug-fn (fn [entry]
+                             (swap! seen conj (:event entry))
+                             (throw (ex-info "diagnostics unavailable" {})))})]
+    (try
+      (is (= [:gesso.live.core/created] @seen))
+      (is (not (live/closed? system)))
+      (is (not (source/closed? (:source system))))
+      (is (not (dispatch/closed? (:dispatcher system))))
+      (finally
+        (live/close! system)))))
+
+(deftest core-debug-failure-does-not-skip-owned-shutdown-test
+  (let [system (live/create {:dispatch-options {:threads 1 :queue-size 2}})
+        seen (atom [])
+        noisy (assoc-in system [:options :debug-fn]
+                        (fn [entry]
+                          (swap! seen conj (:event entry))
+                          (throw (ex-info "diagnostics unavailable" {}))))]
+    (try
+      (is (identical? noisy (live/close! noisy)))
+      (is (live/closed? noisy))
+      (is (source/closed? (:source noisy)))
+      (is (dispatch/closed? (:dispatcher noisy)))
+      (is (= [:gesso.live.core/closing :gesso.live.core/closed] @seen))
+      (finally
+        ;; Also clean up resources when testing the unfixed implementation.
+        (dispatch/close! (:dispatcher system))
+        (source/close! (:source system))))))
+
+(deftest core-debug-failure-after-xtdb-commit-does-not-interrupt-live-delivery-test
+  (let [base (live/create {:rules (request-rules)
+                           :dispatch-options {:threads 1 :queue-size 4}})
+        seen (atom [])
+        noisy (assoc-in base [:options :debug-fn]
+                        (fn [entry]
+                          (swap! seen conj (:event entry))
+                          (throw (ex-info "diagnostics unavailable" {}))))
+        tap (source/subscribe (:source base) {:topic :request :id "req-1"})]
+    (try
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _ops _options]
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [result (live/transact-and-notify!
+                        noisy {:xtdb/connectable :write-node}
+                        {:tx-ops sample-tx :change request-change :emit :sync})]
+            (is (= {:tx-id 42} (:tx-result result)))
+            (is (= :sync (:emit result)))
+            (is (= :emitted-many (get-in result [:emit-results 0 :status])))
+            (is (= "req-1" (:id (deref (s/take! tap) 1000 ::timeout))))
+            (is (some #{:gesso.live.core/emit-expanded} @seen)))))
+      (finally
+        (live/close! base)))))
