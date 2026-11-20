@@ -15,6 +15,7 @@
    [gesso.live.progression.http :as progression.http]
    [gesso.live.source :as source]
    [gesso.live.synced :as synced]
+   [gesso.live.transport.sse :as sse]
    [manifold.stream :as s]))
 
 ;; -----------------------------------------------------------------------------
@@ -1755,5 +1756,44 @@
           "reject an unrepresentable timer before opening the source tap")
       (is (zero? (:tap-count (source/stats (:source system)))))
       (is (not (source/closed? (:source system))))
+      (finally
+        (live/close! system)))))
+
+(deftest core-sse-synchronous-startup-failure-releases-unstarted-flow-test
+  ;; The indexed source subscription is opened before SSE starts. If
+  ;; keepalive startup fails synchronously, the event flow is never collected.
+  ;; A closed SSE response must nevertheless retire that subscription.
+  (let [system (live/create)
+        boom (ex-info "timer initialization failed" {:phase :start})]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.transport.sse/keepalive-task*
+         (fn [_out _opts] (throw boom))}
+        (fn []
+          (let [started (live/start-sse! system {:topic :request :id "req-1"}
+                                         {:sse-options {:keepalive-ms 1000}})]
+            (is (sse/closed? started))
+            (is (s/closed? (:stream started)))
+            (is (zero? (:subscription-count
+                        (source/stats (:source system))))
+                "terminal startup must release its never-collected source subscription")
+            (is (zero? (:tap-count (source/stats (:source system))))))))
+      (finally
+        (live/close! system)))))
+
+(deftest core-sse-throwing-transport-releases-eager-flow-test
+  ;; Even if an unexpected transport error escapes before an SSE handle can
+  ;; be returned, the public startup boundary must not strand source interest.
+  (let [system (live/create)
+        boom (ex-info "unexpected transport exception" {:phase :start})]
+    (try
+      (with-redefs [sse/start! (fn [_ _] (throw boom))]
+        (is (identical? boom
+                        (try
+                          (live/start-sse! system {:topic :request :id "req-1"})
+                          (catch Exception e e))))
+        (is (zero? (:subscription-count
+                    (source/stats (:source system))))
+            "a thrown startup error must retire the eager source subscription"))
       (finally
         (live/close! system)))))

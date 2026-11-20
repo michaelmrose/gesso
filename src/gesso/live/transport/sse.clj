@@ -611,6 +611,26 @@
         :cancel! cancel!
         :closed? closed?}))))
 
+(defn start-source!
+  "Start a Live source-backed SSE stream, releasing its eager subscription
+   if transport initialization fails or terminates before collection.
+
+   A source flow registers its Manifold consumer during construction, before
+   start! installs a Missionary task. An early terminal SSE result is therefore
+   not sufficient to close an unobserved source flow on its own."
+  [src flow-options sse-options]
+  (let [options' (prepare-options! sse-options)
+        {live-events :flow release-flow! :close!}
+        (flow/open-source-flow! src flow-options)]
+    (try
+      (let [started (start! live-events options')]
+        (when (true? @(:closed? started))
+          (release-flow!))
+        started)
+      (catch Throwable e
+        (release-flow!)
+        (throw e)))))
+
 (defn cancel!
   "Cancel a started SSE stream returned by start!."
   [started]
@@ -673,7 +693,4 @@
      ;; The source flow registers its subscription eagerly. Validate SSE
      ;; options before that allocation; rejected startup must not retain a
      ;; source tap that no transport task will ever consume or cancel.
-     (let [sse-options' (prepare-options! sse-options')]
-       (start!
-        (flow/flow-for-source (:source system) flow-options')
-        sse-options')))))
+     (start-source! (:source system) flow-options' sse-options'))))

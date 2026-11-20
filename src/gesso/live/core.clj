@@ -1556,8 +1556,13 @@
          ;; unconsumed indexed stream or broadcast tap in the Live source.
          sse-options' (sse/prepare-options!
                        (with-inherited-debug system sse-options))
-         live-events (live-flow system subscription flow-options')
-         started (sse/start! live-events sse-options')]
+         flow-options'' (assoc flow-options' :subscription subscription)
+         _ (debug!
+            (:debug-fn flow-options'')
+            :gesso.live.core/live-flow
+            {:subscription subscription
+             :at (now-ms)})
+         started (sse/start-source! (:source system) flow-options'' sse-options')]
      (debug!
       debug-fn
       :gesso.live.core/sse-started

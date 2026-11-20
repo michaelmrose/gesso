@@ -1142,3 +1142,32 @@
        clojure.lang.ExceptionInfo
        #":keepalive-ms must be a positive integer"
        (sse/prepare-options! {:keepalive-ms -1}))))
+
+(deftest fragment-sse-synchronous-startup-failure-releases-unstarted-flow-test
+  ;; A checked/authorized fragment has an eager indexed source subscription,
+  ;; even when the keepalive constructor fails before consuming that flow.
+  (let [src (source/create)
+        system {:source src :options {}}
+        authorized (atom 0)
+        boom (ex-info "timer initialization failed" {:phase :start})]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.transport.sse/keepalive-task*
+         (fn [_out _opts] (throw boom))
+         #'gesso.live.model/fragment-scope-name (fn [_ _] :request)
+         #'gesso.live.model/fragment-scope-instance
+         (fn [_ _ _] {:topic :request :id "req-1"})
+         #'gesso.live.model/require-scope-authorized!
+         (fn [_ _ _ _] (swap! authorized inc))}
+        (fn []
+          (let [started (sse/start-fragment-stream!
+                         system {} {} :request-panel "req-1"
+                         {:sse-options {:keepalive-ms 1000}})]
+            (is (= 1 @authorized))
+            (is (sse/closed? started))
+            (is (s/closed? (:stream started)))
+            (is (zero? (:subscription-count (source/stats src)))
+                "fragment SSE startup must retire its never-collected subscription")
+            (is (zero? (:tap-count (source/stats src)))))))
+      (finally
+        (source/close! src)))))

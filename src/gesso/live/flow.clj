@@ -679,8 +679,14 @@
   [options]
   (contains? options :interested?))
 
-(defn flow-for-source
-  "Open a source stream and build a client live-event flow from it.
+(defn open-source-flow!
+  "Open a source stream and return {:flow flow :close! release-subscription}.
+
+   The caller owns the returned close handle until it has safely handed the
+   flow to an active collector. This is important for eager registrations at
+   startup boundaries that can terminate before a Missionary observer starts.
+
+   Build a client live-event flow from an opened source stream.
 
    The normal non-debug path uses source/subscribe, which registers the
    subscription in source.clj's topic/id interest index. Unrelated invalidations
@@ -726,12 +732,21 @@
         :indexed? indexed?
         :at (now-ms)})
 
-      (if indexed?
-        (indexed-flow-for-stream* tap options'')
-        (flow-for-stream* tap options''))
+      {:flow (if indexed?
+               (indexed-flow-for-stream* tap options'')
+               (flow-for-stream* tap options''))
+       :close! (fn [] (s/close! tap))}
       (catch Throwable e
         (s/close! tap)
         (throw e)))))
+
+(defn flow-for-source
+  "Open an indexed subscription (or debug broadcast tap) and return its
+   Missionary Live event flow. The flow owns its stream when collected;
+   use open-source-flow! at startup boundaries that need to release an
+   uncollected registration if initialization fails."
+  [src options]
+  (:flow (open-source-flow! src options)))
 
 (defn collect-task
   "Return a Missionary task that collects a finite flow into a vector.
