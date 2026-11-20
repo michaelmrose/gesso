@@ -145,9 +145,9 @@
               "First request must have a guard even before any write")
           (is (nil? (:biff.xtdb/snapshot-token bound)))
           (is (nil? (:gesso.live/progression bound)))
-          (is (= {:request/id :first-read}
+          (is (= {:request/id :first-read :xtdb/node fresh}
                  (handler {:request/id :first-read}))
-              "Ordinary startup remains usable without fabricating a basis")
+              "Fresh requests retain their admitted node without fabricating a basis")
           (is (thrown-with-msg?
                clojure.lang.ExceptionInfo
                #"no completed transaction"

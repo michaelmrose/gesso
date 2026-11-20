@@ -2492,6 +2492,47 @@
             (is (= token (handler {:request/id :new-database})))))
         (is (= 5 @called))))))
 
+(deftest deferred-biff-requests-retain-admitted-xtdb-node-for-reads-test
+  ;; A freshly allocated Ring request may carry neither an XTDB node nor an
+  ;; explicit read connectable. The frontier wrapper must make the admitted
+  ;; node available to the handler so its snapshot/progression are usable,
+  ;; without overriding a deliberately request-scoped read connection.
+  (let [authority (Object.)
+        observed (Instant/parse "2026-11-20T23:45:00Z")
+        calls (atom [])
+        body (fn [request]
+               (xtdb-live/q-consistent-from request sample-query))]
+    (doseq [completed? [true false]]
+      (with-redefs-fn
+        {(xtdb-var '*status*)
+         (fn [node]
+           (is (identical? authority node))
+           {:latest-completed-txs
+            {"xtdb" (if completed?
+                      [{:tx-id 2038 :system-time observed}]
+                      [])}})
+         (xtdb-var '*q*)
+         (fn [connectable _query opts]
+           (swap! calls conj [connectable opts])
+           :queried)}
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node authority})
+                wrapper (:biff.core/wrap-db-snapshot bound)
+                handler (wrapper body)]
+            (is (= :queried (handler {:request/id :fresh}))
+                "A fresh handler request must still query the admitted node")
+            (is (identical? authority (first (last @calls)))
+                "The actual query must use the node that supplied status")
+            (is (= :queried
+                   (handler {:xtdb/read-connectable :request-read}))
+                "An explicitly supplied read connection stays usable")
+            (is (= :request-read (first (last @calls)))
+                "The admitted fallback must not override request read preference")
+            (is (= :queried (handler {:biff.xtdb/node authority}))
+                "The matching legacy node key remains usable")
+            (is (identical? authority (first (last @calls))))))))))
+
 (deftest deferred-biff-requests-must-not-switch-authoritative-xtdb-node-test
   ;; The observed transaction and snapshot come from exactly one node. A
   ;; deferred outer Biff wrapper may send a different :xtdb/node or
@@ -2568,9 +2609,9 @@
               "No completed transaction means no manufactured snapshot")
           (is (nil? (:gesso.live/progression bound))
               "No completed transaction means no manufactured progression")
-          (is (= {:request/id :ordinary}
+          (is (= {:request/id :ordinary :xtdb/node :authority-node}
                  (handler {:request/id :ordinary}))
-              "An ordinary fresh empty request must remain usable")
+              "An ordinary fresh empty request receives the admitted XTDB node")
           (is (= foreign-token
                  (:biff.xtdb/snapshot-token
                   (handler {:biff.xtdb/snapshot-token foreign-token})))
@@ -2610,7 +2651,7 @@
               "Empty startup guards request execution without creating a basis")
           (is (nil? (:biff.xtdb/snapshot-token bound)))
           (is (nil? (:gesso.live/progression bound)))
-          (is (= {:request/id :fresh}
+          (is (= {:request/id :fresh :xtdb/node :authority-node}
                  (((:biff.core/wrap-db-snapshot bound)
                     (fn [request] request)) {:request/id :fresh}))))))))
 

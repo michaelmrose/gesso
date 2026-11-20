@@ -1149,6 +1149,18 @@
             :runtime-node runtime-node}))))
   wrapped-ctx)
 
+(defn- preserve-admitted-xtdb-node
+  "Carry the node used for frontier admission into fresh Biff handler requests.
+
+   A Ring request need not repeat the binding context's node. Preserve a
+   matching explicitly supplied node and keep request-scoped read connectables
+   intact; they remain preferred by read-connectable-from. Conflicting
+   explicit node identities are rejected separately before this fallback."
+  [bound-node wrapped-ctx]
+  (if (some? (node-from wrapped-ctx))
+    wrapped-ctx
+    (assoc wrapped-ctx :xtdb/node bound-node)))
+
 (declare frontier-xtdb-required-bases
          require-frontier-satisfies-existing-xtdb!)
 
@@ -1246,9 +1258,11 @@
                     (compose-fixed-biff-snapshot!
                      database-name fixed-bases
                      (:biff.xtdb/snapshot-token ctx))]
-                (f (assoc ctx
-                          :biff.xtdb/snapshot-token composed-token
-                          :gesso.live/progression combined-requirement))))]
+                (f (preserve-admitted-xtdb-node
+                    bound-node
+                    (assoc ctx
+                           :biff.xtdb/snapshot-token composed-token
+                           :gesso.live/progression combined-requirement)))))]
         (if-some [outer-wrapper existing-wrapper]
           (outer-wrapper fixed-body)
           fixed-body)))))
@@ -1322,11 +1336,13 @@
                     composed-token (compose-empty-biff-snapshot!
                                     database-name admitted-bases
                                     (:biff.xtdb/snapshot-token wrapped-ctx))]
-                (body (cond-> wrapped-ctx
-                        composed-token
-                        (assoc :biff.xtdb/snapshot-token composed-token)
-                        combined-requirement
-                        (assoc :gesso.live/progression combined-requirement)))))]
+                (body (preserve-admitted-xtdb-node
+                       bound-node
+                       (cond-> wrapped-ctx
+                         composed-token
+                         (assoc :biff.xtdb/snapshot-token composed-token)
+                         combined-requirement
+                         (assoc :gesso.live/progression combined-requirement))))))]
         (if-some [outer-wrapper existing-wrapper]
           (outer-wrapper guarded-body)
           guarded-body)))))
