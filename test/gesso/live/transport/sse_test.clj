@@ -1066,3 +1066,38 @@
         (is (not (source/closed? src))))
       (finally
         (source/close! src)))))
+
+(deftest fragment-rejected-sse-headers-do-not-leak-source-subscription-test
+  ;; Model-backed startup has the same late response construction boundary.
+  ;; Keep authorization first, then reject malformed header containers before
+  ;; allocating the authorized source subscription.
+  (let [src (source/create)
+        system {:source src :options {}}
+        authorized (atom 0)]
+    (try
+      (with-redefs [model/fragment-scope-name (fn [_ _] :request)
+                    model/fragment-scope-instance
+                    (fn [_ _ _] {:topic :request :id "req-1"})
+                    model/require-scope-authorized!
+                    (fn [_ _ _ _] (swap! authorized inc))]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #":headers must be a map"
+             (sse/start-fragment-stream!
+              system {} {} :request-panel "req-1"
+              {:sse-options {:headers :invalid}})))
+        (is (= 1 @authorized))
+        (is (zero? (:subscription-count (source/stats src)))
+            "invalid model SSE headers must not retain a subscription")
+        (is (zero? (:tap-count (source/stats src)))))
+      (finally
+        (source/close! src)))))
+
+(deftest prepare-options-rejects-invalid-headers-test
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #":headers must be a map"
+       (sse/prepare-options! {:headers :invalid})))
+  (is (nil? (:headers (sse/prepare-options! nil))))
+  (is (= {"x-test" "ok"}
+         (:headers (sse/prepare-options! {:headers {"x-test" "ok"}})))))

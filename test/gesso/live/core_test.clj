@@ -1720,3 +1720,21 @@
           "rejecting one request must not close the shared Live source")
       (finally
         (live/close! system)))))
+
+(deftest core-rejected-sse-headers-do-not-leak-source-subscription-test
+  ;; Ring response creation merges headers after the transport has started.
+  ;; Invalid header container types must be rejected before an eager indexed
+  ;; Live subscription is registered; otherwise start-sse! loses its handle.
+  (let [system (live/create)]
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #":headers must be a map"
+           (live/start-sse! system {:topic :request :id "req-1"}
+                            {:sse-options {:headers :invalid}})))
+      (is (zero? (:subscription-count (source/stats (:source system))))
+          "invalid response headers must not leak an indexed subscription")
+      (is (zero? (:tap-count (source/stats (:source system)))))
+      (is (not (source/closed? (:source system))))
+      (finally
+        (live/close! system)))))

@@ -110,6 +110,15 @@
            {k v}))))
   options)
 
+(defn- require-map-or-nil-option!
+  [options k]
+  (let [value (get options k)]
+    (when-not (or (nil? value) (map? value))
+      (throw
+       (ex (str "gesso.live SSE " k " must be a map or nil.")
+           {k value}))))
+  options)
+
 (defn- require-positive-int-option!
   [options k]
   (when-let [v (get options k)]
@@ -131,6 +140,9 @@
     (require-fn-option! options' :on-error)
     (require-fn-option! options' :on-close)
     (require-boolean-option! options' :close-on-complete?)
+    ;; response* merges response headers after starting producers; validate
+    ;; them before source registration at the public SSE entry points.
+    (require-map-or-nil-option! options' :headers)
     (require-positive-int-option! options' :keepalive-ms)
     options'))
 
