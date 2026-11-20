@@ -526,7 +526,10 @@
         (keepalive-task
          (fn [_] nil)
          (fn [error]
-           (when-not @cancelling?
+           ;; Once close-once! has published terminal state, later
+           ;; producer failures are cleanup noise even if the cancellation
+           ;; flag has not yet been set (for example during :on-close).
+           (when-not (or @cancelling? @closed?)
              (fail! error)
              (close-once! :keepalive-error {:error error})
              (cancel-running!))))
@@ -550,7 +553,7 @@
                     (close-once! :completed {})
                     (cancel-running!)))
                 (fn [error]
-                  (if @cancelling?
+                  (if (or @cancelling? @closed?)
                     (debug!
                      debug-fn
                      :gesso.live.sse/task-cancelled

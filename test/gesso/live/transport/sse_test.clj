@@ -766,3 +766,62 @@
           (is (zero? @event-starts))
           (sse/cancel! started)
           (is (= 1 @keepalive-cancels)))))))
+
+(deftest post-close-event-failure-does-not-report-a-new-error-test
+  ;; close-once! publishes its terminal state before invoking :on-close.
+  ;; A producer failure inside that callback must not be reported as a new
+  ;; stream failure merely because cancel-running! has not yet set its flag.
+  (let [event-failure (atom nil)
+        errors (atom [])
+        completed (atom [])
+        late-error (ex-info "event failed after terminal close" {})]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success failure]
+           (reset! event-failure failure)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start! (never-flow)
+                                  {:on-close (fn [entry]
+                                               (swap! completed conj entry)
+                                               (@event-failure late-error))
+                                   :on-error (fn [error _entry]
+                                               (swap! errors conj error))})]
+          (sse/cancel! started)
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (is (= 1 (count @completed)))
+          (is (= :cancelled (:reason (first @completed))))
+          (is (empty? @errors)
+              "an event failure after terminal close cannot become on-error"))))))
+
+(deftest post-close-keepalive-failure-does-not-report-a-new-error-test
+  ;; Keepalive and event error paths must agree on the terminal boundary.
+  ;; If a connection closes synchronously during :on-close, a failing
+  ;; keepalive still cannot change the committed shutdown classification.
+  (let [keepalive-failure (atom nil)
+        errors (atom [])
+        completed (atom [])
+        late-error (ex-info "keepalive failed after terminal close" {})]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success failure]
+           (reset! keepalive-failure failure)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start! (never-flow)
+                                  {:keepalive-ms 1000
+                                   :on-close (fn [entry]
+                                               (swap! completed conj entry)
+                                               (@keepalive-failure late-error))
+                                   :on-error (fn [error _entry]
+                                               (swap! errors conj error))})]
+          (sse/cancel! started)
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (is (= 1 (count @completed)))
+          (is (= :cancelled (:reason (first @completed))))
+          (is (empty? @errors)
+              "a keepalive failure after terminal close cannot become on-error"))))))
