@@ -1232,3 +1232,36 @@
         (is (zero? (:tap-count (source/stats src)))))
       (finally
         (source/close! src)))))
+
+(deftest stream-flow-terminal-emit-refusal-still-releases-stream-test
+  ;; A downstream Missionary observer can reject a terminal notification.
+  ;; The bridge must still release its Manifold subscription and call on-close,
+  ;; even though no terminal value was delivered to the observer. Exercise
+  ;; both the ordinary close sentinel and a failed upstream take.
+  (doseq [terminal [:closed :take-failed]]
+    (let [stream (s/stream)
+          close-count (atom 0)
+          terminal-attempt (promise)
+          boom (ex-info "take failed" {:terminal terminal})
+          options (cond-> {:on-close #(swap! close-count inc)}
+                    (= terminal :take-failed)
+                    (assoc :take! (fn [_ _] (throw boom))))]
+      (with-redefs-fn
+        {#'gesso.live.flow/emit-safely!
+         (fn [_emit _value _debug]
+           (deliver terminal-attempt :refused)
+           false)}
+        (fn []
+          (let [runner (collect-runner (flow/stream-flow stream options))]
+            (try
+              (when (= terminal :closed)
+                (s/close! stream))
+              (is (= :refused (deref terminal-attempt timeout-ms ::timeout))
+                  (str terminal " terminal attempt must occur"))
+              (is (eventually #(s/closed? stream))
+                  (str terminal " physical stream should be retired"))
+              (is (eventually #(= 1 @close-count))
+                  (str terminal " must invoke on-close exactly once"))
+              (finally
+                (cancel-runner! runner)
+                (s/close! stream)))))))))

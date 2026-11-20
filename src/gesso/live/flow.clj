@@ -402,8 +402,14 @@
                      (close-once!))
 
                    (emit-and-stop! [value]
-                     (when (emit-safely! emit! value debug-fn)
-                       (stop!)))
+                     ;; Terminal completion must retire the underlying stream
+                     ;; even if the downstream observer refuses the terminal
+                     ;; sentinel or failure envelope. A failed emit is not a
+                     ;; reason to leave the source subscription running.
+                     (try
+                       (emit-safely! emit! value debug-fn)
+                       (finally
+                         (stop!))))
 
                    (emit-error-and-stop! [cause]
                      (let [wrapped (ex "gesso.live stream failed."
