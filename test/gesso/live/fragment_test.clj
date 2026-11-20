@@ -1270,3 +1270,36 @@
                 (deref invalidation-future timeout-ms ::timeout))
               (when-let [runner (deref runner-future timeout-ms nil)]
                 (cancel-runner! runner)))))))))
+
+(deftest stricter-request-ttl-does-not-evict-still-valid-cached-entry-test
+  ;; A request with a shorter freshness bound needs a rerender, but a failed
+  ;; rerender must not evict an entry that is still fresh for other callers.
+  (let [now (atom 0)
+        manager (fragment/create {:ttl-ms 100 :clock #(deref now)})
+        broad-renders (atom 0)
+        original-render (fn [] (swap! broad-renders inc) :original)
+        strict-error (ex-info "strict renderer failed" {})
+        strict-renders (atom 0)
+        strict-render (fn []
+                        (swap! strict-renders inc)
+                        (throw strict-error))]
+    (is (= {:status :success :value :original}
+           (run-task (fragment/render-task manager fragment-key original-render))))
+    (reset! now 20)
+    (let [result (run-task (fragment/render-task manager fragment-key
+                                                 strict-render {:ttl-ms 10}))]
+      (is (= :failure (:status result))
+          "stricter TTL must reject older markup and execute its renderer")
+      (is (identical? strict-error (:error result))))
+    (is (= 1 @strict-renders))
+    (is (= :original (get-in @(:cache manager) [fragment-key :value]))
+        "a stricter request must not discard an entry still valid for other callers")
+    (is (= {:status :success :value :original}
+           (run-task (fragment/render-task manager fragment-key original-render)))
+        "the less restrictive caller should still reuse its cached result")
+    (is (= 1 @broad-renders))
+    (reset! now 100)
+    (is (= {:status :success :value :original}
+           (run-task (fragment/render-task manager fragment-key original-render))))
+    (is (= 2 @broad-renders)
+        "the original entry must still expire under its own stored TTL")))

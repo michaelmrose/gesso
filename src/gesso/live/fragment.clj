@@ -453,14 +453,17 @@
 
           :else
           (do
-            ;; Another render may have stored a fresh entry since this
-            ;; lookup read the expired one. Expire only the observed entry;
-            ;; never evict its replacement from a concurrent render.
-            (swap! (:cache manager)
-                   (fn [cache]
-                     (if (identical? entry (get cache key))
-                       (dissoc cache key)
-                       cache)))
+            ;; A stricter per-call TTL can make a still-live stored entry
+            ;; unsuitable for this request. Only evict when the entry's own
+            ;; stored expiration has passed: less restrictive callers may
+            ;; still reuse it, even if this caller's rerender fails.
+            ;; Identity checking prevents removing a concurrently stored entry.
+            (when-not (cache-entry-valid? now entry)
+              (swap! (:cache manager)
+                     (fn [cache]
+                       (if (identical? entry (get cache key))
+                         (dissoc cache key)
+                         cache))))
             (debug!
              debug-fn
              :gesso.live.fragment/cache-expired
