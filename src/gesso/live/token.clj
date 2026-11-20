@@ -120,14 +120,37 @@
   (or (:request ctx-or-request)
       ctx-or-request))
 
+(defn- same-http-header-name?
+  "HTTP header field names are case-insensitive, including in raw Ring-ish
+   maps that have not yet normalized the spelling of request header keys."
+  [key header-name]
+  (and (or (string? key) (keyword? key))
+       (.equalsIgnoreCase ^String header-name
+                          ^String (if (keyword? key) (name key) key))))
+
 (defn- header-value
   [headers header-name]
-  (present-token
-   (or (get headers header-name)
-       (get headers (str/lower-case header-name))
-       (get headers (str/upper-case header-name))
-       (get headers (keyword header-name))
-       (get headers (keyword (str/lower-case header-name))))))
+  ;; Prefer canonical spelling if duplicate physical aliases exist, but do not
+  ;; mistake an empty canonical value for an absent mixed-case header. In
+  ;; particular, check all equivalent headers before falling back to params.
+  (or (present-token (get headers header-name))
+      (present-token (get headers (str/upper-case header-name)))
+      (present-token (get headers (keyword header-name)))
+      (some (fn [[key value]]
+              (when (same-http-header-name? key header-name)
+                (present-token value)))
+            headers)))
+
+(defn- dissoc-http-header
+  "Remove all case variants of one header without creating absent submaps."
+  [request header-name]
+  (if (contains? request :headers)
+    (update request :headers
+            (fn [headers]
+              (apply dissoc (or headers {})
+                     (filter #(same-http-header-name? % header-name)
+                             (keys headers)))))
+    request))
 
 (defn- param-value
   [params param-name]
@@ -202,7 +225,8 @@
    Returns the request unchanged if token is nil or blank."
   [request token]
   (if-let [token' (present-token token)]
-    (assoc-in request [:headers consistency-token-header-name] token')
+    (assoc-in (dissoc-http-header request consistency-token-header-name)
+              [:headers consistency-token-header-name] token')
     request))
 
 (defn dissoc-consistency-token
@@ -213,12 +237,7 @@
    those submaps are absent."
   [request]
   (-> request
-      (dissoc-existing-submap :headers
-                              consistency-token-header-name
-                              (str/lower-case consistency-token-header-name)
-                              (str/upper-case consistency-token-header-name)
-                              (keyword consistency-token-header-name)
-                              (keyword (str/lower-case consistency-token-header-name)))
+      (dissoc-http-header consistency-token-header-name)
       (dissoc-existing-submap :params
                               consistency-token-param-name
                               (keyword consistency-token-param-name))

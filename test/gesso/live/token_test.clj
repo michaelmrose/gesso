@@ -122,6 +122,62 @@
           {:headers {"x-gesso-live-consistency-token" ""}
            :params {"gesso-live-consistency-token" "   "}})))))
 
+(deftest consistency-token-header-names-are-case-insensitive-test
+  ;; Raw Ring/Biff-ish contexts are not guaranteed to have canonical lowercase
+  ;; headers. HTTP header names are case-insensitive regardless of their input
+  ;; representation; a valid header must win over a fallback query parameter.
+  (doseq [header-key ["X-Gesso-Live-Consistency-Token"
+                      "x-Gesso-Live-consistency-token"
+                      :X-Gesso-Live-Consistency-Token]]
+    (is (= "tx-header"
+           (token/extract-consistency-token
+            {:headers {header-key "tx-header"}
+             :query-params {"gesso-live-consistency-token" "tx-stale"}}))
+        (str "HTTP header should be recognized: " (pr-str header-key))))
+  (is (= "tx-preferred"
+         (token/extract-consistency-token
+          {:headers {"x-gesso-live-consistency-token" "tx-preferred"
+                     "X-Gesso-Live-Consistency-Token" "tx-other"}}))
+      "Canonical header wins over differently cased duplicates")
+  (is (= "tx-mixed"
+         (token/extract-consistency-token
+          {:headers {"x-gesso-live-consistency-token" "  "
+                     "X-Gesso-Live-Consistency-Token" "tx-mixed"}
+           :params {"gesso-live-consistency-token" "tx-stale"}}))
+      "A blank alias must not hide a populated equivalent header"))
+
+(deftest dissoc-consistency-token-removes-mixed-case-header-aliases-test
+  ;; A token considered cleared must not remain accessible under an alternate
+  ;; casing, including keyword-valued header keys accepted by the helper.
+  (is (= {:headers {"x-other" "keep"}
+          :params {"other" "keep"}}
+         (token/dissoc-consistency-token
+          {:headers {"X-Gesso-Live-Consistency-Token" "tx-1"
+                     "x-GESSO-live-CONSISTENCY-token" "tx-2"
+                     :X-Gesso-Live-Consistency-Token "tx-3"
+                     "x-other" "keep"}
+           :params {"gesso-live-consistency-token" "tx-param"
+                    "other" "keep"}})))
+  (is (= {}
+         (token/dissoc-consistency-token {}))
+      "No missing request maps should be created during removal"))
+
+(deftest assoc-consistency-token-normalizes-existing-header-aliases-test
+  ;; Writing a new canonical token must not leave a second, stale physical
+  ;; header with equivalent HTTP name behind in the resulting request.
+  (is (= {:headers {"x-other" "keep"
+                    "x-gesso-live-consistency-token" "tx-new"}}
+         (token/assoc-consistency-token
+          {:headers {"X-Gesso-Live-Consistency-Token" "tx-old"
+                     :X-Gesso-Live-Consistency-Token "tx-older"
+                     "x-other" "keep"}}
+          "tx-new")))
+  (is (= {:headers {"X-Gesso-Live-Consistency-Token" "tx-old"}}
+         (token/assoc-consistency-token
+          {:headers {"X-Gesso-Live-Consistency-Token" "tx-old"}}
+          nil))
+      "An omitted token still leaves the original request untouched"))
+
 (deftest assoc-dissoc-consistency-token-test
   (testing "assoc-consistency-token adds canonical header"
     (is (= {:headers {"x-gesso-live-consistency-token" "tx-1"}}
