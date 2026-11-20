@@ -483,13 +483,24 @@
                         error
                         {:at (now-ms)}))
 
+         cancel-running!
+         (fn []
+           (reset! cancelling? true)
+           ;; Both producers must be retired independently. A physical
+           ;; cancellation callback is user/executor code and may throw.
+           (cancel-task-safely! @cancel-events-ref :events debug-fn)
+           (cancel-task-safely! @cancel-keepalive-ref :keepalive debug-fn))
+
          close-once!
          (once
           (fn [reason data]
-            ;; Reserve the terminal outcome BEFORE notifying external hooks.
-            ;; An on-error callback may synchronously disconnect the stream or
-            ;; trigger another producer failure; only this winner reports it.
+            ;; A terminal outcome owns the physical stream and producer
+            ;; lifecycle. Retire them BEFORE notifying external application
+            ;; hooks: a slow or reentrant callback must not hold a terminal
+            ;; connection open or leave its producers running.
             (reset! closed? true)
+            (s/close! out)
+            (cancel-running!)
             (when (#{:error :keepalive-error :startup-error} reason)
               (fail! (:error data)))
             (debug!
@@ -501,16 +512,7 @@
             (call-safely (:on-close options')
                          (merge {:reason reason
                                  :at (now-ms)}
-                                data))
-            (s/close! out)))
-
-         cancel-running!
-         (fn []
-           (reset! cancelling? true)
-           ;; Both producers must be retired independently. A physical
-           ;; cancellation callback is user/executor code and may throw.
-           (cancel-task-safely! @cancel-events-ref :events debug-fn)
-           (cancel-task-safely! @cancel-keepalive-ref :keepalive debug-fn))
+                                data))))
 
          fail-startup!
          (fn [error]
@@ -519,8 +521,7 @@
            ;; producer already installed, so retire both and return a closed
            ;; response rather than throwing away the only cleanup handle.
            ;; Do not report a second error after an earlier terminal event.
-           (close-once! :startup-error {:error error})
-           (cancel-running!))]
+           (close-once! :startup-error {:error error}))]
 
      (debug!
       debug-fn
@@ -531,8 +532,7 @@
       out
       (fn []
         (when-not @closed?
-          (close-once! :stream-closed {})
-          (cancel-running!))))
+          (close-once! :stream-closed {}))))
 
      (try
        (when-let [keepalive-task (keepalive-task* out options')]
@@ -546,8 +546,7 @@
            ;; producer failures are cleanup noise even if the cancellation
            ;; flag has not yet been set (for example during :on-close).
            (when-not (or @cancelling? @closed?)
-             (close-once! :keepalive-error {:error error})
-             (cancel-running!))))
+             (close-once! :keepalive-error {:error error}))))
         :keepalive
         debug-fn))
        (catch Exception e
@@ -568,8 +567,7 @@
                    :gesso.live.sse/flow-completed
                    {:at (now-ms)})
                   (when (:close-on-complete? options')
-                    (close-once! :completed {})
-                    (cancel-running!)))
+                    (close-once! :completed {})))
                 (fn [error]
                   (if (or @cancelling? @closed?)
                     (debug!
@@ -578,8 +576,7 @@
                      {:error error
                       :at (now-ms)})
                     (do
-                      (close-once! :error {:error error})
-                      (cancel-running!)))))))
+                      (close-once! :error {:error error})))))))
              (catch Exception e
                (fail-startup! e)
                nil))
@@ -587,8 +584,7 @@
            cancel!
            (once
             (fn []
-              (close-once! :cancelled {})
-              (cancel-running!)))]
+              (close-once! :cancelled {})))]
 
        (when cancel-events!
          (install-canceller! cancel-events-ref cancelling? cancel-events!

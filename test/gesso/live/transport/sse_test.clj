@@ -956,3 +956,83 @@
           (is (sse/closed? started))
           (is (s/closed? (:stream started)))
           (sse/cancel! started))))))
+
+(deftest blocked-error-hook-cannot-delay-terminal-stream-cleanup-test
+  ;; A user callback can block indefinitely. Once an event failure claims the
+  ;; terminal result, the stream and all already-installed producers must be
+  ;; closed before invoking the observational on-error hook.
+  (let [boom (ex-info "event producer failed" {})
+        event-failure (atom nil)
+        entered (promise)
+        release (promise)
+        cancellations (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success failure]
+           (reset! event-failure failure)
+           (fn [] (swap! cancellations conj :events))))
+       #'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success _failure]
+           (fn [] (swap! cancellations conj :keepalive))))}
+      (fn []
+        (let [started (sse/start! (never-flow)
+                                  {:keepalive-ms 1000
+                                   :on-error (fn [_ _]
+                                               (deliver entered true)
+                                               @release)
+                                   :on-close #(swap! closes conj %)})
+              failure-delivery (future (@event-failure boom))]
+          (try
+            (is (= true (deref entered timeout-ms ::timeout)))
+            (is (sse/closed? started))
+            (is (s/closed? (:stream started))
+                "stream must close before the blocking error hook completes")
+            (is (= #{:events :keepalive} (set @cancellations))
+                "both producer cancellers must run before the error hook")
+            (finally
+              (deliver release true)
+              (is (not= ::timeout (deref failure-delivery timeout-ms ::timeout)))
+              (sse/cancel! started)))
+          (is (= [:error] (mapv :reason @closes)))
+          (is (= [:events :keepalive] @cancellations)))))))
+
+(deftest blocked-close-hook-cannot-delay-terminal-stream-cleanup-test
+  ;; Even a normal user-requested cancellation must release physical stream
+  ;; resources before calling an application-supplied on-close hook.
+  (let [entered (promise)
+        release (promise)
+        cancellations (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success _failure]
+           (fn [] (swap! cancellations conj :events))))
+       #'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success _failure]
+           (fn [] (swap! cancellations conj :keepalive))))}
+      (fn []
+        (let [started (sse/start! (never-flow)
+                                  {:keepalive-ms 1000
+                                   :on-close (fn [entry]
+                                               (swap! closes conj entry)
+                                               (deliver entered true)
+                                               @release)})
+              cancel-delivery (future (sse/cancel! started))]
+          (try
+            (is (= true (deref entered timeout-ms ::timeout)))
+            (is (sse/closed? started))
+            (is (s/closed? (:stream started))
+                "stream must close before the blocking close hook completes")
+            (is (= #{:events :keepalive} (set @cancellations))
+                "both producer cancellers must run before the close hook")
+            (finally
+              (deliver release true)
+              (is (not= ::timeout (deref cancel-delivery timeout-ms ::timeout)))
+              (sse/cancel! started)))
+          (is (= [:cancelled] (mapv :reason @closes)))
+          (is (= [:events :keepalive] @cancellations)))))))
