@@ -3623,3 +3623,72 @@ data: client-1
         (str "reject malformed SSE event name: " (pr-str event))))
   ;; Ordinary app event names retain their existing normalized behavior.
   (is (= "custom-wake" (:event (client/channel {:event :custom-wake})))))
+
+;; -----------------------------------------------------------------------------
+;; Pending presentation ownership across logical client reuse
+;; -----------------------------------------------------------------------------
+
+(deftest different-user-reconnect-cannot-drain-disconnected-owners-pending-test
+  (let [channel (test-channel)
+        alice (connect! channel "shared-browser" {:user-id "alice"})]
+    (try
+      (client/send-to-client! channel "shared-browser" fragment-a)
+      (is (= {"shared-browser" 1} (client/pending-counts channel)))
+      (close-response! alice)
+      (is (eventually #(empty? (client/connected-client-ids channel))))
+      (is (= {"shared-browser" 1} (client/pending-counts channel)))
+      (let [bob (connect! channel "shared-browser" {:user-id "bob"})]
+        (try
+          (is (= {} (client/pending-counts channel))
+              "Bob must not inherit Alice's disconnected pending work")
+          (is (nil? (client/drain-fragments! channel "shared-browser")))
+          (client/send-to-client! channel "shared-browser" fragment-b)
+          (is (= [fragment-b]
+                 (client/drain-fragments! channel "shared-browser"))
+              "New work for Bob must still be delivered")
+          (finally
+            (close-response! bob))))
+      (finally
+        (close-response! alice)))))
+
+(deftest different-user-active-reconnect-discards-prior-owner-pending-test
+  (let [channel (test-channel)
+        alice (connect! channel "shared-browser" {:user-id "alice"})]
+    (try
+      (client/send-to-client! channel "shared-browser" fragment-a)
+      (let [bob (connect! channel "shared-browser" {:user-id "bob"})]
+        (try
+          (is (eventually #(s/closed? (:body alice))))
+          (is (nil? (client/drain-fragments! channel "shared-browser"))
+              "An active replacement must not inherit the prior user's work")
+          (finally
+            (close-response! bob))))
+      (finally
+        (close-response! alice)))))
+
+(deftest same-user-reconnect-preserves-pending-but-reduced-scopes-do-not-test
+  (let [channel (test-channel)
+        alice (connect! channel "shared-browser"
+                        {:user-id "alice" :scopes #{[:store "s1"]}})]
+    (try
+      (client/send-to-client! channel "shared-browser" fragment-a)
+      (close-response! alice)
+      (let [same-user (connect! channel "shared-browser"
+                                {:user-id "alice" :scopes #{[:store "s1"]}})]
+        (try
+          (is (= [fragment-a]
+                 (client/drain-fragments! channel "shared-browser"))
+              "Same-user same-scope reconnect retains pending wake recovery")
+          (client/send-to-client! channel "shared-browser" fragment-b)
+          (close-response! same-user)
+          (let [reduced (connect! channel "shared-browser"
+                                  {:user-id "alice" :scopes #{}})]
+            (try
+              (is (nil? (client/drain-fragments! channel "shared-browser"))
+                  "Changed authorized scopes invalidate retained presentation")
+              (finally
+                (close-response! reduced))))
+          (finally
+            (close-response! same-user))))
+      (finally
+        (close-response! alice)))))

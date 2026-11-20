@@ -259,6 +259,9 @@
       :client client-fn
       :state (atom {:clients {}
                     :pending {}
+                    ;; Pending fragments belong to the authenticated audience
+                    ;; at enqueue time, not merely to the reusable browser id.
+                    :pending-owners {}
                     :disconnected-pending-order []
                     :latest-client-id nil
                     :created-at (now-ms)
@@ -286,6 +289,7 @@
   (let [reset-state
         {:clients {}
          :pending {}
+         :pending-owners {}
          :disconnected-pending-order []
          :latest-client-id nil
          :created-at (now-ms)
@@ -360,6 +364,17 @@
 ;; -----------------------------------------------------------------------------
 ;; Stream registration
 ;; -----------------------------------------------------------------------------
+
+(defn- client-audience
+  "The part of a client descriptor that scopes pending presentation work.
+
+   A browser client-id is a reusable connection identifier, not an identity.
+   Retain pending work across same-audience reconnects, but never carry it
+   into a different authenticated user or set of authorized scopes. Apps
+   still own authorization at connection and rendering boundaries."
+  [client]
+  [(:client/user-id client)
+   (:client/scopes client)])
 
 (defn- without-client-id
   [client-ids client-id]
@@ -463,6 +478,9 @@
          :pending
          #(apply dissoc % evicted-client-ids))
         (update
+         :pending-owners
+         #(apply dissoc % evicted-client-ids))
+        (update
          :disconnected-pending-overflow-count
          (fnil + 0)
          overflow-count))))
@@ -494,22 +512,33 @@
         (swap-vals!
          (:state channel)
          (fn [state]
-           (-> state
-               (assoc
-                :latest-client-id
-                client-id
-                :clients
-                (assoc
-                 (:clients state)
-                 client-id
-                 client))
-               ;; A same-id reconnect immediately protects its retained mailbox
-               ;; from disconnected-client eviction at this registration's
-               ;; linearization point.
-               (update
-                :disconnected-pending-order
-                without-client-id
-                client-id))))
+           (let [pending (get-in state [:pending client-id])
+                 audience (client-audience client)
+                 owner (get-in state [:pending-owners client-id] ::unknown)
+                 ;; The same browser id can survive logout/login. Preserve
+                 ;; its mailbox only for the original user's current scopes.
+                 ;; Legacy mailboxes lacking ownership cannot be proven safe.
+                 state' (if (and (seq pending) (not= owner audience))
+                          (-> state
+                              (update :pending dissoc client-id)
+                              (update :pending-owners dissoc client-id))
+                          state)]
+             (-> state'
+                 (assoc
+                  :latest-client-id
+                  client-id
+                  :clients
+                  (assoc
+                   (:clients state')
+                   client-id
+                   client))
+                 ;; A same-id reconnect immediately protects its retained mailbox
+                 ;; from disconnected-client eviction at this registration's
+                 ;; linearization point.
+                 (update
+                  :disconnected-pending-order
+                  without-client-id
+                  client-id)))))
 
         displaced-stream
         (get-in
@@ -627,22 +656,20 @@
     (swap!
      (:state channel)
      (fn [state]
-       (let [current-stream
-             (get-in
-              state
-              [:clients
-               client-id
-               :stream])]
+       (let [client (get-in state [:clients client-id])
+             current-stream (:stream client)]
          (if
           (and expected-stream
                (identical?
                 expected-stream
                 current-stream))
-           (let [pending
-                 (get-in
-                  state
-                  [:pending
-                   client-id])
+           (let [audience (client-audience client)
+                 ;; An old or legacy mailbox with a different owner must not
+                 ;; be combined with new work for the current connection.
+                 pending (when (= audience
+                                  (get-in state [:pending-owners client-id]
+                                          ::unknown))
+                           (get-in state [:pending client-id]))
 
                  [pending'
                   overflow-count]
@@ -669,6 +696,9 @@
                  (assoc-in
                   [:pending client-id]
                   pending')
+                 (assoc-in
+                  [:pending-owners client-id]
+                  audience)
                  (update
                   :sent-count
                   inc)
@@ -706,6 +736,7 @@
                (reset! drained fragments)
                (-> state
                    (update :pending dissoc client-id)
+                   (update :pending-owners dissoc client-id)
                    (update
                     :disconnected-pending-order
                     without-client-id
