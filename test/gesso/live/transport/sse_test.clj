@@ -887,3 +887,72 @@
           (is (zero? @event-starts))
           (is (= [boom] @failures))
           (is (= [:startup-error] (mapv :reason @closes))))))))
+
+(deftest overlapping-producer-failures-report-only-first-terminal-error-test
+  ;; The first producer failure enters on-error; that application callback
+  ;; synchronously delivers another producer failure before returning. The
+  ;; selected terminal error must be reserved before either external hook.
+  (let [event-failure (atom nil)
+        keepalive-failure (atom nil)
+        first-error (ex-info "event failed first" {})
+        other-error (ex-info "keepalive failed while reporting event" {})
+        errors (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success failure]
+           (reset! keepalive-failure failure)
+           (fn [] nil)))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success failure]
+           (reset! event-failure failure)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start! (never-flow)
+                                  {:keepalive-ms 1000
+                                   :on-error (fn [error _entry]
+                                               (swap! errors conj error)
+                                               (when (identical? first-error error)
+                                                 (@keepalive-failure other-error)))
+                                   :on-close (fn [entry] (swap! closes conj entry))})]
+          (@event-failure first-error)
+          (is (= [first-error] @errors)
+              "the losing producer may not emit a second on-error")
+          (is (= [:error] (mapv :reason @closes))
+              "a reentrant loser cannot replace the first terminal reason")
+          (is (identical? first-error (:error (first @closes))))
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (sse/cancel! started))))))
+
+(deftest error-hook-disconnect-preserves-original-failure-reason-test
+  ;; on-error is application code and may close the stream immediately.
+  ;; It must not turn a transport error into a misleading disconnect outcome.
+  (let [event-failure (atom nil)
+        started-ref (atom nil)
+        boom (ex-info "event producer failed" {})
+        errors (atom [])
+        closes (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success failure]
+           (reset! event-failure failure)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start! (never-flow)
+                                  {:on-error (fn [error _entry]
+                                               (swap! errors conj error)
+                                               (s/close! (:stream @started-ref)))
+                                   :on-close (fn [entry] (swap! closes conj entry))})]
+          (reset! started-ref started)
+          (@event-failure boom)
+          (is (= [boom] @errors))
+          (is (= [:error] (mapv :reason @closes))
+              "a callback-induced disconnect cannot steal an earlier error")
+          (is (identical? boom (:error (first @closes))))
+          (is (sse/closed? started))
+          (is (s/closed? (:stream started)))
+          (sse/cancel! started))))))

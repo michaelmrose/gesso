@@ -472,10 +472,26 @@
          cancel-events-ref (atom nil)
          cancel-keepalive-ref (atom nil)
 
+         fail!
+         (fn [error]
+           (debug!
+            debug-fn
+            :gesso.live.sse/failed
+            {:error error
+             :at (now-ms)})
+           (call-safely (:on-error options')
+                        error
+                        {:at (now-ms)}))
+
          close-once!
          (once
           (fn [reason data]
+            ;; Reserve the terminal outcome BEFORE notifying external hooks.
+            ;; An on-error callback may synchronously disconnect the stream or
+            ;; trigger another producer failure; only this winner reports it.
             (reset! closed? true)
+            (when (#{:error :keepalive-error :startup-error} reason)
+              (fail! (:error data)))
             (debug!
              debug-fn
              :gesso.live.sse/closed
@@ -487,17 +503,6 @@
                                  :at (now-ms)}
                                 data))
             (s/close! out)))
-
-         fail!
-         (fn [error]
-           (debug!
-            debug-fn
-            :gesso.live.sse/failed
-            {:error error
-             :at (now-ms)})
-           (call-safely (:on-error options')
-                        error
-                        {:at (now-ms)}))
 
          cancel-running!
          (fn []
@@ -514,9 +519,7 @@
            ;; producer already installed, so retire both and return a closed
            ;; response rather than throwing away the only cleanup handle.
            ;; Do not report a second error after an earlier terminal event.
-           (when-not @closed?
-             (fail! error)
-             (close-once! :startup-error {:error error}))
+           (close-once! :startup-error {:error error})
            (cancel-running!))]
 
      (debug!
@@ -543,7 +546,6 @@
            ;; producer failures are cleanup noise even if the cancellation
            ;; flag has not yet been set (for example during :on-close).
            (when-not (or @cancelling? @closed?)
-             (fail! error)
              (close-once! :keepalive-error {:error error})
              (cancel-running!))))
         :keepalive
@@ -576,7 +578,6 @@
                      {:error error
                       :at (now-ms)})
                     (do
-                      (fail! error)
                       (close-once! :error {:error error})
                       (cancel-running!)))))))
              (catch Exception e
