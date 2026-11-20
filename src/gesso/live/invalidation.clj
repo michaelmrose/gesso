@@ -35,6 +35,12 @@
 (def ^:private compiled-rules-key
   :gesso.live/compiled-rules?)
 
+(def ^:private compilation-token
+  ;; Compiled evidence is not an ordinary public boolean. It is paired with
+  ;; the validated immutable rule contents, so copying genuine metadata onto
+  ;; a different vector does not grant that vector compiled status.
+  (Object.))
+
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
 ;; -----------------------------------------------------------------------------
@@ -48,9 +54,13 @@
   (ex-info message data))
 
 (defn compiled-rules?
-  "Return true if rules were produced by compile-rules."
+  "Return true for rules carrying matching compile-rules validation evidence."
   [rules]
-  (true? (get (meta rules) compiled-rules-key)))
+  (let [evidence (get (meta rules) compiled-rules-key)]
+    (and (vector? rules)
+         (map? evidence)
+         (identical? compilation-token (:token evidence))
+         (= rules (:validated-rules evidence)))))
 
 (defn compile-rules
   "Validate and freeze invalidation rules.
@@ -67,7 +77,9 @@
   [rules]
   (let [rules' (vec (or rules []))]
     (schema/validate! :gesso.live/invalidation-rules rules')
-    (with-meta rules' {compiled-rules-key true})))
+    (with-meta rules'
+      {compiled-rules-key {:token compilation-token
+                           :validated-rules rules'}})))
 
 (defn normalize-rules
   "Return a vector of rules.

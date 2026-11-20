@@ -82,6 +82,28 @@
     (is (invalidation/compiled-rules? rules))
     (is (= [request-rule] rules))))
 
+(deftest compiled-rule-metadata-must-match-validated-contents-test
+  ;; The compiled marker skips repeated structural validation. Unrelated
+  ;; malformed rules must not acquire compiled status from a public boolean
+  ;; or metadata copied from legitimately validated rule contents.
+  (let [bad-rules [{:when-topic :request}]
+        valid-compiled (invalidation/compile-rules [request-rule])
+        candidates [(with-meta bad-rules {:gesso.live/compiled-rules? true})
+                    (with-meta bad-rules (meta valid-compiled))]]
+    (doseq [candidate candidates]
+      (is (not (invalidation/compiled-rules? candidate))
+          "Only successfully compiled rule contents may skip validation")
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Invalid gesso.live value"
+           (invalidation/normalize-rules candidate))
+          "Malformed rules must be rejected during normalization")
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Invalid gesso.live value"
+           (invalidation/expand candidate ctx request-change))
+          "Malformed rules must fail at admission, not at rule execution"))))
+
 (deftest compile-rules-rejects-invalid-rule-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
