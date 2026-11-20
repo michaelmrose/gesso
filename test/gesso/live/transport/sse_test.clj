@@ -1217,6 +1217,44 @@
       (finally
         (source/close! src)))))
 
+(deftest prepare-options-rejects-malformed-header-fields-test
+  ;; Ring response headers must be representable as HTTP field names and
+  ;; string values. Reject malformed values before a source is opened.
+  (doseq [headers [{nil "value"}
+                   {:keyword "value"}
+                   {"bad name" "value"}
+                   {"x-test" nil}
+                   {"x-test" 42}
+                   {"x-test" "good\r\nInjected: yes"}
+                   {"x-test" (str "bad" (char 0) "value")}
+                   {"set-cookie" ["a=1" nil]}
+                   {"set-cookie" ["a=1" "b=2\nno"]}]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"SSE HTTP header"
+         (sse/prepare-options! {:headers headers}))
+        (str "Invalid SSE response headers: " (pr-str headers))))
+  (is (= {"set-cookie" ["a=1" "b=2"]
+          "x-test" "ok"}
+         (:headers (sse/prepare-options!
+                    {:headers {"set-cookie" ["a=1" "b=2"]
+                               "x-test" "ok"}})))))
+
+(deftest invalid-sse-header-fields-do-not-register-source-interest-test
+  (let [src (source/create)]
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"SSE HTTP header"
+           (sse/start-source!
+            src
+            {:subscription {:topic :request :id "req-1"}}
+            {:headers {"x-trace" "bad\r\nInjected: true"}})))
+      (is (zero? (:subscription-count (source/stats src)))
+          "Rejected SSE response headers cannot register a source interest")
+      (finally
+        (source/close! src)))))
+
 (deftest prepare-options-rejects-invalid-headers-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo

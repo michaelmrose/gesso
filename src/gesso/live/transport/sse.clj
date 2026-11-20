@@ -131,6 +131,37 @@
            {k value}))))
   options)
 
+(defn- valid-http-header-value?
+  [value]
+  ;; Ring response values may be a single string or a sequence of strings.
+  ;; HTTP prohibits control bytes in field values, except horizontal tab.
+  (and (string? value)
+       (not-any? (fn [ch]
+                   (let [code (int ch)]
+                     (or (and (< code 32) (not= code 9))
+                         (= code 127))))
+                 value)))
+
+(defn- require-header-fields!
+  [options]
+  ;; Header containers alone are insufficient to guarantee a representable
+  ;; Ring response. Validate before source-backed startup registers an eager
+  ;; Live interest, rather than failing later at the HTTP adapter.
+  (doseq [[header value] (:headers options)]
+    (when-not (and (string? header)
+                   (re-matches #"[!#$%&'*+.^_`|~0-9A-Za-z-]+" header))
+      (throw
+       (ex "gesso.live SSE HTTP header name is invalid."
+           {:header header})))
+    (when-not (or (valid-http-header-value? value)
+                  (and (sequential? value)
+                       (seq value)
+                       (every? valid-http-header-value? value)))
+      (throw
+       (ex "gesso.live SSE HTTP header value is invalid."
+           {:header header :value value}))))
+  options)
+
 (defn- require-positive-int-option!
   [options k]
   (when-let [v (get options k)]
@@ -166,6 +197,7 @@
     ;; response* merges response headers after starting producers; validate
     ;; them before source registration at the public SSE entry points.
     (require-map-or-nil-option! options' :headers)
+    (require-header-fields! options')
     (require-positive-int-option! options' :keepalive-ms)
     options'))
 
