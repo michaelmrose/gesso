@@ -866,19 +866,33 @@
           (existing-wrapper fixed-body))
         fixed-body))))
 
+(defn- frontier-xtdb-required-bases
+  "Validate every basis that explicitly claims XTDB authority.
+
+   Generic progression permits other opaque authorities, but a malformed
+   XTDB-tagged basis cannot be silently treated as unrelated evidence and
+   skipped during request-frontier enforcement. Validation is necessary even
+   when the selected XTDB database has not completed its first transaction."
+  [existing-requirement]
+  (into []
+        (comp
+         (filter #(and (map? %)
+                       (= xtdb-basis-type
+                          (:gesso.live.consistency.xtdb/type %))))
+         (map require-xtdb-basis!))
+        (progression/required-bases existing-requirement)))
+
 (defn- require-frontier-satisfies-existing-xtdb!
-  [frontier existing-requirement]
-  (when existing-requirement
-    (doseq [required (progression/required-bases existing-requirement)
-            :when (and (xtdb-basis? required)
-                       (= (basis-database frontier)
-                          (basis-database required)))]
-      (when (neg? (compare-bases frontier required))
-        (throw
-         (ex "Current XTDB request frontier is behind an existing authoritative progression requirement."
-             {:frontier frontier
-              :required required
-              :database (basis-database frontier)})))))
+  [frontier xtdb-required-bases]
+  (doseq [required xtdb-required-bases
+          :when (= (basis-database frontier)
+                   (basis-database required))]
+    (when (neg? (compare-bases frontier required))
+      (throw
+       (ex "Current XTDB request frontier is behind an existing authoritative progression requirement."
+           {:frontier frontier
+            :required required
+            :database (basis-database frontier)}))))
   frontier)
 
 (defn bind-request-frontier
@@ -892,6 +906,10 @@
      requirement, conservatively composed with any existing canonical requirement;
    - :biff.core/wrap-db-snapshot is preserved and wrapped with a fixed frontier
      so later Biff Graph executions cannot silently drift to a newer snapshot.
+
+   An existing basis tagged as XTDB evidence is validated before the status
+   observation, whether or not the database has completed any transactions.
+   Invalid claimed XTDB evidence is rejected rather than silently ignored.
 
    If XTDB has no completed transaction for the selected database, the
    helper returns ctx unchanged only when there is no existing requirement
@@ -916,42 +934,42 @@
      (throw
       (ex "XTDB request frontier binding requires a context map."
           {:ctx ctx})))
-   (if-some [basis-value (latest-completed-basis ctx database)]
-     (let [existing-requirement (progression-from ctx)
-           _ (require-frontier-satisfies-existing-xtdb!
-              basis-value
-              existing-requirement)
-           snapshot-token (basis-snapshot-token basis-value)
-           current-requirement (progression/requirement basis-value)
-           combined-requirement
-           (progression/compose
-            existing-requirement
-            current-requirement)]
-       (assoc ctx
-              :biff.xtdb/snapshot-token snapshot-token
-              :gesso.live/progression combined-requirement
-              :biff.core/wrap-db-snapshot
-              (fixed-biff-snapshot-wrapper
-               (:biff.core/wrap-db-snapshot ctx)
-               snapshot-token)))
-     ;; With no completed selected-database transaction, an existing browser
-     ;; minimum for that database cannot be satisfied by any Biff snapshot.
-     ;; Returning an unchanged context would silently permit unconstrained
-     ;; ordinary reads. Keep the initial empty-db case usable, and leave
-     ;; independent requirements for other databases in the context.
-     (let [database-name (normalize-database-name database)
-           required (some (fn [candidate]
-                            (when (and (xtdb-basis? candidate)
-                                       (= database-name
-                                          (basis-database candidate)))
-                              candidate))
-                          (progression/required-bases (progression-from ctx)))]
-       (when required
-         (throw
-          (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
-              {:database database-name
-               :required required})))
-       ctx))))
+   (let [existing-requirement (progression-from ctx)
+         xtdb-required-bases (frontier-xtdb-required-bases existing-requirement)]
+     (if-some [basis-value (latest-completed-basis ctx database)]
+       (let [_ (require-frontier-satisfies-existing-xtdb!
+                basis-value
+                xtdb-required-bases)
+             snapshot-token (basis-snapshot-token basis-value)
+             current-requirement (progression/requirement basis-value)
+             combined-requirement
+             (progression/compose
+              existing-requirement
+              current-requirement)]
+         (assoc ctx
+                :biff.xtdb/snapshot-token snapshot-token
+                :gesso.live/progression combined-requirement
+                :biff.core/wrap-db-snapshot
+                (fixed-biff-snapshot-wrapper
+                 (:biff.core/wrap-db-snapshot ctx)
+                 snapshot-token)))
+       ;; With no completed selected-database transaction, an existing browser
+       ;; minimum for that database cannot be satisfied by any Biff snapshot.
+       ;; Returning an unchanged context would silently permit unconstrained
+       ;; ordinary reads. Keep the initial empty-db case usable, and leave
+       ;; independent requirements for other databases in the context.
+       (let [database-name (normalize-database-name database)
+             required (some (fn [candidate]
+                              (when (= database-name
+                                       (basis-database candidate))
+                                candidate))
+                            xtdb-required-bases)]
+         (when required
+           (throw
+            (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
+                {:database database-name
+                 :required required})))
+         ctx)))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options

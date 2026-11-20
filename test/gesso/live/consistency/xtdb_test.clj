@@ -858,6 +858,69 @@
         (is (= "java.lang.String"
                (:system-time-class (ex-data error))))))))
 
+(deftest bind-request-frontier-rejects-malformed-claimed-xtdb-evidence-test
+  ;; Generic progression intentionally treats bases as opaque. XTDB is the
+  ;; authority-specific admission boundary and must reject a malformed basis
+  ;; tagged with its own type, rather than ignore it as "unrelated" evidence.
+  ;; Previously both branches silently skipped all of these forged bases.
+  (let [now (Instant/parse "2026-09-10T18:44:00Z")
+        valid (xtdb-live/basis :xtdb 22 now)
+        bad-bases [(assoc valid :database "")
+                   (assoc valid :tx-id "022")
+                   (assoc valid :gesso.live.consistency.xtdb/version 99)
+                   (assoc valid :snapshot-token "garbage")
+                   (dissoc valid :snapshot-token)]]
+    (doseq [completed? [true false]
+            bad bad-bases]
+      (let [status-calls (atom 0)
+            ctx {:xtdb/node :authority-node
+                 :gesso.live/progression (progression/requirement bad)}]
+        (is (false? (xtdb-live/xtdb-basis? bad)))
+        (with-xtdb-stub
+          '*status*
+          (fn [_]
+            (swap! status-calls inc)
+            {:latest-completed-txs
+             {"xtdb" (if completed?
+                       [{:tx-id 23 :system-time (.plusSeconds now 1)}]
+                       [])}})
+          (fn []
+            (let [error (try
+                          (xtdb-live/bind-request-frontier ctx)
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo error)
+                  "An XTDB-typed malformed requirement must fail closed")
+              (when error
+                (is (re-find #"closed portable XTDB"
+                             (.getMessage error)))
+                (is (= bad (:basis (ex-data error)))))
+              (is (zero? @status-calls)
+                  "Reject malformed claimed evidence before status observation"))))))))
+
+(deftest bind-request-frontier-preserves-foreign-opaque-basis-test
+  ;; This adapter must not reject or reinterpret genuinely non-XTDB opaque
+  ;; requirements, even if no XTDB transaction has completed yet.
+  (let [foreign {:authority :external-service :epoch "external-v4"}
+        ctx {:xtdb/node :authority-node
+             :gesso.live/progression (progression/requirement foreign)}
+        now (Instant/parse "2026-09-10T18:44:01Z")]
+    (doseq [completed? [true false]]
+      (with-xtdb-stub
+        '*status*
+        (fn [_]
+          {:latest-completed-txs
+           {"xtdb" (if completed?
+                     [{:tx-id 23 :system-time now}]
+                     [])}})
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier ctx)]
+            (if completed?
+              (is (= #{foreign (xtdb-live/basis :xtdb 23 now)}
+                     (progression/required-bases
+                      (:gesso.live/progression bound))))
+              (is (identical? ctx bound)))))))))
+
 (deftest bind-request-frontier-binds-matching-biff-and-gesso-frontier-test
   (let [calls (atom 0)
         instant (Instant/parse "2026-09-10T18:34:00Z")
