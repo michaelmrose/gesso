@@ -122,6 +122,36 @@
     (is (= bad-rules rules))
     (is (not (invalidation/compiled-rules? rules)))))
 
+(deftest validation-switches-require-actual-booleans-test
+  ;; :validate? and :validate-rules? are deliberate debugging escape hatches.
+  ;; Explicit nil must not disable validation merely by being falsey, and
+  ;; other truthy values must not accidentally enable a different mode.
+  (doseq [option [:validate? :validate-rules?]
+          invalid [nil "false" 0]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid gesso.live invalidation validation option"
+         (invalidation/expand [request-rule] ctx request-change
+                              {option invalid}))
+        (str "expand must reject " option "=" (pr-str invalid)))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid gesso.live invalidation validation option"
+         (invalidation/expand-many [request-rule] ctx [request-change]
+                                   {option invalid}))
+        (str "expand-many must reject " option "=" (pr-str invalid)))))
+
+(deftest direct-normalize-rules-rejects-invalid-validation-switch-test
+  ;; Direct normalization also goes through opts, and must not silently
+  ;; bypass structural validation when an explicit invalid flag is supplied.
+  (doseq [invalid [nil "false" 0]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"Invalid gesso.live invalidation validation option"
+         (invalidation/normalize-rules [{:when-topic :request}]
+                                       {:validate-rules? invalid}))
+        (str "normalize-rules must reject " (pr-str invalid)))))
+
 ;; -----------------------------------------------------------------------------
 ;; Rule matching
 ;; -----------------------------------------------------------------------------

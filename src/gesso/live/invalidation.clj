@@ -47,7 +47,18 @@
 
 (defn- opts
   [options]
-  (merge default-options options))
+  (let [options' (merge default-options options)]
+    ;; Validation bypasses are explicit debugging choices, never a side effect
+    ;; of passing nil or a loosely truthy value as a configuration flag.
+    ;; Check here so direct normalize-rules calls have the same admission rule
+    ;; as expand and expand-many.
+    (doseq [flag [:validate? :validate-rules?]]
+      (when-not (boolean? (get options' flag))
+        (throw
+         (ex-info "Invalid gesso.live invalidation validation option."
+                  {:option flag
+                   :value (get options' flag)}))))
+    options'))
 
 (defn- ex
   [message data]
