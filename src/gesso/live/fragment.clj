@@ -655,7 +655,21 @@
                       :key key})}))
       ;; A Missionary task may suppress completion callbacks when cancelled.
       ;; The shared outcome has already been selected for all waiting callers.
-      (cancel-flight! flight)))
+      ;; Cancelling an external render may itself throw. The invalidation
+      ;; committed above must still complete, and an obsolete render is
+      ;; already fenced from cache publication even if physical cancellation
+      ;; failed. Record the failure without making clear-key! look uncommitted.
+      (try
+        (cancel-flight! flight)
+        (catch Exception e
+          (when (instance? InterruptedException e)
+            (.interrupt (Thread/currentThread)))
+          (debug!
+           (get-in manager [:options :debug-fn])
+           :gesso.live.fragment/physical-cancel-failed
+           {:key key
+            :error e
+            :at ((get-in manager [:options :clock]))})))))
   manager)
 
 (defn purge-expired!

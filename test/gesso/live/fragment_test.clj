@@ -1738,3 +1738,44 @@
             (finally
               (deliver resume-store true)
               (cancel-runner! other))))))))
+
+(deftest clear-key-survives-throwing-physical-canceller-test
+  ;; Cache invalidation and the typed waiter outcome have already committed
+  ;; before an underlying physical cancellation callback is invoked. Such a
+  ;; callback may throw; it must not turn a completed invalidation into an
+  ;; exceptional control-path result or prevent a fresh render.
+  (let [events (atom [])
+        manager (fragment/create {:ttl-ms 1000
+                                  :clock (constantly 0)
+                                  :debug-fn #(swap! events conj %)})
+        started (promise)
+        release (promise)
+        cancelled (promise)
+        count-renders (atom 0)
+        owner (start-task (fragment/protect-task
+                           manager fragment-key
+                           (controlled-success-task started release :old
+                                                    count-renders cancelled)))]
+    (try
+      (is (= :started (deref started timeout-ms ::timeout)))
+      (let [flight (get @(:inflight manager) fragment-key)]
+        (is (some? flight))
+        ;; Inject failure at the original physical cancellation boundary,
+        ;; not at the fragment manager's invalidation boundary.
+        (reset! (:cancel-ref flight)
+                (fn [] (throw (ex-info "physical cancellation failed"
+                                       {:cause :cancel-failed}))))
+        (is (identical? manager (fragment/clear-key! manager fragment-key)))
+        (let [result (task-result owner)]
+          (is (= :failure (:status result)))
+          (is (= :fragment-invalidated
+                 (:reason (ex-data (:error result))))))
+        (is (zero? (:inflight-count (fragment/stats manager))))
+        (is (some #(= :gesso.live.fragment/physical-cancel-failed (:event %))
+                  @events))
+        (is (= {:status :success :value :fresh}
+               (run-task (fragment/render-task manager fragment-key
+                                               (constantly :fresh))))))
+      (finally
+        (deliver release :go)
+        (cancel-runner! owner)))))
