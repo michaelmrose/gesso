@@ -107,6 +107,47 @@
 ;; Options and consistency maps
 ;; -----------------------------------------------------------------------------
 
+(deftest malformed-explicit-xtdb-options-fail-before-io-test
+  ;; false and [] used to fall through select-keys as empty maps. For a write,
+  ;; silently dropping a caller-supplied database or transaction option can
+  ;; change the authoritative operation that is actually submitted.
+  (let [calls (atom 0)
+        unexpected-api (fn [& _]
+                         (swap! calls inc)
+                         :unexpected)
+        ctx {:xtdb/connectable :connection
+             :xtdb/read-connectable :connection}]
+    (with-redefs-fn
+      {(xtdb-var '*q*) unexpected-api
+       (xtdb-var '*plan-q*) unexpected-api
+       (xtdb-var '*submit-tx*) unexpected-api
+       (xtdb-var '*execute-tx*) unexpected-api}
+      (fn []
+        (doseq [invalid [false []]]
+          (testing (str "Malformed XTDB options: " (pr-str invalid))
+            (doseq [invoke [#(xtdb-live/query-opts invalid)
+                            #(xtdb-live/tx-opts invalid)
+                            #(xtdb-live/prepare-options! invalid)
+                            #(xtdb-live/q-from ctx sample-query invalid)
+                            #(xtdb-live/q-consistent-from ctx sample-query invalid)
+                            #(xtdb-live/plan-q-consistent-from ctx sample-query invalid)
+                            #(xtdb-live/submit-tx-from! ctx sample-tx invalid)
+                            #(xtdb-live/execute-tx-from! ctx sample-tx invalid)]]
+              (is (thrown-with-msg?
+                   clojure.lang.ExceptionInfo
+                   #"XTDB options must be a map or nil"
+                   (invoke)))
+              (is (zero? @calls)
+                  "Invalid options must be rejected before any XTDB API call"))))))
+    ;; nil is the intentionally absent option value; explicit maps still work.
+    (is (= {} (xtdb-live/query-opts nil)))
+    (is (= {} (xtdb-live/tx-opts nil)))
+    (is (= {:debug-fn nil} (xtdb-live/prepare-options! nil)))
+    (is (= {:database "xtdb"}
+           (xtdb-live/query-opts {:database "xtdb"})))
+    (is (= {:database "xtdb"}
+           (xtdb-live/tx-opts {:database "xtdb"})))))
+
 (deftest prepare-options-keeps-only-adapter-options-test
   (is (= {:debug-fn nil}
          (xtdb-live/prepare-options!

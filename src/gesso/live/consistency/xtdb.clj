@@ -264,9 +264,21 @@
         (remove (comp nil? val))
         m))
 
+(defn- require-options-map!
+  [options]
+  ;; An explicitly supplied false or vector is not an absent option map.
+  ;; Silently discarding it could submit a transaction without the database
+  ;; or other XTDB options the caller intended to supply.
+  (when-not (or (nil? options)
+                (map? options))
+    (throw
+     (ex "XTDB options must be a map or nil."
+         {:options options})))
+  options)
+
 (defn- select-compact
   [m ks]
-  (compact-map (select-keys (or m {}) ks)))
+  (compact-map (select-keys (or (require-options-map! m) {}) ks)))
 
 (defn- require-fn-option!
   [options k]
@@ -283,7 +295,8 @@
    XTDB query/tx opts are extracted separately and are not validated here."
   [options]
   (let [options' (merge default-options
-                        (select-keys (or options {}) adapter-option-keys))]
+                        (select-keys (or (require-options-map! options) {})
+                                     adapter-option-keys))]
     (require-fn-option! options' :debug-fn)
     options'))
 
