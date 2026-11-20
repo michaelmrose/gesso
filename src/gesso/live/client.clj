@@ -173,9 +173,20 @@
   [channel]
   (get-in channel [:endpoint :client-id-param]))
 
+(defn- usable-client-id
+  "Return an opaque client id only when it is not blank.
+
+   The browser supplies client ids through request parameters; absent and
+   whitespace-only ids must not become shared channel/mailbox keys. Keep
+   nonblank caller-provided ids unchanged for existing integrations."
+  [client-id]
+  (when (and (some? client-id)
+             (not (str/blank? (str client-id))))
+    client-id))
+
 (defn- client-id-from-ctx
   [channel ctx]
-  (request-param ctx (client-id-param channel)))
+  (usable-client-id (request-param ctx (client-id-param channel))))
 
 (defn- stream-url
   [channel client-id]
@@ -342,7 +353,7 @@
   ([channel ctx]
    (listener channel ctx nil))
   ([channel ctx options]
-   (let [client-id (or (:client/id options)
+   (let [client-id (or (usable-client-id (:client/id options))
                        (new-client-id))
          id        (or (:id options)
                        (str "gesso-live-client-listener-" client-id))

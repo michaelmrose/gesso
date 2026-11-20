@@ -3786,3 +3786,49 @@ data: client-1
             "the original audience retains disconnected recovery"))
       (finally
         (close-response! alice)))))
+
+;; Blank browser ids must not form a shared logical-client mailbox.
+(deftest blank-client-ids-create-distinct-sse-registrations-test
+  (let [channel (test-channel)
+        first-response (connect! channel "")
+        second-response (connect! channel "")
+        third-response (connect! channel "  \t")]
+    (try
+      (let [ids (client/connected-client-ids channel)]
+        (is (= 3 (count ids))
+            "blank identifiers must never share one logical client")
+        (is (every? #(and (string? %) (parse-uuid %)) ids)
+            "server-generated missing identifiers should be opaque UUIDs")
+        (is (not (s/closed? (:body first-response))))
+        (is (not (s/closed? (:body second-response))))
+        (is (not (s/closed? (:body third-response)))))
+      (finally
+        (close-response! first-response)
+        (close-response! second-response)
+        (close-response! third-response)))))
+
+(deftest blank-client-id-cannot-claim-legacy-pending-mailbox-test
+  ;; A pre-existing pending entry under an empty browser id must not be
+  ;; retrievable just by submitting ?client-id= while sharing an app audience.
+  (let [channel (test-channel)
+        audience ["user-1" #{[:store "store-1"]}]]
+    (swap! (:state channel)
+           (fn [state]
+             (-> state
+                 (assoc-in [:pending ""] [fragment-a])
+                 (assoc-in [:pending-owners ""] audience))))
+    (is (nil? (client/drain-fragment! channel (client-ctx "")))
+        "blank client IDs must not claim arbitrary existing mailboxes")
+    (is (= {"" 1} (client/pending-counts channel))
+        "a denied pending claim must not consume queued work")))
+
+(deftest blank-explicit-listener-id-generates-fresh-browser-id-test
+  (let [channel (test-channel)
+        markup (client/listener channel {} {:client/id "\t "})
+        id (get-in markup [1 :data-gesso-live-client-id])]
+    (is (string? id))
+    (is (some? (parse-uuid id)))
+    (is (str/includes? (get-in markup [1 :sse-connect])
+                       (str "client-id=" id)))
+    (is (str/includes? (get-in markup [2 1 :hx-get])
+                       (str "client-id=" id)))))
