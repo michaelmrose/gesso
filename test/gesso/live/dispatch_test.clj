@@ -611,3 +611,57 @@
       (finally
         (release release-running)
         (dispatch/close! d)))))
+
+(deftest close-drops-dequeued-but-unstarted-work-test
+  ;; A worker can take a job from the queue and pause before invoking its
+  ;; runner. Once close! wins, that still-unstarted job must be retired and
+  ;; notified exactly once, including a coalesce slot removed from the queue.
+  (doseq [policy [:throw :block :drop :coalesce]]
+    (let [dequeued (CountDownLatch. 1)
+          resume? (atom false)
+          ran (promise)
+          dropped (promise)
+          original (var-get #'gesso.live.dispatch/run-queue-item!)]
+      (with-redefs-fn
+        {#'gesso.live.dispatch/run-queue-item!
+         (fn [dispatcher item]
+           (release dequeued)
+           ;; Interrupting the worker must not accidentally release this
+           ;; deterministic pre-execution barrier.
+           (while (not @resume?)
+             (Thread/yield))
+           (original dispatcher item))}
+        (fn []
+          (let [d (dispatch/create {:threads 1
+                                    :queue-size 2
+                                    :on-overflow policy})]
+            (try
+              (is (= :submitted
+                     (:status (dispatch/submit!
+                               d {:coalesce-key :pending
+                                  :run #(deliver ran :ran)
+                                  :on-drop #(deliver dropped %)})))
+                  (str policy " submitted before shutdown"))
+              (is (await-latch dequeued)
+                  (str policy " worker dequeued before shutdown"))
+              (let [shutdown (future (dispatch/close! d))]
+                (try
+                  (is (loop [attempts 500]
+                        (cond
+                          (and (dispatch/closed? d)
+                               (zero? (:pending-keys (dispatch/stats d)))) true
+                          (zero? attempts) false
+                          :else (do (Thread/sleep 2)
+                                    (recur (dec attempts)))))
+                      (str policy " queue retirement completes"))
+                  (finally
+                    (reset! resume? true)))
+                (is (= :closed (deref shutdown 2500 ::timeout))
+                    (str policy " shutdown completes")))
+              (is (= :dispatcher-closed (:reason (promise-value dropped)))
+                  (str policy " unstarted job receives shutdown drop"))
+              (is (not (realized? ran))
+                  (str policy " unstarted job must never execute after close"))
+              (finally
+                (reset! resume? true)
+                (dispatch/close! d)))))))))

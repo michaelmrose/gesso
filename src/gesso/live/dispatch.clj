@@ -226,19 +226,26 @@
     (catch Throwable e
       (record-error! dispatcher job e))))
 
-(defn- run-coalesce-slot!
-  [dispatcher slot]
-  ;; Remove the slot from the pending index before reading/running its latest
-  ;; job. After this point, later submissions with the same key create a fresh
-  ;; slot rather than replacing the job that is about to run.
-  (remove-pending-slot! dispatcher slot)
-  (run-job! dispatcher (slot-job slot)))
-
 (defn- run-queue-item!
   [dispatcher item]
-  (if (coalesce-slot? item)
-    (run-coalesce-slot! dispatcher item)
-    (run-job! dispatcher item)))
+  ;; A worker may dequeue an item immediately before close! retires the
+  ;; queue. Until it claims the job, the item is still pending work: shutdown
+  ;; must drop it, rather than allow an unstarted job to run after close.
+  ;; Claiming also removes a coalesced slot from the pending index and reads
+  ;; its latest job under the same queue lock as replacement and retirement.
+  (let [slot? (coalesce-slot? item)
+        job (locking (:coalesce-lock dispatcher)
+              (when-not @(:closed? dispatcher)
+                (when slot?
+                  (remove-pending-slot! dispatcher item))
+                (if slot? (slot-job item) item)))]
+    (if job
+      ;; Claimed before shutdown; execution and job callbacks never hold the
+      ;; dispatcher lifecycle lock.
+      (run-job! dispatcher job)
+      ;; Already closed before the claim: notify even though this item was
+      ;; removed from the queue before the shutdown drain could see it.
+      (notify-drop! (if slot? (slot-job item) item) :dispatcher-closed))))
 
 (defn- worker-loop
   [dispatcher]
