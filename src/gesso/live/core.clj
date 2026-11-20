@@ -73,6 +73,7 @@
    [gesso.live.optimistic.server :as optimistic.server]
    [gesso.live.progression :as progression]
    [gesso.live.progression.http :as progression.http]
+   [gesso.live.schema :as schema]
    [gesso.live.source :as source]
    [gesso.live.synced :as synced]
    [gesso.live.transport.sse :as sse]
@@ -225,15 +226,15 @@
 
 (defn- normalize-changes
   [{:keys [change changes]}]
-  (cond
-    (some? changes)
-    (vec changes)
-
-    (some? change)
-    [change]
-
-    :else
-    []))
+  ;; A malformed app-supplied change is knowable before the XTDB write.
+  ;; Fail at admission rather than committing and later losing notification
+  ;; when a bad change reaches post-commit preparation or expansion.
+  ;; The empty batch remains supported for transaction-only mutations.
+  (let [changes' (cond
+                   (some? changes) (vec changes)
+                   (some? change) [change]
+                   :else [])]
+    (mapv schema/validate-primary-change! changes')))
 
 (defn- dispatch-entry-for
   [entry entry-fn change]

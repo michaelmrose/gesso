@@ -848,6 +848,49 @@
 ;; transact-and-notify!
 ;; -----------------------------------------------------------------------------
 
+(deftest transact-and-notify-invalid-primary-changes-cannot-commit-test
+  ;; Invalid app-supplied changes are knowable before executing XTDB. A bad
+  ;; change in the middle of a batch must not commit the write and then cause
+  ;; an avoidable post-commit notification or preparation failure.
+  (doseq [invalid-change [{:id "req-1"}
+                          {:topic "request" :id "req-1"}
+                          {:topic :request :id nil}
+                          17
+                          nil]
+          emit-mode [:sync :async false]]
+    (let [writes (atom 0)
+          emissions (atom 0)]
+      (with-redefs [live/emit-expanded! (fn [& _] (swap! emissions inc)
+                                        {:status :emitted})
+                    live/submit-expanded! (fn [& _] (swap! emissions inc)
+                                          {:status :submitted})]
+        (with-xtdb-stub
+          'execute-tx-from!
+          (fn [& _]
+            (swap! writes inc)
+            {:tx-result {:tx-id 42}
+             :consistency sample-consistency
+             :progression sample-commit-progression})
+          (fn []
+            (let [error (try
+                          (live/transact-and-notify!
+                           {:options {}}
+                           {:xtdb/connectable :write-node}
+                           {:tx-ops sample-tx
+                            :changes [request-change invalid-change other-request-change]
+                            :emit emit-mode})
+                          nil
+                          (catch Throwable e e))]
+              (is (instance? clojure.lang.ExceptionInfo error)
+                  (str "Malformed change must fail: " (pr-str invalid-change)))
+              (is (= :gesso.live/primary-change
+                     (:schema-key (ex-data error)))
+                  "Reject the offending primary change at the admission boundary")
+              (is (= 0 @writes)
+                  "Malformed change must be rejected before authoritative commit")
+              (is (= 0 @emissions)
+                  "No notifications may precede full batch admission"))))))))
+
 (deftest transact-and-notify-requires-tx-ops-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
@@ -1541,6 +1584,38 @@
             "non-ASSERT transaction failure must not cause f to run again")
         (is (= 1 @tx-calls)
             "non-ASSERT transaction failure must escape immediately")))))
+
+(deftest live-swap-invalid-explicit-change-cannot-commit-test
+  ;; The same admission rule applies to the guarded mutation facade. A
+  ;; malformed explicit :change cannot be returned as successful metadata,
+  ;; even with :emit false, after a real guarded transaction was submitted.
+  (let [reads (atom 0)
+        writes (atom 0)
+        transforms (atom 0)]
+    (with-redefs [synced/live-read (fn [& _] (swap! reads inc) 1)
+                  synced/guarded-tx-ops (fn [& _] [[:guard]])]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [& _]
+          (swap! writes inc)
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [error (try
+                        (live/live-swap! {:xtdb/connectable :write-node}
+                                         atomic-swap-counter
+                                         (fn [n] (swap! transforms inc) (inc n))
+                                         {:system {:options {}}
+                                          :change {:topic "not-a-keyword" :id "req-1"}
+                                          :emit false})
+                        nil
+                        (catch Throwable e e))]
+            (is (= :gesso.live/primary-change
+                   (:schema-key (ex-data error))))
+            (is (= 0 @writes) "A rejected swap must not commit")
+            (is (= 1 @reads))
+            (is (= 1 @transforms))))))))
 
 (deftest live-swap-never-retries-classified-post-commit-delivery-failure-test
   (let [delivery-error
