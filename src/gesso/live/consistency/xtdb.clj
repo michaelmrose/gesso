@@ -336,7 +336,16 @@
     default-database-name
 
     (keyword? database)
-    (name database)
+    (do
+      ;; Clojure's `name` drops a keyword namespace. Without this guard,
+      ;; :tenant-a/shared and :tenant-b/shared silently select the same
+      ;; XTDB database named "shared" and alias authoritative progression.
+      ;; For a database name containing a slash, pass its exact string.
+      (when (namespace database)
+        (throw
+         (ex "XTDB progression database identity must be an unqualified keyword or exact string."
+             {:database database})))
+      (name database))
 
     (and (string? database)
          (not (str/blank? database)))

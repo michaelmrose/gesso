@@ -373,6 +373,45 @@
   (is (= {:tx-id 100}
          (xtdb-live/tx-consistency {:tx-id 100}))))
 
+(deftest database-identity-rejects-qualified-keyword-aliases-test
+  ;; Qualified keywords are normal Clojure data, but `name` drops their
+  ;; namespace. The two tenant-scoped identifiers would otherwise construct
+  ;; indistinguishable authoritative XTDB bases for database "shared".
+  (let [time (Instant/parse "2026-01-01T00:00:00Z")
+        plain (xtdb-live/basis :shared 17 time)]
+    (doseq [database [:tenant-a/shared :tenant-b/shared]]
+      (let [caught (try (xtdb-live/basis database 17 time)
+                        nil
+                        (catch clojure.lang.ExceptionInfo error error))]
+        (is (instance? clojure.lang.ExceptionInfo caught)
+            "Qualified database keyword must not alias its local name")
+        (when caught
+          (is (= database (:database (ex-data caught))))
+          (is (re-find #"unqualified keyword or exact string"
+                       (.getMessage caught))))))
+    (is (= "shared" (xtdb-live/basis-database plain)))
+    (is (= plain (xtdb-live/basis "shared" 17 time)))
+    ;; Exact string identity remains available for any XTDB database name.
+    (is (= "tenant-a/shared"
+           (xtdb-live/basis-database
+            (xtdb-live/basis "tenant-a/shared" 17 time))))))
+
+(deftest query-progression-rejects-qualified-database-identity-test
+  ;; Caller query options may never pretend that a requirement for :shared
+  ;; matches :tenant-a/shared by silently dropping the qualifier.
+  (let [required (xtdb-live/basis :shared 18
+                                   (Instant/parse "2026-01-01T00:00:00Z"))
+        requirement (progression/requirement required)]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"unqualified keyword or exact string"
+         (xtdb-live/read-query-opts nil requirement
+                                    {:database :tenant-a/shared})))
+    (is (= :shared
+           (:database
+            (xtdb-live/read-query-opts nil requirement
+                                       {:database :shared}))))))
+
 (deftest portable-xtdb-basis-is-closed-and-lossless-test
   (let [t (Instant/parse "2026-01-01T00:00:00.123456789Z")
         large-tx-id 9007199254740993
@@ -665,6 +704,29 @@
           {:biff/node :preview-era-node
            :biff/conn :preview-era-conn})))
     (is (nil? (xtdb-live/node-from raw-data-source)))))
+
+(deftest latest-completed-basis-cannot-alias-qualified-database-test
+  ;; The status boundary must reject ambiguous database identities before
+  ;; querying an unrelated XTDB database with the same local name.
+  (let [observations (atom 0)]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        (swap! observations inc)
+        {:latest-completed-txs
+         {"shared" [{:tx-id 19
+                     :system-time (Instant/parse "2026-01-01T00:00:00Z")}]}})
+      (fn []
+        (let [error (try
+                      (xtdb-live/latest-completed-basis
+                       {:xtdb/node :authority-node} :tenant-a/shared)
+                      nil
+                      (catch clojure.lang.ExceptionInfo error error))]
+          (is (instance? clojure.lang.ExceptionInfo error))
+          (when error
+            (is (= :tenant-a/shared (:database (ex-data error)))))
+          (is (zero? @observations)
+              "Do not inspect a different database's authoritative status"))))))
 
 (deftest latest-completed-basis-uses-one-status-observation-test
   (let [calls (atom [])
