@@ -3609,3 +3609,17 @@ data: client-1
             "a client id cannot inject a second SSE event field"))
       (finally
         (close-response! response)))))
+
+(deftest channel-rejects-event-names-containing-sse-line-breaks-test
+  ;; An SSE event name is an entire field value. A CR/LF in a configurable
+  ;; name must not introduce a second event field or protocol instruction.
+  (doseq [event ["client-oob\nevent: forged"
+                 "client-oob\revent: forged"
+                 "client-oob\r\nevent: forged"]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"event.*CR or LF"
+         (client/channel {:event event}))
+        (str "reject malformed SSE event name: " (pr-str event))))
+  ;; Ordinary app event names retain their existing normalized behavior.
+  (is (= "custom-wake" (:event (client/channel {:event :custom-wake})))))

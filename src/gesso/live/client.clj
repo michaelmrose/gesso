@@ -89,7 +89,15 @@
 
 (defn- event-name
   [event]
-  (htmx/event-name event))
+  (let [name (htmx/event-name event)]
+    ;; A configured event name becomes a raw SSE field value. Reject CR/LF
+    ;; rather than encoding it into a different name or allowing field
+    ;; injection into the response.
+    (when (re-find #"[\r\n]" name)
+      (throw
+       (ex "gesso.live client channel :event must not contain CR or LF."
+           {:event event})))
+    name))
 
 (defn- param-name
   [k]
