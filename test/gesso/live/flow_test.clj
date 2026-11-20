@@ -1075,3 +1075,46 @@
              (task-result (collect-runner (flow/stream-flow stream)))))
       (finally
         (s/close! stream)))))
+
+(deftest stream-flow-debug-callback-failure-does-not-stop-delivery-test
+  ;; A faulty optional diagnostic hook must not strand the bridge's serialized
+  ;; completion pump or suppress ordinary values and terminal close.
+  (let [stream (s/stream 4)
+        values [:first :second]
+        trace-attempted (promise)]
+    (try
+      (doseq [value values]
+        (is (true? (put-value stream value))))
+      (s/close! stream)
+      (let [runner (collect-runner
+                    (flow/stream-flow
+                     stream
+                     {:debug-fn (fn [event]
+                                  (when (= :gesso.live.flow/stream-value
+                                           (:event event))
+                                    (deliver trace-attempted true)
+                                    (throw (ex-info "diagnostic hook failed" {}))))}))]
+        (is (= true (deref trace-attempted timeout-ms ::timeout)))
+        (is (= {:status :success :value values}
+               (task-result runner))
+            "the diagnostic callback must not affect event delivery"))
+      (finally
+        (s/close! stream)))))
+
+(deftest flow-for-source-debug-callback-failure-does-not-prevent-subscription-test
+  (let [src (source/create)]
+    (try
+      (let [f (flow/flow-for-source
+               src
+               {:subscription request-sub
+                :relieve? false
+                :debug-fn (fn [_] (throw (ex-info "trace unavailable" {})))})
+            runner (collect-runner f)]
+        (source/emit! src request-invalidation)
+        (source/close! src)
+        (is (= {:status :success
+                :value [(flow/invalidation-event request-invalidation)]}
+               (task-result runner))
+            "trace errors must not prevent flow creation, delivery, or completion"))
+      (finally
+        (source/close! src)))))

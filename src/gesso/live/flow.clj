@@ -40,8 +40,13 @@
    The data expression is inside the guard, so with debugging off it is not
    evaluated."
   [debug-fn event data]
+  ;; Optional diagnostic callbacks must not alter Live delivery, stream
+  ;; progress, or subscription construction when user tracing fails.
   `(when-let [f# ~debug-fn]
-     (f# (assoc ~data :event ~event))))
+     (try
+       (f# (assoc ~data :event ~event))
+       (catch Exception _#
+         nil))))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults
