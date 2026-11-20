@@ -91,7 +91,11 @@
   (when f
     (try
       (apply f args)
-      (catch Exception _
+      ;; Diagnostics supplied by applications must never abort fanout or
+      ;; strand the coalescing timer. AssertionError and other Error subtypes
+      ;; are not Exceptions, but are equally outside source delivery's trust
+      ;; boundary when thrown by this optional hook.
+      (catch Throwable _
         nil))))
 
 (defn closed?

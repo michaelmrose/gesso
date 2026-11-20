@@ -746,6 +746,71 @@
         (finally
           (source/close! src))))))
 
+(deftest throwing-source-error-hook-does-not-abort-other-fanout-test
+  ;; A failed broadcast consumer must not prevent a healthy indexed consumer
+  ;; from seeing the same invalidation merely because the diagnostic callback
+  ;; throws an Error rather than an Exception.
+  (let [reported (promise)
+        src (source/create
+             {:on-error (fn [_]
+                          (deliver reported :called)
+                          (throw (AssertionError. "diagnostic hook failure")))})
+        broken (source/changes src)
+        healthy (source/subscribe src {:topic :request :id "req-1"})
+        original-put (var-get #'gesso.live.source/put-consumer!)]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.source/put-consumer!
+         (fn [stream value]
+           (if (identical? stream broken)
+             (throw (ex-info "broadcast put failed" {}))
+             (original-put stream value)))}
+        (fn []
+          (let [result (try
+                         (source/emit! src invalidation-1)
+                         (catch Throwable e e))]
+            (is (= :emitted (:status result)))
+            (is (= 1 (:attempted result))
+                "Healthy indexed fanout must still be attempted"))))
+      (is (= :called (deref reported timeout-ms ::timeout)))
+      (is (= invalidation-1 (take-value healthy)))
+      (is (s/closed? broken))
+      (is (= :put-error (:kind (first (source/errors src)))))
+      (finally
+        (source/close! src)))))
+
+(deftest throwing-source-error-hook-does-not-poison-coalescing-test
+  ;; The leading invalidation establishes the cooldown schedule. A failing
+  ;; on-error callback during fanout must not leave that cooldown unscheduled,
+  ;; silently retaining a later invalidation forever.
+  (let [src (source/create
+             {:coalesce-window-ms 100
+              :on-error (fn [_]
+                          (throw (AssertionError. "diagnostic hook failure")))})
+        broken (source/changes src)
+        healthy (source/subscribe src {:topic :request :id "req-1"})
+        trailing (assoc invalidation-1 :marker :trailing)
+        original-put (var-get #'gesso.live.source/put-consumer!)]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.source/put-consumer!
+         (fn [stream value]
+           (if (identical? stream broken)
+             (throw (ex-info "broadcast put failed" {}))
+             (original-put stream value)))}
+        (fn []
+          (let [leading-result (try
+                                 (source/emit! src invalidation-1)
+                                 (catch Throwable e e))]
+            (is (= :emitted (:status leading-result)))
+            (is (= :queued (:status (source/emit! src trailing)))))))
+      (is (= invalidation-1 (take-value healthy)))
+      (is (= trailing (take-value healthy))
+          "A trailing invalidation must not be stranded by diagnostics")
+      (is (= 0 (:pending-count (source/stats src))))
+      (finally
+        (source/close! src)))))
+
 (deftest synchronous-source-put-error-closes-consumer-stream-test
   ;; A thrown put! call must use the same terminal cleanup as an asynchronously
   ;; rejected or failed put. No abandoned open stream may outlive registration.
