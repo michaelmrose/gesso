@@ -188,6 +188,32 @@
        (sse/event-frame {:retry "bad\nretry"
                          :data "payload"}))))
 
+(deftest event-frame-rejects-browser-ignored-id-test
+  ;; EventSource ignores an id: field containing U+0000, silently losing the
+  ;; reconnection cursor. Fail at framing rather than emit a misleading id.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"SSE id field must not contain NUL"
+       (sse/event-frame {:id (str "seq-" (char 0) "42")
+                         :data "change"})))
+  ;; Empty ids are meaningful: they explicitly clear Last-Event-ID.
+  (is (= "id: \ndata: change\n\n"
+         (sse/event-frame {:id "" :data "change"}))))
+
+(deftest event-frame-rejects-browser-ignored-retry-test
+  ;; The HTML event stream parser accepts retry: only when every character
+  ;; is an ASCII digit. Reject values that the browser would silently ignore.
+  (doseq [retry [-1 "+1" "25ms" "1.5" "" "1 0" "١٢"]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"SSE retry field must contain only ASCII digits"
+         (sse/event-frame {:retry retry :data "change"}))
+        (str "Invalid EventSource retry: " (pr-str retry))))
+  (is (= "retry: 0\ndata: change\n\n"
+         (sse/event-frame {:retry 0 :data "change"})))
+  (is (= "retry: 0015\ndata: change\n\n"
+         (sse/event-frame {:retry "0015" :data "change"}))))
+
 (deftest live-event-payload-removes-event-field-test
   (is (= {:invalidation request-invalidation}
          (sse/live-event-payload live-event))))

@@ -230,6 +230,22 @@
        (ex "SSE field value must not contain a newline."
            {:field field
             :value value'})))
+    ;; Browsers ignore an id field containing NUL. Reject such values so
+    ;; a caller cannot believe it installed a reconnection cursor when it did
+    ;; not. The empty string is valid and intentionally clears the cursor.
+    (when (and (= :id field) (str/includes? value' "\u0000"))
+      (throw
+       (ex "SSE id field must not contain NUL."
+           {:field field
+            :value value'})))
+    ;; EventSource accepts retry only as nonempty ASCII decimal digits;
+    ;; negative, signed, fractional, or otherwise malformed values are
+    ;; silently ignored by browsers.
+    (when (and (= :retry field) (not (re-matches #"[0-9]+" value')))
+      (throw
+       (ex "SSE retry field must contain only ASCII digits."
+           {:field field
+            :value value'})))
     value'))
 
 (defn- data-lines
