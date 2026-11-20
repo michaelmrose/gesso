@@ -879,8 +879,11 @@
    - :biff.core/wrap-db-snapshot is preserved and wrapped with a fixed frontier
      so later Biff Graph executions cannot silently drift to a newer snapshot.
 
-   The helper returns ctx unchanged when XTDB has no completed transaction yet.
-   It never fabricates an initial basis.
+   If XTDB has no completed transaction for the selected database, the
+   helper returns ctx unchanged only when there is no existing requirement
+   for that database. An existing same-database requirement fails closed:
+   without a completed frontier, ordinary Biff reads cannot be pinned to a
+   snapshot satisfying that requirement. It never fabricates an initial basis.
 
    If an HTTP/browser progression requirement is relevant, bind it into canonical
    context before calling this helper. The trusted current XTDB basis is then
@@ -917,7 +920,24 @@
               (fixed-biff-snapshot-wrapper
                (:biff.core/wrap-db-snapshot ctx)
                snapshot-token)))
-     ctx)))
+     ;; With no completed selected-database transaction, an existing browser
+     ;; minimum for that database cannot be satisfied by any Biff snapshot.
+     ;; Returning an unchanged context would silently permit unconstrained
+     ;; ordinary reads. Keep the initial empty-db case usable, and leave
+     ;; independent requirements for other databases in the context.
+     (let [database-name (normalize-database-name database)
+           required (some (fn [candidate]
+                            (when (and (xtdb-basis? candidate)
+                                       (= database-name
+                                          (basis-database candidate)))
+                              candidate))
+                          (progression/required-bases (progression-from ctx)))]
+       (when required
+         (throw
+          (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
+              {:database database-name
+               :required required})))
+       ctx))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options

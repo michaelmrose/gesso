@@ -864,6 +864,72 @@
           (is (= (xtdb-live/basis :xtdb 107 current-time)
                  (:frontier (ex-data error)))))))))
 
+(deftest bind-request-frontier-rejects-unobserved-required-transaction-test
+  ;; If this XTDB node has no completed transaction, it cannot bind a Biff
+  ;; snapshot satisfying an existing browser requirement for that database.
+  ;; Returning ctx unchanged would allow ordinary Biff reads to proceed
+  ;; without any snapshot token despite the established minimum frontier.
+  (let [required (xtdb-live/basis :xtdb 209
+                                  (Instant/parse "2026-09-10T18:38:00Z"))
+        calls (atom 0)
+        ctx {:xtdb/node :authority-node
+             :gesso.live/progression (progression/requirement required)}]
+    (with-xtdb-stub
+      '*status*
+      (fn [_]
+        (swap! calls inc)
+        {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (let [result (try (xtdb-live/bind-request-frontier ctx)
+                          (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo result)
+              "A node with no completed transaction cannot satisfy a known requirement")
+          (when (instance? clojure.lang.ExceptionInfo result)
+            (is (re-find #"cannot satisfy.*existing.*progression"
+                         (.getMessage result)))
+            (is (= "xtdb" (:database (ex-data result))))
+            (is (= required (:required (ex-data result)))))
+          (is (= 1 @calls)))))))
+
+(deftest bind-request-frontier-rejects-unobserved-selected-database-test
+  ;; A request-local legacy :progression and a nondefault requested database
+  ;; carry exactly the same freshness requirement. No completed transaction
+  ;; for that selected database cannot be mistaken for no constraint.
+  (let [required (xtdb-live/basis :analytics 17
+                                  (Instant/parse "2026-09-10T18:38:01Z"))
+        ctx {:xtdb/node :authority-node
+             :progression (progression/requirement required)}]
+    (with-xtdb-stub
+      '*status*
+      (fn [_] {:latest-completed-txs {"analytics" []
+                                         "xtdb" [{:tx-id 900
+                                                  :system-time
+                                                  (Instant/parse "2026-09-10T18:40:00Z")}]}})
+      (fn []
+        (let [result (try (xtdb-live/bind-request-frontier ctx :analytics)
+                          (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo result))
+          (when (instance? clojure.lang.ExceptionInfo result)
+            (is (= "analytics" (:database (ex-data result))))
+            (is (= required (:required (ex-data result))))))))))
+
+(deftest bind-request-frontier-empty-selected-database-preserves-other-requirements-test
+  ;; A frontier for a different database is not evidence that the selected
+  ;; database contains completed transactions. Preserve it without making up
+  ;; an initial selected-database basis or rejecting unrelated constraints.
+  (let [required (xtdb-live/basis :analytics 17
+                                  (Instant/parse "2026-09-10T18:38:02Z"))
+        ctx {:xtdb/node :authority-node
+             :request/id :untouched
+             :gesso.live/progression (progression/requirement required)}]
+    (with-xtdb-stub
+      '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (is (identical? ctx (xtdb-live/bind-request-frontier ctx)))
+        (is (= (progression/requirement required)
+               (:gesso.live/progression ctx)))))))
+
 (deftest bind-request-frontier-does-not-fabricate-initial-basis-test
   (let [ctx {:xtdb/node :authority-node
              :request/id :request-2}
