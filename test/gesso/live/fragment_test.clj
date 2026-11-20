@@ -1779,3 +1779,59 @@
       (finally
         (deliver release :go)
         (cancel-runner! owner)))))
+
+(deftest clear-key-survives-throwing-late-installed-canceller-test
+  ;; The flight is invalidated after acquisition but before start-flight!
+  ;; publishes its physical cancellation handle. Its late cancellation must
+  ;; be observational, not replace the already committed invalidation result.
+  (let [events (atom [])
+        manager (fragment/create {:ttl-ms 1000
+                                  :clock (constantly 0)
+                                  :debug-fn #(swap! events conj %)})
+        acquired (promise)
+        continue-start (promise)
+        physical-starts (atom 0)
+        cancel-attempts (atom 0)
+        original-start @#'gesso.live.fragment/start-flight!
+        render (fn [_success _failure]
+                 (swap! physical-starts inc)
+                 (fn []
+                   (swap! cancel-attempts inc)
+                   (throw (ex-info "late physical canceller failed"
+                                   {:cause :late-cancel-failed}))))]
+    (with-redefs-fn
+      {#'gesso.live.fragment/start-flight!
+       (fn [m k task options flight]
+         (deliver acquired flight)
+         @continue-start
+         (original-start m k task options flight))}
+      (fn []
+        (let [runner-future
+              (future (start-task (fragment/protect-task
+                                   manager fragment-key render)))]
+          (try
+            (is (map? (deref acquired timeout-ms ::timeout)))
+            (is (= 1 (:inflight-count (fragment/stats manager))))
+            (is (identical? manager (fragment/clear-key! manager fragment-key)))
+            (is (= 0 (:inflight-count (fragment/stats manager))))
+            (deliver continue-start true)
+            (let [runner (deref runner-future timeout-ms ::timeout)]
+              (is (map? runner) "owner must still return its task handle")
+              (when (map? runner)
+                (let [outcome (task-result runner)]
+                  (is (= :failure (:status outcome)))
+                  (is (= :fragment-invalidated
+                         (:reason (ex-data (:error outcome))))))
+                (cancel-runner! runner)))
+            (is (eventually #(= 1 @physical-starts)))
+            (is (eventually #(= 1 @cancel-attempts)))
+            (is (some #(= :gesso.live.fragment/physical-cancel-failed (:event %))
+                      @events)
+                "the late cancellation failure must be recorded")
+            (is (= {:status :success :value :fresh}
+                   (run-task (fragment/render-task manager fragment-key
+                                                   (constantly :fresh)))))
+            (finally
+              (deliver continue-start true)
+              (deref runner-future timeout-ms ::timeout)
+              (fragment/clear-key! manager fragment-key))))))))

@@ -594,6 +594,24 @@
   (when-let [cancel! @(:cancel-ref flight)]
     (cancel!)))
 
+(defn- cancel-flight-safely!
+  "A physical render canceller is an external callback, not part of the
+   already-committed invalidation outcome. Contain its failures both when
+   invalidation finds an installed canceller and when cancellation is
+   requested before that canceller is installed."
+  [manager key flight]
+  (try
+    (cancel-flight! flight)
+    (catch Exception e
+      (when (instance? InterruptedException e)
+        (.interrupt (Thread/currentThread)))
+      (debug!
+       (get-in manager [:options :debug-fn])
+       :gesso.live.fragment/physical-cancel-failed
+       {:key key
+        :error e
+        :at ((get-in manager [:options :clock]))}))))
+
 (defn- reserve-flight-result!
   "Claim the single terminal outcome without invoking shared-flight callbacks."
   [flight]
@@ -653,23 +671,9 @@
           :error (ex "gesso.live fragment render invalidated."
                      {:reason :fragment-invalidated
                       :key key})}))
-      ;; A Missionary task may suppress completion callbacks when cancelled.
-      ;; The shared outcome has already been selected for all waiting callers.
-      ;; Cancelling an external render may itself throw. The invalidation
-      ;; committed above must still complete, and an obsolete render is
-      ;; already fenced from cache publication even if physical cancellation
-      ;; failed. Record the failure without making clear-key! look uncommitted.
-      (try
-        (cancel-flight! flight)
-        (catch Exception e
-          (when (instance? InterruptedException e)
-            (.interrupt (Thread/currentThread)))
-          (debug!
-           (get-in manager [:options :debug-fn])
-           :gesso.live.fragment/physical-cancel-failed
-           {:key key
-            :error e
-            :at ((get-in manager [:options :clock]))})))))
+      ;; Physical cancellation is advisory; failure cannot retract the
+      ;; committed invalidation or alter the typed waiter outcome.
+      (cancel-flight-safely! manager key flight)))
   manager)
 
 (defn purge-expired!
@@ -810,8 +814,11 @@
              :at (clock)})))]
     (let [cancel-once! (cancel-once cancel!)]
       (reset! (:cancel-ref flight) cancel-once!)
+      ;; clear-key! may have completed while start-flight! was still
+      ;; installing the handle. Treat this late physical cancellation with
+      ;; the same failure isolation as immediate invalidation cancellation.
       (when @(:cancel-requested? flight)
-        (cancel-once!)))
+        (cancel-flight-safely! manager key flight)))
     flight))
 
 (defn- protect-task*
