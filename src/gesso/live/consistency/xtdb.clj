@@ -1196,6 +1196,14 @@
 
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper database-name snapshot-token frontier admitted-requirement]
+  ;; Validate the outer Biff wrapper at request-frontier admission. In
+  ;; particular, an explicitly supplied false must not be treated like nil
+  ;; and silently bypass the wrapper whose behavior the caller relies on.
+  (when (and (some? existing-wrapper)
+             (not (ifn? existing-wrapper)))
+    (throw
+     (ex "Existing Biff request snapshot wrapper must be callable."
+         {:wrapper existing-wrapper})))
   (let [fixed-bases (decode-canonical-biff-snapshot!
                      database-name snapshot-token)]
     (fn [f]
@@ -1219,13 +1227,8 @@
                 (f (assoc ctx
                           :biff.xtdb/snapshot-token composed-token
                           :gesso.live/progression combined-requirement))))]
-        (if existing-wrapper
-          (do
-            (when-not (ifn? existing-wrapper)
-              (throw
-               (ex "Existing Biff request snapshot wrapper must be callable."
-                   {:wrapper existing-wrapper})))
-            (existing-wrapper fixed-body))
+        (if-some [outer-wrapper existing-wrapper]
+          (outer-wrapper fixed-body)
           fixed-body)))))
 
 (defn- compose-empty-biff-snapshot!

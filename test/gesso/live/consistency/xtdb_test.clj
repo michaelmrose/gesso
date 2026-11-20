@@ -1928,6 +1928,47 @@
             (when (instance? clojure.lang.ExceptionInfo result)
               (is (= token (:snapshot-token (ex-data result)))))))))))
 
+(deftest populated-frontier-rejects-noncallable-outer-biff-wrapper-test
+  ;; A populated XTDB database is not permission to erase a configured Biff
+  ;; wrapper. In particular, false is present but non-callable: the former
+  ;; truthiness guard treated it as nil and silently skipped the wrapper.
+  ;; Reject such a configuration at request-frontier binding, not after the
+  ;; handler has been installed or invoked.
+  (let [observed (Instant/parse "2026-11-20T22:00:00Z")
+        ctx {:xtdb/node :authority-node}
+        body-calls (atom 0)
+        body (fn [request] (swap! body-calls inc) request)]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs
+               {"xtdb" [{:tx-id 2034 :system-time observed}]}})
+      (fn []
+        (doseq [invalid [false 17 "not-a-wrapper"]]
+          (let [error (try
+                        (xtdb-live/bind-request-frontier
+                         (assoc ctx :biff.core/wrap-db-snapshot invalid))
+                        nil
+                        (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo error)
+                (str "Configured non-callable Biff wrapper must not vanish: "
+                     (pr-str invalid)))
+            (when (instance? clojure.lang.ExceptionInfo error)
+              (is (= invalid (:wrapper (ex-data error)))))))
+        (let [bound (xtdb-live/bind-request-frontier ctx)
+              handler ((:biff.core/wrap-db-snapshot bound) body)]
+          (is (string? (:biff.xtdb/snapshot-token (handler {})))
+              "Absent wrapper still uses Gesso's fixed frontier")
+          (is (= 1 @body-calls)))
+        (let [outer-calls (atom 0)
+              outer (fn [handler]
+                      (swap! outer-calls inc)
+                      (fn [request] (handler request)))
+              bound (xtdb-live/bind-request-frontier
+                     (assoc ctx :biff.core/wrap-db-snapshot outer))
+              handler ((:biff.core/wrap-db-snapshot bound) body)]
+          (is (map? (handler {})))
+          (is (= 1 @outer-calls))
+          (is (= 2 @body-calls)))))))
+
 (deftest populated-frontier-guards-deferred-biff-wrapper-snapshots-test
   ;; A previous Biff wrapper can inject its own time-basis token after Gesso
   ;; binds an authoritative selected-database frontier. A fixed wrapper must
