@@ -116,6 +116,23 @@
       (is (contains? result :tx-id))
       (is (integer? (:tx-id result))))))
 
+(deftest real-xtdb-node-is-accepted-by-raw-connectable-from-helpers-test
+  ;; XTDB's real node implements IPersistentMap even though it is a raw XTDB
+  ;; connectable, not a Gesso/Biff request context. Context extraction must not
+  ;; throw away a node simply because map? is true.
+  (let [n (node)
+        id (unique-id "raw-node-from")]
+    (is (map? n) "Real XTDB nodes implement the Clojure map interface")
+    (is (identical? n (xtdb-live/connectable-from n)))
+    (is (identical? n (xtdb-live/read-connectable-from n)))
+    (is (= [{:one 1}]
+           (xtdb-live/q-from n "SELECT 1 AS one")))
+    (is (= [{:one 1}]
+           (xtdb-live/q-consistent-from n "SELECT 1 AS one")))
+    (let [result (xtdb-live/execute-tx-from! n (put-user-op id "Ada"))]
+      (is (instance? TransactionKey (:tx-result result)))
+      (is (= "Ada" (:name (only-row (q-user id))))))))
+
 ;; -----------------------------------------------------------------------------
 ;; Adapter transaction wrappers against real XTDB
 ;; -----------------------------------------------------------------------------

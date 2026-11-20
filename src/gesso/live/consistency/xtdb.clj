@@ -731,12 +731,20 @@
      :biff.xtdb/connection-pool
      :biff.xtdb/node"
   [x]
-  (if (map? x)
+  (cond
+    ;; XTDB's concrete node is itself map-like. It is a raw connectable, not
+    ;; a Ring/Biff context; extracting context keys would discard the node.
+    (instance? xtdb.api.Xtdb x)
+    x
+
+    (map? x)
     (or (:xtdb/connectable x)
         (:xtdb/conn x)
         (:xtdb/node x)
         (:biff.xtdb/connection-pool x)
         (:biff.xtdb/node x))
+
+    :else
     x))
 
 (defn read-connectable-from
@@ -755,13 +763,21 @@
      :xtdb/node
      :biff.xtdb/node"
   [x]
-  (if (map? x)
+  (cond
+    ;; A direct XTDB node also implements IPersistentMap; do not mistake it
+    ;; for a request context or lose the raw read connectable.
+    (instance? xtdb.api.Xtdb x)
+    x
+
+    (map? x)
     (or (:xtdb/read-connectable x)
         (:xtdb/conn x)
         (:xtdb/connectable x)
         (:biff.xtdb/connection-pool x)
         (:xtdb/node x)
         (:biff.xtdb/node x))
+
+    :else
     x))
 
 
