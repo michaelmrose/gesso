@@ -1340,6 +1340,39 @@
                       (:gesso.live/progression bound))))
               (is (identical? ctx bound)))))))))
 
+(deftest bind-request-frontier-rejects-blank-database-ids-in-biff-token-test
+  ;; XTDB's protobuf time-basis codec can canonically roundtrip blank
+  ;; database names. Canonical encoding alone cannot admit an authoritative
+  ;; Biff snapshot: every database identity must satisfy Gesso's nonblank
+  ;; database-name contract, including preserved foreign databases.
+  (let [t (Instant/parse "2026-11-20T18:00:00Z")
+        active {:latest-completed-txs
+                {"xtdb" [{:tx-id 2019 :system-time t}]}}
+        empty-db {:latest-completed-txs {"xtdb" []}}
+        ctx {:xtdb/node :authority-node :request/id :invalid-foreign-db}]
+    (doseq [invalid-database ["" " "]
+            :let [token (xt.basis/->time-basis-str
+                         {invalid-database [t]
+                          "analytics" [t]})]]
+      (is (= token
+             (xt.basis/->time-basis-str
+              (xt.basis/<-time-basis-str token)))
+          "Malformed database identity is still a canonical XTDB token")
+      (doseq [status [active empty-db]]
+        (with-xtdb-stub
+          '*status*
+          (fn [_] status)
+          (fn []
+            (let [outcome (try
+                            (xtdb-live/bind-request-frontier
+                             (assoc ctx :biff.xtdb/snapshot-token token))
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo outcome)
+                  "Blank foreign database IDs must not survive Biff frontier binding")
+              (when (instance? clojure.lang.ExceptionInfo outcome)
+                (is (= :invalid-snapshot-token (:reason (ex-data outcome))))
+                (is (= token (:snapshot-token (ex-data outcome))))))))))))
+
 (deftest bind-request-frontier-preserves-independent-biff-database-snapshots-test
   ;; A Biff snapshot token can represent more than one XTDB database. Binding
   ;; the current database's frontier must replace that database's coordinate

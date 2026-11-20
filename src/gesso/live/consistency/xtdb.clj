@@ -968,6 +968,16 @@
                         (xt.basis/->time-basis-str decoded)))
         (throw (ex "Noncanonical Biff snapshot token."
                    {:snapshot-token snapshot-token})))
+      ;; XTDB will canonically serialize a time basis with an empty or blank
+      ;; database name. Such a key is not a valid Gesso/XTDB database identity
+      ;; and must not survive when composing independent Biff snapshots.
+      (when-not (every? (fn [database-id]
+                          (and (string? database-id)
+                               (not (str/blank? database-id))))
+                        (keys decoded))
+        (throw (ex "Biff snapshot token contains an invalid database identity."
+                   {:snapshot-token snapshot-token
+                    :databases (keys decoded)})))
       decoded)
     (catch Throwable cause
       (throw
