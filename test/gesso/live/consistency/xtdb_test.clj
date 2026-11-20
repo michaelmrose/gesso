@@ -891,6 +891,90 @@
         (is (= [[:connectable sample-tx {:database :xtdb}]]
                @calls))))))
 
+(deftest submit-tx-result-failure-is-classified-as-submitted-test
+  ;; A returned submit-tx receipt proves acceptance, not execution/commit.
+  ;; A later failure deriving Gesso metadata must not claim that the API
+  ;; rejected the submission or that an authoritative commit was confirmed.
+  (let [receipt {:tx-id 72}
+        cause (ex-info "projection failed"
+                       {:xtdb.error/code :xtdb/assert-failed})
+        calls (atom 0)
+        events (atom [])]
+    (with-redefs-fn
+      {(xtdb-var '*submit-tx*)
+       (fn [& _] (swap! calls inc) receipt)
+       (xtdb-var 'tx-result-progression)
+       (fn [& _] (throw cause))}
+      (fn []
+        (let [captured
+              (xtdb-live/capture-tx-api-calls!
+               #(xtdb-live/submit-tx!
+                 :conn sample-tx
+                 {:debug-fn (fn [data] (swap! events conj (:event data)))}))
+              error (:error captured)
+              classified? (if-let [predicate
+                                   (ns-resolve 'gesso.live.consistency.xtdb
+                                               'post-submit-result-failure?)]
+                            (predicate error)
+                            false)]
+          (is classified?
+              "A returned submit receipt must be distinguished from rejection")
+          (is (= :submitted (:submission/status (ex-data error))))
+          (is (= :post-submit-result (:failure/stage (ex-data error))))
+          (is (nil? (:commit/status (ex-data error)))
+              "Submission is not proof of a committed XTDB transaction")
+          (is (identical? receipt (:tx-result (ex-data error))))
+          (is (identical? cause (.getCause ^Throwable error)))
+          (is (= 1 @calls) "A receipt must never be silently discarded")
+          (is (= [:invoked :returned] (mapv :phase (:events captured)))
+              "Capture must prove that the raw XTDB API returned normally")
+          (is (= [:gesso.live.xtdb/submit-tx-started
+                  :gesso.live.xtdb/submit-tx-result-failed]
+                 @events)
+              "A metadata failure must not be reported as XTDB rejection"))))))
+
+(deftest submit-tx-consistency-derivation-failure-is-submitted-test
+  ;; Consistency extraction, not just optional progression, happens after the
+  ;; XTDB API has returned and must preserve the same submission boundary.
+  (let [receipt {:tx-id 73}
+        cause (ex-info "consistency extraction failed" {:reason :bad-result})
+        calls (atom 0)]
+    (with-redefs-fn
+      {(xtdb-var '*submit-tx*) (fn [& _] (swap! calls inc) receipt)
+       (xtdb-var 'tx-consistency) (fn [& _] (throw cause))}
+      (fn []
+        (let [error (try
+                      (xtdb-live/submit-tx! :conn sample-tx)
+                      (catch Throwable e e))]
+          (is (= :submitted (:submission/status (ex-data error))))
+          (is (= :post-submit-result (:failure/stage (ex-data error))))
+          (is (nil? (:commit/status (ex-data error))))
+          (is (identical? receipt (:tx-result (ex-data error))))
+          (is (identical? cause (.getCause ^Throwable error)))
+          (is (= 1 @calls)))))))
+
+(deftest actual-submit-tx-error-remains-a-genuine-submission-error-test
+  ;; A genuine failure raised by the API itself still propagates unchanged;
+  ;; a missing receipt cannot be claimed accepted by the adapter.
+  (let [real-error (ex-info "XTDB submit failed" {:reason :storage})
+        calls (atom 0)
+        events (atom [])]
+    (with-xtdb-stub
+      '*submit-tx*
+      (fn [& _] (swap! calls inc) (throw real-error))
+      (fn []
+        (let [caught (try
+                       (xtdb-live/submit-tx!
+                        :conn sample-tx
+                        {:debug-fn (fn [event]
+                                     (swap! events conj (:event event)))})
+                       (catch Throwable e e))]
+          (is (identical? real-error caught))
+          (is (nil? (:submission/status (ex-data caught))))
+          (is (= 1 @calls))
+          (is (= [:gesso.live.xtdb/submit-tx-started
+                  :gesso.live.xtdb/submit-tx-failed] @events)))))))
+
 (deftest submit-tx-propagates-failure-test
   (let [boom (ex-info "submit boom" {})]
     (with-xtdb-stub

@@ -1177,6 +1177,32 @@
     :tx-result tx-result}
    cause))
 
+(def post-submit-result-failure-type
+  "XTDB submit-tx returned a submission receipt, but conversion of its
+   public metadata failed. The submission was accepted, not necessarily
+   executed or committed; callers must not assume it was rejected."
+  ::post-submit-result-failure)
+
+(defn post-submit-result-failure?
+  "True when a returned XTDB submission receipt could not be interpreted.
+
+   This is a submission outcome, NOT evidence of committed execution."
+  [error]
+  (and (instance? Throwable error)
+       (= post-submit-result-failure-type (:error/type (ex-data error)))
+       (= :post-submit-result (:failure/stage (ex-data error)))
+       (= :submitted (:submission/status (ex-data error)))))
+
+(defn- post-submit-result-error
+  [cause tx-result]
+  (ex-info
+   "XTDB submission returned a receipt, but result metadata derivation failed."
+   {:error/type post-submit-result-failure-type
+    :failure/stage :post-submit-result
+    :submission/status :submitted
+    :tx-result tx-result}
+   cause))
+
 (defn submit-tx!
   "Submit XTDB2 tx ops.
 
@@ -1193,6 +1219,11 @@
      :debug-fn
        Optional pay-for-play debug hook.
 
+   If XTDB accepted a submission but its returned receipt cannot be converted,
+   post-submit-result-failure? classifies the exception as :submitted. This
+   does not assert the transaction was committed or indexed, and must not be
+   confused with a failure of the XTDB API call itself.
+
    This function does not emit live invalidations and does not manually mutate
    shared XTDB consistency state."
   ([connectable tx-ops]
@@ -1208,11 +1239,18 @@
       {:tx-opts tx-options
        :at (now-ms)})
      (try
-       (let [tx-result   (invoke-xtdb-api! :submit-tx *submit-tx*
-                                           connectable' tx-ops tx-options)
-             consistency (tx-consistency tx-result)
-             progression-value
-             (tx-result-progression tx-result (:database tx-options))]
+       (let [tx-result (invoke-xtdb-api! :submit-tx *submit-tx*
+                                         connectable' tx-ops tx-options)
+             ;; A returned receipt establishes submission, not commit. Any
+             ;; subsequent metadata failure must preserve that distinction
+             ;; instead of looking like the API rejected the transaction.
+             {:keys [consistency progression-value]}
+             (try
+               {:consistency (tx-consistency tx-result)
+                :progression-value
+                (tx-result-progression tx-result (:database tx-options))}
+               (catch Throwable cause
+                 (throw (post-submit-result-error cause tx-result))))]
          (debug!
           debug-fn
           :gesso.live.xtdb/submit-tx-succeeded
@@ -1228,7 +1266,9 @@
        (catch Throwable e
          (debug!
           debug-fn
-          :gesso.live.xtdb/submit-tx-failed
+          (if (post-submit-result-failure? e)
+            :gesso.live.xtdb/submit-tx-result-failed
+            :gesso.live.xtdb/submit-tx-failed)
           {:error e
            :at (now-ms)})
          (throw e))))))
