@@ -114,6 +114,25 @@
     (is (s/closed? tap))
     (is (= 0 (:tap-count (source/stats src))))))
 
+(deftest subscribe-rejects-invalid-interest-before-registration-test
+  ;; A direct source subscriber must satisfy the same admitted interest
+  ;; contract as a flow subscriber. An invalid topic/id would otherwise
+  ;; register successfully but could never match a valid invalidation.
+  (let [src (source/create)]
+    (try
+      (doseq [subscription [{:topic nil :id "req-1"}
+                            {:topic "request" :id "req-1"}
+                            {:topic :request :id nil}]]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"Invalid gesso.live value"
+             (source/subscribe src subscription))
+            (str "Invalid subscription must be rejected: " (pr-str subscription)))
+        (is (zero? (:subscription-count (source/stats src)))
+            "A rejected subscription must not install an indexed tap"))
+      (finally
+        (source/close! src)))))
+
 ;; -----------------------------------------------------------------------------
 ;; Taps
 ;; -----------------------------------------------------------------------------

@@ -501,6 +501,10 @@
   [source subscription]
   (locking (:coalesce-lock source)
     (ensure-open! source)
+    ;; A missing key is not the only invalid interest. Validate the full
+    ;; public subscription contract before installing indexed resources.
+    ;; Otherwise unmatchable topics/ids become silent live consumers.
+    (schema/validate-subscription! subscription)
     (let [k (scope-key subscription)
           subscription-id (next-subscription-id! source)
           stream (s/stream)
