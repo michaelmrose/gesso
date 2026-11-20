@@ -636,7 +636,19 @@
   (let [comparison (compare-bases left right)]
     (cond
       (neg? comparison)
-      (progression/advance left right)
+      (do
+        ;; Generic progression deliberately accepts an exact witness from a
+        ;; trusted adapter without rechecking physical ordering. An increase
+        ;; in tx-id cannot certify that an earlier snapshot-time satisfies an
+        ;; existing later read basis. Refuse to issue a false advance witness.
+        (when (.isBefore ^Instant (basis-system-time right)
+                         ^Instant (basis-system-time left))
+          (throw
+           (ex "XTDB progression witness cannot certify a regressing snapshot-time."
+               {:from left
+                :to right
+                :reason :regressing-progression-snapshot-time})))
+        (progression/advance left right))
 
       (zero? comparison)
       nil

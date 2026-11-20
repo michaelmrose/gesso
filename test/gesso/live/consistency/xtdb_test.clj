@@ -939,6 +939,41 @@
          #"cannot witness a backward"
          (xtdb-live/progression-witness b2 b1)))))
 
+(deftest progression-witness-must-not-assert-a-regressing-snapshot-test
+  ;; A newer transaction id alone does not establish that the next basis
+  ;; satisfies an already installed later system-time. The generic progression
+  ;; layer deliberately trusts this storage-specific witness, so its issuer
+  ;; must reject a contradictory pair before it can authorize installation.
+  (let [later (Instant/parse "2026-11-20T18:10:00Z")
+        earlier (.minusSeconds later 60)
+        old-id-later-time (xtdb-live/basis :xtdb 40 later)
+        new-id-earlier-time (xtdb-live/basis :xtdb 41 earlier)
+        new-id-equal-time (xtdb-live/basis :xtdb 41 later)]
+    (is (neg? (xtdb-live/compare-bases
+               old-id-later-time new-id-earlier-time))
+        "The transaction-order comparator still reports the newer id")
+    (let [outcome (try
+                    (xtdb-live/progression-witness
+                     old-id-later-time new-id-earlier-time)
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo outcome)
+          "Trusted witness must not certify a snapshot-time regression")
+      (when (instance? clojure.lang.ExceptionInfo outcome)
+        (is (= :regressing-progression-snapshot-time
+               (:reason (ex-data outcome))))
+        (is (= old-id-later-time (:from (ex-data outcome))))
+        (is (= new-id-earlier-time (:to (ex-data outcome))))))
+    (is (not (progression/install-allowed?
+              old-id-later-time new-id-earlier-time nil))
+        "Generic installation requires a trusted witness")
+    (let [witness (xtdb-live/progression-witness
+                   old-id-later-time new-id-equal-time)]
+      (is (progression/advances?
+           old-id-later-time new-id-equal-time witness))
+      (is (progression/install-allowed?
+           old-id-later-time new-id-equal-time witness)))))
+
 (deftest stronger-tx-id-must-not-erase-later-required-snapshot-test
   ;; Transaction id determines ordering, but a basis with a higher id and
   ;; earlier timestamp cannot establish the later snapshot also required.
