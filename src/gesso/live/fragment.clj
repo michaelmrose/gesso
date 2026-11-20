@@ -573,18 +573,22 @@
         flight (locking (:cache manager)
                  (let [flight (get @inflight key)]
                    (when flight
-                     (reset! (:cancel-requested? flight) true))
+                     (reset! (:cancel-requested? flight) true)
+                     ;; Detach before entering the canceller: a synchronous
+                     ;; cancellation can block or invoke user code, and new
+                     ;; callers must not join an already-invalidated owner.
+                     ;; Identity-checked removal preserves any replacement.
+                     (swap! inflight
+                            (fn [flights]
+                              (if (identical? flight (get flights key))
+                                (dissoc flights key)
+                                flights))))
                    (swap! (:cache manager) dissoc key)
                    flight))]
+    ;; Do not invoke cancellation under the cache lock. A canceller can run
+    ;; callbacks that need cache publication or another fragment lifecycle.
     (when flight
-      (cancel-flight! flight)
-      ;; Cancellation may synchronously release the old flight. Do not remove
-      ;; a replacement registered by another caller in that interval.
-      (swap! inflight
-             (fn [flights]
-               (if (identical? flight (get flights key))
-                 (dissoc flights key)
-                 flights)))))
+      (cancel-flight! flight)))
   manager)
 
 (defn purge-expired!

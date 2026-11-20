@@ -1434,3 +1434,59 @@
               (deliver proceed true)
               (when-let [old-runner (deref runner-future timeout-ms nil)]
                 (cancel-runner! old-runner)))))))))
+
+(deftest clear-key-detaches-obsolete-flight-before-running-canceller-test
+  ;; clear-key! marks its flight cancelled, but an external canceller can
+  ;; block before returning. Post-invalidation callers must not be allowed
+  ;; to join that old owner while the canceller is still in progress.
+  (let [manager (fragment/create {:ttl-ms 1000 :clock (constantly 0)})
+        old-started (promise)
+        old-release (promise)
+        old-cancelled (promise)
+        old-count (atom 0)
+        old-task (controlled-success-task old-started old-release :obsolete
+                                          old-count old-cancelled)
+        fresh-started (promise)
+        fresh-release (promise)
+        fresh-cancelled (promise)
+        fresh-count (atom 0)
+        fresh-task (controlled-success-task fresh-started fresh-release :fresh
+                                            fresh-count fresh-cancelled)
+        cancellation-entered (promise)
+        allow-cancellation (promise)
+        old-runner (start-task (fragment/protect-task manager fragment-key old-task))
+        original-cancel @#'gesso.live.fragment/cancel-flight!]
+    (try
+      (is (= :started (deref old-started timeout-ms ::timeout)))
+      (with-redefs-fn
+        {#'gesso.live.fragment/cancel-flight!
+         (fn [flight]
+           (deliver cancellation-entered true)
+           @allow-cancellation
+           (original-cancel flight))}
+        (fn []
+          (let [clearing (future (fragment/clear-key! manager fragment-key))]
+            (try
+              (is (= true (deref cancellation-entered timeout-ms ::timeout))
+                  "clear must have finished its cache invalidation before cancellation")
+              (is (zero? (:inflight-count (fragment/stats manager)))
+                  "cancelled owner must be detached before slow cancellation")
+              (let [fresh-runner (start-task
+                                  (fragment/protect-task manager fragment-key fresh-task))]
+                (try
+                  (is (= :started (deref fresh-started timeout-ms ::timeout))
+                      "new request must not join the already-invalidated owner")
+                  (is (= 1 @fresh-count))
+                  (deliver fresh-release true)
+                  (is (= {:status :success :value :fresh} (task-result fresh-runner)))
+                  (finally
+                    (deliver fresh-release true)
+                    (cancel-runner! fresh-runner))))
+              (finally
+                (deliver allow-cancellation true)
+                (is (not= ::timeout (deref clearing timeout-ms ::timeout))
+                    "clear must finish once the canceller is released"))))))
+      (finally
+        (deliver allow-cancellation true)
+        (deliver old-release true)
+        (cancel-runner! old-runner)))))
