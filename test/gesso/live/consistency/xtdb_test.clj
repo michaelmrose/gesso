@@ -394,6 +394,43 @@
          #"closed portable XTDB"
          (xtdb-live/require-xtdb-basis! (assoc basis :extra true))))))
 
+(deftest portable-xtdb-basis-rejects-noncanonical-decimal-identities-test
+  ;; Browser-carried bases are compared as closed immutable data, not merely
+  ;; parsed longs. Accepting "09" as the same id as "9" introduces a second
+  ;; representation of one authoritative coordinate. Previously such a basis
+  ;; passed admission and could even be ordered against newer valid bases;
+  ;; comparison with its canonical twin then falsely reported a conflict.
+  (let [t (Instant/parse "2026-01-01T00:00:00Z")
+        canonical (xtdb-live/basis :xtdb 9 t)
+        zero (xtdb-live/basis :xtdb 0 t)
+        later (xtdb-live/basis :xtdb 10 t)]
+    (doseq [[original wire] [[canonical "09"]
+                             [canonical "0009"]
+                             [canonical "+9"]
+                             [canonical "+09"]
+                             [zero "00"]
+                             [zero "-0"]]]
+      (let [forged (assoc original :tx-id wire)]
+        (is (false? (xtdb-live/xtdb-basis? forged))
+            (str "Noncanonical tx-id must not be admitted: " (pr-str wire)))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/require-xtdb-basis! forged))
+            (str "Noncanonical tx-id must fail closed basis admission: "
+                 (pr-str wire)))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/compare-bases forged later))
+            "Ordering must reject invalid evidence rather than trust its id")))
+    (is (xtdb-live/xtdb-basis? canonical))
+    (is (xtdb-live/xtdb-basis? zero))
+    (is (= "9" (:tx-id canonical)))
+    (is (= "0" (:tx-id zero)))
+    (is (= 9 (xtdb-live/basis-tx-id canonical)))
+    (is (= 0 (xtdb-live/basis-tx-id zero)))))
+
 (deftest consistency-to-basis-requires-complete-authoritative-basis-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (nil? (xtdb-live/consistency->basis {:tx-id 7})))

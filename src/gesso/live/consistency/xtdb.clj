@@ -368,6 +368,13 @@
         (throw
          (ex "XTDB progression wire tx-id must be non-negative."
              {:tx-id value})))
+      ;; A portable authoritative basis is compared as closed data, not just
+      ;; by its parsed id. Alternate encodings such as "09", "+9", or "-0"
+      ;; would make equivalent coordinates appear to be conflicting evidence.
+      (when-not (= value (str tx-id))
+        (throw
+         (ex "XTDB progression wire tx-id must use canonical decimal text."
+             {:tx-id value :canonical (str tx-id)})))
       tx-id)
     (catch clojure.lang.ExceptionInfo e
       (throw e))
