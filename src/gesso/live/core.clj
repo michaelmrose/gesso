@@ -1551,7 +1551,11 @@
   ([system subscription {:keys [flow-options sse-options] :as options}]
    (let [debug-fn (get-in system [:options :debug-fn])
          flow-options' (with-inherited-debug system flow-options)
-         sse-options' (with-inherited-debug system sse-options)
+         ;; Validate the transport boundary before creating an eager source
+         ;; subscription. A rejected SSE configuration must not retain an
+         ;; unconsumed indexed stream or broadcast tap in the Live source.
+         sse-options' (sse/prepare-options!
+                       (with-inherited-debug system sse-options))
          live-events (live-flow system subscription flow-options')
          started (sse/start! live-events sse-options')]
      (debug!

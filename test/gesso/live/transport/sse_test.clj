@@ -3,6 +3,8 @@
    [clojure.edn :as edn]
    [clojure.test :refer [deftest is testing]]
    [gesso.live.progression :as progression]
+   [gesso.live.model :as model]
+   [gesso.live.source :as source]
    [gesso.live.transport.sse :as sse]
    [manifold.stream :as s]
    [missionary.core :as m]))
@@ -1036,3 +1038,31 @@
               (sse/cancel! started)))
           (is (= [:cancelled] (mapv :reason @closes)))
           (is (= [:events :keepalive] @cancellations)))))))
+
+(deftest fragment-rejected-sse-options-do-not-leak-source-subscription-test
+  ;; Model-backed fragments use the same eager source registration. Keep the
+  ;; authorization gate intact, then reject transport options before opening
+  ;; a source subscription. The model stubs isolate this startup ordering.
+  (let [src (source/create)
+        system {:source src :options {}}
+        authorized (atom 0)]
+    (try
+      (with-redefs [model/fragment-scope-name (fn [_ _] :request)
+                    model/fragment-scope-instance
+                    (fn [_ _ _] {:topic :request :id "req-1"})
+                    model/require-scope-authorized!
+                    (fn [_ _ _ _] (swap! authorized inc))]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #":keepalive-ms must be a positive integer"
+             (sse/start-fragment-stream!
+              system {} {} :request-panel "req-1"
+              {:sse-options {:keepalive-ms -1}})))
+        (is (= 1 @authorized)
+            "transport validation must not bypass model authorization")
+        (is (zero? (:subscription-count (source/stats src)))
+            "rejected model-backed SSE startup must not retain a subscription")
+        (is (zero? (:tap-count (source/stats src))))
+        (is (not (source/closed? src))))
+      (finally
+        (source/close! src)))))

@@ -1701,3 +1701,22 @@
             (is (some #{:gesso.live.core/emit-expanded} @seen)))))
       (finally
         (live/close! base)))))
+
+(deftest core-rejected-sse-options-do-not-leak-source-subscription-test
+  ;; Flow construction eagerly registers an indexed consumer. Transport
+  ;; validation must precede that registration or malformed SSE options leave
+  ;; an unconsumed subscription in an otherwise healthy source.
+  (let [system (live/create)]
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #":keepalive-ms must be a positive integer"
+           (live/start-sse! system {:topic :request :id "req-1"}
+                            {:sse-options {:keepalive-ms -1}})))
+      (is (zero? (:subscription-count (source/stats (:source system))))
+          "a rejected SSE request must not register an indexed subscription")
+      (is (zero? (:tap-count (source/stats (:source system)))))
+      (is (not (source/closed? (:source system)))
+          "rejecting one request must not close the shared Live source")
+      (finally
+        (live/close! system)))))

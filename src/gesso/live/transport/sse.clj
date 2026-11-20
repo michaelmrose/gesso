@@ -654,6 +654,10 @@
                            (assoc :subscription subscription))
          sse-options'  (with-inherited-debug system sse-options)]
      (model/require-scope-authorized! compiled ctx scope-name id)
-     (start!
-      (flow/flow-for-source (:source system) flow-options')
-      sse-options'))))
+     ;; The source flow registers its subscription eagerly. Validate SSE
+     ;; options before that allocation; rejected startup must not retain a
+     ;; source tap that no transport task will ever consume or cancel.
+     (let [sse-options' (prepare-options! sse-options')]
+       (start!
+        (flow/flow-for-source (:source system) flow-options')
+        sse-options')))))
