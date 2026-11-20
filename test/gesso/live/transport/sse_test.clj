@@ -588,3 +588,61 @@
         (is (eventually #(sse/closed? started))))
       (finally
         (sse/cancel! started)))))
+
+;; -----------------------------------------------------------------------------
+;; Canceller handoff and terminal cleanup
+;; -----------------------------------------------------------------------------
+
+(deftest startup-stream-close-cancels-task-even-before-handle-installation-test
+  ;; Stream closure can occur inside Missionary task registration, before the
+  ;; returned canceller is stored in the transport. That task still belongs
+  ;; to the closed connection and must be cancelled exactly once.
+  (let [cancellations (atom 0)]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/write-events-task
+       (fn [out _events _options]
+         (fn [_success _failure]
+           (s/close! out)
+           (fn [] (swap! cancellations inc))))}
+      (fn []
+        (let [started (sse/start! (m/seed []))]
+          (try
+            (is (sse/closed? started))
+            (is (eventually #(= 1 @cancellations))
+                "a task registered during close must receive cancellation")
+            (sse/cancel! started)
+            (is (= 1 @cancellations)
+                "cancellation races must not call a task canceller twice")
+            (finally
+              (sse/cancel! started))))))))
+
+(deftest event-write-failure-cancels-existing-keepalive-task-test
+  ;; The error callback closes the SSE stream itself; on-closed therefore
+  ;; observes :closed? true and cannot be relied on to cancel the keepalive.
+  (let [keepalive-cancellations (atom 0)
+        write-failure (ex-info "fixture write failure" {:source :write})
+        errors (atom [])]
+    (with-redefs-fn
+      {#'gesso.live.transport.sse/keepalive-task*
+       (fn [_out _options]
+         (fn [_success _failure]
+           (fn [] (swap! keepalive-cancellations inc))))
+       #'gesso.live.transport.sse/write-events-task
+       (fn [_out _events _options]
+         (fn [_success failure]
+           (failure write-failure)
+           (fn [] nil)))}
+      (fn []
+        (let [started (sse/start! (m/seed [])
+                                  {:keepalive-ms 1000
+                                   :on-error (fn [error _entry]
+                                               (swap! errors conj error))})]
+          (try
+            (is (sse/closed? started))
+            (is (s/closed? (:stream started)))
+            (is (= [write-failure] @errors)
+                "the underlying transport error must remain visible")
+            (is (eventually #(= 1 @keepalive-cancellations))
+                "terminal event failure must cancel the keepalive immediately")
+            (finally
+              (sse/cancel! started))))))))

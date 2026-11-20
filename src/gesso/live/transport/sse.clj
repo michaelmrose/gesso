@@ -150,6 +150,19 @@
       (when (compare-and-set! called? false true)
         (apply f args)))))
 
+(defn- install-canceller!
+  "Publish a task cancellation handle despite concurrent terminal shutdown.
+
+   If shutdown wins before the task returns its handle, invoke the handle
+   immediately after installation. If shutdown races the install, both paths
+   may try to cancel, so the installed handle must run exactly once."
+  [cancel-ref cancelling? cancel-fn]
+  (let [cancel-once! (once cancel-fn)]
+    (reset! cancel-ref cancel-once!)
+    (when @cancelling?
+      (cancel-once!))
+    cancel-once!))
+
 (defn- deferred-task
   "Adapt a Manifold deferred to a Missionary task."
   [deferred]
@@ -489,14 +502,16 @@
           (cancel-running!))))
 
      (when-let [keepalive-task (keepalive-task* out options')]
-       (reset!
+       (install-canceller!
         cancel-keepalive-ref
+        cancelling?
         (keepalive-task
          (fn [_] nil)
          (fn [error]
            (when-not @cancelling?
              (fail! error)
-             (close-once! :keepalive-error {:error error}))))))
+             (close-once! :keepalive-error {:error error})
+             (cancel-running!))))))
 
      (let [events-task (write-events-task out live-events options')
            cancel-events!
@@ -518,7 +533,8 @@
                   :at (now-ms)})
                 (do
                   (fail! error)
-                  (close-once! :error {:error error})))))
+                  (close-once! :error {:error error})
+                  (cancel-running!)))))
 
            cancel!
            (once
@@ -526,7 +542,7 @@
               (close-once! :cancelled {})
               (cancel-running!)))]
 
-       (reset! cancel-events-ref cancel-events!)
+       (install-canceller! cancel-events-ref cancelling? cancel-events!)
 
        {:stream out
         :response (response* out options')
