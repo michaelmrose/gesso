@@ -1049,9 +1049,16 @@
 (defn tx-opts
   "Return only options intended for XTDB2 submit-tx/execute-tx.
 
+   Validate an explicitly selected database before invoking XTDB, so an
+   ambiguous or malformed identity cannot be rejected only after execution
+   while Gesso constructs progression from the returned transaction result.
+   Preserve the exact caller-supplied database representation for XTDB.
    Adapter-only options such as :debug-fn are removed."
   [opts]
-  (select-compact opts tx-option-keys))
+  (let [tx-options (select-compact opts tx-option-keys)]
+    (when (contains? tx-options :database)
+      (normalize-database-name (:database tx-options)))
+    tx-options))
 
 (defn consistency-token
   "Return an opaque stable token for normalized XTDB read consistency.

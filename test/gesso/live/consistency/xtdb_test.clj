@@ -199,6 +199,26 @@
             {:snapshot-time t2
              :key-fn :kebab-case-keyword})))))
 
+(deftest tx-opts-rejects-ambiguous-database-identity-before-use-test
+  ;; A transaction database is an authority identity, not a free-form hint.
+  ;; A qualified keyword would lose its namespace when XTDB progression is
+  ;; constructed after execute-tx, whereas submit-tx's ID-only receipt would
+  ;; never validate the database at all. Both should reject it at admission.
+  (doseq [database [:tenant-a/shared :tenant-b/shared "" "   " 42]]
+    (let [error (try (xtdb-live/tx-opts {:database database})
+                     nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo error)
+          (str "Reject unidentifiable database: " (pr-str database)))
+      (when error
+        (is (= database (:database (ex-data error)))))))
+  ;; An unqualified keyword and a literal string with a slash remain distinct
+  ;; and retain their original XTDB API representation.
+  (is (= {:database :shared} (xtdb-live/tx-opts {:database :shared})))
+  (is (= {:database "tenant-a/shared"}
+         (xtdb-live/tx-opts {:database "tenant-a/shared"})))
+  (is (= {} (xtdb-live/tx-opts {:database nil}))))
+
 (deftest tx-opts-keeps-only-transaction-options-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")]
     (is (= {:database :xtdb
@@ -1109,6 +1129,66 @@
 ;; -----------------------------------------------------------------------------
 ;; Transaction wrappers
 ;; -----------------------------------------------------------------------------
+
+(deftest invalid-database-identity-cannot-reach-xtdb-write-test
+  ;; Rejection must precede BOTH public XTDB APIs. Previously execute-tx!
+  ;; failed only after a successful returned transaction key, and submit-tx!
+  ;; could report success because its ID-only receipt has no progression basis.
+  (let [system-time (Instant/parse "2026-01-01T00:00:00Z")]
+    (doseq [database [:tenant-a/shared :tenant-b/shared "" "  " 42]
+            api [:execute :submit]]
+      (let [writes (atom 0)
+            seam (if (= :execute api) '*execute-tx* '*submit-tx*)
+            replacement (fn [& _]
+                          (swap! writes inc)
+                          (if (= :execute api)
+                            (tx-key 312 system-time)
+                            {:tx-id 312}))]
+        (with-xtdb-stub
+          seam replacement
+          (fn []
+            (let [outcome (try
+                            ((if (= :execute api)
+                               xtdb-live/execute-tx!
+                               xtdb-live/submit-tx!)
+                             :conn sample-tx {:database database})
+                            nil
+                            (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo outcome)
+                  (str "Reject invalid " api " database: " (pr-str database)))
+              (when outcome
+                (is (= database (:database (ex-data outcome)))
+                    "Preserve the exact invalid database identity")
+                (is (nil? (:commit/status (ex-data outcome)))
+                    "A preflight failure is not a post-commit failure")
+                (is (nil? (:submission/status (ex-data outcome)))
+                    "A preflight failure is not an accepted submission"))
+              (is (zero? @writes)
+                  "An invalid database name must never reach XTDB")))))))
+  ;; Valid keyword and explicit slash-containing string names still reach XTDB
+  ;; and produce a correctly attributed authoritative basis on execute.
+  (let [system-time (Instant/parse "2026-01-01T00:00:00Z")
+        calls (atom [])]
+    (with-xtdb-stub
+      '*execute-tx*
+      (fn [_ _ opts]
+        (swap! calls conj opts)
+        (tx-key 313 system-time))
+      (fn []
+        (let [simple (xtdb-live/execute-tx!
+                      :conn sample-tx {:database :shared})
+              literal (xtdb-live/execute-tx!
+                       :conn sample-tx {:database "tenant-a/shared"})]
+          (is (= [{:database :shared} {:database "tenant-a/shared"}]
+                 @calls))
+          (is (= "shared"
+                 (xtdb-live/basis-database
+                  (first (progression/required-bases
+                          (:progression simple))))))
+          (is (= "tenant-a/shared"
+                 (xtdb-live/basis-database
+                  (first (progression/required-bases
+                          (:progression literal)))))))))))
 
 (deftest submit-tx-calls-xtdb-submit-tx-and-filters-opts-test
   (let [calls (atom [])
