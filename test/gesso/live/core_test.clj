@@ -1584,6 +1584,89 @@
         (is (= 1 @tx-calls)
             "post-commit failure is terminal for the mutation attempt")))))
 
+(deftest transact-and-notify-classifies-committed-preparation-failure-test
+  ;; The authoritative transaction has already returned when Gesso notices
+  ;; incompatible, caller-supplied progression on the primary change.
+  ;; Reporting an unclassified error would conceal the committed mutation.
+  (let [writes (atom 0)
+        system {:options {}}
+        ctx {:xtdb/connectable :node}]
+    (with-xtdb-stub
+      'execute-tx-from!
+      (fn [_ctx _tx-ops _opts]
+        (swap! writes inc)
+        {:tx-result {:tx-id 42}
+         :consistency sample-consistency
+         :progression sample-commit-progression})
+      (fn []
+        (let [error (try
+                      (live/transact-and-notify!
+                       system ctx
+                       {:tx-ops sample-tx
+                        :change (assoc request-change
+                                       :progression sample-other-progression)
+                        :emit false})
+                      nil
+                      (catch Throwable e e))]
+          (is (= ::live/post-commit-preparation-failure
+                 (:error/type (ex-data error)))
+              "Committed preparation failures must be explicitly typed")
+          (is (= :committed (:commit/status (ex-data error))))
+          (is (= :post-commit-preparation (:failure/stage (ex-data error))))
+          (is (= {:tx-id 42} (:tx-result (ex-data error))))
+          (is (= sample-other-progression
+                 (:existing-progression (ex-data error)))
+              "Preserve useful original validation diagnostics")
+          (is (instance? Throwable (.getCause ^Throwable error)))
+          (is (= 1 @writes)
+              "Preparation failure cannot retroactively undo an XTDB write"))))))
+
+(deftest live-swap-does-not-retry-assert-shaped-preparation-failure-test
+  ;; The original AssertionError classifier must not see an XTDB-shaped
+  ;; exception raised by *post-commit metadata preparation* and retry a
+  ;; previously committed guarded write.
+  (let [assert-error (ex-info "metadata construction failed"
+                              {:xtdb.error/code :xtdb/assert-failed})
+        writes (atom 0)
+        reads (atom 0)
+        transforms (atom 0)]
+    (with-redefs [synced/live-read
+                  (fn [& _]
+                    (when (> (swap! reads inc) 1)
+                      (throw (ex-info "unsafe post-commit retry" {})))
+                    1)
+                  synced/guarded-tx-ops
+                  (fn [& _] [[:guard]])
+                  progression/compose
+                  (fn [& _] (throw assert-error))]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          (swap! writes inc)
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [error (try
+                        (live/live-swap!
+                         {:xtdb/connectable :write-node}
+                         atomic-swap-counter
+                         (fn [n] (swap! transforms inc) (inc n))
+                         {:system {:options {}} :emit false})
+                        nil
+                        (catch Throwable e e))]
+            (is (= ::live/post-commit-preparation-failure
+                   (:error/type (ex-data error)))
+                "A post-commit error must never be mistaken for an ASSERT loss")
+            (is (identical? assert-error (.getCause ^Throwable error)))
+            (is (= :committed (:commit/status (ex-data error))))
+            (is (= 1 @writes)
+                "Never resubmit a write after metadata processing fails")
+            (is (= 1 @reads)
+                "No post-commit retry of the authoritative read")
+            (is (= 1 @transforms)
+                "Never reapply a swap transform after commit")))))))
+
 (deftest live-swap-never-retries-assert-shaped-post-commit-error-test
   ;; An ASSERT-shaped failure in an app delivery callback does not mean the
   ;; authoritative XTDB write failed. transact-and-notify! has already

@@ -1064,6 +1064,45 @@
        (= :post-commit-delivery
           (:failure/stage (ex-data value)))))
 
+(def post-commit-preparation-failure-type
+  "Error type used when transaction-derived consistency/progression or primary
+   change preparation fails after an XTDB transaction has already committed.
+
+   Unlike a pre-commit assertion conflict this outcome must not be retried as
+   a mutation, even if the preparation error wraps an XTDB-shaped cause."
+  ::post-commit-preparation-failure)
+
+(defn post-commit-preparation-failure?
+  "True for committed mutations whose post-commit change preparation failed."
+  [value]
+  (and (instance? Throwable value)
+       (= post-commit-preparation-failure-type
+          (:error/type (ex-data value)))
+       (= :committed (:commit/status (ex-data value)))
+       (= :post-commit-preparation (:failure/stage (ex-data value)))))
+
+(defn- post-commit-preparation-error
+  [cause tx-result-map ctx changes emit-mode]
+  (ex
+   "XTDB transaction committed, but Gesso Live could not prepare change metadata."
+   ;; Retain the original preparation error's precise explanatory data (e.g.
+   ;; the incompatible progression) for existing clients. Authoritative
+   ;; commit classification always overrides any similarly named cause fields.
+   (merge
+    (or (ex-data cause) {})
+    (cond->
+     {:error/type post-commit-preparation-failure-type
+      :failure/stage :post-commit-preparation
+      :commit/status :committed
+      :tx-result (:tx-result tx-result-map)
+      :consistency (:consistency tx-result-map)
+      :ctx ctx
+      :changes changes
+      :emit emit-mode}
+      (:progression tx-result-map)
+      (assoc :transaction/progression (:progression tx-result-map))))
+   cause))
+
 (defn- post-commit-delivery-error
   [cause
    tx-result-map
@@ -1131,6 +1170,7 @@
      2. capture returned consistency and authoritative progression
      3. assoc consistency onto ctx and conservatively compose ctx progression
      4. attach consistency plus transaction-established progression to changes
+        (classifying failures as post-commit preparation failures)
      5. optionally emit or submit expanded invalidations
      6. classify any failure in step 5 as post-commit delivery failure
      7. return tx/ctx/change/emission metadata
@@ -1189,8 +1229,10 @@
    *after* execute-tx! returned, throws a classified exception satisfying
    post-commit-delivery-failure?. Its ex-data contains :commit/status
    :committed plus committed transaction metadata and any earlier completed
-   delivery results. Such an exception must never be interpreted as mutation
-   rollback."
+   delivery results. Failures while preparing consistency/change metadata
+   after execute-tx! returned satisfy post-commit-preparation-failure?. Both
+   post-commit classifications mean the mutation committed and MUST NOT be
+   retried as if it had rolled back."
   [system ctx {:keys [tx-ops tx-options emit entry entry-fn] :as options}]
   (when-not tx-ops
     (throw
@@ -1202,18 +1244,26 @@
         tx-result-map (execute-tx! ctx tx-ops tx-options)
         consistency' (:consistency tx-result-map)
         transaction-progression (:progression tx-result-map)
-        ctx-progression (progression/compose
-                         (progression ctx)
-                         transaction-progression)
-        ctx' (-> ctx
-                 (with-consistency consistency')
-                 (with-progression ctx-progression))
-        changes' (mapv (fn [change]
-                         (-> change
-                             (attach-consistency consistency')
-                             (bind-transaction-progression!
-                              transaction-progression)))
-                       changes)
+        {:keys [ctx' changes']}
+        (try
+          (let [ctx-progression (progression/compose
+                                 (progression ctx)
+                                 transaction-progression)
+                ctx' (-> ctx
+                         (with-consistency consistency')
+                         (with-progression ctx-progression))
+                changes' (mapv (fn [change]
+                                 (-> change
+                                     (attach-consistency consistency')
+                                     (bind-transaction-progression!
+                                      transaction-progression)))
+                               changes)]
+            {:ctx' ctx' :changes' changes'})
+          (catch Throwable cause
+            ;; execute-tx! has returned: no exception from this preparation
+            ;; stage can honestly be reported as a failed write transaction.
+            (throw (post-commit-preparation-error
+                    cause tx-result-map ctx changes emit-mode))))
         emit-results
         (case emit-mode
           false
@@ -1378,7 +1428,8 @@
       ;; code after the authoritative mutation has already committed. The
       ;; explicit post-commit boundary always wins over deeper cause codes;
       ;; otherwise a guarded swap could repeat a successfully committed write.
-      (post-commit-delivery-failure? cause)
+      (or (post-commit-delivery-failure? cause)
+          (post-commit-preparation-failure? cause))
       false
 
       (= :xtdb/assert-failed
