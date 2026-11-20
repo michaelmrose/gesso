@@ -3692,3 +3692,33 @@ data: client-1
             (close-response! same-user))))
       (finally
         (close-response! alice)))))
+
+(deftest user-target-without-authenticated-identity-does-not-deliver-test
+  ;; An absent user id must never be interpreted as a shared user identity.
+  ;; (str nil) is the empty string, which previously made nil-to-nil
+  ;; user targeting broadcast presentation to all anonymous clients.
+  (let [channel (test-channel)
+        anonymous (connect! channel "anonymous" {:user-id nil})
+        blank-id (connect! channel "blank-id" {:user-id ""})
+        alice (connect! channel "alice-client" {:user-id "alice"})]
+    (try
+      (let [missing (client/send-to-user! channel nil fragment-a)
+            explicit (client/send! channel {:to [:user nil]
+                                            :fragments [fragment-b]})
+            blank (client/send-to-user! channel "" fragment-b)]
+        (is (zero? (:sent missing))
+            "an absent target identity must not select anonymous clients")
+        (is (zero? (:sent explicit))
+            "direct :user nil targeting must not select anonymous clients")
+        (is (zero? (:sent blank))
+            "an empty user id is not an authenticated delivery identity")
+        (is (nil? (drain! channel "anonymous")))
+        (is (nil? (drain! channel "blank-id")))
+        (is (nil? (drain! channel "alice-client"))))
+      (let [named (client/send-to-user! channel "alice" fragment-a)]
+        (is (= 1 (:sent named))
+            "valid non-empty user targeting still delivers")
+        (is (= [fragment-a] (drain! channel "alice-client"))))
+      (finally
+        (doseq [response [anonymous blank-id alice]]
+          (close-response! response))))))

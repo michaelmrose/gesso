@@ -850,11 +850,19 @@
       (select-keys clients [(second to)])
 
       (and (vector? to) (= :user (first to)))
-      (let [user-id (str (second to))]
-        (into {}
-              (filter (fn [[_ client]]
-                        (= user-id (str (:client/user-id client)))))
-              clients))
+      (let [user-id (some-> (second to) str)]
+        ;; A missing identity cannot select an anonymous/blank client.
+        ;; In particular, (str nil) is "", so stringifying both sides
+        ;; previously sent user-targeted OOB content to unauthenticated taps.
+        (if (str/blank? user-id)
+          {}
+          (into {}
+                (filter (fn [[_ client]]
+                          (let [registered-id (:client/user-id client)]
+                            (and (some? registered-id)
+                                 (not (str/blank? (str registered-id)))
+                                 (= user-id (str registered-id))))))
+                clients)))
 
       (and (vector? to) (= :scope (first to)))
       (let [scope (second to)]
@@ -977,7 +985,7 @@
 (defn send-to-user!
   "Send complete OOB fragments to every connected browser client for user-id."
   [channel user-id & fragments]
-  (send! channel {:to [:user (str user-id)]
+  (send! channel {:to [:user (some-> user-id str)]
                   :fragments fragments}))
 
 (defn send-to-scope!
