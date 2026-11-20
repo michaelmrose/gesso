@@ -1584,6 +1584,89 @@
         (is (= 1 @tx-calls)
             "post-commit failure is terminal for the mutation attempt")))))
 
+(deftest live-swap-never-retries-assert-shaped-post-commit-error-test
+  ;; An ASSERT-shaped failure in an app delivery callback does not mean the
+  ;; authoritative XTDB write failed. transact-and-notify! has already
+  ;; committed and classifies the subsequent notification error explicitly.
+  ;; Retrying would reapply an already committed mutation.
+  (let [assert-cause (ex-info "application delivery asserts" 
+                              {:xtdb.error/code :xtdb/assert-failed})
+        tx-count (atom 0)
+        read-count (atom 0)
+        apply-count (atom 0)
+        ctx {:xtdb/connectable :write-node}
+        system {:options {}}]
+    (with-redefs [synced/live-read
+                  (fn [_ctx _synced _read-options]
+                    (let [count' (swap! read-count inc)]
+                      (when (> count' 1)
+                        (throw (ex-info "committed swap retried" {:count count'})))
+                      10))
+                  synced/guarded-tx-ops
+                  (fn [_synced expected new-value]
+                    [[:guard expected new-value]])]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [_ctx _tx-ops _opts]
+          (swap! tx-count inc)
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [error (try
+                        (live/live-swap!
+                         ctx atomic-swap-counter
+                         (fn [value]
+                           (swap! apply-count inc)
+                           (inc value))
+                         {:system system
+                          :emit :async
+                          :entry-fn (fn [_change]
+                                      (throw assert-cause))})
+                        nil
+                        (catch Throwable t t))]
+            (is (live/post-commit-delivery-failure? error)
+                "The original classified post-commit error must escape")
+            (is (identical? assert-cause (some-> error .getCause))
+                "The real delivery callback error must remain the cause")
+            (is (= :committed (:commit/status (ex-data error))))
+            (is (= 1 @tx-count)
+                "One committed transaction must never be submitted again")
+            (is (= 1 @read-count)
+                "The mutation must not reread after notification failure")
+            (is (= 1 @apply-count)
+                "The swap function must not be reapplied after commit")))))))
+
+(deftest live-swap-does-not-retry-wrapped-assert-shaped-post-commit-error-test
+  ;; Outer adapters may wrap a classified delivery failure. Walking the
+  ;; exception cause chain must stop when it reaches the commit boundary,
+  ;; rather than misinterpreting the nested, unrelated XTDB code.
+  (let [assert-cause (ex-info "delivery assert" {:xtdb.error/code :xtdb/assert-failed})
+        committed-error (ex-info "already committed"
+                                 {:error/type live/post-commit-delivery-failure-type
+                                  :failure/stage :post-commit-delivery
+                                  :commit/status :committed}
+                                 assert-cause)
+        outer (ex-info "transport wrapper" {:kind :wrapper} committed-error)
+        reads (atom 0)
+        writes (atom 0)]
+    (with-redefs [synced/live-read (fn [& _] (swap! reads inc) 1)
+                  synced/guarded-tx-ops (fn [& _] [[:guard]])
+                  live/transact-and-notify!
+                  (fn [& _]
+                    (when (> (swap! writes inc) 1)
+                      (throw (ex-info "retried committed transaction" {})))
+                    (throw outer))]
+      (is (identical? outer
+                      (try
+                        (live/live-swap! {:xtdb/connectable :write-node}
+                                         atomic-swap-counter inc
+                                         {:system {:options {}}})
+                        nil
+                        (catch Throwable t t))))
+      (is (= 1 @writes))
+      (is (= 1 @reads)))))
+
 (deftest live-swap-reads-current-write-database-not-request-snapshot-test
   (let [reads (atom [])
         guarded-calls (atom [])

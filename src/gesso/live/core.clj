@@ -1374,6 +1374,13 @@
       (nil? cause)
       false
 
+      ;; A delivery callback may raise an exception carrying this same XTDB
+      ;; code after the authoritative mutation has already committed. The
+      ;; explicit post-commit boundary always wins over deeper cause codes;
+      ;; otherwise a guarded swap could repeat a successfully committed write.
+      (post-commit-delivery-failure? cause)
+      false
+
       (= :xtdb/assert-failed
          (:xtdb.error/code (ex-data cause)))
       true
