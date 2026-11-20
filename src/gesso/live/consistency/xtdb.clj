@@ -751,11 +751,15 @@
     x
 
     (map? x)
-    (or (:xtdb/connectable x)
-        (:xtdb/conn x)
-        (:xtdb/node x)
-        (:biff.xtdb/connection-pool x)
-        (:biff.xtdb/node x))
+    ;; Presence of false is an invalid connectable, not permission to fall
+    ;; through to a different connection or node. Only nil means absent.
+    (first (filter some?
+                   (map #(get x %)
+                        [:xtdb/connectable
+                         :xtdb/conn
+                         :xtdb/node
+                         :biff.xtdb/connection-pool
+                         :biff.xtdb/node])))
 
     :else
     x))
@@ -783,12 +787,16 @@
     x
 
     (map? x)
-    (or (:xtdb/read-connectable x)
-        (:xtdb/conn x)
-        (:xtdb/connectable x)
-        (:biff.xtdb/connection-pool x)
-        (:xtdb/node x)
-        (:biff.xtdb/node x))
+    ;; An explicitly invalid request-scoped read connectable must not be
+    ;; bypassed by silently selecting a shared fallback connection.
+    (first (filter some?
+                   (map #(get x %)
+                        [:xtdb/read-connectable
+                         :xtdb/conn
+                         :xtdb/connectable
+                         :biff.xtdb/connection-pool
+                         :xtdb/node
+                         :biff.xtdb/node])))
 
     :else
     x))
@@ -820,8 +828,11 @@
     x
 
     (map? x)
-    (or (:xtdb/node x)
-        (:biff.xtdb/node x))
+    ;; Only nil allows the fallback. false must fail node admission before
+    ;; status I/O instead of selecting a different node behind the request.
+    (if-some [node (:xtdb/node x)]
+      node
+      (:biff.xtdb/node x))
 
     :else
     nil))

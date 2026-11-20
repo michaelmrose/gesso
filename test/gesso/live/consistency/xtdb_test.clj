@@ -97,6 +97,54 @@
            :xtdb/node :node
            :biff.xtdb/node :biff-node}))))
 
+(deftest explicit-false-connectable-slots-cannot-fall-back-test
+  ;; These are ordered authority-bearing connection selections. An explicit
+  ;; false is invalid, not permission to silently use a weaker node/pool.
+  ;; nil remains the deliberately absent optional slot.
+  (let [calls (atom [])
+        unexpected (fn [& args]
+                     (swap! calls conj args)
+                     :unexpected)
+        write-ctx {:xtdb/connectable false
+                   :xtdb/conn :fallback-connection
+                   :xtdb/node :fallback-node}
+        read-ctx {:xtdb/read-connectable false
+                  :xtdb/conn :fallback-connection
+                  :xtdb/node :fallback-node}
+        status-ctx {:xtdb/node false
+                    :biff.xtdb/node :fallback-node}]
+    (with-redefs-fn
+      {(xtdb-var '*q*) unexpected
+       (xtdb-var '*plan-q*) unexpected
+       (xtdb-var '*submit-tx*) unexpected
+       (xtdb-var '*execute-tx*) unexpected
+       (xtdb-var '*status*) unexpected}
+      (fn []
+        (is (false? (xtdb-live/connectable-from write-ctx)))
+        (is (false? (xtdb-live/read-connectable-from read-ctx)))
+        (is (false? (xtdb-live/node-from status-ctx)))
+        (doseq [invoke [#(xtdb-live/q-from write-ctx sample-query)
+                        #(xtdb-live/plan-q-from write-ctx sample-query)
+                        #(xtdb-live/q-consistent-from read-ctx sample-query)
+                        #(xtdb-live/plan-q-consistent-from read-ctx sample-query)
+                        #(xtdb-live/submit-tx-from! write-ctx sample-tx)
+                        #(xtdb-live/execute-tx-from! write-ctx sample-tx)
+                        #(xtdb-live/latest-completed-basis status-ctx)
+                        #(xtdb-live/bind-request-frontier status-ctx)]]
+          (is (thrown? clojure.lang.ExceptionInfo (invoke)))
+          (is (empty? @calls)
+              "Invalid higher-priority connectable must fail before XTDB I/O")))))
+  ;; Explicit nil continues to permit the existing fallback semantics.
+  (is (= :fallback-connection
+         (xtdb-live/connectable-from
+          {:xtdb/connectable nil :xtdb/conn :fallback-connection})))
+  (is (= :fallback-connection
+         (xtdb-live/read-connectable-from
+          {:xtdb/read-connectable nil :xtdb/conn :fallback-connection})))
+  (is (= :fallback-node
+         (xtdb-live/node-from
+          {:xtdb/node nil :biff.xtdb/node :fallback-node}))))
+
 (deftest require-connectable-throws-on-missing-connectable-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
