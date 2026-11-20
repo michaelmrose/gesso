@@ -1754,7 +1754,11 @@
               (is (= #{foreign (xtdb-live/basis :xtdb 23 now)}
                      (progression/required-bases
                       (:gesso.live/progression bound))))
-              (is (identical? ctx bound)))))))))
+              (do
+                (is (ifn? (:biff.core/wrap-db-snapshot bound)))
+                (is (= #{foreign}
+                       (progression/required-bases
+                        (:gesso.live/progression bound))))))))))))
 
 (deftest bind-request-frontier-rejects-database-without-snapshot-time-test
   ;; The XTDB basis codec accepts and roundtrips a database entry with zero
@@ -2208,9 +2212,10 @@
       '*status*
       (fn [_] {:latest-completed-txs {"xtdb" []}})
       (fn []
-        (is (identical? ctx (xtdb-live/bind-request-frontier ctx)))
-        (is (= (progression/requirement required)
-               (:gesso.live/progression ctx)))))))
+        (let [bound (xtdb-live/bind-request-frontier ctx)]
+          (is (ifn? (:biff.core/wrap-db-snapshot bound)))
+          (is (= (progression/requirement required)
+                 (:gesso.live/progression bound))))))))
 
 (deftest empty-frontier-rejects-unverified-preexisting-biff-snapshot-test
   ;; No completed XTDB transaction means Gesso cannot establish a current
@@ -2248,9 +2253,77 @@
                           (xtdb-live/bind-request-frontier without-token))))
         ;; A valid token for an independent database must not be rejected or
         ;; stripped simply because the selected default database is empty.
-        (let [foreign (assoc base :biff.xtdb/snapshot-token foreign-token)]
-          (is (identical? foreign (xtdb-live/bind-request-frontier foreign))))
+        (let [foreign (assoc base :biff.xtdb/snapshot-token foreign-token)
+              bound (xtdb-live/bind-request-frontier foreign)]
+          (is (= foreign-token (:biff.xtdb/snapshot-token bound)))
+          (is (ifn? (:biff.core/wrap-db-snapshot bound))))
         (is (= 6 @observations))))))
+
+(deftest empty-frontier-no-outer-wrapper-preserves-admitted-obligations-test
+  ;; A Biff body can run on a fresh Ring request even when no outer Biff
+  ;; wrapper was configured at binding. The existing empty-database path
+  ;; returned ctx unchanged, allowing a pre-admitted foreign snapshot and
+  ;; progression to vanish before the body, or a fabricated selected-db
+  ;; snapshot/requirement to arrive without a guard.
+  (let [t (Instant/parse "2026-11-20T23:00:00Z")
+        archive-time (.minusSeconds t 60)
+        selected (xtdb-live/basis :xtdb 2035 t)
+        foreign (xtdb-live/basis :analytics 9 archive-time)
+        foreign-token (xtdb-live/basis-snapshot-token foreign)
+        selected-token (xtdb-live/basis-snapshot-token selected)
+        foreign-requirement (progression/requirement foreign)
+        selected-requirement (progression/requirement selected)
+        calls (atom 0)
+        body (fn [request]
+               (swap! calls inc)
+               {:snapshot (:biff.xtdb/snapshot-token request)
+                :requirement (xtdb-live/progression-from request)})
+        ctx {:xtdb/node :authority-node
+             :biff.xtdb/snapshot-token foreign-token
+             :gesso.live/progression foreign-requirement}]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (let [bound (xtdb-live/bind-request-frontier ctx)
+              outer (:biff.core/wrap-db-snapshot bound)
+              ;; The fallback models how Biff runs a handler when Gesso did
+              ;; not install a wrapper. It exposes the v2034 bug directly.
+              handler ((or outer identity) body)
+              result (handler {:request/id :fresh})]
+          (is (ifn? outer)
+              "Admitted obligations require a request-execution guard")
+          (is (= foreign-token (:snapshot result))
+              "An admitted foreign Biff snapshot must survive the fresh request")
+          (is (= #{foreign}
+                 (progression/required-bases (:requirement result)))
+              "Admitted independent progression must reach the handler")
+          (doseq [[request expected-reason]
+                  [[{:biff.xtdb/snapshot-token selected-token}
+                    :unobserved-selected-database]
+                   [{:biff.xtdb/snapshot-token false}
+                    :invalid-snapshot-token]
+                   [{:gesso.live/progression selected-requirement} nil]
+                   [{:gesso.live/progression false} nil]]]
+            (let [before @calls
+                  error (try (handler request)
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo error)
+                  (str "Unsafe runtime constraint should fail closed: "
+                       (pr-str request)))
+              (when (and expected-reason
+                         (instance? clojure.lang.ExceptionInfo error))
+                (is (= expected-reason (:reason (ex-data error)))))
+              (is (= before @calls)
+                  "Rejected runtime constraints must never reach the body"))))
+        ;; Either admitted source independently warrants the guard; do not
+        ;; require both fields to be present to preserve either one.
+        (doseq [partial [{:gesso.live/progression foreign-requirement}
+                         {:biff.xtdb/snapshot-token foreign-token}]]
+          (let [bound (xtdb-live/bind-request-frontier
+                       (merge {:xtdb/node :authority-node} partial))]
+            (is (ifn? (:biff.core/wrap-db-snapshot bound))
+                "A single foreign constraint also requires a wrapper")))))))
 
 (deftest deferred-biff-wrappers-preserve-authoritative-progression-test
   ;; The Biff handler may receive a new request map, not the context returned

@@ -1271,7 +1271,11 @@
    Recheck its snapshot at execution time and retain admitted independent
    database bases instead of silently losing them."
   [existing-wrapper database-name admitted-token admitted-requirement]
-  (when-not (ifn? existing-wrapper)
+  ;; A request may have admitted foreign snapshots/progression even when Biff
+  ;; has no preexisting wrapper. Install the same execution-time guard for
+  ;; those obligations instead of letting a fresh handler request erase them.
+  (when (and (some? existing-wrapper)
+             (not (ifn? existing-wrapper)))
     (throw
      (ex "Existing Biff request snapshot wrapper must be callable."
          {:wrapper existing-wrapper})))
@@ -1283,23 +1287,26 @@
         (throw
          (ex "Biff request snapshot wrapper requires a callable body."
              {:body body})))
-      (existing-wrapper
-       (fn [wrapped-ctx]
-         (when-not (map? wrapped-ctx)
-           (throw
-            (ex "Existing Biff wrapper must supply a request context map."
-                {:ctx wrapped-ctx})))
-         (let [combined-requirement
-               (compose-wrapped-biff-progression!
-                database-name nil admitted-requirement wrapped-ctx)
-               composed-token (compose-empty-biff-snapshot!
-                               database-name admitted-bases
-                               (:biff.xtdb/snapshot-token wrapped-ctx))]
-           (body (cond-> wrapped-ctx
-                   composed-token
-                   (assoc :biff.xtdb/snapshot-token composed-token)
-                   combined-requirement
-                   (assoc :gesso.live/progression combined-requirement)))))))))
+      (let [guarded-body
+            (fn [wrapped-ctx]
+              (when-not (map? wrapped-ctx)
+                (throw
+                 (ex "Existing Biff wrapper must supply a request context map."
+                     {:ctx wrapped-ctx})))
+              (let [combined-requirement
+                    (compose-wrapped-biff-progression!
+                     database-name nil admitted-requirement wrapped-ctx)
+                    composed-token (compose-empty-biff-snapshot!
+                                    database-name admitted-bases
+                                    (:biff.xtdb/snapshot-token wrapped-ctx))]
+                (body (cond-> wrapped-ctx
+                        composed-token
+                        (assoc :biff.xtdb/snapshot-token composed-token)
+                        combined-requirement
+                        (assoc :gesso.live/progression combined-requirement)))))]
+        (if-some [outer-wrapper existing-wrapper]
+          (outer-wrapper guarded-body)
+          guarded-body)))))
 
 (defn- frontier-xtdb-required-bases
   "Validate every basis that explicitly claims XTDB authority.
@@ -1352,8 +1359,10 @@
    Invalid claimed XTDB evidence is rejected rather than silently ignored.
 
    If XTDB has no completed transaction for the selected database, the
-   helper returns ctx unchanged only when there is no existing requirement
-   for that database. An existing same-database requirement fails closed:
+   helper preserves existing foreign read obligations with a guarded wrapper
+   even when Biff had no prior wrapper. When neither a snapshot nor progression
+   nor an outer wrapper exists, untouched startup keeps the original ctx.
+   An existing same-database requirement fails closed:
    without a completed frontier, ordinary Biff reads cannot be pinned to a
    snapshot satisfying that requirement. It never fabricates an initial basis.
 
@@ -1462,7 +1471,18 @@
                    existing-wrapper database-name
                    (:biff.xtdb/snapshot-token ctx)
                    existing-requirement))
-           ctx))))))
+           ;; No existing outer wrapper does not mean no admitted read
+           ;; constraints: install the same guarded execution boundary if
+           ;; foreign snapshots or progression must survive fresh requests.
+           ;; Truly empty startup remains unchanged and allocates no wrapper.
+           (if (or existing-requirement
+                   (some? (:biff.xtdb/snapshot-token ctx)))
+             (assoc ctx :biff.core/wrap-db-snapshot
+                    (guarded-empty-biff-snapshot-wrapper
+                     nil database-name
+                     (:biff.xtdb/snapshot-token ctx)
+                     existing-requirement))
+             ctx)))))))
 
 ;; -----------------------------------------------------------------------------
 ;; Consistency maps and query options
