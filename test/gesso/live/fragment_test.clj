@@ -1130,3 +1130,18 @@
             (finally
               (deliver proceed true)
               (deref lookup timeout-ms ::timeout))))))))
+
+(deftest cached-fragment-value-equal-to-public-miss-is-not-re-rendered-test
+  ;; protect-task/render-task accept arbitrary values, including the public
+  ;; sentinel formerly used to signal a failed cache lookup. A completed
+  ;; render containing that value must be cached just like any other value.
+  (let [renders (atom 0)
+        manager (fragment/create {:ttl-ms 1000 :clock (constantly 0)})
+        render #(do (swap! renders inc) fragment/miss)]
+    (is (= {:status :success :value fragment/miss}
+           (run-task (fragment/render-task manager fragment-key render))))
+    (is (= 1 (:cache-count (fragment/stats manager))))
+    (is (= {:status :success :value fragment/miss}
+           (run-task (fragment/render-task manager fragment-key render))))
+    (is (= 1 @renders)
+        "a legitimate cached value must not be mistaken for a cache miss")))

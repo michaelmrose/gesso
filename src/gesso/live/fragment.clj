@@ -72,6 +72,10 @@
 (def miss
   ::miss)
 
+;; Internal cache-hit envelopes separate legitimate rendered values from the
+;; public miss sentinel. The lower-level render API accepts arbitrary values.
+(deftype ^:private CacheHit [value])
+
 (def key-dimensions
   [:scope
    :user-key
@@ -433,7 +437,7 @@
               :stored-at (:stored-at entry)
               :expires-at (:expires-at entry)
               :at now})
-            (:value entry))
+            (CacheHit. (:value entry)))
 
           :else
           (do
@@ -657,8 +661,8 @@
   (m/sp
     (let [cached (cache-lookup manager key options)]
       (cond
-        (not= miss cached)
-        cached
+        (instance? CacheHit cached)
+        (.-value ^CacheHit cached)
 
         (not (:singleflight? options))
         (m/? (render-store-task manager key task options))
