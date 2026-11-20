@@ -651,8 +651,9 @@
   "Collapse one generic requirement using trusted XTDB tx ordering.
 
    Generic Live preserves incomparable bases. Once the requirement reaches this
-   XTDB adapter, bases from one database are safely reducible to the greatest
-   transaction id. Mixed/non-XTDB bases fail closed."
+   XTDB adapter, same-database bases are reducible to the greatest transaction
+   id only when their snapshot times do not regress. Contradictory times and
+   mixed/non-XTDB bases fail closed."
   [requirement-value]
   (when-some [requirement'
               (progression/normalize-requirement requirement-value)]
@@ -661,9 +662,20 @@
        (require-xtdb-basis! candidate)
        (if (nil? strongest)
          candidate
-         (if (neg? (compare-bases strongest candidate))
-           candidate
-           strongest)))
+         (let [comparison (compare-bases strongest candidate)
+               newer (if (neg? comparison) candidate strongest)
+               older (if (neg? comparison) strongest candidate)]
+           ;; Transaction-id ordering alone cannot prove that the selected
+           ;; basis satisfies a later system-time requirement. Reject an
+           ;; inversion instead of silently dropping the later snapshot.
+           (when (.isBefore ^Instant (basis-system-time newer)
+                            ^Instant (basis-system-time older))
+             (throw
+              (ex "XTDB progression requirements conflict in transaction and snapshot-time order."
+                  {:older-tx-basis older
+                   :newer-tx-basis newer
+                   :reason :incompatible-required-snapshot-times})))
+           newer)))
      nil
      (progression/required-bases requirement'))))
 
@@ -1144,7 +1156,12 @@
   (doseq [required xtdb-required-bases
           :when (= (basis-database frontier)
                    (basis-database required))]
-    (when (neg? (compare-bases frontier required))
+    ;; A higher transaction id does not by itself prove that the observed
+    ;; snapshot-time satisfies a preexisting later requested time. Reject
+    ;; either missing part of the frontier before publishing a Biff snapshot.
+    (when (or (neg? (compare-bases frontier required))
+              (.isBefore ^Instant (basis-system-time frontier)
+                         ^Instant (basis-system-time required)))
       (throw
        (ex "Current XTDB request frontier is behind an existing authoritative progression requirement."
            {:frontier frontier

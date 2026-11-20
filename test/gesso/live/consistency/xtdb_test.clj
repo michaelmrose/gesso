@@ -939,6 +939,51 @@
          #"cannot witness a backward"
          (xtdb-live/progression-witness b2 b1)))))
 
+(deftest stronger-tx-id-must-not-erase-later-required-snapshot-test
+  ;; Transaction id determines ordering, but a basis with a higher id and
+  ;; earlier timestamp cannot establish the later snapshot also required.
+  ;; Requirement reduction must reject rather than discard that constraint,
+  ;; regardless of input order or whether a query reaches an XTDB call.
+  (let [later (Instant/parse "2026-11-20T18:10:00Z")
+        earlier (Instant/parse "2026-11-20T18:00:00Z")
+        old-id-new-time (xtdb-live/basis :xtdb 40 later)
+        new-id-old-time (xtdb-live/basis :xtdb 41 earlier)
+        ctx {:xtdb/read-connectable :read
+             :gesso.live/progression
+             (progression/requirement-from-bases
+              [old-id-new-time new-id-old-time])}
+        calls (atom 0)]
+    (doseq [candidates [[old-id-new-time new-id-old-time]
+                        [new-id-old-time old-id-new-time]]]
+      (let [req (progression/requirement-from-bases candidates)]
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (xtdb-live/strongest-required-basis req))
+            "No single basis may silently discard a later required time")
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (xtdb-live/read-query-opts nil req)))))
+    (with-xtdb-stub '*q* (fn [& _] (swap! calls inc) :unexpected)
+      (fn []
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (xtdb-live/q-consistent-from ctx sample-query)))
+        (is (zero? @calls)
+            "Unsupported requirement must fail before any XTDB read")))))
+
+(deftest request-frontier-must-not-satisfy-future-snapshot-with-higher-tx-id-test
+  ;; Even if status observes a higher transaction id, an earlier system time
+  ;; cannot establish a preexisting request requirement for a later snapshot.
+  (let [later (Instant/parse "2026-11-20T18:10:00Z")
+        earlier (Instant/parse "2026-11-20T18:00:00Z")
+        required (xtdb-live/basis :xtdb 40 later)
+        ctx {:xtdb/node :authority-node
+             :gesso.live/progression (progression/requirement required)}]
+    (with-xtdb-stub '*status*
+      (fn [_] {:latest-completed-txs
+               {"xtdb" [{:tx-id 41 :system-time earlier}]}})
+      (fn []
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (xtdb-live/bind-request-frontier ctx))
+            "An earlier XTDB status time must not downgrade a browser minimum")))))
+
 (deftest strongest-required-basis-is-order-independent-test
   (let [t1 (Instant/parse "2026-01-01T00:00:00Z")
         t2 (Instant/parse "2026-01-02T00:00:00Z")
