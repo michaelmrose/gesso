@@ -1419,6 +1419,45 @@
                 (is (= :invalid-snapshot-token (:reason (ex-data outcome))))
                 (is (= token (:snapshot-token (ex-data outcome))))))))))))
 
+(deftest bind-request-frontier-rejects-selected-snapshot-ahead-of-observed-frontier-test
+  ;; The selected database's existing Biff token may have established a
+  ;; later snapshot than this node currently reports. Replacing it with the
+  ;; older observed time would silently weaken the request's read constraint.
+  ;; Foreign database coordinates must remain independent.
+  (let [observed (Instant/parse "2026-11-20T18:00:00Z")
+        earlier (.minusSeconds observed 60)
+        later (.plusSeconds observed 60)
+        foreign (.minusSeconds observed 120)
+        status {:latest-completed-txs
+                {"xtdb" [{:tx-id 2021 :system-time observed}]}}
+        ctx {:xtdb/node :authority-node :request/id :ahead-biff-snapshot}
+        token-for (fn [times]
+                    (xt.basis/->time-basis-str
+                     {"xtdb" times "analytics" [foreign]}))]
+    (with-xtdb-stub
+      '*status*
+      (fn [_] status)
+      (fn []
+        (doseq [times [[later] [earlier later]]]
+          (let [token (token-for times)
+                outcome (try
+                          (xtdb-live/bind-request-frontier
+                           (assoc ctx :biff.xtdb/snapshot-token token))
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo outcome)
+                "Never downgrade a selected-database snapshot ahead of status")
+            (when (instance? clojure.lang.ExceptionInfo outcome)
+              (is (= :selected-snapshot-ahead-of-frontier
+                     (:reason (ex-data outcome))))
+              (is (= token (:snapshot-token (ex-data outcome)))))))
+        (doseq [times [[earlier] [earlier observed]]]
+          (let [bound (xtdb-live/bind-request-frontier
+                       (assoc ctx :biff.xtdb/snapshot-token
+                              (token-for times)))]
+            (is (= {"xtdb" [observed] "analytics" [foreign]}
+                   (xt.basis/<-time-basis-str
+                    (:biff.xtdb/snapshot-token bound))))))))))
+
 (deftest bind-request-frontier-preserves-independent-biff-database-snapshots-test
   ;; A Biff snapshot token can represent more than one XTDB database. Binding
   ;; the current database's frontier must replace that database's coordinate

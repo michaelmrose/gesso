@@ -1102,12 +1102,26 @@
              ;; must not be silently discarded when a frontier is present.
              snapshot-token
              (if-some [existing-token (:biff.xtdb/snapshot-token ctx)]
-               (xt.basis/->time-basis-str
-                (assoc (decode-canonical-biff-snapshot!
-                        (basis-database basis-value)
-                        existing-token)
-                       (basis-database basis-value)
-                       [(basis-system-time basis-value)]))
+               (let [database-name (basis-database basis-value)
+                     observed-time (basis-system-time basis-value)
+                     previous-bases (decode-canonical-biff-snapshot!
+                                     database-name existing-token)]
+                 ;; The node's latest completed tx is authoritative for the
+                 ;; selected database. A preexisting Biff snapshot claiming a
+                 ;; later time is not satisfied by that observation. Replacing
+                 ;; it would downgrade an existing selected-database read
+                 ;; constraint without evidence; reject instead. Independent
+                 ;; database time bases are not compared with this frontier.
+                 (when (some #(.isAfter ^Instant % observed-time)
+                             (get previous-bases database-name))
+                   (throw
+                    (ex "Existing Biff snapshot is ahead of the observed XTDB request frontier."
+                        {:database database-name
+                         :snapshot-token existing-token
+                         :observed-frontier basis-value
+                         :reason :selected-snapshot-ahead-of-frontier})))
+                 (xt.basis/->time-basis-str
+                  (assoc previous-bases database-name [observed-time])))
                (basis-snapshot-token basis-value))
              current-requirement (progression/requirement basis-value)
              combined-requirement
