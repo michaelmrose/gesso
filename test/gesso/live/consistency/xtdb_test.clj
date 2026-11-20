@@ -1012,6 +1012,86 @@
           requirement
           {:database :xtdb})))))
 
+(deftest progression-read-opts-preserve-both-consistency-and-caller-constraints-test
+  ;; A plain query allows caller opts to override convenience consistency.
+  ;; Under authoritative progression, that merge must not discard an
+  ;; independently supplied time or an unrelated database's snapshot basis.
+  (let [frontier (Instant/parse "2026-11-20T18:00:00Z")
+        earlier (.minusSeconds frontier 60)
+        later (.plusSeconds frontier 60)
+        archive (.minusSeconds frontier 120)
+        reports (.minusSeconds frontier 180)
+        required (progression/requirement
+                  (xtdb-live/basis :analytics 2025 frontier))
+        token (fn [m] (xt.basis/->time-basis-str m))
+        consistency-token (token {"analytics" [earlier]
+                                  "archive" [archive]})
+        caller-token (token {"analytics" [earlier]
+                             "reports" [reports]})
+        expected {"analytics" [frontier]
+                  "archive" [archive]
+                  "reports" [reports]}
+        ctx {:xtdb/read-connectable :read
+             :gesso.live/progression required}]
+    (let [result (xtdb-live/read-query-opts
+                  {:snapshot-token consistency-token}
+                  required
+                  {:snapshot-token caller-token})]
+      (is (= expected (xt.basis/<-time-basis-str (:snapshot-token result)))
+          "Both distinct databases must retain their independent snapshots"))
+    ;; The consistency source may be stronger than the explicit query option.
+    ;; Checking only the result of merge silently downgrades it.
+    (doseq [[consistency opts expected-reason]
+            [[{:snapshot-time later} {:snapshot-time earlier}
+              :explicit-snapshot-ahead-of-progression]
+             [{:snapshot-token (token {"analytics" [later]})}
+              {:snapshot-token caller-token}
+              :explicit-snapshot-token-ahead-of-progression]
+             [{:snapshot-token "malformed-consistency-token"}
+              {:snapshot-token caller-token}
+              :invalid-snapshot-token]
+             [{:snapshot-token consistency-token}
+              {:snapshot-token (token {"archive" [later]})}
+              :conflicting-independent-snapshot-bases]]]
+      (let [failure (try (xtdb-live/read-query-opts consistency required opts)
+                         nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo failure)
+            (str "Discarded consistency must fail closed: "
+                 (pr-str [consistency opts])))
+        (when (instance? clojure.lang.ExceptionInfo failure)
+          (is (= expected-reason (:reason (ex-data failure)))))))
+    ;; The request wrappers must reject conflicts before consulting XTDB.
+    (let [calls (atom [])
+          io (fn [& args] (swap! calls conj args) :unexpected)]
+      (with-redefs-fn {(xtdb-var '*q*) io
+                       (xtdb-var '*plan-q*) io}
+        (fn []
+          (doseq [invoke [#(xtdb-live/q-consistent-from
+                             (assoc ctx :gesso.live/consistency
+                                    {:snapshot-time later})
+                             sample-query {:snapshot-time earlier})
+                          #(xtdb-live/plan-q-consistent-from
+                             (assoc ctx :gesso.live/consistency
+                                    {:snapshot-token "malformed-consistency-token"})
+                             sample-query {:snapshot-token caller-token})]]
+            (is (thrown? clojure.lang.ExceptionInfo (invoke)))
+            (is (empty? @calls) "Conflicting query constraints must block XTDB I/O"))
+          (let [result (xtdb-live/q-consistent-from
+                        (assoc ctx :gesso.live/consistency
+                               {:snapshot-token consistency-token})
+                        sample-query {:snapshot-token caller-token})]
+            (is (= :unexpected result))
+            (is (= expected
+                   (xt.basis/<-time-basis-str
+                    (:snapshot-token (nth (first @calls) 2)))))))))
+    ;; Without an authoritative progression, the existing documented
+    ;; ordinary query-option precedence remains unchanged.
+    (is (= earlier
+           (:snapshot-time (xtdb-live/read-query-opts
+                            {:snapshot-time later} nil
+                            {:snapshot-time earlier}))))))
+
 (deftest read-progression-preserves-explicit-multi-db-snapshot-token-test
   ;; The caller's explicit XTDB snapshot-token is independently meaningful.
   ;; Installing the progression token must neither discard foreign database

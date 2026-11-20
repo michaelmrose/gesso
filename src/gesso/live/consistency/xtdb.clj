@@ -243,7 +243,7 @@
     :snapshot-token})
 
 (declare normalize-consistency tx-result-consistency consistent-query-opts
-         decode-canonical-biff-snapshot!)
+         query-consistency query-opts decode-canonical-biff-snapshot!)
 
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
@@ -688,18 +688,56 @@
       (not= default-database-name (basis-database required))
       (assoc :database (basis-database required)))))
 
+(defn- combine-progression-snapshot-bases!
+  "Compose separately supplied consistency/caller tokens without losing either.
+
+   The selected database is ultimately fixed to the authoritative progression
+   frontier, but every source must first be checked for an unsatisfied later
+   coordinate. Independent databases retain their bases unless two sources
+   disagree; without additional evidence, choosing either would be unsafe."
+  [required consistency-token caller-token]
+  (let [required-db (basis-database required)
+        observed-time (basis-system-time required)]
+    (reduce
+     (fn [combined token]
+       (let [decoded (decode-canonical-biff-snapshot! required-db token)]
+         (when (some #(.isAfter ^Instant % observed-time)
+                     (get decoded required-db))
+           (throw
+            (ex "Explicit XTDB snapshot token is ahead of authoritative progression."
+                {:snapshot-token token
+                 :required-basis required
+                 :database required-db
+                 :reason :explicit-snapshot-token-ahead-of-progression})))
+         (reduce-kv
+          (fn [acc database times]
+            (when (and (not= database required-db)
+                       (contains? acc database)
+                       (not= (get acc database) times))
+              (throw
+               (ex "Independent XTDB snapshot tokens disagree on a database time basis."
+                   {:database database
+                    :existing-times (get acc database)
+                    :incoming-times times
+                    :reason :conflicting-independent-snapshot-bases})))
+            (assoc acc database times))
+          combined decoded)))
+     {}
+     (filter some? [consistency-token caller-token]))))
+
 (defn- enforce-progression-query-opts
-  [opts requirement-value]
+  [opts requirement-value consistency-options caller-options]
   (if-some [required (strongest-required-basis requirement-value)]
     (let [required-db (basis-database required)
+          observed-time (basis-system-time required)
           explicit-db (when (contains? opts :database)
                         (normalize-database-name (:database opts)))]
-      ;; Progression supplies a minimum read frontier. Overriding a caller's
-      ;; later explicit snapshot-time with the older progression snapshot
-      ;; would silently weaken an independently selected query constraint.
-      ;; Reject the unsupported combination before calling XTDB, rather than
-      ;; pretending the later timestamp was satisfied.
-      (when-some [explicit-time (:snapshot-time opts)]
+      ;; Both consistency metadata and explicit opts are independently supplied
+      ;; read constraints. The ordinary opts merge lets callers override
+      ;; convenience values, but under authoritative progression neither
+      ;; snapshot-time can be silently discarded before its safety check.
+      (doseq [explicit-time (keep :snapshot-time
+                                 [consistency-options caller-options])]
         (let [requested-time
               (cond
                 (instance? Instant explicit-time)
@@ -714,8 +752,7 @@
                      {:snapshot-time explicit-time
                       :database required-db
                       :reason :invalid-explicit-snapshot-time})))]
-          (when (.isAfter ^Instant requested-time
-                          ^Instant (basis-system-time required))
+          (when (.isAfter ^Instant requested-time ^Instant observed-time)
             (throw
              (ex "Explicit XTDB snapshot-time is ahead of authoritative progression."
                  {:snapshot-time explicit-time
@@ -728,33 +765,21 @@
          (ex "Explicit XTDB query database conflicts with authoritative progression."
              {:explicit-database (:database opts)
               :required-database required-db})))
-      ;; Progression is a correctness requirement, not an ordinary preference.
-      ;; An explicit snapshot-token can contain independently established time
-      ;; bases for other databases. Keep those bases, reject any selected-db
-      ;; coordinate later than the trusted progression frontier, and replace
-      ;; only the selected database's coordinate. Malformed supplied tokens
-      ;; must not be silently erased to manufacture an apparently valid read.
-      (let [snapshot-token
-            (if-some [explicit-token (:snapshot-token opts)]
-              (let [existing-bases (decode-canonical-biff-snapshot!
-                                    required-db explicit-token)
-                    observed-time (basis-system-time required)]
-                (when (some #(.isAfter ^Instant % observed-time)
-                            (get existing-bases required-db))
-                  (throw
-                   (ex "Explicit XTDB snapshot token is ahead of authoritative progression."
-                       {:snapshot-token explicit-token
-                        :required-basis required
-                        :database required-db
-                        :reason :explicit-snapshot-token-ahead-of-progression})))
-                (xt.basis/->time-basis-str
-                 (assoc existing-bases required-db [observed-time])))
-              (basis-snapshot-token required))]
+      ;; Validate each supplied canonical token independently. Merge distinct
+      ;; database coordinates instead of losing one to ordinary option-map
+      ;; precedence. A selected-database basis later than progression is never
+      ;; satisfied; older selected coordinates advance to the required time.
+      (let [existing-bases (combine-progression-snapshot-bases!
+                            required
+                            (:snapshot-token consistency-options)
+                            (:snapshot-token caller-options))
+            snapshot-token (xt.basis/->time-basis-str
+                            (assoc existing-bases required-db [observed-time]))]
         (cond-> (-> opts
                     (dissoc :snapshot-time :snapshot-token)
                     (assoc :snapshot-token snapshot-token))
-        (and (not explicit-db)
-             (not= default-database-name required-db))
+          (and (not explicit-db)
+               (not= default-database-name required-db))
           (assoc :database required-db))))
     opts))
 
@@ -780,8 +805,13 @@
   ([consistency progression-value]
    (read-query-opts consistency progression-value nil))
   ([consistency progression-value opts]
-   (-> (consistent-query-opts consistency opts)
-       (enforce-progression-query-opts progression-value))))
+   (let [consistency-options (query-consistency consistency)
+         caller-options (query-opts opts)]
+     (enforce-progression-query-opts
+      (merge consistency-options caller-options)
+      progression-value
+      consistency-options
+      caller-options))))
 
 ;; -----------------------------------------------------------------------------
 ;; Context helpers
