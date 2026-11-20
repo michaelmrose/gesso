@@ -199,6 +199,70 @@
             {:snapshot-time t2
              :key-fn :kebab-case-keyword})))))
 
+(deftest query-opts-rejects-ambiguous-database-identity-test
+  ;; Database selection on reads must observe the same identity contract as
+  ;; writes and portable progression bases. A namespace-qualified keyword
+  ;; cannot silently alias the ordinary database named by its local part.
+  (doseq [database [:tenant-a/shared :tenant-b/shared "" "   " 42]]
+    (let [outcome (try
+                    (xtdb-live/query-opts {:database database})
+                    nil
+                    (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo outcome)
+          (str "Invalid read database must be rejected: " (pr-str database)))
+      (when outcome
+        (is (= database (:database (ex-data outcome)))))))
+  (is (= {:database :shared}
+         (xtdb-live/query-opts {:database :shared})))
+  (is (= {:database "tenant-a/shared" :key-fn :kebab-case-keyword}
+         (xtdb-live/query-opts {:database "tenant-a/shared"
+                                :key-fn :kebab-case-keyword})))
+  (is (= {} (xtdb-live/query-opts {:database nil}))))
+
+(deftest invalid-read-database-cannot-reach-xtdb-query-api-test
+  ;; Every read facade applies query-opts even when no progression is given.
+  ;; An invalid database name must be caught before either public XTDB API
+  ;; executes, not merely during authoritative progression comparison.
+  (doseq [database [:tenant-a/shared :tenant-b/shared "" " " 42]
+          api [:q :q-consistent :q-consistent-from
+               :plan-q :plan-q-consistent :plan-q-consistent-from]]
+    (let [calls (atom 0)
+          opts {:database database}
+          read-ctx {:xtdb/read-connectable :conn}
+          read-op (fn [& _] (swap! calls inc) :read-result)
+          run-read (case api
+                     :q #(xtdb-live/q :conn sample-query opts)
+                     :q-consistent #(xtdb-live/q-consistent :conn sample-query nil opts)
+                     :q-consistent-from #(xtdb-live/q-consistent-from read-ctx sample-query opts)
+                     :plan-q #(xtdb-live/plan-q :conn sample-query opts)
+                     :plan-q-consistent #(xtdb-live/plan-q-consistent :conn sample-query nil opts)
+                     :plan-q-consistent-from #(xtdb-live/plan-q-consistent-from read-ctx sample-query opts))]
+      (with-redefs-fn
+        {(xtdb-var '*q*) read-op
+         (xtdb-var '*plan-q*) read-op}
+        (fn []
+          (let [outcome (try (run-read) nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo outcome)
+                (str "Invalid database must fail before " api ": " (pr-str database)))
+            (when outcome
+              (is (= database (:database (ex-data outcome)))))
+            (is (zero? @calls)
+                "An invalid database identity must never reach an XTDB read API"))))))
+  ;; Valid names retain their exact representation through both query APIs.
+  (let [calls (atom [])
+        read-op (fn [_ _ opts] (swap! calls conj opts) :read-result)]
+    (with-redefs-fn
+      {(xtdb-var '*q*) read-op (xtdb-var '*plan-q*) read-op}
+      (fn []
+        (is (= :read-result
+               (xtdb-live/q :conn sample-query {:database :shared})))
+        (is (= :read-result
+               (xtdb-live/plan-q-consistent :conn sample-query nil
+                                            {:database "tenant-a/shared"})))
+        (is (= [{:database :shared} {:database "tenant-a/shared"}]
+               @calls))))))
+
 (deftest tx-opts-rejects-ambiguous-database-identity-before-use-test
   ;; A transaction database is an authority identity, not a free-form hint.
   ;; A qualified keyword would lose its namespace when XTDB progression is

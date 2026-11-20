@@ -1048,10 +1048,15 @@
 (defn query-opts
   "Build XTDB2 query opts from explicit query opts only.
 
-   This is intentionally plain. For consistency-aware reads, use
-   consistent-query-opts or q-consistent."
+   Reject malformed or ambiguous database identities before invoking an
+   XTDB read, using the same authority-identity contract as tx-opts.
+   Preserve the exact representation of valid caller-supplied database names.
+   For consistency-aware reads, use consistent-query-opts or q-consistent."
   [opts]
-  (select-compact opts query-option-keys))
+  (let [read-options (select-compact opts query-option-keys)]
+    (when (contains? read-options :database)
+      (normalize-database-name (:database read-options)))
+    read-options))
 
 (defn consistent-query-opts
   "Build XTDB2 query opts from consistency plus explicit opts.
