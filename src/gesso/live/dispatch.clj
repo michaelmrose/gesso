@@ -32,6 +32,9 @@
 (def ^:private close-timeout-ms
   1000)
 
+(def ^:private blocked-offer-retry-ms
+  10)
+
 ;; -----------------------------------------------------------------------------
 ;; Small helpers
 ;; -----------------------------------------------------------------------------
@@ -397,15 +400,25 @@
 (defn- enqueue-block!
   [dispatcher job]
   (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
-    (try
-      (.put queue job)
-      (submitted job)
-      (catch InterruptedException e
-        (.interrupt (Thread/currentThread))
-        (throw
-         (ex-info "Interrupted while enqueueing gesso.live dispatch job."
-                  {:job-id (:dispatch/job-id job)}
-                  e))))))
+    ;; Do not hold the lifecycle lock while waiting for capacity. Each offer
+    ;; and the closed check share the same lock as shutdown's queue drain:
+    ;; a blocked submitter must neither hang forever nor enqueue after close.
+    (loop []
+      (let [accepted? (locking (:coalesce-lock dispatcher)
+                        (ensure-open! dispatcher)
+                        (.offer queue job))]
+        (if accepted?
+          (submitted job)
+          (do
+            (try
+              (Thread/sleep blocked-offer-retry-ms)
+              (catch InterruptedException e
+                (.interrupt (Thread/currentThread))
+                (throw
+                 (ex-info "Interrupted while enqueueing gesso.live dispatch job."
+                          {:job-id (:dispatch/job-id job)}
+                          e))))
+            (recur)))))))
 
 (defn- enqueue-drop!
   [dispatcher job]
@@ -475,22 +488,26 @@
   [dispatcher job]
   (ensure-open! dispatcher)
   (let [job' (next-job dispatcher job)]
-    (case (:on-overflow dispatcher)
-      :throw
-      (enqueue-throw! dispatcher job')
-
-      :block
+    (if (= :block (:on-overflow dispatcher))
       (enqueue-block! dispatcher job')
+      ;; Nonblocking submission and the shutdown drain must be serialized.
+      ;; Merely checking :closed? before offering permits stranded work when
+      ;; close! drains the queue between those two operations.
+      (locking (:coalesce-lock dispatcher)
+        (ensure-open! dispatcher)
+        (case (:on-overflow dispatcher)
+          :throw
+          (enqueue-throw! dispatcher job')
 
-      :drop
-      (enqueue-drop! dispatcher job')
+          :drop
+          (enqueue-drop! dispatcher job')
 
-      :coalesce
-      (enqueue-coalesce! dispatcher job')
+          :coalesce
+          (enqueue-coalesce! dispatcher job')
 
-      (throw
-       (ex "Unsupported gesso.live dispatch overflow policy."
-           {:on-overflow (:on-overflow dispatcher)})))))
+          (throw
+           (ex "Unsupported gesso.live dispatch overflow policy."
+               {:on-overflow (:on-overflow dispatcher)})))))))
 
 (defn run-sync!
   "Run job immediately on the caller's thread.

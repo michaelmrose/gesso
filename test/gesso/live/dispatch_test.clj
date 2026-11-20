@@ -379,3 +379,73 @@
         (is (= :drop (:on-overflow s))))
       (finally
         (close d)))))
+
+(deftest close-unblocks-blocked-submit-without-stranding-work-test
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        dropped (promise)
+        d (dispatch/create {:threads 1
+                            :queue-size 1
+                            :on-overflow :block})]
+    (try
+      (dispatch/submit! d {:run (fn []
+                                  (release started)
+                                  (.await release-running))})
+      (is (await-latch started))
+      (dispatch/submit! d {:run (fn [] :queued)
+                           :on-drop #(deliver dropped %)})
+      (let [attempt (future
+                      (try
+                        (dispatch/submit! d {:run (fn [] :stranded)})
+                        (catch clojure.lang.ExceptionInfo e
+                          (ex-message e))))]
+        (is (not (realized? attempt)))
+        (is (= :closed (dispatch/close! d)))
+        (is (= "gesso.live dispatcher is closed."
+               (deref attempt timeout-ms ::timed-out))
+            "a blocked caller must not enqueue new work after close")
+        (is (= :dispatcher-closed (:reason (promise-value dropped))))
+        (is (zero? (.size ^java.util.concurrent.ArrayBlockingQueue
+                          (:queue d)))))
+      (finally
+        (release release-running)
+        (close d)))))
+
+(deftest close-racing-with-nonblocking-submit-never-strands-job-test
+  ;; Force shutdown between the initial open check and queue insertion. The
+  ;; original implementation accepted an orphaned job after close! returned.
+  (doseq [policy [:throw :drop :coalesce]]
+    (let [d (dispatch/create {:threads 1
+                              :queue-size 2
+                              :on-overflow policy})
+          checked (promise)
+          resume (CountDownLatch. 1)
+          first-check? (atom true)
+          original (var-get #'gesso.live.dispatch/ensure-open!)]
+      (try
+        (with-redefs-fn
+          {#'gesso.live.dispatch/ensure-open!
+           (fn [dispatcher]
+             (let [result (original dispatcher)]
+               (when (compare-and-set! first-check? true false)
+                 (deliver checked :open)
+                 (.await resume))
+               result))}
+          (fn []
+            (let [attempt (future
+                            (try
+                              (dispatch/submit! d {:coalesce-key :after-close
+                                                   :run (fn [] :orphan)})
+                              (catch clojure.lang.ExceptionInfo e
+                                (ex-message e))))]
+              (is (= :open (promise-value checked)))
+              (is (= :closed (dispatch/close! d)))
+              (release resume)
+              (is (= "gesso.live dispatcher is closed."
+                     (deref attempt timeout-ms ::timed-out))
+                  (str "closed dispatcher accepted submission under " policy))
+              (is (zero? (.size ^java.util.concurrent.ArrayBlockingQueue
+                                (:queue d)))))))
+        (finally
+          (release resume)
+          (close d))))))
