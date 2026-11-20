@@ -2269,6 +2269,44 @@ data: client-1
         (close-response!
          response-2)))))
 
+(deftest empty-send-does-not-claim-delivery-or-create-mailbox-test
+  ;; Empty OOB work is a no-op, not one logical delivery per target.
+  ;; A phantom send must not create empty pending mailboxes or change the
+  ;; delivery counters, even if a real batch is already pending.
+  (let [channel (test-channel)
+        first-response (connect! channel "client-1")
+        second-response (connect! channel "client-2")]
+    (try
+      (let [result (client/broadcast! channel)]
+        (is (= 0 (:sent result)))
+        (is (= 0 (:woke result)))
+        (is (false? (:woke? result)))
+        (is (= 0 (:fragment-count result)))
+        (is (empty? (client/pending-counts channel)))
+        (is (= 0 (:sent-count (client/state-summary channel)))))
+
+      ;; A no-op payload does not disable target validation.
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"Unsupported gesso.live client delivery target"
+           (client/send! channel {:to [:not-a-target :x]
+                                  :fragments []})))
+
+      ;; An empty send must also leave a real pending batch unchanged.
+      (is (= 1 (:sent (client/send-to-client!
+                        channel "client-1" fragment-a))))
+      (let [count-before (:sent-count (client/state-summary channel))
+            result (client/send! channel {:to [:client "client-1"]
+                                          :fragments []})]
+        (is (= 0 (:sent result)))
+        (is (= 0 (:woke result)))
+        (is (= count-before (:sent-count (client/state-summary channel))))
+        (is (= {"client-1" 1} (client/pending-counts channel)))
+        (is (= [fragment-a] (client/drain-fragments! channel "client-1"))))
+      (finally
+        (close-response! first-response)
+        (close-response! second-response)))))
+
 (deftest sent-count-counts-target-client-deliveries-test
   (let [channel
         (test-channel)

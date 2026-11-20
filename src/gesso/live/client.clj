@@ -958,6 +958,9 @@
    Draining the mailbox ends the epoch, and stream-response always supplies an
    unconditional reconnect/open wake so surviving pending work is recoverable.
 
+   An empty fragment batch is a no-op: no mailbox, wake, or delivery count is
+   recorded. Target validation still applies even for an empty batch.
+
    Returns:
      {:sent ...
       :woke ...
@@ -995,7 +998,10 @@
                  :wake? (:wake? enqueue-outcome)})
                targets)))
          {}
-         selected-targets)
+         ;; Empty fragment batches carry no presentation work. In particular,
+         ;; do not allocate empty mailboxes or count targets as delivered.
+         ;; Target selection still runs above, so invalid targets still fail.
+         (if (seq fragments') selected-targets {}))
 
         woke
         (reduce-kv
