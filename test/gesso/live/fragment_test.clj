@@ -1343,3 +1343,94 @@
                 (deliver resume-store true)
                 (when-let [runner (deref runner-future timeout-ms nil)]
                   (cancel-runner! runner))))))))))
+
+(deftest clear-cache-detaches-old-singleflight-for-new-callers-test
+  ;; Clearing cached presentation is a freshness boundary for calls begun
+  ;; *after* the clear. Pre-clear waiters may finish their original render,
+  ;; but a later request must not join that obsolete in-flight value.
+  (let [manager (fragment/create {:ttl-ms 1000 :clock (constantly 0)})
+        old-start (promise)
+        old-release (promise)
+        old-cancelled (promise)
+        old-count (atom 0)
+        old-task (controlled-success-task old-start old-release :obsolete
+                                          old-count old-cancelled)
+        fresh-start (promise)
+        fresh-release (promise)
+        fresh-cancelled (promise)
+        fresh-count (atom 0)
+        fresh-task (controlled-success-task fresh-start fresh-release :fresh
+                                            fresh-count fresh-cancelled)
+        old-runner (start-task (fragment/protect-task manager fragment-key old-task))]
+    (try
+      (is (= :started (deref old-start timeout-ms ::timeout)))
+      (is (= 1 (:inflight-count (fragment/stats manager))))
+      (fragment/clear-cache! manager)
+      (is (= 0 (:inflight-count (fragment/stats manager)))
+          "a clear must detach obsolete flights for future callers")
+      (let [new-runner (start-task
+                        (fragment/protect-task manager fragment-key fresh-task))]
+        (try
+          (is (= :started (deref fresh-start timeout-ms ::timeout))
+              "a post-clear request must start its own fresh render")
+          (is (= 1 @fresh-count))
+          (deliver fresh-release :go)
+          (deliver old-release :go)
+          (is (= {:status :success :value :fresh} (task-result new-runner)))
+          (is (= {:status :success :value :obsolete} (task-result old-runner))
+              "pre-clear waiters retain their already-started render")
+          (is (= :fresh (get-in @(:cache manager) [fragment-key :value]))
+              "old flight completion must not replace new cached output")
+          (is (= {:status :success :value :fresh}
+                 (run-task (fragment/protect-task manager fragment-key old-task)))
+              "subsequent callers reuse the post-clear result")
+          (is (= 1 @old-count)
+              "cache reuse must not start another obsolete render")
+          (finally
+            (deliver fresh-release :go)
+            (cancel-runner! new-runner))))
+      (finally
+        (deliver old-release :go)
+        (cancel-runner! old-runner)))))
+
+(deftest clear-cache-detached-flight-started-late-cannot-publish-test
+  ;; A flight can acquire a singleflight slot before clear-cache!, then stall
+  ;; before start-flight! installs or starts the renderer. The old flight must
+  ;; retain its pre-clear generation, even if its task starts after the clear.
+  (let [manager (fragment/create {:ttl-ms 1000 :clock (constantly 0)})
+        acquired (promise)
+        proceed (promise)
+        original-start @#'gesso.live.fragment/start-flight!
+        old-count (atom 0)]
+    (with-redefs-fn
+      {#'gesso.live.fragment/start-flight!
+       (fn [m k task options flight]
+         (deliver acquired flight)
+         @proceed
+         (original-start m k task options flight))}
+      (fn []
+        (let [runner-future
+              (future (start-task (fragment/render-task
+                                   manager fragment-key
+                                   (fn [] (swap! old-count inc) :obsolete))))]
+          (try
+            (is (map? (deref acquired timeout-ms ::timeout)))
+            (fragment/clear-cache! manager)
+            (is (zero? (:inflight-count (fragment/stats manager))))
+            (deliver proceed true)
+            (let [old-runner (deref runner-future timeout-ms nil)]
+              (is (some? old-runner))
+              (when old-runner
+                (is (= {:status :success :value :obsolete}
+                       (task-result old-runner)))
+                (is (= {} @(:cache manager))
+                    "a flight acquired before clear cannot cache after starting late")
+                (is (= {:status :success :value :fresh}
+                       (run-task (fragment/render-task manager fragment-key
+                                                       (fn [] :fresh))))
+                    "new requests must run fresh even after old flight finishes")
+                (is (= :fresh (get-in @(:cache manager) [fragment-key :value])))))
+            (finally
+              (deliver proceed true)
+              (when-let [old-runner (deref runner-future timeout-ms nil)]
+                (cancel-runner! old-runner)))))))))

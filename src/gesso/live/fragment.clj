@@ -534,7 +534,12 @@
   [manager]
   (locking (:cache manager)
     (swap! (:cache-generation manager) inc)
-    (reset! (:cache manager) {}))
+    (reset! (:cache manager) {})
+    ;; Existing waiters may finish their old flights, but a post-clear
+    ;; request must never join a render started in the previous generation.
+    ;; release-flight! removes only matching owners, so detached completions
+    ;; cannot unregister replacements acquired after this clear.
+    (reset! (:inflight manager) {}))
   manager)
 
 (defn- cancel-once
@@ -600,10 +605,14 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- new-flight
-  []
+  [manager]
   {:cell (m/dfv)
    :cancel-ref (atom nil)
-   :cancel-requested? (atom false)})
+   :cancel-requested? (atom false)
+   ;; Capture when the flight is acquired, not when its render task begins.
+   ;; A pre-clear owner can be delayed before start-flight! and must not
+   ;; adopt the newer generation merely because it starts afterwards.
+   :cache-generation @(:cache-generation manager)})
 
 (defn- acquire-flight!
   [manager key flight]
@@ -655,7 +664,9 @@
      (m/sp
        ;; Capture generation when the task starts, not when a reusable
        ;; Missionary task value is first constructed.
-       (let [generation @(:cache-generation manager)]
+       (let [generation (if flight
+                          (:cache-generation flight)
+                          @(:cache-generation manager))]
          (debug!
           debug-fn
           :gesso.live.fragment/render-started
@@ -726,7 +737,7 @@
         (m/? (render-store-task manager key task options))
 
         :else
-        (let [flight (new-flight)
+        (let [flight (new-flight manager)
               [role flight'] (acquire-flight! manager key flight)
               debug-fn (:debug-fn options)
               clock (:clock options)]
