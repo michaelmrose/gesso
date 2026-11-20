@@ -287,7 +287,9 @@
      (str "event: " (field-value :event event) "\n"))
    (when retry
      (str "retry: " (field-value :retry retry) "\n"))
-   (data-lines (or data ""))
+   ;; false is a valid value at this low-level framing API. Only nil means
+   ;; that the caller omitted data; `or` would silently replace false with "".
+   (data-lines (if (nil? data) "" data))
    "\n"))
 
 (defn- wire-progression
@@ -325,6 +327,13 @@
         event-name (:event live-event')
         payload (live-event-payload live-event')
         encoded (encoder payload)]
+    ;; The configured encoder owns the wire representation. Coercing nil,
+    ;; booleans, or arbitrary values with `str` can silently lose a payload or
+    ;; publish a representation the application never explicitly selected.
+    (when-not (string? encoded)
+      (throw
+       (ex "gesso.live SSE encoder must return a string."
+           {:encoder/result-class (some-> encoded class .getName)})))
     (event-frame
      {:event event-name
       :data encoded})))

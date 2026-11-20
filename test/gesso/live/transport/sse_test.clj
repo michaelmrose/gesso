@@ -232,6 +232,44 @@
             :consistency-token "tx-1"}
            @seen))))
 
+(deftest event-frame-preserves-false-data-test
+  ;; `false` is meaningful application data. `or` must not turn it into an
+  ;; empty SSE payload when callers use this low-level framing helper.
+  (is (= "data: false\n\n"
+         (sse/event-frame {:data false}))))
+
+(deftest live-event-frame-rejects-nonstring-encoder-results-test
+  ;; An encoder returning nil/false silently sent an empty frame; returning a
+  ;; map or number silently passed an unconfigured wire representation.
+  ;; Requiring a string makes payload encoding an explicit transport boundary.
+  (doseq [encoded [nil false 42 {:payload :not-encoded}]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"SSE encoder must return a string"
+         (sse/live-event-frame
+          live-event
+          {:encoder (constantly encoded)}))
+        (str "SSE encoder must reject " (pr-str encoded)))))
+
+(deftest nonstring-encoder-result-closes-sse-stream-test
+  (let [seen-error (promise)
+        started (sse/start!
+                 (m/seed [live-event])
+                 {:encoder (constantly nil)
+                  :on-error (fn [error _] (deliver seen-error error))})]
+    (try
+      (let [error (deref seen-error timeout-ms ::timeout)]
+        (is (instance? clojure.lang.ExceptionInfo error))
+        (is (= "gesso.live SSE failed to build frame."
+               (when (instance? clojure.lang.ExceptionInfo error)
+                 (ex-message error))))
+        (is (re-find #"SSE encoder must return a string"
+                     (or (some-> error ex-cause ex-message) "")))
+        (is (eventually #(sse/closed? started)))
+        (is (s/closed? (:stream started))))
+      (finally
+        (sse/cancel! started)))))
+
 (deftest live-event-frame-wraps-invalid-live-event-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
