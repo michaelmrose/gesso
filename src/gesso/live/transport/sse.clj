@@ -152,7 +152,13 @@
   [options]
   (let [options' (opts options)]
     (require-http-status-option! options')
-    (require-fn-option! options' :encoder)
+    ;; The encoder is mandatory; an explicit nil must not override pr-str and
+    ;; survive admission only to fail after a source interest is installed.
+    ;; Other callbacks are optional and may legitimately be nil.
+    (when-not (fn? (:encoder options'))
+      (throw
+       (ex "gesso.live SSE :encoder must be a function."
+           {:encoder (:encoder options')})))
     (require-fn-option! options' :debug-fn)
     (require-fn-option! options' :on-error)
     (require-fn-option! options' :on-close)

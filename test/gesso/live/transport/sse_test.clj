@@ -122,6 +122,39 @@
        #":on-close must be a function"
        (sse/prepare-options! {:on-close :not-a-function}))))
 
+(deftest prepare-options-rejects-explicit-nil-encoder-test
+  ;; Unlike the optional tracing/close callbacks, :encoder is required.
+  ;; An explicit nil must not override the default encoder and pass admission.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #":encoder must be a function"
+       (sse/prepare-options! {:encoder nil})))
+  (is (= pr-str (:encoder (sse/prepare-options! {})))))
+
+(deftest nil-encoder-does-not-register-source-interest-test
+  ;; A bad encoder must fail before source-backed transport starts an eager
+  ;; subscription; otherwise an idle stream can remain open until an event.
+  (let [src (source/create)]
+    (try
+      (let [result (try
+                     (sse/start-source!
+                      src
+                      {:subscription {:topic :request :id "req-1"}}
+                      {:encoder nil})
+                     (catch clojure.lang.ExceptionInfo e e))]
+        (try
+          (is (instance? clojure.lang.ExceptionInfo result))
+          (is (and (instance? clojure.lang.ExceptionInfo result)
+                   (re-find #":encoder must be a function"
+                            (ex-message result))))
+          (is (zero? (:subscription-count (source/stats src)))
+              "Invalid SSE encoder must not leave a source subscription")
+          (finally
+            (when (map? result)
+              (sse/cancel! result)))))
+      (finally
+        (source/close! src)))))
+
 (deftest prepare-options-rejects-invalid-booleans-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
