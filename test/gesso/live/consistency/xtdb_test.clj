@@ -971,6 +971,45 @@
               (is (= status (:status (ex-data outcome)))))
             (is (= 1 @status-calls))))))))
 
+(deftest latest-completed-basis-rejects-malformed-status-database-keys-test
+  ;; XTDB status uses exact nonblank string database identities. If an
+  ;; unexpected keyword or blank key contains completed transactions, ordinary
+  ;; string lookup appears empty and could leave Biff reads unpinned. This is
+  ;; malformed STATUS, not evidence of a genuinely empty selected database.
+  (let [t (Instant/parse "2026-09-10T18:30:00Z")
+        completed [{:tx-id 104 :system-time t}]
+        ctx {:xtdb/node :authority-node}]
+    (doseq [by-database [{:xtdb completed}
+                         {" " completed}
+                         {nil completed}
+                         {"xtdb" [] :analytics completed}
+                         {"xtdb" [] "  " completed}]
+            :let [status {:latest-completed-txs by-database}]]
+      (with-xtdb-stub
+        '*status*
+        (fn [_] status)
+        (fn []
+          (doseq [invoke [#(xtdb-live/latest-completed-basis ctx)
+                          #(xtdb-live/bind-request-frontier ctx)]]
+            (let [outcome (try (invoke)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo outcome)
+                  (str "Malformed database keys must fail closed: "
+                       (pr-str by-database)))
+              (when (instance? clojure.lang.ExceptionInfo outcome)
+                (is (= "xtdb" (:database (ex-data outcome))))
+                (is (= status (:status (ex-data outcome))))))))))
+    ;; A valid map with no completed transaction for the selected database
+    ;; remains a legitimate empty-database startup, even if another database
+    ;; has a completed transaction.
+    (with-xtdb-stub
+      '*status*
+      (fn [_] {:latest-completed-txs {"analytics" completed}})
+      (fn []
+        (is (nil? (xtdb-live/latest-completed-basis ctx)))
+        (is (identical? ctx (xtdb-live/bind-request-frontier ctx)))))))
+
 (deftest bind-request-frontier-never-mistakes-missing-status-for-empty-database-test
   ;; The invalid observation is dangerous even with no preexisting browser
   ;; minimum: an unchanged context permits ordinary Biff reads without a

@@ -846,6 +846,20 @@
           (ex "XTDB latest-completed status lacks a usable transaction map."
               {:database database-name
                :status status})))
+       ;; XTDB status indexes completed transactions by exact string database
+       ;; identities. A keyword/nil/blank key can hide a populated database
+       ;; from a valid string lookup, making a malformed observation look like
+       ;; an empty database and leaving the Biff request snapshot unpinned.
+       ;; Validate the complete status keyspace before treating absence as
+       ;; evidence that no transaction has completed for the selected database.
+       (when-not (every? (fn [database-id]
+                           (and (string? database-id)
+                                (not (str/blank? database-id))))
+                         (keys by-database))
+         (throw
+          (ex "XTDB latest-completed status contains malformed database identities."
+              {:database database-name
+               :status status})))
        (let [entries (get by-database database-name)]
          ;; In particular, a present nil entry or [nil] would otherwise be
          ;; read as an empty database by first/when-some. This must fail
