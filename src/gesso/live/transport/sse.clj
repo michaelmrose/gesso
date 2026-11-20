@@ -101,6 +101,18 @@
            {k f}))))
   options)
 
+(defn- require-http-status-option!
+  [options]
+  (let [status (:status options)]
+    ;; The SSE response is constructed after a source flow is opened. A
+    ;; malformed Ring status would otherwise surface at the HTTP boundary,
+    ;; after the Live interest and stream producers were already installed.
+    (when-not (and (integer? status) (<= 100 status 599))
+      (throw
+       (ex "gesso.live SSE :status must be an HTTP status integer (100-599)."
+           {:status status}))))
+  options)
+
 (defn- require-boolean-option!
   [options k]
   (let [v (get options k)]
@@ -139,6 +151,7 @@
    prepared options map directly."
   [options]
   (let [options' (opts options)]
+    (require-http-status-option! options')
     (require-fn-option! options' :encoder)
     (require-fn-option! options' :debug-fn)
     (require-fn-option! options' :on-error)

@@ -1157,6 +1157,33 @@
       (finally
         (source/close! src)))))
 
+(deftest prepare-options-rejects-invalid-http-status-test
+  ;; Malformed status values are not valid Ring responses. A source-backed
+  ;; stream must reject them before registering a Live interest.
+  (doseq [status [nil false "200" 0 99 600 -1]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #":status must be an HTTP status integer"
+         (sse/prepare-options! {:status status}))
+        (str "Invalid SSE response status " (pr-str status))))
+  (is (= 200 (:status (sse/prepare-options! nil))))
+  (is (= 204 (:status (sse/prepare-options! {:status 204})))))
+
+(deftest invalid-sse-http-status-does-not-register-source-interest-test
+  (let [src (source/create)]
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #":status must be an HTTP status integer"
+           (sse/start-source!
+            src
+            {:subscription {:topic :request :id "req-1"}}
+            {:status nil})))
+      (is (= 0 (:tap-count (source/stats src)))
+          "A rejected Ring response must not leave any live source tap")
+      (finally
+        (source/close! src)))))
+
 (deftest prepare-options-rejects-invalid-headers-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
