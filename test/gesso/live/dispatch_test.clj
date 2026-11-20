@@ -578,3 +578,36 @@
       (finally
         (release release-running)
         (dispatch/close! d)))))
+
+(deftest shutdown-interrupts-workers-before-drop-hooks-test
+  ;; Dropped-job callbacks are external application code. A callback may wait
+  ;; for a running worker to terminate before releasing its own resources.
+  ;; Shutdown must request the worker stop before invoking that callback.
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        worker-stopped (promise)
+        observed-in-hook (promise)
+        d (dispatch/create {:threads 1 :queue-size 1 :on-overflow :throw})]
+    (try
+      (dispatch/submit!
+       d {:run (fn []
+                  (release started)
+                  (try
+                    (.await release-running)
+                    (catch InterruptedException _
+                      nil)
+                    (finally
+                      (deliver worker-stopped :stopped))))})
+      (is (await-latch started))
+      (dispatch/submit!
+       d {:run (fn [] :queued)
+          :on-drop (fn [_]
+                     (deliver observed-in-hook
+                              (deref worker-stopped timeout-ms ::timeout)))})
+      (is (= :closed (dispatch/close! d)))
+      (is (= :stopped (promise-value observed-in-hook))
+          "shutdown must interrupt the runner before invoking drop hooks")
+      (is (= :stopped (promise-value worker-stopped)))
+      (finally
+        (release release-running)
+        (dispatch/close! d)))))

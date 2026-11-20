@@ -332,20 +332,18 @@
     item))
 
 (defn- drain-queued-jobs!
-  [dispatcher reason]
-  (let [jobs (locking (:coalesce-lock dispatcher)
-               (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
-                 (loop [dropped []
-                        item (.poll queue)]
-                   (if item
-                     (recur (conj dropped (queued-item-job item))
-                            (.poll queue))
-                     (do
-                       (reset! (:pending-by-key dispatcher) {})
-                       dropped)))))]
-    ;; All queue/index changes are complete before calling application hooks.
-    ;; A hook may synchronously await another thread using coalesce-lock.
-    (mapv #(notify-drop! % reason) jobs)))
+  "Retire all queued jobs and coalescing slots without invoking app callbacks."
+  [dispatcher]
+  (locking (:coalesce-lock dispatcher)
+    (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
+      (loop [dropped []
+             item (.poll queue)]
+        (if item
+          (recur (conj dropped (queued-item-job item))
+                 (.poll queue))
+          (do
+            (reset! (:pending-by-key dispatcher) {})
+            dropped))))))
 
 (defn close!
   "Close dispatcher, drop queued jobs, and interrupt worker threads.
@@ -355,14 +353,20 @@
    depending on what the job function does."
   [dispatcher]
   (when (compare-and-set! (:closed? dispatcher) false true)
-    (drain-queued-jobs! dispatcher :dispatcher-closed)
-    ;; A job can close its own dispatcher. The caller is already running and
-    ;; exits its worker loop after returning; interrupting/joining that same
-    ;; thread would turn a valid close! into InterruptedException.
-    (let [caller (Thread/currentThread)]
+    ;; Retire the queue first, but do not invoke application callbacks yet.
+    ;; A dropped job's hook may wait for a running worker to exit, so all
+    ;; remaining workers must receive their interrupt before that hook runs.
+    (let [dropped-jobs (drain-queued-jobs! dispatcher)
+          caller (Thread/currentThread)]
+      ;; A job can close its own dispatcher. The caller is already running and
+      ;; exits its worker loop after returning; never interrupt/join itself.
       (doseq [^Thread worker (:workers dispatcher)]
         (when-not (identical? caller worker)
           (.interrupt worker)))
+      ;; As in v1957, hooks run outside coalesce-lock. Notify before joining:
+      ;; a worker's shutdown path may itself wait for a drop notification.
+      (doseq [job dropped-jobs]
+        (notify-drop! job :dispatcher-closed))
       (doseq [^Thread worker (:workers dispatcher)]
         (when-not (identical? caller worker)
           (.join worker close-timeout-ms)))))
