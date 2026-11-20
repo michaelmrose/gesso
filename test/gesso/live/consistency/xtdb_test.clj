@@ -857,6 +857,37 @@
             {:tx-id 8 :snapshot-time t}
             :analytics)))))
 
+(deftest consistency-to-basis-rejects-disagreeing-time-coordinates-test
+  ;; An authoritative basis is a paired tx-id/system-time observation.
+  ;; If both metadata fields are present but disagree, choosing system-time
+  ;; with `or` silently discards a stronger snapshot-time requirement.
+  (let [committed (Instant/parse "2026-11-20T18:00:00Z")
+        future (.plusSeconds committed 60)
+        past (.minusSeconds committed 60)
+        expected (xtdb-live/basis :analytics 2022 committed)]
+    (doseq [snapshot-time [future past]
+            :let [metadata {:tx-id 2022
+                            :system-time committed
+                            :snapshot-time snapshot-time}
+                  failure (try (xtdb-live/consistency->basis metadata :analytics)
+                               nil
+                               (catch clojure.lang.ExceptionInfo e e))]]
+      (is (instance? clojure.lang.ExceptionInfo failure)
+          (str "Conflicting authoritative times must be rejected: "
+               (pr-str snapshot-time)))
+      (when (instance? clojure.lang.ExceptionInfo failure)
+        (is (= committed (:system-time (ex-data failure))))
+        (is (= snapshot-time (:snapshot-time (ex-data failure))))))
+    ;; Valid complete and partially supplied metadata still construct the
+    ;; same basis, including the public execute-tx normalized form.
+    (doseq [metadata [{:tx-id 2022 :system-time committed}
+                      {:tx-id 2022 :snapshot-time committed}
+                      {:tx-id 2022
+                       :system-time committed
+                       :snapshot-time committed}]]
+      (is (= expected
+             (xtdb-live/consistency->basis metadata :analytics))))))
+
 (deftest tx-result-progression-needs-complete-public-result-test
   (let [t (Instant/parse "2026-01-01T00:00:00Z")
         result (tx-key 9 t)

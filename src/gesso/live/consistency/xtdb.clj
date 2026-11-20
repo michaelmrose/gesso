@@ -552,6 +552,17 @@
   ([consistency database]
    (let [{:keys [tx-id system-time snapshot-time]}
          (normalize-consistency consistency)
+         ;; An authoritative tx basis cannot be established from mutually
+         ;; contradictory metadata. Both fields originate from the same
+         ;; committed transaction in the normal execute-tx result; choosing
+         ;; system-time with `or` would silently discard the other constraint.
+         _ (when (and (some? system-time)
+                      (some? snapshot-time)
+                      (not= system-time snapshot-time))
+             (throw
+              (ex "XTDB consistency has conflicting system-time and snapshot-time coordinates."
+                  {:system-time system-time
+                   :snapshot-time snapshot-time})))
          time (or system-time snapshot-time)]
      (when (and (some? tx-id)
                 (some? time))
