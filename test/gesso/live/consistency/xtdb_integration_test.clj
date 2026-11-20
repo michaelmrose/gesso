@@ -116,6 +116,46 @@
       (is (contains? result :tx-id))
       (is (integer? (:tx-id result))))))
 
+(deftest fresh-real-xtdb-node-has-no-authoritative-frontier-until-first-write-test
+  ;; XTDB 2.2 reports an uninitialized database as one real TransactionKey
+  ;; whose map-visible tx-id and system-time are both nil, not as []. This is
+  ;; its known empty-state sentinel, not a committed transaction with missing
+  ;; coordinates. An ordinary map with two nil fields remains malformed.
+  (let [fresh (start-test-node!)
+        ctx {:xtdb/node fresh :request/id :first-read}]
+    (try
+      (let [entries (get-in (xt/status fresh) [:latest-completed-txs "xtdb"])
+            placeholder (first entries)]
+        (is (= 1 (count entries)))
+        (is (instance? TransactionKey placeholder))
+        (is (map? placeholder))
+        (is (nil? (:tx-id placeholder)))
+        (is (nil? (:system-time placeholder)))
+        (is (nil? (xtdb-live/latest-completed-basis ctx))
+            "Fresh node has no completed frontier yet")
+        (is (identical? ctx (xtdb-live/bind-request-frontier ctx))
+            "First request should remain valid before any write")
+        ;; The sentinel says "empty," not "every requirement is satisfied."
+        (let [required (xtdb-live/tx-result-progression
+                        {:tx-id 1
+                         :system-time (Instant/parse "2026-01-01T00:00:00Z")})]
+          (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo
+               #"no completed transaction"
+               (xtdb-live/bind-request-frontier
+                (assoc ctx :gesso.live/progression required))))))
+      (let [receipt (xt/execute-tx fresh (put-user-op
+                                         (unique-id "first-write") "Ada"))
+            expected (xtdb-live/tx-result-basis receipt)
+            observed (xtdb-live/latest-completed-basis ctx)
+            bound (xtdb-live/bind-request-frontier ctx)]
+        (is (= expected observed))
+        (is (= (xtdb-live/basis-snapshot-token expected)
+               (:biff.xtdb/snapshot-token bound)))
+        (is (= (xtdb-live/tx-result-progression receipt)
+               (:gesso.live/progression bound))))
+      (finally (.close fresh)))))
+
 (deftest real-xtdb-node-is-accepted-by-raw-connectable-from-helpers-test
   ;; XTDB's real node implements IPersistentMap even though it is a raw XTDB
   ;; connectable, not a Gesso/Biff request context. Context extraction must not

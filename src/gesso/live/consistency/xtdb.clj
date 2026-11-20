@@ -858,8 +858,9 @@
            by-database (:latest-completed-txs status)]
        ;; An absent/malformed status observation is not evidence that a
        ;; database has no completed transactions. XTDB represents a known
-       ;; empty database by an absent entry or empty completed-tx list in a
-       ;; present :latest-completed-txs map. Never silently return an
+       ;; empty database by an absent entry, empty completed-tx list, or its
+       ;; singleton nil-coordinate TransactionKey sentinel in a present
+       ;; :latest-completed-txs map. Never silently return an
        ;; unconstrained Biff request merely because node status is invalid.
        (when-not (map? by-database)
          (throw
@@ -896,16 +897,32 @@
          (when-some [completed (first entries)]
            (let [tx-id (:tx-id completed)
                  system-time (:system-time completed)]
-             (when (or (nil? tx-id) (nil? system-time))
+             (cond
+               ;; An untouched XTDB 2.2 node reports one typed TxKey with
+               ;; both coordinates nil. This is its empty-database sentinel,
+               ;; not a partially observed committed transaction. Requiring
+               ;; the exact singleton, map-like TransactionKey prevents an
+               ;; ordinary malformed status map from masquerading as empty.
+               (and (= 1 (count entries))
+                    (transaction-key? completed)
+                    (map? completed)
+                    (= #{:tx-id :system-time} (set (keys completed)))
+                    (nil? tx-id)
+                    (nil? system-time))
+               nil
+
+               (or (nil? tx-id) (nil? system-time))
                (throw
                 (ex "XTDB latest-completed transaction has incomplete authoritative coordinates."
                     {:database database-name
                      :latest-completed completed
                      :tx-id tx-id
-                     :system-time system-time})))
-             (basis database-name
-                    tx-id
-                    (status-system-time->instant system-time)))))))))
+                     :system-time system-time}))
+
+               :else
+               (basis database-name
+                      tx-id
+                      (status-system-time->instant system-time))))))))))
 
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper snapshot-token]
