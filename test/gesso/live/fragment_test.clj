@@ -1188,3 +1188,44 @@
     (is (= 8 (:cache-count (fragment/stats manager))))
     (is (= (set (range 22 30)) (set (keys @cache)))
         "bounded cache must retain the latest eight writes at a tied clock")))
+
+(deftest bounded-cache-evicts-by-publication-order-when-writes-overlap-test
+  ;; The clock is monotonic, but a render can read its time and be delayed
+  ;; during cache publication while another render publishes first. Ordering
+  ;; eviction by timestamp then :write-order would discard the newest
+  ;; *published* fragment, even though a publication order is available.
+  (let [tick (atom 1000)
+        manager (fragment/create {:ttl-ms 10000
+                                  :max-cache-entries 1
+                                  :clock #(swap! tick inc)})
+        cache (:cache manager)
+        options (:options manager)
+        first-paused (promise)
+        resume-first (promise)
+        original-prune @#'gesso.live.fragment/prune-cache]
+    (with-redefs-fn
+      {#'gesso.live.fragment/prune-cache
+       (fn [entries now cap]
+         (when (and (contains? entries :earlier-clock)
+                    (not (contains? entries :later-clock)))
+           (deliver first-paused true)
+           @resume-first)
+         (original-prune entries now cap))}
+      (fn []
+        (let [early (future
+                      (@#'gesso.live.fragment/cache-store!
+                       manager :earlier-clock :later-publication options))]
+          (try
+            (is (= true (deref first-paused timeout-ms ::timeout))
+                "the first write must be paused after capturing its clock")
+            (@#'gesso.live.fragment/cache-store!
+             manager :later-clock :earlier-publication options)
+            (is (= #{:later-clock} (set (keys @cache))))
+            (deliver resume-first true)
+            (is (= :later-publication (deref early timeout-ms ::timeout)))
+            (is (= #{:earlier-clock} (set (keys @cache)))
+                "last published value must survive a bounded cache eviction")
+            (is (= :later-publication (get-in @cache [:earlier-clock :value])))
+            (finally
+              (deliver resume-first true)
+              (deref early timeout-ms ::timeout))))))))

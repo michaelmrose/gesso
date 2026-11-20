@@ -394,12 +394,15 @@
       (let [evict-count (- (count without-expired) max-cache-entries)
             kept (->> without-expired
                       (sort-by (fn [[_ entry]]
-                                 ;; Multiple renders can complete within one
-                                 ;; millisecond. Break timestamp ties by
-                                 ;; actual cache publication order, not map
-                                 ;; iteration order.
-                                 [(:stored-at entry)
-                                  (or (:write-order entry) 0)]))
+                                 ;; The timestamp is captured before the
+                                 ;; atomic cache update. Concurrent renders can
+                                 ;; publish in the opposite order from their
+                                 ;; captured times, so publication order must
+                                 ;; determine eviction, not just break ties.
+                                 ;; Unnumbered legacy/test entries still sort
+                                 ;; by their original timestamps.
+                                 [(or (:write-order entry) 0)
+                                  (:stored-at entry)]))
                       (drop evict-count)
                       (into {}))]
         {:cache kept
