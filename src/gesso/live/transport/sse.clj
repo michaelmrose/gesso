@@ -153,6 +153,13 @@
       (throw
        (ex "gesso.live SSE HTTP header name is invalid."
            {:header header})))
+    ;; Content-Type is not an application override: EventSource requires the
+    ;; SSE MIME type. Case variants are the same HTTP field, even if Ring
+    ;; would otherwise retain them as separate keys in its header map.
+    (when (.equalsIgnoreCase ^String header "content-type")
+      (throw
+       (ex "gesso.live SSE Content-Type header is reserved."
+           {:header header :value value})))
     (when-not (or (valid-http-header-value? value)
                   (and (sequential? value)
                        (seq value)

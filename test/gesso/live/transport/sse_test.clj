@@ -1255,6 +1255,37 @@
       (finally
         (source/close! src)))))
 
+(deftest sse-content-type-cannot-be-overridden-test
+  ;; EventSource requires text/event-stream. Even a differently-cased header
+  ;; name is an HTTP Content-Type override, not an independent custom header.
+  (doseq [headers [{"content-type" "application/json"}
+                   {"Content-Type" "text/plain"}
+                   {"CONTENT-TYPE" sse/content-type}]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"SSE Content-Type header is reserved"
+         (sse/prepare-options! {:headers headers}))
+        (str "SSE MIME type must not be overridden: " (pr-str headers)))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"SSE Content-Type header is reserved"
+         (sse/response (s/stream) {:headers headers})))))
+
+(deftest reserved-sse-content-type-rejected-before-source-registration-test
+  (let [src (source/create)]
+    (try
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"SSE Content-Type header is reserved"
+           (sse/start-source!
+            src
+            {:subscription {:topic :request :id "req-1"}}
+            {:headers {"Content-Type" "text/plain"}})))
+      (is (zero? (:subscription-count (source/stats src)))
+          "Invalid SSE MIME type must not allocate an interested consumer")
+      (finally
+        (source/close! src)))))
+
 (deftest prepare-options-rejects-invalid-headers-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
