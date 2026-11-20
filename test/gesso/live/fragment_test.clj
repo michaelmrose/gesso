@@ -1145,3 +1145,29 @@
            (run-task (fragment/render-task manager fragment-key render))))
     (is (= 1 @renders)
         "a legitimate cached value must not be mistaken for a cache miss")))
+
+(deftest per-render-shorter-ttl-must-not-reuse-older-cache-entry-test
+  ;; A render-task call can override the manager's cache TTL. A value older
+  ;; than the calling render's chosen TTL must not be reused merely because
+  ;; it was originally stored with a longer TTL. Conversely, a later caller
+  ;; with a longer TTL must not resurrect an entry whose stored TTL expired.
+  (let [now (atom 0)
+        renders (atom 0)
+        manager (fragment/create {:ttl-ms 100 :clock #(deref now)})
+        render #(swap! renders inc)
+        run (fn [options]
+              (run-task (fragment/render-task manager fragment-key render options)))]
+    (is (= {:status :success :value 1} (run nil)))
+    (reset! now 20)
+    (is (= {:status :success :value 2} (run {:ttl-ms 10}))
+        "requesting a 10-ms TTL cannot reuse a 20-ms-old entry")
+    (reset! now 25)
+    (is (= {:status :success :value 2} (run {:ttl-ms 10}))
+        "the new entry should be reusable within the narrower TTL")
+    (reset! now 35)
+    (is (= {:status :success :value 3} (run {:ttl-ms 10}))
+        "the 10-ms entry expires at the requested boundary")
+    (reset! now 50)
+    (is (= {:status :success :value 4} (run {:ttl-ms 100}))
+        "a longer request TTL cannot resurrect a previously expired entry")
+    (is (= 4 @renders))))

@@ -428,7 +428,11 @@
               :at now})
             miss)
 
-          (cache-entry-valid? now entry)
+          (and (cache-entry-valid? now entry)
+               ;; A caller may request a stricter TTL than the one used to
+               ;; store this entry. Respect both the stored expiry and the
+               ;; current render's maximum acceptable age.
+               (< now (+ (:stored-at entry) (:ttl-ms options))))
           (do
             (debug!
              debug-fn
