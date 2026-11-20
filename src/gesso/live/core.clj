@@ -1190,6 +1190,8 @@
   "Common XTDB2 write + live invalidation workflow.
 
    Steps:
+     0. validate caller changes, async dispatch options, and request progression
+        before entering the authoritative transaction
      1. execute XTDB2 tx ops with execute-tx!
      2. capture returned consistency and authoritative progression
      3. assoc consistency onto ctx and conservatively compose ctx progression
@@ -1266,13 +1268,17 @@
         emit-mode (normalize-emit-mode emit)
         changes (normalize-changes options)
         _ (require-async-dispatch-options! emit-mode changes options)
+        ;; Request progression is fully available before execution. Reject a
+        ;; malformed refresh requirement at admission; otherwise an XTDB write
+        ;; can commit before post-commit context composition discovers it.
+        ctx-progression (progression ctx)
         tx-result-map (execute-tx! ctx tx-ops tx-options)
         consistency' (:consistency tx-result-map)
         transaction-progression (:progression tx-result-map)
         {:keys [ctx' changes']}
         (try
           (let [ctx-progression (progression/compose
-                                 (progression ctx)
+                                 ctx-progression
                                  transaction-progression)
                 ctx' (-> ctx
                          (with-consistency consistency')

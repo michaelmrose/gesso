@@ -891,6 +891,51 @@
               (is (= 0 @emissions)
                   "No notifications may precede full batch admission"))))))))
 
+(deftest transact-and-notify-rejects-invalid-context-progression-before-commit-test
+  ;; A malformed request progression is available before XTDB execution.
+  ;; Reject it before the authoritative write rather than discovering it in
+  ;; post-commit context composition, even for notification-free mutations.
+  (doseq [context-data [{:gesso.live/progression 42}
+                        {:progression "bad-progression"}
+                        {:gesso.live/progression
+                         {:gesso.live.progression/type
+                          :gesso.live.progression/requirement
+                          :gesso.live.progression/version 1
+                          :bases []}}]
+          emit-mode [false :sync :async]]
+    (let [ctx (merge {:xtdb/connectable :node} context-data)
+          writes (atom 0)
+          notification-count (atom 0)]
+      (with-redefs [live/emit-expanded!
+                    (fn [& _] (swap! notification-count inc) {:status :emitted})
+                    live/submit-expanded!
+                    (fn [& _] (swap! notification-count inc) {:status :submitted})]
+        (with-xtdb-stub
+          'execute-tx-from!
+          (fn [& _]
+            (swap! writes inc)
+            {:tx-result {:tx-id 42}
+             :consistency sample-consistency
+             :progression sample-commit-progression})
+          (fn []
+            (let [error (try
+                          (live/transact-and-notify!
+                           {:options {}}
+                           ctx
+                           {:tx-ops sample-tx
+                            :change request-change
+                            :emit emit-mode})
+                          nil
+                          (catch Throwable error error))]
+              (is (= :gesso.live.progression/error
+                     (:error/type (ex-data error)))
+                  (str "Malformed request progression must fail at admission: "
+                       (pr-str context-data)))
+              (is (zero? @writes)
+                  "An invalid request context must never reach XTDB execution")
+              (is (zero? @notification-count)
+                  "Rejected requests cannot publish invalidations"))))))))
+
 (deftest transact-and-notify-requires-tx-ops-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
@@ -1577,6 +1622,38 @@
     :col :counter/value
     :topic :atomic-swap-counter
     :default 0}))
+
+(deftest live-swap-rejects-invalid-context-progression-before-guarded-write-test
+  ;; A successful guarded write must not be followed by a preventable request
+  ;; progression error. This is also necessary with :emit false.
+  (let [writes (atom 0)
+        reads (atom 0)
+        transforms (atom 0)
+        ctx {:xtdb/connectable :write-node
+             :gesso.live/progression :invalid-progression}]
+    (with-redefs [synced/live-read (fn [& _] (swap! reads inc) 1)
+                  synced/guarded-tx-ops (fn [& _] [[:guard]])]
+      (with-xtdb-stub
+        'execute-tx-from!
+        (fn [& _]
+          (swap! writes inc)
+          {:tx-result {:tx-id 42}
+           :consistency sample-consistency
+           :progression sample-commit-progression})
+        (fn []
+          (let [error (try
+                        (live/live-swap!
+                         ctx atomic-swap-counter
+                         (fn [value] (swap! transforms inc) (inc value))
+                         {:system {:options {}} :emit false})
+                        nil
+                        (catch Throwable error error))]
+            (is (= :gesso.live.progression/error
+                   (:error/type (ex-data error))))
+            (is (zero? @writes)
+                "Invalid context progression must not commit guarded mutation")
+            (is (= 1 @reads))
+            (is (= 1 @transforms))))))))
 
 (deftest live-swap-retries-only-after-xtdb-assert-conflict-test
   (let [read-count (atom 0)
