@@ -173,7 +173,13 @@
                       (event-option-contract options''))
     (require-fn-option! options'' :debug-fn)
     (require-fn-option! options'' :on-close)
-    (require-fn-option! options'' :take!)
+    ;; :take! is the required Manifold adapter used by every collected flow.
+    ;; Explicit nil must not pass optional-callback validation and then fail
+    ;; during the first pull, after an eager source interest is registered.
+    (when-not (fn? (:take! options''))
+      (throw
+       (ex "gesso.live flow :take! must be a function."
+           {:take! (:take! options'')})))
     (require-boolean-option! options'' :relieve?)
     options''))
 

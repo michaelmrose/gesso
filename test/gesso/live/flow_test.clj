@@ -238,6 +238,37 @@
        (flow/prepare-options! {:subscription request-sub
                                :on-close :not-a-function}))))
 
+(deftest prepare-options-rejects-explicit-nil-take-adapter-test
+  ;; :take! is a required internal adapter once supplied. A nil override
+  ;; previously escaped admission and failed only when collection began.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #":take! must be a function"
+       (flow/prepare-options!
+        {:subscription request-sub :take! nil}))))
+
+(deftest nil-take-adapter-does-not-register-source-interest-test
+  ;; Reject malformed collection adapters before installing an eager indexed
+  ;; subscription. This must also hold if the caller never collects the flow.
+  (let [src (source/create)]
+    (try
+      (let [outcome (try
+                      (flow/open-source-flow!
+                       src {:subscription request-sub :take! nil})
+                      (catch clojure.lang.ExceptionInfo e e))]
+        (try
+          (is (instance? clojure.lang.ExceptionInfo outcome))
+          (is (and (instance? clojure.lang.ExceptionInfo outcome)
+                   (re-find #":take! must be a function"
+                            (ex-message outcome))))
+          (is (zero? (:tap-count (source/stats src)))
+              "Invalid take adapter cannot install an uncollected interest")
+          (finally
+            (when (map? outcome)
+              ((:close! outcome))))))
+      (finally
+        (source/close! src)))))
+
 (deftest prepare-options-rejects-invalid-relieve-flag-test
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo
