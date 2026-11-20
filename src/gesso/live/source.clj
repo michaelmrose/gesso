@@ -401,24 +401,28 @@
 
    Idempotent."
   [source]
-  ;; Close and registration share the same lock. A stream either registers
-  ;; while open and is closed here, or cannot register after shutdown begins.
-  (locking (:coalesce-lock source)
-    (when (compare-and-set! (:closed? source) false true)
-      (let [taps ^ConcurrentHashMap (:taps source)
-            subscriptions ^ConcurrentHashMap (:subscriptions source)
-            scheduler ^ScheduledThreadPoolExecutor (:scheduler source)]
-        (doseq [stream (.values taps)]
-          (s/close! stream))
-        (doseq [stream (.values subscriptions)]
-          (s/close! stream))
-        (.clear taps)
-        (.clear subscriptions)
-        (.clear ^ConcurrentHashMap (:subscription-keys source))
-        (.clear ^ConcurrentHashMap (:by-scope source))
-        (.clear ^ConcurrentHashMap (:pending source))
-        (.clear ^ConcurrentHashMap (:cooldowns source))
-        (.shutdownNow scheduler))))
+  ;; Registration and retirement share the lifecycle lock: a stream is either
+  ;; captured by this close or cannot register after the closed flag is set.
+  ;; Manifold stream close hooks are external callbacks, however, so run them
+  ;; only AFTER releasing that lock. Hooks can wait for other threads that
+  ;; must themselves acquire the registration lock.
+  (let [streams (locking (:coalesce-lock source)
+                  (when (compare-and-set! (:closed? source) false true)
+                    (let [taps ^ConcurrentHashMap (:taps source)
+                          subscriptions ^ConcurrentHashMap (:subscriptions source)
+                          scheduler ^ScheduledThreadPoolExecutor (:scheduler source)
+                          streams (into [] (concat (.values taps)
+                                                   (.values subscriptions)))]
+                      (.clear taps)
+                      (.clear subscriptions)
+                      (.clear ^ConcurrentHashMap (:subscription-keys source))
+                      (.clear ^ConcurrentHashMap (:by-scope source))
+                      (.clear ^ConcurrentHashMap (:pending source))
+                      (.clear ^ConcurrentHashMap (:cooldowns source))
+                      (.shutdownNow scheduler)
+                      streams)))]
+    (doseq [stream streams]
+      (s/close! stream)))
   :closed)
 
 (defn stats

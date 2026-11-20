@@ -666,3 +666,25 @@
       (finally
         (deliver allow-schedule :continue)
         (source/close! src)))))
+
+(deftest source-close-stream-hooks-run-outside-lifecycle-lock-test
+  ;; Manifold runs a stream's on-closed hooks as part of close!. Such a hook
+  ;; may wait for another thread that needs the source registration lock.
+  ;; Source shutdown must never hold that lock while invoking app callbacks.
+  (doseq [consumer [:broadcast :indexed]]
+    (let [src (source/create)
+          stream (case consumer
+                   :broadcast (source/changes src)
+                   :indexed (source/subscribe src {:topic :request :id "req-1"}))
+          acquired (promise)]
+      (s/on-closed stream
+                   (fn []
+                     (let [other-thread (future
+                                          (locking (:coalesce-lock src)
+                                            :lock-available))]
+                       (deliver acquired (deref other-thread 500 ::timeout)))))
+      (is (= :closed (source/close! src)))
+      (is (s/closed? stream))
+      (is (= :lock-available (deref acquired 1000 ::timeout))
+          (str consumer " on-closed callbacks must not hold the source lock"))
+      (is (= 0 (:tap-count (source/stats src)))))))
