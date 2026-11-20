@@ -1006,6 +1006,80 @@
           requirement
           {:database :xtdb})))))
 
+(deftest read-progression-rejects-later-explicit-snapshot-time-before-io-test
+  ;; A progression is a minimum authoritative read frontier. Installing its
+  ;; snapshot token must not erase an explicit later XTDB snapshot-time: that
+  ;; would silently downgrade a caller's already selected read constraint.
+  (let [frontier-time (Instant/parse "2026-11-20T18:00:00Z")
+        later (.plusSeconds frontier-time 120)
+        older (.minusSeconds frontier-time 120)
+        requirement (progression/requirement
+                     (xtdb-live/basis :analytics 2023 frontier-time))
+        context {:xtdb/read-connectable :request-connection
+                 :gesso.live/progression requirement}
+        actual-io (atom 0)
+        unexpected (fn [& _] (swap! actual-io inc) :unexpected)]
+    (doseq [[consistency opts] [[{:snapshot-time later} nil]
+                                [nil {:snapshot-time later}]
+                                [{:snapshot-time older}
+                                 {:snapshot-time later}]]]
+      (let [err (try (xtdb-live/read-query-opts consistency requirement opts)
+                     nil
+                     (catch clojure.lang.ExceptionInfo e e))]
+        (is (instance? clojure.lang.ExceptionInfo err))
+        (when (instance? clojure.lang.ExceptionInfo err)
+          (is (= :explicit-snapshot-ahead-of-progression
+                 (:reason (ex-data err))))
+          (is (= later (:snapshot-time (ex-data err)))))))
+    ;; XTDB also supplies java.time.ZonedDateTime at physical boundaries.
+    ;; Compare the actual instant, not timezone-sensitive text.
+    (let [zoned-later (ZonedDateTime/ofInstant later
+                                            (java.time.ZoneId/of "America/Los_Angeles"))
+          err (try (xtdb-live/read-query-opts
+                    {:snapshot-time zoned-later} requirement)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo err))
+      (when (instance? clojure.lang.ExceptionInfo err)
+        (is (= :explicit-snapshot-ahead-of-progression
+               (:reason (ex-data err))))))
+    (let [err (try (xtdb-live/read-query-opts
+                    {:snapshot-time false} requirement)
+                   nil
+                   (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo err))
+      (when (instance? clojure.lang.ExceptionInfo err)
+        (is (= :invalid-explicit-snapshot-time
+               (:reason (ex-data err))))))
+    (with-redefs-fn
+      {(xtdb-var '*q*) unexpected
+       (xtdb-var '*plan-q*) unexpected}
+      (fn []
+        (doseq [invoke [#(xtdb-live/q-consistent-from
+                           (assoc context :gesso.live/consistency
+                                  {:snapshot-time later}) sample-query)
+                        #(xtdb-live/q-consistent-from
+                           context sample-query {:snapshot-time later})
+                        #(xtdb-live/plan-q-consistent-from
+                           context sample-query {:snapshot-time later})]]
+          (let [err (try (invoke) nil
+                         (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo err))
+            (when (instance? clojure.lang.ExceptionInfo err)
+              (is (= :explicit-snapshot-ahead-of-progression
+                     (:reason (ex-data err))))))
+          (is (zero? @actual-io)
+              "A stronger explicit snapshot must never be downgraded and queried"))))
+    ;; An older, equal, or absent time may still be advanced to the
+    ;; authoritative frontier by the existing progression query translation.
+    (doseq [requested [nil older frontier-time]]
+      (is (= (xtdb-live/basis-snapshot-token
+              (xtdb-live/basis :analytics 2023 frontier-time))
+             (:snapshot-token
+              (xtdb-live/read-query-opts
+               (when requested {:snapshot-time requested})
+               requirement)))))))
+
 (deftest progression-from-prefers-canonical-context-key-test
   (let [t1 (Instant/parse "2026-01-01T00:00:00Z")
         t2 (Instant/parse "2026-01-02T00:00:00Z")

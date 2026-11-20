@@ -693,6 +693,34 @@
     (let [required-db (basis-database required)
           explicit-db (when (contains? opts :database)
                         (normalize-database-name (:database opts)))]
+      ;; Progression supplies a minimum read frontier. Overriding a caller's
+      ;; later explicit snapshot-time with the older progression snapshot
+      ;; would silently weaken an independently selected query constraint.
+      ;; Reject the unsupported combination before calling XTDB, rather than
+      ;; pretending the later timestamp was satisfied.
+      (when-some [explicit-time (:snapshot-time opts)]
+        (let [requested-time
+              (cond
+                (instance? Instant explicit-time)
+                explicit-time
+
+                (instance? ZonedDateTime explicit-time)
+                (.toInstant ^ZonedDateTime explicit-time)
+
+                :else
+                (throw
+                 (ex "XTDB explicit snapshot-time must be an Instant or ZonedDateTime when progression is required."
+                     {:snapshot-time explicit-time
+                      :database required-db
+                      :reason :invalid-explicit-snapshot-time})))]
+          (when (.isAfter ^Instant requested-time
+                          ^Instant (basis-system-time required))
+            (throw
+             (ex "Explicit XTDB snapshot-time is ahead of authoritative progression."
+                 {:snapshot-time explicit-time
+                  :required-basis required
+                  :database required-db
+                  :reason :explicit-snapshot-ahead-of-progression})))))
       (when (and explicit-db
                  (not= explicit-db required-db))
         (throw
