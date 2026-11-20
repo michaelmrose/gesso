@@ -1162,7 +1162,28 @@
     (assoc wrapped-ctx :xtdb/node bound-node)))
 
 (declare frontier-xtdb-required-bases
-         require-frontier-satisfies-existing-xtdb!)
+         require-frontier-satisfies-existing-xtdb!
+         consistency-from)
+
+(defn- compose-wrapped-xtdb-consistency!
+  "Preserve independently admitted XTDB query consistency into a fresh request.
+
+   Biff may execute the handler with a new Ring request lacking the original
+   explicit :await-token or other consistency metadata. Runtime constraints
+   can add independent fields, but an opaque value supplied at admission must
+   not be silently replaced by a different value for the same key."
+  [admitted-consistency wrapped-ctx]
+  (let [runtime-consistency (consistency-from wrapped-ctx)]
+    (doseq [[field value] admitted-consistency
+            :when (and (contains? runtime-consistency field)
+                       (not= value (get runtime-consistency field)))]
+      (throw
+       (ex "Deferred XTDB query consistency conflicts with an admitted read constraint."
+           {:reason :conflicting-runtime-xtdb-consistency
+            :field field
+            :admitted-value value
+            :runtime-value (get runtime-consistency field)})))
+    (merge admitted-consistency runtime-consistency)))
 
 (defn- compose-wrapped-biff-progression!
   "Preserve admitted progression when a Biff wrapper supplies the handler ctx.
@@ -1228,7 +1249,8 @@
     (xt.basis/->time-basis-str fixed-bases)))
 
 (defn- fixed-biff-snapshot-wrapper
-  [existing-wrapper database-name snapshot-token frontier admitted-requirement bound-node]
+  [existing-wrapper database-name snapshot-token frontier admitted-requirement
+   admitted-consistency bound-node]
   ;; Validate the outer Biff wrapper at request-frontier admission. In
   ;; particular, an explicitly supplied false must not be treated like nil
   ;; and silently bypass the wrapper whose behavior the caller relies on.
@@ -1251,7 +1273,10 @@
                  (ex "Existing Biff wrapper must supply a request context map."
                      {:ctx ctx})))
               (require-wrapped-xtdb-node! bound-node ctx)
-              (let [combined-requirement
+              (let [combined-consistency
+                    (compose-wrapped-xtdb-consistency!
+                     admitted-consistency ctx)
+                    combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name frontier admitted-requirement ctx)
                     composed-token
@@ -1260,9 +1285,11 @@
                      (:biff.xtdb/snapshot-token ctx))]
                 (f (preserve-admitted-xtdb-node
                     bound-node
-                    (assoc ctx
-                           :biff.xtdb/snapshot-token composed-token
-                           :gesso.live/progression combined-requirement)))))]
+                    (cond-> (assoc ctx
+                                   :biff.xtdb/snapshot-token composed-token
+                                   :gesso.live/progression combined-requirement)
+                      (seq combined-consistency)
+                      (assoc :gesso.live/consistency combined-consistency))))))]
         (if-some [outer-wrapper existing-wrapper]
           (outer-wrapper fixed-body)
           fixed-body)))))
@@ -1306,7 +1333,8 @@
    wrapper may introduce or replace a token after initial frontier binding.
    Recheck its snapshot at execution time and retain admitted independent
    database bases instead of silently losing them."
-  [existing-wrapper database-name admitted-token admitted-requirement bound-node]
+  [existing-wrapper database-name admitted-token admitted-requirement
+   admitted-consistency bound-node]
   ;; A request may have admitted foreign snapshots/progression even when Biff
   ;; has no preexisting wrapper. Install the same execution-time guard for
   ;; those obligations instead of letting a fresh handler request erase them.
@@ -1330,7 +1358,10 @@
                  (ex "Existing Biff wrapper must supply a request context map."
                      {:ctx wrapped-ctx})))
               (require-wrapped-xtdb-node! bound-node wrapped-ctx)
-              (let [combined-requirement
+              (let [combined-consistency
+                    (compose-wrapped-xtdb-consistency!
+                     admitted-consistency wrapped-ctx)
+                    combined-requirement
                     (compose-wrapped-biff-progression!
                      database-name nil admitted-requirement wrapped-ctx)
                     composed-token (compose-empty-biff-snapshot!
@@ -1342,7 +1373,9 @@
                          composed-token
                          (assoc :biff.xtdb/snapshot-token composed-token)
                          combined-requirement
-                         (assoc :gesso.live/progression combined-requirement))))))]
+                         (assoc :gesso.live/progression combined-requirement)
+                         (seq combined-consistency)
+                         (assoc :gesso.live/consistency combined-consistency))))))]
         (if-some [outer-wrapper existing-wrapper]
           (outer-wrapper guarded-body)
           guarded-body)))))
@@ -1424,6 +1457,7 @@
       (ex "XTDB request frontier binding requires a context map."
           {:ctx ctx})))
    (let [bound-node (node-from ctx)
+         admitted-consistency (consistency-from ctx)
          existing-requirement (progression-from ctx)
          xtdb-required-bases (frontier-xtdb-required-bases existing-requirement)]
      (if-some [basis-value (latest-completed-basis ctx database)]
@@ -1472,6 +1506,7 @@
                  snapshot-token
                  basis-value
                  combined-requirement
+                 admitted-consistency
                  bound-node)))
        ;; With no completed selected-database transaction, an existing browser
        ;; minimum for that database cannot be satisfied by any Biff snapshot.
@@ -1514,6 +1549,7 @@
                  database-name
                  (:biff.xtdb/snapshot-token ctx)
                  existing-requirement
+                 admitted-consistency
                  bound-node)))))))
 
 ;; -----------------------------------------------------------------------------

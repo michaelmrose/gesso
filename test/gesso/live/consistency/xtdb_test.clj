@@ -2492,6 +2492,63 @@
             (is (= token (handler {:request/id :new-database})))))
         (is (= 5 @called))))))
 
+(deftest deferred-biff-requests-preserve-admitted-read-consistency-test
+  ;; Unlike progression, explicit read consistency can require an XTDB wait.
+  ;; A fresh Ring request must not discard the admitted :await-token, even
+  ;; though the Biff snapshot and progression are already preserved.
+  (let [observed (Instant/parse "2026-11-20T23:50:00Z")
+        query-calls (atom [])
+        body-calls (atom 0)
+        body (fn [request]
+               (swap! body-calls inc)
+               (xtdb-live/q-consistent-from request sample-query))]
+    (doseq [completed? [true false]]
+      (with-redefs-fn
+        {(xtdb-var '*status*)
+         (fn [_]
+           {:latest-completed-txs
+            {"xtdb" (if completed?
+                      [{:tx-id 2039 :system-time observed}]
+                      [])}})
+         (xtdb-var '*q*)
+         (fn [connectable _query opts]
+           (swap! query-calls conj [connectable opts])
+           :queried)}
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier
+                       {:xtdb/node :authority-node
+                        :gesso.live/consistency
+                        {:await-token "admitted-await"}})
+                handler ((:biff.core/wrap-db-snapshot bound) body)]
+            (is (= :queried (handler {:request/id :fresh})))
+            (is (= "admitted-await" (:await-token (second (last @query-calls))))
+                "A fresh request must still wait for the admitted transaction")
+            (is (= :queried
+                   (handler {:xtdb/consistency {:default-tz "UTC"}})))
+            (is (= {:await-token "admitted-await" :default-tz "UTC"}
+                   (select-keys (second (last @query-calls))
+                                [:await-token :default-tz]))
+                "Independent runtime consistency fields should compose")
+            (is (= :queried
+                   (handler {:gesso.live/consistency
+                             {:await-token "admitted-await"}})))
+            (is (= "admitted-await" (:await-token (second (last @query-calls)))))
+            (doseq [request [{:gesso.live/consistency
+                              {:await-token "different-await"}}
+                             {:consistency {:await-token "different-await"}}
+                             {:gesso.live/consistency false}]]
+              (let [before @body-calls
+                    prior-q (count @query-calls)
+                    failure (try (handler request)
+                                 nil
+                                 (catch clojure.lang.ExceptionInfo e e))]
+                (is (instance? clojure.lang.ExceptionInfo failure)
+                    "A conflicting or malformed deferred wait must fail closed")
+                (is (= before @body-calls)
+                    "Conflicting consistency must fail before the handler")
+                (is (= prior-q (count @query-calls))
+                    "Conflicting consistency must fail before XTDB I/O")))))))))
+
 (deftest deferred-biff-requests-retain-admitted-xtdb-node-for-reads-test
   ;; A freshly allocated Ring request may carry neither an XTDB node nor an
   ;; explicit read connectable. The frontier wrapper must make the admitted
