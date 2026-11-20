@@ -609,25 +609,28 @@
 ;; -----------------------------------------------------------------------------
 
 (defn- new-flight
-  [manager]
+  [_manager]
   {:cell (m/dfv)
    :cancel-ref (atom nil)
-   :cancel-requested? (atom false)
-   ;; Capture when the flight is acquired, not when its render task begins.
-   ;; A pre-clear owner can be delayed before start-flight! and must not
-   ;; adopt the newer generation merely because it starts afterwards.
-   :cache-generation @(:cache-generation manager)})
+   :cancel-requested? (atom false)})
 
 (defn- acquire-flight!
   [manager key flight]
-  (let [inflight (:inflight manager)]
-    (loop []
-      (let [m @inflight]
-        (if-let [existing (get m key)]
-          [:join existing]
-          (if (compare-and-set! inflight m (assoc m key flight))
-            [:owner flight]
-            (recur)))))))
+  ;; Acquiring a flight and clearing the cache use one lifecycle boundary.
+  ;; Otherwise an owner could register midway through clear-cache!, only to
+  ;; be detached by that same clear. Capture generation at this acquisition
+  ;; point, not at construction or delayed render start.
+  (locking (:cache manager)
+    (let [inflight (:inflight manager)]
+      (loop []
+        (let [m @inflight]
+          (if-let [existing (get m key)]
+            [:join existing]
+            (let [owner (assoc flight :cache-generation
+                               @(:cache-generation manager))]
+              (if (compare-and-set! inflight m (assoc m key owner))
+                [:owner owner]
+                (recur)))))))))
 
 (defn- release-flight!
   [manager key flight]

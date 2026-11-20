@@ -1490,3 +1490,75 @@
         (deliver allow-cancellation true)
         (deliver old-release true)
         (cancel-runner! old-runner)))))
+
+(deftest clear-cache-serializes-with-new-flight-acquisition-test
+  ;; clear-cache! detaches the old singleflight registry under the cache lock.
+  ;; An owner must not be admitted halfway through that boundary, then get
+  ;; detached by the same clear as though it had been an older render.
+  (let [manager (fragment/create {:ttl-ms 1000 :clock (constantly 0)})
+        entered (promise)
+        acquired (promise)
+        worker (atom nil)]
+    (try
+      (locking (:cache manager)
+        (reset! worker
+                (future
+                  (deliver entered true)
+                  (deliver acquired
+                           (@#'gesso.live.fragment/acquire-flight!
+                            manager fragment-key
+                            (@#'gesso.live.fragment/new-flight manager)))))
+        (is (= true (deref entered timeout-ms ::timeout)))
+        (is (= ::timeout (deref acquired 100 ::timeout))
+            "a new singleflight acquisition must wait for the cache-clear lock")
+        (fragment/clear-cache! manager)
+        (is (zero? (:inflight-count (fragment/stats manager)))))
+      (let [[role flight] (deref acquired timeout-ms ::timeout)]
+        (is (= :owner role))
+        (is (identical? flight (get @(:inflight manager) fragment-key))
+            "a post-clear owner must remain registered")
+        (is (= @(:cache-generation manager) (:cache-generation flight))
+            "acquiring after clear must use the current cache generation"))
+      (finally
+        (when-let [f @worker]
+          (deref f timeout-ms nil))
+        (fragment/clear-cache! manager)))))
+
+(deftest flight-created-before-cache-clear-but-acquired-after-can-cache-test
+  ;; An already-created but not yet registered flight must acquire the latest
+  ;; cache generation when it actually becomes owner. Otherwise it renders
+  ;; for the current request but discards its own valid cache publication.
+  (let [manager (fragment/create {:ttl-ms 1000 :clock (constantly 0)})
+        waiting-to-acquire (promise)
+        allow-acquisition (promise)
+        rendered (atom 0)
+        original-acquire @#'gesso.live.fragment/acquire-flight!]
+    (with-redefs-fn
+      {#'gesso.live.fragment/acquire-flight!
+       (fn [m k flight]
+         (deliver waiting-to-acquire true)
+         @allow-acquisition
+         (original-acquire m k flight))}
+      (fn []
+        (let [request (future
+                        (start-task (fragment/render-task manager fragment-key
+                                                          #(do (swap! rendered inc) :fresh))))]
+          (try
+            (is (= true (deref waiting-to-acquire timeout-ms ::timeout)))
+            (fragment/clear-cache! manager)
+            (deliver allow-acquisition true)
+            (let [runner (deref request timeout-ms nil)]
+              (is (some? runner))
+              (when runner
+                (is (= {:status :success :value :fresh} (task-result runner)))
+                (is (= :fresh (get-in @(:cache manager) [fragment-key :value]))
+                    "an owner acquired after clear must cache its result")
+                (is (= {:status :success :value :fresh}
+                       (run-task (fragment/render-task manager fragment-key
+                                                       #(do (swap! rendered inc) :fresh)))))
+                (is (= 1 @rendered)
+                    "a later caller should reuse the freshly cached result")))
+            (finally
+              (deliver allow-acquisition true)
+              (when-let [runner (deref request timeout-ms nil)]
+                (cancel-runner! runner)))))))))
