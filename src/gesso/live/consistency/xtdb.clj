@@ -1128,6 +1128,33 @@
             :reason :invalid-snapshot-token}
            cause)))))
 
+(declare frontier-xtdb-required-bases
+         require-frontier-satisfies-existing-xtdb!)
+
+(defn- compose-wrapped-biff-progression!
+  "Preserve admitted progression when a Biff wrapper supplies the handler ctx.
+
+   A wrapper may receive a fresh Ring request with no canonical progression, or
+   introduce an additional one. The latter must not replace the admission-time
+   requirement or claim a selected-database basis beyond the observed frontier."
+  [database-name frontier admitted-requirement wrapped-ctx]
+  (let [combined (progression/compose
+                  admitted-requirement
+                  (progression-from wrapped-ctx))
+        required-bases (frontier-xtdb-required-bases combined)]
+    (if frontier
+      (require-frontier-satisfies-existing-xtdb! frontier required-bases)
+      (when-some [unsatisfied
+                  (some (fn [candidate]
+                          (when (= database-name (basis-database candidate))
+                            candidate))
+                        required-bases)]
+        (throw
+         (ex "XTDB has no completed transaction and cannot satisfy an existing authoritative progression requirement."
+             {:database database-name
+              :required unsatisfied}))))
+    combined))
+
 (defn- compose-fixed-biff-snapshot!
   "Preserve deferred Biff snapshot obligations without weakening the frontier.
 
@@ -1168,7 +1195,7 @@
     (xt.basis/->time-basis-str fixed-bases)))
 
 (defn- fixed-biff-snapshot-wrapper
-  [existing-wrapper database-name snapshot-token]
+  [existing-wrapper database-name snapshot-token frontier admitted-requirement]
   (let [fixed-bases (decode-canonical-biff-snapshot!
                      database-name snapshot-token)]
     (fn [f]
@@ -1182,12 +1209,16 @@
                 (throw
                  (ex "Existing Biff wrapper must supply a request context map."
                      {:ctx ctx})))
-              (f
-               (assoc ctx
-                      :biff.xtdb/snapshot-token
-                      (compose-fixed-biff-snapshot!
-                       database-name fixed-bases
-                       (:biff.xtdb/snapshot-token ctx)))))]
+              (let [combined-requirement
+                    (compose-wrapped-biff-progression!
+                     database-name frontier admitted-requirement ctx)
+                    composed-token
+                    (compose-fixed-biff-snapshot!
+                     database-name fixed-bases
+                     (:biff.xtdb/snapshot-token ctx))]
+                (f (assoc ctx
+                          :biff.xtdb/snapshot-token composed-token
+                          :gesso.live/progression combined-requirement))))]
         (if existing-wrapper
           (do
             (when-not (ifn? existing-wrapper)
@@ -1236,7 +1267,7 @@
    wrapper may introduce or replace a token after initial frontier binding.
    Recheck its snapshot at execution time and retain admitted independent
    database bases instead of silently losing them."
-  [existing-wrapper database-name admitted-token]
+  [existing-wrapper database-name admitted-token admitted-requirement]
   (when-not (ifn? existing-wrapper)
     (throw
      (ex "Existing Biff request snapshot wrapper must be callable."
@@ -1255,12 +1286,17 @@
            (throw
             (ex "Existing Biff wrapper must supply a request context map."
                 {:ctx wrapped-ctx})))
-         (let [composed-token (compose-empty-biff-snapshot!
+         (let [combined-requirement
+               (compose-wrapped-biff-progression!
+                database-name nil admitted-requirement wrapped-ctx)
+               composed-token (compose-empty-biff-snapshot!
                                database-name admitted-bases
                                (:biff.xtdb/snapshot-token wrapped-ctx))]
            (body (cond-> wrapped-ctx
                    composed-token
-                   (assoc :biff.xtdb/snapshot-token composed-token)))))))))
+                   (assoc :biff.xtdb/snapshot-token composed-token)
+                   combined-requirement
+                   (assoc :gesso.live/progression combined-requirement)))))))))
 
 (defn- frontier-xtdb-required-bases
   "Validate every basis that explicitly claims XTDB authority.
@@ -1380,7 +1416,9 @@
                 (fixed-biff-snapshot-wrapper
                  (:biff.core/wrap-db-snapshot ctx)
                  (basis-database basis-value)
-                 snapshot-token)))
+                 snapshot-token
+                 basis-value
+                 combined-requirement)))
        ;; With no completed selected-database transaction, an existing browser
        ;; minimum for that database cannot be satisfied by any Biff snapshot.
        ;; Returning an unchanged context would silently permit unconstrained
@@ -1419,7 +1457,8 @@
            (assoc ctx :biff.core/wrap-db-snapshot
                   (guarded-empty-biff-snapshot-wrapper
                    existing-wrapper database-name
-                   (:biff.xtdb/snapshot-token ctx)))
+                   (:biff.xtdb/snapshot-token ctx)
+                   existing-requirement))
            ctx))))))
 
 ;; -----------------------------------------------------------------------------

@@ -2211,6 +2211,62 @@
           (is (identical? foreign (xtdb-live/bind-request-frontier foreign))))
         (is (= 6 @observations))))))
 
+(deftest deferred-biff-wrappers-preserve-authoritative-progression-test
+  ;; The Biff handler may receive a new request map, not the context returned
+  ;; by bind-request-frontier. The server-established progression must reach
+  ;; that request, and later wrapper-supplied requirements cannot replace it.
+  (let [time (Instant/parse "2026-11-20T21:00:00Z")
+        archive-time (.minusSeconds time 60)
+        selected (xtdb-live/basis :xtdb 2033 time)
+        foreign (xtdb-live/basis :analytics 7 archive-time)
+        foreign-requirement (progression/requirement foreign)
+        stronger (xtdb-live/basis :xtdb 2034 (.plusSeconds time 60))
+        stronger-requirement (progression/requirement stronger)
+        other {:authority :unrelated-service :version "v1"}
+        other-requirement (progression/requirement other)
+        body-calls (atom 0)
+        body (fn [request]
+               (swap! body-calls inc)
+               (xtdb-live/progression-from request))
+        existing-wrapper (fn [handler]
+                           (fn [request] (handler request)))
+        base {:xtdb/node :authority-node
+              :gesso.live/progression foreign-requirement
+              :biff.core/wrap-db-snapshot existing-wrapper}]
+    (doseq [completed? [true false]]
+      (with-xtdb-stub '*status*
+        (fn [_] {:latest-completed-txs
+                 {"xtdb" (if completed?
+                           [{:tx-id 2033 :system-time time}]
+                           [])}})
+        (fn []
+          (let [bound (xtdb-live/bind-request-frontier base)
+                wrapper (:biff.core/wrap-db-snapshot bound)
+                handler (wrapper body)
+                expected (if completed? #{selected foreign} #{foreign})]
+            (is (= expected
+                   (progression/required-bases (handler {:request/id :new-map})))
+                "The handler must receive the admitted progression from the binding context")
+            (is (= (conj expected other)
+                   (progression/required-bases
+                    (handler {:gesso.live/progression other-requirement})))
+                "Independent runtime progression must compose with admitted requirements")
+            (let [before @body-calls
+                  error (try (handler {:gesso.live/progression stronger-requirement})
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo error)
+                  "An unsatisfied runtime XTDB requirement cannot reach the body")
+              (is (= before @body-calls)
+                  "Reject unsupported runtime progression before handler execution"))
+            (let [before @body-calls
+                  error (try (handler {:gesso.live/progression false})
+                             nil
+                             (catch clojure.lang.ExceptionInfo e e))]
+              (is (instance? clojure.lang.ExceptionInfo error)
+                  "A malformed deferred progression cannot be discarded")
+              (is (= before @body-calls)))))))))
+
 (deftest empty-frontier-preserves-bound-and-deferred-foreign-snapshots-test
   ;; No selected-database completion means no basis for "xtdb". But a Biff
   ;; snapshot for an independent database already admitted at binding time is
