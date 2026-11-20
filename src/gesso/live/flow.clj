@@ -457,8 +457,14 @@
                                      :gesso.live.flow/stream-value
                                      {:value payload
                                       :at (now-ms)})
-                                    (when (emit-safely! emit! payload debug-fn)
-                                      (pull!)))))))
+                                    ;; Refusal of an ordinary value is also a
+                                    ;; terminal condition for this observer.
+                                    ;; Without retiring the underlying stream,
+                                    ;; its source registration remains live
+                                    ;; after the bridge has stopped pulling.
+                                    (if (emit-safely! emit! payload debug-fn)
+                                      (pull!)
+                                      (stop!)))))))
 
                    (drain-ready! []
                      (loop []

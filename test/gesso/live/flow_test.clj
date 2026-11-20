@@ -1265,3 +1265,38 @@
               (finally
                 (cancel-runner! runner)
                 (s/close! stream)))))))))
+
+(deftest source-flow-nonterminal-emit-refusal-retires-subscription-test
+  ;; Refusing an ordinary invalidation must retire the same resources as
+  ;; refusing a terminal emission. Otherwise the collector stops pulling but
+  ;; its source registration remains live and buffers future invalidations.
+  ;; Exercise both indexed and custom-predicate broadcast subscriptions.
+  (doseq [mode [:indexed :broadcast]]
+    (let [src (source/create)
+          close-count (atom 0)
+          refused (promise)
+          options (cond-> {:subscription request-sub
+                           :relieve? false
+                           :on-close #(swap! close-count inc)}
+                    (= mode :broadcast)
+                    (assoc :interested? (fn [_ _] true)))]
+      (try
+        (with-redefs-fn
+          {#'gesso.live.flow/emit-safely!
+           (fn [_emit _value _debug]
+             (deliver refused true)
+             false)}
+          (fn []
+            (let [runner (collect-runner (flow/flow-for-source src options))]
+              (try
+                (source/emit! src request-invalidation)
+                (is (= true (deref refused timeout-ms ::timeout))
+                    (str mode " invalidation emission was refused"))
+                (is (eventually #(zero? (:tap-count (source/stats src))))
+                    (str mode " source registration must be retired"))
+                (is (eventually #(= 1 @close-count))
+                    (str mode " stream close hook must run exactly once"))
+                (finally
+                  (cancel-runner! runner))))))
+        (finally
+          (source/close! src))))))
