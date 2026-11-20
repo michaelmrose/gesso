@@ -47,8 +47,14 @@
    The data expression is inside the guard, so with debugging off it is not
    evaluated."
   [debug-fn event data]
+  ;; Diagnostic callbacks are observational. A failing tracing hook must
+  ;; never suppress rendering, poison the cache, strand a singleflight owner,
+  ;; or replace a genuine renderer exception.
   `(when-let [f# ~debug-fn]
-     (f# (assoc ~data :event ~event))))
+     (try
+       (f# (assoc ~data :event ~event))
+       (catch Exception _#
+         nil))))
 
 ;; -----------------------------------------------------------------------------
 ;; Defaults

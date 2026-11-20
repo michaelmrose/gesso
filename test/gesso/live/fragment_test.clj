@@ -923,3 +923,61 @@
     (is (nil? (:hx-get target-attrs)))
     (is (nil? (:hx-trigger target-attrs)))
     (is (nil? (:sse-swap target-attrs)))))
+
+;; -----------------------------------------------------------------------------
+;; Diagnostic callback failures must not change fragment delivery
+;; -----------------------------------------------------------------------------
+
+(deftest throwing-debug-hook-does-not-break-cache-hit-or-render-test
+  (let [attempts (atom [])
+        renders (atom 0)
+        manager (fragment/create
+                 {:ttl-ms 1000
+                  :clock (constantly 10)
+                  :debug-fn (fn [event]
+                              (swap! attempts conj (:event event))
+                              (throw (ex-info "diagnostic unavailable" {})))})
+        render-fn (fn []
+                    (swap! renders inc)
+                    :html)]
+    (is (= {:status :success :value :html}
+           (run-task (fragment/render-task manager fragment-key render-fn))))
+    (is (= {:status :success :value :html}
+           (run-task (fragment/render-task manager fragment-key render-fn))))
+    (is (= 1 @renders)
+        "a diagnostic exception must not disable useful TTL caching")
+    (is (= 1 (:cache-count (fragment/stats manager))))
+    (is (some #{:gesso.live.fragment/cache-miss} @attempts))
+    (is (some #{:gesso.live.fragment/cache-hit} @attempts))))
+
+(deftest throwing-debug-hook-does-not-strand-singleflight-owner-test
+  (let [manager (fragment/create
+                 {:debug-fn (fn [event]
+                              (when (= :gesso.live.fragment/singleflight-owner
+                                       (:event event))
+                                (throw (ex-info "owner trace unavailable" {}))))})]
+    (try
+      (is (= {:status :success :value :html}
+             (run-task (fragment/render-task manager fragment-key
+                                             (fn [] :html)))))
+      (is (eventually #(zero? (:inflight-count (fragment/stats manager))))
+          "the owner must start and release its flight despite tracing errors")
+      (finally
+        (fragment/clear-key! manager fragment-key)))))
+
+(deftest throwing-debug-hook-does-not-replace-render-failure-test
+  (let [cause (ex-info "original render failed" {:operation :render})
+        attempts (atom 0)
+        manager (fragment/create
+                 {:singleflight? false
+                  :debug-fn (fn [event]
+                              (when (= :gesso.live.fragment/render-failed
+                                       (:event event))
+                                (swap! attempts inc)
+                                (throw (ex-info "trace failed" {}))))})
+        result (run-task (fragment/render-task manager fragment-key
+                                               (fn [] (throw cause))))]
+    (is (= :failure (:status result)))
+    (is (identical? cause (:error result))
+        "the real renderer exception must not be replaced by debug failure")
+    (is (= 1 @attempts))))
