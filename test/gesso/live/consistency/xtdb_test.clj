@@ -891,6 +891,68 @@
         (is (= [[:connectable sample-tx {:database :xtdb}]]
                @calls))))))
 
+(deftest execute-tx-invalid-return-never-proves-commit-test
+  ;; Returning from the API is not by itself a reliable success receipt when
+  ;; the result lacks an identifiable transaction. Avoid claiming a committed
+  ;; write or publishing a success diagnostic from malformed adapter results.
+  (doseq [receipt [nil {} {:tx-id nil} {:tx-id "7"} {:tx-id -1}
+                   {:tx-id 2.5} {:tx-id 9223372036854775808N}]]
+    (let [calls (atom 0)
+          events (atom [])]
+      (with-xtdb-stub
+        '*execute-tx*
+        (fn [& _] (swap! calls inc) receipt)
+        (fn []
+          (let [error (try
+                        (xtdb-live/execute-tx!
+                         :conn sample-tx
+                         {:debug-fn #(swap! events conj (:event %))})
+                        nil
+                        (catch Throwable e e))]
+            (is (xtdb-live/post-execute-result-failure? error)
+                (str "Malformed execute receipt must not report success: "
+                     (pr-str receipt)))
+            (is (= :unknown (:commit/status (ex-data error)))
+                "Cannot assert a committed write without a usable tx-id")
+            (is (= :post-execute-result (:failure/stage (ex-data error))))
+            (is (= receipt (:tx-result (ex-data error))))
+            (is (= [:gesso.live.xtdb/execute-tx-started
+                    :gesso.live.xtdb/execute-tx-result-failed]
+                   @events)
+                "Malformed receipt is a result failure, not a successful commit")
+            (is (= 1 @calls))))))))
+
+(deftest submit-tx-invalid-return-never-proves-submission-test
+  ;; A syntactically unusable receipt does not establish even that an async
+  ;; submission was accepted. Its outcome is unknown, not submitted/committed.
+  (doseq [receipt [nil {} {:tx-id nil} {:tx-id "8"} {:tx-id -1}
+                   {:tx-id 2.5} {:tx-id 9223372036854775808N}]]
+    (let [calls (atom 0)
+          events (atom [])]
+      (with-xtdb-stub
+        '*submit-tx*
+        (fn [& _] (swap! calls inc) receipt)
+        (fn []
+          (let [error (try
+                        (xtdb-live/submit-tx!
+                         :conn sample-tx
+                         {:debug-fn #(swap! events conj (:event %))})
+                        nil
+                        (catch Throwable e e))]
+            (is (xtdb-live/post-submit-result-failure? error)
+                (str "Malformed submit receipt must not report success: "
+                     (pr-str receipt)))
+            (is (= :unknown (:submission/status (ex-data error)))
+                "Cannot confirm acceptance without a usable tx-id")
+            (is (nil? (:commit/status (ex-data error)))
+                "Submission outcome is not commit evidence")
+            (is (= :post-submit-result (:failure/stage (ex-data error))))
+            (is (= receipt (:tx-result (ex-data error))))
+            (is (= [:gesso.live.xtdb/submit-tx-started
+                    :gesso.live.xtdb/submit-tx-result-failed]
+                   @events))
+            (is (= 1 @calls))))))))
+
 (deftest submit-tx-result-failure-is-classified-as-submitted-test
   ;; A returned submit-tx receipt proves acceptance, not execution/commit.
   ;; A later failure deriving Gesso metadata must not claim that the API

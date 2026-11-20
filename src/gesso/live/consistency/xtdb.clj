@@ -1154,18 +1154,24 @@
 ;; -----------------------------------------------------------------------------
 
 (def post-execute-result-failure-type
-  "An XTDB execute-tx call returned successfully, but deriving Gesso's
-   consistency/progression metadata from its result failed. The authoritative
-   transaction is already complete; consumers must not retry the mutation."
+  "An XTDB execute-tx call returned, but its result could not establish
+   usable transaction metadata. A valid transaction receipt followed by
+   conversion failure is :committed; a malformed/unidentifiable returned
+   result is :unknown. Neither outcome permits a blind mutation retry."
   ::post-execute-result-failure)
 
 (defn post-execute-result-failure?
-  "True if an XTDB execute-tx result could not be converted after execution."
+  "True when a returned XTDB execute-tx result failed admission/conversion.
+
+   :committed records a valid returned transaction whose metadata failed
+   conversion; :unknown records a result with no usable transaction identity.
+   Neither is evidence that the XTDB operation failed before execution."
   [error]
   (and (instance? Throwable error)
        (= post-execute-result-failure-type (:error/type (ex-data error)))
        (= :post-execute-result (:failure/stage (ex-data error)))
-       (= :committed (:commit/status (ex-data error)))))
+       (contains? #{:committed :unknown}
+                  (:commit/status (ex-data error)))))
 
 (defn- post-execute-result-error
   [cause tx-result]
@@ -1178,20 +1184,22 @@
    cause))
 
 (def post-submit-result-failure-type
-  "XTDB submit-tx returned a submission receipt, but conversion of its
-   public metadata failed. The submission was accepted, not necessarily
-   executed or committed; callers must not assume it was rejected."
+  "XTDB submit-tx returned, but its result could not establish usable
+   submission metadata. A valid receipt is :submitted even if its metadata
+   conversion fails; an unidentifiable receipt is :unknown, not rejected."
   ::post-submit-result-failure)
 
 (defn post-submit-result-failure?
-  "True when a returned XTDB submission receipt could not be interpreted.
+  "True when an XTDB submission result could not be interpreted.
 
-   This is a submission outcome, NOT evidence of committed execution."
+   :submitted means a usable receipt was returned. :unknown means no usable
+   receipt was returned. Neither establishes a committed transaction."
   [error]
   (and (instance? Throwable error)
        (= post-submit-result-failure-type (:error/type (ex-data error)))
        (= :post-submit-result (:failure/stage (ex-data error)))
-       (= :submitted (:submission/status (ex-data error)))))
+       (contains? #{:submitted :unknown}
+                  (:submission/status (ex-data error)))))
 
 (defn- post-submit-result-error
   [cause tx-result]
@@ -1202,6 +1210,37 @@
     :submission/status :submitted
     :tx-result tx-result}
    cause))
+
+(defn- require-returned-tx-id!
+  "Check whether a returned XTDB API result identifies a transaction.
+
+   XTDB's public submit-tx receipt and execute-tx result have a nonnegative,
+   JVM-long transaction id. A missing/malformed id cannot confirm acceptance
+   or commit. Preserve the original return in a typed UNKNOWN outcome instead
+   of silently reporting success with empty consistency metadata. A caller
+   must reconcile the transaction rather than blindly retrying."
+  [api tx-result]
+  (let [usable? (try
+                  (let [tx-id (:tx-id (tx-result-map tx-result))]
+                    (and (integer? tx-id)
+                         (<= 0 tx-id Long/MAX_VALUE)))
+                  (catch Throwable _ false))]
+    (when-not usable?
+      (throw
+       (ex-info
+        (str "XTDB " (name api) " returned an unidentifiable transaction result.")
+        (merge
+         {:tx-result tx-result}
+         (case api
+           :execute-tx
+           {:error/type post-execute-result-failure-type
+            :failure/stage :post-execute-result
+            :commit/status :unknown}
+           :submit-tx
+           {:error/type post-submit-result-failure-type
+            :failure/stage :post-submit-result
+            :submission/status :unknown})))))
+    tx-result))
 
 (defn submit-tx!
   "Submit XTDB2 tx ops.
@@ -1219,10 +1258,10 @@
      :debug-fn
        Optional pay-for-play debug hook.
 
-   If XTDB accepted a submission but its returned receipt cannot be converted,
-   post-submit-result-failure? classifies the exception as :submitted. This
-   does not assert the transaction was committed or indexed, and must not be
-   confused with a failure of the XTDB API call itself.
+   If XTDB returned an identifiable receipt but its metadata cannot be
+   converted, post-submit-result-failure? classifies it as :submitted. An
+   unidentifiable return is :unknown instead. Neither asserts commit/indexing,
+   and neither should be confused with an XTDB API execution exception.
 
    This function does not emit live invalidations and does not manually mutate
    shared XTDB consistency state."
@@ -1241,7 +1280,8 @@
      (try
        (let [tx-result (invoke-xtdb-api! :submit-tx *submit-tx*
                                          connectable' tx-ops tx-options)
-             ;; A returned receipt establishes submission, not commit. Any
+             _ (require-returned-tx-id! :submit-tx tx-result)
+             ;; A usable returned receipt establishes submission, not commit. Any
              ;; subsequent metadata failure must preserve that distinction
              ;; instead of looking like the API rejected the transaction.
              {:keys [consistency progression-value]}
@@ -1326,6 +1366,7 @@
      (try
        (let [tx-result (invoke-xtdb-api! :execute-tx *execute-tx*
                                          connectable' tx-ops tx-options)
+             _ (require-returned-tx-id! :execute-tx tx-result)
              ;; The XTDB call has returned: any failure deriving its public
              ;; result metadata is post-execution, not an ASSERT conflict.
              {:keys [consistency progression-value]}

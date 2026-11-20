@@ -1919,6 +1919,33 @@
             (is (= 1 @transforms)
                 "Never reapply a swap transform after commit")))))))
 
+(deftest live-swap-cannot-claim-commit-from-missing-xtdb-result-test
+  ;; The XTDB API returned without a usable transaction identity. A guarded
+  ;; mutation cannot report success/committed, nor repeat the write in an
+  ;; attempt to resolve an outcome that remains unknown.
+  (let [reads (atom 0)
+        writes (atom 0)
+        transforms (atom 0)]
+    (with-redefs-fn
+      {#'synced/live-read (fn [& _] (swap! reads inc) 1)
+       #'synced/guarded-tx-ops (fn [& _] [[:guard]])
+       (xtdb-var '*execute-tx*) (fn [& _] (swap! writes inc) nil)}
+      (fn []
+        (let [error (try
+                      (live/live-swap!
+                       {:xtdb/connectable :write-node}
+                       atomic-swap-counter
+                       (fn [n] (swap! transforms inc) (inc n))
+                       {:system {:options {}} :emit false})
+                      nil
+                      (catch Throwable e e))]
+          (is (xtdb-live/post-execute-result-failure? error))
+          (is (= :unknown (:commit/status (ex-data error))))
+          (is (= :post-execute-result (:failure/stage (ex-data error))))
+          (is (= 1 @writes) "Unknown result must not trigger a blind retry")
+          (is (= 1 @reads))
+          (is (= 1 @transforms)))))))
+
 (deftest live-swap-does-not-retry-xtdb-result-derivation-assert-test
   ;; Exercise the real XTDB execute-tx adapter through the public guarded
   ;; swap. Its underlying API returns a committed key before derivation fails
