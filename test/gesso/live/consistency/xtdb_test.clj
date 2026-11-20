@@ -818,6 +818,59 @@
                (xtdb-live/latest-completed-basis
                 {:biff.xtdb/node :authority-node})))))))
 
+(deftest latest-completed-basis-rejects-unobservable-status-shapes-test
+  ;; A successful XTDB status observation is not interchangeable with an
+  ;; absent or malformed status payload. In particular, nil for a selected
+  ;; database is NOT the same as its documented empty completed-tx list.
+  ;; Otherwise a missing status observation can silently disable Biff's
+  ;; authoritative read frontier.
+  (doseq [status [nil
+                  {}
+                  {:latest-completed-txs nil}
+                  {:latest-completed-txs []}
+                  {:latest-completed-txs {"xtdb" nil}}
+                  {:latest-completed-txs {"xtdb" [nil]}}]]
+    (let [status-calls (atom 0)]
+      (with-xtdb-stub
+        '*status*
+        (fn [_] (swap! status-calls inc) status)
+        (fn []
+          (let [outcome (try
+                          (xtdb-live/latest-completed-basis
+                           {:xtdb/node :authority-node})
+                          nil
+                          (catch clojure.lang.ExceptionInfo e e))]
+            (is (instance? clojure.lang.ExceptionInfo outcome)
+                (str "Malformed status must fail closed: " (pr-str status)))
+            (when outcome
+              (is (= "xtdb" (:database (ex-data outcome))))
+              (is (= status (:status (ex-data outcome)))))
+            (is (= 1 @status-calls))))))))
+
+(deftest bind-request-frontier-never-mistakes-missing-status-for-empty-database-test
+  ;; The invalid observation is dangerous even with no preexisting browser
+  ;; minimum: an unchanged context permits ordinary Biff reads without a
+  ;; server-established snapshot. A truly empty per-database vector is okay.
+  (let [ctx {:xtdb/node :authority-node :request/id :fresh-request}
+        status-calls (atom 0)]
+    (with-xtdb-stub
+      '*status*
+      (fn [_] (swap! status-calls inc) nil)
+      (fn []
+        (let [outcome (try (xtdb-live/bind-request-frontier ctx)
+                           nil
+                           (catch clojure.lang.ExceptionInfo e e))]
+          (is (instance? clojure.lang.ExceptionInfo outcome))
+          (when outcome
+            (is (= "xtdb" (:database (ex-data outcome)))))
+          (is (= 1 @status-calls)))))
+    (with-xtdb-stub
+      '*status*
+      (fn [_] {:latest-completed-txs {"xtdb" []}})
+      (fn []
+        (is (identical? ctx (xtdb-live/bind-request-frontier ctx))
+            "Legitimate empty-database startup must remain supported")))))
+
 (deftest latest-completed-basis-returns-nil-when-no-transaction-completed-test
   (let [calls (atom 0)]
     (with-xtdb-stub

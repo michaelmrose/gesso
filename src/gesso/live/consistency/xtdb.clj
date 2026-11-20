@@ -826,23 +826,44 @@
         (ex "Cannot establish an XTDB request frontier without an XTDB node."
             {:expected-one-of [:xtdb/node
                                :biff.xtdb/node]})))
-     (when-some [completed
-                 (first
-                  (get-in
-                   (*status* node)
-                   [:latest-completed-txs database-name]))]
-       (let [tx-id (:tx-id completed)
-             system-time (:system-time completed)]
-         (when (or (nil? tx-id) (nil? system-time))
+     (let [status (*status* node)
+           by-database (:latest-completed-txs status)]
+       ;; An absent/malformed status observation is not evidence that a
+       ;; database has no completed transactions. XTDB represents a known
+       ;; empty database by an absent entry or empty completed-tx list in a
+       ;; present :latest-completed-txs map. Never silently return an
+       ;; unconstrained Biff request merely because node status is invalid.
+       (when-not (map? by-database)
+         (throw
+          (ex "XTDB latest-completed status lacks a usable transaction map."
+              {:database database-name
+               :status status})))
+       (let [entries (get by-database database-name)]
+         ;; In particular, a present nil entry or [nil] would otherwise be
+         ;; read as an empty database by first/when-some. This must fail
+         ;; closed rather than silently discard authoritative snapshot state.
+         (when (and (contains? by-database database-name)
+                    (or (not (or (sequential? entries)
+                                 (instance? java.util.List entries)))
+                        (and (seq entries)
+                             (nil? (first entries)))))
            (throw
-            (ex "XTDB latest-completed transaction has incomplete authoritative coordinates."
+            (ex "XTDB latest-completed status contains malformed transaction entries."
                 {:database database-name
-                 :latest-completed completed
-                 :tx-id tx-id
-                 :system-time system-time})))
-         (basis database-name
-                tx-id
-                (status-system-time->instant system-time)))))))
+                 :status status})))
+         (when-some [completed (first entries)]
+           (let [tx-id (:tx-id completed)
+                 system-time (:system-time completed)]
+             (when (or (nil? tx-id) (nil? system-time))
+               (throw
+                (ex "XTDB latest-completed transaction has incomplete authoritative coordinates."
+                    {:database database-name
+                     :latest-completed completed
+                     :tx-id tx-id
+                     :system-time system-time})))
+             (basis database-name
+                    tx-id
+                    (status-system-time->instant system-time)))))))))
 
 (defn- fixed-biff-snapshot-wrapper
   [existing-wrapper snapshot-token]
