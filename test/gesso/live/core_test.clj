@@ -1797,3 +1797,30 @@
             "a thrown startup error must retire the eager source subscription"))
       (finally
         (live/close! system)))))
+
+(deftest core-sse-release-when-closed-before-observer-test
+  ;; An event producer can be cancelled before it starts collecting the
+  ;; Missionary flow. Terminal SSE shutdown must still release the eager
+  ;; indexed registration or broadcast tap even without an observer.
+  (doseq [[path flow-options stat-key]
+          [[:indexed nil :subscription-count]
+           [:broadcast {:debug-fn (fn [_] nil)} :tap-count]]]
+    (let [system (live/create)]
+      (try
+        (with-redefs-fn
+          {#'gesso.live.transport.sse/write-events-task
+           (fn [_out _flow _opts]
+             (fn [_success _failure]
+               ;; Deliberately do not start collecting the source flow.
+               (fn [] nil)))}
+          (fn []
+            (let [started (live/start-sse! system {:topic :request :id "req-1"}
+                                           {:flow-options flow-options})]
+              (is (= 1 (stat-key (source/stats (:source system))))
+                  (str path " eager registration exists before close"))
+              (sse/cancel! started)
+              (is (sse/closed? started))
+              (is (zero? (stat-key (source/stats (:source system))))
+                  (str path " must release registration on terminal close")))))
+        (finally
+          (live/close! system))))))

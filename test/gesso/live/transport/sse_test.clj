@@ -1171,3 +1171,33 @@
             (is (zero? (:tap-count (source/stats src)))))))
       (finally
         (source/close! src)))))
+
+(deftest fragment-sse-release-when-closed-before-observer-test
+  ;; The model-backed SSE entry point must retain ownership until shutdown,
+  ;; including when an SSE producer never observes its eager indexed flow.
+  (let [src (source/create)
+        system {:source src :options {}}
+        authorized (atom 0)]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.transport.sse/write-events-task
+         (fn [_out _flow _opts]
+           (fn [_success _failure]
+             (fn [] nil)))
+         #'gesso.live.model/fragment-scope-name (fn [_ _] :request)
+         #'gesso.live.model/fragment-scope-instance
+         (fn [_ _ _] {:topic :request :id "req-1"})
+         #'gesso.live.model/require-scope-authorized!
+         (fn [_ _ _ _] (swap! authorized inc))}
+        (fn []
+          (let [started (sse/start-fragment-stream!
+                         system {} {} :request-panel "req-1")]
+            (is (= 1 @authorized))
+            (is (= 1 (:subscription-count (source/stats src))))
+            ;; Simulate downstream disconnect instead of explicit cancel!.
+            (s/close! (:stream started))
+            (is (sse/closed? started))
+            (is (zero? (:subscription-count (source/stats src)))
+                "downstream close must release unobserved authorized interest"))))
+      (finally
+        (source/close! src)))))

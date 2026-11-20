@@ -624,6 +624,13 @@
         (flow/open-source-flow! src flow-options)]
     (try
       (let [started (start! live-events options')]
+        ;; The eager source registration remains ours until the transport
+        ;; actually terminates. The event collector might never start (or
+        ;; might be cancelled before observing the flow), so ordinary SSE
+        ;; shutdown must also release it, not just synchronous startup errors.
+        ;; Manifold invokes on-closed for streams already closed, preserving
+        ;; the handoff if shutdown races with this callback registration.
+        (s/on-closed (:stream started) release-flow!)
         (when (true? @(:closed? started))
           (release-flow!))
         started)
