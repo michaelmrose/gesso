@@ -1012,6 +1012,58 @@
           requirement
           {:database :xtdb})))))
 
+(deftest progression-read-rejects-conflicting-independent-await-tokens-test
+  ;; :await-token is an explicit read-consistency constraint. Once a
+  ;; progression is authoritative, caller options cannot replace a different
+  ;; consistency await-token: without trusted ordering, neither token proves
+  ;; satisfaction of the other. Ordinary non-progression precedence is intact.
+  (let [frontier (Instant/parse "2026-11-20T18:00:00Z")
+        required (progression/requirement
+                  (xtdb-live/basis :analytics 2026 frontier))
+        consistency {:await-token "consistency-await"}
+        caller {:await-token "caller-await"}
+        ctx {:xtdb/read-connectable :read
+             :gesso.live/progression required}
+        calls (atom [])
+        xtdb-call (fn [& args]
+                    (swap! calls conj args)
+                    :unexpected)]
+    (let [failure (try (xtdb-live/read-query-opts consistency required caller)
+                       nil
+                       (catch clojure.lang.ExceptionInfo e e))]
+      (is (instance? clojure.lang.ExceptionInfo failure)
+          "Conflicting read wait requirements must not be silently merged")
+      (when (instance? clojure.lang.ExceptionInfo failure)
+        (is (= :conflicting-await-tokens (:reason (ex-data failure))))
+        (is (= "consistency-await" (:consistency-await-token (ex-data failure))))
+        (is (= "caller-await" (:caller-await-token (ex-data failure))))))
+    (with-redefs-fn {(xtdb-var '*q*) xtdb-call
+                     (xtdb-var '*plan-q*) xtdb-call}
+      (fn []
+        (doseq [invoke [#(xtdb-live/q-consistent-from
+                           (assoc ctx :gesso.live/consistency consistency)
+                           sample-query caller)
+                        #(xtdb-live/plan-q-consistent-from
+                           (assoc ctx :gesso.live/consistency consistency)
+                           sample-query caller)]]
+          (is (thrown? clojure.lang.ExceptionInfo (invoke)))
+          (is (empty? @calls)
+              "Conflicting await tokens must fail before query execution"))))
+    ;; Identical or independently absent await constraints remain supported.
+    (is (= "consistency-await"
+           (:await-token (xtdb-live/read-query-opts
+                          consistency required
+                          {:await-token "consistency-await"}))))
+    (is (= "caller-await"
+           (:await-token (xtdb-live/read-query-opts
+                          {} required caller))))
+    (is (= "consistency-await"
+           (:await-token (xtdb-live/read-query-opts
+                          consistency required {}))))
+    (is (= "caller-await"
+           (:await-token (xtdb-live/read-query-opts
+                          consistency nil caller))))))
+
 (deftest progression-read-opts-preserve-both-consistency-and-caller-constraints-test
   ;; A plain query allows caller opts to override convenience consistency.
   ;; Under authoritative progression, that merge must not discard an

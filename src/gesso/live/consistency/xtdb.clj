@@ -732,6 +732,19 @@
           observed-time (basis-system-time required)
           explicit-db (when (contains? opts :database)
                         (normalize-database-name (:database opts)))]
+      ;; Await tokens are also independently supplied read obligations. We
+      ;; cannot infer which of two different opaque tokens is stronger here.
+      ;; Ordinary map precedence would erase the consistency await-token,
+      ;; so reject the ambiguity rather than silently dropping a wait.
+      (when (and (contains? consistency-options :await-token)
+                 (contains? caller-options :await-token)
+                 (not= (:await-token consistency-options)
+                       (:await-token caller-options)))
+        (throw
+         (ex "XTDB consistency and caller await tokens conflict under authoritative progression."
+             {:consistency-await-token (:await-token consistency-options)
+              :caller-await-token (:await-token caller-options)
+              :reason :conflicting-await-tokens})))
       ;; Both consistency metadata and explicit opts are independently supplied
       ;; read constraints. The ordinary opts merge lets callers override
       ;; convenience values, but under authoritative progression neither
