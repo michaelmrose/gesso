@@ -546,20 +546,25 @@
 
 (defn- schedule-cooldown-flush!
   [source k window-ms]
-  (when-not (closed? source)
-    (.schedule ^ScheduledThreadPoolExecutor (:scheduler source)
-               ^Runnable
-               (fn []
-                 (try
-                   (flush-cooldown! source k window-ms)
-                   (catch Throwable e
-                     (record-error!
-                      source
-                      {:kind :coalesce-flush-error
-                       :scope-key k
-                       :error e}))))
-               (long window-ms)
-               TimeUnit/MILLISECONDS))
+  ;; The open check and scheduler submission share close!'s lifecycle lock.
+  ;; Otherwise close! may shut down the scheduler after the check but before
+  ;; schedule, turning an already accepted leading invalidation into a
+  ;; RejectedExecutionException after its fanout has occurred.
+  (locking (:coalesce-lock source)
+    (when-not (closed? source)
+      (.schedule ^ScheduledThreadPoolExecutor (:scheduler source)
+                 ^Runnable
+                 (fn []
+                   (try
+                     (flush-cooldown! source k window-ms)
+                     (catch Throwable e
+                       (record-error!
+                        source
+                        {:kind :coalesce-flush-error
+                         :scope-key k
+                         :error e}))))
+                 (long window-ms)
+                 TimeUnit/MILLISECONDS)))
   nil)
 
 (defn- flush-cooldown!

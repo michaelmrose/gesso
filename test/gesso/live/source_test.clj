@@ -616,3 +616,53 @@
         (finally
           (deliver resume-validation :continue)
           (source/close! src))))))
+
+(deftest coalesced-leading-scheduler-shutdown-race-is-not-delivery-failure-test
+  ;; Reproduce the accepted-leading-invalidation race between the schedule
+  ;; open check and ScheduledThreadPoolExecutor.schedule. In the old source,
+  ;; close! could shut the scheduler down during this gap. A fanout that had
+  ;; already happened then threw RejectedExecutionException to the caller.
+  (let [src (source/create {:coalesce-window-ms 500})
+        pre-schedule (promise)
+        allow-schedule (promise)
+        checks (atom 0)
+        original-closed? (var-get #'gesso.live.source/closed?)]
+    (try
+      (with-redefs-fn
+        {#'gesso.live.source/closed?
+         (fn [s]
+           (let [was-closed? (original-closed? s)]
+             ;; 1: emit! entry; 2: coalescing acceptance; 3: scheduler.
+             (when (= 3 (swap! checks inc))
+               (deliver pre-schedule :ready)
+               (deref allow-schedule 2000 ::timeout))
+             was-closed?))}
+        (fn []
+          (let [emission (future
+                           (try
+                             (source/emit! src invalidation-1)
+                             (catch Throwable e e)))]
+            (try
+              (is (= :ready (deref pre-schedule 2000 ::timeout)))
+              (let [closing-started (promise)
+                    shutdown (future
+                               (deliver closing-started :started)
+                               (source/close! src))]
+                (is (= :started (deref closing-started 2000 ::timeout)))
+                ;; On the old implementation shutdown can finish before the
+                ;; paused schedule call resumes; on the fixed one it waits
+                ;; for the lock surrounding the complete schedule attempt.
+                (deref shutdown 150 ::waiting-for-schedule)
+                (deliver allow-schedule :continue)
+                (let [result (deref emission 2000 ::timeout)]
+                  (is (map? result)
+                      (str "accepted leading emission must not throw after "
+                           "shutdown races with scheduling: " result))
+                  (is (= :emitted (:status result))))
+                (is (= :closed (deref shutdown 2000 ::timeout)))
+                (is (zero? (:scheduled-count (source/stats src)))))
+              (finally
+                (deliver allow-schedule :continue))))))
+      (finally
+        (deliver allow-schedule :continue)
+        (source/close! src)))))
