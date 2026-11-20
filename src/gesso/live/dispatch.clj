@@ -333,17 +333,19 @@
 
 (defn- drain-queued-jobs!
   [dispatcher reason]
-  (locking (:coalesce-lock dispatcher)
-    (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
-      (loop [dropped []
-             item (.poll queue)]
-        (if item
-          (let [job (queued-item-job item)]
-            (recur (conj dropped (notify-drop! job reason))
-                   (.poll queue)))
-          (do
-            (reset! (:pending-by-key dispatcher) {})
-            dropped))))))
+  (let [jobs (locking (:coalesce-lock dispatcher)
+               (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
+                 (loop [dropped []
+                        item (.poll queue)]
+                   (if item
+                     (recur (conj dropped (queued-item-job item))
+                            (.poll queue))
+                     (do
+                       (reset! (:pending-by-key dispatcher) {})
+                       dropped)))))]
+    ;; All queue/index changes are complete before calling application hooks.
+    ;; A hook may synchronously await another thread using coalesce-lock.
+    (mapv #(notify-drop! % reason) jobs)))
 
 (defn close!
   "Close dispatcher, drop queued jobs, and interrupt worker threads.
@@ -436,7 +438,8 @@
   (let [queue ^ArrayBlockingQueue (:queue dispatcher)]
     (if (.offer queue job)
       (submitted job)
-      (dropped job :queue-full))))
+      ;; The caller runs the on-drop hook after releasing coalesce-lock.
+      ::queue-full)))
 
 (defn- enqueue-new-coalesce-slot!
   [dispatcher key job]
@@ -468,11 +471,9 @@
                :old-job (replace-slot-job! slot job)}
               (enqueue-new-coalesce-slot! dispatcher key job)))]
       (case status
-        :submitted
-        (do
-          (when old-job
-            (notify-drop! old-job :coalesced))
-          (submitted job))
+        ;; Do not notify while the submission path holds coalesce-lock.
+        ;; Return the replaced job to the outer submit! call instead.
+        :submitted {:old-job old-job}
 
         :queue-full
         (throw (queue-full-error dispatcher job))))))
@@ -501,24 +502,31 @@
   (let [job' (next-job dispatcher job)]
     (if (= :block (:on-overflow dispatcher))
       (enqueue-block! dispatcher job')
-      ;; Nonblocking submission and the shutdown drain must be serialized.
-      ;; Merely checking :closed? before offering permits stranded work when
-      ;; close! drains the queue between those two operations.
-      (locking (:coalesce-lock dispatcher)
-        (ensure-open! dispatcher)
-        (case (:on-overflow dispatcher)
-          :throw
-          (enqueue-throw! dispatcher job')
+      ;; Serialize queue and index mutations against shutdown, but never run
+      ;; application on-drop callbacks while holding this lifecycle lock.
+      (let [policy (:on-overflow dispatcher)
+            result (locking (:coalesce-lock dispatcher)
+                     (ensure-open! dispatcher)
+                     (case policy
+                       :throw (enqueue-throw! dispatcher job')
+                       :drop (enqueue-drop! dispatcher job')
+                       :coalesce (enqueue-coalesce! dispatcher job')
+                       (throw
+                        (ex "Unsupported gesso.live dispatch overflow policy."
+                            {:on-overflow policy}))))]
+        (case policy
+          :coalesce
+          (do
+            (when-let [old-job (:old-job result)]
+              (notify-drop! old-job :coalesced))
+            (submitted job'))
 
           :drop
-          (enqueue-drop! dispatcher job')
+          (if (= ::queue-full result)
+            (dropped job' :queue-full)
+            result)
 
-          :coalesce
-          (enqueue-coalesce! dispatcher job')
-
-          (throw
-           (ex "Unsupported gesso.live dispatch overflow policy."
-               {:on-overflow (:on-overflow dispatcher)})))))))
+          result)))))
 
 (defn run-sync!
   "Run job immediately on the caller's thread.

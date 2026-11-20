@@ -495,3 +495,86 @@
           "shutdown is not an async job failure")
       (finally
         (dispatch/close! d)))))
+
+
+;; A drop callback is application code and may need the dispatcher itself or
+;; another thread acquiring its lifecycle lock. Do not invoke it while that
+;; lock is held: even a bounded wait can strand unrelated submissions.
+(deftest coalesced-drop-hook-allows-concurrent-submission-test
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        hook-result (promise)
+        d (dispatch/create {:threads 1 :queue-size 2 :on-overflow :coalesce})]
+    (try
+      (dispatch/submit! d {:coalesce-key :busy
+                           :run (fn [] (release started)
+                                  (await-latch release-running))})
+      (is (await-latch started))
+      (dispatch/submit! d {:coalesce-key :item
+                           :run (fn [] :old)
+                           :on-drop (fn [_]
+                                      (let [attempt (future
+                                                      (:status (dispatch/submit!
+                                                                d {:coalesce-key :other
+                                                                   :run (fn [] :other)})))]
+                                        (deliver hook-result
+                                                 (deref attempt timeout-ms ::timeout))))})
+      (is (= :submitted (:status (dispatch/submit!
+                                  d {:coalesce-key :item :run (fn [] :new)}))))
+      (is (= :submitted (promise-value hook-result))
+          "coalesced on-drop must not hold the dispatch lock while waiting on a submitter")
+      (finally
+        (release release-running)
+        (dispatch/close! d)))))
+
+(deftest overflow-drop-hook-allows-independent-queue-inspection-test
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        hook-result (promise)
+        d (dispatch/create {:threads 1 :queue-size 1 :on-overflow :drop})]
+    (try
+      (dispatch/submit! d {:run (fn [] (release started)
+                                    (await-latch release-running))})
+      (is (await-latch started))
+      (dispatch/submit! d {:run (fn [] :queued)})
+      (is (= :dropped (:status
+                      (dispatch/submit! d
+                                        {:run (fn [] :overflow)
+                                         :on-drop
+                                         (fn [_]
+                                           (let [attempt
+                                                 (future
+                                                   (locking (:coalesce-lock d)
+                                                     :lock-available))]
+                                             (deliver hook-result
+                                                      (deref attempt timeout-ms ::timeout))))}))))
+      (is (= :lock-available (promise-value hook-result))
+          "overflow :on-drop must not hold the queue lifecycle lock")
+      (finally
+        (release release-running)
+        (dispatch/close! d)))))
+
+(deftest shutdown-drop-hook-allows-independent-queue-inspection-test
+  (let [started (CountDownLatch. 1)
+        release-running (CountDownLatch. 1)
+        hook-result (promise)
+        d (dispatch/create {:threads 1 :queue-size 1 :on-overflow :throw})]
+    (try
+      (dispatch/submit! d {:run (fn [] (release started)
+                                    (await-latch release-running))})
+      (is (await-latch started))
+      (dispatch/submit! d {:run (fn [] :queued)
+                           :on-drop (fn [_]
+                                      (let [attempt
+                                            (future
+                                              (locking (:coalesce-lock d)
+                                                :lock-available))]
+                                        (deliver hook-result
+                                                 (deref attempt timeout-ms ::timeout))))})
+      (is (= :closed (dispatch/close! d)))
+      (is (= :lock-available (promise-value hook-result))
+          "shutdown :on-drop must run after queue and pending-index retirement")
+      (is (= 0 (.size ^java.util.concurrent.ArrayBlockingQueue (:queue d))))
+      (finally
+        (release release-running)
+        (dispatch/close! d)))))
