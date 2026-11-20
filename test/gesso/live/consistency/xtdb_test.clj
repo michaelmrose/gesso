@@ -2,10 +2,12 @@
   (:require
    [clojure.test :refer [deftest is testing]]
    [gesso.live.consistency.xtdb :as xtdb-live]
-   [gesso.live.progression :as progression])
+   [gesso.live.progression :as progression]
+   [xtdb.basis :as xt.basis])
   (:import
    [java.lang.reflect InvocationHandler Proxy]
    [java.time Instant ZonedDateTime]
+   [java.util Base64]
    [xtdb.api DataSource TransactionKey]))
 
 (def sample-query
@@ -393,6 +395,59 @@
          clojure.lang.ExceptionInfo
          #"closed portable XTDB"
          (xtdb-live/require-xtdb-basis! (assoc basis :extra true))))))
+
+(defn- snapshot-token-with-unknown-field
+  "Append an ignorable protobuf varint field to an XTDB snapshot token.
+
+   The XTDB decoder accepts unknown protobuf fields, so this creates a
+   different string that decodes to exactly the same database/time basis."
+  [snapshot-token field-number]
+  (let [raw (.decode (Base64/getDecoder) snapshot-token)
+        extended (byte-array (+ (alength raw) 2))]
+    (System/arraycopy raw 0 extended 0 (alength raw))
+    (aset-byte extended (alength raw) (byte (* 8 field-number)))
+    (aset-byte extended (inc (alength raw)) (byte 1))
+    (.encodeToString (Base64/getEncoder) extended)))
+
+(deftest portable-xtdb-basis-rejects-noncanonical-snapshot-tokens-test
+  ;; An XTDB protobuf parser can ignore extra fields. A token with an extra
+  ;; field therefore represents the same authoritative time as the canonical
+  ;; token but has different opaque characters. Gesso must reject, rather than
+  ;; admit two distinct closed bases and later report conflicting evidence.
+  (let [time (Instant/parse "2026-01-01T00:00:00.123456789Z")
+        canonical (xtdb-live/basis :analytics 9 time)
+        original-token (:snapshot-token canonical)
+        later (xtdb-live/basis :analytics 10 (.plusSeconds time 1))]
+    (doseq [unknown-field [3 4 15]]
+      (let [alternate-token (snapshot-token-with-unknown-field
+                             original-token unknown-field)
+            alternate (assoc canonical :snapshot-token alternate-token)]
+        (is (not= original-token alternate-token))
+        (is (= (xt.basis/<-time-basis-str original-token)
+               (xt.basis/<-time-basis-str alternate-token))
+            "The alternate protobuf spelling must denote the same time basis")
+        (is (false? (xtdb-live/xtdb-basis? alternate))
+            "Only canonical snapshot-token strings may become closed evidence")
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/require-xtdb-basis! alternate)))
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/compare-bases canonical alternate))
+            "Comparison must reject malformed evidence before reporting conflict")
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo
+             #"closed portable XTDB"
+             (xtdb-live/compare-bases alternate later))
+            "Ordering must not trust alternate authoritative encodings")))
+    (is (xtdb-live/xtdb-basis? canonical))
+    (is (= time (xtdb-live/basis-system-time canonical)))
+    (is (= original-token
+           (xt.basis/->time-basis-str
+            (xt.basis/<-time-basis-str original-token)))
+        "The native XTDB encoder remains canonical and round-trippable")))
 
 (deftest portable-xtdb-basis-rejects-noncanonical-decimal-identities-test
   ;; Browser-carried bases are compared as closed immutable data, not merely

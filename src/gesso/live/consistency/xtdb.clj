@@ -416,6 +416,18 @@
          (ex "XTDB progression snapshot-token has an invalid time basis."
              {:database database-name
               :times times})))
+      ;; XTDB's protobuf decoder ignores unknown fields. Two different token
+      ;; strings may therefore decode to the same database/time basis, while
+      ;; Gesso's closed progression evidence compares the original strings.
+      ;; Admit only XTDB's canonical serialization of that decoded basis so
+      ;; one authoritative coordinate has exactly one portable identity.
+      (let [canonical (xt.basis/->time-basis-str decoded)]
+        (when-not (= snapshot-token canonical)
+          (throw
+           (ex "XTDB progression snapshot-token must use canonical encoding."
+               {:database database-name
+                :snapshot-token snapshot-token
+                :canonical canonical}))))
       (first times))
     (catch clojure.lang.ExceptionInfo e
       (throw e))
