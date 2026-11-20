@@ -1605,3 +1605,64 @@
         (cancel-runner! owner)
         (when-let [runner @joiner]
           (cancel-runner! runner))))))
+
+(deftest clear-key-invalidation-outcome-wins-physical-completion-after-mark-test
+  ;; Invalidation owns the cache lifecycle lock when it marks a flight
+  ;; cancelled. The renderer's completion callback may still run before
+  ;; clear-key! exits the lock and publishes the typed result. Once the
+  ;; invalidation boundary is reached, its outcome must already be reserved.
+  (let [events (atom [])
+        manager (fragment/create {:debug-fn #(swap! events conj %)})
+        started (promise)
+        release-render (promise)
+        cancelled (promise)
+        renders (atom 0)
+        task (controlled-success-task started release-render :obsolete renders cancelled)
+        owner (start-task (fragment/protect-task manager fragment-key task))
+        joiner (atom nil)
+        marked (promise)
+        resume-clear (promise)
+        clearing (atom nil)]
+    (try
+      (is (= :started (deref started timeout-ms ::timeout)))
+      (reset! joiner (start-task (fragment/protect-task manager fragment-key task)))
+      (is (eventually #(some (fn [e]
+                              (= :gesso.live.fragment/singleflight-joined (:event e)))
+                            @events)))
+      (let [flight (get @(:inflight manager) fragment-key)]
+        (is (some? flight))
+        (add-watch (:cancel-requested? flight) ::pause-invalidation
+                   (fn [_ _ old new]
+                     (when (and (false? old) (true? new))
+                       (deliver marked true)
+                       @resume-clear)))
+        (try
+          (reset! clearing (future (fragment/clear-key! manager fragment-key)))
+          (is (= true (deref marked timeout-ms ::timeout))
+              "invalidator must mark flight before returning")
+          (deliver release-render :go)
+          (is (eventually #(some (fn [e]
+                                  (and (= :gesso.live.fragment/singleflight-released
+                                          (:event e))
+                                       (= :success (:status e))))
+                                @events))
+              "physical success raced after invalidation mark")
+          (deliver resume-clear true)
+          (is (not= ::timeout (deref @clearing timeout-ms ::timeout)))
+          (doseq [runner [owner @joiner]]
+            (let [result (task-result runner)]
+              (is (= :failure (:status result))
+                  "invalidated waiter must not receive obsolete successful markup")
+              (is (= :fragment-invalidated
+                     (:reason (ex-data (:error result)))))))
+          (finally
+            (deliver resume-clear true)
+            (remove-watch (:cancel-requested? flight) ::pause-invalidation))))
+      (finally
+        (deliver resume-clear true)
+        (deliver release-render :go)
+        (when-let [f @clearing]
+          (deref f timeout-ms ::timeout))
+        (cancel-runner! owner)
+        (when-let [runner @joiner]
+          (cancel-runner! runner))))))

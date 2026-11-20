@@ -558,11 +558,16 @@
   (when-let [cancel! @(:cancel-ref flight)]
     (cancel!)))
 
+(defn- reserve-flight-result!
+  "Claim the single terminal outcome without invoking shared-flight callbacks."
+  [flight]
+  (compare-and-set! (:resolved? flight) false true))
+
 (defn- assign-flight!
   "Resolve a shared flight at most once. Cancellation and physical render
    completion may both try to finish it under concurrent invalidation."
   [flight result]
-  (when (compare-and-set! (:resolved? flight) false true)
+  (when (reserve-flight-result! flight)
     ((:cell flight) result)
     true))
 
@@ -575,36 +580,35 @@
    paths usually rely on short TTLs and progression-aware keys instead."
   [manager key]
   (let [inflight (:inflight manager)
-        ;; Mark the current flight cancelled before removing the cached value.
-        ;; A completed render publishing its result holds the same lock while
-        ;; checking this flag, so it cannot race between the check and store.
-        flight (locking (:cache manager)
-                 (let [flight (get @inflight key)]
-                   (when flight
-                     (reset! (:cancel-requested? flight) true)
-                     ;; Detach before entering the canceller: a synchronous
-                     ;; cancellation can block or invoke user code, and new
-                     ;; callers must not join an already-invalidated owner.
-                     ;; Identity-checked removal preserves any replacement.
-                     (swap! inflight
-                            (fn [flights]
-                              (if (identical? flight (get flights key))
-                                (dissoc flights key)
-                                flights))))
-                   (swap! (:cache manager) dissoc key)
-                   flight))]
-    ;; Complete waiters before invoking cancellation. A Missionary task's
-    ;; cancellation may suppress both completion callbacks, which otherwise
-    ;; leaves the shared deferred unresolved forever. The outcome guard also
-    ;; prevents a racing physical completion from assigning it a second time.
+        ;; Reserve invalidation while holding the same cache lock as render
+        ;; publication. Once this boundary wins, a concurrently finishing
+        ;; render must not publish a successful outcome to old waiters.
+        [flight reserved?] (locking (:cache manager)
+                             (let [flight (get @inflight key)
+                                   reserved? (when flight
+                                               (reserve-flight-result! flight))]
+                               (when flight
+                                 (reset! (:cancel-requested? flight) true)
+                                 ;; Detach before invoking a possibly blocking
+                                 ;; physical cancellation callback.
+                                 (swap! inflight
+                                        (fn [flights]
+                                          (if (identical? flight (get flights key))
+                                            (dissoc flights key)
+                                            flights))))
+                               (swap! (:cache manager) dissoc key)
+                               [flight reserved?]))]
+    ;; Deliver outside the cache lock: resuming waiting tasks can trigger
+    ;; arbitrary application callbacks, including new cache operations.
     (when flight
-      (assign-flight! flight
-                      {:status :failure
-                       :error (ex "gesso.live fragment render invalidated."
-                                  {:reason :fragment-invalidated
-                                   :key key})})
-      ;; Do not invoke cancellation under the cache lock: a canceller may
-      ;; run arbitrary application callbacks or wait for task termination.
+      (when reserved?
+        ((:cell flight)
+         {:status :failure
+          :error (ex "gesso.live fragment render invalidated."
+                     {:reason :fragment-invalidated
+                      :key key})}))
+      ;; A Missionary task may suppress completion callbacks when cancelled.
+      ;; The shared outcome has already been selected for all waiting callers.
       (cancel-flight! flight)))
   manager)
 
